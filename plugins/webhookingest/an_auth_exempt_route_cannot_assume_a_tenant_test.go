@@ -151,15 +151,6 @@ func TestAnAuthExemptRouteCannotAssumeATenant(t *testing.T) {
 	// The other tenant's source is seeded FIRST, and it is the reason the
 	// lookup's predicate is evaluated at all.
 	//
-	// signal_workflow_id is written explicitly as the empty string here. The
-	// column is nullable with no default, and handleCreateSource DOES leave
-	// it NULL for a source created with no signal_workflow_id -- routes.go's
-	// three SELECTs now COALESCE it to '' before scanning (cleat#1992 found
-	// this: an uncoalesced NULL there fails with "converting NULL to string
-	// is unsupported", the same 500 this test exists to catch, from an
-	// unrelated cause). Seeding '' rather than NULL here just avoids
-	// depending on that COALESCE to reach the assertions below.
-	//
 	// secret_configured = true for both: cleat#1992/#2172, owner decision
 	// (b), made a signing secret mandatory, so a real row can no longer read
 	// false here. Only "mine"'s secret is actually seeded into the store
@@ -182,9 +173,9 @@ func TestAnAuthExemptRouteCannotAssumeATenant(t *testing.T) {
 	const mineSecret = "mine-tenant-secret"
 	if _, err := su.ExecContext(ctx,
 		`INSERT INTO `+schema+`.webhook_sources
-		     (id, tenant_id, name, source_type, secret_configured, enabled, signal_workflow_id, signal_name)
-		 VALUES ($1, $2, 'theirs', 'generic', true, true, '', 'webhook_received'),
-		        ($3, $4, 'mine',   'generic', true, true, '', 'webhook_received')`,
+		     (id, tenant_id, name, source_type, secret_configured, enabled)
+		 VALUES ($1, $2, 'theirs', 'generic', true, true),
+		        ($3, $4, 'mine',   'generic', true, true)`,
 		otherSourceID, theirs, sourceID, mine); err != nil {
 		t.Fatalf("seeding both tenants' sources: %v", err)
 	}

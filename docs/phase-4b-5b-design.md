@@ -1,5 +1,17 @@
 # Phase 4b & 5b: Detailed Design
 
+> **Phase 4b is superseded.** The static `signal_workflow_id`/`signal_name`
+> binding this section designs (one webhook source signalling one fixed
+> workflow instance) was retired in cleat#2689: it cannot serve more than one
+> concurrent workflow waiting on a shared source, which is exactly the
+> limitation cleat#2625/cleat#2649 built correlated `await_webhook` to
+> remove. Once every source gets a correlated, per-order wait for free
+> (cleat#2697), the design below has no remaining case it serves. Kept here
+> as a historical record of the design it replaced, not as current
+> documentation -- see `plugins/webhookingest/migrations.go`'s Version 10
+> comment and `docs/tutorials/signals-and-human-loop.md` for what replaced
+> it.
+
 ## Phase 4b: Webhookingest Push-to-Signal
 
 ### Problem

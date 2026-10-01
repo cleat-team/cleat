@@ -55,7 +55,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the payload shape it receives from the retry path is the raw `webhook_events.payload` column
   rather than the inline push's wrapped `{"source_id":...,"payload":...}` envelope. Whether this
   static-binding feature is kept at all, and what `webhook_events.processed` should mean now that
-  `await_webhook` no longer reads it, is tracked separately in cleat#2689.
+  `await_webhook` no longer reads it, is tracked separately in cleat#2689 — resolved below, retired
+  entirely.
+
+- **`signal_workflow_id`/`signal_name` are retired: the `webhook_sources` columns, the
+  `create_source`/API fields, and `background.go`'s retry/dead-letter sweep
+  (`processBatch`/`retryEvent`/`markRetryFailed`) are all removed.** cleat#2689, closing the
+  question the previous entry left open. The static, non-correlated 1:1 binding these implemented
+  cannot serve more than one concurrent workflow waiting on a shared source — exactly the
+  limitation cleat#2625/cleat#2649 built correlated `await_webhook` into existence to remove — so
+  once every source gets a correlated, per-order wait for free (cleat#2697), the binding had no
+  remaining case it served. `signal_workflow_id`/`signal_name` sent in a `POST /ingest/sources`
+  body are now **rejected with 400** naming cleat#2689, rather than silently ignored — a caller
+  configuring a binding that no longer does anything gets told so, instead of getting a 201 and a
+  source that quietly never signals. `webhook_events.retry_count`/`last_retry_at` are dropped with
+  them (written only by the deleted sweep); `status`/`error_msg`/`processed` survive unchanged,
+  still written by `handleDeleteSource`'s cancellation.
+
+  **Migration note, and an upgrade step if you are running 0.3.0, 0.3.1 or 0.3.2:** Version 10
+  (`plugins/webhookingest/migrations.go`) drops the four columns outright, with no backfill —
+  but unlike the previous entry's "0.3.0 requires a fresh database" (which is true of the
+  0.2.0→0.3.0 transition specifically, since the columns didn't exist before then), 0.3.0/0.3.1/
+  0.3.2 all shipped `signal_workflow_id` with a working push-to-signal path. **Before upgrading**,
+  run this against your database and, for every row it returns, migrate that workflow onto
+  correlated `await_webhook` (cleat#2625/cleat#2649) first:
+  ```sql
+  SELECT id, tenant_id, signal_workflow_id, signal_name
+  FROM webhook_sources
+  WHERE signal_workflow_id IS NOT NULL AND deleted_at IS NULL;
+  ```
+  Skipping this step does not fail the upgrade, but it cannot be undone afterwards: bound sources
+  stop receiving signals with no error or warning, and because v10 drops the column, the SELECT
+  above no longer works — run it first.
 
 - **`await_webhook`'s `Keys` and a source's own `correlation_key_field` must now agree on whether
   a second correlation key exists at all, or the call errors instead of hanging forever.**

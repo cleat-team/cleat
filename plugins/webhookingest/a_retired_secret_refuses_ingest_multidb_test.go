@@ -26,11 +26,9 @@ import (
 // (a): a source that WAS signed, whose Secrets entry is then retired, must
 // refuse ingest -- not silently fall back to unsigned. It runs on all three
 // real backends, because secret_configured is a plain bool column and its
-// scan (BIT on SQL Server, TINYINT on MySQL, BOOLEAN on PostgreSQL) is exactly
-// the kind of thing that has broken per-dialect elsewhere in this repo
-// (plugins/webhookingest/background.go's own comment on
-// queryUnprocessedWebhookEvents is the same class of defect, on `NOT
-// e.processed`).
+// scan (BIT on SQL Server, TINYINT on MySQL, BOOLEAN on PostgreSQL) is
+// exactly the kind of thing that has broken per-dialect elsewhere in this
+// repo.
 //
 // A REAL SecretStore, not plugintest.FakeSecrets: the marker (secret_configured)
 // and the store are two different systems, and this test exists specifically

@@ -146,7 +146,6 @@ var crossTenantLedger = map[string]bypassKind{
 	// could sit beside it without sharing a marked ctx -- same statement,
 	// same reasoning as the Run entry above, just no longer inlined there.
 	"plugins/jobqueue/background.go:(*Plugin).sweepAbandonedJobs": kindClaimAcrossTenants,
-	"plugins/webhookingest/background.go:(*Plugin).Run":           kindClaimAcrossTenants,
 	"plugins/scheduler/background.go:(*Plugin).runDueSchedules":   kindClaimAcrossTenants,
 	// scheduledbackup's runDueBackups USED to be here, with a reason covering
 	// both a per-tenant claim and the orphan sweep. cleat#2247 removed the

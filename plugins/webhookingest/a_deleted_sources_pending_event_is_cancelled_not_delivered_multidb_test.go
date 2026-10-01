@@ -28,23 +28,24 @@ import (
 // TestADeletedSourcesPendingEventIsCancelledNotDelivered is cleat-review's
 // finding on #2221, across all three real dialects.
 //
-// An event ingested BEFORE a source is deleted, still pending because
-// handleIngestWebhook's inline SignalWorkflow attempt never ran (this test's
-// Environment carries none at ingest time -- the same state a signal
-// delivery that failed and is awaiting the next sweep would leave behind),
-// must never reach a workflow once the source is gone. Measured before this
+// An event ingested BEFORE a source is deleted, still pending, must never
+// reach a workflow once the source is gone. Measured before the original
 // fix: deleting the source left the event row untouched, and a subsequent
-// processBatch delivered it anyway -- one new signal call, on all three
-// dialects, for a webhook accepted during exactly the compromise window an
-// operator's delete is meant to shut off.
+// background retry sweep delivered it anyway -- one new signal call, on all
+// three dialects, for a webhook accepted during exactly the compromise
+// window an operator's delete is meant to shut off.
 //
-// The fix has two independent halves and this test pins both: handleDeleteSource
-// (routes.go) now cancels the source's own pending events in the same
-// transaction as the soft-delete (status='cancelled', processed=true), which
-// stops the PUSH path (processBatch/deliver's SignalWorkflow call); and,
-// owner decision on cleat#2199, awaitWebhook (host_functions.go) now filters
-// the same way, so the PULL path (a workflow's own await_webhook call) is
-// stopped too.
+// That sweep (background.go's processBatch/retryEvent, and the
+// signal_workflow_id/signal_name static binding it served) was retired in
+// cleat#2689 -- the correlated await_webhook path below is the only
+// delivery mechanism left, so this test no longer has a PUSH half to pin.
+// What remains, still pinned here: handleDeleteSource (routes.go) cancels
+// the source's own pending events in the same transaction as the
+// soft-delete (status='cancelled', processed=true) -- now purely an audit
+// signal, since nothing reads webhook_events.processed for delivery
+// anymore -- and, owner decision on cleat#2199, awaitWebhook
+// (host_functions.go) refuses a cancelled event too, so the PULL path (a
+// workflow's own await_webhook call) cannot hand it out either.
 func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		be := be
@@ -90,13 +91,6 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 			secretStore := engine.NewSecretStoreWithRing(be.DB, string(dialect), ring)
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
 			p.secrets = engine.NewPluginSecrets(secretStore)
-			// No SignalWorkflow yet: handleIngestWebhook's inline delivery
-			// attempt (routes.go's `if p.env != nil && p.env.SignalWorkflow !=
-			// nil` guard) is a no-op against this Environment, so the event
-			// this test ingests stays processed=false, status='pending'. A
-			// SignalWorkflow is attached later, after the delete, so the
-			// assertion below is "the sweep never calls it for THIS event",
-			// not "nothing was configured to call it".
 			p.env = &plugin.Environment{Dialect: dialect, Logger: quiet}
 
 			tenantID := uuid.MustParse(engine.DefaultTenantUUID)
@@ -104,7 +98,7 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 
 			const rawSecret = "delete-cancels-pending-event-secret"
 			createBody := `{"name":"delete-cancels-pending","source_type":"github",` +
-				`"secret":"` + rawSecret + `","signal_workflow_id":"wf-review-2221"}`
+				`"secret":"` + rawSecret + `"}`
 			createReq := httptest.NewRequest("POST", "/ingest/sources",
 				strings.NewReader(createBody)).WithContext(tenantCtx)
 			createRec := httptest.NewRecorder()
@@ -163,19 +157,6 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 				t.Fatalf("PRECONDITION FAILED: event status before delete: got %q, want pending or empty", statusBefore)
 			}
 
-			// Backdate received_at past processBatch's own 10-second cutoff
-			// (background.go's queryUnprocessedWebhookEvents) -- a plain write
-			// through the same cross-tenant connection used above, not a
-			// second call through the route (which always stamps "now").
-			// Without this the sweep below would skip the row on its own
-			// recency guard regardless of whether the cancellation fix works,
-			// proving nothing either way.
-			if _, err := plugintest.ExecRebound(t, ctx, readConn, dialect,
-				`UPDATE webhook_events SET received_at = $1 WHERE id = $2`,
-				time.Now().Add(-30*time.Second), eventID); err != nil {
-				t.Fatalf("backdate received_at: %v", err)
-			}
-
 			// The delete itself.
 			deleteReq := httptest.NewRequest("DELETE", "/ingest/sources/"+sourceID, nil).WithContext(tenantCtx)
 			deleteReq.SetPathValue("id", sourceID)
@@ -202,19 +183,7 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 				t.Errorf("event processed after delete: got false, want true")
 			}
 
-			// PUSH path: the background retry sweep must never signal this
-			// event's workflow now that its source is gone.
-			signalled := 0
-			p.env.SignalWorkflow = func(_ context.Context, _, _, _ string) error {
-				signalled++
-				return nil
-			}
-			p.processBatch(ctx)
-			if signalled != 0 {
-				t.Errorf("processBatch signalled a deleted source's cancelled event %d time(s), want 0", signalled)
-			}
-
-			// PULL path: await_webhook must not hand it out either -- owner
+			// PULL path: await_webhook must not hand it out -- owner
 			// decision on cleat#2199.
 			cc := &plugin.CallContext{TenantID: tenantID.String(), WorkflowID: "wf-review-2221", DB: be.DB}
 			awaitCtx := plugin.WithCallContext(auth.WithTenantID(context.Background(), tenantID), cc)
