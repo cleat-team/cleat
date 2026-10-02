@@ -16,6 +16,7 @@ package main
 var coreTables = []string{
 	"admin.orgs",
 	"admin.plugin_tables",
+	"admin.operator_api_keys",
 	"admin.tenant_api_keys",
 	"admin.tenant_roles",
 	"admin.tenant_egress_allow",

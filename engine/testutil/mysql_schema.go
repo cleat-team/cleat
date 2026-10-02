@@ -32,6 +32,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 // Kept in the same order as postgresCleanupTables; TestCleanupTableListsAgree
 // fails if the three drift apart again.
 var mysqlCleanupTables = []string{
+	"operator_api_keys",
 	"tenant_api_keys",
 	"workflow_tags",
 	"workflow_routing",
