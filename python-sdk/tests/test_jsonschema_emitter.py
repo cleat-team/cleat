@@ -9,8 +9,7 @@ nullable, a nested dataclass gains "required") would still "pass" a test
 that only checked for SOME non-empty schema.
 """
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
 
 import pytest
 
@@ -106,12 +105,12 @@ def test_dict_schema_describes_values_via_additional_properties():
 
 
 def test_optional_is_indistinguishable_from_plain_because_everything_is_nullable():
-    """Optional[str] and a plain str get the IDENTICAL schema: _from_dict's
+    """str | None and a plain str get the IDENTICAL schema: _from_dict's
     null handling does not depend on whether the annotation says Optional,
     so there is nothing for Optional to add."""
 
     @cleat_entry
-    def wf(h: HostCalls, a: str, b: Optional[str] = None) -> str:
+    def wf(h: HostCalls, a: str, b: str | None = None) -> str:
         return "{}"
 
     props = entry_point_param_schema(_func(wf))["properties"]
@@ -127,17 +126,16 @@ def test_multi_arm_union_is_any_schema():
     assert schema == {}
 
 
-def test_nested_dataclass_has_no_required_array():
-    """Divergence 3: a nested dataclass's missing-field TypeError is raised
-    inside export_wrapper's own try/except, becoming a completed run's
-    {"error": ...} today -- not a refusal -- so this module does not newly
-    turn that into a pre-start 400 by emitting "required" at a nested
-    level."""
+def test_nested_dataclass_has_a_required_array():
+    """Divergence 3, owner decision 2026-10-01: a nested dataclass's
+    missing-field TypeError is enforced by the schema too, not only at the
+    top level -- a documented breaking change (see CHANGELOG.md)."""
 
     @dataclass
     class Address:
         street: str
         city: str
+        unit: str = ""
 
     @cleat_entry
     def wf(h: HostCalls, address: Address) -> str:
@@ -145,16 +143,30 @@ def test_nested_dataclass_has_no_required_array():
 
     schema = entry_point_param_schema(_func(wf))["properties"]["address"]
     assert schema["type"] == ["object", "null"]
-    assert set(schema["properties"]) == {"street", "city"}
-    assert "required" not in schema
+    assert set(schema["properties"]) == {"street", "city", "unit"}
+    assert schema["required"] == ["street", "city"]
+    assert "unit" not in schema["required"]
     assert schema["additionalProperties"] is True
+
+
+def test_nested_dataclass_field_with_a_default_factory_is_not_required():
+    @dataclass
+    class Cart:
+        items: list[str] = field(default_factory=list)
+
+    @cleat_entry
+    def wf(h: HostCalls, cart: Cart) -> str:
+        return "{}"
+
+    schema = entry_point_param_schema(_func(wf))["properties"]["cart"]
+    assert "required" not in schema
 
 
 def test_self_referential_dataclass_does_not_recurse_forever():
     @dataclass
     class Node:
         value: int
-        next: Optional["Node"] = None
+        next: "Node | None" = None
 
     @cleat_entry
     def wf(h: HostCalls, head: Node) -> str:

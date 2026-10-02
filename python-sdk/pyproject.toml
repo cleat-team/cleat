@@ -161,11 +161,14 @@ select = ["E4", "E7", "E9", "F", "I", "B", "C4", "PIE", "UP", "SIM", "PERF", "RU
 ignore = ["RUF003", "PERF203"]
 
 [tool.ruff.lint.per-file-ignores]
-# T201 is `print` found in library code, which is worth catching -- there are
-# 13 today and all 13 are in vet.py, a CLI whose job is printing. Ignoring it
-# in the four places printing is correct leaves the rule live everywhere it
-# would mean something.
+# T201 is `print` found in library code, which is worth catching. Ignoring it
+# only in the places whose whole job is printing -- CLI entry points shelled
+# out to from cmd/cleat, not `cleat_sdk` as a library -- leaves the rule live
+# everywhere it would mean something. jsonschema_emitter.py (cleat#2914) is
+# the same shape as vet.py: invoked via `python3 -m cleat_sdk.X`, its stdout
+# IS its return value.
 "cleat_sdk/vet.py" = ["T201"]
+"cleat_sdk/jsonschema_emitter.py" = ["T201"]
 "scripts/**" = ["T201"]
 "tests/**" = ["T201", "B011"]
 "examples/**" = ["T201", "BLE001"]

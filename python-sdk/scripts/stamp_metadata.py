@@ -240,8 +240,11 @@ def build_metadata(args: argparse.Namespace) -> dict:
     # stamp; a future multi-entry Python build would need its own resolution
     # story (the __cleat_entry__ dispatch key entry.py's _select already
     # supports is a different field name from __entry_point, and nothing
-    # currently reconciles the two) -- out of scope here, flagged rather
-    # than guessed at.
+    # currently reconciles the two) -- out of scope here, filed as cleat#2937
+    # rather than guessed at. Also note cleat#2936: this stamp does not yet
+    # survive on a real Component Model binary at all (see WASM_VERSION
+    # above) -- a separate, more urgent gap this comment's own reasoning
+    # does not depend on.
     if entry_points_str:
         meta["entry_points"] = [p for p in entry_points_str.split(",") if p]
 

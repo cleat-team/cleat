@@ -33,25 +33,23 @@ ARE DELIBERATE, NOT OVERSIGHTS:
    So this module never emits ``anySchema()`` for a lone string parameter
    the way Go does -- it always describes an object.
 
-3. NO "required" ON A NESTED DATACLASS OBJECT. A nested dataclass field
-   with no default DOES raise if absent
-   (``target_type(**kwargs)`` -- a plain ``TypeError``), unlike Go's own
-   struct fields, which ``encoding/json`` never enforces the presence of.
-   But that ``TypeError`` is raised INSIDE ``export_wrapper``'s own
+3. "required" ON A NESTED DATACLASS OBJECT -- OWNER DECISION, 2026-10-01
+   (cleat#2933). A nested dataclass field with no default DOES raise if
+   absent (``target_type(**kwargs)`` -- a plain ``TypeError``), unlike Go's
+   own struct fields, which ``encoding/json`` never enforces the presence
+   of. That ``TypeError`` is raised INSIDE ``export_wrapper``'s own
    ``try/except Exception`` -- the same boundary that turns a missing
    TOP-LEVEL required parameter into a completed run's ``{"error": ...}``
    result rather than a WASM trap (contrast Go, where the analogous failure
    ``panic``s and the engine sees a dead guest -- cleat#1981's whole reason
-   to validate before dispatch). Enforcing "required" at a NESTED level here
-   would newly turn a result that is TODAY a 201-with-error-payload into a
-   400-before-any-run-exists -- a real behavior change, but a strictly
-   smaller and less certain one than the top-level case cleat#1980's own
-   issue text already asks for ("every declared parameter required... per
-   #1690, absent parameters are a refusal"), which says nothing about
-   nesting. This module therefore omits "required" at every nested object
-   level, matching Go's own ``structSchema``'s deliberate choice -- flagged
-   explicitly in the PR as a scope question for an explicit decision, not
-   decided unilaterally here.
+   to validate before dispatch) -- so enforcing "required" here is a
+   DELIBERATE, DOCUMENTED BREAKING CHANGE: a payload missing a nested
+   required field now gets a pre-start 400 where it used to get a
+   201-with-error-payload. This module omitted "required" at nested levels
+   until this decision, flagged explicitly as an open scope question rather
+   than decided unilaterally; the owner ruled it should be enforced, so the
+   schema describes correct shape at every level, not only the top one. See
+   CHANGELOG.md's "UPGRADE NOTES" for the concrete before/after.
 
 4. RESULT IS ALWAYS UNCONSTRAINED. ``export_wrapper`` finishes with
    ``json.dumps(result, default=str)`` over whatever the workflow body
@@ -65,9 +63,9 @@ ARE DELIBERATE, NOT OVERSIGHTS:
    guessing") -- more so here, since ``default=str`` can serialise an
    object the return annotation never promised.
 
-5. LEAF/CONTAINER TYPE CONSTRAINTS ARE A DELIBERATE TIGHTENING BEYOND
-   TODAY'S BINDING, FLAGGED FOR EXPLICIT REVIEW RATHER THAN DECIDED HERE.
-   Measured directly against ``export_wrapper`` (not assumed): ``_from_dict``
+5. LEAF/CONTAINER TYPE CONSTRAINTS ARE A DELIBERATE, OWNER-RULED TIGHTENING
+   BEYOND TODAY'S BINDING (cleat#2933, 2026-10-01: ship strict). Measured
+   directly against ``export_wrapper`` (not assumed): ``_from_dict``
    does not actually reject ANY value/type mismatch below the top level.
    ``{"user_id": 42}`` against a declared ``user_id: str`` is bound as the
    Python int ``42``, unchanged; ``{"cart": "notalist"}`` against a declared
@@ -84,29 +82,23 @@ ARE DELIBERATE, NOT OVERSIGHTS:
    as an ordinary completed run carrying ``{"error": ...}``, same as any
    workflow-body exception.
 
-   So a STRICTLY faithful schema -- "describe what the binding does, not
-   what might be nicer", this issue's own words -- would emit ``anySchema()``
-   for every scalar and container VALUE, keeping type information only at
-   the top level (which parameters exist, which are required) and for
-   nested dataclasses' PROPERTY NAMES (not their field types either, by the
-   same argument). This module instead emits real ``"type"`` constraints at
-   every level, by deliberate choice: it is the more useful schema for
-   `tests/conformance`-style documentation and the eventual OpenAPI endpoint
-   (cleat#2913), and the asymmetry with the strictest reading is the same
-   SHAPE of choice the owner already made once for Go's scalar-null
-   question (cleat#2927) -- trade a documented, narrow permissiveness gap in
-   the SDK for a schema that actually describes types, accepting that a
-   caller who was previously (silently) tolerated sending a wrong-shaped
-   leaf value will now see a 400 instead. It is called out here, explicitly,
-   because unlike the null case this has had no owner ruling yet -- the PR
-   this module ships in asks for one rather than deciding it unilaterally.
+   A STRICTLY faithful schema -- "describe what the binding does, not what
+   might be nicer", this issue's own words -- would instead emit
+   ``anySchema()`` for every scalar and container VALUE, keeping type
+   information only at the object-shape level (which parameters/fields
+   exist, which are required). This module emits real ``"type"``
+   constraints at every level instead: raised explicitly as an open
+   question rather than decided unilaterally, the owner ruled to ship
+   strict, broader than #2927's scalar-null-only ruling -- a caller who was
+   previously (silently) tolerated sending a wrong-shaped leaf value now
+   gets a 400. See CHANGELOG.md's "UPGRADE NOTES" for the concrete
+   before/after.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import importlib.util
-import inspect
 import json
 import sys
 import typing
@@ -219,13 +211,22 @@ def _schema_from_type(target_type: Any, visiting: frozenset[Any] = frozenset()) 
         except Exception:  # noqa: BLE001
             field_hints = {}
         properties = {}
+        required = []
         for f in dataclasses.fields(target_type):
             field_type = field_hints.get(f.name, f.type)
             properties[f.name] = _schema_from_type(field_type, nested_visiting)
-        # DELIBERATELY NO "required" HERE -- see module docstring, point 3.
-        return _nullable(
-            {"type": "object", "properties": properties, "additionalProperties": True}
-        )
+            # Owner decision, 2026-10-01 (see module docstring, point 3): a
+            # missing required field at a NESTED level is now enforced here
+            # too, not only at the top level. dataclasses.MISSING on both
+            # default and default_factory is the same test
+            # `target_type(**kwargs)` effectively applies -- a field with
+            # neither has no fallback value to construct with.
+            if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
+                required.append(f.name)
+        schema = {"type": "object", "properties": properties, "additionalProperties": True}
+        if required:
+            schema["required"] = required
+        return _nullable(schema)
 
     # ---- Plain scalars _from_dict passes through unchanged but whose JSON
     # wire shape is still fully known ----
