@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -63,10 +64,22 @@ func TestMSSQLUUIDColumnsAreConvertedInProjections(t *testing.T) {
 			t.Fatalf("read %s: %v", f, err)
 		}
 		for _, v := range findRawUUIDProjections(f, string(src), byTable) {
-			t.Errorf("%s:%d projects UUID column %q without CONVERT/CAST:\n    %s\n\n"+
-				"go-mssqldb scans UNIQUEIDENTIFIER into a Go string as 16 raw bytes, not "+
-				"canonical UUID text. Wrap it: CONVERT(NVARCHAR(36), %s) AS %s",
-				f, v.line, v.column, v.context, v.column, v.column)
+			// LOWER(), not a bare CONVERT -- and this message is the only place
+			// the prescribed form is written down, which is why it is worth a
+			// comment of its own. CONVERT(NVARCHAR(36), x) returns UPPERCASE on
+			// SQL Server while the value the application WROTE is lowercase, so
+			// a projection that is CONVERTed and not LOWERed yields an id that
+			// does not equal the one that created the row: a by-id lookup
+			// misses, and a command that prints an id and accepts it back fails
+			// to match its own output. cleat#2983.
+			//
+			// The guard ACCEPTS the corrected form -- wrappedInConversion walks
+			// outward through nesting for exactly this shape, and names
+			// LOWER(CONVERT(NVARCHAR(36), tenant_id)) as its example -- so the
+			// old message prescribed a form that passes this check and ships the
+			// bug anyway. An author who obeyed it wrote a new defect; that is
+			// what makes the message itself the vector rather than the sites.
+			t.Errorf("%s", uuidProjectionMessage(f, v.line, v.column, v.context))
 		}
 	}
 	// A floor rather than an exact count: the set grows as the repo does. It
@@ -475,4 +488,64 @@ func feedsAnInsert(head string) bool {
 		return false
 	}
 	return !strings.Contains(head[i:], ";")
+}
+
+// uuidProjectionMessage is what an author who trips this guard is told. It is a
+// function rather than an inline Errorf argument so that its TEXT can be
+// asserted on -- which is the whole point of the change that introduced it.
+//
+// THE MESSAGE IS THE VECTOR. This guard does not require LOWER, it requires
+// CONVERT, so its advice is the only place the prescribed form is written down:
+// an author who obeys the message writes `CONVERT(NVARCHAR(36), x)`, passes the
+// check, and ships an id that is UPPERCASE on SQL Server where the value the
+// application wrote is lowercase. That is not hypothetical -- it is exactly what
+// happened in cleat#2982, where a minted credential could not be recognised as
+// its own row and `cleatctl operator-key revoke --key-id <what list printed>`
+// matched nothing.
+//
+// So the wrap here is `LOWER(CONVERT(...))`, which this guard already ACCEPTS:
+// wrappedInConversion walks outward through nesting for precisely this shape. A
+// message that demands "canonical UUID text" and prescribes a wrap that is not
+// canonical, issued by code that would have taken the canonical one, is the
+// defect cleat#2983 is about.
+func uuidProjectionMessage(file string, line int, column, context string) string {
+	return fmt.Sprintf("%s:%d projects UUID column %q without CONVERT/CAST:\n    %s\n\n"+
+		"go-mssqldb scans UNIQUEIDENTIFIER into a Go string as 16 raw bytes, not "+
+		"canonical UUID text. Wrap it: LOWER(CONVERT(NVARCHAR(36), %s)) AS %s -- the "+
+		"LOWER is not decoration: CONVERT alone returns UPPERCASE on SQL Server, so "+
+		"the value would not equal the lowercase id the application wrote (cleat#2983).",
+		file, line, column, context, column, column)
+}
+
+// TestTheProjectionAdvicePrescribesTheCanonicalForm pins the artefact this issue
+// is about, and it asserts on the TEXT because the text is what failed.
+//
+// A status-only test could not have caught this: the guard's verdict was correct
+// in every instance -- it refused exactly what it said it refused. What was
+// wrong was the repair it named, and only an assertion over the message can see
+// that.
+func TestTheProjectionAdvicePrescribesTheCanonicalForm(t *testing.T) {
+	msg := uuidProjectionMessage("engine/x.go", 12, "tenant_id", "&wf.TenantID")
+
+	if !strings.Contains(msg, "LOWER(CONVERT(NVARCHAR(36), tenant_id))") {
+		t.Errorf("the prescribed wrap is not the canonical one, so an author who obeys this "+
+			"message writes an id that is UPPERCASE on SQL Server:\n%s", msg)
+	}
+
+	// THE CONTROL, and it needs care: `CONVERT(NVARCHAR(36), tenant_id)` is a
+	// SUBSTRING of the corrected text, so asserting only that the message
+	// mentions CONVERT would pass on both the broken and the fixed message and
+	// measure nothing. The assertion has to be that the OLD PRESCRIPTION -- the
+	// whole "Wrap it: ... AS ..." clause, un-LOWERed -- is absent.
+	if strings.Contains(msg, "Wrap it: CONVERT(NVARCHAR(36), tenant_id) AS tenant_id") {
+		t.Errorf("the message still prescribes the un-LOWERed wrap, which passes this guard "+
+			"and ships the bug:\n%s", msg)
+	}
+
+	// And it must say WHY. A prescription with no reason is one a later reader
+	// removes as noise, which is how the un-LOWERed form would come back.
+	if !strings.Contains(msg, "UPPERCASE") {
+		t.Errorf("the message prescribes LOWER without saying why, so the next reader has no "+
+			"reason to keep it:\n%s", msg)
+	}
 }

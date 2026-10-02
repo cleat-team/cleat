@@ -46,9 +46,17 @@ package engine
 // NOTE THE CASE, because the first probe of this passed while printing that.
 // CONVERT(NVARCHAR(36), tenant_id) returns UPPERCASE and the fixture constants
 // are lowercase, so `wf.TenantID == unscopedTenantA` was false for a row that
-// plainly belonged to tenant A. Every comparison here is case-insensitive, and
-// the same hazard is live in cmd/cleat-worker/setup.go:storeForTenant, which
-// compares tenant strings with ==.
+// plainly belonged to tenant A. Every comparison here is case-insensitive.
+//
+// The same SHAPE appears in cmd/cleat-worker/setup.go:storeForTenant, which
+// compares tenant strings with == -- but that one is NOT live, and the reason is
+// worth writing down rather than re-deriving. The value it compares against is
+// w.storeTenantID, which is always the all-zeros UUID (cmd/cleat-worker/main.go
+// sets it from a constant, and no flag overrides that). The all-zeros UUID
+// contains no letters, so its case cannot vary: `tenantID == w.storeTenantID` is
+// true for the default tenant and false for every other, whichever case the
+// projection produced. It is safe by the shape of the constant rather than by
+// design, which is a different thing -- cleat#2983.
 
 import (
 	"context"
