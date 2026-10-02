@@ -283,3 +283,87 @@ func TestDeployWorkflow_StoresANonObjectMetadataPayloadUnchanged(t *testing.T) {
 			"binary must be stored exactly as built -- which is also what develop did")
 	}
 }
+
+// artifactWithZeroStamp is what every standalone stamper leaves when it is given
+// no version: a well-formed cleat.metadata object whose workflow_version is 0.
+// Java's scripts/inject-metadata.sh defaults it with `${CLEAT_WORKFLOW_VERSION:-0}`,
+// AssemblyScript's inject-metadata.js with a trailing `: 0`, Rust's
+// inject_metadata.rs through an env fallback, and stamp_metadata.py the same way
+// (which is cleat#2941's B1). Non-zero abi/min so only the version is degenerate.
+func artifactWithZeroStamp(t *testing.T) []byte {
+	t.Helper()
+	return artifactWithRawMetadata(t, `{"workflow_name":"provision","workflow_version":0,`+
+		`"abi_version":1,"min_compatible_version":1,"plugin_deps":{},"sdk_language":"java"}`)
+}
+
+// TestRestampWorkflowVersionRestampsAZeroStamp is the regression test for
+// cleat-review's B3 on this PR's third head.
+//
+// An earlier version of restampWorkflowVersion returned early for any stamp that
+// was not positive, on the analogy of `cleat deploy` -- which asks whether to
+// RECORD the stamp, and rightly declines 0 because a version of 0 cannot be
+// recorded. The question here is different: does the stored binary agree with the
+// row? A 0 stamp is the case that most needs changing, not the case to skip, and
+// skipping it re-opened cleat#2944 for the single commonest unversioned build.
+func TestRestampWorkflowVersionRestampsAZeroStamp(t *testing.T) {
+	built := artifactWithZeroStamp(t)
+
+	got, err := restampWorkflowVersion(built, 2)
+	if err != nil {
+		t.Fatalf("restampWorkflowVersion: %v", err)
+	}
+	if string(got) == string(built) {
+		t.Fatal("a 0 stamp was left alone; cmd/cleat-worker's pre-flight compares with `!=` and " +
+			"exempts nothing, so this binary is released on every claim and never runs")
+	}
+
+	meta, err := wasm.ReadMetadata(got)
+	if err != nil {
+		t.Fatalf("the restamped artifact has no readable metadata: %v", err)
+	}
+	if meta.WorkflowVersion != 2 {
+		t.Errorf("workflow_version = %d, want 2", meta.WorkflowVersion)
+	}
+	// The keys a 0-stamped build carries must survive exactly as in the 1 case.
+	if !bytes.Contains(got, []byte(`"sdk_language":"java"`)) {
+		t.Error("restamping a 0 stamp dropped sdk_language")
+	}
+}
+
+// The same case through `cleatctl deploy`, which is where cleat-review measured
+// it: byte-patch a stamp to 0, deploy, and the stored binary must report the
+// version the row records rather than 0.
+func TestDeployWorkflow_RestampsAZeroStamp(t *testing.T) {
+	dir := t.TempDir()
+	zeroed := artifactWithZeroStamp(t)
+	path := writeWASM(t, dir, zeroed)
+
+	var capturedDef *engine.WorkflowDef
+	store := &mockStore{
+		listWorkflowDefsFn: func(_ context.Context, _ string) ([]engine.WorkflowDef, error) {
+			return nil, nil
+		},
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
+			capturedDef = def
+			return nil
+		},
+	}
+
+	captureStdout(t, func() {
+		deployWorkflow(context.Background(), store, nil, []string{"provision", path})
+	})
+
+	if capturedDef == nil {
+		t.Fatal("expected DeployWorkflowDef to be called")
+	}
+	got, err := wasm.ReadMetadata(capturedDef.WASMBytes)
+	if err != nil {
+		t.Fatalf("the stored binary has no readable metadata: %v", err)
+	}
+	if got.WorkflowVersion != capturedDef.Version {
+		t.Errorf("stored binary reports workflow_version %d but the row is v%d.\n\n"+
+			"A 0 stamp is the default of every standalone stamper given no version, and the "+
+			"worker's pre-flight exempts nothing, so this run is released on every claim and "+
+			"never executes. cleat#2944.", got.WorkflowVersion, capturedDef.Version)
+	}
+}

@@ -189,6 +189,17 @@ func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
 	return writeCustomSection(wasmBytes, entryPointsSectionName, []byte(payload.String()))
 }
 
+// ErrNotAJSONObject is returned by SetMetadataField when the cleat.metadata
+// payload is valid JSON but not an object: the literal `null`, an array, a bare
+// scalar. There are no keys to patch, and json.Unmarshal leaves its map target
+// nil for `null`, so assigning into that nil map would panic rather than fail.
+//
+// It is a sentinel rather than a message because callers differ on what it
+// means. A caller that can leave the section as it found it should treat it as
+// "nothing to patch" rather than a failure -- a binary carrying such a payload
+// is one the calling command did not produce.
+var ErrNotAJSONObject = errors.New("cleat.metadata: not a JSON object")
+
 // SetMetadataField returns wasmBytes with the cleat.metadata key set to
 // rawValue, leaving every OTHER key exactly as the build wrote it.
 //
@@ -204,8 +215,8 @@ func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
 // byte-for-byte: the payload is decoded into a map and re-encoded, so
 // encoding/json sorts the keys and compacts the whitespace inside a value
 // ([1, 2] becomes [1,2]). HTML escaping is switched off, so <, > and & inside a
-// value are left as the build wrote them rather than becoming <-style
-// escapes. Every key and every value survives; only their order and interior
+// value are left as the build wrote them rather than becoming backslash-u
+// escape sequences. Every key and every value survives; only their order and interior
 // whitespace change. Nothing reads the section positionally, and the field this
 // was written for is not order sensitive.
 //
@@ -225,9 +236,10 @@ func SetMetadataField(wasmBytes []byte, key string, rawValue json.RawMessage) ([
 	if fields == nil {
 		// Unmarshal leaves the map nil for a JSON `null`, and assigning into it
 		// panics ("assignment to entry in nil map") -- reached from
-		// cleatctl deploy, where ReadMetadata accepts `null` as a zero Metadata
-		// and the version it reports (0) differs from the assigned one.
-		return nil, fmt.Errorf("cleat.metadata: not a JSON object")
+		// cleatctl deploy before this was a returned error rather than a crash.
+		// Returned as a sentinel because a caller which may leave a section as it
+		// found it needs to tell this apart from a write that genuinely failed.
+		return nil, ErrNotAJSONObject
 	}
 	fields[key] = rawValue
 

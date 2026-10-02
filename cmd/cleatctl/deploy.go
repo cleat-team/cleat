@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -218,15 +219,6 @@ func restampWorkflowVersion(wasmBytes []byte, version int) ([]byte, error) {
 	if err != nil || meta == nil {
 		return wasmBytes, nil
 	}
-	if meta.WorkflowVersion <= 0 {
-		// No usable stamp. A cleat.metadata payload of `null` parses to a zero
-		// Metadata and reports version 0, as does a build that declared none.
-		// There is nothing to reconcile, so store the binary as built -- and this
-		// is the gate that keeps such a payload away from SetMetadataField, which
-		// needs a JSON object to patch. `cleat deploy` treats a stamp the same
-		// way, trusting it only when it is positive.
-		return wasmBytes, nil
-	}
 	if meta.WorkflowVersion == version {
 		return wasmBytes, nil
 	}
@@ -239,6 +231,26 @@ func restampWorkflowVersion(wasmBytes []byte, version int) ([]byte, error) {
 	// cleat-review on this PR's first head, where the round-trip silently lost
 	// all four.)
 	out, err := wasm.SetMetadataField(wasmBytes, "workflow_version", json.RawMessage(strconv.Itoa(version)))
+	if errors.Is(err, wasm.ErrNotAJSONObject) {
+		// The one shape that is left alone: valid JSON with no keys to patch, so
+		// there is nothing to restamp. Stored as built, which is what develop did.
+		//
+		// A stamp of 0 is deliberately NOT skipped, and an earlier version of this
+		// function that skipped non-positive stamps was wrong. 0 is what every
+		// standalone stamper defaults to when given no version -- Java's
+		// inject-metadata.sh (`:-0`), Rust's inject_metadata.rs, AssemblyScript's
+		// inject-metadata.js, and Python without CLEAT_WORKFLOW_VERSION -- and
+		// cmd/cleat-worker's pre-flight compares with `!=`, exempting nothing, so
+		// such a binary is released on every claim and its runs never execute.
+		// Restamping a 0 IS the fix cleat#2944 exists for.
+		//
+		// The `cleat deploy` analogy that produced the bug is worth stating so it
+		// is not reapplied: there the question is "should this stamp be the
+		// RECORDED version?", and declining 0 is right because a version of 0
+		// cannot be recorded. Here the question is "does the stored binary agree
+		// with the row?", and 0 is the case that most needs changing.
+		return wasmBytes, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("could not stamp the binary with workflow_version %d: %w", version, err)
 	}
