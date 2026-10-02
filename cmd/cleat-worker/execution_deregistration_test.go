@@ -47,8 +47,8 @@ func TestDeregisteringAnExecutionLeavesASuccessorsRegistrationAlone(t *testing.T
 	if got, _ := w.execCancel.Load("run-1"); got != succReg {
 		t.Errorf("execCancel[\"run-1\"] = %v, want the successor's registration", got)
 	}
-	if !w.runIsFenced("run-1") {
-		t.Error("runIsFenced(\"run-1\") = false -- the predecessor's teardown cleared the successor's marker")
+	if !w.runIsFenced("run-1", 2) {
+		t.Error("runIsFenced(\"run-1\", 2) = false -- the predecessor's teardown cleared the successor's marker")
 	}
 	if succCtx.Err() != nil {
 		t.Error("the successor's context was cancelled by the predecessor's teardown")
@@ -77,7 +77,7 @@ func TestDeregisteringAnExecutionClearsItsOwnEntries(t *testing.T) {
 	if _, ok := w.execCancel.Load("run-1"); ok {
 		t.Error("execCancel[\"run-1\"] still present after its own deregistration")
 	}
-	if w.runIsFenced("run-1") {
-		t.Error("runIsFenced(\"run-1\") = true after its own deregistration")
+	if w.runIsFenced("run-1", 3) {
+		t.Error("runIsFenced(\"run-1\", 3) = true after its own deregistration")
 	}
 }

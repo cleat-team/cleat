@@ -105,12 +105,11 @@ func TestALiveWorkerWithAnUnfencedRunDoesNotRelease(t *testing.T) {
 	}
 }
 
-// The predicate's two clauses, plainly. NOT asserted here: that the marker is
-// per-generation. It is not -- runIsFenced loads by id and ignores the stored
-// value -- so a test claiming otherwise would be asserting a property the code
-// does not have. See the note on the PR: a predecessor's marker lingering past
-// a successor's claim would refuse the successor's durable calls, which is
-// worth its own look rather than being smuggled in here.
+// The predicate's two clauses, plainly. The per-generation half -- that a
+// predecessor's marker does not answer for a successor -- is asserted
+// separately, by TestAStaleFenceMarkerDoesNotStopASuccessor below: it has a
+// different consequence (a genuine failure released rather than recorded), so
+// it wants its own test rather than being folded into this one.
 func TestRunWasStoppedPredicate(t *testing.T) {
 	f := newStoppedRunFixture(t)
 	wf := f.wf()
@@ -118,10 +117,9 @@ func TestRunWasStoppedPredicate(t *testing.T) {
 	if f.w.runWasStopped(wf) {
 		t.Error("runWasStopped = true for a live worker and an unfenced run")
 	}
-	// The value is the generation the fence judged (PR #2950). runIsFenced
-	// loads by id and ignores it -- see cleat#2956 -- so this is here to keep
-	// the fixture faithful to what the fence actually writes, not because the
-	// predicate reads it.
+	// The value is the generation the fence judged (PR #2950), and the predicate
+	// compares it, so this stores the fixture's OWN generation -- what the fence
+	// writes for the generation it judged.
 	f.w.fencedRuns.Store(wf.ID, wf.Generation)
 	if !f.w.runWasStopped(wf) {
 		t.Error("runWasStopped = false for a fenced run")
@@ -131,6 +129,46 @@ func TestRunWasStoppedPredicate(t *testing.T) {
 	g.w.cancel()
 	if !g.w.runWasStopped(g.wf()) {
 		t.Error("runWasStopped = false while shutting down")
+	}
+}
+
+// cleat#2956: the per-generation half of runIsFenced.
+//
+// fencedRuns is keyed by workflow id, and an entry is removed by the marking run's
+// OWN teardown -- which, for a run that was fenced out, is exactly the teardown that
+// may never come. So a predecessor's marker is still there when a successor claims
+// the same id, and an id-only read answers "this run is fenced" for an execution
+// nobody fenced. Two consequences from that one cause, both asserted here.
+func TestAStaleFenceMarkerDoesNotStopASuccessor(t *testing.T) {
+	f := newStoppedRunFixture(t)
+	predecessor := f.wf() // "run-1" at generation 3
+
+	// What the fence leaves behind for the generation it judged.
+	f.w.fencedRuns.Store(predecessor.ID, predecessor.Generation)
+
+	// The marker still means what it says for its own generation -- without this
+	// the test is satisfied by a predicate that answers false always.
+	if !f.w.runWasStopped(predecessor) {
+		t.Error("runWasStopped = false for the generation the fence actually judged")
+	}
+
+	// A successor claims the same workflow id at a later generation.
+	successor := f.wf()
+	successor.Generation = predecessor.Generation + 1
+
+	// The release half: an id-only predicate says "stopped" here, so this
+	// successor's GENUINE failure is released instead of recorded -- and a run
+	// released on failure can cycle claim -> fail -> release -> claim.
+	if f.w.runWasStopped(successor) {
+		t.Error("runWasStopped = true for a successor generation -- the predecessor's marker was " +
+			"read as the successor's, so a real failure would be released rather than recorded (cleat#2956)")
+	}
+	// The same defect through WithCanStartNewWork. Asserted separately because it
+	// is a different caller with a different consequence -- a refused durable call,
+	// not a released run -- and because a fix that made only runWasStopped
+	// generation-aware would leave this one live.
+	if f.w.runIsFenced(successor.ID, successor.Generation) {
+		t.Error("runIsFenced(id, successor generation) = true -- an unfenced guest's durable calls would be refused")
 	}
 }
 

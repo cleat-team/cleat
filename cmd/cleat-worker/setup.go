@@ -2324,7 +2324,7 @@ func (w *Worker) shuttingDown() bool {
 // and each of them turned it into a terminal failure -- which converts a
 // hand-over into an application failure the caller cannot tell from a real one.
 func (w *Worker) runWasStopped(wf *engine.WorkflowInstance) bool {
-	return w.shuttingDown() || w.runIsFenced(wf.ID)
+	return w.shuttingDown() || w.runIsFenced(wf.ID, wf.Generation)
 }
 
 // releaseIfStopped releases wf and reports whether it did, when this execution
@@ -2341,7 +2341,7 @@ func (w *Worker) releaseIfStopped(wf *engine.WorkflowInstance, what string, err 
 	w.logger.InfoContext(context.Background(),
 		"run was stopped rather than failing: releasing it for another worker instead of recording a failure",
 		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "at", what,
-		"shutting_down", w.shuttingDown(), "fenced", w.runIsFenced(wf.ID), "error", err)
+		"shutting_down", w.shuttingDown(), "fenced", w.runIsFenced(wf.ID, wf.Generation), "error", err)
 	w.releaseWorkflow(wf)
 	return true
 }
@@ -3486,7 +3486,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// for why decision 1 has to be checked here rather than left to
 		// execCtx cancellation.
 		engine.WithCanStartNewWork(func() bool {
-			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID)
+			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID, wf.Generation)
 		}),
 		// cleat#2020: w.ctx is cancelled on SIGINT/SIGTERM (main.go's signal
 		// handler) and on the watchdog's poison-pill exit (w.cancel() in
@@ -4201,13 +4201,27 @@ func (w *Worker) heartbeatPresumedLost() bool {
 	return time.Since(last) > w.reclaimAfter()
 }
 
-// runIsFenced reports whether THIS run's own fenced heartbeat has already
-// reported it lost -- decision 1, scoped to one workflow ID rather than
-// every run this worker holds. See fencedRuns' doc comment for why this,
-// and not execCtx cancellation, is what freshCall actually refuses on.
-func (w *Worker) runIsFenced(workflowID string) bool {
-	_, ok := w.fencedRuns.Load(workflowID)
-	return ok
+// runIsFenced reports whether THIS generation of this run has had its own fenced
+// heartbeat report it lost -- decision 1, scoped to one run rather than every run
+// this worker holds. See fencedRuns' doc comment for why this, and not execCtx
+// cancellation, is what freshCall actually refuses on.
+//
+// The generation is part of the question rather than a detail of it. fencedRuns is
+// keyed by workflow id, and a marker outlives the claim that set it -- it is removed
+// by the marking run's OWN teardown, which for a run that was fenced out may never
+// come. An id-only read therefore answers "has ANY generation of this run been
+// fenced", which is not what either caller asks, and both symptoms have one cause:
+// a successor's GENUINE failure looks like a fence loss (runWasStopped releases it
+// rather than recording it, so the run can cycle claim -> fail -> release -> claim),
+// and a successor's guest has its durable calls refused by a fence that judged its
+// predecessor (cleat#2956).
+//
+// Both callers can state the generation, and did not have to be changed to: the two
+// release-path callers hold the instance, and the WithCanStartNewWork closure captures
+// the same wf that WithGeneration is handed a few lines above it.
+func (w *Worker) runIsFenced(workflowID string, generation int64) bool {
+	v, ok := w.fencedRuns.Load(workflowID)
+	return ok && v == generation
 }
 
 // recordDBTrouble marks this worker's own database contact as having just

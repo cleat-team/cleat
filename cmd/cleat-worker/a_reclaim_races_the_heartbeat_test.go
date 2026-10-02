@@ -76,10 +76,13 @@ func TestTheFenceDoesNotCancelTheSuccessorWhenAReclaimRacesTheHeartbeat(t *testi
 	if judgedCtx.Err() != nil {
 		t.Error("the judged execution's context was cancelled -- nothing of that generation was still registered to stop")
 	}
-	// fencedRuns being keyed by id alone means the successor inherits the
-	// predecessor's fence marker, which is what makes the NEW execution's
-	// durable calls refuse -- the same defect one level down.
-	if w.runIsFenced("run-1") {
+	// fencedRuns is keyed by workflow id, so an id-only marker is what a
+	// successor would inherit -- and inheriting it is what makes the NEW
+	// execution's durable calls refuse, the same defect one level down
+	// (cleat#2956). This asks about the SUCCESSOR's generation, which is what
+	// makes the assertion about that inheritance rather than about the id: a
+	// marker left for the judged generation must not answer for a later one.
+	if w.runIsFenced("run-1", 2) {
 		t.Error("the run was marked fenced -- the marker landed on the successor's registration")
 	}
 	// WS-1's diagnostic: the WARN must carry the generation SENT beside the one
@@ -110,7 +113,7 @@ func TestTheFenceStillCancelsTheRunItJudgedWhenNothingRacesIt(t *testing.T) {
 	if judgedCtx.Err() == nil {
 		t.Error("the judged execution was NOT cancelled -- a fence that never cancels protects nothing")
 	}
-	if !w.runIsFenced("run-1") {
-		t.Error("runIsFenced(\"run-1\") = false -- the judgement did not reach fencedRuns")
+	if !w.runIsFenced("run-1", 4) {
+		t.Error("runIsFenced(\"run-1\", 4) = false -- the judgement did not reach fencedRuns")
 	}
 }

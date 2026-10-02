@@ -53,8 +53,8 @@ func TestHeartbeatAndFenceInFlightCancelsARunHeartbeatBatchFencedReportsLost(t *
 	// freshCall refuses on via WithCanStartNewWork -- see fencedRuns' doc
 	// comment on why execCtx cancellation alone does not stop a real guest's
 	// next durable call.
-	if !w.runIsFenced("run-lost") {
-		t.Fatal("runIsFenced(\"run-lost\") = false -- HeartbeatBatchFenced reported it lost")
+	if !w.runIsFenced("run-lost", 7) {
+		t.Fatal("runIsFenced(\"run-lost\", 7) = false -- HeartbeatBatchFenced reported it lost")
 	}
 }
 
@@ -74,8 +74,8 @@ func TestHeartbeatAndFenceInFlightLeavesARunAloneWhenNotReportedLost(t *testing.
 		t.Fatal("execCtx for run-live was cancelled -- HeartbeatBatchFenced did not report it lost")
 	default:
 	}
-	if w.runIsFenced("run-live") {
-		t.Fatal("runIsFenced(\"run-live\") = true -- HeartbeatBatchFenced did not report it lost")
+	if w.runIsFenced("run-live", 3) {
+		t.Fatal("runIsFenced(\"run-live\", 3) = true -- HeartbeatBatchFenced did not report it lost")
 	}
 }
 
@@ -95,8 +95,8 @@ func TestHeartbeatAndFenceInFlightCancelsNothingWhenTheStoreCallErrors(t *testin
 		t.Fatal("execCtx was cancelled on a HeartbeatBatchFenced error -- a failed call says nothing about which runs are lost, only that we could not ask")
 	default:
 	}
-	if w.runIsFenced("run-during-outage") {
-		t.Fatal("runIsFenced(\"run-during-outage\") = true on a HeartbeatBatchFenced error -- a failed call says nothing about which runs are lost")
+	if w.runIsFenced("run-during-outage", 1) {
+		t.Fatal("runIsFenced(\"run-during-outage\", 1) = true on a HeartbeatBatchFenced error -- a failed call says nothing about which runs are lost")
 	}
 }
 
@@ -119,8 +119,8 @@ func TestHeartbeatAndFenceInFlightSkipsARunAlreadyDeregistered(t *testing.T) {
 	// No entry to clean up (executeWorkflow's defer already ran), so none
 	// must be created -- see fencedRuns' doc comment on why it is set only
 	// alongside a still-present execCancel.
-	if w.runIsFenced("run-already-gone") {
-		t.Fatal("runIsFenced(\"run-already-gone\") = true for a run whose execution had already finished")
+	if w.runIsFenced("run-already-gone", 1) {
+		t.Fatal("runIsFenced(\"run-already-gone\", 1) = true for a run whose execution had already finished")
 	}
 }
 
