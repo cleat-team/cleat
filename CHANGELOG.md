@@ -182,7 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Agents are usable from every SDK, because the loop is a workflow rather than a library.**
   `cleat/agentworkflow` implements it once, and each SDK's surface is a single `run_agent`-style
   call that starts it as a child and awaits it — `agentworkflow.RunAsChild` in Go and
-  `cleat_sdk.agent.run_agent` in Python; Rust, Java and AssemblyScript are a named follow-up
+  `cleat_sdk.agent.run_agent` in Python; Rust, Java and AssemblyScript are cleat#2978
   rather than an unasserted gap. **Each LLM turn and each tool call is a durable step**, so an
   agent survives a crash mid-conversation and resumes without asking the model again for turns it
   already completed and without repeating a tool call whose effect already happened. Tools come in
