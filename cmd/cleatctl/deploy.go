@@ -142,7 +142,7 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 
 	// cleat#1980: `cleat build` writes a schema sidecar next to the WASM
 	// binary when it computed one -- wasm.Metadata itself is deliberately
-	// barred from carrying this (see wasm/metadata_carries_no_entry_point_parameter_list_test.go),
+	// barred from carrying this (see wasm/metadata_carries_no_entry_point_parameters_test.go),
 	// so there is nowhere inside wasmBytes to read it back from. Its absence
 	// is not an error: an older build, or a build from a language
 	// internal/jsonschema has no emitter for yet, simply has none, and this
