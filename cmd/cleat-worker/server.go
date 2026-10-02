@@ -638,10 +638,17 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 	// limit BEFORE this filter, so a page can come back shorter than the limit,
 	// and X-Total-Count (adjusted below) is the count of what this caller can
 	// see rather than the count the store scanned. Filtering in SQL is the right
-	// repair and is not this slice; filed as a follow-up. It is correct for the
+	// repair and is not this slice; filed as cleat#3009. It is correct for the
 	// sizes at which a tenant lists runs and wrong at none of them in the
 	// direction that matters -- it never shows an internal run.
-	if internal := s.internalDefinitionNames(r.Context(), st); len(internal) > 0 {
+	internal, ierr := s.internalDefinitionNames(r.Context(), st)
+	if ierr != nil {
+		// Fail closed: an unreadable definition set cannot be filtered, and an
+		// unfiltered list would show every internal run.
+		s.writeError(w, 500, ierr.Error())
+		return
+	}
+	if len(internal) > 0 {
 		kept := workflows[:0]
 		for _, wf := range workflows {
 			if !internal[wf.DefName] {

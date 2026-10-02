@@ -76,15 +76,27 @@ func (s *apiServer) refuseIfInternalDef(w http.ResponseWriter, r *http.Request, 
 	return true
 }
 
-// definitionIsInternal is the single predicate all of the above reduce to. It
-// fails OPEN on a read error, deliberately: this is an access check layered on
-// top of routes that each do their own existence handling, and turning a store
-// error into a 404 here would report a missing definition when the truth is
-// that nobody could tell. The handler answers the error properly a moment
-// later.
+// definitionIsInternal is the single predicate all of the above reduce to.
+//
+// It FAILS CLOSED on a read error. This is an access check, and a check that
+// cannot determine the class must not serve the request -- on the run routes
+// the handler can carry on without the definition, so a transient def-read
+// error is otherwise the one path on which an `internal` run is served.
+//
+// The cost is real and accepted: a read error now answers the route's own
+// not-found rather than a 500, so an operator sees "not found" during a store
+// blip instead of a server error. That is the safe direction for an access
+// check, and it discloses nothing new -- not-found is already this route's
+// designed answer for "not yours to see".
+//
+// def == nil is NOT an error and must stay false: it means no such definition,
+// and the handler produces its own miss for that a moment later.
 func (s *apiServer) definitionIsInternal(ctx context.Context, st engine.WorkflowStore, name string, version int) bool {
 	def, err := st.GetWorkflowDef(ctx, name, version)
-	if err != nil || def == nil {
+	if err != nil {
+		return true
+	}
+	if def == nil {
 		return false
 	}
 	// OrDefault rather than a bare comparison: a row predating the column
@@ -128,10 +140,13 @@ func withoutInternalDefs(defs []engine.WorkflowDef) []engine.WorkflowDef {
 // other helpers use: a name with one internal version is treated as internal
 // for the whole list. That is the conservative direction, and the alternative
 // -- resolving every listed run's definition version -- is a query per row.
-func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.WorkflowStore) map[string]bool {
+func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.WorkflowStore) (map[string]bool, error) {
 	defs, err := st.ListWorkflowDefs(ctx, "")
 	if err != nil {
-		return nil
+		// NOT nil-and-carry-on: an unreadable definition set would silently
+		// filter nothing, which discloses every internal run in the list. Fail
+		// closed and let the caller refuse the whole page.
+		return nil, err
 	}
 	internal := make(map[string]bool)
 	for _, d := range defs {
@@ -139,5 +154,5 @@ func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.Workf
 			internal[d.Name] = true
 		}
 	}
-	return internal
+	return internal, nil
 }
