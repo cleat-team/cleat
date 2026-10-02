@@ -1447,13 +1447,41 @@ func TestMySQLIntegration_ConcurrencyKeys(t *testing.T) {
 		t.Fatalf("ReleaseWorkflowConcurrencyKeys: %v", err)
 	}
 
-	// Reap expired keys (there shouldn't be any since TTL hasn't expired).
+	// Hold a live, unexpired key across the reap below, so the assertion after
+	// it can be about THIS test's key rather than about the database's total.
+	//
+	// cleat#2922: the total is not this test's to assert. This reap deletes a
+	// key that is expired OR whose workflow row is gone or terminal, and a
+	// long-lived shared test database accumulates such orphans from earlier
+	// runs -- so `reaped != 0` failed for a reason this test does not control,
+	// and did: measured at 9 and at 3 across runs, and reproducibly by running
+	// the whole ./engine/ -run TestMySQLIntegration family in one process,
+	// while the same test alone passes. Asserting on the count made this test's
+	// verdict a property of the database rather than of the code.
+	held, err := s.AcquireConcurrencyKey(ctx, "surviving-key", runID, time.Hour)
+	if err != nil {
+		t.Fatalf("AcquireConcurrencyKey(surviving-key): %v", err)
+	}
+	if !held {
+		t.Fatal("AcquireConcurrencyKey returned false for a fresh key")
+	}
+
 	reaped, err := s.ReapExpiredConcurrencyKeys(ctx)
 	if err != nil {
 		t.Fatalf("ReapExpiredConcurrencyKeys: %v", err)
 	}
-	if reaped != 0 {
-		t.Errorf("ReapExpiredConcurrencyKeys = %d, want 0 (no keys should be expired)", reaped)
+	t.Logf("ReapExpiredConcurrencyKeys reaped %d key(s) across the database", reaped)
+
+	// The key this test holds is unexpired and its run is live, so the reap
+	// must not have taken it. Re-acquiring it for a DIFFERENT run asks that
+	// without reading the count: success means it was gone.
+	reacquired, err := s.AcquireConcurrencyKey(ctx, "surviving-key", runID2, time.Hour)
+	if err != nil {
+		t.Fatalf("AcquireConcurrencyKey(surviving-key, second run): %v", err)
+	}
+	if reacquired {
+		t.Error("the reap removed a live, unexpired key: the key held by a running workflow " +
+			"was gone afterwards, so the next caller could take it")
 	}
 }
 
