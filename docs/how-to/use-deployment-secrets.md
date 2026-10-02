@@ -197,32 +197,83 @@ The value is read from **stdin**, or `--from-file` — never a flag, for the
 same reason `set-secret`'s value is not one.
 
 **Writes are operator-only on all three dialects.** Each has a least-privilege
-`cleat_app` login a worker serves as, kept apart from the owner/migrate login
-that applies schema changes, and none of the three grants it INSERT, UPDATE or
-DELETE on this table — only SELECT, so a worker can still resolve a secret at
-call time. PostgreSQL has had this since the baseline
+`cleat_app` identity a worker serves as, kept apart from the owner/migrate
+login that applies schema changes, and none of the three grants it INSERT,
+UPDATE or DELETE on this table — only SELECT, so a worker can still resolve a
+secret at call time. PostgreSQL has had this since the baseline
 (`migrations/postgres/001_schema.sql`, folded in from the pre-compaction
-`005_app_role.sql`); MySQL and SQL Server gained their own `cleat_app` in
-`migrations/{mysql,mssql}/007_app_login.sql` (cleat#2203, owner decision 4A on
-#1992, which had deferred it rather than building it with the rest of this
-table).
+`005_app_role.sql`); MySQL and SQL Server gained their own `cleat_app`
+(cleat#2203, owner decision 4A on #1992, which had deferred it rather than
+building it with the rest of this table).
 
 The three dialects get there by different mechanisms, because their privilege
-models differ. PostgreSQL and MySQL simply never grant the write privileges in
-the first place — MySQL's grant checks are an OR across whatever applies, with
-no way to override a broader grant, so the migration grants every other table
-individually and never issues one covering this one. SQL Server's `cleat_app`
-gets the same broad per-schema GRANT as every other table (new tables, plugin
-or core, are covered automatically) and then an explicit `DENY` on this one
-table, which overrides the GRANT regardless of which came first — the one
-tool of the three that can say "except this" rather than "everything but
-this". On SQL Server this is a role-segregation measure only, not an RLS
-exemption fix the way PostgreSQL's split originally was: SQL Server's security
-policies have no superuser-style bypass, so even the owner/migrate login is
-already subject to them (see `docs/contributor/migrations.md`). Encryption at
-rest — the master key never touches the database on any dialect — remains
-what protects this table's contents; the login split is what keeps an
-ordinary worker from writing a row at all, correct ciphertext or not.
+models differ:
+
+- **PostgreSQL**: `cleat_app` is a role created directly in the migration
+  (`CREATE ROLE cleat_app NOLOGIN`), which never gets a write grant on this
+  table in the first place. A deployment gives it a login password with
+  `deploy/postgres/900-app-role.sh`.
+- **MySQL**: has no database-scoped principal and no way to override a
+  broader grant with a narrower one — its privilege checks are an OR across
+  whatever applies, so the only way to keep a table out is to never grant it.
+  `CREATE USER` needs the global `CREATE USER` privilege and `GRANT` needs
+  `GRANT OPTION`, neither of which a MySQL migrate login has ever needed
+  (measured: shipping this as a migration broke `--migrate-only` for a login
+  scoped to `ALL ON <db>.*`), so cleat_app's entire creation and every GRANT
+  live in `deploy/mysql/900-app-role.sh` instead — there is no
+  `migrations/mysql/*_app_login.sql` file at all.
+- **SQL Server**: `migrations/mssql/007_app_login.sql` creates a database
+  ROLE, `cleat_app_role`, with a schema-level GRANT (new tables, plugin or
+  core, are covered automatically) and an explicit `DENY` on this one table,
+  which overrides the GRANT regardless of which came first — the one tool of
+  the three that can say "except this" rather than "everything but this".
+  `CREATE ROLE` needs only `ALTER ANY ROLE`, which `db_owner` already implies,
+  so this much stays a migration; the LOGIN that actually authenticates as
+  `cleat_app` needs `securityadmin`/`sysadmin` (measured: unsplit, this broke
+  `--migrate-only` for a plain `db_owner` login with "User does not have
+  permission to perform this action. (15247)"), so it is created by
+  `deploy/mssql/900-app-role.sh` and added to `cleat_app_role`.
+
+On SQL Server this split is about role segregation and the write restriction,
+not an RLS exemption fix the way PostgreSQL's original split was: SQL
+Server's security policies have no superuser-style bypass, so even the
+owner/migrate login is already subject to them (see
+`docs/contributor/migrations.md`). Encryption at rest — the master key never
+touches the database on any dialect — remains what protects this table's
+contents; the login split is what keeps an ordinary worker from writing a row
+at all, correct ciphertext or not.
+
+### Bringing `cleat_app` up on MySQL or SQL Server
+
+Run the migrate step first (`--migrate-only`, with the owner/migrate login),
+then once, with a connection privileged enough to create the login —
+root on MySQL; a `securityadmin`/`sysadmin` login on SQL Server:
+
+```sh
+# MySQL
+CLEAT_APP_PASSWORD=<password> ./deploy/mysql/900-app-role.sh <host> <port> <admin-user> <admin-password> <database>
+
+# SQL Server
+./deploy/mssql/900-app-role.sh <server> <admin-user> <admin-password> <database>
+```
+
+Both are idempotent: re-run after a schema change, a password rotation, or
+(MySQL specifically) after enabling a plugin that was not installed the first
+time — `deploy/mysql/900-app-role.sh` grants against the tables that exist
+*when it runs*, there being no MySQL equivalent of PostgreSQL's
+`ALTER DEFAULT PRIVILEGES` to cover ones added later. `deploy/mssql/900-app-role.sh`
+generates its own random password; `deploy/mysql/900-app-role.sh` takes one,
+the same convention `deploy/postgres/900-app-role.sh` uses.
+
+The worker then serves with `--db` pointed at `cleat_app` and `--migrate-db`
+pointed at the owner/migrate login, the same split every dialect uses.
+`deploy/mysql/900-app-role.sh` refuses to run against a `<database>` whose
+name matches `cleat\_%` — MySQL isolates tenants with one database per
+tenant named exactly that way (`engine.MySQLTenantDatabaseName`), and
+`cleat_app` needs a wildcard grant on that pattern to create and migrate
+them, which would otherwise also grant it write on that database's own
+`deployment_secrets`. Every example in this repo names the main database
+`cleat`, which does not collide.
 
 ## Retire a secret
 

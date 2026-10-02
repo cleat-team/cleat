@@ -180,13 +180,18 @@ else:
   *is* the database name on MySQL — there is no narrower schema underneath it — so a grant string
   built as `"<priv> ON <schema>.<table> TO <grantee>"` differs between any two scratch databases by
   construction, since each one `scratchMySQLDB` builds gets its own generated name.
-  `TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL` caught this the day
-  `migrations/mysql/007_app_login.sql` added the first MySQL migration ever to issue a `GRANT`:
-  every one of its statements reported as a difference between two databases built from the
-  identical chain. `migration/catalogdiff/mysql.go` drops the schema/database name from the
-  comparable string for this reason — table and routine entries never carried it either, for the
-  same underlying reason (`WHERE table_schema = DATABASE()` already scopes the query to one
-  database, so the name adds nothing to compare).
+  `TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL` caught this while cleat#2203 was
+  developing MySQL's first-ever migration-issued `GRANT`: every one of its statements reported as a
+  difference between two databases built from the identical chain. `migration/catalogdiff/mysql.go`
+  drops the schema/database name from the comparable string for this reason — table and routine
+  entries never carried it either, for the same underlying reason (`WHERE table_schema = DATABASE()`
+  already scopes the query to one database, so the name adds nothing to compare). **cleat#2203 went
+  on to move that GRANT out of migrations entirely**, into a deploy-time script
+  (`deploy/mysql/900-app-role.sh`) — CREATE USER and GRANT OPTION are privileges no MySQL migration
+  has ever been able to assume of its migrate login — so no committed migration exercises this fix
+  today. It is kept anyway: the defect is in the comparator, triggered by the shape of ANY MySQL
+  migration that grants anything, and the test passing without the fix proves only that nothing yet
+  asks the question, not that the comparator answers it correctly.
 
 PostgreSQL lost two `cleat_sweep` memberships to exactly this in cleat#2416, with the per-database
 diff reporting clean. Check the dialect's column *behaviourally* — query the catalogue — rather than

@@ -4,19 +4,57 @@ package main
 // since the baseline (migrations/postgres/001_schema.sql); MySQL and SQL Server had no
 // application login at all, so the one login every worker used could write it too
 // (docs/how-to/use-deployment-secrets.md used to say exactly that -- "no equivalent role
-// split to revoke from"). migrations/{mysql,mssql}/007_app_login.sql adds cleat_app to
-// both. This proves the new logins on real databases rather than reading the SQL and
-// trusting it: a GRANT that silently failed, or a MySQL statement that (per the
-// migration's own comment) accidentally granted at the database level instead of per
-// table, would still read as correct from the file.
+// split to revoke from"). This adds cleat_app to both, following three rounds of
+// cleat-review measurement against real databases:
 //
-// Each dialect gets its OWN assertion shape, not a shared helper pretending the two
-// privilege models are the same thing: MySQL has no DENY, so the proof is "no grant for
-// write was ever issued"; SQL Server's DENY overrides a broader GRANT regardless of
-// order, so the proof is the DENY actually refusing an operation its schema-level GRANT
-// would otherwise allow. Postgres is included as a known-positive: if the harness
-// (deployScratch, pgAppRoleDSN, runWorker) cannot see PostgreSQL's existing, already
-// shipped restriction, it cannot be trusted to see the two new ones either.
+//   - migrations/mssql/007_app_login.sql creates a database ROLE (cleat_app_role)
+//     carrying the GRANT/DENY; deploy/mssql/900-app-role.sh creates the LOGIN and adds
+//     it to that role. Splitting it this way is required, not stylistic: CREATE LOGIN
+//     needs securityadmin/sysadmin, which a SQL Server migrate login has never needed
+//     before (G2) -- measured by running 007 as a plain db_owner login with no server
+//     role, which develop itself migrates cleanly and which failed on an unsplit
+//     version of this file with "User does not have permission to perform this action.
+//     (15247)".
+//   - MySQL has no database-scoped principal at all, so CREATE USER and every GRANT
+//     move out of migrations/ entirely into deploy/mysql/900-app-role.sh (G2: CREATE
+//     USER needs the global CREATE USER privilege, and GRANT needs GRANT OPTION on
+//     each privilege granted, neither of which a MySQL migrate login has ever needed).
+//   - Both scripts set a real, unknowable password in the SAME action that creates the
+//     login, rather than a dormant locked/disabled account a later "just enable it"
+//     step could open with an empty or published password (G3).
+//   - deploy/mysql/900-app-role.sh grants cleat_app full rights on `cleat\_%`, not just
+//     the one named database: MySQL isolates tenants with one database per tenant
+//     (engine.MySQLTenantDatabaseName), created and migrated lazily through the SAME
+//     connection the worker serves on, so cleat_app needs DDL there too or a worker
+//     cannot even boot (G1) -- measured directly: TestAWorkerBootsAndServesAsTheAppLoginOnEveryDialect's
+//     mysql subtest failed at "create tenant database: Access denied" before this
+//     grant existed, and a hardcoded list of the 29 core tables alone was not enough
+//     either -- a booted worker with its default plugin set failed on `rate_limits`,
+//     `oauth_sessions`, `tenant_trials`, `task_queue`, `schedules`, `backup_config` and
+//     `backup_history`, all created by PLUGIN migrations the hardcoded list had never
+//     heard of. The script queries information_schema instead, for the same reason
+//     this file's own mysqlAppRoleDSN below does.
+//
+// THIS FILE'S mysqlAppRoleDSN/mssqlAppRoleDSN DO NOT EXECUTE THE DEPLOY SCRIPTS. Doing
+// so would need the `mysql` and `sqlcmd` client binaries on whatever machine runs `go
+// test` -- confirmed absent from this repo's own CI (multi-db-ci.yml only ever reaches
+// sqlcmd through `docker exec` into the SQL Server container itself, and never installs
+// a `mysql` client at all) and from the development machine this PR was written on.
+// `deploy/postgres/900-app-role.sh` has exactly the same shape and is untested by any
+// Go test for the same reason (`psql` is equally absent here). So these two functions
+// are a SEPARATE implementation of the scripts' SQL, in Go, over the same `database/sql`
+// connection every other helper in this file already uses -- matching, not calling, the
+// shipped artifact. Keeping the two in sync is manual; a shared Go implementation behind
+// a cleatctl subcommand, callable from both, would remove that risk and is follow-up
+// work beyond this PR's three required fixes.
+//
+// Each dialect's write-restriction assertion has its OWN shape, not a shared helper
+// pretending the two privilege models are the same thing: MySQL has no DENY, so the
+// proof is "no grant for write was ever issued"; SQL Server's DENY overrides a broader
+// GRANT regardless of order, so the proof is the DENY actually refusing an operation its
+// schema-level GRANT would otherwise allow. Postgres is included as a known-positive: if
+// the harness (deployScratch, pgAppRoleDSN, runWorker) cannot see PostgreSQL's existing,
+// already shipped restriction, it cannot be trusted to see the two new ones either.
 //
 // Each case also proves two things a passing INSERT refusal alone would not:
 //   - the SAME login can still write an ordinary table (otherwise "denied" might mean
@@ -26,13 +64,17 @@ package main
 //     untouched would itself be broken, and a reader could not tell from this test)
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/go-sql-driver/mysql"
+	gomysql "github.com/go-sql-driver/mysql"
 )
 
 func TestTheAppLoginCannotWriteDeploymentSecrets(t *testing.T) {
@@ -69,7 +111,7 @@ func TestTheAppLoginCannotWriteDeploymentSecrets(t *testing.T) {
 			case "postgres":
 				appDSN = pgAppRoleDSN(t, owner, ownerDSN)
 			case "mysql":
-				appDSN = mysqlAppRoleDSN(t, owner, ownerDSN)
+				appDSN = mysqlAppRoleDSN(t, owner, ownerDSN, false)
 			case "mssql":
 				appDSN = mssqlAppRoleDSN(t, owner, ownerDSN)
 			}
@@ -121,6 +163,164 @@ func TestTheAppLoginCannotWriteDeploymentSecrets(t *testing.T) {
 	}
 }
 
+// TestAWorkerBootsAndServesAsTheAppLoginOnEveryDialect is cleat-review's G1 probe, kept
+// as a permanent regression test rather than a one-off measurement: the worker must
+// actually BOOT and SERVE a request as the app login, not merely pass individual SQL
+// statements run directly against the database. MySQL's failure mode was exactly this
+// gap -- TestTheAppLoginCannotWriteDeploymentSecrets's mysql subtest, which only ever
+// opens its own ad hoc *sql.DB against the already-migrated scratch database, could not
+// have caught "the worker cannot create its OWN tenant database at boot", because that
+// step runs during `--migrate-only`/boot, before this test's app connection exists.
+func TestAWorkerBootsAndServesAsTheAppLoginOnEveryDialect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the worker binary")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "cleat-worker")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/cleat-worker")
+	build.Dir = repoRoot
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/cleat-worker: %v\n%s", err, out)
+	}
+
+	for _, c := range []deployDialect{
+		{"postgres", "CLEAT_TEST_POSTGRES", "postgres"},
+		{"mysql", "CLEAT_TEST_MYSQL", "mysql"},
+		{"mssql", "CLEAT_TEST_MSSQL", "sqlserver"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.admin() == "" {
+				t.Skipf("%s not set, skipping %s", c.env, c.name)
+			}
+			ownerDSN, owner := deployScratch(t, c)
+			if code, out := runWorker(t, bin, nil, "--driver="+c.name, "--db="+ownerDSN, "--migrate-only"); code != 0 {
+				t.Fatalf("--migrate-only exited %d:\n%s", code, out)
+			}
+
+			var appDSN string
+			switch c.name {
+			case "postgres":
+				appDSN = pgAppRoleDSN(t, owner, ownerDSN)
+			case "mysql":
+				appDSN = mysqlAppRoleDSN(t, owner, ownerDSN, true)
+			case "mssql":
+				appDSN = mssqlAppRoleDSN(t, owner, ownerDSN)
+			}
+
+			args := []string{
+				"--driver=" + c.name, "--db=" + appDSN, "--migrate-db=" + ownerDSN,
+				"--require-auth=false",
+			}
+			ok, out := startsHealthy(t, bin, args...)
+			if !ok {
+				t.Fatalf("the worker did not become healthy serving as the app login:\n%s", out)
+			}
+			// A worker that starts and answers /healthz can still have failed to wire up
+			// something that only errors in the background -- every plugin this binary
+			// registers initializes unconditionally with no --plugin-config (cleat-review
+			// found exactly this: rate-limiter, oauth-provider, tenant-lifecycle, jobqueue
+			// and scheduledbackup all run an immediate startup query). None of those should
+			// print a permission error against a correctly-granted app login.
+			if strings.Contains(out, "denied") || strings.Contains(out, "permission") {
+				t.Fatalf("the app login could serve /healthz but something else failed with a permission error:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestMigrateOnlySucceedsWithADatabaseScopedLoginOnMySQLAndMSSQL is cleat-review's G2
+// probe, kept as a permanent regression test: a migrate login scoped to its own
+// database, with no server-level role, must still be able to run --migrate-only.
+// PostgreSQL is not included -- its migrate login has needed CREATEROLE since before
+// this PR (001_schema.sql's own CREATE ROLE cleat_app), which AWS documents the RDS
+// master role as having by default, so there is no NEW requirement to regress here.
+func TestMigrateOnlySucceedsWithADatabaseScopedLoginOnMySQLAndMSSQL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the worker binary")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "cleat-worker")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/cleat-worker")
+	build.Dir = repoRoot
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/cleat-worker: %v\n%s", err, out)
+	}
+
+	for _, c := range []deployDialect{
+		{"mysql", "CLEAT_TEST_MYSQL", "mysql"},
+		{"mssql", "CLEAT_TEST_MSSQL", "sqlserver"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.admin() == "" {
+				t.Skipf("%s not set, skipping %s", c.env, c.name)
+			}
+			ownerDSN, owner := deployScratch(t, c)
+			scopedDSN := scopedMigrateLoginDSN(t, c.name, owner, ownerDSN)
+			if code, out := runWorker(t, bin, nil, "--driver="+c.name, "--db="+scopedDSN, "--migrate-only"); code != 0 {
+				t.Fatalf("--migrate-only exited %d with a database-scoped migrate login "+
+					"(no server-level role) -- cleat#2203 must not raise this requirement:\n%s", code, out)
+			}
+		})
+	}
+}
+
+// scopedMigrateLoginDSN creates a login scoped to ONLY the database deployScratch just
+// built -- no server-level role -- and returns a DSN for it. This is the login shape
+// cleat-review's G2 measured: db_owner on SQL Server, `ALL ON <db>.*` (plus `cleat\_%`,
+// which MySQL has needed since before this PR for its own per-tenant-database replay,
+// `cmd/cleat-worker/main.go`'s `if *driver == "mysql"` block) on MySQL.
+func scopedMigrateLoginDSN(t *testing.T, dialect string, owner *sql.DB, ownerDSN string) string {
+	t.Helper()
+	switch dialect {
+	case "mysql":
+		if _, err := owner.Exec(`CREATE USER IF NOT EXISTS 'cleat_2203_scoped_migrate'@'%' IDENTIFIED BY 'cleat-2203-scoped-pw'`); err != nil {
+			t.Fatalf("creating a scoped migrate login: %v", err)
+		}
+		cfg, err := gomysql.ParseDSN(ownerDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := owner.Exec(fmt.Sprintf("GRANT ALL ON `%s`.* TO 'cleat_2203_scoped_migrate'@'%%'", cfg.DBName)); err != nil {
+			t.Fatalf("granting the scoped migrate login rights on its own database: %v", err)
+		}
+		if _, err := owner.Exec(`GRANT ALL ON ` + "`cleat\\_%`" + `.* TO 'cleat_2203_scoped_migrate'@'%'`); err != nil {
+			t.Fatalf("granting the scoped migrate login rights on the tenant-database pattern: %v", err)
+		}
+		cfg.User = "cleat_2203_scoped_migrate"
+		cfg.Passwd = "cleat-2203-scoped-pw"
+		return cfg.FormatDSN()
+	default: // mssql
+		if _, err := owner.Exec(`CREATE LOGIN cleat_2203_scoped_migrate WITH PASSWORD = 'Cleat-2203-Scoped-Pw!'`); err != nil {
+			t.Fatalf("creating a scoped migrate login: %v", err)
+		}
+		if _, err := owner.Exec(`CREATE USER cleat_2203_scoped_migrate FOR LOGIN cleat_2203_scoped_migrate`); err != nil {
+			t.Fatalf("mapping the scoped migrate login into this database: %v", err)
+		}
+		if _, err := owner.Exec(`ALTER ROLE db_owner ADD MEMBER cleat_2203_scoped_migrate`); err != nil {
+			t.Fatalf("making the scoped migrate login db_owner: %v", err)
+		}
+		var sysadmin int
+		if err := owner.QueryRow(`SELECT IS_SRVROLEMEMBER('sysadmin', 'cleat_2203_scoped_migrate')`).Scan(&sysadmin); err != nil {
+			t.Fatalf("checking the scoped login is not sysadmin: %v", err)
+		}
+		if sysadmin == 1 {
+			t.Fatal("cleat_2203_scoped_migrate is sysadmin -- the scratch server already grants it, so this probe proves nothing")
+		}
+		u, err := url.Parse(ownerDSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.User = url.UserPassword("cleat_2203_scoped_migrate", "Cleat-2203-Scoped-Pw!")
+		return u.String()
+	}
+}
+
 // deploymentSecretsInsert returns a two-placeholder (name, ciphertext) INSERT, one
 // placeholder style per dialect, matching every other table-driven DSN helper in this
 // package.
@@ -153,39 +353,182 @@ func writeProbeStmt(dialect string) string {
 	}
 }
 
-// mysqlAppRoleDSN gives the MySQL cleat_app login (migrations/mysql/007_app_login.sql)
-// a password and unlocks it -- the ACCOUNT LOCK equivalent of PostgreSQL's NOLOGIN,
-// see pgAppRoleDSN -- and returns the DSN the worker connects with.
-func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
+// mysqlAppRoleDSN creates cleat_app with a real password directly (see this file's
+// header for why it does not simply run deploy/mysql/900-app-role.sh), granting every
+// table and routine QUERIED from information_schema -- not a fixed list -- for the same
+// reason the deploy script queries rather than hardcodes: a fixed list of the 29 core
+// tables already proved wrong once in this PR's own history, against tables plugin
+// migrations add.
+//
+// grantTenantPattern adds the G1 `cleat\_%` wildcard grant -- needed to create or use a
+// per-tenant database at all, but NOT passed by TestTheAppLoginCannotWriteDeploymentSecrets:
+// deployScratch's own scratch databases are named `cleat_2117_deploy_<n>`, which matches
+// `cleat\_%` (the exact collision deploy/mysql/900-app-role.sh's own guard exists to
+// refuse in a real deployment), so granting it here would also grant cleat_app write on
+// THIS database's own deployment_secrets and the write-restriction test would prove
+// nothing. Only TestAWorkerBootsAndServesAsTheAppLoginOnEveryDialect, which asserts
+// nothing about deployment_secrets, passes true.
+func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string, grantTenantPattern bool) string {
 	t.Helper()
-	if _, err := owner.Exec(`ALTER USER 'cleat_app'@'%' IDENTIFIED BY 'cleat-2203-pw' ACCOUNT UNLOCK`); err != nil {
-		t.Fatalf("giving cleat_app a password (is the schema baseline applied?): %v", err)
-	}
-	cfg, err := mysql.ParseDSN(ownerDSN)
+	const pw = "cleat-2203-pw"
+	cfg, err := gomysql.ParseDSN(ownerDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := owner.Exec(fmt.Sprintf(`CREATE USER IF NOT EXISTS 'cleat_app'@'%%' IDENTIFIED BY '%s'`, pw)); err != nil {
+		t.Fatalf("creating cleat_app: %v", err)
+	}
+	if _, err := owner.Exec(fmt.Sprintf(`ALTER USER 'cleat_app'@'%%' IDENTIFIED BY '%s'`, pw)); err != nil {
+		t.Fatalf("setting cleat_app's password: %v", err)
+	}
+
+	ctx := context.Background()
+	rows, err := owner.QueryContext(ctx,
+		`SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = 'BASE TABLE'`, cfg.DBName)
+	if err != nil {
+		t.Fatalf("listing tables: %v", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		tables = append(tables, name)
+	}
+	rows.Close()
+	if len(tables) == 0 {
+		t.Fatalf("%s has no tables -- has the migrate step run?", cfg.DBName)
+	}
+	for _, tbl := range tables {
+		if _, err := owner.Exec(fmt.Sprintf("GRANT SELECT ON `%s` TO 'cleat_app'@'%%'", tbl)); err != nil {
+			t.Fatalf("granting SELECT on %s: %v", tbl, err)
+		}
+		if tbl == "deployment_secrets" {
+			continue
+		}
+		if _, err := owner.Exec(fmt.Sprintf("GRANT INSERT, UPDATE, DELETE ON `%s` TO 'cleat_app'@'%%'", tbl)); err != nil {
+			t.Fatalf("granting write on %s: %v", tbl, err)
+		}
+	}
+
+	routineRows, err := owner.QueryContext(ctx,
+		`SELECT routine_name FROM information_schema.routines WHERE routine_schema = ?`, cfg.DBName)
+	if err != nil {
+		t.Fatalf("listing routines: %v", err)
+	}
+	var routines []string
+	for routineRows.Next() {
+		var name string
+		if err := routineRows.Scan(&name); err != nil {
+			routineRows.Close()
+			t.Fatal(err)
+		}
+		routines = append(routines, name)
+	}
+	routineRows.Close()
+	for _, r := range routines {
+		if _, err := owner.Exec(fmt.Sprintf("GRANT EXECUTE ON PROCEDURE `%s` TO 'cleat_app'@'%%'", r)); err != nil {
+			t.Fatalf("granting EXECUTE on %s: %v", r, err)
+		}
+	}
+
+	if grantTenantPattern {
+		// G1: the per-tenant-database pattern. See deploy/mysql/900-app-role.sh's own
+		// comment on this exact grant for why it is safe for deployment_secrets in a
+		// real deployment (and this function's own doc comment for why it is NOT safe
+		// to pass true against deployScratch's own scratch database name).
+		if _, err := owner.Exec("GRANT ALL PRIVILEGES ON `cleat\\_%`.* TO 'cleat_app'@'%'"); err != nil {
+			t.Fatalf("granting cleat_app rights on the tenant-database pattern: %v", err)
+		}
+	}
+
 	cfg.User = "cleat_app"
-	cfg.Passwd = "cleat-2203-pw"
+	cfg.Passwd = pw
 	return cfg.FormatDSN()
 }
 
-// mssqlAppRoleDSN gives the SQL Server cleat_app login
-// (migrations/mssql/007_app_login.sql) a password and ENABLEs it -- it is created
-// DISABLED, the same NOLOGIN-shaped gap pgAppRoleDSN documents for PostgreSQL -- and
-// returns the DSN the worker connects with.
+// mssqlAppRoleDSN creates the cleat_app LOGIN (migrations/mssql/007_app_login.sql
+// already created cleat_app_role, the database role carrying the GRANT/DENY) with a
+// random password, enables it, and adds it to cleat_app_role -- see this file's header
+// for why it does not simply run deploy/mssql/900-app-role.sh.
 func mssqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
 	t.Helper()
-	if _, err := owner.Exec(`ALTER LOGIN cleat_app WITH PASSWORD = 'cleat-2203-Pw!'`); err != nil {
-		t.Fatalf("setting cleat_app's password (is the schema baseline applied?): %v", err)
+	const pw = "cleat-2203-Pw!-not-a-literal-in-the-shipped-script"
+	if _, err := owner.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'cleat_app')
+		EXEC('CREATE LOGIN cleat_app WITH PASSWORD = ''` + pw + `''')`); err != nil {
+		t.Fatalf("creating cleat_app login: %v", err)
+	}
+	if _, err := owner.Exec(`ALTER LOGIN cleat_app WITH PASSWORD = '` + pw + `'`); err != nil {
+		t.Fatalf("setting cleat_app's password: %v", err)
 	}
 	if _, err := owner.Exec(`ALTER LOGIN cleat_app ENABLE`); err != nil {
 		t.Fatalf("enabling cleat_app: %v", err)
+	}
+	if _, err := owner.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_app')
+		CREATE USER cleat_app FOR LOGIN cleat_app`); err != nil {
+		t.Fatalf("mapping cleat_app into this database: %v", err)
+	}
+	var roleExists int
+	if err := owner.QueryRow(`SELECT COUNT(*) FROM sys.database_principals WHERE name = N'cleat_app_role' AND type = 'R'`).Scan(&roleExists); err != nil {
+		t.Fatal(err)
+	}
+	if roleExists == 0 {
+		t.Fatal("cleat_app_role does not exist -- has migrations/mssql/007_app_login.sql applied?")
+	}
+	if _, err := owner.Exec(`ALTER ROLE cleat_app_role ADD MEMBER cleat_app`); err != nil {
+		t.Fatalf("adding cleat_app to cleat_app_role: %v", err)
 	}
 	u, err := url.Parse(ownerDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.UserPassword("cleat_app", "cleat-2203-Pw!")
+	u.User = url.UserPassword("cleat_app", pw)
 	return u.String()
+}
+
+// TestTheMySQLDeployScriptRefusesACollidingDatabaseName proves
+// deploy/mysql/900-app-role.sh's guard against a main database whose name also matches
+// the tenant-database pattern cleat_app is granted ALL PRIVILEGES on. Needs no database
+// connection and no `mysql` client (see this file's header for why that matters) --
+// the guard is pure shell, checked before the script ever tries to reach a server, so
+// an unreachable host and a deliberately wrong admin password are fine here: if the
+// guard did not refuse first, this would fail differently (a connection error, not the
+// guard's own message), which is the known-positive this test is built around.
+func TestTheMySQLDeployScriptRefusesACollidingDatabaseName(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(repoRoot, "deploy", "mysql", "900-app-role.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("deploy/mysql/900-app-role.sh: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		database string
+		wantErr  bool
+	}{
+		{"collides", "cleat_production", true},
+		{"collides with the test harness's own scratch name shape", "cleat_2117_deploy_123", true},
+		{"does not collide", "cleat", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("bash", script, "unreachable-host.invalid", "3306", "root", "x", tc.database)
+			cmd.Env = append(cmd.Env, "CLEAT_APP_PASSWORD=x")
+			out, err := cmd.CombinedOutput()
+			refused := strings.Contains(string(out), "matches the tenant-database pattern")
+			if tc.wantErr && !refused {
+				t.Fatalf("expected the guard to refuse %q, got:\n%s", tc.database, out)
+			}
+			if !tc.wantErr && refused {
+				t.Fatalf("the guard refused %q, which does not collide:\n%s", tc.database, out)
+			}
+			if !tc.wantErr && err == nil {
+				t.Fatalf("expected the script to fail past the guard (no mysql client / unreachable host), got exit 0:\n%s", out)
+			}
+		})
+	}
 }

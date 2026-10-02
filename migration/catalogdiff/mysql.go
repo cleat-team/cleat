@@ -245,12 +245,21 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	// the SAME database ("admin" vs "dbo"/"public"), so Postgres's and SQL Server's
 	// grant strings keep it. On MySQL a schema IS the database -- there is no narrower
 	// namespace below it -- and `scratchMySQLDB` gives every test database its own
-	// generated name (cleat#2203: TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL
-	// built two scratch databases from the identical chain and reported every one of
-	// migrations/mysql/007_app_login.sql's GRANTs as a difference, because the name
-	// `table_schema` resolves to was never the same string twice). Filtering on
-	// `table_schema = DATABASE()` already scopes this to the connection's own database,
-	// so the name itself adds nothing a reader could use to tell two grants apart.
+	// generated name. Found working on cleat#2203: an early draft added
+	// migrations/mysql/007_app_login.sql, issuing MySQL's first-ever migration GRANT, and
+	// TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL built two scratch databases
+	// from that identical chain and reported every one of its GRANTs as a difference,
+	// because the name `table_schema` resolves to was never the same string twice.
+	// cleat#2203 ultimately moved cleat_app's creation and GRANTs to a deploy-time script
+	// (deploy/mysql/900-app-role.sh) instead, over a privilege requirement a migration
+	// cannot ask of a MySQL migrate login (CREATE USER, GRANT OPTION) -- see that script's
+	// own header -- so no committed migration triggers this comparator bug today. The bug
+	// is still real and still here: the next MySQL migration to issue ANY grant will hit
+	// it, and `TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL` passing without this
+	// fix proves nothing one way or the other about whether it is present, only that
+	// nothing currently exercises it. Filtering on `table_schema = DATABASE()` already
+	// scopes the query to the connection's own database, so the name itself adds nothing a
+	// reader could use to tell two grants apart.
 	grantRows, err := db.QueryContext(ctx, `
 		SELECT grantee, table_name, privilege_type
 		FROM information_schema.table_privileges
