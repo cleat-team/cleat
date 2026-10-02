@@ -20,8 +20,15 @@ PostgreSQL (or MySQL/SQL Server) connection URL. The worker connects to your
 existing database; it does not manage it. Example:
 
     --db "postgres://user:pass@localhost:5432/cleat?sslmode=disable"
-    --db "mysql://user:pass@tcp(localhost:3306)/cleat"
+    --db "user:pass@tcp(localhost:3306)/cleat"
     --db "sqlserver://user:pass@localhost:1433?database=cleat"
+
+The MySQL form carries no `mysql://` scheme prefix, and that is deliberate: `go-sql-driver/mysql`
+has no concept of a scheme and does not strip one, so it is read as the start of the username and
+the connection is refused as that literal user (`Access denied for user 'mysql'@…`).
+`cleatctl`'s and `cleat`'s dialect detection *do* recognise a `mysql://` prefix — as a heuristic
+for what someone may paste, not as a claim that the DSN connects — so a recognised shape is not a
+working one here (cleat#2938).
 
 A MySQL session whose `time_zone` is not UTC introduces a DST-sized blind spot in
 `--idempotency-key-retention`'s bound — see `docs/durable-calls.md`'s "Compared against the
