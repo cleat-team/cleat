@@ -177,6 +177,59 @@ func ownerDBFor(t *testing.T, dbName string) *sql.DB {
 // crashDatabase is the database this suite runs in, created on demand.
 const crashDatabase = "cleat_crash"
 
+// payloadEncryptionDatabase, payloadEncryptionMidRunDatabase and
+// payloadEncryptionKnownPositiveDatabase are cleat#2324's isolation fix for a
+// defect this suite's own feature introduced into its own test infrastructure.
+//
+// cleat#2324 made payload_encryption_ever_enabled (migrations/postgres/008) a
+// ONE-WAY, per-database ratchet: once any worker has ever started with
+// --encrypt-sensitive-payloads against a database, cmd/cleat-worker refuses to
+// start keyless against that SAME database, forever. That is the feature
+// working as designed -- a deployment cannot silently go from "sealed" back to
+// "readable by anyone" -- and every test in this package that starts an
+// encrypted worker against the shared crashDatabase sets that ratchet
+// permanently for every OTHER test that shares it.
+//
+// Measured on cleat-review2's #2924 round 9 report: `Test Go (crash)` failed
+// 18+ tests, 100% reproducible, because TestChecksumChainSurvivesAwaitChild's
+// own subtest table runs SIGTERM/encrypted BEFORE SIGKILL/plain (declaration
+// order), and the next worker after that was keyless -- refused by this PR's
+// own mechanism, against crashDatabase, which every other test in the package
+// also shares.
+//
+// This is not a bug to patch around with a reset: the ratchet is deliberately
+// irreversible in production (see store_payload_encryption_state.go -- there
+// is no UnmarkPayloadEncryptionEnabled), so a test harness that reset it would
+// be testing a code path that cannot exist outside this package. The fix is
+// isolation, not resetting state nothing in production can reset.
+//
+// Three databases, not one, because "shares a database with nothing that sets
+// the ratchet" is not the same requirement for every test:
+//
+//   - payloadEncryptionDatabase is for every test that starts an ENCRYPTED
+//     worker and never asserts that a KEYLESS worker must start cleanly first.
+//     Marking it twice is a no-op (ON CONFLICT DO NOTHING), so these tests can
+//     safely share one database with each other -- the ratchet only matters to
+//     a test that depends on finding it unset.
+//   - payloadEncryptionMidRunDatabase is TestEnablingEncryptionMidRunDoesNotStrandTheRun's
+//     own database: that test's FIRST assertion is that a keyless worker
+//     starts and writes plaintext, which is the one thing payloadEncryptionDatabase
+//     can no longer guarantee once any test above has run.
+//   - payloadEncryptionKnownPositiveDatabase is TestPayloadEncryptionWiringKnownPositive's
+//     own database, for the identical reason: it is the negative control
+//     eventTextContains needs elsewhere in this package, and it can only prove
+//     anything by starting a keyless worker from a deployment that has never
+//     seen encryption.
+//
+// crashDatabase itself is now never marked by anything in this package, so
+// every OTHER crash test (the large majority, which never touches
+// --encrypt-sensitive-payloads) is completely unaffected by this feature.
+const (
+	payloadEncryptionDatabase              = "cleat_crash_payload_encryption"
+	payloadEncryptionMidRunDatabase        = "cleat_crash_payload_encryption_midrun"
+	payloadEncryptionKnownPositiveDatabase = "cleat_crash_payload_encryption_known_positive"
+)
+
 // ensureCrashDatabase creates and returns a DSN for a database used only by
 // this suite.
 //

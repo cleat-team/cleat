@@ -1711,6 +1711,20 @@ func main() {
 		os.Exit(0)
 	}
 
+	// cleat#2324: now that the schema is current (migrated or verified
+	// above), ask whether this database has ever had payload encryption
+	// configured, and refuse to proceed if this worker has no key ring --
+	// see checkPayloadEncryptionState's doc comment. Placed AFTER the
+	// migrate-or-verify block on purpose: payload_encryption_ever_enabled is
+	// itself a migration (008), so checking before the schema is confirmed
+	// current would refuse a worker on a legitimately-out-of-date database
+	// for the wrong reason, and a --migrate-only job -- which never reaches
+	// here -- has no key ring to be keyless about.
+	if err := checkPayloadEncryptionState(ctx, store, payloadEncryption); err != nil {
+		logger.ErrorContext(context.Background(), err.Error(), "worker_id", workerID)
+		os.Exit(1)
+	}
+
 	// Publish this worker's secret keys and run the secrets startup check, as
 	// ONE span under the shared secret-key gate, now that the schema is current.
 	//

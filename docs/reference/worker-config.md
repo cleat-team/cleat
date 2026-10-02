@@ -475,6 +475,23 @@ This flag does **not** cover most other places workflow data is stored --
 and `idempotency_keys.error_msg` are all plaintext whether or not this flag is
 set. See cleat#2312 for the full per-column measurement.
 
+**A worker started without this flag refuses to start if this database has
+ever had it enabled (cleat#2324).** A sealed column carries no envelope or
+version prefix (by design -- see `engine/encryption.go`'s doc comment), so a
+keyless worker cannot recognise ciphertext by inspecting a row; without this
+guard it would read a sealed column as plaintext, silently. The database
+remembers "payload encryption was enabled here" the first time any worker
+starts with `--encrypt-sensitive-payloads` and a key ring configured
+(`payload_encryption_ever_enabled`, migration 008), and every worker started
+without one checks that marker before doing anything else.
+
+The marker is insert-only -- nothing in this release clears it. A deployment
+that enabled this flag and later wants to run keyless again has no supported
+path back short of operating on `payload_encryption_ever_enabled` directly,
+and should not do so without first confirming (e.g. via
+`cleatctl reseal-payloads`'s own accounting) that no sealed row remains
+anywhere a keyless worker could read.
+
 ---
 
 ## Plugins

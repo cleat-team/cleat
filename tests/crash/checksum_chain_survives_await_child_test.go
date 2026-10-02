@@ -73,7 +73,17 @@ func TestChecksumChainSurvivesAwaitChild(t *testing.T) {
 }
 
 func runChecksumChainCase(t *testing.T, encrypt, sigkill, forceAdaptive bool) {
-	db := ownerDB(t)
+	// cleat#2324: the encrypted cases run in their own database, never
+	// crashDatabase. SIGKILL/plain runs AFTER SIGTERM/encrypted in this
+	// function's own subtest table, and payload_encryption_ever_enabled is a
+	// one-way ratchet -- sharing crashDatabase would make the plain case's
+	// keyless worker start refused by this PR's own mechanism, every run, not
+	// a flake. See harness_test.go's comment on payloadEncryptionDatabase.
+	dbName := crashDatabase
+	if encrypt {
+		dbName = payloadEncryptionDatabase
+	}
+	db := ownerDBFor(t, dbName)
 	defer db.Close()
 	suffix := uniqueSuffix()
 	taskQueue, wfID := "queue-cc2333-"+suffix, "cc2333-wf-"+suffix
@@ -99,7 +109,7 @@ func runChecksumChainCase(t *testing.T, encrypt, sigkill, forceAdaptive bool) {
 		encFlags = append(encFlags, "--batch-flush-enter-rate", "1", "--batch-flush-exit-rate", "1")
 	}
 
-	first := startWorker(t, bin, taskQueue, svc.srv.URL,
+	first := startWorkerOn(t, dbName, bin, taskQueue, svc.srv.URL,
 		append(append([]string{}, encFlags...), "--shutdown-grace", "1s")...)
 	startWorkflowEntry(t, db, wfID, suffix, taskQueue, "parent_with_child")
 	svc.awaitHeldCall(t, first, startBudget)
@@ -129,7 +139,7 @@ func runChecksumChainCase(t *testing.T, encrypt, sigkill, forceAdaptive bool) {
 		awaitExit(t, exited, 30*time.Second, first)
 	}
 
-	second := startWorker(t, bin, taskQueue, svc.srv.URL, encFlags...)
+	second := startWorkerOn(t, dbName, bin, taskQueue, svc.srv.URL, encFlags...)
 	status, errMsg := awaitTerminal(t, db, wfID, completeBudget)
 	logEventHistory(t, db, wfID, "AFTER replay")
 	if status != "done" {
