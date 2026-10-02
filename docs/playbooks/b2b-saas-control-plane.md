@@ -35,9 +35,15 @@ A B2B SaaS control plane is a remarkably consistent shopping list:
 Each is a vendor relationship, an SDK, a failure mode, a bill, and a place where tenancy has to be
 re-modelled from scratch — because none of them knows what a tenant is in your system.
 
-**The cleat version is one binary and one Postgres**, and the reason is not that cleat reimplements
-those products well. It is that **cleat already had to model a tenant to do its own job**, so
-everything hung off that model inherits tenancy for free.
+**The cleat version is one platform and one Postgres**, and the reason is not that cleat
+reimplements those products well. It is that **cleat already had to model a tenant to do its own
+job**, so everything hung off that model inherits tenancy for free.
+
+**That is a shared worker pool and one database — a pool of stateless processes, scaled for
+throughput and never per tenant.** Tenant count and process count are independent: isolation comes
+from row-level security in the database, never from giving a tenant its own process. (An earlier
+version of this paragraph said "one binary", which read as a literal single-process requirement and
+sent at least one reader chasing one that does not exist — cleat#2670.)
 
 ---
 
