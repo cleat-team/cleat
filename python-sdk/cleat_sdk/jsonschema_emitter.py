@@ -59,12 +59,34 @@ ARE DELIBERATE, NOT OVERSIGHTS:
    works. The first version of this branch read ``fields()`` directly and
    had this exactly backwards (cleat-review G6 on #2933): it demanded the
    one payload that crashes construction and rejected the one that
-   works. The mirror gap is an ``InitVar`` field, which IS a real
-   ``__init__`` parameter but is never a stored field, so ``fields()``
-   omits it the other way. Reading ``inspect.signature(target_type)`` --
-   the actual callable ``target_type(**kwargs)`` exposes -- fixes both
-   directions with one source of truth instead of patching ``fields()``'s
-   output with an exclusion list.
+   works. Reading ``inspect.signature(target_type)`` instead -- the actual
+   callable ``target_type(**kwargs)`` exposes -- fixes that direction with
+   one source of truth instead of patching ``fields()``'s output with an
+   exclusion list.
+
+   THE MIRROR CASE, AN InitVar FIELD, IS ONLY PARTIALLY FIXED, AND SAYING
+   SO PRECISELY MATTERS (cleat-review A2 on #2933). An ``InitVar`` IS a
+   real ``__init__`` parameter that ``fields()`` never lists, so reading
+   the signature does make this module aware of its NAME and TYPE for the
+   first time. But ``_from_dict``'s own kwargs-building loop iterates
+   ``dataclasses.fields(target_type)``, which excludes ``InitVar``
+   -- so no payload this binding constructs can EVER supply one.
+   Measured: ``InitVar[int]`` with no default (required, by this module's
+   own rule) makes ``target_type(**kwargs)`` raise
+   "missing 1 required positional argument" for EVERY payload, with or
+   without that key present -- the dataclass is uninstantiable through
+   this binding regardless of what the schema says. This module still
+   reports such a field as present and required, because that is an
+   honest description of ``__init__``'s signature; it is just not,
+   in that one case, a description of a payload that can ever succeed.
+   An ``InitVar`` WITH a default (e.g. ``InitVar[str] = None``) has no
+   such problem -- omitting it from the payload works fine, since
+   ``__init__`` itself falls back to the default the same way it would
+   for an ordinary optional field. Fixing the required-InitVar case
+   (tracked as cleat#2940) belongs in ``_from_dict`` itself (it would
+   need to read ``__init__``'s signature too, to know an InitVar needs
+   passing through at all), not
+   in this emitter, and is tracked separately rather than attempted here.
 
 4. RESULT IS ALWAYS UNCONSTRAINED. ``export_wrapper`` finishes with
    ``json.dumps(result, default=str)`` over whatever the workflow body
@@ -238,10 +260,12 @@ def _schema_from_type(target_type: Any, visiting: frozenset[Any] = frozenset()) 
         # branch had that backwards: it required the one key that crashes
         # construction and accepted a payload without it that works fine,
         # confirmed with a throwaway probe (field(init=False), no explicit
-        # default). An InitVar pseudo-field is the opposite mismatch --
-        # it IS a constructor keyword but fields() never lists it -- so
-        # reading the signature fixes both directions at once rather than
-        # patching fields() output with an init-False exclusion list.
+        # default). An InitVar pseudo-field is the opposite mismatch -- it
+        # IS a constructor keyword but fields() never lists it -- so
+        # reading the signature makes this module AWARE of one for the
+        # first time (see module docstring for why that is only a partial
+        # fix: _from_dict can never actually supply a required InitVar's
+        # value, independent of what this schema says).
         sig = inspect.signature(target_type)
         for name, param in sig.parameters.items():
             field_type = field_hints.get(name, param.annotation)

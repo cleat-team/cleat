@@ -14,7 +14,7 @@ from dataclasses import InitVar, dataclass, field
 import pytest
 
 try:
-    from cleat_sdk.entry import cleat_entry
+    from cleat_sdk.entry import _from_dict, cleat_entry
     from cleat_sdk.host_calls import HostCalls
     from cleat_sdk.jsonschema_emitter import (
         entry_point_param_schema,
@@ -212,6 +212,37 @@ def test_nested_dataclass_initvar_is_a_required_property_not_a_field():
     schema = entry_point_param_schema(_func(wf))["properties"]["order"]
     assert schema["properties"]["secret"]["type"] == ["string", "null"]
     assert "secret" not in schema["required"]
+
+
+def test_a_required_initvar_is_reported_but_uninstantiable_by_any_payload():
+    """cleat-review A2 on #2933, pinned rather than only documented. A
+    required (no-default) InitVar is a real __init__ parameter, so this
+    module correctly reports it as present and required -- but
+    _from_dict's own kwargs-building loop iterates dataclasses.fields(),
+    which excludes InitVar, so NO payload this binding builds can ever
+    supply one. The schema is an honest description of __init__'s
+    signature; it is not a promise that some payload satisfies it. Fixing
+    that belongs in _from_dict, not here -- tracked as a follow-up, not
+    attempted in this module."""
+
+    @dataclass
+    class Order:
+        sku: str
+        seed: InitVar[int]
+
+        def __post_init__(self, seed):
+            pass
+
+    @cleat_entry
+    def wf(h: HostCalls, order: Order) -> str:
+        return "{}"
+
+    schema = entry_point_param_schema(_func(wf))["properties"]["order"]
+    assert schema["required"] == ["sku", "seed"]
+
+    for payload in ({"sku": "a", "seed": 3}, {"sku": "a"}):
+        with pytest.raises(TypeError, match="missing 1 required positional argument: 'seed'"):
+            _from_dict(payload, Order)
 
 
 def test_self_referential_dataclass_does_not_recurse_forever():
