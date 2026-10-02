@@ -535,7 +535,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// cleat#1980: a sidecar next to the WASM binary, not another custom
 	// section -- wasm.Metadata is deliberately barred from carrying anything
 	// describing an entry point's parameters
-	// (wasm/metadata_carries_no_entry_point_parameter_list_test.go), because
+	// (wasm/metadata_carries_no_entry_point_parameters_test.go), because
 	// the host has nothing to validate a stored payload against and two
 	// CHANGELOG/issue references tell an operator so. A schema document is
 	// exactly that information, so it travels beside the binary instead:
