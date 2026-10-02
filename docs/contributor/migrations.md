@@ -148,7 +148,7 @@ Each dialect hides something outside the database, or inside it but outside a sc
 | MySQL | **users and their privileges** | the `mysql` system schema, not the database |
 | SQL Server | **logins** (server-level), and database **roles** | `sys.server_principals`; `sys.database_principals` |
 
-Three of those need a caveat, because a table like this invites a check that measures something
+Four of those need a caveat, because a table like this invites a check that measures something
 else:
 
 - **PostgreSQL's role memberships are real and were really lost** (cleat#2416), so that check has
@@ -161,13 +161,32 @@ else:
   *deployment* does it (`cmd/cleat-worker/setup.go`, `cmd/cleatctl/setsecret.go`). A membership
   check on a freshly-migrated database would therefore test nothing. Assert the role exists; do
   not assert who is in it.
-- **SQL Server's object grants are not a fact about cleat at all — they are the server's.** A
-  `sys.database_permissions` read returns **229 rows even in a brand-new empty database** (dbo 1,
-  `public` 2 database-level, `public` 226 object-level), all on server-supplied objects like
-  `sys.dm_pdw_nodes_os_tasks`. Nothing in `migrations/mssql/` issues a `GRANT`: the word appears
-  only in prose. So a comparison of that catalog compares server defaults to server defaults, and
-  a generator that *dumps* it would write 229 server defaults into the baseline as if they were
-  schema. Filter to what the migrations created — or, here, emit no grants at all.
+- **SQL Server's object grants used to be entirely the server's, and that stopped being true at
+  `migrations/mssql/006_app_login.sql` (cleat#2203).** A `sys.database_permissions` read returns
+  **229 rows even in a brand-new empty database** (dbo 1, `public` 2 database-level, `public` 226
+  object-level), all on server-supplied objects like `sys.dm_pdw_nodes_os_tasks` — this part still
+  holds, and is why `migration/catalogdiff/mssql.go`'s own grant query filters to `dp.class = 1`
+  (object-level) joined against `sys.objects`, rather than dumping the view raw. **That filter is
+  also, incidentally, why cleat_app's own grants do not show up in it**: they are schema-level
+  (`GRANT ... ON SCHEMA::dbo`, `class = 3`) and the one object-level statement is a `DENY`
+  (`state = 'D'`), not a `GRANT` (`state = 'G'`) — so the comparator's existing "compare server
+  defaults to server defaults" property survives by not modeling either kind, not because neither
+  kind exists any more. A generator that *dumps* `sys.database_permissions` raw would still write
+  229 server defaults into the baseline as if they were schema, and would now also need to decide
+  what to do with real ones. Filter to what the migrations created, as today — or emit none at all,
+  the same choice this note gave before cleat_app existed.
+- **MySQL's grants are real and the per-database diff can see them, but the obvious query embeds
+  the one thing that is never the same twice.** `information_schema.table_privileges.table_schema`
+  *is* the database name on MySQL — there is no narrower schema underneath it — so a grant string
+  built as `"<priv> ON <schema>.<table> TO <grantee>"` differs between any two scratch databases by
+  construction, since each one `scratchMySQLDB` builds gets its own generated name.
+  `TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL` caught this the day
+  `migrations/mysql/006_app_login.sql` added the first MySQL migration ever to issue a `GRANT`:
+  every one of its statements reported as a difference between two databases built from the
+  identical chain. `migration/catalogdiff/mysql.go` drops the schema/database name from the
+  comparable string for this reason — table and routine entries never carried it either, for the
+  same underlying reason (`WHERE table_schema = DATABASE()` already scopes the query to one
+  database, so the name adds nothing to compare).
 
 PostgreSQL lost two `cleat_sweep` memberships to exactly this in cleat#2416, with the per-database
 diff reporting clean. Check the dialect's column *behaviourally* — query the catalogue — rather than

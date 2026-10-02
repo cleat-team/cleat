@@ -196,20 +196,33 @@ printf %s "$SENDGRID_KEY" | cleatctl --db "$DSN" set-deployment-secret --name em
 The value is read from **stdin**, or `--from-file` — never a flag, for the
 same reason `set-secret`'s value is not one.
 
-**Writes are operator-only on PostgreSQL, not on MySQL or SQL Server.**
-Migration 103 (PostgreSQL) revokes `cleat_app`'s INSERT/UPDATE/DELETE on this
-table, so a worker's own database role cannot write here even if something
-reachable through it tried. MySQL and SQL Server have **no equivalent role
-split to revoke from** — there is one login per database on MySQL, and no
-`cleat_app`-equivalent application role on SQL Server at all (unlike
-`tenant_secrets`, which uses SQL Server's security-policy mechanism instead;
-this table carries no `tenant_id` for that mechanism to key a predicate on).
-So on those two dialects, **the serving login keeps full read/write access to
-this table**, and encryption at rest — the master key never touches the
-database on any dialect — is what actually protects it, not a database-level
-write restriction. Owner decision 4A, recorded on #1992: a separate,
-least-privilege login for MySQL and SQL Server is deferred to #2203, not
-built here.
+**Writes are operator-only on all three dialects.** Each has a least-privilege
+`cleat_app` login a worker serves as, kept apart from the owner/migrate login
+that applies schema changes, and none of the three grants it INSERT, UPDATE or
+DELETE on this table — only SELECT, so a worker can still resolve a secret at
+call time. PostgreSQL has had this since the baseline
+(`migrations/postgres/001_schema.sql`, folded in from the pre-compaction
+`005_app_role.sql`); MySQL and SQL Server gained their own `cleat_app` in
+`migrations/{mysql,mssql}/006_app_login.sql` (cleat#2203, owner decision 4A on
+#1992, which had deferred it rather than building it with the rest of this
+table).
+
+The three dialects get there by different mechanisms, because their privilege
+models differ. PostgreSQL and MySQL simply never grant the write privileges in
+the first place — MySQL's grant checks are an OR across whatever applies, with
+no way to override a broader grant, so the migration grants every other table
+individually and never issues one covering this one. SQL Server's `cleat_app`
+gets the same broad per-schema GRANT as every other table (new tables, plugin
+or core, are covered automatically) and then an explicit `DENY` on this one
+table, which overrides the GRANT regardless of which came first — the one
+tool of the three that can say "except this" rather than "everything but
+this". On SQL Server this is a role-segregation measure only, not an RLS
+exemption fix the way PostgreSQL's split originally was: SQL Server's security
+policies have no superuser-style bypass, so even the owner/migrate login is
+already subject to them (see `docs/contributor/migrations.md`). Encryption at
+rest — the master key never touches the database on any dialect — remains
+what protects this table's contents; the login split is what keeps an
+ordinary worker from writing a row at all, correct ciphertext or not.
 
 ## Retire a secret
 

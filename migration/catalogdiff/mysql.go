@@ -240,22 +240,33 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	}
 	rtRows.Close()
 
+	// table_schema is deliberately left OUT of the comparable string. On every other
+	// dialect a schema is a namespace that can genuinely differ from another schema in
+	// the SAME database ("admin" vs "dbo"/"public"), so Postgres's and SQL Server's
+	// grant strings keep it. On MySQL a schema IS the database -- there is no narrower
+	// namespace below it -- and `scratchMySQLDB` gives every test database its own
+	// generated name (cleat#2203: TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL
+	// built two scratch databases from the identical chain and reported every one of
+	// migrations/mysql/006_app_login.sql's GRANTs as a difference, because the name
+	// `table_schema` resolves to was never the same string twice). Filtering on
+	// `table_schema = DATABASE()` already scopes this to the connection's own database,
+	// so the name itself adds nothing a reader could use to tell two grants apart.
 	grantRows, err := db.QueryContext(ctx, `
-		SELECT grantee, table_schema, table_name, privilege_type
+		SELECT grantee, table_name, privilege_type
 		FROM information_schema.table_privileges
 		WHERE table_schema = DATABASE()
-		ORDER BY 1, 2, 3, 4
+		ORDER BY 1, 2, 3
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("catalogdiff: listing grants: %w", err)
 	}
 	for grantRows.Next() {
-		var grantee, schema, table, priv string
-		if err := grantRows.Scan(&grantee, &schema, &table, &priv); err != nil {
+		var grantee, table, priv string
+		if err := grantRows.Scan(&grantee, &table, &priv); err != nil {
 			grantRows.Close()
 			return nil, fmt.Errorf("catalogdiff: scanning grant: %w", err)
 		}
-		cat.Grants = append(cat.Grants, fmt.Sprintf("%s ON %s.%s TO %s", priv, schema, table, grantee))
+		cat.Grants = append(cat.Grants, fmt.Sprintf("%s ON %s TO %s", priv, table, grantee))
 	}
 	if err := grantRows.Err(); err != nil {
 		return nil, fmt.Errorf("catalogdiff: listing grants: %w", err)
