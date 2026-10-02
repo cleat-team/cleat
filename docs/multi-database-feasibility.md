@@ -31,7 +31,7 @@ The coupling breaks down into four tiers:
 | `FOR UPDATE SKIP LOCKED` | `db.go:475,542,1876` | Worker claim dispatch — the core poll loop. Marks rows as claimed in one atomic operation without blocking other workers. |
 | `RETURNING` clause | 12+ query locations | Atomic claim-and-read — claim a workflow row, get its data back in one round-trip. Essential for the claim-execute pattern. |
 | Row-Level Security + `set_config`/`current_setting` | `db.go:418,675`, migration 002 | Multi-tenant isolation enforced at the database level. Every query runs in a session scoped to a tenant UUID. |
-| PL/pgSQL stored procedures | migration 009, 4 functions | Tenant provisioning — creating login roles, granting plugin access, using `EXECUTE format(...)` dynamic SQL. |
+| PL/pgSQL stored procedures | `001_schema.sql`, 4 functions | Tenant provisioning — creating login roles, granting plugin access, using `EXECUTE format(...)` dynamic SQL. |
 
 ### Tier 2 — Pervasive but Replaceable PostgreSQL Syntax
 

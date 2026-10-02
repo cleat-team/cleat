@@ -162,3 +162,31 @@ func hostnameOrEmpty() string {
 	}
 	return h
 }
+
+// podAddress builds the DNS name this worker is reachable at, given its own
+// hostname and serviceName (--worker-service-name, cleat#2196). Empty in,
+// empty out: outside Kubernetes, or inside it without the headless Service
+// this flag is meant to name, there is nothing to resolve the result
+// against, and an address nobody can reach is worse than none -- it would
+// read as "this worker is addressable" to anything that later consumes it.
+//
+// Takes hostname as a parameter rather than calling hostnameOrEmpty()
+// itself, so the string-building logic is directly testable without a real
+// or faked os.Hostname(); both call sites pass hostnameOrEmpty().
+//
+// Returns the SHORT form, <hostname>.<serviceName>, not the fully-qualified
+// <hostname>.<serviceName>.<namespace>.svc.cluster.local. Kubernetes' pod
+// DNS search list already includes "<namespace>.svc.cluster.local" for any
+// pod resolving a name from within the same namespace (the only case
+// cleat#2196's reaper-to-worker channel needs -- workers in one cleat
+// deployment share one namespace), so the short form resolves correctly
+// without this process needing to know its own namespace at all. See
+// k8s/service.yaml and charts/cleat/templates/service.yaml, whose header
+// comments describe the matching headless Service and pod spec.subdomain
+// this depends on.
+func podAddress(hostname, serviceName string) string {
+	if serviceName == "" || hostname == "" {
+		return ""
+	}
+	return hostname + "." + serviceName
+}

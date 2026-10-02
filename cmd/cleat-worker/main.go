@@ -1746,6 +1746,7 @@ func main() {
 	if err := registerWithKeyCheck(ctx, workerRegistry, secretStore, engine.WorkerRegistration{
 		WorkerID:         workerID,
 		Hostname:         hostnameOrEmpty(),
+		Address:          podAddress(hostnameOrEmpty(), *workerServiceName),
 		PID:              os.Getpid(),
 		Concurrency:      *concurrency,
 		ConnectionBudget: *clusterConnectionBudgetFlag,
