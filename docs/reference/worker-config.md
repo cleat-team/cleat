@@ -23,6 +23,11 @@ existing database; it does not manage it. Example:
     --db "mysql://user:pass@tcp(localhost:3306)/cleat"
     --db "sqlserver://user:pass@localhost:1433?database=cleat"
 
+A MySQL session whose `time_zone` is not UTC introduces a DST-sized blind spot in
+`--idempotency-key-retention`'s bound — see `docs/durable-calls.md`'s "Compared against the
+store's own clock" section for the exact `time_zone` DSN parameter to pin it, if that precision
+matters to your deployment.
+
 ---
 
 ### --driver

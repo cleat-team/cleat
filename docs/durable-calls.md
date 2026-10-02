@@ -203,7 +203,19 @@ needing to know or correct it. This does **not** cancel a DST transition that fa
 window being measured — a session in a DST-observing zone can read a 24-hour-old row as roughly an
 hour younger right after the clocks fall back, so the bound can overshoot by up to an hour, once a
 year, for a session in such a zone. A deployment that cares about the bound to that precision
-should pin its MySQL session to UTC.
+should pin its MySQL session to UTC — which observes no DST, so there is no transition left to
+overshoot across — by adding `time_zone` to `--db`'s DSN:
+
+```
+--db "mysql://user:pass@tcp(host:3306)/cleat?parseTime=true&time_zone=%27%2B00%3A00%27"
+```
+
+The driver passes an unrecognised DSN parameter straight through as a session variable
+(`go-sql-driver/mysql`'s `handleParams`, `SET time_zone = <value>`), so the value must be the
+*SQL string literal* `'+00:00'`, quotes included — `%27` is `'` and `%2B` is `+`, both of which a
+bare DSN query string cannot carry unescaped. `plugins/auditlog/chain_db_test.go`'s
+`TestTheChainDoesNotDependOnTheMySQLSessionTimeZone` pins a session the same way for its own test
+setup (`url.QueryEscape("'" + zone + "'")`), which is the non-UTC zone side of the same hazard.
 
 **Validated at worker startup, same shape as `--ambiguity-lookup` below, plus one more check:**
 every operation named in `--idempotency-key-ops` must also be declared
