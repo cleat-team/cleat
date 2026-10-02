@@ -162,7 +162,7 @@ else:
   check on a freshly-migrated database would therefore test nothing. Assert the role exists; do
   not assert who is in it.
 - **SQL Server's object grants used to be entirely the server's, and that stopped being true at
-  `migrations/mssql/007_app_login.sql` (cleat#2203).** A `sys.database_permissions` read returns
+  `migrations/mssql/008_app_login.sql` (cleat#2203).** A `sys.database_permissions` read returns
   **229 rows even in a brand-new empty database** (dbo 1, `public` 2 database-level, `public` 226
   object-level), all on server-supplied objects like `sys.dm_pdw_nodes_os_tasks` — this part still
   holds, and is why `migration/catalogdiff/mssql.go`'s own grant query filters to `dp.class = 1`

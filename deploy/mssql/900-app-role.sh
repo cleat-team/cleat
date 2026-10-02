@@ -3,7 +3,7 @@
 # Create (or update) the cleat_app login, map it to a user, and add it to
 # cleat_app_role -- cleat#2203.
 #
-# migrations/mssql/007_app_login.sql creates cleat_app_role (a database ROLE
+# migrations/mssql/008_app_login.sql creates cleat_app_role (a database ROLE
 # carrying the GRANTs and the DENY on deployment_secrets) and stops there,
 # deliberately: CREATE LOGIN is a SERVER-level operation, needing securityadmin
 # or sysadmin, and nothing else a SQL Server migration does needs more than

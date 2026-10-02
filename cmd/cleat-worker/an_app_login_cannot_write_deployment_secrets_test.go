@@ -7,7 +7,7 @@ package main
 // split to revoke from"). This adds cleat_app to both, following three rounds of
 // cleat-review measurement against real databases:
 //
-//   - migrations/mssql/007_app_login.sql creates a database ROLE (cleat_app_role)
+//   - migrations/mssql/008_app_login.sql creates a database ROLE (cleat_app_role)
 //     carrying the GRANT/DENY; deploy/mssql/900-app-role.sh creates the LOGIN and adds
 //     it to that role. Splitting it this way is required, not stylistic: CREATE LOGIN
 //     needs securityadmin/sysadmin, which a SQL Server migrate login has never needed
@@ -515,7 +515,7 @@ func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string, grantTenantPa
 	return cfg.FormatDSN()
 }
 
-// mssqlAppRoleDSN creates the cleat_app LOGIN (migrations/mssql/007_app_login.sql
+// mssqlAppRoleDSN creates the cleat_app LOGIN (migrations/mssql/008_app_login.sql
 // already created cleat_app_role, the database role carrying the GRANT/DENY) with a
 // random password, enables it, and adds it to cleat_app_role -- see this file's header
 // for why it does not simply run deploy/mssql/900-app-role.sh.
@@ -553,7 +553,7 @@ func mssqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
 		t.Fatal(err)
 	}
 	if roleExists == 0 {
-		t.Fatal("cleat_app_role does not exist -- has migrations/mssql/007_app_login.sql applied?")
+		t.Fatal("cleat_app_role does not exist -- has migrations/mssql/008_app_login.sql applied?")
 	}
 	if _, err := owner.Exec(`ALTER ROLE cleat_app_role ADD MEMBER cleat_app`); err != nil {
 		t.Fatalf("adding cleat_app to cleat_app_role: %v", err)

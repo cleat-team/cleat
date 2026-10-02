@@ -36,7 +36,7 @@
 # `backup_config` and `backup_history` are created by PLUGIN migrations
 # (plugin.RunMigrations), which run after the core chain and whose table set
 # depends on which plugins a deployment enables. PostgreSQL covers this with
-# `ALTER DEFAULT PRIVILEGES`; SQL Server's 007_app_login.sql covers it with a
+# `ALTER DEFAULT PRIVILEGES`; SQL Server's 008_app_login.sql covers it with a
 # schema-level GRANT; MySQL has neither mechanism, and a hardcoded list is
 # exactly the growing-population census CLAUDE.md warns never stays correct.
 # Querying information_schema.tables at RUN time is the only form of this
@@ -62,10 +62,23 @@ set -euo pipefail
 # that literal and turn the rest of itself into SQL, the same class of defect N1 found
 # in this script's SQL Server sibling. Reject it here for the same reason: this script
 # has no QUOTENAME-equivalent anywhere to hand the value to instead.
+#
+# A backslash is a second, quieter way to corrupt the same literal: MySQL treats
+# backslash as a string-literal escape character by default (NO_BACKSLASH_ESCAPES is
+# not assumed here), so a password containing one is not rejected by the connection --
+# it is silently REWRITTEN (`\n` becomes a newline, `\\` collapses to one backslash),
+# and the password actually set no longer matches what the operator typed. Reject it
+# rather than doubling it, same reasoning as the quote above (cleat-review's A3).
 case "$CLEAT_APP_PASSWORD" in
 *\'*)
 	echo "ERROR: CLEAT_APP_PASSWORD must not contain a single quote -- it is substituted" >&2
 	echo "textually into a SQL string literal. Choose a password without one." >&2
+	exit 1
+	;;
+*\\*)
+	echo "ERROR: CLEAT_APP_PASSWORD must not contain a backslash -- MySQL treats it as a" >&2
+	echo "string-literal escape character, so it would silently change the password" >&2
+	echo "actually set. Choose a password without one." >&2
 	exit 1
 	;;
 esac
