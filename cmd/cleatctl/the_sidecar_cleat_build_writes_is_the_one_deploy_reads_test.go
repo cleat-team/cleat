@@ -91,7 +91,7 @@ func TestTheSidecarCleatBuildWritesIsTheOneDeployReads(t *testing.T) {
 
 	// --- 1. the real build -------------------------------------------------
 	outDir := t.TempDir()
-	cleatBuildInto(t, outDir, joinFixture)
+	cleatBuildInto(t, outDir, joinFixture, "go")
 
 	wasmPath := filepath.Join(outDir, joinWasmName)
 	sidecarPath := wasmPath + ".schema.json"
@@ -209,7 +209,7 @@ func TestTheSidecarCleatBuildWritesIsTheOneDeployReads(t *testing.T) {
 // cleatBuildInto runs the real `cleat build` over a repo-relative fixture into
 // outDir. It shells out exactly as the worker-side writer assertions do, so this
 // test exercises the build the way production invokes it.
-func cleatBuildInto(t *testing.T, outDir, fixture string) {
+func cleatBuildInto(t *testing.T, outDir, fixture, target string) {
 	t.Helper()
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -221,12 +221,36 @@ func cleatBuildInto(t *testing.T, outDir, fixture string) {
 	root := filepath.Dir(filepath.Dir(cwd)) // cmd/cleatctl -> repo root
 
 	cmd := exec.Command("go", "run", filepath.Join(root, "cmd", "cleat"),
-		"build", "--target", "go", "-o", outDir, filepath.Join(root, fixture))
+		"build", "--target", target, "-o", outDir, filepath.Join(root, fixture))
 	cmd.Dir = root
 	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("cleat build failed:\n%s\n%v", string(out), err)
+		t.Fatalf("cleat build --target %s failed:\n%s\n%v", target, string(out), err)
 	}
+}
+
+// soleWasmIn returns the single .wasm in dir, failing if there is not exactly
+// one. The tests below then assert the sidecar at `that + ".schema.json"` --
+// the READER's derivation -- rather than scanning for a suffix, which is the
+// slack the writer-side tests in cmd/cleat-worker leave (they match by suffix
+// after scanning, so a build writing foo.wasm beside bar.wasm.schema.json
+// satisfies them).
+func soleWasmIn(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	var wasms []string
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".wasm" {
+			wasms = append(wasms, e.Name())
+		}
+	}
+	if len(wasms) != 1 {
+		t.Fatalf("expected exactly one .wasm in %s, got %v", dir, wasms)
+	}
+	return filepath.Join(dir, wasms[0])
 }
 
 func schemaFilesIn(t *testing.T, dir string) []string {
