@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -16,26 +17,29 @@ import (
 // restamp calls this and the command crashed where it used to store the artifact
 // unchanged (cleat#2944, found by cleat-review).
 //
-// A panic fails a Go test anyway, so the error assertions are what make the
-// *reason* legible rather than just the absence of a crash.
+// A panic fails a Go test anyway, so the sentinel assertion is what makes the
+// *reason* legible rather than just the absence of a crash -- and it is the
+// contract a future errors.Is caller depends on.
 //
-// There are two error paths and the table says which case takes which. Only
-// `null` unmarshals cleanly into a nil map and reaches the explicit check; an
-// array, string, number or boolean is rejected by json.Unmarshal itself, because
-// it cannot decode a non-object into map[string]json.RawMessage.
+// Every shape here is valid JSON that is not an object, so all of them must
+// report ErrNotAJSONObject. An earlier version of this test asserted a message
+// for `null` and merely "some error" for the rest, which let the sentinel's doc
+// claim a contract only `null` satisfied. Invalid JSON is a *different* case and
+// is covered by TestSetMetadataFieldRejectsInvalidJSON below.
 func TestSetMetadataFieldRejectsANonObjectPayload(t *testing.T) {
 	header := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 
 	for _, tc := range []struct {
 		name    string
 		payload string
-		wantMsg string // "" means any error will do
 	}{
-		{"null", `null`, "not a JSON object"},
-		{"an array", `[1,2]`, ""},
-		{"a bare string", `"hello"`, ""},
-		{"a number", `42`, ""},
-		{"a boolean", `true`, ""},
+		{"null", `null`},
+		{"an array", `[1,2]`},
+		{"a bare string", `"hello"`},
+		{"a number", `42`},
+		{"a boolean", `true`},
+		{"an array of objects", `[{"workflow_version":1}]`},
+		{"null with whitespace", "  null\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, err := writeCustomSection(header, sectionName, []byte(tc.payload))
@@ -48,10 +52,38 @@ func TestSetMetadataFieldRejectsANonObjectPayload(t *testing.T) {
 					"a non-object has no keys to patch and must be reported as such, not "+
 					"patched or panicked on", tc.name, len(out))
 			}
-			if tc.wantMsg != "" && !strings.Contains(err.Error(), tc.wantMsg) {
-				t.Errorf("error %q does not say %q", err, tc.wantMsg)
+			if !errors.Is(err, ErrNotAJSONObject) {
+				t.Errorf("error is %v, want ErrNotAJSONObject.\n\n"+
+					"The sentinel says \"this payload is not a JSON object\", so every "+
+					"valid-JSON non-object must report it rather than the invalid-JSON "+
+					"error -- otherwise the doc promises a contract callers cannot rely on.",
+					err)
 			}
 		})
+	}
+}
+
+// The neighbouring case, which the sentinel must NOT claim: bytes that are not
+// JSON at all are a different failure, and a caller distinguishing them (to say
+// "cannot read this section" rather than "no keys to patch") needs them apart.
+func TestSetMetadataFieldRejectsInvalidJSON(t *testing.T) {
+	header := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+
+	for _, payload := range []string{``, `{`, `{not json}`, `{"a":}`, "{\"a\":1}}"} {
+		b, err := writeCustomSection(header, sectionName, []byte(payload))
+		if err != nil {
+			t.Fatalf("writeCustomSection: %v", err)
+		}
+		_, err = SetMetadataField(b, "workflow_version", json.RawMessage("2"))
+		if err == nil {
+			t.Fatalf("SetMetadataField accepted %q", payload)
+		}
+		if errors.Is(err, ErrNotAJSONObject) {
+			t.Errorf("%q is invalid JSON, not a valid non-object; got ErrNotAJSONObject", payload)
+		}
+		if !strings.Contains(err.Error(), "invalid JSON") {
+			t.Errorf("%q gave %v, want an invalid-JSON error", payload, err)
+		}
 	}
 }
 

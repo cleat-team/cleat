@@ -229,16 +229,22 @@ func SetMetadataField(wasmBytes []byte, key string, rawValue json.RawMessage) ([
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &fields); err != nil {
+		if json.Valid(payload) {
+			// Valid JSON that is not an object: an array, a string, a number, a
+			// boolean. Unmarshal fails on the target TYPE rather than on the
+			// syntax, and "not a JSON object" is exactly the condition the
+			// sentinel names, so reporting it here is what keeps the documented
+			// contract true rather than narrowing the doc to `null`.
+			return nil, ErrNotAJSONObject
+		}
 		// The same message ReadMetadata gives for the same input, so a caller
 		// cannot tell the two readers apart by their error.
 		return nil, fmt.Errorf("cleat.metadata: invalid JSON: %w", err)
 	}
 	if fields == nil {
-		// Unmarshal leaves the map nil for a JSON `null`, and assigning into it
-		// panics ("assignment to entry in nil map") -- reached from
-		// cleatctl deploy before this was a returned error rather than a crash.
-		// Returned as a sentinel because a caller which may leave a section as it
-		// found it needs to tell this apart from a write that genuinely failed.
+		// Unmarshal leaves the map nil for a JSON `null` -- valid JSON, and the
+		// only non-object shape that decodes cleanly enough to reach here rather
+		// than the branch above.
 		return nil, ErrNotAJSONObject
 	}
 	fields[key] = rawValue
