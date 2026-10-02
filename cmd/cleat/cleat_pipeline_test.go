@@ -1755,7 +1755,7 @@ func TestRunBuild_ASTarget_NoPackageJSON(t *testing.T) {
 func TestRunBuild_PythonTarget_NoPyFile(t *testing.T) {
 	if os.Getenv("TEST_BUILD_PYTHON") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildPython(dir, ".", "", "latest")
+		runBuildPython(dir, ".", "", "latest", 1)
 		return
 	}
 	emptyDir := t.TempDir()

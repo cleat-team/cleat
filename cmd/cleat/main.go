@@ -272,7 +272,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildPython(pattern, outDir, runtime, channel)
+		runBuildPython(pattern, outDir, runtime, channel, workflowVersion)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)

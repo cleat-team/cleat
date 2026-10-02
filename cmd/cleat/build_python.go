@@ -7,10 +7,51 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/cleat-team/cleat/wasm"
 )
+
+// pythonStampEnv is the environment `cleat build --target python` hands to
+// python-sdk/scripts/build_wasm.py, which forwards it to stamp_metadata.py as
+// that writes cleat.metadata into the component.
+//
+// It is a named function rather than three inline os.Setenv calls for the
+// reason cmd/cleat/build_metadata.go's nonGoMetadata is one: the contract
+// "these variables, carrying these values" is then testable without
+// componentize-py installed, on any machine and in any CI job. cleat#1077 was
+// the same defect on the other three non-Go targets -- metadata that
+// `cleat deploy` rejected, produced by a build nothing had checked -- and the
+// test that pins it asserts on the constructed value, not on a build having
+// happened.
+//
+// CLEAT_WORKFLOW_VERSION is the cleat#2936 half of that contract. `--version`
+// reached every other target and stopped here: runBuildPython never took the
+// flag, so stamp_metadata.py's env_or_arg("CLEAT_WORKFLOW_VERSION", ...) found
+// nothing and defaulted the stamp to 0. Nothing noticed while the stamp could
+// not be read back -- a Component Model binary's cleat.metadata was unreadable,
+// so cmd/cleat-worker/setup.go's version pre-flight saw wfMeta == nil and
+// skipped. Making that read work made wfMeta non-nil, and 0 then disagreed with
+// the def_version a deploy records (cleat deploy prefers the stamp, and its own
+// --version defaults to 1), so every Python run was released as "version_check"
+// on claim and looped forever without ever running. Rust, Java and
+// AssemblyScript get the same value from nonGoMetadata.
+func pythonStampEnv(workflowVersion int, entryPoints, channel string) map[string]string {
+	env := map[string]string{
+		"CLEAT_WORKFLOW_VERSION": strconv.Itoa(workflowVersion),
+	}
+	// Only set when there is something to say: build_wasm.py treats an empty
+	// value as absent, and an entry point name derived from a failed schema
+	// computation would be the empty string.
+	if entryPoints != "" {
+		env["CLEAT_ENTRY_POINTS"] = entryPoints
+	}
+	if channel != "" {
+		env["CLEAT_CHILD_BINDING_POLICY"] = channel
+	}
+	return env
+}
 
 // runBuildPython compiles a Python workflow to WASM using componentize-py
 // via the python-sdk/scripts/build_wasm.py helper.
@@ -21,7 +62,7 @@ import (
 //   - "path/to/dir/"          — a directory (looks for .py files)
 //
 // runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for both.
-func runBuildPython(pattern, outDir, runtime, channel string) {
+func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion int) {
 	pyFile := ""
 	funcName := ""
 
@@ -191,19 +232,13 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 	fmt.Printf("  Compiling Python to WASM via componentize-py...\n")
 	fmt.Printf("  Entry: %s\n", entry)
 
-	if channel != "" {
-		os.Setenv("CLEAT_CHILD_BINDING_POLICY", channel)
-		defer os.Unsetenv("CLEAT_CHILD_BINDING_POLICY")
-	}
-
 	// cleat#2914. Computed BEFORE the build call (not after, the way Go's
 	// buildEntryPointSchemas runs after wasm.WriteMetadata) because the
 	// entry point NAME this derives has to reach stamp_metadata.py during
 	// THIS SAME componentize-py invocation -- CLEAT_ENTRY_POINTS, read by
-	// python-sdk/scripts/build_wasm.py the same way CLEAT_CHILD_BINDING_POLICY
-	// already is, two lines up. Without it, wasm.Metadata.EntryPoints stays
-	// unstamped for Python (stamp_metadata.py's build_metadata never had an
-	// entry_points case before this), and determineEntryPoint
+	// python-sdk/scripts/build_wasm.py. Without it, wasm.Metadata.EntryPoints
+	// stays unstamped for Python (stamp_metadata.py's build_metadata never had
+	// an entry_points case before this), and determineEntryPoint
 	// (cmd/cleat-worker/setup.go) can never resolve a schema key on its own
 	// for a Component Model binary, whose single "run" export never matches
 	// its "handle_"-prefixed fallback scan -- the schema below would be
@@ -218,9 +253,19 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 	entryPointName, schemaJSON, schemaErr := computePythonEntryPointSchema(pyFile, funcName)
 	if schemaErr != nil {
 		fmt.Fprintf(os.Stderr, "  Warning: could not compute an entry point schema (non-fatal): %v\n", schemaErr)
-	} else {
-		os.Setenv("CLEAT_ENTRY_POINTS", entryPointName)
-		defer os.Unsetenv("CLEAT_ENTRY_POINTS")
+		entryPointName = ""
+	}
+
+	// Every value the stamp needs is known by now, so the environment goes on
+	// in one place, immediately before the build that reads it. See
+	// pythonStampEnv for what these variables do and why the version is one of
+	// them. CLEAT_CHILD_BINDING_POLICY used to be set above the schema
+	// computation; that computation is a separate python3 process
+	// (cleat_sdk.jsonschema_emitter) that does not read it, so setting it here
+	// instead changes nothing.
+	for k, v := range pythonStampEnv(workflowVersion, entryPointName, channel) {
+		os.Setenv(k, v)
+		defer os.Unsetenv(k)
 	}
 
 	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {

@@ -227,10 +227,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed with "not a valid WASM binary (bad magic/version)" / "unsupported WASM version" — including
   the `entry_points` stamp cleat#2914 added, which this is why it shipped dormant. A worker
   resolving a Python workflow's entry point with no explicit `__entry_point` in the start request
-  has therefore always failed outright until this fix. The custom-section walk itself needed no
-  change: a component's custom sections (id 0) frame identically to a core module's, verified by
-  hand-walking all 642 top-level sections of a real `componentize-py` artifact and landing exactly
-  at EOF. **Deliberately not widened**: `readImportSection`/`readImportModuleNames`
+  has therefore always failed outright. Reading the stamp back is a prerequisite for that path
+  rather than the whole of it: a component exports `run` no matter how many `@cleat_entry`
+  functions it has, while the stamp carries the logical name, so which of the two
+  `determineEntryPoint` should return is still open (cleat#2937). The custom-section walk itself
+  needed no change: a component's custom sections (id 0) frame identically to a core module's,
+  verified by hand-walking all 642 top-level sections of a real `componentize-py` artifact and
+  landing exactly at EOF. **Deliberately not widened**: `readImportSection`/`readImportModuleNames`
   (`wasm/metadata.go`) and the section readers in `wasm/memory.go`/`wasm/sizereport.go` all
   interpret non-zero section IDs with core-module-only meaning (e.g. section ID 2 means "import" in
   a core module and "core instance" in a component) — widening those the same way would silently
@@ -249,6 +252,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine reads, and builds write others it does not (`stamp_metadata.py` adds `sdk_language`,
   `sdk_version` and `created_at`), so the restamp patches the raw payload rather than rebuilding
   it from the struct and dropping them. (cleat#2944)
+
+- **`cleat build --target python` stamped `workflow_version: 0`, so a Python workflow never ran.**
+  `runBuildPython` never took `--version` — `runBuildJava`, `runBuildAssemblyScript` and
+  `runBuildRust` all do — so `stamp_metadata.py`'s `env_or_arg("CLEAT_WORKFLOW_VERSION", ...)` found
+  nothing and fell back to its own default of 0. That was inert while the stamp was unreadable, and
+  stopped being inert the moment the entry above made it readable: `cmd/cleat-worker`'s version
+  pre-flight then compared that 0 against the `def_version` a deploy records (`cleat deploy` prefers
+  the stamp and defaults `--version` to 1) and released the run back to the queue on every claim,
+  so a Python workflow looped between claim and release and never executed. The Python build now
+  stamps the version it was asked for. (cleat#2936)
 
 ## [0.3.0] - 2026-09-27
 
