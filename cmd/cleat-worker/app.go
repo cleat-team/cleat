@@ -94,11 +94,19 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 // off by default. While it is off the route does not exist: the answer is the 404 an unregistered /api/
 // path gets, so a caller cannot tell a gated route from a missing one.
 //
-// It exists because worker-level routes (drain, the health detail) accept ANY tenant's API key. cleat has
-// no operator identity yet (cleat#2169), so "who may drain a worker" cannot be answered per caller, and
-// the decision is made per deployment instead: the operator turns the routes on, and while they are on any
-// authenticated key can call them. The gate is checked per request, not at registration, so a test can
-// flip the flag.
+// It exists because worker-level routes (drain, the health detail) accept ANY tenant's API key. Nothing
+// HERE answers "who may drain a worker" per caller, so the decision is made per deployment instead: the
+// operator turns the routes on, and while they are on any authenticated key can call them. The gate is
+// checked per request, not at registration, so a test can flip the flag.
+//
+// cleat#2169 has since added the per-caller answer, and it is at the AUTH layer rather than here:
+// auth.OperatorMiddleware lets an operator key reach /api/admin/* and refuses it everywhere else in the
+// API. That does NOT narrow this gate, and the two are independent on purpose -- a TENANT key still calls
+// these routes while the flag is on, which is the behaviour this comment described before operators
+// existed, and changing that would break every deployment whose automation drains a worker with an
+// ordinary key. What an operator credential adds is a key that is CORRECT for these routes, not a
+// restriction on the ones already reaching them. Whether drain in particular should become operator-only
+// is a separate decision, and this comment is the place it was left open.
 func (s *apiServer) adminAPIOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !*enableAdminAPI {

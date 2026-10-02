@@ -1530,6 +1530,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// WS-4's addition to WS-3's file, declared as WORKSTREAM.md asks: leaving
+	// this unwired is worse than the cross-stream edit. The credential exists
+	// (migrations/{postgres/010,mysql/008,mssql/009}_operator_api_keys.sql, and
+	// `cleatctl operator-key create` mints one), so a worker that could not
+	// authenticate one would ship a credential nothing accepts.
+	//
+	// ON `db`, the same connection authResolver was just built on, and for the
+	// reason spelled out at the auth.MiddlewareWithMux call site below: operator
+	// keys live in the base database the DSN names, and on MySQL a tenant-scoped
+	// pool is a different database entirely. Built on `store` -- which is
+	// factory.OpenStore(ctx, defaultTenantID, ...) -- every operator key would
+	// 401 on MySQL while its row sat in the base database. cleat#866 for the
+	// tenant keys, and the same shape here.
+	//
+	// The dialect is the same *driver value authResolver was handed, so this
+	// cannot fail where that did not. It is still checked rather than ignored:
+	// `operatorResolver, _ :=` would put a nil resolver on the request path and
+	// turn a startup error into a panic on the first operator request, and a
+	// future split (a different driver here, say) would be silent.
+	operatorResolver, orErr := auth.NewOperatorStoreForDialect(db, *driver)
+	if orErr != nil {
+		logger.ErrorContext(context.Background(), "cannot build the operator key resolver, so no operator key could be authenticated", "worker_id", workerID, "error", orErr)
+		os.Exit(1)
+	}
+
 	pluginEnv := &plugin.Environment{
 		HTTPTransport:    pluginEgressTransport(egressAllow, operatorEgress, pluginPrivateHosts),
 		DB:               getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
@@ -2506,6 +2531,26 @@ func main() {
 			}
 
 			handler = auth.MiddlewareWithMux(authResolver, true, mux, pluginAuthExemptPatterns...)(handler)
+
+			// WS-4's addition to WS-3's file, declared as WORKSTREAM.md asks:
+			// leaving this unwired is worse than the cross-stream edit, because
+			// an operator key that no middleware recognises is a credential the
+			// operator can mint, copy and present, and that is answered "invalid
+			// or revoked API key" on every route. cleat#2169.
+			//
+			// OUTERMOST, and applied after the line above so that it is. It has
+			// to be outside auth.MiddlewareWithMux: that one resolves the key
+			// against admin.tenant_api_keys and 401s everything else, so an
+			// operator key would be refused as a bad TENANT key before anything
+			// could tell it apart. Being outside also keeps an operator request
+			// out of HostBindingMiddlewareWithMux -- correct rather than
+			// incidental, since host binding stops one tenant's key being used
+			// against another tenant's domain and an operator has no domain.
+			//
+			// Installed with the rest of the auth chain, under --require-auth:
+			// with authentication off nothing is gated, so there is no decision
+			// for this to make.
+			handler = auth.OperatorMiddleware(operatorResolver)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//

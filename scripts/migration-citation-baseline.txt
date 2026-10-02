@@ -92,16 +92,13 @@ engine/admin_functions_are_not_public_test.go	migration 064
 engine/admin_functions_pin_their_search_path_test.go	migration 069
 engine/admin_functions_pin_their_search_path_test.go	migration 070
 engine/allowed_signals_writer_test.go	migration 037
-engine/an_expired_idempotency_key_starts_a_new_run_test.go	migration 010
 engine/an_idempotency_key_belongs_to_one_tenant_test.go	083_an_idempotency_key_belongs_to_one_tenant.sql
-engine/an_idempotency_key_belongs_to_one_tenant_test.go	migration 010
 engine/an_idempotency_key_belongs_to_one_tenant_test.go	migration 077
 engine/an_idempotency_key_belongs_to_one_tenant_test.go	migration 083
 engine/an_input_survives_the_column_or_does_not_test.go	migrations/mysql/070
 engine/an_input_survives_the_column_or_does_not_test.go	migrations/mysql/071
 engine/child_failure_reaches_the_parent_test.go	migration 053
 engine/claim_defers_a_held_concurrency_key_test.go	migration 058
-engine/concurrency_key_tenant_scope_test.go	migration 010
 engine/db.go	migration 101
 engine/db.go	migrations/postgres/049
 engine/db.go	migrations/postgres/101
@@ -200,7 +197,6 @@ migration/minimum_server_version.go	migration 077
 migration/mssql_admin_role_test.go	migration 012
 migration/mssql_admin_role_test.go	migration 103
 migration/mssql_json_scalar_test.go	migration 103
-migration/mysql_bootstrap_test.go	migration 010
 migration/mysql_event_columns_test.go	migration 030
 migration/mysql_event_columns_test.go	migrations/mysql/030
 migration/mysql_single_tenant_test.go	migration 038
