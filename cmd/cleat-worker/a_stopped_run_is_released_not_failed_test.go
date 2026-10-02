@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +35,15 @@ func newStoppedRunFixture(t *testing.T) *stoppedRunFixture {
 	t.Helper()
 	f := &stoppedRunFixture{}
 	ms := &mockStore{
+		// Enough for executeWorkflow to get as far as eng.Replay: a def whose
+		// module loads. Nothing here runs a guest -- Replay fails on its own,
+		// which is the point (see the post-Replay test below).
+		loadWASMFn: func(_ context.Context, _ string, _ int) ([]byte, error) {
+			return []byte{
+				0x00, 0x61, 0x73, 0x6d, // magic
+				0x01, 0x00, 0x00, 0x00, // version 1
+			}, nil
+		},
 		releaseWorkflowFn: func(_ context.Context, _ string, _ string, _ int64, _ time.Time) error {
 			f.releases++
 			return nil
@@ -118,5 +131,51 @@ func TestRunWasStoppedPredicate(t *testing.T) {
 	g.w.cancel()
 	if !g.w.runWasStopped(g.wf()) {
 		t.Error("runWasStopped = false while shutting down")
+	}
+}
+
+// The post-Replay call site (setup.go:3761), DRIVEN rather than assumed.
+//
+// The three tests above call releaseIfStopped directly, which pins the helper
+// and says nothing about whether executeWorkflow still calls it: deleting that
+// one line left the whole cmd/cleat-worker package green (measured 2026-10-02,
+// by cleat-review and reproduced here). Between the fence and the release there
+// are 600-odd lines of real work, so this runs the real sequence instead.
+//
+// Replay is allowed to fail here, and that is the case this guard exists for:
+// the fence cancels execCtx, the cancellation lands on a read the engine makes
+// before the guest runs, and what comes back is an ERROR that must be read as
+// "this segment was cut off", not "this workflow failed".
+func TestAFencedRunIsReleasedAtThePostReplayBranch(t *testing.T) {
+	f := newStoppedRunFixture(t)
+	wf := f.wf()
+	wf.DefVersion = 1
+	// Naming the entry point in the input is what lets a bare module through
+	// determineEntryPoint without a cleat.metadata section.
+	wf.Input = json.RawMessage(`{"__entry_point":"test"}`)
+	// What the heartbeat fence leaves behind for the generation it judged.
+	f.w.fencedRuns.Store(wf.ID, wf.Generation)
+
+	// Capture the log, because the release NAME is what says WHICH site did it.
+	// `releases == 1` alone would also be satisfied by a release from the
+	// history-load or tenant-pool guard, so a test asserting only that would
+	// still pass if this branch were dropped. releaseIfStopped logs the site it
+	// fired at, so assert on that text.
+	var logs bytes.Buffer
+	f.w.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	f.w.wg.Add(1) // executeWorkflow defers w.wg.Done()
+	f.w.executeWorkflow(wf)
+
+	if f.releases != 1 {
+		t.Errorf("releases = %d, want 1 -- a fenced run must be handed back at the post-Replay branch "+
+			"(setup.go:3761); if this is 0 the call there was dropped and the run is being failed instead",
+			f.releases)
+	}
+	if !strings.Contains(logs.String(), "at=post-replay") {
+		t.Errorf("the release did not come from the post-Replay branch.\n\n"+
+			"Want a release logged at=post-replay (setup.go:3761). Got:\n%s\n"+
+			"If this branch is unreachable in the test, a release from an earlier guard is being "+
+			"mistaken for it and this test does not pin the site it names.", logs.String())
 	}
 }
