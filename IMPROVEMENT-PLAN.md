@@ -10676,10 +10676,16 @@ execution, all three of which were false because the directory did not exist.
 
 **Built**: `examples/b2b-saas-control-plane-dbos-port/` — a durable provisioning workflow that
 records a milestone per step, a best-effort welcome email, a trial-expiry sweep as a DBOS scheduled
-workflow, and an HTTP backend; six scenarios (20 assertions) against a real DBOS runtime and a real
-Postgres; the `dbos-pair-loc.sh` case and `check-dbos-pair-loc.py` registration; a scenario runner
-that drives the HTTP surface end to end (10 assertions, including waiting for the real cron sweep);
-and a CI job. Measured with the pair's own counter: **cleat 641, DBOS 468** non-comment lines.
+workflow, and an HTTP backend; six scenarios against a real DBOS runtime and a real Postgres; the
+`dbos-pair-loc.sh` case and `check-dbos-pair-loc.py` registration; a scenario runner that drives the
+HTTP surface end to end, including waiting for the real cron sweep; and a CI job. Measured with the
+pair's own counter: **cleat 641, DBOS 468** non-comment lines.
+
+**The assertion counts are deliberately not quoted, and the first draft of this paragraph is why.**
+It said "20 assertions" in one place and "10" in another; cleat-review2 counted 21 `ok:` lines on
+PR #2954 and was right. Correcting it to 21 would have left the actual defect in place — `npm test`
+prints one `ok:` line per assertion, so a census of them drifts the moment a test is added, and
+nothing checks it. The command is the durable form; the number is not.
 
 **The pair's claim is about where the code sits, not how much of it there is.** DBOS is smaller
 here, as it is on the control pair, so a line count is not the finding. Four requirements are
