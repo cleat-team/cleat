@@ -69,6 +69,15 @@ on:
     # -- a workflow that does not run on its own changes is a workflow whose
     # changes are unverified.
     paths:
+      # The module files the build consumes. Listed because a dependency bump
+      # can change what the fixture compiles to, which is exactly a change this
+      # check exists to notice -- and because a path filter that omits an input
+      # silently stops running on the changes that matter. The sibling
+      # ecosystem-ci.yml lists go.mod/go.sum; go.work is here too, since
+      # `go build` resolves through the workspace.
+      - 'go.mod'
+      - 'go.sum'
+      - 'go.work'
       - 'cmd/cleat-worker/**'
       - 'cmd/cleat/**'
       - 'cmd/cleatctl/**'

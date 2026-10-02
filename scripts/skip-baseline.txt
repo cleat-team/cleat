@@ -76,6 +76,7 @@ cmd/cleat-worker	TestAmbiguityLookupEndToEnd_ResolvesACrashedCall	1
 cmd/cleat-worker	TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth	2
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
 cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
+cmd/cleat-worker	TestEmitOpenAPIDocumentForTheGeneratedClientCheck	1
 cmd/cleat-worker	TestHeartbeatBatchFencedIsolatedFromASaturatedExecutionPool	2
 cmd/cleat-worker	TestIdempotencyKeyReplayEndToEnd_ResolvesACrashedCall	1
 cmd/cleat-worker	TestMainRefusesToStartOnAStaleRouteSignature	2
