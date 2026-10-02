@@ -253,8 +253,8 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// redeploy of the same version, which is an ordinary upsert.
 	// IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length, entry_point_schemas)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length, entry_point_schemas, input_validation_disabled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes,
 			abi_version = EXCLUDED.abi_version,
@@ -263,8 +263,9 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 			disabled_at = EXCLUDED.disabled_at,
 			gc_eligible = EXCLUDED.gc_eligible,
 			max_history_length = EXCLUDED.max_history_length,
-			entry_point_schemas = EXCLUDED.entry_point_schemas
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, tenantID, def.MaxHistoryLength, entryPointSchemasJSON)
+			entry_point_schemas = EXCLUDED.entry_point_schemas,
+			input_validation_disabled = EXCLUDED.input_validation_disabled
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, tenantID, def.MaxHistoryLength, entryPointSchemasJSON, def.InputValidationDisabled)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -284,12 +285,12 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 	var rows *sql.Rows
 	if name == "" {
 		rows, err = tx.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled
 			FROM workflow_defs ORDER BY name, version DESC
 		`)
 	} else {
 		rows, err = tx.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled
 			FROM workflow_defs WHERE name = $1 ORDER BY version DESC
 		`, name)
 	}
@@ -305,7 +306,7 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 		var entryPointSchemasRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		def.CreatedAt = createdAt
@@ -339,10 +340,10 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	var wasmBytes []byte
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled
 		FROM workflow_defs WHERE name = $1 AND version = $2
 	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}

@@ -30,6 +30,17 @@ type WorkflowDef struct {
 	// every caller that reads it back.
 	EntryPointSchemas map[string]EntryPointSchema `json:"entry_point_schemas,omitempty"`
 
+	// InputValidationDisabled opts this version OUT of cleat#1981's
+	// validate-input-against-schema behaviour, which is otherwise on by
+	// default for any entry point EntryPointSchemas carries a (non-empty)
+	// Params schema for. Set only at deploy (`cleatctl deploy
+	// --no-validate-input`) -- there is deliberately no per-request way to
+	// disable validation, so a caller cannot switch it off for its own
+	// requests. False (validation enabled) for every version deployed
+	// before this column existed, matching the NOT NULL DEFAULT false on
+	// all three dialects (migrations/*/007 or 006_input_validation_disabled).
+	InputValidationDisabled bool `json:"input_validation_disabled,omitempty"`
+
 	// DisabledAt carries ADMISSION CONTROL, and only that. A disabled version
 	// cannot be started, cannot be routed to, cannot be pointed at by a tag,
 	// and is not chosen for a child workflow. NULL means live.

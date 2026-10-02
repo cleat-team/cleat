@@ -1,0 +1,14 @@
+-- cleat#1981: typed invocation, part 2. Input validation against
+-- entry_point_schemas (cleat#1980) is on by default for any definition that
+-- carries a schema. This column is the one escape hatch the issue asks for:
+-- a per-definition opt-out at deploy (`cleatctl deploy --no-validate-input`),
+-- for a schema that turns out to be wrong in production. There is
+-- deliberately no per-request way to disable it -- a caller must not be
+-- able to switch validation off for its own requests.
+--
+-- NOT NULL DEFAULT false, unlike entry_point_schemas: "validation enabled"
+-- is a real default every existing row already has (nothing could have set
+-- this before today), not a per-row absence to distinguish, so this follows
+-- exposure's shape (005_workflow_defs_exposure_class.sql) rather than
+-- entry_point_schemas' nullable one.
+ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS input_validation_disabled boolean NOT NULL DEFAULT false;

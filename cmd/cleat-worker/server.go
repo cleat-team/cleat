@@ -22,6 +22,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/jsonschema"
 	"github.com/cleat-team/cleat/plugin"
 	"golang.org/x/time/rate"
 )
@@ -979,6 +980,53 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		s.writeError(w, 400, err.Error())
 		return
+	}
+
+	// cleat#1981: validate the start input against the entry point's
+	// build-time schema (cleat#1980), before any run is created.
+	//
+	// On by default for a definition that carries a schema for THIS entry
+	// point -- the owner decision recorded on the issue. A definition with
+	// no schema at all (Rust/Java/AssemblyScript, or any build from before
+	// cleat#1980) starts untyped, exactly as it did before this feature
+	// existed: EntryPointSchemas is nil for those, so the lookup below finds
+	// nothing and validation is skipped, not refused. That is NOT the same
+	// case as a schema that IS present but fails to decode -- jsonschema.Validate
+	// returns an error (not a violation) for a corrupt stored schema, and
+	// THAT fails closed with a 500 rather than silently passing the request
+	// through: the schema is this server's own artifact, not the caller's
+	// input, so its corruption is not something a 400 should describe.
+	//
+	// GetWorkflowDef resolves the entry point the SAME way execution does --
+	// determineEntryPoint reads the merged input's __entry_point field (or
+	// the WASM's single declared entry point) -- so validation and execution
+	// can never disagree about which schema applies. An entry point this
+	// cannot resolve is not refused HERE: it is refused identically whether
+	// or not this feature exists, when determineEntryPoint runs again at
+	// execution time.
+	if def, defErr := st.GetWorkflowDef(r.Context(), name, targetVersion); defErr != nil {
+		s.writeError(w, 500, defErr.Error())
+		return
+	} else if def != nil && !def.InputValidationDisabled && len(def.EntryPointSchemas) > 0 {
+		if entryPoint, epErr := determineEntryPoint(in, def.WASMBytes); epErr == nil {
+			if schema, ok := def.EntryPointSchemas[entryPoint]; ok && len(schema.Params) > 0 {
+				violation, schemaErr := jsonschema.Validate(schema.Params, input.Input)
+				if schemaErr != nil {
+					s.writeError(w, 500, fmt.Sprintf(
+						"entry point %q of %s v%d has a stored input schema that could not be parsed: %v",
+						entryPoint, name, targetVersion, schemaErr))
+					return
+				}
+				if violation != nil {
+					s.writeJSON(w, 400, map[string]string{
+						"error": violation.Error(),
+						"field": violation.Field,
+						"rule":  violation.Rule,
+					})
+					return
+				}
+			}
+		}
 	}
 
 	// Support Concurrency-Key header or JSON body field (Feature 5).

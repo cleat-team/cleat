@@ -1,6 +1,7 @@
 package jsonschema
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -69,35 +70,134 @@ func TestBasicTypes(t *testing.T) {
 	}
 }
 
-func TestPointerUnwrapsToPointeeSchema(t *testing.T) {
+// TestPointerUnwrapsToPointeeSchemaWithNull is cleat#2927 G1: a PRESENT
+// value must match the pointee's schema, but encoding/json also accepts the
+// JSON literal null for a pointer field (sets it to nil, no error), so the
+// schema must admit both -- verified empirically in internal/jsonschema's
+// own commit message, not assumed from the Go spec's prose alone.
+func TestPointerUnwrapsToPointeeSchemaWithNull(t *testing.T) {
 	got := schemaOf(t, "func F(x *int) {}", "F")
-	want := Schema{"type": "integer"}
+	want := Schema{"type": []any{"integer", "null"}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %#v, want %#v -- a pointer parameter's PRESENT value must still match its pointee's schema", got, want)
+		t.Errorf("got %#v, want %#v -- a pointer parameter's PRESENT value must match its pointee's schema OR be null", got, want)
 	}
 }
 
-func TestByteSliceIsBase64String(t *testing.T) {
+// TestDoublePointerDoesNotDoubleWrapNull covers nullable()'s own
+// idempotency guard: fromGoType recurses through **int's outer Pointer
+// into its inner Pointer, which already returns {"type":["integer","null"]}
+// -- the outer nullable() call must see that as "already has type", not
+// panic or silently produce a nested/duplicated null.
+func TestDoublePointerDoesNotDoubleWrapNull(t *testing.T) {
+	got := schemaOf(t, "func F(x **int) {}", "F")
+	want := Schema{"type": []any{"integer", "null"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestByteSliceIsBase64StringOrNull(t *testing.T) {
 	got := schemaOf(t, "func F(x []byte) {}", "F")
-	want := Schema{"type": "string", "contentEncoding": "base64"}
+	want := Schema{"type": []any{"string", "null"}, "contentEncoding": "base64"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %#v, want %#v -- encoding/json base64-encodes []byte, never emits a JSON array of numbers", got, want)
+		t.Errorf("got %#v, want %#v -- encoding/json base64-encodes []byte, never emits a JSON array of numbers, and resets it to nil on a JSON null (cleat#2927)", got, want)
 	}
 }
 
-func TestOrdinarySliceIsArray(t *testing.T) {
+func TestOrdinarySliceIsArrayOrNull(t *testing.T) {
 	got := schemaOf(t, "func F(x []string) {}", "F")
-	want := Schema{"type": "array", "items": Schema{"type": "string"}}
+	want := Schema{"type": []any{"array", "null"}, "items": Schema{"type": "string"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %#v, want %#v", got, want)
 	}
 }
 
-func TestMapIsObjectWithAdditionalProperties(t *testing.T) {
+// TestFixedArrayIsNotNullable is the negative control TestOrdinarySliceIsArrayOrNull
+// needs: a Go array (unlike a slice) is a value type with no nil state, and
+// encoding/json's own null handling for one is a documented no-op (the
+// array keeps whatever it already held) rather than a reset -- confirmed
+// empirically, not assumed. Marking it nullable would claim a value the
+// type can never actually take.
+func TestFixedArrayIsNotNullable(t *testing.T) {
+	got := schemaOf(t, "func F(x [3]int) {}", "F")
+	want := Schema{"type": "array", "items": Schema{"type": "integer"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v -- a fixed-size array must NOT be nullable", got, want)
+	}
+}
+
+// TestScalarStructAndFixedArrayRejectNullByOwnerDecision pins the owner's
+// ruling on cleat#2927: a plain int/string/bool/struct/fixed-array parameter
+// stays STRICT -- null is a 400 -- even though encoding/json's own binding
+// treats null as a no-op for these kinds (the field keeps its zero value, no
+// error). That is a DELIBERATE divergence from "mirror the binding" for
+// exactly these kinds, decided because null-for-a-scalar is the same
+// "null looks like zero" ambiguity cleat#1065 already named for an ABSENT
+// parameter -- closing it for a PRESENT-but-null one is judged worth being
+// stricter than the binding, unlike pointer/slice/map (jsonschema.go's
+// nullable()), where null is a real, distinct value the binding can
+// genuinely produce.
+//
+// Without this test, nothing pins the ruling: TestValidateNullableTypeAcceptsNull
+// only asserts the nullable SIDE, so a later "make every kind nullable"
+// change (the option the owner declined) would fail no test here. Falsified
+// by wrapping each kind's schema in nullable() before writing this test --
+// every case went from a violation to nil, confirming the test would have
+// caught the declined change.
+func TestScalarStructAndFixedArrayRejectNullByOwnerDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"int", "func F(x int) {}"},
+		{"string", "func F(x string) {}"},
+		{"bool", "func F(x bool) {}"},
+		{"struct", "type S struct{ A int `json:\"a\"` }\nfunc F(x S) {}"},
+		{"fixed array", "func F(x [3]int) {}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := schemaOf(t, tc.src, "F")
+
+			// The schema itself must not be nullable -- "type" is a bare
+			// string, not the [T,"null"] list nullable() emits.
+			if _, isList := schema["type"].([]any); isList {
+				t.Fatalf("schema %#v declares a nullable type for %s -- the owner ruling keeps this kind strict", schema, tc.name)
+			}
+
+			schemaJSON, err := json.Marshal(schema)
+			if err != nil {
+				t.Fatalf("marshal schema: %v", err)
+			}
+			v, err := Validate(schemaJSON, json.RawMessage(`null`))
+			if err != nil {
+				t.Fatalf("Validate returned an error, not a violation: %v", err)
+			}
+			if v == nil {
+				t.Errorf("null was accepted against a %s schema %s -- the owner ruling says this must be a 400", tc.name, schemaJSON)
+			}
+		})
+	}
+}
+
+func TestMapIsObjectWithAdditionalPropertiesOrNull(t *testing.T) {
 	got := schemaOf(t, "func F(x map[string]int) {}", "F")
-	want := Schema{"type": "object", "additionalProperties": Schema{"type": "integer"}}
+	want := Schema{"type": []any{"object", "null"}, "additionalProperties": Schema{"type": "integer"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// TestNestedPointerFieldIsNullable covers the case cleat#2927's review
+// measured directly: nullable() is applied inside fromGoType's own Pointer/
+// Slice/Map cases, so a STRUCT FIELD of one of these kinds inherits the
+// same null tolerance with no separate change needed in structSchema.
+func TestNestedPointerFieldIsNullable(t *testing.T) {
+	got := schemaOf(t, "type S struct{ P *int `json:\"p\"` }\nfunc F(x S) {}", "F")
+	want := Schema{"type": "object", "properties": Schema{
+		"p": Schema{"type": []any{"integer", "null"}},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v -- a nested pointer field must be nullable too", got, want)
 	}
 }
 
