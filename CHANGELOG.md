@@ -123,12 +123,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `encoding/json` resets these to `nil` on `null`, which is a real, distinct value these types
     can hold, not merely the absence of one.
   - **Definitions with no stored schema are unaffected and start untyped, as before** — this
-    includes every Python, Rust, Java and AssemblyScript build today (no non-Go entry-point schema
-    emitter exists yet) and any Go build from before cleat#1980.
+    includes Rust, Java and AssemblyScript (no entry-point schema emitter exists for these yet),
+    any Python build from before cleat#2914, and any Go build from before cleat#1980.
   - **Escape hatch:** `cleatctl deploy workflow <name> <wasm-file> --no-validate-input` disables
     validation for that one deployed version, even if it carries a schema. Per-definition only, set
     at deploy time — there is no per-request override, so a caller cannot switch validation off for
     its own requests.
+
+- **Python entry points now compute and validate against a JSON Schema too, from `@cleat_entry`'s
+  own type hints.** cleat#2914, the Python half of cleat#1980's typed invocation. `cleat build
+  --target python` now also writes a `<wasm>.schema.json` sidecar (via the new
+  `cleat_sdk.jsonschema_emitter`), so a Python workflow rebuilt and redeployed after this starts
+  validating its input the same as a Go one — the "unaffected" bullet above now covers Python
+  builds from before this change only, not Python in general.
+  - **Every Python parameter is nullable, not only the pointer/slice/map subset Go's binding
+    makes nullable.** `cleat_sdk.entry._from_dict`'s very first check is `if value is None: return
+    None`, unconditionally, for every declared type — so a plain required `str` or `int`
+    parameter sent JSON `null` is accepted (bound to Python `None`), unlike the equivalent Go
+    parameter, which the bullet above makes a 400.
+  - **A nested dataclass field's absence is not enforced by the schema**, even though a plain
+    `TypeError` is raised if one is missing from a dict value at runtime — because that failure is
+    caught by the SDK's own exception boundary and reported as a completed run's `{"error": ...}`
+    result today, not a refusal, enforcing it here would be a new behavior change beyond what this
+    issue asked for. Flagged in the PR for a follow-up decision; only a **top-level** parameter's
+    absence is enforced (always has been, since cleat#1690).
+  - **Known, deliberate departure from "mirror the binding, not improve on it": leaf and container
+    parameter VALUES are validated by declared type (`string`/`integer`/`array`/...), even though
+    `_from_dict` does not actually reject a mismatched value at any of these levels today** — a
+    `str`-typed parameter sent a JSON number, or a `list[int]`-typed one sent a JSON string, is
+    silently accepted by the unmodified SDK and now gets a 400 instead. This is **not yet an owner
+    ruling** the way the Go null case above is; it is the shipped default pending one, documented
+    in `cleat_sdk/jsonschema_emitter.py`'s module docstring (point 5) with the exact probes that
+    found it.
 
 ### Added
 

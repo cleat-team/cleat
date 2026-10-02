@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -195,6 +196,33 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 		defer os.Unsetenv("CLEAT_CHILD_BINDING_POLICY")
 	}
 
+	// cleat#2914. Computed BEFORE the build call (not after, the way Go's
+	// buildEntryPointSchemas runs after wasm.WriteMetadata) because the
+	// entry point NAME this derives has to reach stamp_metadata.py during
+	// THIS SAME componentize-py invocation -- CLEAT_ENTRY_POINTS, read by
+	// python-sdk/scripts/build_wasm.py the same way CLEAT_CHILD_BINDING_POLICY
+	// already is, two lines up. Without it, wasm.Metadata.EntryPoints stays
+	// unstamped for Python (stamp_metadata.py's build_metadata never had an
+	// entry_points case before this), and determineEntryPoint
+	// (cmd/cleat-worker/setup.go) can never resolve a schema key on its own
+	// for a Component Model binary, whose single "run" export never matches
+	// its "handle_"-prefixed fallback scan -- the schema below would be
+	// computed, stored, and never looked up. See stamp_metadata.py's own
+	// comment on entry_points for the full story.
+	//
+	// A failure here is NOT fatal, mirroring Go's own "an older build, or a
+	// language internal/jsonschema has no emitter for yet" tolerance
+	// (main.go, around its own buildEntryPointSchemas call): a definition
+	// with no schema starts untyped, exactly as every Python definition did
+	// before cleat#2914 existed.
+	entryPointName, schemaJSON, schemaErr := computePythonEntryPointSchema(pyFile, funcName)
+	if schemaErr != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: could not compute an entry point schema (non-fatal): %v\n", schemaErr)
+	} else {
+		os.Setenv("CLEAT_ENTRY_POINTS", entryPointName)
+		defer os.Unsetenv("CLEAT_ENTRY_POINTS")
+	}
+
 	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Make sure the Python file has a @cleat_entry decorated function.\n")
@@ -224,6 +252,73 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 
 	fi, _ := os.Stat(dstWasm)
 	fmt.Printf("  Wrote %s (%s)\n", dstWasm, formatSize(fi.Size()))
+
+	// cleat#2914. Same sidecar convention as the Go build path (main.go,
+	// next to its own buildEntryPointSchemas call): cleatctl deploy workflow
+	// reads <wasm path>.schema.json if present and treats its absence as
+	// "no emitter for this language yet", so writing it is purely additive.
+	// schemaJSON is already shaped as the map[string]engine.EntryPointSchema
+	// cleatctl deploy's own json.Unmarshal expects -- cleat_sdk.jsonschema_emitter
+	// prints exactly that document, keyed by the one entry point name this
+	// build produces.
+	if schemaErr == nil {
+		if err := os.WriteFile(dstWasm+".schema.json", schemaJSON, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: writing entry point schema to %s.schema.json: %v\n", dstWasm, err)
+			os.Exit(1)
+		}
+		logBuildProgress("  Wrote %s.schema.json\n", dstWasm)
+	}
+}
+
+// computePythonEntryPointSchema shells out to cleat_sdk.jsonschema_emitter
+// (cleat#2914) to derive the JSON Schema pair for the @cleat_entry function
+// named funcName in pyFile, from its type hints -- the Python counterpart of
+// buildEntryPointSchemas (cmd/cleat/entrypoint_schemas.go) on the Go side.
+//
+// Returns the entry point's own logical name (the @cleat_entry(...) argument,
+// or the Python function name if none was given -- see
+// cleat_sdk.jsonschema_emitter._find_entry) alongside the schema document
+// ALREADY SHAPED as {"<name>": {"params": ..., "result": ...}}, matching
+// map[string]engine.EntryPointSchema exactly: the caller can write it
+// straight to a ".schema.json" sidecar with no further marshaling.
+//
+// Shells out rather than re-implementing type-hint introspection in Go for
+// the same reason detectEntryFunction does: get_type_hints needs a live
+// Python import to resolve annotations, which only python3 itself can do.
+func computePythonEntryPointSchema(pyFile, funcName string) (entryPointName string, schemaJSON []byte, err error) {
+	sdkDir := findPythonSDKDir()
+
+	cmd := exec.Command("python3", "-m", "cleat_sdk.jsonschema_emitter", pyFile, funcName)
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	if sdkDir != "" {
+		cmd.Env = append(os.Environ(), "PYTHONPATH="+sdkDir)
+	}
+
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if strings.Contains(stderr, "No module named") || strings.Contains(stderr, "ModuleNotFoundError") || errors.Is(err, exec.ErrNotFound) {
+			return "", nil, errors.New("cleat_sdk not importable (SDK not installed on this machine)")
+		}
+		if stderr != "" {
+			return "", nil, errors.New(stderr)
+		}
+		return "", nil, err
+	}
+
+	var schemas map[string]json.RawMessage
+	if err := json.Unmarshal(out, &schemas); err != nil {
+		return "", nil, fmt.Errorf("parsing cleat_sdk.jsonschema_emitter output: %w", err)
+	}
+	if len(schemas) != 1 {
+		return "", nil, fmt.Errorf("cleat_sdk.jsonschema_emitter printed %d entry points, want exactly 1", len(schemas))
+	}
+	for emittedName := range schemas {
+		entryPointName = emittedName
+	}
+	return entryPointName, out, nil
 }
 
 // detectEntryFunction uses the proper Python AST-based detector from
