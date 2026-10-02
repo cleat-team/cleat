@@ -13,6 +13,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 func runDeploy(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
@@ -47,8 +48,10 @@ Subcommands:
 
 // deployWorkflow reads a WASM binary from a file and deploys it as a new
 // workflow version. It computes the new version number automatically by
-// incrementing the latest deployed version. If an exact version already
-// exists with the same SHA256 hash, the deployment is skipped.
+// incrementing the latest deployed version. If that artifact is already
+// deployed the deployment is skipped -- compared on content with
+// cleat.metadata's workflow_version normalised out, because this command
+// restamps that field before storing (contentFingerprint, cleat#2944).
 func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	fs := flag.NewFlagSet("deploy workflow", flag.ContinueOnError)
 	// cleat#1981: the one escape hatch validate-input-at-start asks for, for
@@ -80,8 +83,18 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		osExit(1)
 	}
 
-	// Compute SHA256 hash for dedup.
+	// SHA256 of the file as given, for the summary line -- what the user can
+	// check against the file on disk.
 	hash := sha256.Sum256(wasmBytes)
+
+	// cleat#2944. The dedup key is NOT that hash. This command restamps the
+	// binary below, so the bytes it stores carry a version the file on disk does
+	// not; comparing raw bytes would mean an identical artifact stopped matching
+	// the moment it had been deployed once, silently retiring the "already has
+	// the same binary (skipped)" behaviour deployWorkflow's own doc comment
+	// promises. contentFingerprint normalises that one field out of both sides,
+	// so "the same binary" keeps meaning the same binary.
+	fingerprint := contentFingerprint(wasmBytes)
 
 	// Determine next version number.
 	var nextVersion int
@@ -97,8 +110,7 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 			}
 			// Check for duplicate WASM.
 			if len(def.WASMBytes) > 0 {
-				existingHash := sha256.Sum256(def.WASMBytes)
-				if existingHash == hash {
+				if contentFingerprint(def.WASMBytes) == fingerprint {
 					fmt.Printf("WASM unchanged: %s v%d already has the same binary (skipped)\n", name, def.Version)
 					return
 				}
@@ -144,6 +156,25 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		}
 	}
 
+	// cleat#2944. The stamp inside the binary and the version this row records
+	// must agree: cmd/cleat-worker's pre-flight releases a run whose binary
+	// reports a different workflow_version from the workflow_defs.version it was
+	// queued against, on every claim, so the run loops between claim and release
+	// and never executes.
+	//
+	// This command is documented as "deploys a new version"
+	// (docs/explanation/workflow-versioning.md:251) and assigns MAX(version)+1
+	// above. Before this it stored the binary unchanged, still carrying whatever
+	// `cleat build --version` wrote (1 by default) -- so every redeploy of a
+	// rebuilt artifact produced a row that the only available binary could not
+	// serve. Restamping rather than adopting the stamp: the version recorded
+	// here is the one this command assigns.
+	wasmBytes, err = restampWorkflowVersion(wasmBytes, nextVersion)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, nextVersion, err)
+		osExit(1)
+	}
+
 	def := &engine.WorkflowDef{
 		Name:                    name,
 		Version:                 nextVersion,
@@ -163,6 +194,68 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 
 	fmt.Printf("Deployed %s v%d (ABI v%d, minVersion=%d, %d bytes, SHA256=%x)\n",
 		name, nextVersion, abiVersion, minVersion, len(wasmBytes), hash[:8])
+}
+
+// restampWorkflowVersion returns wasmBytes with cleat.metadata's
+// workflow_version set to version, so the binary and the workflow_defs row it
+// is stored in agree (cleat#2944).
+//
+// A binary carrying no readable cleat.metadata is returned unchanged and without
+// error: there is no stamp to disagree with, and cmd/cleat-worker's pre-flight
+// reads that same metadata, so it cannot fire either. That is also what keeps
+// this correct on a tree without cleat#2941 -- wasm.ReadMetadata rejects a
+// Component Model binary there, so a Python artifact is stored exactly as it is
+// today, and the version disagreement is unreachable for the same reason.
+//
+// A write failure IS an error, not a warning: continuing would store a binary
+// whose stamp disagrees with its row, which is the defect this exists to close.
+func restampWorkflowVersion(wasmBytes []byte, version int) ([]byte, error) {
+	meta, err := wasm.ReadMetadata(wasmBytes)
+	if err != nil || meta == nil {
+		return wasmBytes, nil
+	}
+	if meta.WorkflowVersion == version {
+		return wasmBytes, nil
+	}
+	restamped := *meta
+	restamped.WorkflowVersion = version
+	out, err := wasm.WriteMetadata(wasmBytes, &restamped)
+	if err != nil {
+		return nil, fmt.Errorf("could not stamp the binary with workflow_version %d: %w", version, err)
+	}
+	return out, nil
+}
+
+// contentFingerprint is the dedup key deployWorkflow compares: the artifact's
+// bytes with cleat.metadata's workflow_version normalised out.
+//
+// cleat#2944 gave that field a reason to differ between the file on disk and the
+// row it is stored in -- the stamp is rewritten to the version being assigned --
+// and the guard in deployWorkflow's doc comment ("If an exact version already
+// exists with the same SHA256 hash, the deployment is skipped") has to survive
+// it. Normalising rather than dropping the guard: two artifacts differing in any
+// other way, including in another metadata field, still fingerprint differently.
+//
+// Both sides are normalised by this same function, so it does not matter that
+// re-serialising may not reproduce the bytes `cleat build` wrote -- a Python
+// component's metadata is emitted by stamp_metadata.py's json.dumps, not by
+// Go's json.Marshal. Equal metadata normalises to equal bytes either way.
+func contentFingerprint(wasmBytes []byte) [sha256.Size]byte {
+	meta, err := wasm.ReadMetadata(wasmBytes)
+	if err != nil || meta == nil {
+		return sha256.Sum256(wasmBytes)
+	}
+	normalised := *meta
+	// 0 rather than any real version: wasm.Metadata.Validate() rejects a
+	// non-positive workflow_version, so if this ever escaped into stored bytes
+	// it would fail loudly rather than describe a plausible wrong version. It
+	// cannot -- the result is hashed and discarded here.
+	normalised.WorkflowVersion = 0
+	b, err := wasm.WriteMetadata(wasmBytes, &normalised)
+	if err != nil {
+		return sha256.Sum256(wasmBytes)
+	}
+	return sha256.Sum256(b)
 }
 
 // deployPlugin reads a plugin WASM binary and writes it to plugin_defs.
