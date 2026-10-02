@@ -1996,6 +1996,18 @@ type Worker struct {
 	// budget nobody configured -- the same opt-in rule the per-worker budget
 	// follows.
 	workerRegistry *engine.WorkerRegistry
+
+	// internalAuthSecret is CLEAT_INTERNAL_AUTH_KEY, read once at startup --
+	// cleat#2196's reaper-to-worker veto channel. Read unconditionally,
+	// independent of whether THIS worker also serves --internal-addr: this is
+	// the CLIENT half (reapOnce asking another worker before reclaiming its
+	// run), and asking does not require answering. Empty disables the channel
+	// for THIS worker's reaper, which falls back to its pre-#2196 unconditional
+	// ReapStaleInstances -- the same behaviour every worker had before the
+	// channel existed, and the correct one for any deployment that has not
+	// opted in at all.
+	internalAuthSecret string
+
 	// membershipLastBeat is when the last membership tick succeeded, or, until the
 	// first one does, when this worker registered (main sets it; a zero value would
 	// mean a slow boot is never a lapse -- cleat#2167). Read and written only by the
@@ -4724,6 +4736,293 @@ func (w *Worker) reaperLoop() {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// cleat#2196: the reaper's veto channel
+// ---------------------------------------------------------------------------
+//
+// Before reclaiming a stale run, the reaper ASKS the worker named in the row
+// whether it still holds it, and takes a "yes, and I am making progress" as a
+// veto for one more window. The database stays the only authority on who holds
+// a run -- the channel never grants ownership and generation fencing is
+// unchanged -- so it buys liveness for a worker whose own path to the database
+// is degraded (the one case neither #2166's grace period nor #2006's stall
+// shape covers: the database is healthy and exactly one worker is stale), at
+// the cost of one extra window before that worker's runs are reclaimed.
+//
+// Everything here fails toward RECLAIMING. A store without the interface, a
+// worker with no shared secret, a holder with no published address, a dial
+// error, a timeout, a non-200 -- each is "no veto", and the row is reclaimed
+// exactly as it was before any of this existed. Only an explicit, authenticated
+// "held: true" from the named holder removes a row from a tick's sweep.
+
+// askerFunc asks one worker whether it still holds one run at one generation.
+// A function rather than a direct askInternalHolds call so the split and the
+// ask phase are both testable without a live peer -- the tests pass a stub.
+type askerFunc func(ctx context.Context, address, runID string, generation int64) bool
+
+// holderQuestion is one row this tick will ask a holder about.
+type holderQuestion struct {
+	holder  string
+	address string
+	key     engine.GenerationKey
+}
+
+// staleRowsToAsk returns the rows this tick should ASK about, which is
+// deliberately a NARROWER set than the sweep covers.
+//
+// THE TWO-WINDOW SPLIT, and why carrying it needs no state at all. WS-2's
+// design on cleat#2009 bounds the veto to one extra reclaim window; this is
+// that bound, expressed with nothing persisted:
+//
+//	normal  = rows stale by >= 1 window   (what the sweep may reclaim)
+//	doubled = rows stale by >= 2 windows  (what it reclaims WITHOUT asking)
+//	ask     = normal - doubled            (asked; a "held" answer excludes it)
+//
+// A row vetoed now is in ask on this tick and in doubled on the next, so the
+// exclusion lifts by itself one window later -- no per-row bookkeeping to
+// expire, leak, or get stuck holding a run forever. A row already past the
+// second window is never asked, so no holder, honest or lying, can delay its
+// own reclaim past one extra window.
+//
+// Both reads use the same limit, which is what makes doubled a subset of
+// normal rather than merely overlapping it: each takes the OLDEST rows by
+// heartbeat_at on its own side of the threshold, and everything older than two
+// windows is older than everything in [one, two).
+func (w *Worker) staleRowsToAsk(ctx context.Context, reaper engine.StaleHolderReaper, staleTimeout time.Duration) ([]engine.StaleHold, error) {
+	normal, err := reaper.ListStaleHolders(ctx, staleTimeout, w.maxReclaimPerTick)
+	if err != nil {
+		return nil, err
+	}
+	if len(normal) == 0 {
+		return nil, nil
+	}
+	doubled, err := reaper.ListStaleHolders(ctx, 2*staleTimeout, w.maxReclaimPerTick)
+	if err != nil {
+		return nil, err
+	}
+	past := make(map[engine.GenerationKey]struct{}, len(doubled))
+	for _, h := range doubled {
+		past[h.Key] = struct{}{}
+	}
+	ask := make([]engine.StaleHold, 0, len(normal))
+	for _, h := range normal {
+		if _, ok := past[h.Key]; !ok {
+			ask = append(ask, h)
+		}
+	}
+	return ask, nil
+}
+
+// registryAddresses returns worker_id -> the address that worker published, in
+// ONE registry read rather than one per holder.
+//
+// THE WINDOW IS workerRegistryRetention, NOT THE MEMBERSHIP LEASE, and that is
+// load-bearing rather than tidy: the holders this exists to resolve are exactly
+// the ones whose heartbeats have stopped, so under the lease (10s at the
+// default heartbeat) they are ALREADY SWEPT while their runs remain askable
+// until two reclaim windows (29s). Reading with the lease would return an empty
+// map for every holder worth asking -- see workerRegistryRetention for the
+// arithmetic, and for why the sweep had to be widened to match.
+func (w *Worker) registryAddresses(ctx context.Context) (map[string]string, error) {
+	if w.workerRegistry == nil {
+		return nil, nil
+	}
+	live, err := w.workerRegistry.ListLive(ctx, workerRegistryRetention(w.heartbeatInterval, w.reclaimAfter()))
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]string, len(live))
+	for _, r := range live {
+		if r.Address != "" {
+			byID[r.WorkerID] = r.Address
+		}
+	}
+	return byID, nil
+}
+
+// holderQuestions pairs each row to ask about with the address of the worker
+// holding it. Takes the address map rather than reading the registry itself, so
+// the pairing is testable without a database.
+//
+// A row whose holder published no address is dropped rather than asked
+// anywhere: this worker predates --worker-service-name, runs outside
+// Kubernetes, is in a deployment whose headless Service does not select it, or
+// has aged out of the registry. Told apart from an unreachable holder in no way
+// that matters -- both are "no veto, reclaim proceeds", the pre-#2196
+// behaviour.
+func (w *Worker) holderQuestions(rows []engine.StaleHold, addresses map[string]string) []holderQuestion {
+	out := make([]holderQuestion, 0, len(rows))
+	for _, h := range rows {
+		address := addresses[h.AssignedTo]
+		if address == "" {
+			continue
+		}
+		out = append(out, holderQuestion{holder: h.AssignedTo, address: address, key: h.Key})
+	}
+	return out
+}
+
+// askHolders asks each holder whether it still holds the runs it was named for,
+// and returns the (run, generation) pairs a live holder vetoed.
+//
+// ONE BOUNDED PHASE, one goroutine per HOLDER rather than per row: a worker
+// holding several stale runs is asked about them in sequence, so a single
+// unhealthy holder cannot fan out into a burst of connections, while distinct
+// holders are asked concurrently so a tick's total wait stays near one timeout
+// instead of growing with the number of stale workers.
+//
+// An ask that does not answer inside the budget is NO VETO, and its row is
+// reclaimed -- which is the pre-#2196 behaviour, and precisely what the
+// acceptance criterion asks of a killed worker ("a worker that is killed loses
+// them within the normal window"). Nothing here can block a reclaim.
+//
+// WHAT IT COSTS A TICK. One dbCallDeadline for the whole phase, whatever the
+// number of holders, so at the defaults the reaper's worst case is three such
+// phases (list, ask, reclaim, ~2.5s each) inside a 10s tick interval -- asking
+// cannot push the reaper past its own cadence.
+func (w *Worker) askHolders(ctx context.Context, questions []holderQuestion, ask askerFunc) []engine.GenerationKey {
+	if len(questions) == 0 {
+		return nil
+	}
+	byHolder := make(map[string][]engine.GenerationKey, len(questions))
+	addresses := make(map[string]string, len(questions))
+	for _, q := range questions {
+		byHolder[q.holder] = append(byHolder[q.holder], q.key)
+		addresses[q.holder] = q.address
+	}
+
+	askCtx, cancel := context.WithTimeout(ctx, w.dbCallDeadline())
+	defer cancel()
+
+	var mu sync.Mutex
+	var vetoed []engine.GenerationKey
+	var wg sync.WaitGroup
+	for holder, keys := range byHolder {
+		wg.Add(1)
+		go func(holder string, keys []engine.GenerationKey) {
+			defer wg.Done()
+			defer recoverBackgroundGoroutine(w.logger, w.id, "reaper-ask-holder")
+			address := addresses[holder]
+			var held []engine.GenerationKey
+			for _, k := range keys {
+				if askCtx.Err() != nil {
+					// Budget spent: the remaining rows are "no veto", which is
+					// the safe direction -- they get reclaimed.
+					break
+				}
+				if ask(askCtx, address, k.WorkflowID, k.Generation) {
+					held = append(held, k)
+				}
+			}
+			if len(held) == 0 {
+				return
+			}
+			mu.Lock()
+			vetoed = append(vetoed, held...)
+			mu.Unlock()
+			w.logger.InfoContext(w.ctx, "Reaper: a holder vetoed reclaim of its run for one more window",
+				"worker_id", w.id, "holder", holder, "held", len(held))
+		}(holder, keys)
+	}
+	wg.Wait()
+	return vetoed
+}
+
+// askHolder is the production askerFunc: one authenticated GET to the holder's
+// --internal-addr listener. askInternalHolds already collapses every failure to
+// held=false, and the error it returns is nil by construction; it is dropped
+// here as well so no future caller can mistake "could not ask" for "must not
+// reclaim".
+//
+// ONE CLIENT PER ASK, AND EGRESS-GUARDED -- not the stock client this started
+// as. A worker address is a cluster-internal name, so it is RFC1918 by
+// construction; the absolute floor would refuse it, and the tree-wide guard
+// (plugins/every_plugin_routes_its_egress_through_the_guard_test.go) requires
+// every http.Client here to carry an explicit Transport rather than the
+// default, so an unguarded one is a build failure as well as a denied dial.
+//
+// The grant is the host being dialled and nothing else, which is the
+// OPERATOR-named side of that guard's line: the address comes from
+// --worker-service-name, never from a guest. A pooled client could not carry a
+// per-host exempt set, so this is built per ask -- the same shape, and the same
+// reason, as forwardToService's client. See service_egress.go.
+func (w *Worker) askHolder(ctx context.Context, address, runID string, generation int64) bool {
+	client := &http.Client{
+		// A backstop only. The ask phase's own context (askHolders) is the real
+		// bound, at one dbCallDeadline for every holder together.
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: w.serviceEgressGuard(ctx, "http://"+address).DialContext},
+	}
+	held, _ := askInternalHolds(ctx, client, address, w.internalAuthSecret, runID, generation)
+	return held
+}
+
+// reapUnitOnce performs one reap unit's sweep for this tick, consulting the
+// veto channel when both the store and this worker's configuration support it.
+//
+// A store that does not implement StaleHolderReaper, or a worker with no
+// CLEAT_INTERNAL_AUTH_KEY, gets exactly the unconditional ReapStaleInstances
+// every worker ran before the channel existed -- the channel is additive and a
+// deployment that never opted in is bit-for-bit unchanged.
+//
+// The two database phases are wrapped in probeBoundedCall; the asks BETWEEN
+// them are not, and that separation is the point. An ask is HTTP to another
+// worker, and folding it into the database-reachability probe would report a
+// slow peer as this worker's DATABASE being unreachable -- the one reading that
+// must not happen here, since the premise of the whole channel is that the
+// database is healthy and one worker is not.
+//
+// WHAT A TICK COSTS WITH THE CHANNEL ON. One extra indexed SELECT against each
+// unit (ListStaleHolders) before the reclaim that would otherwise be the tick's
+// only statement. Nothing else: when there is nothing stale -- the ordinary
+// tick -- the second listing, the registry read and the asks are all skipped.
+func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, error) {
+	reaper, ok := unit.store.(engine.StaleHolderReaper)
+	if !ok || w.internalAuthSecret == "" {
+		var n int
+		err := w.probeBoundedCall(func(reapCtx context.Context) error {
+			var err error
+			n, err = unit.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
+			return err
+		})
+		return n, err
+	}
+
+	var rows []engine.StaleHold
+	var addresses map[string]string
+	err := w.probeBoundedCall(func(reapCtx context.Context) error {
+		var e error
+		rows, e = w.staleRowsToAsk(reapCtx, reaper, staleTimeout)
+		if e != nil || len(rows) == 0 {
+			// Nothing to ask about -- the ordinary tick, and the one the
+			// registry read below would otherwise charge for.
+			return e
+		}
+		addresses, e = w.registryAddresses(reapCtx)
+		return e
+	})
+	if err != nil {
+		// The listing and the address read are this worker's OWN database
+		// reads, so a failure is a failure of the reclaim attempt and is treated
+		// as one -- skip this unit this tick rather than reclaim unasked. Same
+		// choice, and same reasoning, as the suspected-stall probe's FAIL
+		// CLOSED: the tick a read like this is most likely to fail on is the one
+		// where reclaiming blind would take a live worker's run, and
+		// recordDBTrouble (from probeBoundedCall) still covers the failure.
+		return 0, err
+	}
+
+	exclude := w.askHolders(w.ctx, w.holderQuestions(rows, addresses), w.askHolder)
+
+	var n int
+	err = w.probeBoundedCall(func(reapCtx context.Context) error {
+		var err error
+		n, err = reaper.ReapStaleInstancesExcept(reapCtx, staleTimeout, w.maxReclaimPerTick, exclude)
+		return err
+	})
+	return n, err
+}
+
 // reapOnce is one reaper tick, extracted from reaperLoop so a test can drive
 // it directly without a ticker. cleat#2005.
 func (w *Worker) reapOnce() {
@@ -4808,12 +5107,7 @@ func (w *Worker) reapOnce() {
 		if suppressed {
 			continue
 		}
-		var n int
-		err := w.probeBoundedCall(func(reapCtx context.Context) error {
-			var err error
-			n, err = unit.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
-			return err
-		})
+		n, err := w.reapUnitOnce(unit, staleTimeout)
 		reaped += n
 		if err != nil {
 			lastErr = err

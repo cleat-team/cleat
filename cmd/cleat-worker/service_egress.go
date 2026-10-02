@@ -73,13 +73,45 @@ func (c *dbServiceCaller) serviceEgressGuard(ctx context.Context, endpoint strin
 	if c.egress != nil {
 		return c.egress // a test supplied one
 	}
+	return operatorServiceEgressGuard(c.operatorEgress, endpoint)
+}
+
+// operatorServiceEgressGuard is serviceEgressGuard's construction, taking the
+// deployment's allowlist directly rather than through a dbServiceCaller, so a
+// caller that is not a forwarder can build the SAME policy instead of a second
+// spelling of it.
+//
+// WHY A SECOND CALLER EXISTS AT ALL. cleat#2196's reaper asks another worker
+// whether it still holds a run, at an address the OPERATOR named with
+// --worker-service-name -- the same question this file answers, for the same
+// reason: a worker address is a cluster-internal name, which is RFC1918 by
+// construction, so the absolute floor would refuse every one of them and the
+// channel would be dead on arrival. The exempt set is still exactly the
+// endpoint being dialled, so the reaper cannot be turned into a way to reach a
+// host the operator did not configure; and TenantOptional is still true, since
+// a hold query names a run and a generation and nothing about a tenant.
+func operatorServiceEgressGuard(operatorEgress *engine.HostAllowlist, endpoint string) *engine.EgressGuard {
 	return &engine.EgressGuard{
-		OperatorAllows: operatorAllowFunc(c.operatorEgress),
+		OperatorAllows: operatorAllowFunc(operatorEgress),
 
 		PluginHostExempt: serviceEndpointHosts(endpoint).permits,
 
 		TenantOptional: func(context.Context) bool { return true },
 	}
+}
+
+// serviceEgressGuard on the Worker is serviceEgressGuard's policy for a caller
+// that is not a forwarder -- the reaper's ask to another worker. cleat#2196.
+//
+// A METHOD NAMED serviceEgressGuard rather than a helper named after what it
+// returns: plugins/every_plugin_routes_its_egress_through_the_guard_test.go
+// matches the SELECTOR NAME of the dial-context function against an exact
+// allowlist -- egressGuard or serviceEgressGuard -- precisely so that a helper
+// called anythingServiceEgressTransport does not qualify by being spelled well.
+// Building the guard here and dialling through it is the thing that must be
+// visible at the call site, and the name is how it is kept visible.
+func (w *Worker) serviceEgressGuard(_ context.Context, endpoint string) *engine.EgressGuard {
+	return operatorServiceEgressGuard(w.operatorEgress, endpoint)
 }
 
 // serviceEndpointHosts is the exempt set: the host of the endpoint being

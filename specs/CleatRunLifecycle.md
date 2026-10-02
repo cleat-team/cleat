@@ -13,6 +13,17 @@ Measured 2026-09-23: 444,729 distinct states, 4,330,355 generated, search depth 
 `TypeOK`, `Safety`, and `SettledIsFinal` (an action invariant) all hold at this bound —
 re-derive with `make tla`, not by trusting this paragraph.
 
+`Reap` carries one added conjunct since 2026-10-01 (`ReapGuardSatisfied`, cleat#2196's
+reaper-to-worker veto channel — WS-2's #2009 design comment: "an additional conjunct on the
+existing reclaim-action guard... followed by re-checking S4 still holds"). No new variable: a
+worker already known dead reclaims exactly as before, and a merely heartbeat-stale alive
+worker's run needs DOUBLE `HeartbeatTimeout` of staleness age rather than one, modeling the
+channel's "one extra reclaimAfter() window, then reclaim proceeds regardless" bound using the
+existing `clock`/`heartbeatAt` pair. Re-measured same day: 444,729 distinct states (identical
+to the baseline above — the conjunct restricts *when* `Reap` fires, not *which* states are
+ultimately reachable), 4,317,121 generated, search depth 14, ~14s. `TypeOK`, `Safety`
+(including S4/`AtMostOneClaimHolder`), and `SettledIsFinal` all still hold.
+
 `L1_EventualSettlement`, `L2_ClaimProgress` and `L3_CascadeProgress` are **defined but
 deliberately NOT gated** in `CleatRunLifecycle.cfg`. Three distinct, real, no-mutation-needed
 counter-examples were found for this family of `[](P => <>Q)` property on the clean spec in

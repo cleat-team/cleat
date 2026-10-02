@@ -161,13 +161,18 @@ configured.
 |------|---------|-------------|
 | int | `200` | Maximum stale instances the reaper reclaims per tick (`0` = unbounded) |
 
-The reaper reclaims any instance whose heartbeat predates
-`max(2 × --heartbeat-interval, 10s)`. **Any stall that outlasts that window ages
-every running instance past it at once**, because they all heartbeat through the
-same table — a migration holding `ACCESS EXCLUSIVE` at worker boot, a database
-failover, a paused volume. Without a bound, the sweep after the stall reclaims
-the entire running set in one statement and every in-flight workflow replays
-simultaneously, against a database that has just finished whatever stalled it.
+The reaper reclaims any instance whose heartbeat predates the **reclaim
+window** — derived from `--heartbeat` as
+`--heartbeat + 3 × the database-call deadline + the retry interval + 1s`, about
+**14.5s** at the default 5s heartbeat, or exactly `--reclaim-timeout` when that
+is set. (This is *not* the membership lease, `max(2 × --heartbeat, 10s)`, which
+answers a different question and is swept separately.) **Any stall that outlasts
+that window ages every running instance past it at once**, because they all
+heartbeat through the same table — a migration holding `ACCESS EXCLUSIVE` at
+worker boot, a database failover, a paused volume. Without a bound, the sweep
+after the stall reclaims the entire running set in one statement and every
+in-flight workflow replays simultaneously, against a database that has just
+finished whatever stalled it.
 
 No data is lost — fencing guarantees that — but it is a self-inflicted
 thundering herd at the moment the database can least absorb one. See
@@ -212,9 +217,10 @@ A worker can poll multiple queues. Example:
 |------|---------|-------------|
 | duration | `5s` | Heartbeat interval |
 
-The worker updates its heartbeat in the database at this interval. Stale
-instances (missing two consecutive heartbeats) are reaped and made available
-to other workers.
+The worker updates its heartbeat in the database at this interval. A run whose
+heartbeat predates the **reclaim window** (see `--reclaim-timeout`, and note it
+is not the lease below) is treated as abandoned and made available to other
+workers.
 
 **Must be below 150s.** `cleat-worker` refuses to start otherwise. A secret
 writer (`set-secret`, `reseal-secrets`) counts a worker as live for five minutes
@@ -222,6 +228,28 @@ after its last heartbeat, and the worker re-checks its secrets after a gap longe
 than `max(2 × --heartbeat, 10s)`. At 150s or more that threshold reaches the
 writer's five minutes, so a stalled worker could be written past and resume
 without noticing.
+
+---
+
+### --reclaim-timeout
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0` | How long a run may go without a heartbeat before another worker may claim it (`0` = derive from `--heartbeat`) |
+
+`0` derives it as the window `--max-reclaim-per-tick` documents (about 14.5s at
+the default heartbeat), which is the historical behaviour and changes nothing.
+Set it to decouple the two: the heartbeat is how often a **live** worker checks
+in, while this is how long a **dead** one's work stays stranded — and a database
+outage stops the heartbeat without the worker being dead. Sizing it to a failover
+window (tens of seconds for streaming replication, longer for managed Multi-AZ)
+buys outage tolerance at the cost of that much extra delay before a crashed
+worker's runs are recovered.
+
+Refused if below `2 × --heartbeat`, which would reclaim runs whose workers are
+heartbeating normally. It does **not** move the worker-membership lease, which
+answers a different question — which workers exist, for shard distribution — and
+still follows `--heartbeat`.
 
 ---
 
@@ -689,6 +717,79 @@ Maximum burst size allowed above the per-tenant rate limit. Only meaningful
 when `--rate-limit-per-tenant` is set to a non-zero value.
 
 ---
+
+### --worker-service-name
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Headless Kubernetes Service (clusterIP: None) selecting this worker's pods |
+
+When set, the worker publishes `<hostname>.<this>` — the per-pod DNS name the
+headless Service gives it — in `admin.workers.address`, so another worker can
+reach it **by name** rather than by a pod IP that changes on every restart.
+
+This is the address half of the reaper-to-worker veto channel
+([cleat#2196](https://github.com/cleat-team/cleat/issues/2196)), and it has to
+be set on **every** worker, not only the ones answering: each worker both asks
+and may be asked. Empty (the correct value outside Kubernetes, or inside it
+without this headless Service) means "my address is not known to be resolvable",
+and this worker's runs are reclaimed on the ordinary timeout with no veto
+attempted. It is wired into `k8s/deployment.yaml` and the Helm chart by default.
+
+### --internal-addr
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Listen address for `/internal/holds`, reached by other workers only |
+
+Shaped exactly like `--pprof-addr`: its own opt-in address, empty by default,
+never served on the ordinary API port and never wired into ingress. When set,
+the worker answers `GET /internal/holds/{run_id}?generation=G` from its **own
+in-process** map of what it is executing — never by re-querying the database,
+because the case this exists for is a worker whose own path to the database has
+degraded, where a database query is exactly as blind as the heartbeat the reaper
+already does not trust.
+
+Authentication is `CLEAT_INTERNAL_AUTH_KEY`, an **environment variable, not a
+flag** (a flag value is visible in `ps`), whose value every worker in the
+deployment shares. The secret is read once at startup and used for both halves
+of the channel, so a worker needs it set whether it answers this listener or
+only asks. `--internal-addr` set without the variable refuses to start rather
+than serving a listener that would authenticate no caller.
+
+This is a **narrow, interim** mechanism, symmetric (every worker is both caller
+and callee) and tenant-blind (a hold query names a run and a generation, nothing
+about a tenant). It is meant to be retired once
+[cleat#2169](https://github.com/cleat-team/cleat/issues/2169)'s general
+operator-credential design lands — it is deliberately not that.
+
+## The reaper's veto channel
+
+With the two flags above set, `reapOnce` asks the worker named in a stale row
+whether it still holds that run before reclaiming it, and a `"yes, and I am
+making progress"` defers that row by **one extra reclaim window** — no more.
+The database stays the only authority on who holds a run: the channel never
+grants ownership, and generation fencing is unchanged.
+
+**The veto is bounded, and it costs liveness in exactly one direction.** A row
+stale by one reclaim window is asked; a row stale by **two** is reclaimed
+without being asked at all, whatever its holder would have said. So an honest
+holder — or a lying one — can delay its own run's reclaim by one window and no
+further.
+
+**Every failure to get a definite "yes" is a reclaim.** A worker that is
+unreachable is treated exactly as one that is dead: a dial error, a timeout, a
+non-200, a malformed answer, or no published address all mean the row is swept
+on the ordinary timeout. That is deliberate — the alternative strands a
+genuinely dead worker's runs forever — and it is why the channel is an
+optimisation over fencing rather than a new source of truth.
+
+One consequence worth knowing when tuning: a worker's row in `admin.workers` is
+retained for **longer than the membership lease** (`max(2 × --heartbeat, 10s)`)
+— long enough to cover the whole window in which its runs can still be asked
+about, since the workers this resolves are precisely the ones whose heartbeats
+have stopped. The connection share is unaffected: it is still divided by the
+lease.
 
 ## WASM
 
