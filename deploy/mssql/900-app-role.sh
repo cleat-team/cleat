@@ -18,45 +18,60 @@
 # password), just split one principal earlier here because SQL Server's role
 # and login are two separate object types where PostgreSQL's are one.
 #
-# The password is a SERVER-GENERATED random value, not a literal in this
-# file: an earlier draft used a fixed throwaway string, created-then-disabled,
-# on the reasoning that a disabled login cannot authenticate with any
-# password. That is true until the FIRST enable -- `ALTER LOGIN cleat_app
-# ENABLE` alone, with no password change, would have published that literal
-# as cleat_app's real password (cleat-review's G3). This script sets a real,
-# unknowable password and enables the login in the same run, so there is no
-# window where "enabled" and "a published credential" coincide.
+# The password is OPERATOR-SUPPLIED, via CLEAT_APP_PASSWORD -- the same
+# convention deploy/mysql/900-app-role.sh already uses. An earlier draft had
+# this script generate a random password itself, server-side, via NEWID(),
+# and never print or return it: that closed cleat-review's G3 (no literal
+# published) but opened a worse gap the same review caught on its next pass
+# (N1) -- a login nobody, including the operator running this script, can
+# authenticate as, since the only copy of the password was discarded the
+# moment the script exited. Worse, re-running the script to pick up a new
+# plugin's grants would silently reset cleat_app's password to a SECOND
+# unknown value, locking out any worker already configured with the first.
+# A random password is right for a login that is created disabled and never
+# enabled without also setting a known one in the same step (G3's actual
+# context, inside a migration) -- it is wrong for a step whose entire job is
+# to hand the operator a working, usable login (this one).
 #
 # Required usage:
-#   ./deploy/mssql/900-app-role.sh <server> <admin-user> <admin-password> <database>
+#   CLEAT_APP_PASSWORD=<password> \
+#     ./deploy/mssql/900-app-role.sh <server> <admin-user> <admin-password> <database>
 #
 # <database> is the one this worker serves from -- cleat_app_role's GRANTs are
 # schema-scoped (SCHEMA::dbo, SCHEMA::admin) within it. Run it again, with a
-# different <database>, for a second application database.
+# different <database>, for a second application database. Re-run this script
+# after enabling a plugin that was not installed this time.
 
 set -euo pipefail
+
+: "${CLEAT_APP_PASSWORD:?CLEAT_APP_PASSWORD must be set -- the password cleat_app will authenticate with}"
 
 server="${1:?usage: $0 <server> <admin-user> <admin-password> <database>}"
 admin_user="${2:?usage: $0 <server> <admin-user> <admin-password> <database>}"
 admin_password="${3:?usage: $0 <server> <admin-user> <admin-password> <database>}"
 database="${4:?usage: $0 <server> <admin-user> <admin-password> <database>}"
 
+# The -v substitution below is TEXTUAL, not an escaped bind parameter: sqlcmd
+# splices CLEAT_APP_PASSWORD's value directly into `N'$(CLEAT_APP_PASSWORD)'`
+# with no quoting of its own. A password containing a single quote would
+# break out of that literal and turn the rest of itself into T-SQL, the same
+# class of defect as string-built SQL anywhere else in this tree. Reject it
+# rather than doubling it here, because QUOTENAME below is the one place in
+# this script already trusted to quote a value correctly, and giving it an
+# ALREADY-escaped input would double-escape it.
+case "$CLEAT_APP_PASSWORD" in
+*\'*)
+	echo "ERROR: CLEAT_APP_PASSWORD must not contain a single quote -- it is substituted" >&2
+	echo "textually into a T-SQL string literal. Choose a password without one." >&2
+	exit 1
+	;;
+esac
+
 sqlcmd_exec() {
 	/opt/mssql-tools18/bin/sqlcmd -S "$server" -U "$admin_user" -P "$admin_password" -C -d "$database" "$@"
 }
 
-# The password lives only in this SQLCMDPASSWORD-style script variable, passed
-# with -v rather than interpolated into the heredoc: a $(VAR) token left
-# UNDEFINED is not a failure sqlcmd reports on its own -- it is substituted as
-# the LITERAL TEXT "$(CLEAT_APP_PASSWORD)" and the script carries on, exit 0,
-# which would make `WITH PASSWORD = '$(CLEAT_APP_PASSWORD)'` a real, fixed
-# password nobody chose. Measured directly. Passing it as a shell-constructed
-# -v argument means an unset or empty value is a bash parameter failure
-# (":?") before sqlcmd ever runs, not a silent literal.
-random_password="$(/opt/mssql-tools18/bin/sqlcmd -S "$server" -U "$admin_user" -P "$admin_password" -C -h -1 -Q "SET NOCOUNT ON; SELECT CONVERT(NVARCHAR(36), NEWID()) + CONVERT(NVARCHAR(36), NEWID()) + N'Aa1!';" | tr -d '[:space:]')"
-: "${random_password:?failed to generate a random password from the server}"
-
-sqlcmd_exec -v CLEAT_APP_PASSWORD="${random_password}" <<-'SQL'
+sqlcmd_exec -v CLEAT_APP_PASSWORD="${CLEAT_APP_PASSWORD}" <<-'SQL'
 	DECLARE @pw NVARCHAR(128) = N'$(CLEAT_APP_PASSWORD)';
 
 	IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'cleat_app' AND type = 'S')

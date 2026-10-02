@@ -57,6 +57,19 @@ set -euo pipefail
 
 : "${CLEAT_APP_PASSWORD:?CLEAT_APP_PASSWORD must be set -- the password cleat_app will authenticate with}"
 
+# CLEAT_APP_PASSWORD is spliced directly into `IDENTIFIED BY '${CLEAT_APP_PASSWORD}'`
+# below with no escaping -- a password containing a single quote would break out of
+# that literal and turn the rest of itself into SQL, the same class of defect N1 found
+# in this script's SQL Server sibling. Reject it here for the same reason: this script
+# has no QUOTENAME-equivalent anywhere to hand the value to instead.
+case "$CLEAT_APP_PASSWORD" in
+*\'*)
+	echo "ERROR: CLEAT_APP_PASSWORD must not contain a single quote -- it is substituted" >&2
+	echo "textually into a SQL string literal. Choose a password without one." >&2
+	exit 1
+	;;
+esac
+
 host="${1:?usage: $0 <host> <port> <admin-user> <admin-password> <database>}"
 port="${2:?usage: $0 <host> <port> <admin-user> <admin-password> <database>}"
 admin_user="${3:?usage: $0 <host> <port> <admin-user> <admin-password> <database>}"

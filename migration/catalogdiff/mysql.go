@@ -245,8 +245,8 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	// the SAME database ("admin" vs "dbo"/"public"), so Postgres's and SQL Server's
 	// grant strings keep it. On MySQL a schema IS the database -- there is no narrower
 	// namespace below it -- and `scratchMySQLDB` gives every test database its own
-	// generated name. Found working on cleat#2203: an early draft added
-	// migrations/mysql/007_app_login.sql, issuing MySQL's first-ever migration GRANT, and
+	// generated name. Found working on cleat#2203: an early draft added a new MySQL
+	// migration file issuing MySQL's first-ever migration GRANT, and
 	// TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL built two scratch databases
 	// from that identical chain and reported every one of its GRANTs as a difference,
 	// because the name `table_schema` resolves to was never the same string twice.

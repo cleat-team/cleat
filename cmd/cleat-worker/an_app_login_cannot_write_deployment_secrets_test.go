@@ -65,7 +65,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -76,6 +78,22 @@ import (
 
 	gomysql "github.com/go-sql-driver/mysql"
 )
+
+// randomTestPassword generates a password for a scratch login this test creates and
+// drops, per cleat-review's N2b: a hardcoded literal here is indistinguishable, to
+// gitleaks, from a real credential, and was flagged as one. The hex body contains
+// neither a quote nor a backslash, so it is safe to splice directly into both a MySQL
+// single-quoted string (fmt.Sprintf's '%s') and a T-SQL one (string concatenation) with
+// no escaping. The suffix exists only to satisfy SQL Server's default password
+// complexity policy (upper, lower, digit) when it is enabled on the test container.
+func randomTestPassword(t *testing.T) string {
+	t.Helper()
+	buf := make([]byte, 20)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatalf("generating a random test password: %v", err)
+	}
+	return hex.EncodeToString(buf) + "Aa1!"
+}
 
 func TestTheAppLoginCannotWriteDeploymentSecrets(t *testing.T) {
 	if testing.Short() {
@@ -277,10 +295,29 @@ func TestMigrateOnlySucceedsWithADatabaseScopedLoginOnMySQLAndMSSQL(t *testing.T
 // `cmd/cleat-worker/main.go`'s `if *driver == "mysql"` block) on MySQL.
 func scopedMigrateLoginDSN(t *testing.T, dialect string, owner *sql.DB, ownerDSN string) string {
 	t.Helper()
+	pw := randomTestPassword(t)
 	switch dialect {
 	case "mysql":
-		if _, err := owner.Exec(`CREATE USER IF NOT EXISTS 'cleat_2203_scoped_migrate'@'%' IDENTIFIED BY 'cleat-2203-scoped-pw'`); err != nil {
+		// log_bin_trust_function_creators: 003_procedures.sql's CREATE PROCEDURE needs it
+		// under binary logging unless the connection is SUPER -- develop needs this for
+		// ITS OWN migrate login already (unrelated to cleat#2203), and this test's whole
+		// point is a login that is deliberately NOT SUPER. A stock MySQL 8 image with
+		// binary logging on refuses 003 without this; set it explicitly rather than
+		// assuming whatever happens to be configured outside this test.
+		if _, err := owner.Exec(`SET GLOBAL log_bin_trust_function_creators = 1`); err != nil {
+			t.Fatalf("setting log_bin_trust_function_creators: %v", err)
+		}
+		if _, err := owner.Exec(fmt.Sprintf(`CREATE USER IF NOT EXISTS 'cleat_2203_scoped_migrate'@'%%' IDENTIFIED BY '%s'`, pw)); err != nil {
 			t.Fatalf("creating a scoped migrate login: %v", err)
+		}
+		t.Cleanup(func() { _, _ = owner.Exec(`DROP USER IF EXISTS 'cleat_2203_scoped_migrate'@'%'`) })
+		// IF NOT EXISTS makes the CREATE a no-op against a login a previous run's
+		// t.Cleanup failed to drop (container reused across runs) -- without this ALTER,
+		// that stale login keeps its OLD password while this run's DSN carries the NEW
+		// one, which fails as "Access denied ... (using password: YES)", not as "does not
+		// exist". Measured directly reproducing it against a long-lived container.
+		if _, err := owner.Exec(fmt.Sprintf(`ALTER USER 'cleat_2203_scoped_migrate'@'%%' IDENTIFIED BY '%s'`, pw)); err != nil {
+			t.Fatalf("setting the scoped migrate login's password: %v", err)
 		}
 		cfg, err := gomysql.ParseDSN(ownerDSN)
 		if err != nil {
@@ -293,16 +330,36 @@ func scopedMigrateLoginDSN(t *testing.T, dialect string, owner *sql.DB, ownerDSN
 			t.Fatalf("granting the scoped migrate login rights on the tenant-database pattern: %v", err)
 		}
 		cfg.User = "cleat_2203_scoped_migrate"
-		cfg.Passwd = "cleat-2203-scoped-pw"
+		cfg.Passwd = pw
 		return cfg.FormatDSN()
 	default: // mssql
-		if _, err := owner.Exec(`CREATE LOGIN cleat_2203_scoped_migrate WITH PASSWORD = 'Cleat-2203-Scoped-Pw!'`); err != nil {
+		// A bare CREATE LOGIN errors outright -- "already exists (15025)" -- against a
+		// login a previous run's t.Cleanup failed to drop (container reused across runs),
+		// unlike MySQL's IF NOT EXISTS. Guard it the same way mssqlAppRoleDSN already
+		// does, and ALWAYS set the password afterwards so a stale login still picks up
+		// this run's new one -- the same hermeticity gap just fixed above for MySQL.
+		if _, err := owner.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'cleat_2203_scoped_migrate')
+			EXEC('CREATE LOGIN cleat_2203_scoped_migrate WITH PASSWORD = ''` + pw + `''')`); err != nil {
 			t.Fatalf("creating a scoped migrate login: %v", err)
 		}
-		if _, err := owner.Exec(`CREATE USER cleat_2203_scoped_migrate FOR LOGIN cleat_2203_scoped_migrate`); err != nil {
+		t.Cleanup(func() {
+			_, _ = owner.Exec(`DROP USER IF EXISTS cleat_2203_scoped_migrate`)
+			_, _ = owner.Exec(`DROP LOGIN cleat_2203_scoped_migrate`)
+		})
+		if _, err := owner.Exec(`ALTER LOGIN cleat_2203_scoped_migrate WITH PASSWORD = '` + pw + `'`); err != nil {
+			t.Fatalf("setting the scoped migrate login's password: %v", err)
+		}
+		if _, err := owner.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_2203_scoped_migrate')
+			CREATE USER cleat_2203_scoped_migrate FOR LOGIN cleat_2203_scoped_migrate`); err != nil {
 			t.Fatalf("mapping the scoped migrate login into this database: %v", err)
 		}
-		if _, err := owner.Exec(`ALTER ROLE db_owner ADD MEMBER cleat_2203_scoped_migrate`); err != nil {
+		if _, err := owner.Exec(`IF NOT EXISTS (
+				SELECT 1 FROM sys.database_role_members rm
+				JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id
+				JOIN sys.database_principals m ON m.principal_id = rm.member_principal_id
+				WHERE r.name = N'db_owner' AND m.name = N'cleat_2203_scoped_migrate'
+			)
+			ALTER ROLE db_owner ADD MEMBER cleat_2203_scoped_migrate`); err != nil {
 			t.Fatalf("making the scoped migrate login db_owner: %v", err)
 		}
 		var sysadmin int
@@ -316,7 +373,7 @@ func scopedMigrateLoginDSN(t *testing.T, dialect string, owner *sql.DB, ownerDSN
 		if err != nil {
 			t.Fatal(err)
 		}
-		u.User = url.UserPassword("cleat_2203_scoped_migrate", "Cleat-2203-Scoped-Pw!")
+		u.User = url.UserPassword("cleat_2203_scoped_migrate", pw)
 		return u.String()
 	}
 }
@@ -370,7 +427,7 @@ func writeProbeStmt(dialect string) string {
 // nothing about deployment_secrets, passes true.
 func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string, grantTenantPattern bool) string {
 	t.Helper()
-	const pw = "cleat-2203-pw"
+	pw := randomTestPassword(t)
 	cfg, err := gomysql.ParseDSN(ownerDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -378,6 +435,15 @@ func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string, grantTenantPa
 	if _, err := owner.Exec(fmt.Sprintf(`CREATE USER IF NOT EXISTS 'cleat_app'@'%%' IDENTIFIED BY '%s'`, pw)); err != nil {
 		t.Fatalf("creating cleat_app: %v", err)
 	}
+	// cleat_app is a SERVER-GLOBAL principal, not scoped to this test's scratch database --
+	// cleat-review's N3: a subtest that grants it `cleat\_%` (grantTenantPattern) leaves that
+	// grant in place for every OTHER test's scratch database too, since deployScratch names
+	// them all `cleat_2117_deploy_<n>`, which matches. Measured: drop cleat_app, the write
+	// test passes; run the boot test first (which grants the wildcard) without this cleanup,
+	// then the write test fails. Dropping the whole user here means every test that creates
+	// cleat_app also removes it, regardless of execution order between test FUNCTIONS, which
+	// `grantTenantPattern` alone cannot fix since it only controls what THIS call grants.
+	t.Cleanup(func() { _, _ = owner.Exec(`DROP USER IF EXISTS 'cleat_app'@'%'`) })
 	if _, err := owner.Exec(fmt.Sprintf(`ALTER USER 'cleat_app'@'%%' IDENTIFIED BY '%s'`, pw)); err != nil {
 		t.Fatalf("setting cleat_app's password: %v", err)
 	}
@@ -455,7 +521,7 @@ func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string, grantTenantPa
 // for why it does not simply run deploy/mssql/900-app-role.sh.
 func mssqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
 	t.Helper()
-	const pw = "cleat-2203-Pw!-not-a-literal-in-the-shipped-script"
+	pw := randomTestPassword(t)
 	if _, err := owner.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'cleat_app')
 		EXEC('CREATE LOGIN cleat_app WITH PASSWORD = ''` + pw + `''')`); err != nil {
 		t.Fatalf("creating cleat_app login: %v", err)
@@ -470,6 +536,18 @@ func mssqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
 		CREATE USER cleat_app FOR LOGIN cleat_app`); err != nil {
 		t.Fatalf("mapping cleat_app into this database: %v", err)
 	}
+	// cleat_app is a server-level LOGIN, so it survives this scratch database's own
+	// cleanup. Unlike MySQL's wildcard (N3), SQL Server's GRANT/DENY lives on
+	// cleat_app_role, which is scoped to one database -- so there is no cross-database
+	// privilege leak here to worry about -- but the login itself still accumulates
+	// across repeated local runs without this, which is a correctness problem the
+	// moment two test runs disagree about its password. Drop the mapping in THIS
+	// database before the login itself; best-effort, since another concurrent
+	// scratch database could still be mapped to it.
+	t.Cleanup(func() {
+		_, _ = owner.Exec(`DROP USER IF EXISTS cleat_app`)
+		_, _ = owner.Exec(`DROP LOGIN cleat_app`)
+	})
 	var roleExists int
 	if err := owner.QueryRow(`SELECT COUNT(*) FROM sys.database_principals WHERE name = N'cleat_app_role' AND type = 'R'`).Scan(&roleExists); err != nil {
 		t.Fatal(err)
