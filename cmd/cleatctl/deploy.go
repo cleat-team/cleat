@@ -5,14 +5,17 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"golang.org/x/mod/semver"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 func runDeploy(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
@@ -48,7 +51,9 @@ Subcommands:
 // deployWorkflow reads a WASM binary from a file and deploys it as a new
 // workflow version. It computes the new version number automatically by
 // incrementing the latest deployed version. If an exact version already
-// exists with the same SHA256 hash, the deployment is skipped.
+// exists with the same SHA256 hash, the deployment is skipped -- except that
+// the skip has never fired against a real store, which is cleat#2947 rather
+// than a property of this comment.
 func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	fs := flag.NewFlagSet("deploy workflow", flag.ContinueOnError)
 	// cleat#1981: the one escape hatch validate-input-at-start asks for, for
@@ -81,6 +86,17 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 	}
 
 	// Compute SHA256 hash for dedup.
+	//
+	// The guard this feeds is DEAD: it compares against def.WASMBytes, and no
+	// store's ListWorkflowDefs selects wasm_bytes on any dialect
+	// (engine/store_deployment.go:288, engine/mysql_ops.go:905/911,
+	// engine/mssql_deployment.go:387/392), so the field is always empty and the
+	// "already has the same binary (skipped)" branch below never runs. Filed as
+	// cleat#2947 rather than fixed here: wiring it up means deciding which
+	// versions to load (LoadWASM is per-version, and a Python artifact is ~19MB),
+	// which is its own change. NOTED THERE: once it is wired, the comparison must
+	// normalise cleat.metadata's workflow_version out of both sides, because the
+	// restamp above makes stored bytes carry a version the file on disk does not.
 	hash := sha256.Sum256(wasmBytes)
 
 	// Determine next version number.
@@ -95,7 +111,8 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 			if def.Version >= nextVersion {
 				nextVersion = def.Version + 1
 			}
-			// Check for duplicate WASM.
+			// Check for duplicate WASM. Dead against every real store -- see
+			// the note on `hash` above and cleat#2947.
 			if len(def.WASMBytes) > 0 {
 				existingHash := sha256.Sum256(def.WASMBytes)
 				if existingHash == hash {
@@ -144,6 +161,25 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		}
 	}
 
+	// cleat#2944. The stamp inside the binary and the version this row records
+	// must agree: cmd/cleat-worker's pre-flight releases a run whose binary
+	// reports a different workflow_version from the workflow_defs.version it was
+	// queued against, on every claim, so the run loops between claim and release
+	// and never executes.
+	//
+	// This command is documented as "deploys a new version"
+	// (docs/explanation/workflow-versioning.md:251) and assigns MAX(version)+1
+	// above. Before this it stored the binary unchanged, still carrying whatever
+	// `cleat build --version` wrote (1 by default) -- so every redeploy of a
+	// rebuilt artifact produced a row that the only available binary could not
+	// serve. Restamping rather than adopting the stamp: the version recorded
+	// here is the one this command assigns.
+	wasmBytes, err = restampWorkflowVersion(wasmBytes, nextVersion)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, nextVersion, err)
+		osExit(1)
+	}
+
 	def := &engine.WorkflowDef{
 		Name:                    name,
 		Version:                 nextVersion,
@@ -163,6 +199,62 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 
 	fmt.Printf("Deployed %s v%d (ABI v%d, minVersion=%d, %d bytes, SHA256=%x)\n",
 		name, nextVersion, abiVersion, minVersion, len(wasmBytes), hash[:8])
+}
+
+// restampWorkflowVersion returns wasmBytes with cleat.metadata's
+// workflow_version set to version, so the binary and the workflow_defs row it
+// is stored in agree (cleat#2944).
+//
+// A binary carrying no readable cleat.metadata is returned unchanged and without
+// error: there is no stamp to disagree with, and cmd/cleat-worker's pre-flight
+// reads that same metadata, so it cannot fire either. That is also what keeps
+// this correct on a tree without cleat#2941 -- wasm.ReadMetadata rejects a
+// Component Model binary there, so a Python artifact is stored exactly as it is
+// today, and the version disagreement is unreachable for the same reason.
+//
+// A write failure IS an error, not a warning: continuing would store a binary
+// whose stamp disagrees with its row, which is the defect this exists to close.
+func restampWorkflowVersion(wasmBytes []byte, version int) ([]byte, error) {
+	meta, err := wasm.ReadMetadata(wasmBytes)
+	if err != nil || meta == nil {
+		return wasmBytes, nil
+	}
+	if meta.WorkflowVersion == version {
+		return wasmBytes, nil
+	}
+	// SetMetadataField rather than a Metadata round-trip. The struct models the
+	// keys the engine reads, and a build writes others it does not --
+	// stamp_metadata.py writes sdk_language, sdk_version and created_at, and
+	// Rust/Java/AssemblyScript inject sdk_version -- so rebuilding the payload
+	// from the struct would rewrite the whole section and drop them. This
+	// changes one key and leaves every other as the build wrote it. (Found by
+	// cleat-review on this PR's first head, where the round-trip silently lost
+	// all four.)
+	out, err := wasm.SetMetadataField(wasmBytes, "workflow_version", json.RawMessage(strconv.Itoa(version)))
+	if errors.Is(err, wasm.ErrNotAJSONObject) {
+		// The one shape that is left alone: valid JSON with no keys to patch, so
+		// there is nothing to restamp. Stored as built, which is what develop did.
+		//
+		// A stamp of 0 is deliberately NOT skipped, and an earlier version of this
+		// function that skipped non-positive stamps was wrong. 0 is what every
+		// standalone stamper defaults to when given no version -- Java's
+		// inject-metadata.sh (`:-0`), Rust's inject_metadata.rs, AssemblyScript's
+		// inject-metadata.js, and Python without CLEAT_WORKFLOW_VERSION -- and
+		// cmd/cleat-worker's pre-flight compares with `!=`, exempting nothing, so
+		// such a binary is released on every claim and its runs never execute.
+		// Restamping a 0 IS the fix cleat#2944 exists for.
+		//
+		// The `cleat deploy` analogy that produced the bug is worth stating so it
+		// is not reapplied: there the question is "should this stamp be the
+		// RECORDED version?", and declining 0 is right because a version of 0
+		// cannot be recorded. Here the question is "does the stored binary agree
+		// with the row?", and 0 is the case that most needs changing.
+		return wasmBytes, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("could not stamp the binary with workflow_version %d: %w", version, err)
+	}
+	return out, nil
 }
 
 // deployPlugin reads a plugin WASM binary and writes it to plugin_defs.

@@ -7,6 +7,7 @@
 package wasm
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -186,6 +187,78 @@ func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
 		payload.WriteByte('\n')
 	}
 	return writeCustomSection(wasmBytes, entryPointsSectionName, []byte(payload.String()))
+}
+
+// ErrNotAJSONObject is returned by SetMetadataField when the cleat.metadata
+// payload is valid JSON but not an object: the literal `null`, an array, a bare
+// scalar. There are no keys to patch, and json.Unmarshal leaves its map target
+// nil for `null`, so assigning into that nil map would panic rather than fail.
+//
+// It is a sentinel rather than a message because callers differ on what it
+// means. A caller that can leave the section as it found it should treat it as
+// "nothing to patch" rather than a failure -- a binary carrying such a payload
+// is one the calling command did not produce.
+var ErrNotAJSONObject = errors.New("cleat.metadata: not a JSON object")
+
+// SetMetadataField returns wasmBytes with the cleat.metadata key set to
+// rawValue, leaving every OTHER key exactly as the build wrote it.
+//
+// It exists because ReadMetadata/WriteMetadata round-trip through the Metadata
+// struct, and that struct models the keys the engine reads -- while a build may
+// write keys it does not. stamp_metadata.py writes sdk_language, sdk_version and
+// created_at, and the Rust, Java and AssemblyScript builds inject sdk_version
+// too. Rebuilding the payload from the struct DROPS every one of them, so a
+// caller that only meant to change one field silently rewrites the whole
+// section and loses provenance (cleat#2944).
+//
+// Key ORDER is not preserved, and values are preserved SEMANTICALLY rather than
+// byte-for-byte: the payload is decoded into a map and re-encoded, so
+// encoding/json sorts the keys and compacts the whitespace inside a value
+// ([1, 2] becomes [1,2]). HTML escaping is switched off, so <, > and & inside a
+// value are left as the build wrote them rather than becoming backslash-u
+// escape sequences. Every key and every value survives; only their order and interior
+// whitespace change. Nothing reads the section positionally, and the field this
+// was written for is not order sensitive.
+//
+// A payload that is valid JSON but not an object (the literal null, an array, a
+// bare string) is an error, not a panic: it has no keys to patch.
+func SetMetadataField(wasmBytes []byte, key string, rawValue json.RawMessage) ([]byte, error) {
+	payload, err := readCustomSection(wasmBytes, sectionName)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		if json.Valid(payload) {
+			// Valid JSON that is not an object: an array, a string, a number, a
+			// boolean. Unmarshal fails on the target TYPE rather than on the
+			// syntax, and "not a JSON object" is exactly the condition the
+			// sentinel names, so reporting it here is what keeps the documented
+			// contract true rather than narrowing the doc to `null`.
+			return nil, ErrNotAJSONObject
+		}
+		// The same message ReadMetadata gives for the same input, so a caller
+		// cannot tell the two readers apart by their error.
+		return nil, fmt.Errorf("cleat.metadata: invalid JSON: %w", err)
+	}
+	if fields == nil {
+		// Unmarshal leaves the map nil for a JSON `null` -- valid JSON, and the
+		// only non-object shape that decodes cleanly enough to reach here rather
+		// than the branch above.
+		return nil, ErrNotAJSONObject
+	}
+	fields[key] = rawValue
+
+	// An Encoder rather than json.Marshal, with HTML escaping off, so a value the
+	// build wrote is not rewritten. Marshal escapes <, > and & inside a
+	// RawMessage; the compaction below happens either way.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fields); err != nil {
+		return nil, fmt.Errorf("cleat.metadata: %w", err)
+	}
+	return writeCustomSection(wasmBytes, sectionName, bytes.TrimRight(buf.Bytes(), "\n"))
 }
 
 // --- low-level WASM custom section helpers ---
