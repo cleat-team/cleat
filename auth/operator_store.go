@@ -95,7 +95,24 @@ func resolveOperatorStmt(dialect string) string {
 		// the base database the DSN names is where the row lives.
 		return `SELECT key_id, description FROM operator_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
 	case DialectMSSQL:
-		return `SELECT CONVERT(NVARCHAR(36), key_id), description FROM admin.operator_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
+		// LOWER() around the projection, and it is not cosmetic: SQL Server
+		// hands a UNIQUEIDENTIFIER back from CONVERT as UPPERCASE, while
+		// uuid.New().String() -- what CreateOperatorKey writes into that column
+		// -- is lowercase. Without this the key id the lookup returns does not
+		// equal the one that was created, so an operator key could be minted and
+		// then not recognised as its own row, and `cleatctl operator-key revoke
+		// --key-id <what list printed>` would not match. Both failed on a real
+		// SQL Server before this was added, and neither failed on PostgreSQL or
+		// MySQL.
+		//
+		// This is the same defect and the same repair as
+		// cmd/cleat-worker/api_admin.go's EqualFold comment records for
+		// GetWorkflowByID ("SQL Server hands one back as whatever CONVERT
+		// produced -- uppercase ... Normalising at the source is the real fix",
+		// IMPROVEMENT-PLAN 3.99). The alternative here was comparing with
+		// EqualFold at each call site, which leaves every reader to remember it;
+		// the projection is what makes the value canonical for all of them.
+		return `SELECT LOWER(CONVERT(NVARCHAR(36), key_id)), description FROM admin.operator_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
 	default:
 		return `SELECT key_id::text, description FROM admin.operator_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
 	}
@@ -180,7 +197,10 @@ func listOperatorStmt(dialect string) string {
 	case DialectMySQL:
 		return `SELECT key_id, description, disabled_at, expires_at FROM operator_api_keys ORDER BY created_at DESC`
 	case DialectMSSQL:
-		return `SELECT CONVERT(NVARCHAR(36), key_id), description, disabled_at, expires_at FROM admin.operator_api_keys ORDER BY created_at DESC`
+		// LOWER(), for the reason resolveOperatorStmt's MSSQL arm gives at
+		// length: without it the ids this lists are uppercase and do not match
+		// the rows themselves, so a revoke driven by what `list` printed misses.
+		return `SELECT LOWER(CONVERT(NVARCHAR(36), key_id)), description, disabled_at, expires_at FROM admin.operator_api_keys ORDER BY created_at DESC`
 	default:
 		return `SELECT key_id::text, description, disabled_at, expires_at FROM admin.operator_api_keys ORDER BY created_at DESC`
 	}
