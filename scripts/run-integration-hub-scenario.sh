@@ -508,6 +508,43 @@ print("absent")
   echo "$state"
 }
 
+# worker_container_id reads the SAME `docker compose ps` row as
+# worker_container_state and returns the container's short ID. It exists for
+# exactly one assertion: that a restart produced a DIFFERENT container. The ID
+# is the observable to use because it cannot be satisfied by a state field that
+# reads correctly while being wrong (see the restart step for that failure).
+# Same exit-status contract as worker_container_state -- 1 means "could not
+# tell", never "absent", so a caller cannot read a failed read as a verdict.
+worker_container_id() {
+  local out rc err
+  out="$("${COMPOSE[@]}" ps -a --format json cleat-worker 2>/tmp/ih-ps-id.err)"
+  rc=$?
+  err="$(tr '\n' ' ' </tmp/ih-ps-id.err 2>/dev/null)"
+  if (( rc != 0 )); then
+    echo "worker_container_id: docker compose ps exited $rc: $err" >&2
+    return 1
+  fi
+  local id
+  id="$(python3 -c '
+import json, sys
+data = sys.stdin.read()
+try:
+    rows = json.loads(data) if data.strip().startswith("[") \
+        else [json.loads(l) for l in data.splitlines() if l.strip()]
+except Exception:
+    sys.exit(1)
+for d in rows:
+    if isinstance(d, dict) and d.get("Service") == "cleat-worker":
+        print(d.get("ID", ""))
+        sys.exit(0)
+print("")
+' <<<"$out")" || { echo "worker_container_id: could not parse docker compose ps output" >&2; return 1; }
+  # An empty ID is a failed read, not an absent container -- the same
+  # distinction worker_container_state's header records one axis over.
+  [[ -n "$id" ]] || { echo "worker_container_id: compose reported no ID for cleat-worker" >&2; return 1; }
+  echo "$id"
+}
+
 # wait_for_worker_state polls worker_container_state for up to $limit
 # seconds. It only succeeds on a DETERMINED match -- an unknown reading
 # (worker_container_state returning 1) is neither a match nor a mismatch,
@@ -686,9 +723,39 @@ else
   # PRE-KILL startup burst -- a healthy worker -- so a failure to come back was
   # reported with evidence of the worker that had just been killed.
   RESTART_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  if ! "${COMPOSE[@]}" up -d cleat-worker >/tmp/ih-restart.log 2>&1; then
+
+  # cleat#2965: before this, `up -d cleat-worker` alone could no-op. Compose
+  # read the container as Running -- its own captured output said so, verbatim
+  # -- and correctly did nothing for what it read, while the SIGKILL above had
+  # already killed it. So the step's success depended on a state field that
+  # reads correctly and is wrong. The repair is not to wait on that field (a
+  # guard whose correctness rests on the thing that failed is not a guard) but
+  # to stop consulting it: --force-recreate's documented semantics are that it
+  # acts regardless of current state, and recreation is what this step wants
+  # after a SIGKILL anyway.
+  PRE_RESTART_ID="$(worker_container_id 2>/tmp/ih-pre-id.err)" || PRE_RESTART_ID=""
+
+  if ! "${COMPOSE[@]}" up -d --force-recreate cleat-worker >/tmp/ih-restart.log 2>&1; then
     echo "FAIL: could not restart the worker" >&2
     cat /tmp/ih-restart.log >&2
+    failures=$((failures + 1))
+  fi
+
+  # The assertion that decides whether the restart happened. It is on the
+  # container ID, NOT on a state: a replaced container has a different ID, and
+  # no reading of a state field can make that true or false. Asserting
+  # "running" here would be satisfied by the very read that failed above.
+  POST_RESTART_ID="$(worker_container_id 2>/tmp/ih-post-id.err)" || POST_RESTART_ID=""
+  if [[ -z "$PRE_RESTART_ID" || -z "$POST_RESTART_ID" ]]; then
+    # UNMEASURED -- not a pass and not a failure. Without both IDs the question
+    # has no answer, and reporting it either way would be inventing one.
+    echo "UNMEASURED: could not read the cleat-worker container ID on both sides of the restart" >&2
+    echo "  before='${PRE_RESTART_ID}' after='${POST_RESTART_ID}'" >&2
+    echo "  This is a failure of the CHECK, not a finding about the worker." >&2
+    failures=$((failures + 1))
+  elif [[ "$PRE_RESTART_ID" == "$POST_RESTART_ID" ]]; then
+    echo "FAIL: the worker was NOT restarted -- the container ID is unchanged ($POST_RESTART_ID)." >&2
+    echo "  The container SIGKILLed above is still the one on disk; --force-recreate did not replace it." >&2
     failures=$((failures + 1))
   fi
 
