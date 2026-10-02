@@ -39,6 +39,24 @@ SECTION_NAME = "cleat.metadata"
 WASM_MAGIC = b"\x00asm"
 WASM_VERSION = b"\x01\x00\x00\x00"
 
+# cleat#2936. A Component Model binary (componentize-py's actual output for
+# this SDK) shares the core module's 4-byte magic above, but encodes what
+# follows differently: a u16 LE version (bytes 4-5) and a u16 LE "layer"
+# field (bytes 6-7), fixed at 1 for a component. A core module's version 1
+# fits entirely in the low u16, which is why WASM_VERSION above reads 0x0000
+# in that same high half -- it is reading a core module's zero layer, not a
+# byte the spec leaves unused. See
+# https://github.com/WebAssembly/component-model/blob/main/design/mvp/Binary.md.
+# The version field itself is deliberately not pinned to one value: it read
+# 13 (0x0d 0x00) in a real componentize-py artifact
+# (tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm), and
+# nothing promises it will not move again. find_custom_section below only
+# ever inspects custom sections (id 0), which this format and the core
+# module format frame identically -- verified by hand-walking all 642
+# top-level sections of that same artifact and landing exactly at EOF -- so
+# accepting either header is sufficient there.
+COMPONENT_LAYER = b"\x01\x00"
+
 
 def encode_uleb128(value: int) -> bytes:
     """Encode an integer as unsigned LEB128 varint."""
@@ -104,8 +122,10 @@ def find_custom_section(wasm_bytes: bytes, name: str) -> tuple[bytes | None, int
     if wasm_bytes[:4] != WASM_MAGIC:
         raise ValueError("not a valid WASM file (bad magic number)")
 
-    if wasm_bytes[4:8] != WASM_VERSION:
-        raise ValueError("unsupported WASM version (only v1 supported)")
+    if wasm_bytes[4:8] != WASM_VERSION and wasm_bytes[6:8] != COMPONENT_LAYER:
+        raise ValueError(
+            "unsupported WASM header (not a core module v1 or a Component Model layer-1 binary)"
+        )
 
     offset = 8
     name_bytes = name.encode("utf-8")
@@ -241,10 +261,9 @@ def build_metadata(args: argparse.Namespace) -> dict:
     # story (the __cleat_entry__ dispatch key entry.py's _select already
     # supports is a different field name from __entry_point, and nothing
     # currently reconciles the two) -- out of scope here, filed as cleat#2937
-    # rather than guessed at. Also note cleat#2936: this stamp does not yet
-    # survive on a real Component Model binary at all (see WASM_VERSION
-    # above) -- a separate, more urgent gap this comment's own reasoning
-    # does not depend on.
+    # rather than guessed at. cleat#2936 (this stamp did not survive on a
+    # real Component Model binary at all) is fixed -- see COMPONENT_LAYER
+    # above -- so this now reaches a real componentize-py artifact.
     if entry_points_str:
         meta["entry_points"] = [p for p in entry_points_str.split(",") if p]
 
