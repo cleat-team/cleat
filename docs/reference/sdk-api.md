@@ -977,3 +977,42 @@ instead of silently succeeding. Point 2 remains documentation of a rule, not
 a rule a test enforces — there is no version boundary decided yet for a
 test to check against. Point 3(c) remains a documented hazard with no
 enforcement and, per the paragraph above, no fix proposed either.
+
+## Agent Workflows -- `run_agent`
+
+An agent is a **workflow**, not a library. `cleat/agentworkflow` (Go) implements
+the ReAct loop, and every SDK reaches it the same way: start it as a child
+workflow and await it. Before cleat#1983 each language reimplemented the loop,
+and two of those copies -- one per template -- were never tested.
+
+| SDK | `run_agent` | how |
+|---|---|---|
+| Go | ✅ `agentworkflow.RunAsChild(h, cfg, msg)` | [`cleat/agentworkflow`](../../cleat/agentworkflow) |
+| Python | ✅ `cleat_sdk.agent.run_agent(h, cfg, msg)` | [`python-sdk/cleat_sdk/agent.py`](../../python-sdk/cleat_sdk/agent.py) |
+| Rust, Java, AssemblyScript | **not yet** | a named follow-up, not an unasserted gap |
+
+**Why a workflow.** Each LLM turn and each tool call is a durable step inside
+the agent, so a run that dies mid-conversation resumes from its recorded history
+without asking the model again for turns it already completed -- and that comes
+to every language for free, because the durability is the engine's, not the
+SDK's. A library running inside the guest would have to be rewritten per
+language to get the same thing.
+
+**Installation contract.** A child is resolved *by name* against a deployed
+workflow definition, so the agent must be deployed under the name `run_agent`
+looks for -- `agent` (`agentworkflow.ChildName`, `AGENT_WORKFLOW_NAME` in
+Python). A deployment under any other name means calling `ChildWorkflow`
+directly with the marshalled config, which is two lines.
+
+**Tools.** A tool entry tells the agent how to reach the outside world:
+`service` (`DurableCall`), `plugin` (`PluginCall`) or `workflow` (a child,
+awaited). The model sees only the name, description and JSON schema; the
+dispatch is opaque to it. A `service` tool needs its endpoint registered on the
+worker with `--service-endpoints`, or the call fails permanently -- the failure
+names the flag.
+
+**Not in this first cut, stated rather than implied:** `chat_stream`
+(`plugins/llm/host_functions.go`) is **not** used. Streaming would make the
+agent's per-turn step a stream rather than a single recorded event, which is a
+different durability question, and it is deliberately left out rather than
+half-implemented.
