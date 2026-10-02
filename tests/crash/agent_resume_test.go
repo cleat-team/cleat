@@ -44,11 +44,14 @@ package crash
 // llmStub's doc comment.
 //
 // ASSERTED ON RECORDED EVENTS, NOT ON TIMING, which is the acceptance's own
-// wording. Two records are consulted: the parent's event_history, read while
-// the workflow is still running (a terminal workflow's history is deleted by
-// finalize_workflow_status, so after completion it always reads 0 and says
-// nothing), and the two stubs' own request logs. Nothing here sleeps and
-// hopes, and nothing reads a duration.
+// wording. Three records are consulted, and they are not interchangeable: the
+// AGENT CHILD's event_history for the loop's own durable steps (the LLM turns
+// and the tool work), the CLIENT's for the fact that the loop was a child at
+// all, and the two stubs' request logs for the counts. The histories are read
+// while the workflow is still RUNNING, because a terminal workflow's history
+// is deleted by finalize_workflow_status and afterwards always reads 0 --
+// which says nothing. Nothing here sleeps and hopes, and nothing reads a
+// duration.
 
 import (
 	"database/sql"
@@ -611,7 +614,9 @@ func childRunID(t *testing.T, db *sql.DB, parentID, defName string) string {
 	return id
 }
 
-// eventTypeCount counts the parent's recorded events of one type.
+// eventTypeCount counts one run's recorded events of one type. The run is
+// whichever history the caller is asking about -- see the file header on why
+// the agent child's and the client's are consulted for different things.
 func eventTypeCount(t *testing.T, db *sql.DB, id, eventType string) int {
 	t.Helper()
 	var n int
