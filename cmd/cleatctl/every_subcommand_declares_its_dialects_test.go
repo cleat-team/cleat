@@ -92,6 +92,18 @@ var unrestrictedSubcommands = map[string]string{
 	// per-tenant-database question to get wrong.
 	"set-deployment-secret":    "ported to all three; deployment_secrets has no tenant dimension, same reasoning as set-secret (cleat#1992 part 1)",
 	"retire-deployment-secret": "ported to all three; deployment_secrets has no tenant dimension, same reasoning as retire-secret (cleat#1992 part 1)",
+
+	// All three, and this one is exactly the case this map's neighbourhood
+	// describes: an operator key lives in a table MySQL writes BARE -- there is
+	// no admin schema there, migrations/mysql/008_operator_api_keys.sql says why
+	// -- which is the same difference that makes revoke-api-key postgres-only in
+	// portedOn above. What makes all three work here is that the SQL is not
+	// cleatctl's: every statement carries a per-dialect arm in
+	// auth/operator_store.go (resolveOperatorStmt, createOperatorStmt,
+	// listOperatorStmt, revokeOperatorStmt), and the command calls those rather
+	// than issuing its own -- which is also what keeps
+	// auth.TenantStore.RevokeAPIKey's defect from recurring. cleat#2169.
+	"operator-key": "ported to all three; auth/operator_store.go carries a per-dialect arm for every statement, so the missing admin schema on MySQL is answered there (cleat#2169)",
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.

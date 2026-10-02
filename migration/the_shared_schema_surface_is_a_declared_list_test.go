@@ -26,6 +26,20 @@ import (
 // number would have been satisfied by a rename.
 var (
 	sharedTables = []string{
+		// Migrations 010/008/009, cleat#2169's operator credential. Shared in
+		// the strictest sense on
+		// this list: an operator key authenticates the person who runs the
+		// DEPLOYMENT, so there is no per-pool operator for a per-pool copy to
+		// describe. A pool-local copy would mean a credential minted against one
+		// pool is unknown to the next, and -- the direction that matters -- that
+		// REVOKING it on one pool leaves it live on every other. That is the
+		// cleat#1375 hazard accepted in exchange, and here it is the lesser one
+		// by a wide margin.
+		//
+		// Table only: it carries no routine, and the migration that creates it is
+		// the only one that ever touches its shape -- a later one would be the
+		// rewrite-for-the-others case this comment is about.
+		"admin.operator_api_keys",
 		// Migration 091, cleat#1898. Shared for the same reason admin.tenants
 		// is: an org groups tenants across the whole database, not per pool --
 		// a per-pool copy would let two pools disagree about which org a

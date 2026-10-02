@@ -95,7 +95,7 @@ func TestRunner_AppliesShippedMySQLMigrations(t *testing.T) {
 	}
 	if pkColumns != 2 {
 		t.Errorf("idempotency_keys' primary key has %d column(s), want 2 "+
-			"(key_hash, tenant_id) -- migration 010 did not take effect", pkColumns)
+			"(key_hash, tenant_id) -- the scoped primary key did not take effect", pkColumns)
 	}
 }
 

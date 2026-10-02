@@ -139,7 +139,21 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 }
 
 // operatorFromContext extracts the operator identity from the request context.
+// operatorFromContext is the audit attribution recorded against an admin
+// action: WHO took it.
+//
+// The operator branch is checked first, and it is not merely precedence. An
+// operator request has no tenant at all (auth.OperatorMiddleware sets one
+// identity or the other, never both), so before cleat#2169 landed this function
+// answered "unknown" for every operator -- an audit record that names no one,
+// on the actions that most need naming. Operator.String's "operator:" prefix is
+// what keeps the two answers apart here: the field holds a tenant UUID, and a
+// key_id is a UUID too, so an unprefixed attribution would be indistinguishable
+// from a tenant's.
 func operatorFromContext(r *http.Request) string {
+	if op, ok := auth.OperatorFromContext(r.Context()); ok {
+		return op.String()
+	}
 	if tid, ok := auth.TenantIDFromContext(r.Context()); ok {
 		return tid.String()
 	}

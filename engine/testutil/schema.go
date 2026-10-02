@@ -94,6 +94,7 @@ var postgresCleanupTables = []string{
 	// On none of them did the real table get cleared -- the entry 2.60d added
 	// here to stop tenant_api_keys accumulating had been inert since it landed.
 	// TestCleanupPostgresTestDataClearsAdminTenantAPIKeys is the regression.
+	"admin.operator_api_keys",
 	"admin.tenant_api_keys",
 	"workflow_tags",
 	"workflow_routing",
