@@ -340,8 +340,22 @@ func MSSQLDeletions(db *sql.DB) ([]MSSQLDeletion, error) {
 	// batch_id is CONVERTed rather than scanned raw: a UNIQUEIDENTIFIER arrives
 	// as 16 bytes, and a report that prints them renders mojibake where a
 	// reader expects an identifier they can group on.
+	//
+	// LOWERed as well, because CONVERT alone returns UPPERCASE while a batch id
+	// the application wrote is lowercase -- so a reader grouping on this column
+	// groups on a different string from the one anywhere else in the tree
+	// (cleat#2983).
+	//
+	// NOTE THIS WRAP IS NOT ENFORCED, and it is the only site in the tree that
+	// is not. TestMSSQLUUIDColumnsAreConvertedInProjections learns UUID columns
+	// from the migrations and applies them to the tables a statement NAMES, so a
+	// statement whose table is a runtime-concatenated identifier -- as this one
+	// is, `FROM ` + mssqlAuditTable -- is invisible to it: the audit table is
+	// created at runtime and no migration declares it, so there is nothing to
+	// derive. A green run of that guard is therefore silent about this line, and
+	// an edit that drops the LOWER here would not be caught. See its file header.
 	rows, err := db.Query(`SELECT table_name, row_id, tenant_id,
-		CONVERT(NVARCHAR(36), batch_id), batch_rows,
+		LOWER(CONVERT(NVARCHAR(36), batch_id)), batch_rows,
 		spid, program_name, host_name, host_pid, stmt
 		FROM ` + mssqlAuditTable + ` ORDER BY audit_id`)
 	if err != nil {

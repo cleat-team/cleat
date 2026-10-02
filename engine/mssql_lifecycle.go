@@ -179,7 +179,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	// The LEFT JOIN reads queues without a lock hint, so it does not lock the
 	// queue rows -- those are locked in sorted order by the next step.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT w.id, CONVERT(NVARCHAR(36), w.tenant_id) AS tenant_id, w.concurrency_key, w.concurrency_key_hash,
+		SELECT w.id, LOWER(CONVERT(NVARCHAR(36), w.tenant_id)) AS tenant_id, w.concurrency_key, w.concurrency_key_hash,
 		       CASE WHEN q.name IS NOT NULL THEN 1 ELSE 0 END AS registered
 		FROM workflow_instances w WITH (READPAST, UPDLOCK, ROWLOCK)
 		LEFT JOIN queues q ON q.tenant_id = w.tenant_id AND q.name = w.concurrency_key AND q.disabled_at IS NULL
@@ -341,7 +341,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
 		       INSERTED.next_wake_at,
-		       CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
+		       LOWER(CONVERT(NVARCHAR(36), INSERTED.tenant_id)) AS tenant_id,
 		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
@@ -735,7 +735,13 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		       -- equal to the worker's own tenant, so storeForTenant tried to
 		       -- open a store for them and the factory rejected them as an
 		       -- invalid UUID -- failing every workflow on SQL Server.
-		       CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
+		       --
+		       -- LOWERed as well as converted: CONVERT alone returns the id
+		       -- UPPERCASE while the value the application wrote is lowercase, so
+		       -- this TenantID string is not the one that created the row. The
+		       -- raw-bytes paragraph above says what CONVERT buys; this says why
+		       -- it is not the whole answer. cleat#2983.
+		       LOWER(CONVERT(NVARCHAR(36), INSERTED.tenant_id)) AS tenant_id,
 		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,

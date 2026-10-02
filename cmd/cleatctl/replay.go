@@ -245,7 +245,7 @@ func loadWorkflowInstanceSQL() plugin.Query {
 		       COALESCE(result, ''), COALESCE(error_msg, ''),
 		       COALESCE(error_code, ''), COALESCE(error_op, ''),
 		       COALESCE(assigned_to, ''), next_wake_at,
-		       CONVERT(NVARCHAR(36), tenant_id),
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)),
 		       created_at, generation
 		FROM workflow_instances
 		WHERE id = $1`,

@@ -103,7 +103,7 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone,
-		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WHERE tenant_id = @p1 ORDER BY name
 	`, s.tenantID)
@@ -213,7 +213,11 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		       -- string to uniqueidentifier" and NO schedule ever fires on SQL
 		       -- Server. It also lands in the cron:<tenant>:<name>:<instant>
 		       -- idempotency key, which is the at-least-once delivery guarantee.
-		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
+		       --
+		       -- LOWERed as well as converted: CONVERT alone returns UPPERCASE on
+		       -- SQL Server while the tenant the application wrote is lowercase,
+		       -- so this string is not the one that created the row. cleat#2983.
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WITH (READPAST, UPDLOCK, ROWLOCK)
 		WHERE disabled_at IS NULL AND next_run_at <= SYSUTCDATETIME() AND tenant_id = @p1
