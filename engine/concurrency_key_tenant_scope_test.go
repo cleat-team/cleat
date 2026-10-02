@@ -66,8 +66,9 @@ func seedRunForTenant(t *testing.T, store WorkflowStore, tenantID, defName strin
 // "cleanup".
 //
 // THIS IS THE SECOND INSTANCE OF A CLASS THAT ALREADY HAD A WRITTEN FIX.
-// idempotency_keys had the identical shape and was repaired by migration 010,
-// whose post-mortem is quoted in store_lifecycle.go: two customers both
+// idempotency_keys had the identical shape and its primary key was widened to
+// (key_hash, tenant_id) -- migrations/postgres/001_schema.sql -- whose post-mortem
+// is quoted in store_lifecycle.go: two customers both
 // choosing "order-123" collided and the second was handed the first's workflow
 // ID. Same client-supplied string, same global namespace. The sibling table was
 // left behind.

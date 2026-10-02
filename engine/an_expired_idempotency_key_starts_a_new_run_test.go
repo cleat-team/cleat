@@ -125,7 +125,8 @@ func TestAnExpiredIdempotencyKeyStartsANewRun(t *testing.T) {
 // The fix deletes a row before the insert. A delete that is not scoped by
 // expiry would remove a LIVE row a concurrent starter had just written, and two
 // callers would each get their own run for one key -- the exact defect
-// migration 010 exists to prevent, reintroduced by the fix for cleat#1671. The
+// the idempotency key's tenant-scoped primary key exists to prevent
+// (migrations/postgres/001_schema.sql), reintroduced by the fix for cleat#1671. The
 // expired-row test above passes just as happily either way, because it has no
 // competitor.
 //
@@ -312,8 +313,8 @@ func TestEveryDialectClearsAnExpiredIdempotencyKeyBeforeInserting(t *testing.T) 
 			if !strings.Contains(stmt, "expires_at <= "+c.nowExpr) {
 				t.Errorf("%s's delete is not scoped by expiry (%q). Scoped by the key alone it "+
 					"removes a LIVE row a concurrent starter just wrote, and two callers each "+
-					"get their own run for one key -- the defect migration 010 exists to "+
-					"prevent", c.file, strings.TrimSpace(stmt))
+					"get their own run for one key -- the defect the (key_hash, tenant_id) "+
+					"primary key exists to prevent", c.file, strings.TrimSpace(stmt))
 			}
 		})
 	}
