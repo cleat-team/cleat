@@ -226,6 +226,9 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
+		return
+	}
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())

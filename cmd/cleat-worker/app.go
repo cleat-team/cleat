@@ -43,6 +43,27 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
 	mux.HandleFunc("/api/schedules", api.handleSchedulesList)
+	// cleat#1986 slice 2b: where an `internal` workflow definition stops being
+	// reachable, and where it deliberately does not.
+	//
+	// IN, enforced below this line: every /api/workflows/... route, the runs
+	// list, GET /api/definitions, /api/openapi.json, and /api/instances/... . An
+	// internal definition answers the SAME 404 a route gives for a workflow that
+	// does not exist, so its existence is not disclosed; the collection routes
+	// OMIT it instead, because a list is not addressing one member.
+	//
+	// OUT, on purpose, and these are decisions rather than omissions:
+	//   * /api/admin/* and /api/dead-letters* -- operator surfaces. An operator
+	//     must still read an internal run's history, reach its DLQ entry and
+	//     cancel it. Exposure governs ingress, not administration, and a guard
+	//     here would strand exactly the runs it exists to rescue.
+	//   * /api/schedules* -- a schedule references a definition BY NAME, so a
+	//     schedule for an internal definition discloses that name. Deliberately
+	//     not filtered: a cron-triggered internal workflow is legitimate and
+	//     arguably should have a schedule, so the fix may be to hide the name
+	//     rather than the schedule. Filed as cleat#3001, which is the general
+	//     form -- an internal definition's NAME is still disclosed on routes
+	//     that do not address a workflow, /metrics among them.
 	mux.HandleFunc("/api/workflows/", api.handleWorkflows)
 	mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 	mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
@@ -366,6 +387,9 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	if r.Method != http.MethodPost {
