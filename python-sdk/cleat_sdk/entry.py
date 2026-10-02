@@ -350,6 +350,46 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     )
 
 
+def _resolve_dual_form(
+    name: str | Callable | None,
+    make_entry: Callable[[Callable, str | None], Callable],
+) -> Callable:
+    """Resolve ``@d``, ``@d()`` and ``@d("name")`` into one decorator call.
+
+    ``make_entry(func, explicit_name)`` builds the wrapper, where
+    ``explicit_name`` is the caller's name or ``None`` when the caller gave
+    none -- and ``None`` is not "no name is possible", it is the instruction to
+    use the FUNCTION'S OWN NAME.
+
+    THIS IS ONE FUNCTION RATHER THAN THREE COPIES, and that is the fix rather
+    than a tidy-up. ``cleat_entry``, ``virtual_object`` and ``query_handler``
+    each carried this branch verbatim:
+
+        if callable(name):
+            # ``name`` is actually the decorated function.
+            return _make_entry(name)
+
+    and each of them was wrong in the same way: the single argument of the
+    bare form is the decorated FUNCTION, and it was passed straight into the
+    slot the workflow NAME is read from. So ``entry_name`` was a function
+    object, ``module._cleat_entry_wrappers`` was keyed by it, and
+    ``jsonschema_emitter._find_entry`` -- which matches on that key being the
+    workflow name -- found nothing.
+
+    Three copies meant three places to fix and three places to forget, which is
+    the shape the bug arrived in. cleat#2976.
+    """
+    if callable(name):
+        # BARE FORM: ``@cleat_entry`` with no parentheses. The argument is the
+        # decorated function and the name slot is EMPTY, so make_entry falls
+        # through to func.__name__ -- the same key the parenthesised form
+        # produces for a function of that name, because that is what "defaults
+        # to the Python function name" means in both.
+        return make_entry(name, None)
+
+    return lambda func: make_entry(func, name)
+
+
 def cleat_entry(name: str | None = None) -> Callable:
     """Mark a function as a Cleat workflow entry point.
 
@@ -412,7 +452,7 @@ def cleat_entry(name: str | None = None) -> Callable:
     ``wrapper._is_cleat_entry = True`` for introspection.
     """
 
-    def _make_entry(func: Callable) -> Callable:
+    def _make_entry(func: Callable, explicit_name: str | None) -> Callable:
         # ---- resolve workflow parameter names (skip injected HostCalls) ----
         hints = get_type_hints(func)
         sig = inspect.signature(func)
@@ -457,7 +497,10 @@ def cleat_entry(name: str | None = None) -> Callable:
 
         workflow_param_names, required_param_names = _classify_entry_params(func, hints)
 
-        workflow_name = name if name is not None else func.__name__
+        # The name this entry is registered under, and the key every reader of
+        # the registry matches on. explicit_name is None for the bare form and
+        # for @cleat_entry(), both of which mean the function's own name.
+        workflow_name = explicit_name if explicit_name is not None else func.__name__
 
         @functools.wraps(func)
         def export_wrapper(args_str: str) -> str:
@@ -548,15 +591,10 @@ def cleat_entry(name: str | None = None) -> Callable:
 
         return export_wrapper
 
-    # ------------------------------------------------------------------
     # Support both ``@cleat_entry`` (without parentheses, legacy) and
-    # ``@cleat_entry(...)`` (with parentheses, preferred).
-    # ------------------------------------------------------------------
-    if callable(name):
-        # ``name`` is actually the decorated function.
-        return _make_entry(name)
-
-    return _make_entry
+    # ``@cleat_entry(...)`` (with parentheses, preferred). See
+    # _resolve_dual_form for why this is not inlined here.
+    return _resolve_dual_form(name, _make_entry)
 
 
 def virtual_object(name: str | None = None) -> Callable:
@@ -591,16 +629,13 @@ def virtual_object(name: str | None = None) -> Callable:
         handler.
     """
 
-    def _make_entry(func: Callable) -> Callable:
-        entry_name = name if name is not None else func.__name__
+    def _make_entry(func: Callable, explicit_name: str | None) -> Callable:
+        entry_name = explicit_name if explicit_name is not None else func.__name__
         decorated = cleat_entry(entry_name)(func)
         decorated._is_virtual_object = True  # type: ignore[attr-defined]
         return decorated
 
-    if callable(name):
-        return _make_entry(name)
-
-    return _make_entry
+    return _resolve_dual_form(name, _make_entry)
 
 
 def query_handler(name: str | None = None) -> Callable:
@@ -640,13 +675,10 @@ def query_handler(name: str | None = None) -> Callable:
         host runtime distinguishes queries by the ``_is_query_handler`` flag.
     """
 
-    def _make_entry(func: Callable) -> Callable:
-        entry_name = name if name is not None else func.__name__
+    def _make_entry(func: Callable, explicit_name: str | None) -> Callable:
+        entry_name = explicit_name if explicit_name is not None else func.__name__
         decorated = cleat_entry(entry_name)(func)
         decorated._is_query_handler = True  # type: ignore[attr-defined]
         return decorated
 
-    if callable(name):
-        return _make_entry(name)
-
-    return _make_entry
+    return _resolve_dual_form(name, _make_entry)

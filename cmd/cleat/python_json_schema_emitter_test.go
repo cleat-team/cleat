@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -111,6 +113,80 @@ def place_order(h: HostCalls, user_id: str, cart: list[int], address: Address, p
 	}
 	if len(wantRequired) > 0 {
 		t.Errorf("params.required is missing %v (priority correctly absent: it has a default)", wantRequired)
+	}
+}
+
+// TestComputePythonEntryPointSchemaWorksForTheBareDecoratorForm is cleat#2976.
+//
+// “@cleat_entry“ WITH NO PARENTHESES is the form “python-sdk/README.md“
+// documents and every one of the nine “python-sdk/examples/*.py“ uses. It was
+// also the form that produced no schema at all: the decorator's dual-form
+// branch passed the decorated FUNCTION into the slot the workflow NAME is read
+// from, so the registry was keyed by a function object, the emitter found no
+// entry, and “cleat build --target python“ reported Build SUCCESS while
+// writing no “.schema.json“ -- leaving start-input validation silently off.
+//
+// WHY THIS TEST AND NOT ONE ABOUT THE REGISTRY KEY. The SDK's own tests already
+// covered this form and they PASSED: test_entry.py's “test_cleat_entry_basic“
+// decorates with a bare “@cleat_entry“ and asserts the wrapper runs
+// end-to-end, which it did. The defect was never in what the wrapper does -- it
+// was in what the registry is keyed by, which only a reader of the registry can
+// see. So this asserts the artifact the build actually consumes, through the
+// same helper the build calls, and compares the two decorator forms against
+// each other rather than against a hand-written expectation: they address one
+// workflow, so a caller must not be able to tell which form it was written
+// with.
+func TestComputePythonEntryPointSchemaWorksForTheBareDecoratorForm(t *testing.T) {
+	skipIfNoCleatSDKPython(t)
+	t.Setenv("PYTHONPATH", filepath.Join(repoRoot(t), "python-sdk"))
+
+	const source = `
+from cleat_sdk.entry import cleat_entry
+from cleat_sdk.host_calls import HostCalls
+
+
+%s
+def place_order(h: HostCalls, user_id: str, priority: int = 1) -> str:
+    return "{}"
+`
+
+	bare := writePythonFixture(t, fmt.Sprintf(source, "@cleat_entry"))
+	paren := writePythonFixture(t, fmt.Sprintf(source, `@cleat_entry("place_order")`))
+
+	bareName, bareSchema, err := computePythonEntryPointSchema(bare, "place_order")
+	if err != nil {
+		t.Fatalf("computePythonEntryPointSchema on the BARE form: %v\n\n"+
+			"This is cleat#2976. `cleat build --target python` treats a schema-computation "+
+			"failure as NON-FATAL (see runBuildPython), so this error does not fail the "+
+			"build -- it silently drops the .schema.json sidecar and turns start-input "+
+			"validation off for the form every documented example uses.", err)
+	}
+	if bareName != "place_order" {
+		t.Errorf("bare form resolved the entry point as %q, want %q -- the decorator "+
+			"defaults to the function's own name, the same key the parenthesised form "+
+			"produces when it is given no explicit name", bareName, "place_order")
+	}
+
+	_, parenSchema, err := computePythonEntryPointSchema(paren, "place_order")
+	if err != nil {
+		t.Fatalf("computePythonEntryPointSchema on the parenthesised form (the control): %v", err)
+	}
+
+	// Compare decoded, not bytes: key order is the emitter's business, and a
+	// difference in whitespace is not a difference a caller can observe.
+	var bareDecoded, parenDecoded any
+	if err := json.Unmarshal(bareSchema, &bareDecoded); err != nil {
+		t.Fatalf("bare schema does not unmarshal: %v\n%s", err, bareSchema)
+	}
+	if err := json.Unmarshal(parenSchema, &parenDecoded); err != nil {
+		t.Fatalf("parenthesised schema does not unmarshal: %v\n%s", err, parenSchema)
+	}
+	if !reflect.DeepEqual(bareDecoded, parenDecoded) {
+		t.Errorf("the two decorator forms describe the same workflow differently:\n"+
+			"  bare  %s\n  paren %s\n"+
+			"A caller must not be able to tell which form the workflow was written with; "+
+			"before cleat#2976 only the parenthesised one produced a document at all.",
+			bareSchema, parenSchema)
 	}
 }
 

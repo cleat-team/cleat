@@ -355,3 +355,86 @@ class TestUnwrapResult:
 
         result = _unwrap_result(ResultStr())
         assert result == {"error": "not none"}
+
+
+# ---------------------------------------------------------------------------
+# The registry key, which is what the build reads
+# ---------------------------------------------------------------------------
+
+
+class TestTheRegistryKeyIsTheWorkflowName:
+    """cleat#2976: every decorator form must register under a NAME.
+
+    ``jsonschema_emitter._find_entry`` matches on the KEY of
+    ``module._cleat_entry_wrappers``, not on ``getattr(module, func_name)`` --
+    its own docstring says so. So the key is the address the build uses to find
+    a workflow, and it has to be a name in every form the SDK documents.
+
+    THE TESTS ABOVE DO NOT COVER THIS AND COULD NOT HAVE. ``test_cleat_entry_basic``
+    decorates with a bare ``@cleat_entry`` and asserts the wrapper runs
+    end-to-end -- which it did, because the defect was never in what the wrapper
+    does. It was in what the registry is keyed by, and only reading the registry
+    can see that; the build's side of it is asserted in
+    ``cmd/cleat/python_json_schema_emitter_test.go``.
+    """
+
+    @staticmethod
+    def _registry():
+        import sys
+
+        return getattr(sys.modules[__name__], "_cleat_entry_wrappers", {})
+
+    def test_a_bare_decorator_registers_under_the_functions_own_name(self):
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry
+        def bare_named_workflow(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        assert "bare_named_workflow" in self._registry(), (
+            "the bare form did not register under the function's name; keys were "
+            f"{list(self._registry())}"
+        )
+
+    def test_no_form_registers_under_a_function_object(self):
+        """The regression itself, stated as a property rather than a case.
+
+        Asserting one form's key would have missed the other two: the same
+        branch was copy-pasted into ``cleat_entry``, ``virtual_object`` and
+        ``query_handler``, so all three keyed the registry by a function object
+        when used bare.
+        """
+        from cleat_sdk.entry import cleat_entry, query_handler, virtual_object
+
+        @cleat_entry
+        def bare_regression_entry(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        @virtual_object
+        def bare_regression_object(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        @query_handler
+        def bare_regression_query(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        non_strings = [k for k in self._registry() if not isinstance(k, str)]
+        assert non_strings == [], (
+            "the registry is keyed by something that is not a name, so the schema "
+            f"emitter -- which matches on the key -- finds no entry for it: {non_strings}"
+        )
+
+    def test_the_parenthesised_form_still_registers_under_its_argument(self):
+        """The control: the fix must not have moved the explicit form's key."""
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry("ExplicitDifferentFromIdentifier")
+        def paren_control(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        assert "ExplicitDifferentFromIdentifier" in self._registry()
+        assert "paren_control" not in self._registry(), (
+            "the explicit name must win over the identifier, exactly as "
+            "TestComputePythonEntryPointSchemaUsesTheDecoratorsOwnName asserts on the "
+            "build side"
+        )
