@@ -38,7 +38,13 @@ var goFixtureExpectations = map[string]string{
 	// declared by a //cleat:require directive in that package rather than in
 	// this fixture. It must verify cleanly -- if it does not, the directive is
 	// not being read from imported packages again.
-	"dagguest":     "",
+	"dagguest": "",
+	// cleat#1983: the same shape one level over -- its only route to the five
+	// host calls the agent loop makes is cleat/agentworkflow's //cleat:require
+	// directive. It must verify cleanly, and the import check in
+	// wasm/a_workflow_agent_wires_its_imports_from_an_imported_package_test.go
+	// is what proves the five are actually wired.
+	"agentguest":   "",
 	"deferfunc":    "",
 	"durablesend":  "",
 	"fencereentry": "",
