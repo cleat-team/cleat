@@ -5,6 +5,70 @@ import (
 	"time"
 )
 
+// ExposureClass is one of a closed set of three, carried per workflow-definition
+// version (cleat#1986).
+//
+// The set is closed by the DATABASE as well: each dialect's workflow_defs.exposure
+// carries a CHECK over exactly these three values, added with the column in #2888.
+// So a value outside the set is refused at the column as well as here, and the two
+// lists have to agree -- the migration is the other half of this declaration.
+type ExposureClass string
+
+const (
+	// ExposureAuth is the DEFAULT and today's behaviour: reachable from the HTTP
+	// API with authentication required. Every row deployed before the column
+	// existed reads back as this, matching NOT NULL DEFAULT 'auth'.
+	ExposureAuth ExposureClass = "auth"
+
+	// ExposurePublic is reachable WITHOUT authentication, and only for a tenant an
+	// operator has opted in. A deploy that asks for it without that opt-in is
+	// refused rather than silently downgraded.
+	//
+	// NOTHING MAY SET THIS YET: the per-tenant opt-in it depends on does not exist
+	// (it is the last item of cleat#1986), so the deploy path refuses this class
+	// with a message naming the missing policy. That is deliberate rather than an
+	// oversight -- storing 'public' with no opt-in to check would be a definition
+	// that is one enforcement slice away from being world-readable.
+	ExposurePublic ExposureClass = "public"
+
+	// ExposureInternal is not reachable from the external HTTP surface at all, for
+	// any route that addresses the workflow. It remains reachable as a child
+	// workflow or by an in-engine signal, which never traverse ingress.
+	ExposureInternal ExposureClass = "internal"
+)
+
+// ParseExposure maps a string to an ExposureClass, reporting whether it is one of
+// the closed set. It exists so a caller can REFUSE an unknown class with a message
+// naming the accepted values, rather than storing something the database's CHECK
+// would reject later with a message naming a constraint.
+func ParseExposure(s string) (ExposureClass, bool) {
+	switch c := ExposureClass(s); c {
+	case ExposureAuth, ExposurePublic, ExposureInternal:
+		return c, true
+	}
+	return "", false
+}
+
+// OrDefault returns the class a store should WRITE when a caller set none: the
+// empty string becomes ExposureAuth, which is the column's own NOT NULL
+// DEFAULT 'auth'.
+//
+// It exists because the stores now always NAME the exposure column in their
+// INSERT, and a named column no longer receives the database's default -- it
+// receives whatever the caller supplied, and "" is not in the closed set the
+// CHECK enforces. Every deploy path that predates this column (and every caller
+// with no opinion) therefore has to be handed the default rather than the zero
+// value. Measured rather than reasoned: without this,
+// TestWorkflowDefDefaultsToTheAuthExposureClass fails on postgres with
+// `pq: new row for relation "workflow_defs" violates check constraint
+// "ck_workflow_defs_exposure" (23514)`.
+func (c ExposureClass) OrDefault() ExposureClass {
+	if c == "" {
+		return ExposureAuth
+	}
+	return c
+}
+
 type WorkflowDef struct {
 	Name       string            `json:"name"`
 	Version    int               `json:"version"`
@@ -40,6 +104,20 @@ type WorkflowDef struct {
 	// before this column existed, matching the NOT NULL DEFAULT false on
 	// all three dialects (migrations/*/007 or 006_input_validation_disabled).
 	InputValidationDisabled bool `json:"input_validation_disabled,omitempty"`
+
+	// Exposure is this version's exposure class (cleat#1986) -- one of the closed
+	// set declared above.
+	//
+	// NOT NULL DEFAULT 'auth' on all three dialects, so a version deployed before
+	// the column existed reads back as ExposureAuth, which is today's behaviour.
+	// That default is what makes this field safe to add ahead of its enforcement:
+	// every row carries a real class, and every existing row carries the one whose
+	// meaning is "what the server already does".
+	//
+	// Nothing reads it yet -- the enforcement slice is next (cleat#1986). Set only
+	// at deploy (cleatctl deploy --exposure); a source-level declaration, and the
+	// tightening-only rule that goes with it, are later slices.
+	Exposure ExposureClass `json:"exposure"`
 
 	// DisabledAt carries ADMISSION CONTROL, and only that. A disabled version
 	// cannot be started, cannot be routed to, cannot be pointed at by a tag,

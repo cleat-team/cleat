@@ -1103,7 +1103,7 @@ func TestMySQLStore_ListWorkflowDefs_All(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil, false},
+				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil, false, "auth"},
 			},
 		},
 	}, nil)
@@ -1122,7 +1122,7 @@ func TestMySQLStore_ListWorkflowDefs_ByName(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil, false, "auth"},
 			},
 		},
 	}, nil)
@@ -1140,7 +1140,7 @@ func TestMySQLStore_GetWorkflowDef_Found(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		queryRowOk("SELECT name, version, wasm_bytes",
 			"test-wf", int64(2), []byte("wasm-data"), int64(1), int64(0),
-			[]byte(`{"p":"1.0"}`), createdAt, nil, false, nil, false,
+			[]byte(`{"p":"1.0"}`), createdAt, nil, false, nil, false, "auth",
 		),
 	}, nil)
 	def, err := store.GetWorkflowDef(testCtx, "test-wf", 2)
