@@ -142,6 +142,33 @@ func (e *Engine) registeredLanguages() []string {
 	return langs
 }
 
+// replayAbortedBeforeGuest reports whether a failed checksum verification is
+// really an ABORTED replay rather than a mismatch, and returns the error to
+// surface if so (nil otherwise).
+//
+// Both execution paths run the verifier during pre-replay, and the verifier's
+// own reads are ordinary context-taking DB reads -- so a fence cancel
+// (cleat#2008 fix 1) or a worker shutdown arrives here as context.Canceled.
+// Reporting that as a checksum failure does three wrong things at once: it
+// mislabels the error, it counts the cancellation in
+// RecordReplayChecksumFailure, and it turns a hand-over into a fatal replay
+// error. Proceeding is no better, because every later read on that context
+// fails the same way. cleat#2942.
+func replayAbortedBeforeGuest(ctx context.Context, workflowID string, verr error) error {
+	// The context's own error is preferred as the WRAPPED cause when the
+	// context is why we are here: the verifier can return a plain
+	// "load history: ... context canceled" that does not wrap
+	// context.Canceled, and callers use errors.Is to tell a stopped replay from
+	// a broken one. The verifier's own text is still carried for the log.
+	if cerr := ctx.Err(); cerr != nil {
+		return fmt.Errorf("host: workflow %s: replay aborted before the guest ran: %v: %w", workflowID, verr, cerr)
+	}
+	if errors.Is(verr, context.Canceled) || errors.Is(verr, context.DeadlineExceeded) {
+		return fmt.Errorf("host: workflow %s: replay aborted before the guest ran: %w", workflowID, verr)
+	}
+	return nil
+}
+
 // executeWithBackend runs a workflow execution (fresh or replay) using the
 // given WasmBackend. The backend handles compilation and execution; the
 // Engine manages the execSession, history, timeouts, and result handling.
@@ -241,6 +268,9 @@ func (e *Engine) executeWithBackend(
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if verr := e.workflowEventVerifier(ctx, e.workflowID); verr != nil {
+				if aerr := replayAbortedBeforeGuest(ctx, e.workflowID, verr); aerr != nil {
+					return "", nil, nil, nil, nil, aerr
+				}
 				e.log().WarnContext(ctx, "checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", verr)
 				if e.Metrics != nil {
 					e.Metrics.RecordReplayChecksumFailure(ctx)
@@ -525,6 +555,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if err := e.workflowEventVerifier(ctx, e.workflowID); err != nil {
+				if aerr := replayAbortedBeforeGuest(ctx, e.workflowID, err); aerr != nil {
+					return "", nil, nil, nil, nil, aerr
+				}
 				e.log().WarnContext(ctx, "replay checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", err)
 				if e.Metrics != nil {
 					e.Metrics.RecordReplayChecksumFailure(ctx)

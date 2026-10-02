@@ -2309,6 +2309,43 @@ func (w *Worker) shuttingDown() bool {
 	return w.ctx.Err() != nil
 }
 
+// runWasStopped reports whether this execution was STOPPED rather than broken:
+// the worker is shutting down, or the run was fenced out to a later generation.
+//
+// Both mean the segment's own outcome describes nothing about the workflow -- a
+// fenced run's next durable call is refused (fencedRuns, via
+// WithCanStartNewWork), and a shutting-down worker's guest was told to stop --
+// so neither may be persisted as this run's result. The post-execute path has
+// handled the shutdown half since cleat#2285: release, do not fail.
+//
+// cleat#2942 is the fence half of the same rule plus the PRE-EXECUTE reads,
+// which had no guard at all. A fence cancels this execution's context
+// (cleat#2008 fix 1), that cancellation lands on ordinary context-taking reads,
+// and each of them turned it into a terminal failure -- which converts a
+// hand-over into an application failure the caller cannot tell from a real one.
+func (w *Worker) runWasStopped(wf *engine.WorkflowInstance) bool {
+	return w.shuttingDown() || w.runIsFenced(wf.ID)
+}
+
+// releaseIfStopped releases wf and reports whether it did, when this execution
+// was stopped rather than broken. Callers invoke it from an error path, before
+// recording any failure: a stopped execution's error describes the stopping,
+// not the run.
+//
+// "what" names the point of failure for the log, so a hand-over is visible
+// where it happened rather than only as an absence of failures.
+func (w *Worker) releaseIfStopped(wf *engine.WorkflowInstance, what string, err error) bool {
+	if !w.runWasStopped(wf) {
+		return false
+	}
+	w.logger.InfoContext(context.Background(),
+		"run was stopped rather than failing: releasing it for another worker instead of recording a failure",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "at", what,
+		"shutting_down", w.shuttingDown(), "fenced", w.runIsFenced(wf.ID), "error", err)
+	w.releaseWorkflow(wf)
+	return true
+}
+
 // shutdownTailDuration is how long gracefulShutdown waits after the hard-stop
 // for the aborted runs to unwind and write their suspend back, before it
 // releases whatever did not unwind and cancels (cleat#2287). It is short on
@@ -3287,6 +3324,13 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseForAnotherWorker(wf, fmt.Sprintf("history load: %v", err), "history_decrypt")
 			return
 		}
+		// A stopped worker or a fenced-out run must not have this read's
+		// failure written down as the run's own (cleat#2942). This read takes
+		// w.ctx, so the shutdown half is the reachable one here; the predicate
+		// covers both so a later context change cannot silently reintroduce it.
+		if w.releaseIfStopped(wf, "history load", err) {
+			return
+		}
 		w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "")
 		return
 	}
@@ -3541,6 +3585,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if w.tenantPools != nil && wf.TenantID != "" {
 		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
 		if err != nil {
+			// Same rule as the history load above: a stopped execution did not
+			// fail, so its read failures are not this run's outcome
+			// (cleat#2942).
+			if w.releaseIfStopped(wf, "tenant pool", err) {
+				return
+			}
 			w.logger.ErrorContext(context.Background(), "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("tenant pool: %v", err), engine.ErrUnknown.String(), "")
 			return
@@ -3696,6 +3746,19 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		w.logger.InfoContext(context.Background(), "worker shutting down: releasing the run for another worker instead of persisting its outcome",
 			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "errored", err != nil, "suspended", suspended != nil)
 		w.releaseWorkflow(wf)
+		return
+	}
+	// FENCED OUT: the same reasoning one generation later (cleat#2942). The
+	// fence cancelled this execution's context (cleat#2008 fix 1), so what came
+	// back describes a segment that was cut off rather than a workflow that
+	// failed -- an error may be the cancellation landing on a read the engine
+	// makes before the guest runs, and a "done" cannot be trusted either,
+	// because the guest's next durable call was refused. The release below is
+	// itself fenced on (id, worker, generation), so for a run another worker
+	// legitimately reclaimed this is a no-op that logs at debug -- which is
+	// exactly the "a lost fence is not an error" rule recordTerminalFailure's
+	// own doc states.
+	if w.releaseIfStopped(wf, "post-replay", err) {
 		return
 	}
 	if err != nil {
