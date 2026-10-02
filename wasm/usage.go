@@ -38,9 +38,20 @@ const PythonTarget = "python"
 var sdkHelperImports = map[string][]string{
 	"Saga.AddStepCall": {"cleat_call"},
 
-	// Saga.Run's own LogKV. The steps' calls are closures the workflow wrote,
-	// so they need nothing here.
-	"Saga.Run": {"cleat_log"},
+	// Saga.Run and Saga.RunWithResult share one body -- Run delegates to
+	// RunWithResult (cleat#2627) -- so both need the same imports: the saga's
+	// own LogKV, and the SetQueryState it publishes its progress with. The
+	// steps' calls are closures the workflow wrote, so they need nothing here.
+	//
+	// TWO KEYS, not one, because the analyzer sees the method the WORKFLOW
+	// calls: saga.Run(h) hits the first, saga.RunWithResult(h) the second.
+	// Before #2627 the saga made no SetQueryState call and order-lifecycle
+	// wrote its own in workflow code, which the ordinary scan caught. The saga
+	// makes it now, so it has to be declared here or the module builds, imports
+	// nothing, and publishes nothing at run time -- the failure this table
+	// exists to prevent, and one a host-side test cannot see.
+	"Saga.Run":           {"cleat_log", "set_query_state"},
+	"Saga.RunWithResult": {"cleat_log", "set_query_state"},
 
 	// Selector.Select calls five HostCalls methods -- DurableSleep, Now,
 	// AwaitSignals, PollSignal and AwaitChild -- and this list is the union of

@@ -111,7 +111,13 @@ func TestTheSDKHelperScanSeesBothRoutesToAHostCalls(t *testing.T) {
 		route string
 	}{
 		{"Selector.Select", "DurableSleep", "field"},
-		{"Saga.Run", "LogKV", "parameter"},
+		// Saga.RunWithResult, not Saga.Run: cleat#2627 moved the body there and
+		// left Run delegating, so Run makes no host call of its own and the scan
+		// no longer returns it. The ROUTE is what this control pins, and
+		// RunWithResult receives its HostCalls as a parameter exactly as Run
+		// did -- but the name has to follow the body, or the control stops
+		// exercising the parameter route while still passing.
+		{"Saga.RunWithResult", "LogKV", "parameter"},
 	} {
 		calls, ok := found[want.key]
 		if !ok {

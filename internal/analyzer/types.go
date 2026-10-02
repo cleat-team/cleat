@@ -200,12 +200,20 @@ func SDKDurableHelper(sel *types.Selection) bool {
 	// fixing only Select would have looked like fixing nothing.
 	case "Selector.Select", "Selector.AddTimer":
 		return true
-	// Saga.Run's own LogKV, which is not the steps' calls: those are closures
-	// the workflow wrote, so every layer already sees them. This is the one
-	// host call Run makes that no workflow wrote, and without it a saga's
-	// progress logging is silently dropped in any workflow that does not log
-	// on its own account.
-	case "Saga.Run":
+	// Saga.Run and Saga.RunWithResult share one body -- Run delegates to
+	// RunWithResult (cleat#2627) -- so both routes make the same host calls no
+	// workflow wrote: LogKV, and SetQueryState, which is how a saga now
+	// publishes its progress. The steps' calls are closures the workflow wrote,
+	// so every other layer already sees them.
+	//
+	// BOTH KEYS ARE LOAD-BEARING and neither implies the other: the analyzer
+	// sees the method the WORKFLOW writes, so saga.Run(h) consults one row and
+	// saga.RunWithResult(h) the other. Without the row a saga's logging is
+	// dropped and its published query state is silently empty, in any workflow
+	// that does not happen to make those calls on its own account -- which is
+	// the per-boundary SetQueryState call #2627 deleted from order-lifecycle,
+	// leaving the saga to make it.
+	case "Saga.Run", "Saga.RunWithResult":
 		return true
 	}
 	return false

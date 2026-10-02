@@ -202,8 +202,8 @@ func PlaceOrder(h cleat.HostCalls, input string) (string, error) {
 	// ---- The saga ----
 	//
 	// NO BOOKKEEPING HERE. The three lists this block used to maintain --
-	// completed, unwound, unwindFailed -- are now what Saga.Run returns and
-	// publishes itself, so the per-step appends and the step-boundary
+	// completed, unwound, unwindFailed -- are now what Saga.RunWithResult
+	// returns and publishes itself, so the per-step appends and the step-boundary
 	// SetQueryState calls are gone (cleat#2627). See SagaResult's doc comment
 	// for why they are three lists rather than two, and why "ran" is not
 	// "succeeded": that reasoning did not change, it just moved to where the
