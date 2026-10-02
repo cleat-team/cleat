@@ -91,5 +91,11 @@ func (s *apiServer) handleGetInstanceState(w http.ResponseWriter, r *http.Reques
 		s.writeError(w, 404, "workflow not found")
 		return
 	}
+	// cleat#1986 slice 2b: same 404 an unknown run gets, reusing the row just
+	// fetched. /api/instances/{id}/events reaches the same conclusion through
+	// runExists; this route does its own lookup and so needs its own guard.
+	if s.refuseIfInternalRunLoaded(w, r, st, wf, "workflow not found") {
+		return
+	}
 	s.writeJSON(w, 200, wf)
 }

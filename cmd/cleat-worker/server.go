@@ -628,6 +628,36 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, 500, err.Error())
 		return
 	}
+	// cleat#1986 slice 2b: an `internal` run must not appear in this list.
+	//
+	// This route is EXTERNAL and addresses runs, so a 404 on the routes that
+	// address one run is undone by a list that still shows it. A list cannot
+	// answer 404 -- it is not addressing one definition -- so it OMITS them.
+	//
+	// KNOWN LIMITATION, stated rather than hidden: the store applies offset and
+	// limit BEFORE this filter, so a page can come back shorter than the limit,
+	// and X-Total-Count (adjusted below) is the count of what this caller can
+	// see rather than the count the store scanned. Filtering in SQL is the right
+	// repair and is not this slice; filed as cleat#3009. It is correct for the
+	// sizes at which a tenant lists runs and wrong at none of them in the
+	// direction that matters -- it never shows an internal run.
+	internal, ierr := s.internalDefinitionNames(r.Context(), st)
+	if ierr != nil {
+		// Fail closed: an unreadable definition set cannot be filtered, and an
+		// unfiltered list would show every internal run.
+		s.writeError(w, 500, ierr.Error())
+		return
+	}
+	if len(internal) > 0 {
+		kept := workflows[:0]
+		for _, wf := range workflows {
+			if !internal[wf.DefName] {
+				kept = append(kept, wf)
+			}
+		}
+		total -= len(workflows) - len(kept)
+		workflows = kept
+	}
 	// Header rather than an envelope: the body stays a bare array, so no
 	// existing caller breaks. handleGetInstanceEvents established this shape.
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
@@ -712,7 +742,7 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 		s.handleSetRoutingRule(w, r, id)
 	case len(parts) == 3 && parts[1] == "routing" && r.Method == http.MethodDelete:
 		// DELETE /api/workflows/:name/routing/:ruleID
-		s.handleRemoveRoutingRule(w, r, parts[2])
+		s.handleRemoveRoutingRule(w, r, id, parts[2])
 	case len(parts) == 2 && parts[1] == "tags" && r.Method == http.MethodGet:
 		// GET /api/workflows/:name/tags
 		s.handleListWorkflowTags(w, r, id)
@@ -739,6 +769,9 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	// Check if this is a query state request.
@@ -787,6 +820,9 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 func (s *apiServer) handleGetTerminalRun(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	wf, err := st.GetTerminalRun(r.Context(), id)
@@ -967,6 +1003,21 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		s.writeError(w, 409, fmt.Sprintf(
 			"version %d of %q is deprecated and cannot be started", targetVersion, name))
+		return
+	}
+
+	// cleat#1986 slice 2b: an `internal` definition is not startable from the
+	// external HTTP surface, and answers exactly what an undeployed name gets.
+	//
+	// AFTER routing and AFTER the deprecation check, on the same reasoning the
+	// deprecation check uses: `targetVersion` is whatever actually chose the
+	// version -- latest, or a routing rule naming one explicitly -- so checking
+	// any earlier would test a version the request is not going to start. The
+	// class is per VERSION, so this has to be the version that would run.
+	//
+	// Before every run-creating line below, so no run is created and then
+	// abandoned.
+	if s.refuseIfInternalDef(w, r, st, name, targetVersion, "workflow definition not found") {
 		return
 	}
 
@@ -1337,6 +1388,9 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "not found") {
+		return
+	}
 	var req struct {
 		SignalName string `json:"signal_name"`
 		Payload    string `json:"payload"`
@@ -1448,6 +1502,9 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "not found") {
+		return
+	}
 	var req struct {
 		Reason string `json:"reason"`
 		// Preemptive selects the cleat#1153 behaviour: stop the workflow and
@@ -1549,6 +1606,16 @@ func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.
 		s.writeError(w, 404, "workflow not found")
 		return false
 	}
+	// cleat#1986 slice 2b: an `internal` run is NOT FOUND, not forbidden.
+	//
+	// This is the shared "does this run exist" gate, so putting the class check
+	// here covers every route that asks the question the same way -- and answers
+	// with the byte-identical body the route already uses for a run that is not
+	// there, which is the whole point of 404 over 403. It reuses `wf`, so the
+	// gate costs no extra read.
+	if s.refuseIfInternalRunLoaded(w, r, st, wf, "workflow not found") {
+		return false
+	}
 	return true
 }
 
@@ -1594,6 +1661,21 @@ func (s *apiServer) defExists(w http.ResponseWriter, r *http.Request, st engine.
 	if len(defs) == 0 {
 		s.writeError(w, 404, "workflow definition not found")
 		return false
+	}
+	// cleat#1986 slice 2b: a definition with ANY `internal` version is not found
+	// on the name-scoped routes, and answers with the same body an undeployed
+	// name gets.
+	//
+	// ANY version, not the latest: these routes address the definition BY NAME
+	// and take no version (that is why defExists lists rather than fetches), so
+	// the conservative reading of "not reachable for any route that addresses
+	// the workflow" is the one that cannot be sidestepped by deploying a newer
+	// non-internal version under the same name.
+	for _, d := range defs {
+		if d.Exposure.OrDefault() == engine.ExposureInternal {
+			s.writeError(w, 404, "workflow definition not found")
+			return false
+		}
 	}
 	return true
 }
@@ -1644,6 +1726,9 @@ func (s *apiServer) handleListRoutingRules(w http.ResponseWriter, r *http.Reques
 func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request, name string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
 		return
 	}
 	var req struct {
@@ -1699,9 +1784,12 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Request, ruleID string) {
+func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Request, name, ruleID string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
 		return
 	}
 	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
@@ -1777,6 +1865,9 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
+		return
+	}
 	var req struct {
 		Tag     string `json:"tag"`
 		Version int    `json:"version"`
@@ -1850,6 +1941,9 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Request, name, tag string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
 		return
 	}
 	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
@@ -2032,6 +2126,9 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
+		return
+	}
 	// Look up the workflow instance to get def_name and def_version.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
@@ -2100,6 +2197,9 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
+		return
+	}
 	callers, err := st.GetAllowedSignalCallers(r.Context(), id)
 	if err != nil {
 		// 404 for a workflow this tenant cannot see, same as
@@ -2132,6 +2232,9 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	var req struct {
@@ -2185,6 +2288,9 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "no such promise for this workflow") {
+		return
+	}
 	var req struct {
 		Result string `json:"result"`
 	}
@@ -2213,6 +2319,9 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, id, promiseID string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "no such promise for this workflow") {
 		return
 	}
 	var req struct {
@@ -2266,6 +2375,9 @@ func isTerminalStatus(status string) bool {
 func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id, updateName string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	// Verify the workflow exists.
@@ -2659,6 +2771,13 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, 500, err.Error())
 		return
 	}
+
+	// cleat#1986 slice 2b: this route enumerates every definition the caller's
+	// tenant owns, so it discloses an `internal` one -- its name, its versions
+	// and its active-instance counts. Same class as the run list and the
+	// OpenAPI document: filtered rather than refused, because a collection
+	// cannot answer 404 for one of its members.
+	defs = withoutInternalDefs(defs)
 
 	// Load memory stats for enrichment.
 	memoryStats := make(map[string]*engine.WorkflowMemoryStats)

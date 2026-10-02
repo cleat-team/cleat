@@ -51,7 +51,16 @@ func (s *apiServer) handleOpenAPIDocument(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, buildOpenAPIDocument(defs))
+	// cleat#1986 slice 2b: an `internal` definition is not published here.
+	//
+	// This route is on the external surface (mounted WITHOUT adminAPIOnly) and
+	// enumerates every definition the caller's tenant owns, so it discloses an
+	// internal definition's existence and its entry-point schemas -- the same
+	// disclosure the 404 on the per-definition routes exists to prevent, and a
+	// document a client is generated from would carry calls for it. Same
+	// class as the run list, filtered rather than refused because a document
+	// cannot answer 404 for one of the definitions inside it.
+	s.writeJSON(w, http.StatusOK, buildOpenAPIDocument(withoutInternalDefs(defs)))
 }
 
 // buildOpenAPIDocument assembles the document from the caller's definitions.
