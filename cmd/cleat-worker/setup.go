@@ -3971,6 +3971,16 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
 	w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
 
+	// cleat#2942: the generations as SENT, kept so the fence's WARN below can
+	// print the generation the store judged against beside the one it reads
+	// live from w.inflight. The two differ exactly when a same-worker
+	// re-claim landed while this call was in flight, and today's message
+	// prints only the live one -- so it reads as a run superseded by itself.
+	sentGeneration := make(map[string]int64, len(runs))
+	for _, r := range runs {
+		sentGeneration[r.WorkflowID] = r.Generation
+	}
+
 	for _, id := range lost {
 		wfAny, ok := w.inflight.Load(id)
 		wf, _ := wfAny.(*engine.WorkflowInstance)
@@ -3992,7 +4002,8 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 			continue
 		}
 		w.logger.WarnContext(w.ctx, "execution fenced out: run superseded by a later generation",
-			"worker_id", w.id, "workflow_id", id, "def_name", defName, "generation", generation)
+			"worker_id", w.id, "workflow_id", id, "def_name", defName,
+			"sent_generation", sentGeneration[id], "generation", generation)
 		w.Metrics.RecordExecutionFencedOut(w.ctx, defName)
 		// This, not cancel() below, is what stops the NEXT durable call --
 		// see fencedRuns' doc comment. Set only here, alongside the execCancel
