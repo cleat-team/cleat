@@ -26,7 +26,7 @@ is where a client should convert anything.
 
 Build (the test does this):
 
-    cleat build --target python --entry agent_client.py:run_agent_client \\
+    cleat build --target python --entry agent_client.py:run_agent_client \
       -o /tmp/out testdata/agentclientpy/agent_client.py
 """
 

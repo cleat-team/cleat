@@ -19,7 +19,7 @@ Requires the agent workflow deployed under the name ``agent``:
 
 Usage:
     cleat build --target python --entry agent.py:research_agent
-    cleat run --wasm research_agent.wasm --entry-point research_agent \\
+    cleat run --wasm research_agent.wasm --entry-point research_agent \
       --input '{"topic": "Compare Temporal, DBOS, and Cleat"}'
 """
 

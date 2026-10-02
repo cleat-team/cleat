@@ -44,7 +44,17 @@ var goFixtureExpectations = map[string]string{
 	// directive. It must verify cleanly, and the import check in
 	// wasm/a_workflow_agent_wires_its_imports_from_an_imported_package_test.go
 	// is what proves the five are actually wired.
-	"agentguest":   "",
+	"agentguest": "",
+	// cleat#1983: the Go half of the acceptance test's CLIENT. Its only route
+	// to ChildWorkflow/AwaitChild is agentworkflow.RunAsChild, so like
+	// agentguest it depends on the directive being read from an imported
+	// package rather than on anything in this file.
+	"agentclient": "",
+	// cleat#1983: the workflow tool's child in the same test -- the fixture the
+	// crash scenario starts through ChildWorkflow and counts the runs of. One
+	// DurableCall and nothing exotic; listed because a fixture holding Go files
+	// that is not listed is a fixture nothing checks.
+	"summarise":    "",
 	"deferfunc":    "",
 	"durablesend":  "",
 	"fencereentry": "",
