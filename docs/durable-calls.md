@@ -207,8 +207,15 @@ should pin its MySQL session to UTC — which observes no DST, so there is no tr
 overshoot across — by adding `time_zone` to `--db`'s DSN:
 
 ```
---db "mysql://user:pass@tcp(host:3306)/cleat?parseTime=true&time_zone=%27%2B00%3A00%27"
+--db "user:pass@tcp(host:3306)/cleat?parseTime=true&time_zone=%27%2B00%3A00%27"
 ```
+
+No `mysql://` scheme prefix: `go-sql-driver/mysql`'s own DSN parser does not strip one, so it
+reads as the start of the username, and the connection is refused as that literal user
+("Access denied for user 'mysql'@…") — reproduced directly, both on the main pool and on
+`MySQLStoreFactory.OpenIsolatedStore`'s per-tenant pool (cleat-review, #2935). The bare
+`user:pass@tcp(host:port)/db?params` form is what `cmd/cleat-worker` and every store factory
+actually connect with.
 
 The driver passes an unrecognised DSN parameter straight through as a session variable
 (`go-sql-driver/mysql`'s `handleParams`, `SET time_zone = <value>`), so the value must be the
