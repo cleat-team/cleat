@@ -1,0 +1,112 @@
+# ---------------------------------------------------------------------------
+# OpenAPI generated-client check (cleat#2972, cleat#1980 acceptance item 3)
+#
+# Generates a TypeScript client from the worker's own /api/openapi.json and
+# requires it to type-check a correct call and to REFUSE a misspelled required
+# field:
+#
+#   "A TypeScript client generated from it type-checks a correct call and
+#    fails to compile on a misspelled field."
+#
+# The endpoint itself landed in cleat#2971; before that nothing served
+# /api/openapi.json on develop, so this could not exist.
+#
+# ---------------------------------------------------------------------------
+# WHY A SEPARATE WORKFLOW, not a job inside ci.yml
+#
+# ci.yml's triggers, concurrency group and check count are load-bearing for
+# every stream: the merge gate is LITERAL CLEAN, so a check that is added to
+# that file and later flakes blocks everybody's merges. Keeping this in its own
+# file leaves ci.yml untouched BY CONSTRUCTION rather than by care, and lets
+# this check be path-filtered without narrowing anyone else's coverage.
+#
+# ---------------------------------------------------------------------------
+# THIS IS NOT A REQUIRED CONTEXT, and the moment it becomes one, it needs the
+# `merge_group` trigger. A required check is evaluated against the PROJECTED
+# tip on a temporary `gh-readonly-queue/...` ref, which fires `merge_group` and
+# NOT `pull_request`. Without that trigger the check never starts in queue
+# context, the queue waits for a status that cannot arrive, and NOTHING MERGES
+# with no check going red. Every workflow in this directory that owns a
+# required context carries that trigger and a comment saying so.
+#
+# ---------------------------------------------------------------------------
+# THE SCRIPT'S EXIT STATUS IS THE POINT, so it is not swallowed here:
+#
+#   0  the document supports a typed client
+#   1  a finding about the DOCUMENT (the generated types accept a call the
+#      endpoint would reject, or reject one it would accept)
+#   2  the check could not establish what it was measuring -- no node, the
+#      build failed, no sidecar, no document, the generator failed
+#
+# 2 is a failure of the CHECK, not of the document, and it must not be read as
+# a pass. That distinction is why the script has three statuses rather than
+# two: a check that measured nothing agrees with every tree.
+#
+# ---------------------------------------------------------------------------
+# WHAT A GREEN HERE DOES NOT COVER is stated in the script's own header (the
+# sidecar read in `cleatctl deploy`, the deploy, and the HTTP routing
+# registration). The build -> deploy join is cleat#1980's item 1 and is not
+# claimed by this check.
+# ---------------------------------------------------------------------------
+name: OpenAPI Generated Client Check
+
+on:
+  pull_request:
+    # No `edited`, deliberately, and the reasoning is not "the guard does not
+    # require it". scripts/check-workflow-pr-triggers.sh enforces `edited` only
+    # on workflows with a `branches:` filter (its own line 21: a workflow with
+    # none "needs nothing"), and this has none -- so the guard is silent here
+    # rather than approving. The retarget hazard it exists for can reach a
+    # `paths:` filter too, because retargeting changes the diff and therefore
+    # the path set. That is accepted rather than overlooked: this check is NOT
+    # a required context, so a miss cannot merge anything unverified on its
+    # own, and the next push runs it. Adding `edited` would re-run a ~2 minute
+    # job on every title and body edit, which is the cost that guard's own
+    # header weighs and declines to impose generally.
+    types: [opened, synchronize, reopened]
+    # Path-filtered so this runs where it can disagree and stays out of the way
+    # elsewhere. Every path the check reads is listed, including its own files
+    # -- a workflow that does not run on its own changes is a workflow whose
+    # changes are unverified.
+    paths:
+      - 'cmd/cleat-worker/**'
+      - 'cmd/cleat/**'
+      - 'cmd/cleatctl/**'
+      - 'internal/jsonschema/**'
+      - 'internal/analyzer/**'
+      - 'testdata/optionalparam/**'
+      - 'scripts/run-openapi-client-check.sh'
+      - 'scripts/openapi-client-check/**'
+      - '.github/workflows/openapi-client.yml'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openapi-client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generated-client:
+    name: OpenAPI generated client
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # The script pins openapi-typescript and typescript EXACTLY (env-
+      # overridable for a deliberate bump). A floating generator version turns
+      # "the document changed" into "the tool changed", and this check exists
+      # to make a statement about the document.
+      - name: Generate a client from /api/openapi.json and compile it
+        run: bash scripts/run-openapi-client-check.sh
