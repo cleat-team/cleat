@@ -1,4 +1,4 @@
-cmd/cleat/templates/agent/workflow.go	func AgentLoop
+cmd/cleat/templates/agent/workflow.go	func ResearchAgent
 engine/db.go	func PostgresStore.SetSyncCommitOff
 engine/engine.go	func Engine.EncryptSensitivePayloads
 engine/engine.go	func Engine.Encryption
