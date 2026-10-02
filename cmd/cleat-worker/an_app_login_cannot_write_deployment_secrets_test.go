@@ -4,7 +4,7 @@ package main
 // since the baseline (migrations/postgres/001_schema.sql); MySQL and SQL Server had no
 // application login at all, so the one login every worker used could write it too
 // (docs/how-to/use-deployment-secrets.md used to say exactly that -- "no equivalent role
-// split to revoke from"). migrations/{mysql,mssql}/006_app_login.sql adds cleat_app to
+// split to revoke from"). migrations/{mysql,mssql}/007_app_login.sql adds cleat_app to
 // both. This proves the new logins on real databases rather than reading the SQL and
 // trusting it: a GRANT that silently failed, or a MySQL statement that (per the
 // migration's own comment) accidentally granted at the database level instead of per
@@ -153,7 +153,7 @@ func writeProbeStmt(dialect string) string {
 	}
 }
 
-// mysqlAppRoleDSN gives the MySQL cleat_app login (migrations/mysql/006_app_login.sql)
+// mysqlAppRoleDSN gives the MySQL cleat_app login (migrations/mysql/007_app_login.sql)
 // a password and unlocks it -- the ACCOUNT LOCK equivalent of PostgreSQL's NOLOGIN,
 // see pgAppRoleDSN -- and returns the DSN the worker connects with.
 func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
@@ -171,7 +171,7 @@ func mysqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
 }
 
 // mssqlAppRoleDSN gives the SQL Server cleat_app login
-// (migrations/mssql/006_app_login.sql) a password and ENABLEs it -- it is created
+// (migrations/mssql/007_app_login.sql) a password and ENABLEs it -- it is created
 // DISABLED, the same NOLOGIN-shaped gap pgAppRoleDSN documents for PostgreSQL -- and
 // returns the DSN the worker connects with.
 func mssqlAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {

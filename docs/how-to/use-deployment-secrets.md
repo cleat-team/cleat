@@ -203,7 +203,7 @@ DELETE on this table — only SELECT, so a worker can still resolve a secret at
 call time. PostgreSQL has had this since the baseline
 (`migrations/postgres/001_schema.sql`, folded in from the pre-compaction
 `005_app_role.sql`); MySQL and SQL Server gained their own `cleat_app` in
-`migrations/{mysql,mssql}/006_app_login.sql` (cleat#2203, owner decision 4A on
+`migrations/{mysql,mssql}/007_app_login.sql` (cleat#2203, owner decision 4A on
 #1992, which had deferred it rather than building it with the rest of this
 table).
 

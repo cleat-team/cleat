@@ -247,7 +247,7 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	// namespace below it -- and `scratchMySQLDB` gives every test database its own
 	// generated name (cleat#2203: TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL
 	// built two scratch databases from the identical chain and reported every one of
-	// migrations/mysql/006_app_login.sql's GRANTs as a difference, because the name
+	// migrations/mysql/007_app_login.sql's GRANTs as a difference, because the name
 	// `table_schema` resolves to was never the same string twice). Filtering on
 	// `table_schema = DATABASE()` already scopes this to the connection's own database,
 	// so the name itself adds nothing a reader could use to tell two grants apart.
