@@ -2049,7 +2049,14 @@ type Worker struct {
 	// other engine-side reads that take Replay's own ctx argument directly --
 	// but it is NOT what stops the next durable call; see fencedRuns below
 	// for why and what does.
-	execCancel sync.Map // map[workflowID]context.CancelFunc
+	//
+	// The value is a *execRegistration, which carries the GENERATION it
+	// belongs to and is a pointer -- comparable, which sync.Map's
+	// CompareAndDelete requires and a bare context.CancelFunc is not. Both the
+	// fence and deregistration have to tell one generation's entry from a
+	// successor's for the same id; see execRegistration's doc comment
+	// (cleat#2942).
+	execCancel sync.Map // map[workflowID]*execRegistration
 
 	// fencedRuns is set for a workflow ID the moment its fenced heartbeat
 	// reports the run lost, and is what freshCall actually refuses on via
@@ -2078,7 +2085,12 @@ type Worker struct {
 	// affected by this. fencedRuns reuses that same proven call site for
 	// decision 1, scoped to the one run rather than every run this worker
 	// holds.
-	fencedRuns sync.Map // map[workflowID]struct{}
+	//
+	// cleat#2942: the value is the generation this marker belongs to, not an
+	// empty struct, so a run's own teardown can CompareAndDelete exactly its
+	// own marker. A predecessor deregistering must not clear a marker a
+	// successor for the same id set.
+	fencedRuns sync.Map // map[workflowID]int64
 
 	// lastHeartbeatOK is the UnixNano of the last heartbeatAndFenceInFlight
 	// call that could actually ask the store -- a successful
@@ -3004,11 +3016,49 @@ func (w *Worker) dispatchLoop() {
 	}
 }
 
+// execRegistration is what execCancel maps a workflow id to: the cancel func
+// for the execution registered under that id, tagged with the generation it
+// belongs to.
+//
+// The tag exists because the maps the heartbeat fence reads are keyed by
+// wf.ID alone while the fence asks a (id, generation) question. A suspend
+// makes a worker re-claim its OWN run milliseconds after releasing it, and
+// claiming Stores by wf.ID, so a successor's registration silently replaces
+// the judged one in place; the fence then cancels the execution that just
+// claimed, which dies in its pre-replay reads and is reported as a failed run
+// rather than handed over (cleat#2942). The generation lets the fence see that
+// the entry it loaded is not the one it judged, and lets a run's teardown
+// CompareAndDelete its own entry rather than a successor's.
+//
+// A pointer rather than the struct by value because sync.Map.CompareAndDelete
+// requires a comparable value, and the struct holds a context.CancelFunc (a
+// func type, which is not comparable).
+type execRegistration struct {
+	generation int64
+	cancel     context.CancelFunc
+}
+
+// deregisterExecution drops this execution's own entries from the maps the
+// fence reads.
+//
+// Every one is a CompareAndDelete by ENTRY, never a Delete by id: a same-worker
+// re-claim Stores a successor's registration under the same wf.ID, so an
+// id-only Delete here would tear down a run that is still executing. This is
+// the deferred half of the same root cause as the fence cancelling the wrong
+// generation (cleat#2942).
+func (w *Worker) deregisterExecution(wf *engine.WorkflowInstance, reg *execRegistration) {
+	w.inflight.CompareAndDelete(wf.ID, wf)
+	w.fencedRuns.CompareAndDelete(wf.ID, wf.Generation)
+	w.execCancel.CompareAndDelete(wf.ID, reg)
+}
+
 func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	defer w.wg.Done()
+	// execEngines stays id-keyed on purpose: unlike the three maps below it
+	// carries no fence decision, and this execution uses its own local `eng`
+	// for the rest of the function -- a successor losing this lookup entry
+	// costs a debug handle, not a wrong cancellation (cleat#2942).
 	defer w.execEngines.Delete(wf.ID)
-	defer w.inflight.Delete(wf.ID)
-	defer w.fencedRuns.Delete(wf.ID)
 
 	// cleat#2008: this execution's OWN context, cancelled independently of
 	// every other execution and of w.ctx, the moment its fenced heartbeat
@@ -3022,8 +3072,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// w.inflight (and so eligible to be heartbeat) but has no cancel func for
 	// the heartbeat loop to call.
 	execCtx, execCancel := context.WithCancel(w.ctx)
-	w.execCancel.Store(wf.ID, execCancel)
-	defer w.execCancel.Delete(wf.ID)
+	// The entry carries its generation and is a pointer so that both the fence
+	// and deregistration identify THIS registration rather than whatever a
+	// successor has since Stored under the same id (cleat#2942).
+	reg := &execRegistration{generation: wf.Generation, cancel: execCancel}
+	w.execCancel.Store(wf.ID, reg)
+	defer w.deregisterExecution(wf, reg)
 	defer execCancel()
 
 	defer func() {
@@ -3982,13 +4036,15 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	}
 
 	for _, id := range lost {
+		sentGen := sentGeneration[id]
+
 		wfAny, ok := w.inflight.Load(id)
+		if !ok {
+			continue
+		}
 		wf, _ := wfAny.(*engine.WorkflowInstance)
-		var defName string
-		var generation int64
-		if ok && wf != nil {
-			defName = wf.DefName
-			generation = wf.Generation
+		if wf == nil {
+			continue
 		}
 		cancelAny, ok := w.execCancel.Load(id)
 		if !ok {
@@ -3997,21 +4053,39 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 			// returning. Nothing to cancel.
 			continue
 		}
-		cancel, ok := cancelAny.(context.CancelFunc)
-		if !ok {
+		reg, ok := cancelAny.(*execRegistration)
+		if !ok || reg == nil {
+			continue
+		}
+		// cleat#2942: judge the fence against the generation SENT, not the one
+		// live in these maps now. A suspend makes this worker re-claim its OWN
+		// run milliseconds later, and claiming Stores by wf.ID, so a successor
+		// overwrites both entries in place. If either has moved to a later
+		// generation, the hand-over this fence exists to perform has ALREADY
+		// happened locally: nothing of the judged generation is left to stop,
+		// and cancelling here would kill the execution that just claimed --
+		// which then dies in its pre-replay reads and (engine/executor.go:249)
+		// is surfaced as a fatal "checksum verification failed", failing a run
+		// that should simply have been handed over.
+		if wf.Generation != sentGen || reg.generation != sentGen {
+			w.logger.WarnContext(w.ctx, "heartbeat: run was re-claimed while the fence was deciding; not fencing",
+				"worker_id", w.id, "workflow_id", id, "def_name", wf.DefName,
+				"sent_generation", sentGen, "generation", wf.Generation)
 			continue
 		}
 		w.logger.WarnContext(w.ctx, "execution fenced out: run superseded by a later generation",
-			"worker_id", w.id, "workflow_id", id, "def_name", defName,
-			"sent_generation", sentGeneration[id], "generation", generation)
-		w.Metrics.RecordExecutionFencedOut(w.ctx, defName)
+			"worker_id", w.id, "workflow_id", id, "def_name", wf.DefName,
+			"sent_generation", sentGen, "generation", wf.Generation)
+		w.Metrics.RecordExecutionFencedOut(w.ctx, wf.DefName)
 		// This, not cancel() below, is what stops the NEXT durable call --
 		// see fencedRuns' doc comment. Set only here, alongside the execCancel
 		// that proves the execution is still registered, so a run that has
 		// already finished (and deregistered) by the time this loop reaches
-		// it never gets an entry nothing would go on to delete.
-		w.fencedRuns.Store(id, struct{}{})
-		cancel()
+		// it never gets an entry nothing would go on to delete. The value is
+		// the generation judged, so the executing run's own CompareAndDelete
+		// removes only its own marker (cleat#2942).
+		w.fencedRuns.Store(id, sentGen)
+		reg.cancel()
 	}
 	return true
 }

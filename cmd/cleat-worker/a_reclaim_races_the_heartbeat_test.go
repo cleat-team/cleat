@@ -44,7 +44,7 @@ func reclaimRacingStore(w **Worker, id string, newGen int64, successorCtx *conte
 			var cancel context.CancelFunc
 			*successorCtx, cancel = context.WithCancel(context.Background())
 			(*w).inflight.Store(id, &engine.WorkflowInstance{ID: id, DefName: "test-def", Generation: newGen})
-			(*w).execCancel.Store(id, cancel)
+			(*w).execCancel.Store(id, &execRegistration{generation: newGen, cancel: cancel})
 			return []string{id}, nil
 		},
 	}

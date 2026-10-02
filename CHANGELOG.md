@@ -177,6 +177,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The heartbeat fence could cancel the execution it had NOT judged, when this worker re-claimed its
+  own run after a suspend.** `heartbeatAndFenceInFlight` snapshots the in-flight set and only then asks
+  the store which runs were superseded; a suspend makes the worker re-claim its OWN run milliseconds
+  later, and claiming Stores by `wf.ID`, so the successor's registration silently replaced the judged
+  one in the three maps the fence reads. The fence then read the generation live and cancelled the
+  execution that had just claimed — which died in its pre-replay reads, and `engine/executor.go:249`
+  reported the resulting `context.Canceled` as a fatal "checksum verification failed", failing a run
+  that should simply have run on. The fence now judges against the generation it SENT rather than the
+  one live in the maps, and a run's teardown deregisters with `sync.Map.CompareAndDelete` of its own
+  entry instead of a `Delete` by id, so a predecessor finishing can no longer remove a successor's
+  registration either. The fence's WARN now also carries `sent_generation` beside `generation`, so a
+  hit reads as the re-claim it is rather than as a run superseded by itself. **Scoped to the fence and
+  its maps:** the general conversion of a fence cancel into a failed run (`engine/executor.go:249`) is
+  a separate change and is not made here. (cleat#2942)
+
 - **`llm.chat` priced a model it did not recognise as one of the provider's mid-range models,
   silently, in both directions at once** — a spend ceiling (`Cost` is what it enforces against)
   permitted 5x the intended spend on an under-priced model and tripped ~16x early on an

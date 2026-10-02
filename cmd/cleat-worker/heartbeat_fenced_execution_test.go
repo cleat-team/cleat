@@ -26,7 +26,7 @@ import (
 func registerInflightExecution(w *Worker, id, defName string, generation int64) context.Context {
 	w.inflight.Store(id, &engine.WorkflowInstance{ID: id, DefName: defName, Generation: generation})
 	execCtx, execCancel := context.WithCancel(context.Background())
-	w.execCancel.Store(id, execCancel)
+	w.execCancel.Store(id, &execRegistration{generation: generation, cancel: execCancel})
 	return execCtx
 }
 
