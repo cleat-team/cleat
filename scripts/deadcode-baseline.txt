@@ -12,6 +12,7 @@ cmd/cleat-worker	field backoffUntil
 cmd/cleat-worker	field circuitOpen
 cmd/cleat-worker	func (*Worker).waitForDB
 cmd/cleat-worker	func (*healthTracker).maxAge
+cmd/cleat-worker	func askInternalHolds
 cmd/cleat-worker	func baseDSNFromDSN
 cmd/cleat-worker	var lastFreshStepCount
 cmd/cleatctl	func printCheckDBUsage
