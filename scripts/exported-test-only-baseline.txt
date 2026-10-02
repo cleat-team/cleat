@@ -70,7 +70,6 @@ engine/version_metrics.go	func LogStaleAlerts
 engine/versioned_loader.go	func NewWorkflowLoader
 engine/wasm_cache.go	func NewWASMCache
 engine/wasm_disk_cache.go	func WasmDiskCache.LookupBytes
-engine/worker_registry.go	func WorkerRegistry.ListLive
 internal/telemetry/tracing.go	func InitTracing
 migration/catalogdiff/catalogdiff.go	func AssertNoPluginObjects
 plugin/capabilities.go	func DefaultLimits

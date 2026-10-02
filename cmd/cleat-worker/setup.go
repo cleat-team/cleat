@@ -4755,12 +4755,6 @@ func (w *Worker) reaperLoop() {
 // exactly as it was before any of this existed. Only an explicit, authenticated
 // "held: true" from the named holder removes a row from a tick's sweep.
 
-// internalHoldsHTTPClient dials another worker's --internal-addr listener. One
-// shared client rather than one per tick or per ask, so its connection pool is
-// what amortises the round trips; every deadline is supplied per call by the
-// context (see askHolders), so it carries no configuration of its own.
-var internalHoldsHTTPClient = &http.Client{}
-
 // askerFunc asks one worker whether it still holds one run at one generation.
 // A function rather than a direct askInternalHolds call so the split and the
 // ask phase are both testable without a live peer -- the tests pass a stub.
@@ -4939,8 +4933,27 @@ func (w *Worker) askHolders(ctx context.Context, questions []holderQuestion, ask
 // held=false, and the error it returns is nil by construction; it is dropped
 // here as well so no future caller can mistake "could not ask" for "must not
 // reclaim".
+//
+// ONE CLIENT PER ASK, AND EGRESS-GUARDED -- not the stock client this started
+// as. A worker address is a cluster-internal name, so it is RFC1918 by
+// construction; the absolute floor would refuse it, and the tree-wide guard
+// (plugins/every_plugin_routes_its_egress_through_the_guard_test.go) requires
+// every http.Client here to carry an explicit Transport rather than the
+// default, so an unguarded one is a build failure as well as a denied dial.
+//
+// The grant is the host being dialled and nothing else, which is the
+// OPERATOR-named side of that guard's line: the address comes from
+// --worker-service-name, never from a guest. A pooled client could not carry a
+// per-host exempt set, so this is built per ask -- the same shape, and the same
+// reason, as forwardToService's client. See service_egress.go.
 func (w *Worker) askHolder(ctx context.Context, address, runID string, generation int64) bool {
-	held, _ := askInternalHolds(ctx, internalHoldsHTTPClient, address, w.internalAuthSecret, runID, generation)
+	client := &http.Client{
+		// A backstop only. The ask phase's own context (askHolders) is the real
+		// bound, at one dbCallDeadline for every holder together.
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: w.serviceEgressGuard(ctx, "http://"+address).DialContext},
+	}
+	held, _ := askInternalHolds(ctx, client, address, w.internalAuthSecret, runID, generation)
 	return held
 }
 

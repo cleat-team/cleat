@@ -148,13 +148,35 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 		t.Fatalf("run %s is two windows stale, so the veto must no longer cover it, but it was left running", runID)
 	}
 
-	// THE KILLED HOLDER: nobody is listening at the address it published. Its
-	// run must be reclaimed within the NORMAL window -- one window stale, not
-	// two. Unreachable and dead are deliberately the same from here.
+	// THE KILLED HOLDER: nobody is listening at the address it published, and
+	// this run is stale by ONE window -- not two. It must be reclaimed within the
+	// NORMAL window. That is the half of the acceptance criterion saying an
+	// unreachable holder is treated exactly as a dead one, and it is the only
+	// thing that tests the fail-toward-reclaiming direction the whole channel
+	// rests on.
+	//
+	// RE-SEEDED FIRST, AND THAT IS LOAD-BEARING. Phase 2 left this row 'ready',
+	// and the store only ever reclaims status='running' rows -- so without this
+	// step the phase would assert that a row nothing could reclaim was not
+	// reclaimed, and would pass against an asker that always answers "held".
+	// cleat-review2 caught exactly that on the first version of this test by
+	// mutating askHolder to return true unconditionally and watching the
+	// unmodified test stay green: with nothing live to hold, the phase measured
+	// nothing while reading as coverage.
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Fatalf("stopping the holder's listener: %v", err)
 	}
-	ageRun("15 seconds")
+	if _, err := db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'running', assigned_to = $2, generation = $3,
+		    heartbeat_at = now() - interval '15 seconds'
+		WHERE id = $1`, runID, holderID, generation); err != nil {
+		t.Fatalf("re-seeding the run as running for the killed-holder phase: %v", err)
+	}
+	if got := statusOf(); got != "running" {
+		t.Fatalf("the killed-holder phase needs a live run to reclaim; the re-seed left it %q", got)
+	}
+
 	w.reapOnce()
 	if got := statusOf(); got == "running" {
 		t.Fatalf("run %s belongs to a holder that cannot be reached at all, and is one window stale; "+
