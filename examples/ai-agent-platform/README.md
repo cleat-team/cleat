@@ -174,14 +174,16 @@ centrally: report the effective ceiling in the run's error.
 ## The agent loop is a copy, and it will be replaced
 
 `RunAgent`'s loop is hand-written here, and you should not write your own in a
-product. As of 2026-09-28 there is **no reusable loop**: `cleat/ai/agent` exists
-and has no importer at all, and the only working versions are two hand-copies
-inside `cleat init` templates (`cmd/cleat/templates/agent/workflow.go`,
+product. As of 2026-09-28 there was **no reusable loop**: `cleat/ai/agent`
+existed and had no importer at all, and the working versions were two
+hand-copies inside `cleat init` templates
+(`cmd/cleat/templates/agent/workflow.go`,
 `templates/agent-python/agent.py`) — separate from each other, and untested as
 loops.
 
-**cleat#1983 replaces all three with one reusable agent workflow any SDK starts
-as a child.** This example is the fourth copy, and it is written in the form
+**cleat#1983 replaced all three with one reusable agent workflow any SDK starts
+as a child**, and the two templates are clients of it now. This example is the
+remaining hand-written copy — deliberately not migrated, and written in the form
 that piece will replace rather than as the permanent answer to an open question.
 Until it lands: copy a template or this file, and expect to delete it.
 
