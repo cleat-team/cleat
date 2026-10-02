@@ -10599,3 +10599,65 @@ Deleted: `plugins/scheduledbackup/{routes,commands}.go`.
 `admin.plugin_tables` ("every `tenant_scoped` row names a table that still has a `tenant_id`
 column") would catch the registry-flip class for a future plugin the same way this migration's own
 regression test catches it for this one. No issue filed yet.
+
+---
+
+### 3.344 The shipped app-role scripts had never been executed by any test, and executing them found a false success — ✅ **FIXED 2026-10-02** (cleat#2939)
+
+`deploy/{postgres,mysql,mssql}/900-app-role.sh` are shipped artifacts: an operator runs them to
+stand up the least-privilege `cleat_app` login. No test ran any of them. Next door,
+`pgAppRoleDSN`/`mysqlAppRoleDSN`/`mssqlAppRoleDSN` reimplement the same provisioning in Go and
+`database/sql`, "matching, not calling, the shipped artifact" — so the two can drift silently, and
+the shipped one is what actually runs in a deployment. It had already cost us: cleat-review's N1
+(`deploy/mssql/900-app-role.sh` shipping a password no operator could retrieve) survived **three
+rounds** of Go-based verification, because the Go double was correct and the shell was not.
+
+**The filed remedy was re-scoped, on evidence, rather than implemented as written.** cleat#2939
+proposed one shared Go implementation behind a `cleatctl` subcommand. Two measurements argue
+against it as the primary fix. First, `docker-compose.cluster.yml:40` mounts `./deploy/postgres`
+into `/docker-entrypoint-initdb.d:ro`, so PostgreSQL's script runs inside a **stock postgres
+container**, where no Go binary exists — "one implementation instead of three" cannot cover it.
+Second, and worse: if the scripts become thin wrappers over a binary, what remains untested is the
+wrapper (argument parsing, env handling, `set -e`) — which is the class N1 itself lived in.
+
+**The reason for the duplication was also wrong.** It was that the `mysql` and `sqlcmd` clients are
+absent where `go test` runs. True of the runner's PATH, false of the **containers**: every dialect's
+CI job runs a container carrying its own client, and CI already reaches in that way
+(`docker ps -q --filter "publish=5432"` then `docker exec "$CONTAINER" psql ...`,
+`multi-db-ci.yml`). So the tests now pipe the shipped script into the container that serves the
+test's own DSN over stdin (`docker exec -i <id> bash -s -- <args>`) and run it there. Discovery is
+by **published port**, the only thing the DSN and the container provably agree on.
+
+**The first thing executing them found was a shipped defect, in the code that motivated the
+issue.** `deploy/mssql/900-app-role.sh` printed `Msg 15151 ... Cannot alter the role
+'cleat_app_role', because it does not exist`, then printed its own `cleat_app is ready ... a member
+of cleat_app_role` line, and **exited 0** — `sqlcmd` reports SQL errors through ERRORLEVEL only
+when given `-b`. An operator whose migrate step had not run was told the app login was ready, and
+it was not a member of the role, so every GRANT and the DENY on `deployment_secrets` were simply
+absent. **The asymmetry is dialect-shaped**: PostgreSQL's script passes `-v ON_ERROR_STOP=1` and the
+`mysql` client exits non-zero on its own (`mysql` with a wrong password → exit 1, measured), so SQL
+Server is the one dialect whose client has to be asked. Fixed by adding `-b` to `sqlcmd_exec`.
+
+**Both tests were falsified before being believed**, each with the mutation applied and verified:
+
+| mutation | expected red | measured |
+|---|---|---|
+| revert the `-b` fix | Test 2 / **mssql** only | exactly that — `Msg 15151` + the success line, postgres and mysql green |
+| drop MySQL's `deployment_secrets` exclusion | Test 1 / **mysql** only | exactly that — "inserted into deployment_secrets" |
+
+The second is why Test 1 asserts **end state** (the login the script provisioned cannot write
+`deployment_secrets`, but still can write an ordinary table) rather than the script's exit status:
+a test that trusted the exit status would have passed straight over the `-b` defect.
+
+**Where it runs, and what it does not cover.** `./cmd/...` is in `tier1.packages`, and Tier 1 Gate
+sets all three DSNs — so this runs all three dialects inside a **required** check. The `commands`
+job in `ci.yml` provides a single PostgreSQL service, so the mysql and mssql subtests skip there:
+4 skips, 2 per test, measured **by name** with only `CLEAT_TEST_POSTGRES` set, and recorded in
+`scripts/skip-ledger.d/`. Also stated rather than implied: the scripts' argument and env handling
+is exercised only as far as these call sites drive it, and initdb.d's use of the PostgreSQL script
+is not reproduced — the script's SQL logic and its exit status are what is now measured.
+
+**Files**: `cmd/cleat-worker/the_shipped_app_role_scripts_actually_work_test.go` (new),
+`cmd/cleat-worker/a_migration_is_a_deploy_step_test.go` (`deployScratchNamed`, so a scratch
+database can avoid the `cleat_*` prefix MySQL's own guard refuses),
+`deploy/mssql/900-app-role.sh`, `scripts/skip-baseline.txt`, `scripts/skip-ledger.d/`.

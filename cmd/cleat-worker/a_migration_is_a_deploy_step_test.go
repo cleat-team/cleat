@@ -54,6 +54,19 @@ func (c deployDialect) admin() string {
 // deployScratch creates an EMPTY database for one dialect and returns the DSN the
 // worker should use and a handle for inspecting it.
 func deployScratch(t *testing.T, c deployDialect) (dsn string, db *sql.DB) {
+	return deployScratchNamed(t, c, "cleat_2117_deploy_")
+}
+
+// deployScratchNamed is deployScratch with the database name's prefix as a parameter.
+//
+// The prefix matters because two guards key on the database NAME. deploy/mysql/900-app-role.sh
+// refuses any database matching `cleat_*` (see its own guard, and
+// TestTheMySQLDeployScriptRefusesACollidingDatabaseName), and deployScratch's own
+// `cleat_2117_deploy_<n>` matches that pattern -- deliberately, since
+// mysqlAppRoleDSN's grantTenantPattern case depends on the collision. So a caller that
+// needs to run the shipped script against its own scratch database must not reuse the
+// default prefix, or the script refuses the database before reaching any SQL.
+func deployScratchNamed(t *testing.T, c deployDialect, prefix string) (dsn string, db *sql.DB) {
 	t.Helper()
 	admin := c.admin()
 	adb, err := sql.Open(c.driver, admin)
@@ -64,7 +77,7 @@ func deployScratch(t *testing.T, c deployDialect) (dsn string, db *sql.DB) {
 	if err := adb.Ping(); err != nil {
 		t.Fatalf("%s is set but unreachable: %v", c.env, err)
 	}
-	name := fmt.Sprintf("cleat_2117_deploy_%d", time.Now().UnixNano()%1_000_000_000)
+	name := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano()%1_000_000_000)
 	switch c.name {
 	case "postgres":
 		if _, err := adb.Exec(`CREATE DATABASE ` + name); err != nil {
