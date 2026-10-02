@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/cleat-team/cleat/internal/analyzer"
 )
 
 // TestEverySDKHelperHasItsImports is TestEveryCompositeHostCallHasAnImportRow
@@ -146,7 +148,13 @@ func TestTheSDKHelperScanSeesBothRoutesToAHostCalls(t *testing.T) {
 type sdkHelperMethod struct {
 	key   string // "Type.Method", the sdkHelperImports key
 	calls []string
-	route string // "field" or "parameter"
+	route string // "field", "parameter", or "delegation" for a body that only calls another helper
+
+	// delegates are SDK helper methods this body calls on its OWN receiver --
+	// Run's body is `s.RunWithResult(h)` -- which is not a host call and so is
+	// invisible to the h.<Method> scan below. They are resolved transitively;
+	// see the closure in scanSDKHelperMethods. cleat#2627.
+	delegates []string
 }
 
 // sdkHelperScanSkipDirs are SDK subdirectories this scan does not walk, with
@@ -266,6 +274,19 @@ func scanSDKHelperMethods(t *testing.T, sdk string) []sdkHelperMethod {
 		}
 		m.calls = append(m.calls, call)
 	}
+	recordDelegate := func(key, target string) {
+		m := out[key]
+		if m == nil {
+			m = &sdkHelperMethod{key: key, route: "delegation"}
+			out[key] = m
+		}
+		for _, d := range m.delegates {
+			if d == target {
+				return
+			}
+		}
+		m.delegates = append(m.delegates, target)
+	}
 
 	for _, f := range files {
 		for _, decl := range f.Decls {
@@ -310,8 +331,14 @@ func scanSDKHelperMethods(t *testing.T, sdk string) []sdkHelperMethod {
 				}
 				switch x := sel.X.(type) {
 				case *ast.Ident: // h.Method(...) where h is a HostCalls parameter
-					if params[x.Name] {
+					switch {
+					case params[x.Name]:
 						record(key, sel.Sel.Name, "parameter")
+					case recvName != "" && x.Name == recvName:
+						// s.Method(...) on this method's OWN receiver: an
+						// SDK-internal delegation, not a host call. Resolved
+						// transitively below.
+						recordDelegate(key, recvType+"."+sel.Sel.Name)
 					}
 				case *ast.SelectorExpr: // s.h.Method(...) where h is a HostCalls field
 					if !fields[x.Sel.Name] {
@@ -323,6 +350,50 @@ func scanSDKHelperMethods(t *testing.T, sdk string) []sdkHelperMethod {
 				}
 				return true
 			})
+		}
+	}
+
+	// FOLLOW SDK-INTERNAL DELEGATION, because a helper's row must cover what it
+	// eventually does, not only what it spells. Run's body is now
+	// `s.RunWithResult(h)` -- a call on its own receiver -- so a scan reading
+	// only direct h.<Method> calls finds no host call in Run at all and stops
+	// requiring its row to cover anything. The row is still needed: a workflow
+	// writing saga.Run(h) performs exactly what RunWithResult performs.
+	//
+	// This is the half of cleat#2627's defect that survived the other test:
+	// dropping set_query_state from the Saga.Run row left wasm and analyzer
+	// green while every compiled workflow calling saga.Run(h) -- three in this
+	// tree, and every external user -- silently published nothing.
+	var closure func(key string, onPath map[string]bool) map[string]bool
+	closure = func(key string, onPath map[string]bool) map[string]bool {
+		found := map[string]bool{}
+		m := out[key]
+		if m == nil || onPath[key] {
+			return found
+		}
+		onPath[key] = true
+		for _, c := range m.calls {
+			found[c] = true
+		}
+		for _, d := range m.delegates {
+			for c := range closure(d, onPath) {
+				found[c] = true
+			}
+		}
+		delete(onPath, key)
+		return found
+	}
+	for key, m := range out {
+		merged := map[string]bool{}
+		for _, c := range m.calls {
+			merged[c] = true
+		}
+		for c := range closure(key, map[string]bool{}) {
+			merged[c] = true
+		}
+		m.calls = m.calls[:0]
+		for c := range merged {
+			m.calls = append(m.calls, c)
 		}
 	}
 
@@ -348,3 +419,30 @@ func baseTypeName(e ast.Expr) string {
 }
 
 func startsUpper(s string) bool { return s != "" && s[0] >= 'A' && s[0] <= 'Z' }
+
+// TestEverySDKHelperRowIsAcceptedByTheGate pins the half of the binding between
+// the two hand lists that nothing covered before.
+//
+// TestEverySDKHelperHasItsImports checks that a row COVERS what the helper
+// calls. This checks that the row is REACHABLE: wasm consults sdkHelperImports
+// only for a selection analyzer.SDKDurableHelper accepts, so a row whose key
+// the gate refuses is never read, contributes no import, and lets the module
+// build and return a zero value at run time. cleat#2627 had to update both
+// lists in lockstep and only one of them was covered by a test.
+//
+// ONE DIRECTION ONLY, deliberately. The converse -- a key the gate accepts with
+// no row -- is already covered, and by a stronger check: a helper the gate
+// accepts is one that makes host calls (directly or, since cleat#2627, through
+// delegation), so TestEverySDKHelperHasItsImports finds it and fails on the
+// missing row. Asserting it again here would test the same thing twice and
+// would need the accepted set enumerated, which is exactly the mutable-map
+// export this avoids.
+func TestEverySDKHelperRowIsAcceptedByTheGate(t *testing.T) {
+	for key := range sdkHelperImports {
+		if !analyzer.SDKDurableHelperName(key) {
+			t.Errorf("sdkHelperImports has a row for %q, but analyzer.SDKDurableHelper "+
+				"does not accept it -- the gate is consulted before the row is read, so "+
+				"this row is dead and its imports are never added", key)
+		}
+	}
+}

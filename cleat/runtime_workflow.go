@@ -555,7 +555,17 @@ func (s *Saga) AddStepCall(c StepCall) *Saga {
 
 // SagaResult is what a saga did, returned by RunWithResult and published as
 // query state on the same call. The three lists are named for the three things
-// that can happen to a step, and a step is in at most one of them.
+// that can happen to a step, and their overlap is deliberate rather than a
+// defect:
+//
+//	Completed     every step whose Forward returned nil
+//	Unwound       ⊆ Completed -- compensations that ran AND SUCCEEDED
+//	UnwindFailed  ⊆ Completed -- compensations that ran and FAILED
+//
+// Unwound and UnwindFailed are disjoint from each other, because a compensation
+// that ran and failed has undone nothing. A step that completed and was later
+// undone appears in Completed AND Unwound, which is exactly what lets a caller
+// report "these ran, and these were rolled back".
 //
 // It exists so that a caller does not have to keep its own tally to report
 // what happened. Before cleat#2627 an author who wanted to show "these steps
@@ -565,9 +575,9 @@ type SagaResult struct {
 	// Completed are the steps whose Forward returned nil, in execution order.
 	Completed []string
 
-	// Unwound are the steps whose compensation RAN, in the order they were
-	// undone -- which is the reverse of Completed, and is the order a reader
-	// wants ("what was rolled back, and in what order").
+	// Unwound are the steps whose compensation RAN AND SUCCEEDED, in the order
+	// they were undone -- which is the reverse of Completed, and is the order a
+	// reader wants ("what was rolled back, and in what order").
 	Unwound []string
 
 	// UnwindFailed are the steps whose compensation was attempted and returned
@@ -577,8 +587,9 @@ type SagaResult struct {
 	UnwindFailed []string
 }
 
-// sagaQueryState keys. Exported as constants only where a caller must agree with
-// them; a poller reads them by name.
+// sagaQueryState keys. Unexported deliberately: they are a contract a poller
+// reads by name, not an API a caller compiles against, so a name change is a
+// breaking change to the published state and not to anyone's build.
 const (
 	// sagaCurrentStep is published before each step's Forward runs. It carries
 	// the step's Description, which is the string the author already passed to

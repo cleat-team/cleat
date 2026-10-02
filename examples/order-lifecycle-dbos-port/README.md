@@ -114,7 +114,7 @@ at all, which is the gap the comparison is naming, not a feature.
 | **total** | | **274** |
 
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
-on the same date: **707**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
+on the same date: **731**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
 
 **Corrected 2026-09-28 (cleat#2622): `server.ts` grew from 57 to 70 lines after this table was
@@ -154,17 +154,25 @@ proof of a claimable event, so the loop re-checks the CONDITION across a fixed a
 than trusting the first signal. That is more `order.go` than the single call it replaced, net of the
 same PR's doc comments explaining why. `backend/main.go` and `order_test.go` are unchanged.
 
-**Corrected 2026-10-02 (cleat#2627): 759 → 707, and this is the largest move yet because it was not
-a tuning of `order.go` but a deletion of what the file no longer had to do.** The saga SDK now
+**Corrected 2026-10-02 (cleat#2627): 759 → 731.** Most of the move is a deletion. The saga SDK now
 publishes its own progress — the step it is about to run, the step that failed, and which
 compensations ran and succeeded versus ran and failed — so `order.go` stopped maintaining three
 parallel lists by hand across every step boundary and stopped issuing a `SetQueryState` call at
-each one. It is the same published contract (the example's own tests assert it unchanged), moved
-from the application into the platform; the 52 lines that left `order.go` are application lines
-that every saga author had to write and could get wrong. `cleat/runtime_workflow.go` carries the
-mechanism instead, and that file is not counted here — this table is the app's lines, the same
-accounting that already keeps the generated plugin clients out of it. `backend/main.go` and
-`order_test.go` are byte-identical to 759's measurement.
+each one, which is `order.go` 283 → 231. Those are application lines every saga author had to write
+and could get wrong; `cleat/runtime_workflow.go` carries the mechanism instead, and that file is not
+counted here — this table is the app's lines, the same accounting that already keeps the generated
+plugin clients out of it. `backend/main.go` is byte-identical to 759's measurement.
+
+**24 lines come back in this same PR, and they are named rather than netted silently.** One is a
+status write the approval gate now needs: the saga reports its progress as `current_step` and writes
+`status` only at the end, so without it an approved order reads "awaiting_approval" for the whole
+saga — through the very steps that charge it. The rest is the regression test for that, which has to
+SAMPLE the published status while the workflow runs, because the finished state reads "done" whether
+or not the gate cleared its own status, so a final-state assertion cannot see the difference.
+
+**An interim version of this note said 707, and that number was the mechanism alone.** It measured
+`order.go` plus its test before review found the approval bug; the two figures are different claims
+and are recorded separately so neither is mistaken for the other.
 
 ## The counter
 

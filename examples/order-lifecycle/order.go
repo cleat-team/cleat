@@ -197,6 +197,19 @@ func PlaceOrder(h cleat.HostCalls, input string) (string, error) {
 			h.SetQueryState("rejection_reason", reasonOr(sr.Payload, "rejected without a reason"))
 			return "", fmt.Errorf("order %s: rejected", in.OrderID)
 		}
+
+		// The decision is in and the order is no longer waiting on one, so this
+		// has to be published. It is app state -- the saga cannot know the order
+		// was gated -- and without it the published status stays
+		// "awaiting_approval" for the WHOLE saga, because the saga reports its
+		// progress as current_step and only writes status again at the end.
+		// Two things then read wrong: any poller sees an order that is being
+		// charged described as still awaiting a decision, and the demo UI, which
+		// offers the Approve/Reject controls whenever it sees that value, leaves
+		// them on screen for an order already approved. On develop the saga's
+		// own status writes ("charging", "dispatching") moved it on; cleat#2627
+		// removed those, so the app has to say so itself.
+		h.SetQueryState("status", "approved")
 	}
 
 	// ---- The saga ----
