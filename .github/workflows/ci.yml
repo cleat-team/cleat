@@ -1939,6 +1939,96 @@ jobs:
       - name: Run the scenario end to end
         run: scripts/run-integration-hub-dbos-scenario.sh
 
+  b2b-saas-control-plane-dbos-pair-scenario:
+    name: B2B SaaS control plane DBOS pair scenario
+    runs-on: ubuntu-latest
+    # merge_group is excluded for the same reason as the sibling jobs above --
+    # read integration-hub-scenario's comment before removing this line. Not a
+    # required context (.github/required-checks.txt), so a merge_group run
+    # would add an npm install/build to the critical path of every queue entry
+    # while gating nothing.
+    if: github.event_name != 'merge_group'
+    # examples/b2b-saas-control-plane-dbos-port, RUN rather than only built --
+    # cleat#2597/#2681. The pair's README states the claim this job exists to
+    # back: an equally-scoped DBOS counterpart of the b2b-saas-control-plane
+    # scenario exists and runs, and building it shows which parts of that
+    # scenario are application code here and platform behaviour on cleat's
+    # side. An unexecuted port is not evidence for any of that.
+    #
+    # THIS JOB IS WHY THE CLEAT-SIDE README'S DBOS SECTION IS TRUE. That
+    # section, in examples/b2b-saas-control-plane/README.md, promised a DBOS
+    # counterpart directory, a scripts/dbos-pair-loc.sh case for it, and CI
+    # execution -- and all three were false when it was written, because the
+    # cleat half shipped (#2716) without the DBOS half. Building the port and
+    # adding this job is what closes it; the README is not edited to match.
+    #
+    # ONE ARM, NOT A DIALECT MATRIX, same reasoning as the sibling DBOS jobs:
+    # the DBOS SDK's system database is Postgres-only, so there is no second
+    # dialect on this side to diverge on. Note the cleat-side scenario is ALSO
+    # single-dialect, for a different reason (`--create-tenant` refuses on
+    # MySQL and SQL Server) -- the pair is one-armed from both directions, and
+    # neither side's reason is the other's.
+    #
+    # No create-database step: DBOS.launch() creates the system database named
+    # by DBOS_SYSTEM_DATABASE_URL if it does not exist. Measured -- a pool
+    # opened against a missing database fails with `3D000`, so the port calls
+    # ensureSchema() AFTER launch() rather than before.
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 127.0.0.1, not localhost -- see test-go's identical comment on this
+      # exact ::1-vs-IPv4 hazard.
+      DBOS_SYSTEM_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/b2b_saas_control_plane_dbos_ci
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # cloc is not part of the ubuntu-latest image; scripts/dbos-pair-loc.sh
+      # reports UNMEASURED rather than a false zero if it is missing, so an
+      # image that stops shipping something this step no longer installs
+      # fails loud here rather than reporting a clean run that counted
+      # nothing.
+      - name: Install cloc
+        run: sudo apt-get update && sudo apt-get install -y cloc
+
+      - name: Count lines for both sides of the pair
+        run: scripts/dbos-pair-loc.sh b2b-saas-control-plane
+
+      # The checker walks every pair dbos-pair-loc.sh knows about, so this
+      # covers this pair's README too. Run here as well as in the sibling jobs
+      # so a drift in THIS pair is reported by the job that owns it, rather
+      # than only by a job whose subject is a different pair. --self-test
+      # first, same reason as every guard above it: on a tree where the
+      # numbers agree, "nothing drifted" and "the check matched nothing" print
+      # the same kind of success.
+      # ADVISORY until late in 0.4.0 (owner decision, cleat#2699) --
+      # continue-on-error means this step reports without failing the job.
+      # Tracked for reversal as cleat#2700, matching the sibling jobs.
+      - name: README line counts agree with the pair's own counter
+        continue-on-error: true
+        run: |
+          python3 scripts/check-dbos-pair-loc.py --self-test
+          python3 scripts/check-dbos-pair-loc.py
+
+      # No "dump logs on failure" step after this one, for the same reason as
+      # the sibling scenario jobs: the script's own EXIT trap tails the
+      # server's log on failure, before anything here could read it.
+      - name: Run the scenario end to end
+        run: scripts/run-b2b-saas-control-plane-dbos-scenario.sh
+
   ai-agent-platform-scenario:
     name: AI agent platform scenario
     runs-on: ubuntu-latest
