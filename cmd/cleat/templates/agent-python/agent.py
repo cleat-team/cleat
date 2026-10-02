@@ -1,18 +1,29 @@
-"""Research Agent — a cleat AI agent powered by Cleat and LangChain.
+"""Research Agent -- a Python workflow that runs cleat's shipped agent.
 
-This agent researches a topic using an LLM with web search and calculator
-tools. Every step is recorded in cleat's event history, so the agent
-survives crashes and resumes deterministically without losing progress
-or incurring duplicate API costs.
+THE LOOP IS NOT IN THIS FILE, and that is the change cleat#1983 made. A library
+that runs inside the guest has to be rewritten in every language, so this file
+and its Go sibling each carried a hand-written copy of the same ReAct loop, and
+neither was tested. The loop now ships as a workflow (`cleat/agentworkflow`),
+and what a Python workflow does instead is declare its tools and call
+`run_agent`.
+
+EVERY LLM TURN AND EVERY TOOL CALL INSIDE THE AGENT IS A DURABLE STEP, so this
+agent survives a crash mid-conversation and resumes without asking the model
+again for turns it already completed, and without repeating a tool call whose
+effect already happened. The hand-written loop claimed the same property in
+prose; here it is the engine's, and it comes to every SDK at once.
+
+Requires the agent workflow deployed under the name ``agent``:
+
+    cleat deploy --name agent ./out/agent.wasm
 
 Usage:
     cleat build --target python --entry agent.py:research_agent
-    cleat run --wasm research_agent.wasm --entry-point ResearchAgent \
-      --input '{"topic": "Compare Temporal, DBOS, and Cleat"}'
+    cleat run --wasm research_agent.wasm --entry-point research_agent --input '{"topic": "Compare Temporal, DBOS, and Cleat"}'
 """
 
 from cleat_sdk import HostCalls, cleat_entry
-from cleat_sdk.plugins import Plugins
+from cleat_sdk.agent import AgentConfig, Tool, run_agent
 
 SYSTEM_PROMPT = """You are a helpful research assistant. Use tools when you need
 to look up current information or perform calculations. Be thorough and cite sources.
@@ -22,154 +33,44 @@ Available tools:
 - calculator: Perform mathematical calculations
 """
 
-MAX_STEPS = 10
+# TOOLS ARE DATA. Each entry says what the model sees (name, description,
+# parameters) and how the call is dispatched (kind, plus the target). A service
+# tool resolves at the worker via --service-endpoints, the same way the
+# hand-written executors in this file used to.
+TOOLS = [
+    Tool(
+        name="web_search",
+        kind="service",
+        service="websearch",
+        operation="search",
+        description="Search the web for current information",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="calculator",
+        kind="service",
+        service="calculator",
+        operation="eval",
+        description="Evaluate a mathematical expression",
+        parameters={
+            "type": "object",
+            "properties": {"expression": {"type": "string"}},
+            "required": ["expression"],
+        },
+    ),
+]
 
 
-@cleat_entry("ResearchAgent")
+@cleat_entry("research_agent")
 def research_agent(h: HostCalls, topic: str) -> str:
-    """Research a topic using an LLM with tools.
-
-    Parameters
-    ----------
-    h : HostCalls
-        The Cleat host calls interface (injected automatically).
-    topic : str
-        The research topic to investigate.
-
-    Returns
-    -------
-    str
-        The final research result.
-    """
-    plugins = Plugins(h)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": topic},
-    ]
-
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "Search the web for current information about a topic",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query",
-                        }
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "calculator",
-                "description": "Perform a mathematical calculation",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "expression": {
-                            "type": "string",
-                            "description": "The mathematical expression to evaluate",
-                        }
-                    },
-                    "required": ["expression"],
-                },
-            },
-        },
-    ]
-
-    for step in range(MAX_STEPS):
-        h.cleat_log(f"ResearchAgent step {step + 1}/{MAX_STEPS}")
-
-        result = plugins.llm_chat(
-            provider="openai",
-            model="gpt-4o",
-            messages=messages,
-            tools=tools,
-        )
-
-        # Check if the model returned a final answer (no tool calls)
-        if not result.choices:
-            h.cleat_log(f"ResearchAgent finished at step {step + 1}")
-            return "No response from LLM"
-
-        choice = result.choices[0]
-        message = choice.get("message", {})
-        tool_calls = message.get("tool_calls", [])
-
-        if not tool_calls:
-            content = message.get("content", "")
-            h.cleat_log(f"ResearchAgent returned final answer at step {step + 1}")
-            return content
-
-        # Add assistant message to conversation
-        messages.append(message)
-
-        # Execute each tool call
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            tool_name = fn.get("name", "")
-            tool_args_str = fn.get("arguments", "{}")
-
-            import json
-            try:
-                tool_args = json.loads(tool_args_str)
-            except json.JSONDecodeError:
-                tool_args = {}
-
-            # Execute the tool via cleat's cleat_call
-            if tool_name == "web_search":
-                query = tool_args.get("query", "")
-                tool_result = execute_web_search(h, query)
-            elif tool_name == "calculator":
-                expression = tool_args.get("expression", "")
-                tool_result = execute_calculator(h, expression)
-            else:
-                tool_result = f"Unknown tool: {tool_name}"
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.get("id", ""),
-                "content": tool_result,
-            })
-
-    h.cleat_log("ResearchAgent reached max steps")
-    return "Max steps reached without final answer"
-
-
-def execute_web_search(h: HostCalls, query: str) -> str:
-    """Execute a web search via h.call to a registered "websearch" service.
-
-    No such plugin ships with cleat -- this calls out to an external service
-    by name, resolved at the worker via `--service-endpoints
-    websearch=https://your-search-provider`. The result is recorded in event
-    history for deterministic replay.
-    """
-    try:
-        result = h.call("websearch", "search", {"query": query})
-        return result
-    except Exception as e:
-        h.cleat_log(f"Web search failed: {e}")
-        return f"Search error: {e}"
-
-
-def execute_calculator(h: HostCalls, expression: str) -> str:
-    """Execute a calculation via h.call to a registered "calculator" service.
-
-    Same mechanism as execute_web_search: resolved at the worker via
-    `--service-endpoints calculator=https://...`. The result is recorded in
-    event history.
-    """
-    try:
-        result = h.call("calculator", "eval", {"expression": expression})
-        return result
-    except Exception as e:
-        h.cleat_log(f"Calculator failed: {e}")
-        return f"Calculation error: {e}"
+    """Research a topic, through the shipped agent workflow."""
+    result = run_agent(
+        h,
+        AgentConfig(system_prompt=SYSTEM_PROMPT, tools=TOOLS, max_steps=10),
+        f"Research this topic and report what you find: {topic}",
+    )
+    return result["answer"]

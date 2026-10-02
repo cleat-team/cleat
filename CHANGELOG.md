@@ -166,7 +166,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unconstrained — but the owner ruled to ship strict, for the same reason as the null case: close
     a permissiveness gap in the SDK rather than encode it permanently into the schema.
 
+- **The Go-only `cleat/ai/agent` library is deleted, and so are `cleat/ai/llm` and
+  `cleat/ai/pgvector`.** None of the three had an importer outside `cleat/ai` (verified with
+  `git grep -ln '"[^"]*/ai/\(agent\|llm\|pgvector\)"'`, which matched only `ai/agent` importing
+  `ai/llm`). **Use `run_agent` instead** — an agent is now a workflow, reached from every SDK by
+  starting it as a child; see "Agent Workflows" in
+  [`docs/reference/sdk-api.md`](docs/reference/sdk-api.md). An external caller of
+  `agent.Run(ctx, client, cfg, msg, executeTool)` has no drop-in replacement: the tool executor
+  that took a callback becomes a declarative tool list, which is the point — a callback cannot
+  survive a crash and be resumed, and a durable step can. Sanctioned by the owner's 2026-09-22
+  ruling that breaking changes are acceptable here. (cleat#1983)
+
 ### Added
+
+- **Agents are usable from every SDK, because the loop is a workflow rather than a library.**
+  `cleat/agentworkflow` implements it once, and each SDK's surface is a single `run_agent`-style
+  call that starts it as a child and awaits it — `agentworkflow.RunAsChild` in Go and
+  `cleat_sdk.agent.run_agent` in Python; Rust, Java and AssemblyScript are cleat#2978
+  rather than an unasserted gap. **Each LLM turn and each tool call is a durable step**, so an
+  agent survives a crash mid-conversation and resumes without asking the model again for turns it
+  already completed and without repeating a tool call whose effect already happened. Tools come in
+  the three kinds a workflow can reach — `service` (`DurableCall`), `plugin` (`PluginCall`) and
+  `workflow` (a child, awaited) — without the model being told which. The two agent templates'
+  hand-written loops, one per language and neither tested, are deleted. (cleat#1983)
 
 - **`cleat/pluginclients` is new public SDK surface**: generated, typed callers for the bundled
   `webhookingest` and `email` plugins (`cleat/pluginclients/webhookingest`, `cleat/pluginclients/email`),

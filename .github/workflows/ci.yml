@@ -2462,6 +2462,43 @@ jobs:
         if: matrix.package.name == 'commands'
         uses: gradle/actions/setup-gradle@v6
 
+      # The Python agent client, for cleat#1983's acceptance. That test runs the
+      # shipped agent workflow from BOTH SDKs, and a Python workflow is a
+      # Component Model binary, which only `componentize-py` produces -- so
+      # without this the Python subtest SKIPS.
+      #
+      # A skip here is not a pass wearing a different colour: ./tests/crash/...
+      # is a tier-1 package (tiers.yaml), and the skip budget for this leg
+      # would count it. It is also the exact skip-that-hides-a-regression shape
+      # -- a missing toolchain and a broken build would both read as green.
+      # So the toolchain is installed rather than tolerated, exactly as
+      # plugin-harness-ci.yml does for the same reason.
+      #
+      # NOTE (WS-1 -> WS-3): .github/workflows/ is WS-3's under WORKSTREAM.md's
+      # shared-files table. Added here rather than leaving the mechanism
+      # unwired, for the same reason the crash matrix entry above gives. Move
+      # or restructure it freely.
+      #
+      # Both halves are load-bearing. The console script is what
+      # `cleat build --target python` shells out to
+      # (cmd/cleat/build_python.go), and componentize-py can import perfectly
+      # well while having no script on PATH -- a pip --user install puts it in
+      # a bin directory nothing searches. And the interpreter has to be >= 3.10:
+      # the SDK uses PEP 604 unions at module scope, so importing it on 3.9 is
+      # a TypeError rather than a version warning.
+      #
+      # The SDK is deliberately NOT pip-installed. The test points PYTHONPATH
+      # at this checkout's python-sdk, so the SDK under test is always the one
+      # in the diff rather than whatever PyPI last published.
+      - name: Setup Python for the crash agent client
+        if: matrix.package.name == 'crash'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install componentize-py for the crash agent client
+        if: matrix.package.name == 'crash'
+        run: pip install componentize-py
+
       # GAP2 from cleat#2005's third review round: the real-Postgres
       # docker-pause reproduction
       # (TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun,

@@ -1,4 +1,4 @@
 name: "{{.ProjectName}}"
 language: go
 entry_points:
-  - agent_loop
+  - research_agent

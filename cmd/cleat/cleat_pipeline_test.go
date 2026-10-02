@@ -2097,9 +2097,11 @@ func TestScaffoldAgent(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "my-agent")
 	scaffoldAgent(dir)
 
+	// No tools.go since cleat#1983: an agent's tools arrive in the RUN's input
+	// as declarative entries rather than as Go functions in the deployed
+	// workflow, so one deployment serves every caller.
 	expectedFiles := []string{
 		"workflow.go",
-		"tools.go",
 		"docker-compose.yml",
 		"README.md",
 		"cleat.yaml",

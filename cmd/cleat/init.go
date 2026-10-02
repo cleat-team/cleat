@@ -116,7 +116,9 @@ func scaffoldAgent(projectName string) {
 	}
 
 	copyTemplate("workflow.go", "workflow.go")
-	copyTemplate("tools.go", "tools.go")
+	// No tools.go since cleat#1983: the agent's tools are declarative entries
+	// in the RUN's input, not Go functions compiled into the deployed
+	// workflow, so one deployment of the agent serves every caller's tool set.
 	copyTemplate("go.mod.txt", "go.mod")
 	copyTemplate("docker-compose.yml", "docker-compose.yml")
 
@@ -142,7 +144,7 @@ func scaffoldAgent(projectName string) {
 		os.Exit(1)
 	}
 
-	writeYAML(dir, projectName, "agent_loop")
+	writeYAML(dir, projectName, "research_agent")
 	tidyScaffold(dir)
 	fmt.Printf("Created AI agent project in %s/\n", dir)
 }

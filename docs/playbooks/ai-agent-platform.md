@@ -94,14 +94,20 @@ workflow's own fetch), a hosted vector database over `DurableFetch`, or retrieva
 
 ## Three things this page was missing, and two of them were the load-bearing ones
 
-**The agent loop itself is still hand-rolled, and you should not write your own.** As of 2026-09-25
-there is no reusable loop: `cleat/ai/agent` exists and **has no importer at all**, and the only
-working versions are two hand-copies inside `cleat init` templates
+**The agent loop was hand-rolled in three places, and you should not write your own. Fixed
+2026-10-02.** As of 2026-09-25 there was no reusable loop: `cleat/ai/agent` existed and **had no
+importer at all**, and the working versions were hand-copies inside `cleat init` templates
 (`cmd/cleat/templates/agent/workflow.go`, `templates/agent-python/agent.py`) — separate from each
-other, and untested as loops. cleat#1983 replaces all three with one reusable agent workflow any SDK
-starts as a child. **Until it lands: copy a template, and expect to delete it.** Do not build a
-product on a loop you are writing yourself — the loop is the part the engine is supposed to own, and
-it is the part that is not there yet.
+other, and untested as loops. cleat#1983 deleted the library and turned both templates into clients
+of one reusable agent workflow that any SDK starts as a child; see "Agent Workflows" in
+[`docs/reference/sdk-api.md`](../reference/sdk-api.md). **Do not write your own loop** — the engine
+owns it now.
+
+One hand-written loop remains: `examples/ai-agent-platform/agent.go` carries its own `RunAgent`. It
+is this playbook's reference implementation and its own scenario asserts the same durability claim
+by counting the model's requests across a SIGKILL, so it is not dead weight — but it is a copy of a
+loop that now ships once, and cleat#1983 did not migrate it. Tracked as **cleat#2980**; until it
+lands, take the agent from the workflow and this example for the deployment shape.
 
 `examples/ai-agent-platform/` (2026-09-28, cleat#2535) is **the fourth copy**, written in the form
 #1983 will replace rather than as the permanent answer: it says so in its README, and a reader who
@@ -403,9 +409,10 @@ load-bearing claims:
   premise is per-tenant budgets and it had no idea the key was shared — a `${secret:…}` was resolved
   and discarded, so every tenant spent the operator's key. Now documented as shipped, in the section
   above.
-- **The agent loop is still hand-rolled and the section saying so did not exist.** `cleat/ai/agent`
-  has no importer; two `cleat init` templates carry separate untested copies; cleat#1983 replaces
-  them. Builders were being told to build a product on a loop the engine does not yet own.
+- **The agent loop was hand-rolled and the section saying so did not exist.** `cleat/ai/agent` had
+  no importer; two `cleat init` templates carried separate untested copies; cleat#1983 replaced them
+  with the workflow above. Builders were being told to build a product on a loop the engine did not
+  yet own.
 - **`engine.Redact` on plugin payloads was checked**, so that "not verified" is discharged.
 
 Line citations were replaced with symbol names throughout — `FuncOptions` was cited at
