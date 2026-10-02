@@ -118,17 +118,30 @@ def place_order(h: HostCalls, user_id: str, cart: list[int], address: Address, p
 
 // TestComputePythonEntryPointSchemaWorksForTheBareDecoratorForm is cleat#2976.
 //
-// “@cleat_entry“ WITH NO PARENTHESES is the form “python-sdk/README.md“
-// documents and every one of the nine “python-sdk/examples/*.py“ uses. It was
-// also the form that produced no schema at all: the decorator's dual-form
-// branch passed the decorated FUNCTION into the slot the workflow NAME is read
-// from, so the registry was keyed by a function object, the emitter found no
-// entry, and “cleat build --target python“ reported Build SUCCESS while
-// writing no “.schema.json“ -- leaving start-input validation silently off.
+// `@cleat_entry` WITH NO PARENTHESES is the form `python-sdk/README.md`
+// documents and NINE OF THE ELEVEN `python-sdk/examples/*.py` use -- the other
+// two pass an explicit name, which is exactly the case the parenthesised form
+// exists for. It was also the form that produced no schema at all: the
+// decorator's dual-form branch passed the decorated FUNCTION into the slot the
+// workflow NAME is read from, so the registry was keyed by a function object,
+// and `cleat build --target python` reported Build SUCCESS while writing no
+// `.schema.json` -- leaving start-input validation silently off.
+//
+// WHERE IT ACTUALLY FAILED, because the obvious reading is wrong and this
+// comment asserted it until cleat-review corrected it. `_find_entry` DID find
+// the entry: it matches on `wrapper.__name__`, which `functools.wraps` set
+// correctly even on the broken tree, and it RETURNS the registry key as the
+// workflow name. The failure is downstream, in the emitter's `main()` --
+// `json.dumps({workflow_name: ...})` with a function as the key:
+//
+//	TypeError: keys must be str, int, float, bool or None, not function
+//
+// This comment's own evidence is what refutes the old phrasing: "not function"
+// is a statement about a key that EXISTS.
 //
 // WHY THIS TEST AND NOT ONE ABOUT THE REGISTRY KEY. The SDK's own tests already
-// covered this form and they PASSED: test_entry.py's “test_cleat_entry_basic“
-// decorates with a bare “@cleat_entry“ and asserts the wrapper runs
+// covered this form and they PASSED: test_entry.py's `test_cleat_entry_basic`
+// decorates with a bare `@cleat_entry` and asserts the wrapper runs
 // end-to-end, which it did. The defect was never in what the wrapper does -- it
 // was in what the registry is keyed by, which only a reader of the registry can
 // see. So this asserts the artifact the build actually consumes, through the

@@ -365,10 +365,12 @@ class TestUnwrapResult:
 class TestTheRegistryKeyIsTheWorkflowName:
     """cleat#2976: every decorator form must register under a NAME.
 
-    ``jsonschema_emitter._find_entry`` matches on the KEY of
-    ``module._cleat_entry_wrappers``, not on ``getattr(module, func_name)`` --
-    its own docstring says so. So the key is the address the build uses to find
-    a workflow, and it has to be a name in every form the SDK documents.
+    ``jsonschema_emitter._find_entry`` locates the entry by
+    ``wrapper.__name__`` and RETURNS the registry key as the workflow name;
+    ``json.dumps({workflow_name: ...})`` is what turns that key into the
+    document. So the key is the address the build uses, and it has to be a name
+    in every form the SDK documents -- a function object there is a TypeError at
+    the emitter's ``main()``, not a lookup miss.
 
     THE TESTS ABOVE DO NOT COVER THIS AND COULD NOT HAVE. ``test_cleat_entry_basic``
     decorates with a bare ``@cleat_entry`` and asserts the wrapper runs
