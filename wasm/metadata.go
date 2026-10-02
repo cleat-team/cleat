@@ -188,6 +188,40 @@ func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
 	return writeCustomSection(wasmBytes, entryPointsSectionName, []byte(payload.String()))
 }
 
+// SetMetadataField returns wasmBytes with the cleat.metadata key set to
+// rawValue, leaving every OTHER key exactly as the build wrote it.
+//
+// It exists because ReadMetadata/WriteMetadata round-trip through the Metadata
+// struct, and that struct models the keys the engine reads -- while a build may
+// write keys it does not. stamp_metadata.py writes sdk_language, sdk_version and
+// created_at, and the Rust, Java and AssemblyScript builds inject sdk_version
+// too. Rebuilding the payload from the struct DROPS every one of them, so a
+// caller that only meant to change one field silently rewrites the whole
+// section and loses provenance (cleat#2944).
+//
+// Key ORDER is not preserved: the payload is decoded into a map and re-encoded,
+// and encoding/json sorts map keys. Every key and every value survives
+// byte-for-byte; only their order changes. Nothing reads the section
+// positionally, and the field this was written for is not order sensitive.
+func SetMetadataField(wasmBytes []byte, key string, rawValue json.RawMessage) ([]byte, error) {
+	payload, err := readCustomSection(wasmBytes, sectionName)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		// The same message ReadMetadata gives for the same input, so a caller
+		// cannot tell the two readers apart by their error.
+		return nil, fmt.Errorf("cleat.metadata: invalid JSON: %w", err)
+	}
+	fields[key] = rawValue
+	patched, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("cleat.metadata: %w", err)
+	}
+	return writeCustomSection(wasmBytes, sectionName, patched)
+}
+
 // --- low-level WASM custom section helpers ---
 
 func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {

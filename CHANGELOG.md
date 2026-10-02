@@ -211,10 +211,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cleat build --version` had written, 1 by default. `cmd/cleat-worker`'s pre-flight releases a
   run whose binary reports a different `workflow_version` from the `workflow_defs` row it was
   queued against, on every claim, so the run never executed. The deploy now restamps
-  `cleat.metadata` to the version it assigns, making the binary and its row agree by
-  construction. The "already has the same binary (skipped)" dedup guard is preserved: it compares
-  content with `workflow_version` normalised out, because the stored bytes now carry a version the
-  file on disk does not. (cleat#2944)
+  `cleat.metadata`'s `workflow_version` to the version it assigns, making the binary and its row
+  agree by construction. Only that one key is rewritten: `wasm.Metadata` models the keys the
+  engine reads, and builds write others it does not (`stamp_metadata.py` adds `sdk_language`,
+  `sdk_version` and `created_at`), so the restamp patches the raw payload rather than rebuilding
+  it from the struct and dropping them. (cleat#2944)
 
 ## [0.3.0] - 2026-09-27
 

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,26 +15,12 @@ import (
 // section, not about executing anything, so nothing else is needed.
 var coreModuleHeader = []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 
-// artifactWithMetadata returns a core module carrying cleat.metadata, plus the
-// bytes of a trailing custom section so a caller can produce two artifacts that
-// differ in their BODY while sharing a metadata stamp -- which is what a rebuild
-// at an unchanged `cleat build --version` actually produces.
-func artifactWithMetadata(t *testing.T, meta *wasm.Metadata, bodyMarker string) []byte {
-	t.Helper()
-	b, err := wasm.WriteMetadata(coreModuleHeader, meta)
-	if err != nil {
-		t.Fatalf("WriteMetadata: %v", err)
-	}
-	if bodyMarker == "" {
-		return b
-	}
-	return append(b, customSectionBytes(bodyMarker)...)
-}
-
-// customSectionBytes encodes a custom section named bodyMarker with no payload.
-func customSectionBytes(name string) []byte {
+// customSectionWithPayload encodes a custom section named `name` carrying
+// `payload` (nil for none).
+func customSectionWithPayload(name string, payload []byte) []byte {
 	out := []byte{0x00} // custom section id
 	body := append(uleb128(uint32(len(name))), []byte(name)...)
+	body = append(body, payload...)
 	out = append(out, uleb128(uint32(len(body)))...)
 	return append(out, body...)
 }
@@ -53,6 +38,31 @@ func uleb128(v uint32) []byte {
 	}
 }
 
+// artifactWithMetadata returns a core module carrying cleat.metadata written
+// through the Go struct, plus a trailing custom section so a caller can produce
+// two artifacts that differ in their BODY while sharing a metadata stamp --
+// which is what a rebuild at an unchanged `cleat build --version` produces.
+func artifactWithMetadata(t *testing.T, meta *wasm.Metadata, bodyMarker string) []byte {
+	t.Helper()
+	b, err := wasm.WriteMetadata(coreModuleHeader, meta)
+	if err != nil {
+		t.Fatalf("WriteMetadata: %v", err)
+	}
+	if bodyMarker == "" {
+		return b
+	}
+	return append(b, customSectionWithPayload(bodyMarker, nil)...)
+}
+
+// artifactWithRawMetadata returns a core module whose cleat.metadata payload is
+// exactly `payload`. A test needs this to include keys wasm.Metadata does not
+// model, which WriteMetadata cannot produce by construction.
+func artifactWithRawMetadata(t *testing.T, payload string) []byte {
+	t.Helper()
+	b := append([]byte{}, coreModuleHeader...)
+	return append(b, customSectionWithPayload("cleat.metadata", []byte(payload))...)
+}
+
 // TestDeployWorkflow_RestampsTheBinaryToTheVersionItRecords is the regression
 // test for cleat#2944.
 //
@@ -65,10 +75,10 @@ func uleb128(v uint32) []byte {
 // workflow_version from the row it was queued against, on every claim, so the
 // run looped between claim and release and never executed.
 //
-// The subtlety this test is built around: the input must differ from the stored
-// row in its BODY, not just its version. An identical file is caught by the
-// dedup guard and never reaches the insert -- which is a different behaviour,
-// covered by TestDeployWorkflow_SkipsARedeployOfTheSameArtifactAfterRestamping.
+// The input must differ from the stored row in its BODY, not just its version:
+// an identical file is caught by the dedup guard and never reaches the insert,
+// which is a different behaviour (and one that does not fire against a real
+// store -- cleat#2946).
 func TestDeployWorkflow_RestampsTheBinaryToTheVersionItRecords(t *testing.T) {
 	dir := t.TempDir()
 
@@ -133,58 +143,53 @@ func TestDeployWorkflow_RestampsTheBinaryToTheVersionItRecords(t *testing.T) {
 	}
 }
 
-// TestDeployWorkflow_SkipsARedeployOfTheSameArtifactAfterRestamping pins the
-// other half of cleat#2944: the guard in deployWorkflow's doc comment -- "If an
-// exact version already exists with the same SHA256 hash, the deployment is
-// skipped" -- is documented behaviour, and restamping gives the stored bytes a
-// version the file on disk does not have.
-//
-// Compared on raw bytes, those two never match again and the guard silently
-// dies, turning an accidental double-deploy into a spurious new version. The
-// comparison is normalised for exactly this case: the row below holds the
-// artifact as a fixed deploy WOULD store it (stamped v2), the input is the same
-// artifact as built (stamped v1).
-func TestDeployWorkflow_SkipsARedeployOfTheSameArtifactAfterRestamping(t *testing.T) {
-	dir := t.TempDir()
+// TestRestampWorkflowVersionPreservesKeysItDoesNotModel is the regression test
+// for the second defect cleat-review found on this PR: the restamp originally
+// round-tripped through wasm.Metadata, which models only the keys the engine
+// reads. stamp_metadata.py writes sdk_language, sdk_version and created_at as
+// well, and Rust/Java/AssemblyScript inject sdk_version, so every restamp
+// dropped them -- "restamps workflow_version" rewrote the whole section.
+func TestRestampWorkflowVersionPreservesKeysItDoesNotModel(t *testing.T) {
+	payload := `{"workflow_name":"provision","workflow_version":1,"abi_version":1,` +
+		`"min_compatible_version":1,"plugin_deps":{},"entry_points":["place_order"],` +
+		`"sdk_language":"python","sdk_version":"0.3.2","created_at":"2026-10-02T00:00:00Z"}`
+	built := artifactWithRawMetadata(t, payload)
 
-	meta := &wasm.Metadata{
-		WorkflowName:         "provision",
-		WorkflowVersion:      1,
-		ABIVersion:           wasm.CurrentABIVersion,
-		MinCompatibleVersion: wasm.CurrentABIVersion,
-		Language:             "go",
-	}
-	asBuilt := artifactWithMetadata(t, meta, "")
-	path := writeWASM(t, dir, asBuilt)
-
-	stampedV2, err := restampWorkflowVersion(asBuilt, 2)
+	got, err := restampWorkflowVersion(built, 2)
 	if err != nil {
 		t.Fatalf("restampWorkflowVersion: %v", err)
 	}
-	if stampedV2 == nil || string(stampedV2) == string(asBuilt) {
-		t.Fatal("restampWorkflowVersion did not change the artifact, so this test is not exercising the stamped case")
+
+	meta, err := wasm.ReadMetadata(got)
+	if err != nil {
+		t.Fatalf("the restamped artifact has no readable metadata: %v", err)
+	}
+	if meta.WorkflowVersion != 2 {
+		t.Errorf("workflow_version = %d, want 2", meta.WorkflowVersion)
 	}
 
-	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
-			return []engine.WorkflowDef{
-				{Name: name, Version: 2, ABIVersion: wasm.CurrentABIVersion,
-					WASMBytes: stampedV2, CreatedAt: time.Now()},
-			}, nil
-		},
-		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
-			t.Errorf("DeployWorkflowDef called for v%d: the same artifact was already deployed as "+
-				"v2 and the doc comment says that is skipped. Comparing raw bytes breaks the "+
-				"moment stored bytes carry a version the file does not. cleat#2944.", def.Version)
-			return nil
-		},
-	}
-
-	stdout := captureStdout(t, func() {
-		deployWorkflow(context.Background(), store, nil, []string{"provision", path})
-	})
-	if !strings.Contains(stdout, "WASM unchanged") {
-		t.Errorf("expected 'WASM unchanged' in stdout, got: %s", stdout)
+	// Asserted as raw key:value pairs in the stored payload, because
+	// wasm.ReadMetadata cannot see them -- which is precisely why they were
+	// being lost. encoding/json re-encodes the payload's map, so key ORDER
+	// changes and a whole-payload comparison would be a false failure; values
+	// are preserved verbatim.
+	for _, want := range []string{
+		`"sdk_language":"python"`,
+		`"sdk_version":"0.3.2"`,
+		`"created_at":"2026-10-02T00:00:00Z"`,
+		`"entry_points":["place_order"]`,
+		`"workflow_name":"provision"`,
+		// Modelled by the struct, but tagged omitempty -- so a round-trip drops
+		// it when it is present-and-empty, a different mechanism from the three
+		// above and worth its own case.
+		`"plugin_deps":{}`,
+	} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Errorf("the restamped artifact lost %s.\n\n"+
+				"wasm.Metadata models only the keys the engine reads; rebuilding the payload "+
+				"from that struct rewrites the whole section and drops every key it does not "+
+				"carry. Patch the one key instead. cleat#2944.", want)
+		}
 	}
 }
 
@@ -203,6 +208,7 @@ func TestRestampWorkflowVersionLeavesAnUnstampedArtifactAlone(t *testing.T) {
 	}{
 		{"a core module with no metadata", coreModuleHeader},
 		{"a Component Model header", []byte{0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00}},
+		{"a core module with a non-metadata section", append(append([]byte{}, coreModuleHeader...), customSectionWithPayload("other", nil)...)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := restampWorkflowVersion(tc.in, 7)
@@ -216,40 +222,24 @@ func TestRestampWorkflowVersionLeavesAnUnstampedArtifactAlone(t *testing.T) {
 	}
 }
 
-// TestContentFingerprintIgnoresOnlyTheWorkflowVersion bounds the normalisation:
-// it must ignore the version and nothing else, or the dedup guard would start
-// treating genuinely different artifacts as the same one.
-func TestContentFingerprintIgnoresOnlyTheWorkflowVersion(t *testing.T) {
-	base := func(version int, marker string) []byte {
-		return artifactWithMetadata(t, &wasm.Metadata{
-			WorkflowName:         "provision",
-			WorkflowVersion:      version,
-			ABIVersion:           wasm.CurrentABIVersion,
-			MinCompatibleVersion: wasm.CurrentABIVersion,
-			Language:             "go",
-		}, marker)
-	}
-	renamed := func(version int, marker string) []byte {
-		return artifactWithMetadata(t, &wasm.Metadata{
-			WorkflowName:         "something-else",
-			WorkflowVersion:      version,
-			ABIVersion:           wasm.CurrentABIVersion,
-			MinCompatibleVersion: wasm.CurrentABIVersion,
-			Language:             "go",
-		}, marker)
-	}
+// The version is written as a JSON number, not a string -- wasm.Metadata's
+// WorkflowVersion is an int, and a quoted value would fail to unmarshal and
+// take the whole definition's metadata with it.
+func TestRestampWorkflowVersionWritesANumberNotAString(t *testing.T) {
+	built := artifactWithRawMetadata(t, `{"workflow_name":"provision","workflow_version":1}`)
 
-	if contentFingerprint(base(1, "")) != contentFingerprint(base(9, "")) {
-		t.Error("two artifacts differing only in workflow_version must fingerprint equal, " +
-			"or the dedup guard dies the moment a deploy restamps")
+	got, err := restampWorkflowVersion(built, 12)
+	if err != nil {
+		t.Fatalf("restampWorkflowVersion: %v", err)
 	}
-	if contentFingerprint(base(1, "")) == contentFingerprint(base(1, "body")) {
-		t.Error("two artifacts with different bodies must fingerprint differently")
+	if !bytes.Contains(got, []byte(`"workflow_version":12`)) {
+		t.Errorf("expected an unquoted 12 in the payload; got %s", got[8:])
 	}
-	if contentFingerprint(base(1, "")) == contentFingerprint(renamed(1, "")) {
-		t.Error("two artifacts with different metadata must fingerprint differently")
+	meta, err := wasm.ReadMetadata(got)
+	if err != nil {
+		t.Fatalf("ReadMetadata on the restamped artifact: %v", err)
 	}
-	if contentFingerprint(base(1, "")) == contentFingerprint(coreModuleHeader) {
-		t.Error("an artifact with metadata must fingerprint differently from one without")
+	if meta.WorkflowVersion != 12 {
+		t.Errorf("WorkflowVersion = %d, want 12", meta.WorkflowVersion)
 	}
 }
