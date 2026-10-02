@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"sort"
 	"strings"
@@ -74,10 +76,12 @@ func (s *apiServer) handleOpenAPIDocument(w http.ResponseWriter, r *http.Request
 //     call is what `cleatctl` and the start API's own version resolution are
 //     for; the document is not the place to enumerate history.
 //
-//  3. Entry points are carried as an enum on "entry_point", with "input" a
-//     oneOf when a definition declares more than one. A single entry point
+//  3. Entry points are carried as an enum on "entry_point", with "input" an
+//     anyOf when a definition declares more than one. A single entry point
 //     (the common case) puts its parameter schema on "input" directly, so the
-//     generated type is the object the caller actually writes.
+//     generated type is the object the caller actually writes. It is anyOf
+//     and not oneOf because the branches are open objects and therefore
+//     overlap -- see the comment at the assignment.
 //
 // Result schemas are published under components.schemas rather than being
 // typed onto a response: the start endpoint returns a run id, not the
@@ -113,6 +117,14 @@ func buildOpenAPIDocument(defs []engine.WorkflowDef) map[string]any {
 	}
 	sort.Strings(names)
 
+	// Derived identifiers must be a TOTAL mapping from workflow name, or two
+	// definitions that sanitise alike share one operationId (OpenAPI 3.1
+	// requires uniqueness) and one components key (the second silently
+	// overwrites the first). Not exotic: cleat build takes the workflow name
+	// from the DIRECTORY name, so "my-workflow" and "my_workflow" are a
+	// realistic pair for one tenant.
+	stems := stemsFor(names)
+
 	paths := map[string]any{}
 	components := map[string]any{}
 
@@ -140,7 +152,7 @@ func buildOpenAPIDocument(defs []engine.WorkflowDef) map[string]any {
 			typed = append(typed, ep)
 			inputs = append(inputs, sch.Params)
 			if len(sch.Result) > 0 {
-				components[resultSchemaName(name, ep)] = sch.Result
+				components[resultSchemaName(stems[name], ep)] = sch.Result
 			}
 		}
 		if len(typed) == 0 {
@@ -151,12 +163,20 @@ func buildOpenAPIDocument(defs []engine.WorkflowDef) map[string]any {
 		if len(inputs) == 1 {
 			inputSchema = inputs[0]
 		} else {
-			inputSchema = map[string]any{"oneOf": inputs}
+			// anyOf, NOT oneOf. Every emitted schema carries
+			// additionalProperties:true (the binding ignores keys it does not
+			// know), so two entry points' schemas are not disjoint: an object
+			// with both an "amount" and a "ref" matches both branches.
+			// oneOf demands EXACTLY one match and would reject a call
+			// handleStartWorkflow accepts -- the document disagreeing with the
+			// server, which is the same defect the empty-Params predicate above
+			// exists to avoid, arriving from the other direction.
+			inputSchema = map[string]any{"anyOf": inputs}
 		}
 
 		paths["/api/workflows/"+name+"/start"] = map[string]any{
 			"post": map[string]any{
-				"operationId": "start_" + sanitiseOperationID(name),
+				"operationId": "start_" + stems[name],
 				"summary":     "Start a " + name + " run",
 				"requestBody": map[string]any{
 					"required": true,
@@ -208,17 +228,51 @@ func buildOpenAPIDocument(defs []engine.WorkflowDef) map[string]any {
 	return doc
 }
 
+// stemsFor returns a TOTAL mapping from workflow name to the identifier stem
+// used for its operationId and its components keys.
+//
+// A plain sanitise is not total: "a-b" and "a_b" both become "a_b", so one
+// tenant holding both would get one operationId between them (OpenAPI 3.1
+// requires uniqueness) and one components key, the second schema silently
+// overwriting the first. When a group of names collapses onto one stem,
+// EVERY member of the group is disambiguated -- not just the later ones --
+// so the result does not depend on the order the names arrived in.
+//
+// Only workflow names need this. Entry-point names are guest function names
+// (Go, Python), which are identifiers before they reach here, so
+// sanitiseOperationID is the identity on them and distinct names stay
+// distinct.
+func stemsFor(names []string) map[string]string {
+	group := make(map[string][]string, len(names))
+	for _, n := range names {
+		s := sanitiseOperationID(n)
+		group[s] = append(group[s], n)
+	}
+
+	stems := make(map[string]string, len(names))
+	for _, n := range names {
+		s := sanitiseOperationID(n)
+		if len(group[s]) == 1 {
+			stems[n] = s
+			continue
+		}
+		sum := sha256.Sum256([]byte(n))
+		stems[n] = s + "_" + hex.EncodeToString(sum[:4])
+	}
+	return stems
+}
+
 // resultSchemaName is the components.schemas key for an entry point's result
 // schema. Namespaced by both the workflow and the entry point because two
-// workflows may legitimately share an entry-point name.
-func resultSchemaName(name, entryPoint string) string {
-	return sanitiseOperationID(name) + "." + sanitiseOperationID(entryPoint) + ".result"
+// workflows may legitimately share an entry-point name. The stem is passed in
+// already disambiguated by stemsFor.
+func resultSchemaName(stem, entryPoint string) string {
+	return stem + "." + sanitiseOperationID(entryPoint) + ".result"
 }
 
 // sanitiseOperationID maps a workflow or entry-point name onto the character
-// set an OpenAPI operationId and a components key both accept. Workflow names
-// are hyphenated slugs, and a client generator derives an identifier from
-// this, so the mapping has to be total rather than a validation that can fail.
+// set an OpenAPI operationId and a components key both accept. It is NOT
+// injective -- see stemsFor for what that costs and how it is paid for.
 func sanitiseOperationID(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {

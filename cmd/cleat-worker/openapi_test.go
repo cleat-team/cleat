@@ -18,6 +18,7 @@ const (
 	amountParamSchema  = `{"type":"object","properties":{"amount":{"type":"integer"}},"required":["amount"],"additionalProperties":true}`
 	refundParamSchema  = `{"type":"object","properties":{"ref":{"type":"string"}},"required":["ref"],"additionalProperties":true}`
 	amountResultSchema = `{"type":"object","properties":{"settled":{"type":"boolean"}},"additionalProperties":true}`
+	refundResultSchema = `{"type":"object","properties":{"reversed":{"type":"boolean"}},"additionalProperties":true}`
 )
 
 func typedDef(name string, version int, entryPoints map[string]engine.EntryPointSchema) engine.WorkflowDef {
@@ -156,29 +157,11 @@ func TestAnEmptySchemaIsTreatedAsNoSchema(t *testing.T) {
 	}
 }
 
-// TestSeveralEntryPointsBecomeAnEnumAndAOneOf covers a definition declaring
-// more than one entry point, where a single input schema would have to be a
-// lie about at least one of them.
-func TestSeveralEntryPointsBecomeAnEnumAndAOneOf(t *testing.T) {
-	doc := document(t, []engine.WorkflowDef{
-		typedDef("billing", 1, map[string]engine.EntryPointSchema{
-			"charge": paramsOf(amountParamSchema),
-			"refund": paramsOf(refundParamSchema),
-		}),
-	})
-
-	props := dig(t, doc, "paths", "/api/workflows/billing/start", "post",
-		"requestBody", "content", "application/json", "schema", "properties").(map[string]any)
-
-	enum := props["entry_point"].(map[string]any)["enum"].([]any)
-	if len(enum) != 2 {
-		t.Fatalf("entry_point enum = %v, want both entry points", enum)
-	}
-	oneOf, ok := props["input"].(map[string]any)["oneOf"].([]any)
-	if !ok || len(oneOf) != 2 {
-		t.Fatalf("input = %v, want a oneOf over both schemas", props["input"])
-	}
-}
+// The "several entry points" case lives in
+// TestOverlappingEntryPointSchemasUseAnyOfNotOneOf below, which absorbed it:
+// that test also asserts both entry points are offered, and it is the one that
+// can fail, because it states why the brancher must be anyOf rather than only
+// that a brancher exists.
 
 // TestTheNewestVersionDecidesTheShape. ListWorkflowDefs returns every version
 // ordered name, version DESC; a caller generating a client wants the shape
@@ -280,6 +263,123 @@ func TestTheDocumentIsServedFromTheCallersTenantStore(t *testing.T) {
 		if _, ok := paths["/api/workflows/"+other+"/start"]; ok {
 			t.Errorf("the document names %q, which belongs to another scope", other)
 		}
+	}
+}
+
+// TestTwoWorkflowsWhoseNamesSanitiseAlikeDoNotCollide.
+//
+// Found by cleat-review on cleat#2971. sanitiseOperationID maps every
+// character outside [A-Za-z0-9_] to "_", so "billing-v2" and "billing_v2" --
+// and, more realistically, "my-workflow" and "my_workflow", since cleat build
+// takes the workflow name from the DIRECTORY name -- produce one operationId
+// between them and one components key between them.
+//
+// Both consequences are silent in the response and both are wrong: OpenAPI 3.1
+// requires operationId to be unique, and the second workflow's result schema
+// overwrites the first's, so a caller reading components gets one schema where
+// the tenant has two definitions.
+func TestTwoWorkflowsWhoseNamesSanitiseAlikeDoNotCollide(t *testing.T) {
+	doc := document(t, []engine.WorkflowDef{
+		typedDef("billing-v2", 1, map[string]engine.EntryPointSchema{
+			"run": {Params: json.RawMessage(amountParamSchema), Result: json.RawMessage(amountResultSchema)},
+		}),
+		typedDef("billing_v2", 1, map[string]engine.EntryPointSchema{
+			"run": {Params: json.RawMessage(refundParamSchema), Result: json.RawMessage(refundResultSchema)},
+		}),
+	})
+
+	paths := doc["paths"].(map[string]any)
+	for _, want := range []string{"/api/workflows/billing-v2/start", "/api/workflows/billing_v2/start"} {
+		if _, ok := paths[want]; !ok {
+			t.Errorf("path %q is missing: both definitions must be served", want)
+		}
+	}
+
+	seen := map[string]string{}
+	for p, v := range paths {
+		opID, _ := v.(map[string]any)["post"].(map[string]any)["operationId"].(string)
+		if prev, dup := seen[opID]; dup {
+			t.Errorf("operationId %q is used by both %q and %q; OpenAPI requires it to be unique", opID, prev, p)
+		}
+		seen[opID] = p
+	}
+
+	schemas, _ := doc["components"].(map[string]any)["schemas"].(map[string]any)
+	if len(schemas) != 2 {
+		t.Errorf("components.schemas holds %d entries, want 2 -- one workflow's result schema was overwritten: %v",
+			len(schemas), schemas)
+	}
+}
+
+// TestOverlappingEntryPointSchemasUseAnyOfNotOneOf.
+//
+// Found by cleat-review on cleat#2971. Every emitted Params schema carries
+// additionalProperties:true (the binding ignores unknown keys), so two entry
+// points' schemas are NOT disjoint: an object satisfying "charge" also
+// satisfies "refund" whenever it happens to carry a ref key too, and a
+// superset instance matches both.
+//
+// oneOf requires EXACTLY one match, so it would reject a call that
+// handleStartWorkflow accepts -- the same document-disagrees-with-the-server
+// defect this file guards against for an empty Params, in the other
+// direction. anyOf says what is true: at least one.
+func TestOverlappingEntryPointSchemasUseAnyOfNotOneOf(t *testing.T) {
+	doc := document(t, []engine.WorkflowDef{
+		typedDef("billing", 1, map[string]engine.EntryPointSchema{
+			"charge": paramsOf(amountParamSchema),
+			"refund": paramsOf(refundParamSchema),
+		}),
+	})
+
+	props := dig(t, doc, "paths", "/api/workflows/billing/start", "post",
+		"requestBody", "content", "application/json", "schema", "properties").(map[string]any)
+
+	// Both entry points must still be offered: a document that dropped one to
+	// dodge the overlap would be a different way of disagreeing with the
+	// server.
+	enum, _ := props["entry_point"].(map[string]any)["enum"].([]any)
+	if len(enum) != 2 {
+		t.Fatalf("entry_point enum = %v, want both entry points", enum)
+	}
+
+	input, _ := props["input"].(map[string]any)
+	if input == nil {
+		t.Fatalf("input = %v, want an object", props["input"])
+	}
+	if _, bad := input["oneOf"]; bad {
+		t.Error("input uses oneOf, which requires exactly one branch to match; the branches are open objects " +
+			"(additionalProperties:true) so a valid call can match both and would be rejected")
+	}
+	branches, ok := input["anyOf"].([]any)
+	if !ok || len(branches) != 2 {
+		t.Fatalf("input = %v, want anyOf over both schemas", input)
+	}
+
+	// The overlap is not hypothetical, so it is shown rather than asserted in
+	// prose: this instance satisfies BOTH branches.
+	superset := map[string]any{"amount": 1, "ref": "r-1"}
+	matched := 0
+	for _, b := range branches {
+		props, _ := b.(map[string]any)["properties"].(map[string]any)
+		required, _ := b.(map[string]any)["required"].([]any)
+		ok := true
+		for _, r := range required {
+			if _, present := superset[r.(string)]; !present {
+				ok = false
+			}
+		}
+		for k := range superset {
+			if _, declared := props[k]; !declared {
+				// additionalProperties:true, so an undeclared key still matches
+			}
+		}
+		if ok {
+			matched++
+		}
+	}
+	if matched != 2 {
+		t.Fatalf("the fixture instance matched %d branches, not 2 -- this test would not detect a oneOf "+
+			"rejecting it, so it cannot disagree and proves nothing", matched)
 	}
 }
 
