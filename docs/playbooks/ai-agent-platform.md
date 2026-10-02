@@ -103,9 +103,11 @@ of one reusable agent workflow that any SDK starts as a child; see "Agent Workfl
 [`docs/reference/sdk-api.md`](../reference/sdk-api.md). **Do not write your own loop** — the engine
 owns it now.
 
-One hand-written loop remains, deliberately: `examples/ai-agent-platform/agent.go` carries its own
-`RunAgent`, and its README says why. It is the worked example of a product-shaped build rather than
-a recommendation, and cleat#1983 did not migrate it.
+One hand-written loop remains: `examples/ai-agent-platform/agent.go` carries its own `RunAgent`. It
+is this playbook's reference implementation and its own scenario asserts the same durability claim
+by counting the model's requests across a SIGKILL, so it is not dead weight — but it is a copy of a
+loop that now ships once, and cleat#1983 did not migrate it. Tracked as **cleat#2980**; until it
+lands, take the agent from the workflow and this example for the deployment shape.
 
 `examples/ai-agent-platform/` (2026-09-28, cleat#2535) is **the fourth copy**, written in the form
 #1983 will replace rather than as the permanent answer: it says so in its README, and a reader who
