@@ -78,7 +78,7 @@ func artifactWithRawMetadata(t *testing.T, payload string) []byte {
 // The input must differ from the stored row in its BODY, not just its version:
 // an identical file is caught by the dedup guard and never reaches the insert,
 // which is a different behaviour (and one that does not fire against a real
-// store -- cleat#2946).
+// store -- cleat#2947).
 func TestDeployWorkflow_RestampsTheBinaryToTheVersionItRecords(t *testing.T) {
 	dir := t.TempDir()
 
@@ -170,9 +170,10 @@ func TestRestampWorkflowVersionPreservesKeysItDoesNotModel(t *testing.T) {
 
 	// Asserted as raw key:value pairs in the stored payload, because
 	// wasm.ReadMetadata cannot see them -- which is precisely why they were
-	// being lost. encoding/json re-encodes the payload's map, so key ORDER
-	// changes and a whole-payload comparison would be a false failure; values
-	// are preserved verbatim.
+	// being lost. Values survive SEMANTICALLY, not byte-for-byte: the payload is
+	// re-encoded, so key ORDER changes and interior whitespace is compacted
+	// (which is why every expected string below is written without spaces and a
+	// whole-payload comparison would be a false failure).
 	for _, want := range []string{
 		`"sdk_language":"python"`,
 		`"sdk_version":"0.3.2"`,
@@ -241,5 +242,44 @@ func TestRestampWorkflowVersionWritesANumberNotAString(t *testing.T) {
 	}
 	if meta.WorkflowVersion != 12 {
 		t.Errorf("WorkflowVersion = %d, want 12", meta.WorkflowVersion)
+	}
+}
+
+// TestDeployWorkflow_StoresANonObjectMetadataPayloadUnchanged is the regression
+// test for the panic cleat-review found on this PR's second head.
+//
+// A cleat.metadata payload of the JSON literal `null` parses to a zero
+// wasm.Metadata, which reports version 0 -- not the version being assigned -- so
+// the restamp proceeded and SetMetadataField assigned into the nil map
+// json.Unmarshal leaves behind for `null`. That panics with "assignment to entry
+// in nil map", from `cleatctl deploy`, where develop stored the artifact as-is.
+//
+// The row is still created; what must not happen is a crash.
+func TestDeployWorkflow_StoresANonObjectMetadataPayloadUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	built := artifactWithRawMetadata(t, `null`)
+	path := writeWASM(t, dir, built)
+
+	var capturedDef *engine.WorkflowDef
+	store := &mockStore{
+		listWorkflowDefsFn: func(_ context.Context, _ string) ([]engine.WorkflowDef, error) {
+			return nil, nil
+		},
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
+			capturedDef = def
+			return nil
+		},
+	}
+
+	captureStdout(t, func() {
+		deployWorkflow(context.Background(), store, nil, []string{"provision", path})
+	})
+
+	if capturedDef == nil {
+		t.Fatal("expected DeployWorkflowDef to be called")
+	}
+	if string(capturedDef.WASMBytes) != string(built) {
+		t.Error("a cleat.metadata payload that is not a JSON object has no key to patch, so the " +
+			"binary must be stored exactly as built -- which is also what develop did")
 	}
 }

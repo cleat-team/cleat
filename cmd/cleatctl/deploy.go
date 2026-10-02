@@ -218,6 +218,15 @@ func restampWorkflowVersion(wasmBytes []byte, version int) ([]byte, error) {
 	if err != nil || meta == nil {
 		return wasmBytes, nil
 	}
+	if meta.WorkflowVersion <= 0 {
+		// No usable stamp. A cleat.metadata payload of `null` parses to a zero
+		// Metadata and reports version 0, as does a build that declared none.
+		// There is nothing to reconcile, so store the binary as built -- and this
+		// is the gate that keeps such a payload away from SetMetadataField, which
+		// needs a JSON object to patch. `cleat deploy` treats a stamp the same
+		// way, trusting it only when it is positive.
+		return wasmBytes, nil
+	}
 	if meta.WorkflowVersion == version {
 		return wasmBytes, nil
 	}

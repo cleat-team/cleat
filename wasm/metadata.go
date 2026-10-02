@@ -7,6 +7,7 @@
 package wasm
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -199,10 +200,17 @@ func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
 // caller that only meant to change one field silently rewrites the whole
 // section and loses provenance (cleat#2944).
 //
-// Key ORDER is not preserved: the payload is decoded into a map and re-encoded,
-// and encoding/json sorts map keys. Every key and every value survives
-// byte-for-byte; only their order changes. Nothing reads the section
-// positionally, and the field this was written for is not order sensitive.
+// Key ORDER is not preserved, and values are preserved SEMANTICALLY rather than
+// byte-for-byte: the payload is decoded into a map and re-encoded, so
+// encoding/json sorts the keys and compacts the whitespace inside a value
+// ([1, 2] becomes [1,2]). HTML escaping is switched off, so <, > and & inside a
+// value are left as the build wrote them rather than becoming <-style
+// escapes. Every key and every value survives; only their order and interior
+// whitespace change. Nothing reads the section positionally, and the field this
+// was written for is not order sensitive.
+//
+// A payload that is valid JSON but not an object (the literal null, an array, a
+// bare string) is an error, not a panic: it has no keys to patch.
 func SetMetadataField(wasmBytes []byte, key string, rawValue json.RawMessage) ([]byte, error) {
 	payload, err := readCustomSection(wasmBytes, sectionName)
 	if err != nil {
@@ -214,12 +222,25 @@ func SetMetadataField(wasmBytes []byte, key string, rawValue json.RawMessage) ([
 		// cannot tell the two readers apart by their error.
 		return nil, fmt.Errorf("cleat.metadata: invalid JSON: %w", err)
 	}
+	if fields == nil {
+		// Unmarshal leaves the map nil for a JSON `null`, and assigning into it
+		// panics ("assignment to entry in nil map") -- reached from
+		// cleatctl deploy, where ReadMetadata accepts `null` as a zero Metadata
+		// and the version it reports (0) differs from the assigned one.
+		return nil, fmt.Errorf("cleat.metadata: not a JSON object")
+	}
 	fields[key] = rawValue
-	patched, err := json.Marshal(fields)
-	if err != nil {
+
+	// An Encoder rather than json.Marshal, with HTML escaping off, so a value the
+	// build wrote is not rewritten. Marshal escapes <, > and & inside a
+	// RawMessage; the compaction below happens either way.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fields); err != nil {
 		return nil, fmt.Errorf("cleat.metadata: %w", err)
 	}
-	return writeCustomSection(wasmBytes, sectionName, patched)
+	return writeCustomSection(wasmBytes, sectionName, bytes.TrimRight(buf.Bytes(), "\n"))
 }
 
 // --- low-level WASM custom section helpers ---
