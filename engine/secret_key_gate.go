@@ -91,8 +91,10 @@ const (
 
 	// SecretKeyLiveWindow is how recent a heartbeat must be for a writer to
 	// count a worker. Deliberately generous: a crashed worker's row is removed
-	// within the workers' own stale window by any live worker's sweep, so this
-	// only matters when NO worker is left to sweep, and then it stops a dead
+	// by any live worker's sweep (cmd/cleat-worker's workerRegistryRetention,
+	// which is longer than the membership lease since cleat#2196's veto channel
+	// has to resolve the address of a holder whose heartbeats have stopped), so
+	// this only matters when NO worker is left to sweep, and then it stops a dead
 	// row blocking writes forever. Being too lenient is safe (a restarting
 	// worker re-reads the table); being too strict is what would hide a
 	// serving worker.

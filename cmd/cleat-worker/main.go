@@ -2271,6 +2271,7 @@ func main() {
 		secrets:                          secretStore,
 		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
+		internalAuthSecret:               os.Getenv("CLEAT_INTERNAL_AUTH_KEY"),
 		connectionShare:                  share,
 		connectionBudgetParts:            budget,
 		clusterConnectionBudget:          *clusterConnectionBudgetFlag,
@@ -2643,7 +2644,11 @@ func main() {
 	// is no in-flight work for this listener to wait on, so it can shut
 	// down the moment ctx is cancelled rather than needing --shutdown-grace.
 	if *internalAddr != "" {
-		internalSecret := os.Getenv("CLEAT_INTERNAL_AUTH_KEY")
+		// Read from the Worker rather than the environment a second time: the
+		// reaper's half of this channel (cleat#2196 step 4) needs the same
+		// secret to ASK with, on a worker that may never serve this listener,
+		// and one read means the two halves cannot be configured to disagree.
+		internalSecret := w.internalAuthSecret
 		if internalSecret == "" {
 			logger.ErrorContext(context.Background(), "--internal-addr is set but CLEAT_INTERNAL_AUTH_KEY is not -- "+
 				"the internal holds listener would authenticate no caller at all, which is worse than not starting it",

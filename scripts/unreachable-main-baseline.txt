@@ -1,7 +1,6 @@
 cmd/cleat-worker	MemoryController.WorkflowMemoryEstimate
 cmd/cleat-worker	Worker.DrainComplete
 cmd/cleat-worker	Worker.waitForDB
-cmd/cleat-worker	askInternalHolds
 cmd/cleat-worker	baseDSNFromDSN
 cmd/cleat-worker	healthTracker.maxAge
 cmd/cleatctl	printCheckDBUsage
