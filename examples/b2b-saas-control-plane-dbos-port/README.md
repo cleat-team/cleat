@@ -196,7 +196,10 @@ once, and neither side's reason is the other's — see
 for the cleat half.
 
 **MySQL is excluded twice over on the cleat side**: it is single-tenant by
-construction (`migrations/mysql/038`), so a scenario whose whole subject is
+construction — `migrations/mysql/001_schema.sql` gives `tenants` a
+`UNIQUE KEY ... (singleton)` that permits exactly one row, and the constraint's
+own name (`uq_tenants_mysql_is_single_tenant_only_see_tiers_yaml_d1`) points at
+the `tiers.yaml` D1 decision behind it — so a scenario whose whole subject is
 per-tenant provisioning has nothing to provision there.
 
 ## Reading the sweep
