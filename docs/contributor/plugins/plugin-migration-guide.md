@@ -268,9 +268,15 @@ ones. If a test fails, check:
 
 ### Step 1: Run the tenant roles migration
 
-Apply migration 009, which creates the `create_tenant_role` and
-`drop_tenant_role` PostgreSQL functions. Migrations are applied by the worker,
-which exits once they are done — there is no `cleat migrate` subcommand:
+Most of these tables and functions ship in `migrations/postgres/001_schema.sql`
+(the two exceptions are tracked separately, cleat#2932), not
+a dedicated migration -- the schema rebaseline before 0.3.0 folded what was
+once a separate numbered migration into the initial schema, and "migration
+009" is the wrong citation either way now: that number names
+`009_worker_address.sql` (cleat#2196), an unrelated migration. Applying the
+schema is the same step as any other fresh install; migrations are applied
+by the worker, which exits once they are done -- there is no `cleat migrate`
+subcommand:
 
 ```bash
 cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"

@@ -278,6 +278,7 @@ func (w *Worker) registerInWorkerRegistry(ctx context.Context) error {
 	return registerWithKeyCheck(ctx, w.workerRegistry, w.secrets, engine.WorkerRegistration{
 		WorkerID:         w.id,
 		Hostname:         hostnameOrEmpty(),
+		Address:          podAddress(hostnameOrEmpty(), *workerServiceName),
 		PID:              os.Getpid(),
 		Concurrency:      w.concurrency,
 		ConnectionBudget: w.clusterConnectionBudget,

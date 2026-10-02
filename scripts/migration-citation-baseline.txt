@@ -45,7 +45,6 @@ cmd/cleatctl/speaks_three_dialects_test.go	migrations/mssql/074
 docs/contributor/design/cleat-execution-design.md	migration 033
 docs/contributor/migrations.md	004_fix_finalize_workflow_status_fence.sql
 docs/contributor/migrations.md	migrations/mysql/077
-docs/contributor/plugins/plugin-migration-guide.md	migration 009
 docs/contributor/plugins/plugin-security.md	074_a_dropped_tenants_rows_go_with_it.sql
 docs/contributor/plugins/plugin-security.md	077_every_entity_records_when_it_last_changed.sql
 docs/durable-call-intent-design.md	migration 020
@@ -56,7 +55,6 @@ docs/explanation/postgresql-schema.md	migration 052
 docs/explanation/postgresql-schema.md	migration 074
 docs/explanation/postgresql-schema.md	migration 075
 docs/explanation/postgresql-schema.md	migrations/postgres/072
-docs/multi-database-feasibility.md	migration 009
 docs/operations/egress-policy.md	migrations/postgres/063
 docs/operations/upgrading.md	002_constraints.sql
 docs/operations/upgrading.md	008_rls_fail_closed.sql
@@ -72,7 +70,6 @@ docs/reference/workflow-lifecycle.md	038_defer_phase_marker.sql
 docs/reference/workflow-lifecycle.md	migration 101
 docs/reference/workflow-lifecycle.md	migrations/postgres/038
 docs/reference/workflow-lifecycle.md	migrations/postgres/040
-docs/sqlserver-compatibility-analysis.md	migration 009
 engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go	migration 103
 engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go	migrations/mssql/077
 engine/a_dropped_tenants_rows_all_go_with_it_test.go	migration 056

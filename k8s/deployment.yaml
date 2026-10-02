@@ -17,6 +17,10 @@ spec:
       # A worker drains for --shutdown-grace (20s) after SIGTERM (cleat#2285); the kubelet's 30s default would leave
       # too little room for the release writes.
       terminationGracePeriodSeconds: 60
+      # Must match the headless Service's name in service.yaml (cleat#2196):
+      # this is what makes each pod resolvable as <pod-name>.cleat-worker-headless,
+      # rather than just reachable through the load-balanced ClusterIP above.
+      subdomain: cleat-worker-headless
       containers:
         - name: worker
           image: cleat-worker:latest
@@ -29,6 +33,7 @@ spec:
             - "--memory-hard-limit=0.95"
             - "--memory-check-interval=2s"
             - "--memory-sample-retention=1000"
+            - "--worker-service-name=cleat-worker-headless"
           env:
             - name: DATABASE_URL
               valueFrom:

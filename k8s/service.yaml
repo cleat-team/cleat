@@ -15,3 +15,27 @@ spec:
     - name: metrics
       port: 9090
       targetPort: 8080
+---
+# Headless (clusterIP: None): no load-balancing, no single cluster IP -- its
+# only job is to give each worker pod a stable, per-pod DNS name, for
+# cleat#2196's reaper-to-worker veto channel (owner decision: headless
+# Service + DNS, not captured pod IPs). Combined with spec.subdomain on the
+# pod template in deployment.yaml, each pod resolves as
+# <pod-name>.cleat-worker-headless(.<namespace>.svc.cluster.local) --
+# standard Kubernetes DNS-for-Services-and-Pods behaviour, and it does NOT
+# require a StatefulSet: a plain Deployment pod gets this record as long as
+# its subdomain names a headless Service that selects it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cleat-worker-headless
+  labels:
+    app: cleat-worker
+spec:
+  clusterIP: None
+  selector:
+    app: cleat-worker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

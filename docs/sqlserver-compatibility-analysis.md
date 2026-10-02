@@ -118,7 +118,7 @@ RLS, like PostgreSQL RLS, enforces isolation at the database engine level.
 | `ON CONFLICT DO UPDATE SET` | Few | `MERGE ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT` | Medium |
 | `pq.Array()` / `ANY($1)` | 2 | Dynamic `IN (...)` clause building | Medium |
 | JSONB columns | All tables | `NVARCHAR(MAX)` with `JSON_VALUE`/`JSON_QUERY` | Medium |
-| PL/pgSQL functions (migration 009) | 4 funcs | T-SQL stored procedures | Medium |
+| PL/pgSQL functions (`001_schema.sql`) | 4 funcs | T-SQL stored procedures | Medium |
 | `search_path` schema routing | DSN setup | `EXECUTE AS USER` or schema prefix per tenant | Medium |
 
 ### 4.3 Data Type Translation

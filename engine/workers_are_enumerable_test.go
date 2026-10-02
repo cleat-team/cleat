@@ -59,7 +59,11 @@ func TestWorkersAreEnumerable(t *testing.T) {
 			}
 
 			for _, reg := range []WorkerRegistration{
-				{WorkerID: idA, Hostname: "host-a", PID: 111, Concurrency: 10, ConnectionBudget: 100},
+				// A publishes an Address (cleat#2196's DNS-based worker-to-worker
+				// addressing, as --worker-service-name would populate it); B
+				// does not, to prove the column defaults to empty rather than
+				// to NULL (which would break Address's plain string Scan).
+				{WorkerID: idA, Hostname: "host-a", Address: "host-a.cleat-worker-headless", PID: 111, Concurrency: 10, ConnectionBudget: 100},
 				{WorkerID: idB, Hostname: "host-b", PID: 222, Concurrency: 2, ConnectionBudget: 100},
 			} {
 				if err := r.Register(ctx, reg); err != nil {
@@ -72,18 +76,27 @@ func TestWorkersAreEnumerable(t *testing.T) {
 
 			// The whole point of the table: a worker that holds no workflow is
 			// still visible. Neither of these has claimed anything.
-			var a WorkerRegistration
+			var a, b WorkerRegistration
 			live, err := r.ListLive(ctx, maxAge)
 			if err != nil {
 				t.Fatalf("ListLive: %v", err)
 			}
 			for _, w := range live {
-				if w.WorkerID == idA {
+				switch w.WorkerID {
+				case idA:
 					a = w
+				case idB:
+					b = w
 				}
 			}
 			if a.Hostname != "host-a" || a.PID != 111 || a.Concurrency != 10 || a.ConnectionBudget != 100 {
 				t.Errorf("worker A read back as %+v; the diagnostic columns did not survive the round trip", a)
+			}
+			if a.Address != "host-a.cleat-worker-headless" {
+				t.Errorf("worker A's Address = %q, want %q -- it did not survive the round trip", a.Address, "host-a.cleat-worker-headless")
+			}
+			if b.Address != "" {
+				t.Errorf("worker B's Address = %q, want \"\" (never set) -- the column's default is not empty, or NULL is being read back as something other than the zero value", b.Address)
 			}
 			if a.StartedAt.IsZero() || a.LastHeartbeatAt.IsZero() {
 				t.Errorf("worker A has a zero timestamp: started=%v heartbeat=%v", a.StartedAt, a.LastHeartbeatAt)
