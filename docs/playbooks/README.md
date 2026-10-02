@@ -106,7 +106,7 @@ cheap.
 | | Use case | The distinctive win |
 |---|---|---|
 | 1 | [AI agent platform with per-tenant budgets](ai-agent-platform.md) | Replay *is* the audit trail; agent runs resume rather than restart |
-| 2 | [Multi-tenant B2B SaaS control plane](b2b-saas-control-plane.md) | Five vendors collapse into one binary and a database |
+| 2 | [Multi-tenant B2B SaaS control plane](b2b-saas-control-plane.md) | Five vendors collapse into one platform and a database |
 | 3 | [Order and subscription lifecycle](order-lifecycle.md) | Compensations and idempotency you do not write |
 | 4 | [Event-driven integration hub](integration-hub.md) | An integration per tenant costs a row |
 

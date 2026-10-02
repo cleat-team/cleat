@@ -27,7 +27,7 @@ and then deleted, and its output is reproduced verbatim.
 
 ## Why "good enough" is the deciding concept
 
-The playbooks all make one argument: replace five vendors with one binary and a database. That
+The playbooks all make one argument: replace five vendors with one platform and a database. That
 argument has a specific failure mode, and it is worth stating precisely because it governs
 everything else.
 
