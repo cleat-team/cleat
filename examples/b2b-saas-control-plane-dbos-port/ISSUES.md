@@ -81,6 +81,26 @@ against 5.2.11 before writing any of this. See the pair's `README.md` for the
 full reasoning, including why the three ports should be bumped together from
 here rather than drifting apart.
 
+## No rate limiting either: platform feature vs. application code
+
+cleat's worker bounds its HTTP surface as a platform feature — `plugins/ratelimiter`,
+plus an `ipRateLimiter` and a `keyedRateLimiter` in `cmd/cleat-worker/main.go` — so
+`examples/b2b-saas-control-plane`'s backend is proxying to something already bounded and
+never has to think about it. Here `src/server.ts` has to add `express-rate-limit`
+itself, and it did so only after a code-scanning finding:
+
+`js/missing-rate-limiting` failed this PR's CodeQL check on the two routes that touch the
+database directly (`POST /api/signup`, `GET /api/tenant/lifecycle`). The sibling port's
+routes are clean because they call DBOS APIs rather than SQL — so the rule fired on a
+real difference in this port, not on a stylistic one.
+
+**It was kept rather than dismissed**, and the way that was decided is the part worth
+reusing: the finding was checked against the codebase's own convention before being
+judged noise, and cleat's worker *does* rate-limit. A linter rule the project does not
+follow and a real gap look identical in a red check; the convention is what tells them
+apart. This is the fourth difference in the pair's list, and the only one that arrived
+from tooling rather than from design.
+
 ## Not ported
 
 - **The web frontend** (`examples/b2b-saas-control-plane/web/`). The sibling

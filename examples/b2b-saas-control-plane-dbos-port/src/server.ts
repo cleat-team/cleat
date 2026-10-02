@@ -18,6 +18,7 @@
 // directory and examples/order-lifecycle-dbos-port does not, and this pair
 // follows that precedent rather than inventing a difference.
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { randomBytes, randomUUID } from 'crypto';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { Pool } from 'pg';
@@ -31,6 +32,32 @@ import {
 
 const app = express();
 app.use(express.json());
+
+// Rate limiting: the FOURTH thing this port writes that cleat's platform
+// supplies, and it arrived here from a code-scanning finding rather than from
+// design -- `js/missing-rate-limiting` failed this PR's CodeQL check on the
+// two routes below that touch the database directly.
+//
+// Worth keeping rather than suppressing, for two reasons. cleat's own worker
+// rate-limits as a platform feature: `plugins/ratelimiter`, and an
+// `ipRateLimiter` plus a `keyedRateLimiter` in cmd/cleat-worker/main.go. So
+// this is the codebase's convention rather than a linter's preference. And it
+// is the same asymmetry the other three differences describe -- on the cleat
+// side the worker behind examples/b2b-saas-control-plane/backend proxies the
+// limit, so an unauthenticated endpoint that writes rows is bounded without
+// the example doing anything; here the port author has to add it.
+//
+// /healthz is skipped deliberately: it is the readiness probe the scenario
+// runner polls, and rate-limiting it would turn a slow start into what looks
+// like a failed one, which is the opposite of what a limiter is for.
+const limiter = rateLimit({
+  windowMs: 60_000,
+  limit: 120,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  skip: (req) => req.path === '/healthz',
+});
+app.use(limiter);
 
 let pool: Pool | null = null;
 

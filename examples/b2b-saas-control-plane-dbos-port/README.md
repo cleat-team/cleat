@@ -13,14 +13,16 @@ constant, printed at the start of every test run):
 
 > An equally-scoped, idiomatic, EXECUTED DBOS port of the
 > b2b-saas-control-plane scenario exists and runs, and building it shows that
-> the tenant filter, the audit append and the append's replay idempotency are
-> the port author's code rather than the platform's — where cleat supplies
-> all three.
+> the tenant filter, the audit append and its replay idempotency, and the rate
+> limit on the HTTP surface are the port author's code rather than the
+> platform's — where cleat supplies all four.
 
-Every clause of that is carried by a test, and none of it asserts that DBOS is
-worse. It asserts *where the code is*, which is a fact about the two platforms
-rather than a preference. On line count DBOS is **smaller** here, as it is on
-the control pair — the claim is not about size.
+Every clause of that is carried by a test — the first three by
+`src/provision.test.ts`, the fourth by
+`scripts/run-b2b-saas-control-plane-dbos-scenario.sh` — and none of it asserts
+that DBOS is worse. It asserts *where the code is*, which is a fact about the
+two platforms rather than a preference. On line count DBOS is **smaller** here,
+as it is on the control pair — the claim is not about size.
 
 ## Same scope as the cleat side
 
@@ -51,10 +53,11 @@ follows that precedent rather than inventing a difference. The pair's
 comparison is between the workflow, the backend and the tests — the files
 `scripts/dbos-pair-loc.sh` counts.
 
-## Three structural differences, stated rather than hidden
+## Four structural differences, stated rather than hidden
 
 Each is a thing the cleat side gets from its platform and this port has to
-write itself. `src/workflow.ts`'s header carries the same three.
+write itself. The first three are also carried in `src/workflow.ts`'s header;
+the fourth lives in `src/server.ts`.
 
 1. **Tenancy is a filter here, not a boundary.** On the cleat side the run
    executes as the tenant it provisions, so the engine scopes every host call
@@ -72,6 +75,20 @@ write itself. `src/workflow.ts`'s header carries the same three.
    cleat's auditlog uses for the same reason — a deterministic id
    (`workflowId:seq`) plus a primary key — and it is asserted by
    `testMilestoneRecordingIsIdempotent`.
+4. **Rate limiting is application code, and it arrived here from a
+   code-scanning finding rather than from design.** cleat's worker bounds its
+   HTTP surface as a platform feature — `plugins/ratelimiter`, plus an
+   `ipRateLimiter` and a `keyedRateLimiter` in `cmd/cleat-worker/main.go` — so
+   an example proxied through it is bounded without the example doing
+   anything. Here `src/server.ts` adds `express-rate-limit` itself, asserted
+   by the scenario runner, which drives a route past its allowance and
+   requires a `429`.
+
+   It is kept rather than suppressed because that check was read as a real gap
+   rather than linter noise: `js/missing-rate-limiting` failed this PR's CodeQL
+   check on the two routes that touch the database directly, and the
+   codebase's own convention is to rate-limit. That confirmation is what
+   separates a rule this project follows from one it does not.
 
 ## Version and date, and why both are pinned
 
@@ -135,8 +152,8 @@ Application lines, non-comment:
 | side | files | code |
 |---|---|---|
 | cleat: workflow, backend, tests | `provision.go`, `backend/main.go`, `provision_test.go` | 641 |
-| DBOS: workflow, backend, tests | `src/workflow.ts`, `src/server.ts`, `src/provision.test.ts` | 458 |
-| **total** | | **458** |
+| DBOS: workflow, backend, tests | `src/workflow.ts`, `src/server.ts`, `src/provision.test.ts` | 468 |
+| **total** | | **468** |
 
 Against cleat's side, `scripts/dbos-pair-loc.sh b2b-saas-control-plane`
 on the same date: **641**.
@@ -144,6 +161,18 @@ on the same date: **641**.
 Re-derive both with that script rather than re-quoting these numbers — they are
 a census of files that will change, and `scripts/check-dbos-pair-loc.py` fails
 CI if this table and the script disagree.
+
+**Corrected 2026-10-02, in this PR's own review cycle: 458 → 468.** Ten code
+lines in two steps: nine when `src/server.ts` gained a rate limiter (the fourth
+structural difference below), and one more when the claim quoted in
+`src/provision.test.ts` grew its fourth clause. Recorded as the running total
+rather than as two separate corrections, because a reader re-deriving wants the
+table to match the tree, not a history of how the number got there. The counter
+and `scripts/check-dbos-pair-loc.py` were right both times and this table was
+stale for the length of one edit; it is recorded here rather than silently
+replaced because that is this pair's convention (see
+`examples/order-lifecycle-dbos-port/README.md`'s own "Corrected" entries, and
+cleat#2622 for why the check exists at all).
 
 **DBOS is smaller here, and that is not the pair's finding.** The control pair
 (`order-lifecycle`) already establishes that a line count alone does not favour

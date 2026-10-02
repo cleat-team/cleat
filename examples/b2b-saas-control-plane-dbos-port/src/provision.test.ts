@@ -18,9 +18,14 @@
 //    where cleat supplies all three."
 //
 // The filter clause is carried by `testATenantKeyCannotReadAnotherTenantsRow`
-// and the idempotency clause by `testMilestoneRecordingIsIdempotent`. Neither
-// asserts that DBOS is worse; they assert that the code is here and not
-// there, which is a fact about the two platforms rather than a preference.
+// and the idempotency clause by `testMilestoneRecordingIsIdempotent`. The
+// fourth -- the rate limit -- is carried by the SCENARIO RUNNER rather than
+// here, because it is a property of the HTTP surface and this file drives the
+// workflow directly; it is stated in the claim anyway, and the claim kept
+// whole, rather than dropping a clause we did not test where we happened to
+// be testing. None of the four asserts that DBOS is worse; they assert that
+// the code is here and not there, which is a fact about the two platforms
+// rather than a preference.
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
@@ -28,8 +33,9 @@ import { ProvisionTenant, ProvisionInput, ensureSchema, recordMilestone, registe
 
 const CLAIM =
   'b2b-saas-control-plane-dbos-port: an equally-scoped, idiomatic, EXECUTED DBOS port exists ' +
-  'and runs, and shows the tenant filter, the audit append and its replay idempotency are the ' +
-  "port author's code rather than the platform's -- where cleat supplies all three (cleat#2597).";
+  'and runs, and shows the tenant filter, the audit append and its replay idempotency, and the ' +
+  "rate limit on the HTTP surface are the port author's code rather than the platform's -- " +
+  'where cleat supplies all four (cleat#2597).';
 
 function baseInput(tenantId: string): ProvisionInput {
   return {

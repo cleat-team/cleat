@@ -262,6 +262,25 @@ assert_eq "a tenant inside its trial is left alone" \
   "False"
 
 echo
+echo "==> scenario: the API is rate-limited"
+# The FOURTH thing this port writes that cleat's platform supplies. cleat's
+# worker rate-limits as a platform feature (plugins/ratelimiter, plus an
+# ipRateLimiter and a keyedRateLimiter in cmd/cleat-worker/main.go), so an
+# example proxied through it is bounded without the example doing anything;
+# here the limiter is this port's own code. Asserted rather than assumed,
+# because "the limiter is configured" and "the limiter refuses" are different
+# claims and only the second one is the point.
+limited=0
+for _ in $(seq 1 140); do
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$API/api/tenant/lifecycle")"
+  if [[ "$code" == "429" ]]; then
+    limited=1
+    break
+  fi
+done
+assert_eq "a route past its allowance is refused with 429" "$limited" "1"
+
+echo
 if (( failures > 0 )); then
   echo "$failures assertion(s) failed" >&2
   exit 1

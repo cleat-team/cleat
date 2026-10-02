@@ -10678,11 +10678,11 @@ execution, all three of which were false because the directory did not exist.
 records a milestone per step, a best-effort welcome email, a trial-expiry sweep as a DBOS scheduled
 workflow, and an HTTP backend; six scenarios (20 assertions) against a real DBOS runtime and a real
 Postgres; the `dbos-pair-loc.sh` case and `check-dbos-pair-loc.py` registration; a scenario runner
-that drives the HTTP surface end to end (9 assertions, including waiting for the real cron sweep);
-and a CI job. Measured with the pair's own counter: **cleat 641, DBOS 458** non-comment lines.
+that drives the HTTP surface end to end (10 assertions, including waiting for the real cron sweep);
+and a CI job. Measured with the pair's own counter: **cleat 641, DBOS 468** non-comment lines.
 
 **The pair's claim is about where the code sits, not how much of it there is.** DBOS is smaller
-here, as it is on the control pair, so a line count is not the finding. Three requirements are
+here, as it is on the control pair, so a line count is not the finding. Four requirements are
 platform behaviour on cleat's side and application code on this one, and each is carried by a test:
 the **tenant filter** (cleat's run executes as the tenant it provisions, so the engine scopes every
 host call and the workflow cannot address another tenant; here a `tenantId` is threaded into every
@@ -10690,7 +10690,20 @@ write and a missed thread is a cross-tenant write nothing refuses); the **audit 
 `plugins/auditlog` is hash-chained and verified; here it is an INSERT into a table the port owns);
 and the append's **replay idempotency** (a DBOS step that commits and dies before its completion is
 checkpointed *is re-run* on recovery — DBOS gives the retry, not the dedupe, so the port carries the
-same deterministic-id-plus-primary-key fix cleat's auditlog uses).
+same deterministic-id-plus-primary-key fix cleat's auditlog uses); and the **rate limit on the HTTP
+surface** (cleat's worker bounds it as a platform feature — `plugins/ratelimiter`, plus an
+`ipRateLimiter` and a `keyedRateLimiter` in `cmd/cleat-worker/main.go` — where this port adds
+`express-rate-limit` itself).
+
+**The fourth was found by CodeQL, and checking the codebase's convention is what made it a finding
+rather than noise.** `js/missing-rate-limiting` failed the required CodeQL check on the two routes
+that touch the database directly, and the sibling DBOS port is clean only because its routes call
+DBOS APIs rather than SQL — so the rule fired on a real structural difference in this port. A
+linter rule the project does not follow and a real gap look identical in a red check; what
+separates them here is that cleat's worker **does** rate-limit, so the rule describes this
+codebase's own posture. Kept and asserted — the scenario runner drives a route past its allowance
+and requires a `429` — rather than dismissed, which is the choice a security alert should force
+rather than skip.
 
 **Two defects found in the new code by testing rather than reading, both invisible locally.**
 `ensureSchema()` ran before `DBOS.launch()`, which passes on a machine where the database already
