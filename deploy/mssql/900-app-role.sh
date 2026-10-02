@@ -67,8 +67,21 @@ case "$CLEAT_APP_PASSWORD" in
 	;;
 esac
 
+# -b is load bearing, and until it was added this script reported success on
+# failure. sqlcmd returns 0 for a SQL error unless -b is given, so with the
+# database's cleat_app_role missing (a migrate step that has not run, or ran a
+# chain without this migration) the ALTER ROLE below failed, printed
+# `Msg 15151 ... Cannot alter the role 'cleat_app_role', because it does not
+# exist or you do not have permission.`, and the script then printed its own
+# "cleat_app is ready ... a member of cleat_app_role" line and exited 0. The
+# deployment gets a cleat_app that is not a member of the role, so every GRANT
+# and the DENY on deployment_secrets are simply absent, and nothing failed.
+# PostgreSQL never had this (its script passes -v ON_ERROR_STOP=1) and the mysql
+# client exits non-zero on its own; SQL Server is the one dialect whose client
+# has to be asked. Measured both ways: with -b the failing case above exits 1 and
+# stops before the success line, and a genuinely successful run still exits 0.
 sqlcmd_exec() {
-	/opt/mssql-tools18/bin/sqlcmd -S "$server" -U "$admin_user" -P "$admin_password" -C -d "$database" "$@"
+	/opt/mssql-tools18/bin/sqlcmd -b -S "$server" -U "$admin_user" -P "$admin_password" -C -d "$database" "$@"
 }
 
 sqlcmd_exec -v CLEAT_APP_PASSWORD="${CLEAT_APP_PASSWORD}" <<-'SQL'

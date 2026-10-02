@@ -194,6 +194,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field at all** (the model only ever appears in the request URL), so `input.Model` is the only
   candidate there; a limit of that API, not a gap in this fix. (cleat#2572)
 
+- **`deploy/mssql/900-app-role.sh` reported the `cleat_app` login ready when it had not been added
+  to `cleat_app_role`, and exited 0.** `sqlcmd` returns a SQL error through ERRORLEVEL only when
+  given `-b`, so `ALTER ROLE cleat_app_role ADD MEMBER cleat_app` failing — a database whose
+  migrate step has not run, or ran a chain without `migrations/mssql/008_app_login.sql` — printed
+  `Msg 15151 ... Cannot alter the role 'cleat_app_role', because it does not exist`, followed by
+  the script's own `cleat_app is ready ... a member of cleat_app_role` line, and then exited 0. The
+  deployment is left with a `cleat_app` that is not in the role, so every GRANT and the DENY on
+  `deployment_secrets` that the role carries are simply absent, and nothing failed. PostgreSQL's
+  script never had this (it passes `-v ON_ERROR_STOP=1`) and the `mysql` client exits non-zero on
+  its own; SQL Server was the one dialect whose client had to be asked. Found by the first test to
+  ever execute these scripts — see §3.344. (cleat#2939)
+
 - **Every example app's live run-state panel rendered empty, because
   `backendkit.Client.GetWorkflowState` requested `/api/workflows/{id}/state` — a route that does not
   exist.** Every call answered 404, and every caller read that as "no state", so `order-lifecycle`,
