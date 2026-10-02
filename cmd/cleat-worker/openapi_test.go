@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/jsonschema"
 )
 
 // The two schema fragments used throughout. They are the shape
@@ -355,31 +356,38 @@ func TestOverlappingEntryPointSchemasUseAnyOfNotOneOf(t *testing.T) {
 		t.Fatalf("input = %v, want anyOf over both schemas", input)
 	}
 
-	// The overlap is not hypothetical, so it is shown rather than asserted in
-	// prose: this instance satisfies BOTH branches.
-	superset := map[string]any{"amount": 1, "ref": "r-1"}
+	// The overlap is not asserted in prose. It is measured with the SAME
+	// validator the server runs at the start path (jsonschema.Validate), on an
+	// instance carrying every field of both branches -- so this fails if a
+	// later edit makes the branches disjoint, rather than leaving the test
+	// green and vacuous.
+	//
+	// An earlier version of this block hand-rolled the matching and never read
+	// the binding it computed, so it was a no-op that read like a check --
+	// staticcheck caught it as SA4006, and the comment claimed a conclusion the
+	// code neither enacted nor tested. Hence the real validator.
+	instance, err := json.Marshal(map[string]any{"amount": 1, "ref": "r-1"})
+	if err != nil {
+		t.Fatalf("marshalling the fixture instance: %v", err)
+	}
+
 	matched := 0
-	for _, b := range branches {
-		props, _ := b.(map[string]any)["properties"].(map[string]any)
-		required, _ := b.(map[string]any)["required"].([]any)
-		ok := true
-		for _, r := range required {
-			if _, present := superset[r.(string)]; !present {
-				ok = false
-			}
+	for i, b := range branches {
+		branchJSON, err := json.Marshal(b)
+		if err != nil {
+			t.Fatalf("branch %d did not re-marshal: %v", i, err)
 		}
-		for k := range superset {
-			if _, declared := props[k]; !declared {
-				// additionalProperties:true, so an undeclared key still matches
-			}
+		violation, err := jsonschema.Validate(branchJSON, instance)
+		if err != nil {
+			t.Fatalf("branch %d could not be validated: %v", i, err)
 		}
-		if ok {
+		if violation == nil {
 			matched++
 		}
 	}
 	if matched != 2 {
-		t.Fatalf("the fixture instance matched %d branches, not 2 -- this test would not detect a oneOf "+
-			"rejecting it, so it cannot disagree and proves nothing", matched)
+		t.Fatalf("the fixture instance satisfied %d branches, not 2 -- so it does not demonstrate the "+
+			"overlap, this test cannot detect a oneOf rejecting it, and it proves nothing", matched)
 	}
 }
 
