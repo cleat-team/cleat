@@ -9,7 +9,7 @@ nullable, a nested dataclass gains "required") would still "pass" a test
 that only checked for SOME non-empty schema.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 
 import pytest
 
@@ -160,6 +160,58 @@ def test_nested_dataclass_field_with_a_default_factory_is_not_required():
 
     schema = entry_point_param_schema(_func(wf))["properties"]["cart"]
     assert "required" not in schema
+
+
+def test_nested_dataclass_field_with_init_false_is_absent_from_the_schema():
+    """cleat-review G6. A field(init=False) is never a valid __init__
+    keyword -- target_type(**kwargs) raises "unexpected keyword argument"
+    if a caller's value for it is ever passed through, and omitting it is
+    exactly what works. dataclasses.fields() still lists it, so deriving
+    "required"/properties from fields() (the first version of this
+    function) got this backwards: it demanded the one payload that
+    crashes construction and rejected the one that works. Reading
+    inspect.signature(target_type) instead -- __init__'s own parameter
+    list -- excludes it from both properties and required, matching what
+    the binding actually accepts."""
+
+    @dataclass
+    class Order:
+        sku: str
+        total: int = field(init=False)
+
+        def __post_init__(self):
+            self.total = 0
+
+    @cleat_entry
+    def wf(h: HostCalls, order: Order) -> str:
+        return "{}"
+
+    schema = entry_point_param_schema(_func(wf))["properties"]["order"]
+    assert "total" not in schema["properties"]
+    assert schema["required"] == ["sku"]
+
+
+def test_nested_dataclass_initvar_is_a_required_property_not_a_field():
+    """The inverse of the init=False case: an InitVar IS a valid __init__
+    keyword (target_type's own __post_init__ consumes it) but is NOT a
+    stored field, so dataclasses.fields() never lists it at all -- the
+    opposite blind spot inspect.signature(target_type) also closes."""
+
+    @dataclass
+    class Order:
+        sku: str
+        secret: InitVar[str] = None
+
+        def __post_init__(self, secret):
+            pass
+
+    @cleat_entry
+    def wf(h: HostCalls, order: Order) -> str:
+        return "{}"
+
+    schema = entry_point_param_schema(_func(wf))["properties"]["order"]
+    assert schema["properties"]["secret"]["type"] == ["string", "null"]
+    assert "secret" not in schema["required"]
 
 
 def test_self_referential_dataclass_does_not_recurse_forever():

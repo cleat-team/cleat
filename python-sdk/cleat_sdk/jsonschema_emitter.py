@@ -51,6 +51,21 @@ ARE DELIBERATE, NOT OVERSIGHTS:
    schema describes correct shape at every level, not only the top one. See
    CHANGELOG.md's "UPGRADE NOTES" for the concrete before/after.
 
+   WHAT "REQUIRED" ACTUALLY MEANS IS __init__'S SIGNATURE, NOT
+   dataclasses.fields(). A ``field(init=False)`` field (typically computed
+   in ``__post_init__``) is listed by ``fields()`` but is NOT a parameter
+   ``__init__`` accepts at all -- passing one is itself the
+   "unexpected keyword argument" ``TypeError``, and omitting it is what
+   works. The first version of this branch read ``fields()`` directly and
+   had this exactly backwards (cleat-review G6 on #2933): it demanded the
+   one payload that crashes construction and rejected the one that
+   works. The mirror gap is an ``InitVar`` field, which IS a real
+   ``__init__`` parameter but is never a stored field, so ``fields()``
+   omits it the other way. Reading ``inspect.signature(target_type)`` --
+   the actual callable ``target_type(**kwargs)`` exposes -- fixes both
+   directions with one source of truth instead of patching ``fields()``'s
+   output with an exclusion list.
+
 4. RESULT IS ALWAYS UNCONSTRAINED. ``export_wrapper`` finishes with
    ``json.dumps(result, default=str)`` over whatever the workflow body
    returned -- a plain string, a dict, a duck-typed Result's unwrapped
@@ -99,6 +114,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import inspect
 import json
 import sys
 import typing
@@ -212,17 +228,39 @@ def _schema_from_type(target_type: Any, visiting: frozenset[Any] = frozenset()) 
             field_hints = {}
         properties = {}
         required = []
-        for f in dataclasses.fields(target_type):
-            field_type = field_hints.get(f.name, f.type)
-            properties[f.name] = _schema_from_type(field_type, nested_visiting)
+        # cleat-review G6: iterate target_type(**kwargs)'s actual __init__
+        # SIGNATURE, not dataclasses.fields(). The two are not the same
+        # set: a field declared `field(init=False)` (e.g. a value computed
+        # in __post_init__) appears in fields() but NOT in __init__'s
+        # parameters -- passing it as a kwarg is the exact
+        # "unexpected keyword argument" TypeError the governing rule
+        # exists to describe faithfully, and the first version of this
+        # branch had that backwards: it required the one key that crashes
+        # construction and accepted a payload without it that works fine,
+        # confirmed with a throwaway probe (field(init=False), no explicit
+        # default). An InitVar pseudo-field is the opposite mismatch --
+        # it IS a constructor keyword but fields() never lists it -- so
+        # reading the signature fixes both directions at once rather than
+        # patching fields() output with an init-False exclusion list.
+        sig = inspect.signature(target_type)
+        for name, param in sig.parameters.items():
+            field_type = field_hints.get(name, param.annotation)
+            # InitVar[X] is dataclasses' own wrapper, not a real type --
+            # typing.get_type_hints returns it UNwrapped (confirmed
+            # empirically), so unwrap it the same way _from_dict would
+            # never need to (it never sees InitVar at all; __init__ already
+            # consumed it by the time a value reaches a stored field).
+            if isinstance(field_type, dataclasses.InitVar):
+                field_type = field_type.type
+            properties[name] = _schema_from_type(field_type, nested_visiting)
             # Owner decision, 2026-10-01 (see module docstring, point 3): a
             # missing required field at a NESTED level is now enforced here
-            # too, not only at the top level. dataclasses.MISSING on both
-            # default and default_factory is the same test
-            # `target_type(**kwargs)` effectively applies -- a field with
-            # neither has no fallback value to construct with.
-            if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
-                required.append(f.name)
+            # too, not only at the top level -- "no default" in __init__'s
+            # own signature is the exact test `target_type(**kwargs)`
+            # applies, which is why this reads the signature rather than
+            # re-deriving the rule from dataclasses.Field attributes.
+            if param.default is inspect.Parameter.empty:
+                required.append(name)
         schema = {"type": "object", "properties": properties, "additionalProperties": True}
         if required:
             schema["required"] = required
