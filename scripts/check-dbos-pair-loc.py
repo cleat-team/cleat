@@ -67,12 +67,14 @@ import sys
 PAIRS = {
     "order-lifecycle": "examples/order-lifecycle-dbos-port/README.md",
     "integration-hub": "examples/integration-hub-dbos-port/README.md",
+    "b2b-saas-control-plane": "examples/b2b-saas-control-plane-dbos-port/README.md",
 }
 
 # pair name -> what the README calls the non-cleat side, for problem messages
 OTHER_SIDE_LABEL = {
     "order-lifecycle": "DBOS",
     "integration-hub": "DBOS-isolated",
+    "b2b-saas-control-plane": "DBOS",
 }
 
 SUM_RE = re.compile(r"^SUM:\s+\d+\s+\d+\s+\d+\s+(\d+)\s*$", re.MULTILINE)
@@ -241,11 +243,20 @@ def parse_integration_hub_readme(text):
 SCRIPT_PARSERS = {
     "order-lifecycle": parse_order_lifecycle_script_output,
     "integration-hub": parse_integration_hub_script_output,
+    # Same shape as order-lifecycle: one app section per side, and the pair's
+    # whole README-side claim is the single total -- so the parser is reused
+    # rather than re-implemented ("a second dict entry, not a second parser"),
+    # even though its name says order-lifecycle. It keys on the section
+    # markers, not on the pair.
+    "b2b-saas-control-plane": parse_order_lifecycle_script_output,
 }
 
 README_PARSERS = {
     "order-lifecycle": parse_order_lifecycle_readme,
     "integration-hub": parse_integration_hub_readme,
+    # Likewise the same README shape: a "| **total** | | **N** |" row plus an
+    # "Against cleat's side ... on the same date: **N**" sentence.
+    "b2b-saas-control-plane": parse_order_lifecycle_readme,
 }
 
 

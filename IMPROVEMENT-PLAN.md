@@ -10661,3 +10661,49 @@ is not reproduced — the script's SQL logic and its exit status are what is now
 `cmd/cleat-worker/a_migration_is_a_deploy_step_test.go` (`deployScratchNamed`, so a scratch
 database can avoid the `cleat_*` prefix MySQL's own guard refuses),
 `deploy/mssql/900-app-role.sh`, `scripts/skip-baseline.txt`, `scripts/skip-ledger.d/`.
+
+---
+
+### 3.345 The b2b-saas-control-plane scenario gets its DBOS counterpart, and the port shows where cleat's edge actually sits — ✅ **FIXED 2026-10-02** (cleat#2681)
+
+cleat#2681 is Stage 4/4 of cleat#2534 and the fourth of cleat#2597's cleat-vs-DBOS pairs.
+**Its cleat half had already shipped** — #2716, merged 2026-09-30, whose body opens with
+"cleat#2534/#2681, Stage 4/4". The issue was still open only because #2716 carried no closing
+keyword (`closingIssuesReferences: []`), the same shape as cleat#2203 and cleat#2949 the same day.
+What was genuinely outstanding was the DBOS side, and the cleat README already *promised* it: its
+"DBOS TypeScript counterpart" section named a directory, a `scripts/dbos-pair-loc.sh` case and CI
+execution, all three of which were false because the directory did not exist.
+
+**Built**: `examples/b2b-saas-control-plane-dbos-port/` — a durable provisioning workflow that
+records a milestone per step, a best-effort welcome email, a trial-expiry sweep as a DBOS scheduled
+workflow, and an HTTP backend; six scenarios (20 assertions) against a real DBOS runtime and a real
+Postgres; the `dbos-pair-loc.sh` case and `check-dbos-pair-loc.py` registration; a scenario runner
+that drives the HTTP surface end to end (9 assertions, including waiting for the real cron sweep);
+and a CI job. Measured with the pair's own counter: **cleat 641, DBOS 458** non-comment lines.
+
+**The pair's claim is about where the code sits, not how much of it there is.** DBOS is smaller
+here, as it is on the control pair, so a line count is not the finding. Three requirements are
+platform behaviour on cleat's side and application code on this one, and each is carried by a test:
+the **tenant filter** (cleat's run executes as the tenant it provisions, so the engine scopes every
+host call and the workflow cannot address another tenant; here a `tenantId` is threaded into every
+write and a missed thread is a cross-tenant write nothing refuses); the **audit append** (cleat's
+`plugins/auditlog` is hash-chained and verified; here it is an INSERT into a table the port owns);
+and the append's **replay idempotency** (a DBOS step that commits and dies before its completion is
+checkpointed *is re-run* on recovery — DBOS gives the retry, not the dedupe, so the port carries the
+same deterministic-id-plus-primary-key fix cleat's auditlog uses).
+
+**Two defects found in the new code by testing rather than reading, both invisible locally.**
+`ensureSchema()` ran before `DBOS.launch()`, which passes on a machine where the database already
+exists and fails on a fresh runner with `3D000` — `launch()` is what creates the system database.
+Found by running against a database that did not exist, with the sibling port as control. And two
+shellcheck findings would have failed the required Lint job: the check was the sibling runner
+exiting 0 where this one exited 1, which is what distinguishes a real finding from linter noise.
+
+**One deliberate divergence, recorded rather than left to drift**: this port pins
+`@dbos-inc/dbos-sdk` 5.2.11 (current) while the two sibling ports pin 5.1.10. Verified first by
+building and running the sibling's code unchanged on 5.2.11. The README states the three should be
+bumped together from here rather than drifting apart.
+
+**Files**: `examples/b2b-saas-control-plane-dbos-port/{package.json,package-lock.json,tsconfig.json,README.md,ISSUES.md,src/{workflow.ts,server.ts,provision.test.ts}}`,
+`scripts/run-b2b-saas-control-plane-dbos-scenario.sh`, `scripts/dbos-pair-loc.sh`,
+`scripts/check-dbos-pair-loc.py`, `.github/workflows/ci.yml`.

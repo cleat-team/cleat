@@ -18,6 +18,7 @@
 #
 #   scripts/dbos-pair-loc.sh order-lifecycle
 #   scripts/dbos-pair-loc.sh integration-hub
+#   scripts/dbos-pair-loc.sh b2b-saas-control-plane
 #
 # Adding a pair means adding one case below, not a new script: the whole
 # point is one counting rule for every pair this harness ever grows.
@@ -146,6 +147,30 @@ case "$pair" in
       "$repo_root/examples/order-lifecycle-dbos-port/src/workflow.ts"
       "$repo_root/examples/order-lifecycle-dbos-port/src/server.ts"
       "$repo_root/examples/order-lifecycle-dbos-port/src/order.test.ts"
+    )
+    for f in "${cleat_app_files[@]}" "${dbos_app_files[@]}"; do
+      [ -f "$f" ] || { echo "UNMEASURED: expected file is missing: $f" >&2; exit 2; }
+    done
+    print_group "cleat: app" "${cleat_app_files[@]}"
+    print_group "DBOS: app" "${dbos_app_files[@]}"
+    ;;
+
+  b2b-saas-control-plane)
+    # The same simple shape as order-lifecycle above -- one app section per
+    # side, and the pair's whole README-side claim is the single total, so no
+    # role breakdown and no extra checker. Registering it in
+    # scripts/check-dbos-pair-loc.py is therefore a second dict entry rather
+    # than a second parser (contrast integration-hub, whose three role
+    # sections needed one).
+    cleat_app_files=(
+      "$repo_root/examples/b2b-saas-control-plane/provision.go"
+      "$repo_root/examples/b2b-saas-control-plane/backend/main.go"
+      "$repo_root/examples/b2b-saas-control-plane/provision_test.go"
+    )
+    dbos_app_files=(
+      "$repo_root/examples/b2b-saas-control-plane-dbos-port/src/workflow.ts"
+      "$repo_root/examples/b2b-saas-control-plane-dbos-port/src/server.ts"
+      "$repo_root/examples/b2b-saas-control-plane-dbos-port/src/provision.test.ts"
     )
     for f in "${cleat_app_files[@]}" "${dbos_app_files[@]}"; do
       [ -f "$f" ] || { echo "UNMEASURED: expected file is missing: $f" >&2; exit 2; }
