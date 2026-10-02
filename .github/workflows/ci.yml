@@ -708,6 +708,48 @@ jobs:
             ${{ github.event.pull_request.base.sha }} HEAD
           LINT_GUARD_EOF
 
+      # Python sources are not allowed to contain a smart quote. cleat#2987 asked
+      # for this over Go and Python; the Go half is deliberately dropped, and the
+      # reason is worth more than the check. All 24 occurrences the issue reported
+      # are in `.go` files because **gofmt puts them there**: in a Go comment gofmt
+      # rewrites '' to U+201D and `` to U+201C in any comment it treats as
+      # documentation -- one attached to a declaration, or the one above `package`
+      # -- including inside a code span. A blank-line-separated comment, an inline
+      # comment in a function body and an end-of-file comment are left alone, and
+      # so are string literals and `""`. So a curly quote in a doc comment is a
+      # FIXPOINT that `lint-go`'s own `gofmt -l` already accepts, and every ASCII
+      # way of writing it is rewritten back on the next `gofmt -w`. The first
+      # version of this PR repaired all 24 to ASCII; CI's gofmt refused exactly the
+      # 10 files that took a `''` repair and accepted the 2 that did not (one had
+      # used `"`, one a backtick) -- a 10-of-10, 2-of-2 discriminator. So the sites
+      # with no ASCII form gofmt keeps are the ones whose curly character stands
+      # for a quote pair; the ones that stood for `"` were repaired stably and CI
+      # took them. A Go check could never be satisfied, and the transient form is
+      # already caught by that `gofmt -l`.
+      #
+      # What is left is Python, and nothing already running covers it: `ruff check
+      # python-sdk/` reads only that directory, so every .py outside it -- including
+      # the template shipped from cmd/cleat/templates/agent-python/ -- is unguarded.
+      # Measured 2026-10-02: 136 tracked .py, 0 containing any of the four
+      # codepoints, 27 of them generated (the componentize-py _wit tree, which
+      # python-sdk/pyproject.toml already excludes from ruff in the same words).
+      #
+      # --self-test first, and its known-negative is the half that matters: a
+      # version of this check that flagged EVERY quotation mark would pass each of
+      # its positive cases and fail only "straight quotes only". Both exclusions
+      # are unreachable on today's tree -- the generated tree holds no curly quote,
+      # and no tracked .py is binary -- so the self-test requires each to FIRE,
+      # because an exclusion that never fires cannot be told from one that does not
+      # work. One case pins the scope decision the other way: a .go file full of
+      # curly quotes has to pass.
+      - name: Curly-quote guard
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Curly-quote guard" >> "$LINT_FAILURES_FILE"
+          python3 scripts/check-curly-quotes.py --self-test
+          python3 scripts/check-curly-quotes.py
+          LINT_GUARD_EOF
+
       # The readiness scorecard is the document that answers "is cleat ready",
       # and it was the only doc-vs-reality surface with no guard. Measured on
       # 2026-09-18: 125 commits stale, still claiming four of ten bars missed
