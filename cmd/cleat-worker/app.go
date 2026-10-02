@@ -52,6 +52,17 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
 	mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
+	// The per-tenant OpenAPI document (cleat#2913). A metadata read like
+	// GET /api/definitions above -- assembled from workflow_defs, not a read
+	// through a durable run, so it is not Tier C.
+	//
+	// Registered with an exact path and no method prefix, matching the
+	// /api/workflows family it reads from: the handler answers a non-GET
+	// itself, the same way handleWorkflowsList does. A method-prefixed
+	// pattern would make that check unreachable -- a branch that can never
+	// decide anything -- so the two styles are not interchangeable here.
+	mux.HandleFunc("/api/openapi.json", api.handleOpenAPIDocument)
+
 	// Version management.
 	//
 	// api.scopedStore, not api.store: store is the process-wide connection
