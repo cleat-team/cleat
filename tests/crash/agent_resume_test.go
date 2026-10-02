@@ -110,14 +110,108 @@ const (
 	childToolOperation = "summarise"
 )
 
+// agentClient is one client workflow the acceptance runs the agent through.
+//
+// The acceptance names two -- "a Go workflow and a Python workflow each run the
+// same agent config ... through the shipped agent workflow" -- and they differ
+// in exactly one thing: the language whose SDK starts the child. Everything
+// after that is the same deployment of the same agent, which is the claim the
+// workflow form makes and the thing this table is arranged to show.
+type agentClient struct {
+	name string
+	// defName is what the client is deployed as, and what the scenario queues.
+	defName string
+	// input is the client's own workflow input. See agentClients.
+	input string
+	// build compiles the client. It may skip the subtest when a toolchain is
+	// genuinely absent -- see buildPythonClientWASM for why that distinction is
+	// the narrow one.
+	build func(*testing.T) []byte
+}
+
+func agentClients() []agentClient {
+	return []agentClient{
+		{
+			name:    "go",
+			defName: "agentclient",
+			// The Go entry point takes a single string parameter, which the
+			// engine fills with the ENTIRE input JSON (wasm/exports.go
+			// special-cases it), so the client's input is the agent config
+			// itself.
+			input: agentConfigJSON,
+			build: func(t *testing.T) []byte {
+				return buildWorkflowWASM(t, "testdata/agentclient")
+			},
+		},
+		{
+			name:    "python",
+			defName: "agentclientpy",
+			// Wrapped, and not by choice: a Python entry point binds each
+			// parameter BY NAME from the input object, so the config has to sit
+			// under a key. The envelope differs; the agent config inside it is
+			// the same text, spliced in rather than retyped.
+			//
+			// __entry_point: "run" IS A WORKAROUND WITH AN EXPIRY DATE, and it
+			// is cleat#2937. A Component Model binary exports exactly one
+			// function, `run` (python-sdk/wit/cleat.wit:501) -- the logical
+			// entry point is dispatched INSIDE the guest by
+			// cleat_sdk/entry.py's `_dispatcher_run`. determineEntryPoint
+			// returns the LOGICAL name for a lone declared entry point, so
+			// without this key the worker looks for an export called
+			// `run_agent_client`, does not find it, and the run traps:
+			//
+			//	wasm trap: component get func: component export
+			//	"run_agent_client" not found
+			//
+			// Measured here 2026-10-02, and it is the same failure
+			// cleat-review measured on #2941. The owner has settled the design
+			// (keep the logical name; the engine translates it to the
+			// component's export) and it is not implemented yet, so `run` is
+			// today's documented working path for a Python workflow on a
+			// worker. When #2937 lands, this key goes away and the client is
+			// addressed by its logical name like the Go one -- which is why
+			// this comment names the issue rather than describing a quirk.
+			//
+			// The asymmetry with the Go client is the whole of it: a Go module
+			// emits one export per entry point, named after the entry point,
+			// and needs no help.
+			input: `{"config": ` + agentConfigJSON + `, "__entry_point": "run"}`,
+			build: buildPythonClientWASM,
+		},
+	}
+}
+
 // TestCrashMidAgentLoopResumesWithoutReaskingTheModel is the acceptance.
 func TestCrashMidAgentLoopResumesWithoutReaskingTheModel(t *testing.T) {
 	db := ownerDB(t)
 	defer db.Close()
 
-	suffix := uniqueSuffix()
-	taskQueue := "queue-agent-" + suffix
-	wfID := "agent-wf-" + suffix
+	taskQueue := "queue-agent-" + uniqueSuffix()
+	bin := buildWorker(t)
+
+	// Built and deployed ONCE for both clients, because they are the same
+	// artifact: one deployment of the agent serves every caller, and the
+	// clients differ only in which SDK starts it. Building them per subtest
+	// would be four identical compilations and would also hide a divergence --
+	// if the two clients reached different agents, the counts below would
+	// still agree.
+	deployOneDef(t, db, "agent", buildWorkflowWASM(t, "examples/agent"), taskQueue)
+	deployOneDef(t, db, "summarise", buildWorkflowWASM(t, "testdata/summarise"), taskQueue)
+	grantLoopbackEgress(t, db)
+
+	for _, client := range agentClients() {
+		t.Run(client.name, func(t *testing.T) {
+			deployOneDef(t, db, client.defName, client.build(t), taskQueue)
+			runAgentCrashScenario(t, db, bin, taskQueue, client)
+		})
+	}
+}
+
+// runAgentCrashScenario is the body of the acceptance, run once per client.
+func runAgentCrashScenario(t *testing.T, db *sql.DB, bin, taskQueue string, client agentClient) {
+	t.Helper()
+
+	wfID := "agent-wf-" + client.name + "-" + uniqueSuffix()
 
 	// The tools service. Reused from this suite rather than re-implemented: it
 	// already counts per operation and already knows the worker forwards
@@ -125,12 +219,10 @@ func TestCrashMidAgentLoopResumesWithoutReaskingTheModel(t *testing.T) {
 	// which is exactly how the agent's service tool reaches it.
 	svc := newChargeService(t)
 
-	// The model. Scripted, so "which turn is it" is a fact about the stub
-	// rather than about elapsed time.
+	// The model. Its replies are a function of the conversation, so "which turn
+	// is it" is a fact about what has actually happened rather than about
+	// elapsed time or arrival order.
 	llm := newLLMStub(t)
-
-	deployAgentScenario(t, db, taskQueue)
-	bin := buildWorker(t)
 
 	// Hold the turn that follows both tools: the only window that separates
 	// "completed steps are durable" from "the loop re-runs". A crash before the
@@ -150,7 +242,7 @@ func TestCrashMidAgentLoopResumesWithoutReaskingTheModel(t *testing.T) {
 	first := startWorker(t, bin, taskQueue, svc.srv.URL,
 		"--plugin-config", llm.configFile(t),
 		"--plugin-egress-allow-private", "127.0.0.1")
-	startWorkflowWithInput(t, db, wfID, agentConfigJSON, taskQueue)
+	startWorkflowWithInput(t, db, wfID, client.defName, client.input, taskQueue)
 
 	llm.awaitHeldCall(t, first, startBudget)
 
@@ -251,30 +343,19 @@ func TestCrashMidAgentLoopResumesWithoutReaskingTheModel(t *testing.T) {
 // Scenario deployment
 // ---------------------------------------------------------------------------
 
-// deployAgentScenario registers the three definitions this scenario needs.
+// The scenario's definitions, and why they are FOUR and separate.
 //
-// Three, not one, because the acceptance names two different tool kinds and
-// both have to be real deployments:
+//	agent          the shipped agent workflow          (examples/agent)
+//	summarise      the workflow tool's child           (testdata/summarise)
+//	agentclient    the Go client                       (testdata/agentclient)
+//	agentclientpy  the Python client                   (testdata/agentclientpy)
 //
-//	agent         the shipped agent workflow (examples/agent)
-//	agentclient   the Go client that starts it as a child (testdata/agentclient)
-//	summarise     the workflow tool's child (testdata/summarise)
-//
-// Each declares exactly one entry point, which matters: a child is started by
-// NAME (h.ChildWorkflow("summarise", ...)), and the engine resolves the entry
-// point from the module's own metadata only when there is exactly one. A
-// second entry point in the same artifact would make every child start
-// ambiguous, so these are separate builds rather than one artifact with
-// several entries.
-func deployAgentScenario(t *testing.T, db *sql.DB, taskQueue string) {
-	t.Helper()
-
-	deployOneDef(t, db, "agent", buildWorkflowWASM(t, "examples/agent"), taskQueue)
-	deployOneDef(t, db, "agentclient", buildWorkflowWASM(t, "testdata/agentclient"), taskQueue)
-	deployOneDef(t, db, "summarise", buildWorkflowWASM(t, "testdata/summarise"), taskQueue)
-
-	grantLoopbackEgress(t, db)
-}
+// Each declares exactly ONE entry point, which is load-bearing rather than
+// tidy: a child is started by NAME (h.ChildWorkflow("summarise", ...)) and the
+// engine resolves the entry point from the module's own metadata only when
+// there is exactly one. A second entry point in the same artifact would make
+// every child start ambiguous, so the client and the child cannot share a
+// build even though both are Go.
 
 // grantLoopbackEgress lets the default tenant reach the two stubs.
 //
@@ -346,6 +427,111 @@ func buildWorkflowWASM(t *testing.T, relDir string) []byte {
 	return nil
 }
 
+// buildPythonClientWASM compiles the Python client to a Component Model
+// binary, which is what the engine runs a Python workflow from.
+//
+// THE TWO SKIPS ARE THE NARROW KIND AND EVERYTHING AFTER THEM IS FATAL, which
+// is check-skips.sh's taxonomy rather than a preference. "The toolchain is not
+// installed" is an environmental precondition; "the toolchain is installed and
+// the build broke" is a finding about the tree. Collapsing them into one skip
+// is how a real break goes green forever, and the plugin-harness suite shipped
+// exactly that mistake before rewriting it -- see buildPythonWorkflowWasm in
+// tests/plugin-harness/wasm_plugin_test.go, which this follows.
+//
+// Two toolchain checks rather than one, because the module and the console
+// script come apart: componentize-py can import perfectly well while having no
+// `componentize-py` on PATH, and it is the SCRIPT that `cleat build --target
+// python` shells out to. A pip --user install puts the script in a bin
+// directory that need not be on PATH at all.
+//
+// The interpreter matters as much as the script: the SDK uses PEP 604 unions
+// at module scope, so importing it on Python 3.9 is a TypeError rather than a
+// version warning. Installing the SDK is not required -- the build is given
+// PYTHONPATH into this repository's python-sdk, so the SDK under test is
+// always this checkout's.
+// missingPythonToolchain decides what an absent toolchain MEANS, and the
+// answer is different in CI than on a laptop.
+//
+// LOCALLY IT SKIPS, because a developer running `go test ./tests/crash/` may
+// legitimately not have componentize-py and should still get the other
+// twenty-odd tests in this package. That is the whole of the skip's
+// justification and it is a narrow one: the resource is optional for a local
+// run and nobody asked for it. engine/testutil's TestDB guards on exactly that
+// distinction, and scripts/skip-ledger.tsv records the same precondition for
+// the engine's Python-guest tests.
+//
+// IN CI IT IS FATAL. ci.yml installs the toolchain for this job by name, so a
+// missing one there is a broken job rather than an absent precondition -- and
+// a skip would be the worst possible report of it, because the Python half of
+// cleat#1983's acceptance would stop running while the suite stayed green.
+// That is the failure this repository names "a skip that hides a crash", and
+// it is why the two cases do not share an exit.
+//
+// The mutation that would have caught it either way: delete the
+// `Install componentize-py` step from ci.yml and this test skips instead of
+// failing, on a tree where the Python agent client is never built.
+func missingPythonToolchain(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("the Python agent client cannot be built, and this job installs the "+
+			"toolchain it needs (ci.yml, 'Install componentize-py for the crash agent "+
+			"client'). Missing here means the job is broken, not that a precondition is "+
+			"absent -- do not turn this into a skip: the Python half of the acceptance "+
+			"would stop running silently.\n\n%s", reason)
+	}
+	t.Skipf("componentize-py or a compatible python3 is unavailable, so the Python agent "+
+		"client cannot be built. CI installs both, where this test always runs. To run it "+
+		"locally: `pip install componentize-py` on Python >= 3.10, with its bin directory "+
+		"on PATH.\n\n%s", reason)
+}
+
+func buildPythonClientWASM(t *testing.T) []byte {
+	t.Helper()
+	root := repoRoot(t)
+	sdkPath := filepath.Join(root, "python-sdk")
+	src := filepath.Join(root, "testdata", "agentclientpy", "agent_client.py")
+	const entry = "run_agent_client"
+
+	if _, err := exec.LookPath("componentize-py"); err != nil {
+		missingPythonToolchain(t, "componentize-py is not on PATH; "+
+			"`cleat build --target python` shells out to that script")
+	}
+	probe := exec.Command("python3", "-c", "import componentize_py, cleat_sdk")
+	probe.Env = append(os.Environ(), "PYTHONPATH="+sdkPath)
+	if out, err := probe.CombinedOutput(); err != nil {
+		missingPythonToolchain(t, fmt.Sprintf(
+			"the Python SDK does not import under the `python3` on PATH (%v):\n%s", err, out))
+	}
+
+	outDir := t.TempDir()
+	cmd := exec.Command("go", "run", filepath.Join(root, "cmd", "cleat"),
+		"build", "--target", "python", "--entry", src+":"+entry, "-o", outDir, src)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+sdkPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// Fatal, not Skip. Whether the toolchain exists was decided above; the
+		// probe is what legitimately skips. Reaching here means the toolchain
+		// IS present and the build broke.
+		t.Fatalf("building the Python agent client: %v\n%s", err, out)
+	}
+
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("reading the Python build output: %v", err)
+	}
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".wasm" {
+			b, err := os.ReadFile(filepath.Join(outDir, e.Name()))
+			if err != nil {
+				t.Fatalf("reading %s: %v", e.Name(), err)
+			}
+			return b
+		}
+	}
+	t.Fatalf("no .wasm in the Python build output at %s", outDir)
+	return nil
+}
+
 // deployOneDef registers one definition the way deployFixture registers
 // crashcall, and for the same reasons: the tenant must be explicit (the RLS
 // policy is `tenant_id = assert_tenant_set()` and NULL does not satisfy it, so
@@ -376,12 +562,12 @@ func deployOneDef(t *testing.T, db *sql.DB, name string, wasm []byte, taskQueue 
 // point, so the engine resolves it from the module metadata and no
 // __entry_point is needed -- which is also the mechanism the child starts
 // depend on, so the scenario exercises it rather than sidestepping it.
-func startWorkflowWithInput(t *testing.T, db *sql.DB, id, inputJSON, taskQueue string) {
+func startWorkflowWithInput(t *testing.T, db *sql.DB, id, defName, inputJSON, taskQueue string) {
 	t.Helper()
 	if _, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES ($1, 'agentclient', 1, 'ready', $2::jsonb, $3, $4)`,
-		id, inputJSON, taskQueue, defaultTenant); err != nil {
+		VALUES ($1, $2, 1, 'ready', $3::jsonb, $4, $5)`,
+		id, defName, inputJSON, taskQueue, defaultTenant); err != nil {
 		t.Fatalf("queueing workflow %s: %v", id, err)
 	}
 	t.Cleanup(func() {
