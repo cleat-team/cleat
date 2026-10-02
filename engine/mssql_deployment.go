@@ -145,7 +145,7 @@ func (s *MSSQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantIDStr string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys
+		`SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenant_api_keys
 		 WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`, keyHash).Scan(&tenantIDStr)
 	if err != nil {
 		return uuid.Nil, err
@@ -718,7 +718,7 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error
 // GetRoutingRules returns all routing rules for a workflow.
 func (s *MSSQLStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT CONVERT(NVARCHAR(36), id), workflow_name, target_version, weight
+		SELECT LOWER(CONVERT(NVARCHAR(36), id)), workflow_name, target_version, weight
 		FROM workflow_routing WHERE workflow_name = @p1 AND tenant_id = @p2
 	`, workflowName, s.tenantID)
 	if err != nil {

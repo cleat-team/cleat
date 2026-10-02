@@ -28,13 +28,38 @@ import (
 // re-binds it -- which is why both instances were found by accident rather
 // than by a test.
 //
+// AND THE CASE IS NOT OBSERVABLE FROM BEHAVIOUR, which is why this is a text
+// guard and not a test that exercises the store. Measured 2026-10-02: reverting
+// the LOWER at the SQL Server schedule projection -- a site whose tenant is
+// bound straight back to a UNIQUEIDENTIFIER parameter and composed into the
+// cron:<tenant>:<name>:<instant> idempotency key -- left every message,
+// schedule and claim test green, including 112 MSSQL subtests run against a
+// real SQL Server 2022. So a green suite says nothing about a projection's case,
+// and cleat#2993's nine sites shipped through exactly that blind spot.
+//
 // A sweep would fix the sites that exist today. This fails at authoring time
 // instead, in every job, with no SQL Server required: it reads the shipped
 // migrations to learn which columns are UNIQUEIDENTIFIER, then refuses any
-// SELECT or OUTPUT in the MSSQL store that projects one without CONVERT or
-// CAST. Deriving the column list from the migrations rather than hardcoding it
-// is the point -- a UUID column added later is covered without anyone
-// remembering to update this test.
+// SELECT or OUTPUT in the MSSQL store that projects one without BOTH a CONVERT
+// or CAST and a LOWER. Deriving the column list from the migrations rather than
+// hardcoding it is the point -- a UUID column added later is covered without
+// anyone remembering to update this test.
+//
+// WHAT IT CANNOT SEE, so that a green run is not read as more than it is: the
+// derivation needs a table NAME. A statement whose table arrives as a
+// runtime-concatenated identifier -- `FROM ` + someVar -- matches no table
+// reference, contributes no UUID columns, and is skipped without comment. It
+// also misses tables no migration declares, because there is nothing to derive.
+//
+// Both together describe exactly one site in the tree today:
+// engine/testutil/mssql_row_disappearance.go, whose audit table is created at
+// runtime. That site's LOWER is wrapped BY HAND and is NOT enforced -- an edit
+// that drops it would leave this guard green. Found on 2026-10-02 by
+// enumerating every non-LOWERed CONVERT(NVARCHAR(36), ...) in the tree and
+// diffing against what this guard reported: three of the four non-test hits
+// were prose, this was the fourth. That enumeration is the control for a claim
+// of coverage, and it is cheap; re-run it when a UUID column moves somewhere
+// this cannot follow.
 func TestMSSQLUUIDColumnsAreConvertedInProjections(t *testing.T) {
 	byTable := mssqlUUIDColumns(t)
 	if len(byTable) == 0 {
@@ -64,22 +89,19 @@ func TestMSSQLUUIDColumnsAreConvertedInProjections(t *testing.T) {
 			t.Fatalf("read %s: %v", f, err)
 		}
 		for _, v := range findRawUUIDProjections(f, string(src), byTable) {
-			// LOWER(), not a bare CONVERT -- and this message is the only place
-			// the prescribed form is written down, which is why it is worth a
-			// comment of its own. CONVERT(NVARCHAR(36), x) returns UPPERCASE on
-			// SQL Server while the value the application WROTE is lowercase, so
-			// a projection that is CONVERTed and not LOWERed yields an id that
-			// does not equal the one that created the row: a by-id lookup
-			// misses, and a command that prints an id and accepts it back fails
-			// to match its own output. cleat#2983.
-			//
-			// The guard ACCEPTS the corrected form -- wrappedInConversion walks
-			// outward through nesting for exactly this shape, and names
-			// LOWER(CONVERT(NVARCHAR(36), tenant_id)) as its example -- so the
-			// old message prescribed a form that passes this check and ships the
-			// bug anyway. An author who obeyed it wrote a new defect; that is
-			// what makes the message itself the vector rather than the sites.
-			t.Errorf("%s", uuidProjectionMessage(f, v.line, v.column, v.context))
+			// The guard now REQUIRES LOWER, so the message is advice rather than
+			// the only line standing between an author and the defect -- which is
+			// the change cleat#2993 exists to make. Until it landed, this guard
+			// accepted a bare CONVERT and its message prescribed one, so an
+			// author who obeyed it wrote `CONVERT(NVARCHAR(36), x)`, passed, and
+			// shipped an id that is UPPERCASE on SQL Server where the value the
+			// application wrote is lowercase: a by-id lookup misses, and a
+			// command that prints an id and accepts it back fails to match its
+			// own output (cleat#2983). The message still names the canonical form,
+			// and TestTheProjectionAdvicePrescribesTheCanonicalForm still asserts
+			// its text -- the repair for a message that was a vector is a message
+			// that is not, not the removal of the test that noticed.
+			t.Errorf("%s", uuidProjectionMessage(f, v))
 		}
 	}
 	// A floor rather than an exact count: the set grows as the repo does. It
@@ -232,9 +254,15 @@ func mssqlUUIDColumns(t *testing.T) map[string]map[string]bool {
 }
 
 type rawUUIDProjection struct {
-	line    int
-	column  string
-	context string
+	line   int
+	column string
+	// converted distinguishes the two ways a projection can be wrong, because
+	// they are different defects with different repairs and the message owes the
+	// reader the right one. false: no CONVERT at all, so the driver hands back
+	// 16 raw bytes. true: CONVERTed but not LOWERed, so the text is canonical in
+	// the wrong case -- cleat#2993.
+	converted bool
+	context   string
 }
 
 var (
@@ -338,14 +366,16 @@ func findRawUUIDProjections(file, src string, byTable map[string]map[string]bool
 					if precededByAS(proj, cm[0]) {
 						continue
 					}
-					if wrappedInConversion(proj, cm[0]) {
+					converted, lowered := projectionWrapping(proj, cm[0])
+					if converted && lowered {
 						continue
 					}
 					line := base + strings.Count(sql[:pm[4]+cm[0]], "\n")
 					out = append(out, rawUUIDProjection{
-						line:    line,
-						column:  col,
-						context: strings.TrimSpace(collapse(proj[maxInt(0, cm[0]-50):minInt(len(proj), cm[1]+20)])),
+						line:      line,
+						column:    col,
+						converted: converted,
+						context:   strings.TrimSpace(collapse(proj[maxInt(0, cm[0]-50):minInt(len(proj), cm[1]+20)])),
 					})
 				}
 			}
@@ -398,8 +428,16 @@ func precededByAS(proj string, idx int) bool {
 	return i-2 < 0 || !isIdentByte(proj[i-2])
 }
 
-// wrappedInConversion reports whether the token at idx sits inside a
-// CONVERT(...) or CAST(...) call.
+// projectionWrapping reports, for the token at idx, whether it sits inside a
+// CONVERT(...)/CAST(...) call and whether it sits inside a LOWER(...) call.
+//
+// BOTH are required, and they are two requirements rather than one restated:
+// CONVERT supplies canonical UUID TEXT where go-mssqldb would otherwise hand
+// back 16 raw storage bytes, and LOWER supplies the CASE, because
+// CONVERT(NVARCHAR(36), x) returns UPPERCASE on SQL Server while the value the
+// application wrote is lowercase. Either alone is a defect -- the first is the
+// raw-bytes bug this guard was written for, the second is cleat#2983, which
+// shipped through this guard because CONVERT alone satisfied it.
 //
 // Comma-based lookback does not work here: CONVERT(NVARCHAR(36), tenant_id)
 // contains a comma between the function name and the column, so scanning back
@@ -407,7 +445,24 @@ func precededByAS(proj string, idx int) bool {
 // outward through balanced parentheses instead, checking the name of each
 // enclosing call, which is the only way to answer the question correctly for
 // nested expressions like LOWER(CONVERT(NVARCHAR(36), tenant_id)).
-func wrappedInConversion(proj string, idx int) bool {
+//
+// A single outward walk collecting both facts, rather than two walks: two would
+// be the same code twice, and the second would have to be trusted not to differ.
+//
+// WHAT THE ORDER OF THE TWO DOES NOT MATTER FOR, measured rather than assumed on
+// SQL Server 2022 on 2026-10-02. Both nestings lower the result correctly, so the
+// walk accepts either and this is not an oversight:
+//
+//	LOWER(CONVERT(NVARCHAR(36), id))  -> a0533f82-3acc-4ffb-897e-b04d7fd395af
+//	CONVERT(NVARCHAR(36), LOWER(id))  -> a0533f82-3acc-4ffb-897e-b04d7fd395af
+//
+// A bare LOWER(id) with no conversion at all ALSO returns that same lowercase
+// text, so the rule refuses a form that works. That is deliberate and is the one
+// place this predicate is stricter than the database: it relies on SQL Server
+// implicitly choosing the character type for LOWER's argument, and a guard whose
+// subject is "say explicitly what the text conversion is" should not accept an
+// implicit one. The cost of refusing it is a wrap that is also correct.
+func projectionWrapping(proj string, idx int) (converted, lowered bool) {
 	depth := 0
 	for i := idx - 1; i >= 0; i-- {
 		switch proj[i] {
@@ -427,14 +482,16 @@ func wrappedInConversion(proj string, idx int) bool {
 			for j >= 0 && (isIdentByte(proj[j])) {
 				j--
 			}
-			name := strings.ToUpper(proj[j+1 : end])
-			if name == "CONVERT" || name == "CAST" {
-				return true
+			switch strings.ToUpper(proj[j+1 : end]) {
+			case "CONVERT", "CAST":
+				converted = true
+			case "LOWER":
+				lowered = true
 			}
-			// Some other call (LOWER, ISNULL, COALESCE): keep looking outward.
+			// Some other call (ISNULL, COALESCE): keep looking outward.
 		}
 	}
-	return false
+	return converted, lowered
 }
 
 func isIdentByte(b byte) bool {
@@ -494,27 +551,42 @@ func feedsAnInsert(head string) bool {
 // function rather than an inline Errorf argument so that its TEXT can be
 // asserted on -- which is the whole point of the change that introduced it.
 //
-// THE MESSAGE IS THE VECTOR. This guard does not require LOWER, it requires
-// CONVERT, so its advice is the only place the prescribed form is written down:
-// an author who obeys the message writes `CONVERT(NVARCHAR(36), x)`, passes the
-// check, and ships an id that is UPPERCASE on SQL Server where the value the
-// application wrote is lowercase. That is not hypothetical -- it is exactly what
-// happened in cleat#2982, where a minted credential could not be recognised as
-// its own row and `cleatctl operator-key revoke --key-id <what list printed>`
-// matched nothing.
+// THE MESSAGE WAS THE VECTOR, and that is why the text is asserted on rather
+// than trusted. Until cleat#2993 this guard required CONVERT and NOT LOWER, so
+// its advice was the only place the prescribed form was written down: an author
+// who obeyed the message wrote `CONVERT(NVARCHAR(36), x)`, passed the check, and
+// shipped an id that is UPPERCASE on SQL Server where the value the application
+// wrote is lowercase. That is not hypothetical -- it is what happened in
+// cleat#2982, where a minted credential could not be recognised as its own row
+// and `cleatctl operator-key revoke --key-id <what list printed>` matched nothing.
 //
-// So the wrap here is `LOWER(CONVERT(...))`, which this guard already ACCEPTS:
-// wrappedInConversion walks outward through nesting for precisely this shape. A
-// message that demands "canonical UUID text" and prescribes a wrap that is not
-// canonical, issued by code that would have taken the canonical one, is the
-// defect cleat#2983 is about.
-func uuidProjectionMessage(file string, line int, column, context string) string {
-	return fmt.Sprintf("%s:%d projects UUID column %q without CONVERT/CAST:\n    %s\n\n"+
-		"go-mssqldb scans UNIQUEIDENTIFIER into a Go string as 16 raw bytes, not "+
-		"canonical UUID text. Wrap it: LOWER(CONVERT(NVARCHAR(36), %s)) AS %s -- the "+
-		"LOWER is not decoration: CONVERT alone returns UPPERCASE on SQL Server, so "+
-		"the value would not equal the lowercase id the application wrote (cleat#2983).",
-		file, line, column, context, column, column)
+// The guard NOW enforces the canonical form, so the message is advice rather
+// than the last line of defence. It still distinguishes the two defects, because
+// they have different causes and a reader who is told the wrong one looks in the
+// wrong place: "without CONVERT/CAST" means the driver is handing back raw bytes,
+// while "CONVERTed but not LOWERed" means the text is right and only the case is
+// wrong.
+func uuidProjectionMessage(file string, v rawUUIDProjection) string {
+	// The per-mode sentence names the DEFECT, and the tail explains the
+	// PRESCRIPTION. They are separate because both modes prescribe the same wrap:
+	// whoever is told to write LOWER(CONVERT(...)) needs to know why the LOWER is
+	// there even when their own defect was the missing CONVERT, and an author who
+	// does not know why removes it as noise -- which is how this came back the
+	// first time.
+	missing := "without CONVERT/CAST"
+	defect := "go-mssqldb scans UNIQUEIDENTIFIER into a Go string as 16 raw bytes, " +
+		"not canonical UUID text."
+	if v.converted {
+		missing = "CONVERTed but not LOWERed"
+		defect = "the text is canonical but in the wrong case, so the projected id " +
+			"would not equal the id that created the row: a by-id lookup misses, and a " +
+			"command that prints an id and accepts it back fails to match its own output."
+	}
+	return fmt.Sprintf("%s:%d projects UUID column %q %s:\n    %s\n\n"+
+		"%s Wrap it: LOWER(CONVERT(NVARCHAR(36), %s)) AS %s -- the LOWER is not "+
+		"decoration: CONVERT alone returns UPPERCASE on SQL Server while the value the "+
+		"application wrote is lowercase (cleat#2983, cleat#2993).",
+		file, v.line, v.column, missing, v.context, defect, v.column, v.column)
 }
 
 // TestTheProjectionAdvicePrescribesTheCanonicalForm pins the artefact this issue
@@ -525,27 +597,119 @@ func uuidProjectionMessage(file string, line int, column, context string) string
 // wrong was the repair it named, and only an assertion over the message can see
 // that.
 func TestTheProjectionAdvicePrescribesTheCanonicalForm(t *testing.T) {
-	msg := uuidProjectionMessage("engine/x.go", 12, "tenant_id", "&wf.TenantID")
+	// Both modes, because the guard can now be tripped two ways and a message
+	// that only tells the reader about one of them sends the other one looking
+	// in the wrong place.
+	for _, converted := range []bool{false, true} {
+		msg := uuidProjectionMessage("engine/x.go", rawUUIDProjection{
+			line: 12, column: "tenant_id", context: "&wf.TenantID", converted: converted,
+		})
 
-	if !strings.Contains(msg, "LOWER(CONVERT(NVARCHAR(36), tenant_id))") {
-		t.Errorf("the prescribed wrap is not the canonical one, so an author who obeys this "+
-			"message writes an id that is UPPERCASE on SQL Server:\n%s", msg)
+		if !strings.Contains(msg, "LOWER(CONVERT(NVARCHAR(36), tenant_id))") {
+			t.Errorf("the prescribed wrap is not the canonical one, so an author who obeys "+
+				"this message writes an id that is UPPERCASE on SQL Server:\n%s", msg)
+		}
+
+		// THE CONTROL, and it needs care: `CONVERT(NVARCHAR(36), tenant_id)` is a
+		// SUBSTRING of the corrected text, so asserting only that the message
+		// mentions CONVERT would pass on both the broken and the fixed message and
+		// measure nothing. The assertion has to be that the OLD PRESCRIPTION -- the
+		// whole "Wrap it: ... AS ..." clause, un-LOWERed -- is absent.
+		if strings.Contains(msg, "Wrap it: CONVERT(NVARCHAR(36), tenant_id) AS tenant_id") {
+			t.Errorf("the message still prescribes the un-LOWERed wrap, which passed this "+
+				"guard before cleat#2993 and ships the bug:\n%s", msg)
+		}
+
+		// And it must say WHY. A prescription with no reason is one a later reader
+		// removes as noise, which is how the un-LOWERed form came back.
+		if !strings.Contains(msg, "UPPERCASE") {
+			t.Errorf("the message prescribes LOWER without saying why, so the next reader "+
+				"has no reason to keep it:\n%s", msg)
+		}
 	}
 
-	// THE CONTROL, and it needs care: `CONVERT(NVARCHAR(36), tenant_id)` is a
-	// SUBSTRING of the corrected text, so asserting only that the message
-	// mentions CONVERT would pass on both the broken and the fixed message and
-	// measure nothing. The assertion has to be that the OLD PRESCRIPTION -- the
-	// whole "Wrap it: ... AS ..." clause, un-LOWERed -- is absent.
-	if strings.Contains(msg, "Wrap it: CONVERT(NVARCHAR(36), tenant_id) AS tenant_id") {
-		t.Errorf("the message still prescribes the un-LOWERed wrap, which passes this guard "+
-			"and ships the bug:\n%s", msg)
+	// The two modes must not read the same. Asserting each mode separately above
+	// cannot see a message that ignores its argument and prints one fixed text,
+	// which would leave the "CONVERTed but not LOWERed" reader told to add a
+	// CONVERT they already have.
+	raw := uuidProjectionMessage("engine/x.go", rawUUIDProjection{
+		line: 12, column: "tenant_id", context: "&wf.TenantID", converted: false,
+	})
+	done := uuidProjectionMessage("engine/x.go", rawUUIDProjection{
+		line: 12, column: "tenant_id", context: "&wf.TenantID", converted: true,
+	})
+	if raw == done {
+		t.Errorf("the message does not distinguish a raw projection from an un-LOWERed "+
+			"one, so it names the wrong defect for one of them:\n%s", done)
 	}
+	if !strings.Contains(done, "not LOWERed") || !strings.Contains(raw, "without CONVERT/CAST") {
+		t.Errorf("the two modes are different but not for the right reason; a "+
+			"CONVERTed-but-not-LOWERed site must be told about the case, not about "+
+			"raw bytes\nraw:  %s\ndone: %s", raw, done)
+	}
+	// And each must name the CAUSE, not only the label: a reader told "without
+	// CONVERT/CAST" who is not told what the driver actually returns has no way
+	// to judge whether the wrap is the right repair or a ritual.
+	if !strings.Contains(raw, "16 raw bytes") {
+		t.Errorf("the raw-projection message does not say what the driver returns "+
+			"instead of text:\n%s", raw)
+	}
+	if !strings.Contains(done, "wrong case") {
+		t.Errorf("the un-LOWERed message does not name the case as the defect, so a reader "+
+			"sees an id that looks canonical and cannot tell what is wrong with it:\n%s", done)
+	}
+}
 
-	// And it must say WHY. A prescription with no reason is one a later reader
-	// removes as noise, which is how the un-LOWERed form would come back.
-	if !strings.Contains(msg, "UPPERCASE") {
-		t.Errorf("the message prescribes LOWER without saying why, so the next reader has no "+
-			"reason to keep it:\n%s", msg)
+// TestTheProjectionWrappingPredicateSeparatesTheForms drives the predicate
+// directly, which the tree-scanning guard cannot do: the scan only ever reports
+// the sites that FAIL, so a predicate that accepted everything and one that
+// refused everything would both be invisible to it on a tree that happens to
+// have no bad sites. This is the check that can disagree.
+//
+// The column is written as X and located by strings.Index, so each case reads as
+// the SQL it is.
+func TestTheProjectionWrappingPredicateSeparatesTheForms(t *testing.T) {
+	cases := []struct {
+		proj                       string
+		wantConverted, wantLowered bool
+		name                       string
+	}{
+		{"LOWER(CONVERT(NVARCHAR(36), X)) AS id", true, true,
+			"the canonical form"},
+		{"CONVERT(NVARCHAR(36), X) AS id", true, false,
+			"cleat#2993: converted, uppercase, must be reported"},
+		{"X", false, false,
+			"cleat#2983: raw bytes, must be reported"},
+		{"CAST(X AS NVARCHAR(36)) AS id", true, false,
+			"CAST is the other conversion and needs LOWER too"},
+		{"LOWER(CAST(X AS NVARCHAR(36))) AS id", true, true,
+			"and LOWER wrapping a CAST is accepted"},
+		{"CONVERT(NVARCHAR(36), LOWER(X)) AS id", true, true,
+			"the inverted nesting, measured valid on SQL Server 2022"},
+		{"LOWER(ISNULL(CONVERT(NVARCHAR(36), X), '')) AS id", true, true,
+			"a LOWER further out still encloses the token"},
+		{"ISNULL(CONVERT(NVARCHAR(36), X), '') AS id", true, false,
+			"and a non-LOWERing wrapper around the conversion does not"},
+		{"LOWER(X) AS id", false, true,
+			"bare LOWER: measured to WORK on the server, refused here because the " +
+				"character type would be chosen implicitly"},
+		{"LEFT(CONVERT(NVARCHAR(36), X), 8) AS id", true, false,
+			"a conversion used as an argument is still the projection's conversion"},
+		{"LOWER(tenant_id), CONVERT(NVARCHAR(36), X) AS id", true, false,
+			"a SIBLING LOWER does not lower this token, and its closing paren must " +
+				"not be mistaken for an enclosing one"},
+		{"INSERTED.X", false, false,
+			"a qualified column, as OUTPUT clauses use"},
+	}
+	for _, tc := range cases {
+		idx := strings.Index(tc.proj, "X")
+		if idx < 0 {
+			t.Fatalf("case %q has no X to locate", tc.name)
+		}
+		gotConverted, gotLowered := projectionWrapping(tc.proj, idx)
+		if gotConverted != tc.wantConverted || gotLowered != tc.wantLowered {
+			t.Errorf("%s: projectionWrapping(%q) = converted=%v lowered=%v, want %v/%v",
+				tc.name, tc.proj, gotConverted, gotLowered, tc.wantConverted, tc.wantLowered)
+		}
 	}
 }

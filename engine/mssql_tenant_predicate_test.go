@@ -143,7 +143,15 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	// lives here because the mechanism does -- the digest is over the SQL, so
 	// this exemption stops covering the statement the moment the statement
 	// changes.
-	"replay.go:loadWorkflowInstanceSQL#cd97aca08a1e": {
+	//
+	// RE-KEYED 2026-10-02 by cleat#2993, which wrapped this statement's tenant_id
+	// projection in LOWER. The reason is remade rather than copied across: it is
+	// still true of the NEW text, because the edit touched a projected column and
+	// neither added nor removed a predicate. The digest moving is this mechanism
+	// working as documented above -- an exemption is a claim about one
+	// statement's text, and the text moved. The previous key was
+	// "replay.go:loadWorkflowInstanceSQL#cd97aca08a1e".
+	"replay.go:loadWorkflowInstanceSQL#2a0ad1292ad8": {
 		SQL:    "select id, def_name, def_version, status, input, coalesce(result, ''), coalesc",
 		Reason: adminToolAcrossTenants,
 	},
