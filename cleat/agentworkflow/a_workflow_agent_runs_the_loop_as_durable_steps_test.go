@@ -293,6 +293,41 @@ func TestTheLoopReplaysWithoutDivergence(t *testing.T) {
 	}
 }
 
+// The per-language surface, which is the whole reason the loop is a workflow:
+// start the child, await it. Asserted on the RECORDED child call, because a
+// wrapper that silently started nothing would still let a stubbed response
+// come back and look like success.
+func TestRunAsChildStartsAndAwaitsTheAgent(t *testing.T) {
+	env := cleattest.NewTestEnv()
+	env.OnChildWorkflow(agentworkflow.ChildName).
+		Return(`{"answer":"hi","steps":1,"tool_calls":null}`, nil)
+
+	res, err := agentworkflow.RunAsChild(env.H(), agentworkflow.Input{
+		Provider: "openai", Model: "gpt-4o-mini",
+		Tools: []agentworkflow.Tool{{
+			Name: "t", Kind: agentworkflow.KindService, Service: "s", Operation: "o",
+		}},
+	}, "hello")
+	if err != nil {
+		t.Fatalf("RunAsChild: %v", err)
+	}
+	if res.Answer != "hi" {
+		t.Errorf("Answer = %q", res.Answer)
+	}
+
+	hist := env.ChildWorkflowCallHistory()
+	if len(hist) != 1 || hist[0].Name != agentworkflow.ChildName {
+		t.Fatalf("child calls = %+v, want exactly one to %q", hist, agentworkflow.ChildName)
+	}
+	// The message and the tool list have to REACH the child; a wrapper that
+	// dropped either would still return the stub's answer.
+	for _, want := range []string{`"message":"hello"`, `"name":"t"`, `"kind":"service"`} {
+		if !strings.Contains(hist[0].InputJSON, want) {
+			t.Errorf("the child's input %q does not carry %s", hist[0].InputJSON, want)
+		}
+	}
+}
+
 // A tool the model invented is reported BACK to it rather than failing the
 // run: the model can correct itself, and the run is still recorded so an
 // operator can see it happening.

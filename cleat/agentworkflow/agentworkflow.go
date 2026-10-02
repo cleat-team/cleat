@@ -353,6 +353,48 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 	return "", fmt.Errorf("agent: exceeded max steps (%d)", in.MaxSteps)
 }
 
+// ChildName is the workflow name the agent must be DEPLOYED under for
+// RunAsChild to find it. A child is resolved by name against a deployed
+// workflow_defs row (the worker loads its bytes by def_name), so this is a
+// deployment contract, not a convention.
+const ChildName = "agent"
+
+// RunAsChild is the `run_agent(config, message)` wrapper the SDKs expose: it
+// starts the agent as a child workflow and awaits it.
+//
+// THIS IS THE WHOLE PER-LANGUAGE SURFACE. Everything else -- the loop, the tool
+// dispatch, the step budget, the durability -- lives in the workflow, which is
+// why the same agent works from Go, Python, Rust, Java or AssemblyScript
+// without any of them implementing it. Before cleat#1983 each language
+// reimplemented the loop, and two of those implementations were untested.
+//
+// The caller's workflow needs the agent deployed under ChildName. A deployment
+// under a different name means calling h.ChildWorkflow directly with the
+// marshalled Input -- two lines, and the reason this is a convenience rather
+// than a mechanism.
+func RunAsChild(h cleat.HostCalls, cfg Input, message string) (Result, error) {
+	cfg.Message = message
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("agent: marshal config: %w", err)
+	}
+
+	runID, err := h.ChildWorkflow(ChildName, string(payload))
+	if err != nil {
+		return Result{}, fmt.Errorf("agent: start child %q: %w", ChildName, err)
+	}
+	out, err := h.AwaitChild(runID)
+	if err != nil {
+		return Result{}, fmt.Errorf("agent: await child %q: %w", ChildName, err)
+	}
+
+	var res Result
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		return Result{}, fmt.Errorf("agent: decode child result: %w", err)
+	}
+	return res, nil
+}
+
 // validate rejects a tool that cannot be dispatched, at the point the tool is
 // declared rather than when the model first calls it. A malformed tool would
 // otherwise look like a model failure.
