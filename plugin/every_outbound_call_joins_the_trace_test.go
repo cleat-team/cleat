@@ -106,6 +106,15 @@ var notYetPropagating = map[string]string{
 		"HTTP calls are infrastructure chatter rather than a unit of business work, and the unit " +
 		"worth tracing is what happens when records actually arrive -- which is downstream of here. " +
 		"Compare plugins/datadogexport, which DOES originate: one real export per config per 60s.",
+	"cmd/cleat-worker/internal_holds.go:askInternalHolds": "cleat#2196's reaper-to-worker veto channel. The caller is the reaper's periodic " +
+		"reclaim tick (step 4, not yet built) -- a timer-driven background sweep over the whole " +
+		"worker, not scoped to any one run, so there is no CallContext and no TraceID to join: " +
+		"calling plugin.SetTraceparentFromContext here would be the no-op-that-looks-like-a-fix " +
+		"the entry below (oidc.go:getJSON's sibling note) warns against. Whether to originate a " +
+		"trace -- and at what granularity: one per tick, one per holder asked, one per reclaim " +
+		"batch -- is exactly stage 3's open design question (needsOrigination, above), and step " +
+		"4 is where that gets decided, not this PR, which builds the dial-out function but has " +
+		"no caller for it yet.",
 	"plugins/oauthprovider/routes.go:handleCallback": "an inbound HTTP HANDLER, not a workflow step. The trace it should join belongs to the " +
 		"browser or IdP that called it and arrives on the INBOUND request -- not to any run, and " +
 		"there is no CallContext here. Joining it means parsing the incoming traceparent on the " +

@@ -98,7 +98,26 @@ var (
 	// address is not known to be resolvable", and nothing currently reads
 	// the address this populates -- that is cleat#2196's step 4, not yet
 	// built. See podAddress in connection_share.go.
-	workerServiceName   = flag.String("worker-service-name", "", "Headless Kubernetes Service name selecting this worker's pods, for DNS-based worker-to-worker addressing (empty disables; see cleat#2196)")
+	workerServiceName = flag.String("worker-service-name", "", "Headless Kubernetes Service name selecting this worker's pods, for DNS-based worker-to-worker addressing (empty disables; see cleat#2196)")
+	// Shaped exactly like --pprof-addr: its own opt-in address, empty by
+	// default, never reachable from the ordinary API port or from ingress.
+	// Serves /internal/holds (cleat#2196's reaper-to-worker veto channel) --
+	// a reaper asks the worker named in a stale row's assigned_to whether it
+	// still holds that run before reclaiming it. Needs --worker-service-name
+	// set (step 2, cleat#2196) to be dialable by name at all; set without it,
+	// the listener still starts, it is just unreachable by anything that
+	// doesn't already know this pod's IP.
+	//
+	// Authenticated by CLEAT_INTERNAL_AUTH_KEY (env, never a flag -- a flag
+	// value is visible in `ps`), a single shared secret every worker in the
+	// deployment is given the same value of. Deliberately NOT cleat#2169's
+	// future operator credential: that is a per-caller identity for
+	// cross-tenant HTTP admin routes, a different and larger problem this
+	// does not try to solve. This is narrower and interim -- symmetric
+	// (every worker is both a caller and a callee), tenant-blind (a hold
+	// query names a run and a generation, nothing about a tenant), and
+	// meant to be retired once cleat#2169 lands, not extended.
+	internalAddr        = flag.String("internal-addr", "", "Worker-to-worker internal HTTP listen address (e.g., :7070). Serves /internal/holds for cleat#2196's reaper veto channel. Empty disables it (default). Requires CLEAT_INTERNAL_AUTH_KEY to be set, and is refused otherwise.")
 	taskQueuesStr       = flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
 	compactionThreshold = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
 	compactionInterval  = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")

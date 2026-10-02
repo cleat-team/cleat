@@ -2633,6 +2633,38 @@ func main() {
 		}()
 	}
 
+	// Start the internal-holds listener for cleat#2196's reaper-to-worker
+	// veto channel. Shaped like --pprof-addr above: its own opt-in address,
+	// off by default, never on the API port and never in k8s/service.yaml
+	// or the Helm chart's Service. Unlike pprof, it IS wired into graceful
+	// shutdown (the api-addr pattern above, not the pprof one) -- a reaper
+	// mid-query during a rolling restart should see a clean connection
+	// close rather than an abrupt reset, and (unlike the API server) there
+	// is no in-flight work for this listener to wait on, so it can shut
+	// down the moment ctx is cancelled rather than needing --shutdown-grace.
+	if *internalAddr != "" {
+		internalSecret := os.Getenv("CLEAT_INTERNAL_AUTH_KEY")
+		if internalSecret == "" {
+			logger.ErrorContext(context.Background(), "--internal-addr is set but CLEAT_INTERNAL_AUTH_KEY is not -- "+
+				"the internal holds listener would authenticate no caller at all, which is worse than not starting it",
+				"worker_id", workerID)
+			os.Exit(1)
+		}
+		internalSrv := newInternalHoldsServer(*internalAddr, internalSecret, w)
+		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "internal-holds-listener")
+			logger.InfoContext(context.Background(), "internal holds listening", "worker_id", workerID, "addr", *internalAddr)
+			if err := internalSrv.ListenAndServe(); err != http.ErrServerClosed {
+				logger.ErrorContext(context.Background(), "internal holds server error", "worker_id", workerID, "error", err)
+			}
+		}()
+		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "internal-holds-shutdown")
+			<-ctx.Done()
+			internalSrv.Shutdown(context.Background())
+		}()
+	}
+
 	// Handle shutdown signals.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
