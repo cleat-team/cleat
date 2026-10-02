@@ -61,13 +61,35 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 	// -- there is deliberately no per-request equivalent, so a caller cannot
 	// switch validation off for its own requests.
 	noValidateInput := fs.Bool("no-validate-input", false, "disable cleat#1981 start-input validation for this version, even if it carries a schema")
+	// cleat#1986: this version's exposure class. A source-level declaration is a
+	// later slice, so the deploy path is the only way to set it today -- and with
+	// nothing declaring a class yet there is nothing to tighten against, so this
+	// simply sets it.
+	exposureFlag := fs.String("exposure", string(engine.ExposureAuth),
+		"exposure class for this version: auth (default) or internal; public is not available until the per-tenant opt-in exists (cleat#1986)")
 	positional, err := parseFlagsAnywhere(fs, args)
 	if err != nil {
 		osExit(1)
 	}
 
 	if len(positional) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file> [--no-validate-input]")
+		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file> [--no-validate-input] [--exposure auth|internal]")
+		osExit(1)
+	}
+
+	// cleat#1986. 'public' is REFUSED rather than stored: it is only legal for a
+	// tenant an operator has opted in, and that per-tenant opt-in does not exist
+	// yet -- so accepting it here would store a definition that becomes
+	// world-readable the moment the enforcement slice lands. Refusing names the
+	// missing policy; storing it would not.
+	exposure, ok := engine.ParseExposure(*exposureFlag)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "error: --exposure must be one of %q, %q or %q, got %q\n",
+			engine.ExposureAuth, engine.ExposurePublic, engine.ExposureInternal, *exposureFlag)
+		osExit(1)
+	}
+	if exposure == engine.ExposurePublic {
+		fmt.Fprintln(os.Stderr, "error: --exposure=public is not available yet: it is only legal for a tenant an operator has opted in, and that per-tenant opt-in is not implemented (cleat#1986). Deploy as auth or internal.")
 		osExit(1)
 	}
 
@@ -189,6 +211,7 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		PluginDeps:              pluginDeps,
 		EntryPointSchemas:       entryPointSchemas,
 		InputValidationDisabled: *noValidateInput,
+		Exposure:                exposure,
 		CreatedAt:               time.Now(),
 	}
 
