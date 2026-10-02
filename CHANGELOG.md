@@ -136,8 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also writes a `<wasm>.schema.json` sidecar (via the new `cleat_sdk.jsonschema_emitter`), so a
   Python workflow rebuilt and redeployed after this starts validating its input the same as a Go
   one — the "unaffected" bullet above now covers Python builds from before this change only, not
-  Python in general. (Known limitation at the time of writing: this only takes effect once
-  cleat#2936 — a pre-existing bug independent of this change — is fixed; see that issue.)
+  Python in general. (cleat#2936 — a pre-existing bug independent of this change, where
+  `wasm.ReadMetadata` and `stamp_metadata.py` both rejected every Component Model binary outright,
+  so the `entry_points` stamp this relies on never survived on a real `componentize-py` build — is
+  now fixed; see that issue.)
   - **Every Python parameter is nullable, not only the pointer/slice/map subset Go's binding
     makes nullable.** `cleat_sdk.entry._from_dict`'s very first check is `if value is None: return
     None`, unconditionally, for every declared type — so a plain required `str` or `int`
@@ -215,6 +217,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker never sends — the test and the method agreed with each other, and neither asked the route.
   (cleat#2573)
 
+- **`wasm.ReadMetadata`/`WriteMetadata` and `stamp_metadata.py` rejected every WASM Component
+  Model binary outright, so the `cleat.metadata` custom section never worked on Python's actual
+  build output.** `cleat build --target python` compiles via `componentize-py`, which emits a
+  Component Model binary, not a core module — its header shares the core module's 4-byte magic but
+  encodes what follows differently (a u16 LE version plus a u16 LE "layer" field, fixed at 1 for a
+  component, rather than the core module's single u32 LE version). The header check only ever
+  recognized the core-module encoding, so every read/write of a Python workflow's embedded metadata
+  failed with "not a valid WASM binary (bad magic/version)" / "unsupported WASM version" — including
+  the `entry_points` stamp cleat#2914 added, which this is why it shipped dormant. A worker
+  resolving a Python workflow's entry point with no explicit `__entry_point` in the start request
+  has therefore always failed outright until this fix. The custom-section walk itself needed no
+  change: a component's custom sections (id 0) frame identically to a core module's, verified by
+  hand-walking all 642 top-level sections of a real `componentize-py` artifact and landing exactly
+  at EOF. **Deliberately not widened**: `readImportSection`/`readImportModuleNames`
+  (`wasm/metadata.go`) and the section readers in `wasm/memory.go`/`wasm/sizereport.go` all
+  interpret non-zero section IDs with core-module-only meaning (e.g. section ID 2 means "import" in
+  a core module and "core instance" in a component) — widening those the same way would silently
+  misparse a component's bytes rather than failing loudly, so they stay core-module-only on
+  purpose. (cleat#2936)
 - **`cleatctl deploy workflow` recorded a `workflow_defs` row whose version disagreed with the
   version stamped in the binary it stored, so a redeploy of a rebuilt workflow looped forever and
   never ran.** The command is documented as "deploys a new version"

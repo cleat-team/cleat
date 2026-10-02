@@ -267,11 +267,18 @@ func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 	if len(wasmBytes) < 8 {
 		return nil, fmt.Errorf("not a valid WASM binary (too short)")
 	}
-	// Check magic + version header.
-	if !hasWasmHeader(wasmBytes) {
+	// Check magic + version header. A Component Model binary's top-level
+	// sections use the identical id/size/content framing a core module's do
+	// for a custom section (id 0) -- verified against a real componentize-py
+	// artifact, cleat#2936 -- so this walk is safe on either header. It is
+	// NOT safe to widen readImportSection/readImportModuleNames the same way:
+	// their section ID 2 means "import" only in a core module; at a
+	// component's top level it means "core instance", a different section
+	// entirely.
+	if !hasWasmHeader(wasmBytes) && !hasComponentHeader(wasmBytes) {
 		return nil, fmt.Errorf("not a valid WASM binary (bad magic/version)")
 	}
-	offset := 8 // skip magic (4) + version (4)
+	offset := 8 // skip magic (4) + version/layer (4)
 	for offset < len(wasmBytes) {
 		sectionID := wasmBytes[offset]
 		offset++
@@ -342,7 +349,9 @@ func stripCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 	if len(wasmBytes) < 8 {
 		return nil, fmt.Errorf("not a valid WASM binary (too short)")
 	}
-	if !hasWasmHeader(wasmBytes) {
+	// See readCustomSection's comment: this walk only ever inspects custom
+	// sections (id 0), which both headers frame identically.
+	if !hasWasmHeader(wasmBytes) && !hasComponentHeader(wasmBytes) {
 		return nil, fmt.Errorf("not a valid WASM binary (bad magic/version)")
 	}
 
@@ -404,6 +413,29 @@ func hasWasmHeader(b []byte) bool {
 		b[4] == 0x01 && b[5] == 0x00 && b[6] == 0x00 && b[7] == 0x00
 }
 
+// hasComponentHeader reports whether b opens with a WASM Component Model
+// binary header -- cleat#2936. It shares hasWasmHeader's 4-byte magic, but
+// what follows is not the same field read two ways: the Component Model
+// spec splits the core module's single u32 LE version into a u16 LE version
+// (bytes 4-5) and a u16 LE "layer" (bytes 6-7), fixed at 1 for a component
+// and -- because a core module's version 1 fits entirely in the low u16 --
+// always 0 for a core module. That is why hasWasmHeader's bytes 6-7 check
+// reads 0x00 0x00: it is reading a core module's zero layer, not asserting
+// anything about a byte the spec calls unused. See
+// https://github.com/WebAssembly/component-model/blob/main/design/mvp/Binary.md.
+//
+// The version field itself is deliberately NOT constrained to one value here:
+// it read 13 (0x0d 0x00) in a real componentize-py artifact
+// (tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm), and
+// the spec does not promise it will not move again.
+func hasComponentHeader(b []byte) bool {
+	if len(b) < 8 {
+		return false
+	}
+	return b[0] == 0x00 && b[1] == 0x61 && b[2] == 0x73 && b[3] == 0x6d &&
+		b[6] == 0x01 && b[7] == 0x00
+}
+
 // decodeULEB128 decodes an unsigned LEB128 value from b and returns the
 // decoded value and the number of bytes consumed.
 func decodeULEB128(b []byte) (uint32, int) {
@@ -441,10 +473,13 @@ func DetectLanguage(wasmBytes []byte) string {
 		return meta.Language
 	}
 
-	// 2. Check Component Model header (bytes 4-7 = 0x0d 0x00 0x01 0x00).
-	if len(wasmBytes) > 7 &&
-		wasmBytes[4] == 0x0d && wasmBytes[5] == 0x00 &&
-		wasmBytes[6] == 0x01 && wasmBytes[7] == 0x00 {
+	// 2. Check Component Model header. This used to hardcode the exact
+	// version bytes one observed componentize-py artifact happened to carry
+	// (0x0d 0x00, i.e. version 13) alongside the layer field, which is the
+	// only part the spec actually fixes -- see hasComponentHeader's comment
+	// (cleat#2936). A future componentize-py bumping its version would have
+	// silently stopped matching here.
+	if hasComponentHeader(wasmBytes) {
 		return "python"
 	}
 
@@ -620,6 +655,14 @@ func skipImportDesc(b []byte, offset, sectionEnd int) (int, error) {
 	return offset, nil
 }
 
+// readImportSection reads core-module section ID 2 as "import" -- true only
+// for a core module. At a Component Model binary's top level, section ID 2
+// means "core instance" instead, so this deliberately stays on hasWasmHeader
+// alone rather than also accepting hasComponentHeader (cleat#2936): widening
+// it would silently parse a component's core-instance bytes as import
+// module/field name pairs. Callers already treat a rejection here as "cannot
+// tell" (see the comment on skipImportDesc below), so a component binary
+// falls through safely without this function understanding it.
 func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 	if len(wasmBytes) < 8 || !hasWasmHeader(wasmBytes) {
 		return nil, fmt.Errorf("not a valid WASM binary")
@@ -706,6 +749,9 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 // readImportModuleNames extracts the module names from the import section
 // (section ID 2) of a WASM binary. It returns only the module names, skipping
 // the full descriptor parsing of each import.
+//
+// Deliberately core-module-only -- see readImportSection's comment above;
+// the same section-ID-2 ambiguity applies here (cleat#2936).
 func readImportModuleNames(wasmBytes []byte) ([]string, error) {
 	if len(wasmBytes) < 8 {
 		return nil, fmt.Errorf("not a valid WASM binary (too short)")
