@@ -137,6 +137,60 @@ func HostCallsMethod(sel *types.Selection) bool {
 	return IsHostCallsType(sel.Recv())
 }
 
+// sdkDurableHelpers is the set of "Type.Method" names SDKDurableHelper
+// accepts -- the keys the predicate below looks up.
+// THE SET IS THE SOURCE OF TRUTH, and the predicate reads it. It used to be a
+// switch inside the predicate, which made the accepted names unaddressable by
+// name -- and they need to be addressable, because the imports these helpers
+// require live in a SECOND hand list (wasm's sdkHelperImports) that must agree
+// with this one. Neither direction of disagreement fails loudly: a name here
+// with no row there contributes no import, and a row there with no name here is
+// never consulted at all. In both cases the module builds, the call reaches a
+// nil adapter, and it returns a zero value at run time. cleat#2627 was the
+// first change that had to update both lists in lockstep, and only one of the
+// two was covered by a test -- so TestEverySDKHelperRowIsAcceptedByTheGate
+// (wasm) now checks them against each other through SDKDurableHelperNames.
+var sdkDurableHelpers = map[string]bool{
+	"Saga.AddStepCall": true,
+
+	// Selector.Select is the SECOND of these and it was not found the way
+	// Saga.AddStepCall was. Saga.AddStepCall was reasoned about while the
+	// feature was being written; this one shipped, and a cleat.Selector timer
+	// fired instantly in every compiled workflow that did not independently
+	// write h.DurableSleep -- for as long as the type has existed.
+	//
+	// Measured on 8ca97d46 through the ports harness, two guest packages that
+	// differ by exactly one line:
+	//
+	//	no h.DurableSleep in the package: generation 1, 87ms, a 1500ms timer
+	//	                                  fired, durable clock advanced 0ms
+	//	one h.DurableSleep in the package: generation 2, the timer waited, the
+	//	                                  durable clock advanced exactly 1500ms
+	//
+	// Same Selector, same deadline. The variable is whether the WORKFLOW's own
+	// source happens to mention the host call the SDK makes on its behalf.
+	"Selector.Select": true,
+
+	// AddTimer is here for Now() and looks harmless next to Select. It is not:
+	// an unwired Now() returns 0, so every deadline this Selector computes is
+	// measured from the epoch and is already in the past. A Select that sleeps
+	// correctly would then fire immediately anyway, for a second reason, and
+	// fixing only Select would have looked like fixing nothing.
+	"Selector.AddTimer": true,
+
+	// Saga.Run and Saga.RunWithResult share one body -- Run delegates to
+	// RunWithResult (cleat#2627) -- so both routes make the same host calls no
+	// workflow wrote: LogKV, and SetQueryState, which is how a saga now
+	// publishes its progress. The steps' calls are closures the workflow wrote,
+	// so every other layer already sees them.
+	//
+	// BOTH KEYS ARE LOAD-BEARING and neither implies the other: the analyzer
+	// sees the method the WORKFLOW writes, so saga.Run(h) consults one row and
+	// saga.RunWithResult(h) the other.
+	"Saga.Run":           true,
+	"Saga.RunWithResult": true,
+}
+
 // SDKDurableHelper reports whether a selection is an SDK helper that makes a
 // durable host call on the caller's behalf, rather than a HostCalls method the
 // workflow wrote itself.
@@ -173,42 +227,20 @@ func SDKDurableHelper(sel *types.Selection) bool {
 	if named.Obj().Pkg().Name() != "cleat" {
 		return false
 	}
-	switch named.Obj().Name() + "." + sel.Obj().Name() {
-	case "Saga.AddStepCall":
-		return true
-	// Selector.Select is the SECOND of these and it was not found the way
-	// Saga.AddStepCall was. Saga.AddStepCall was reasoned about while the
-	// feature was being written; this one shipped, and a cleat.Selector timer
-	// fired instantly in every compiled workflow that did not independently
-	// write h.DurableSleep -- for as long as the type has existed.
-	//
-	// Measured on 8ca97d46 through the ports harness, two guest packages that
-	// differ by exactly one line:
-	//
-	//	no h.DurableSleep in the package: generation 1, 87ms, a 1500ms timer
-	//	                                  fired, durable clock advanced 0ms
-	//	one h.DurableSleep in the package: generation 2, the timer waited, the
-	//	                                  durable clock advanced exactly 1500ms
-	//
-	// Same Selector, same deadline. The variable is whether the WORKFLOW's own
-	// source happens to mention the host call the SDK makes on its behalf.
-	//
-	// AddTimer is here for Now() and looks harmless next to Select. It is not:
-	// an unwired Now() returns 0, so every deadline this Selector computes is
-	// measured from the epoch and is already in the past. A Select that sleeps
-	// correctly would then fire immediately anyway, for a second reason, and
-	// fixing only Select would have looked like fixing nothing.
-	case "Selector.Select", "Selector.AddTimer":
-		return true
-	// Saga.Run's own LogKV, which is not the steps' calls: those are closures
-	// the workflow wrote, so every layer already sees them. This is the one
-	// host call Run makes that no workflow wrote, and without it a saga's
-	// progress logging is silently dropped in any workflow that does not log
-	// on its own account.
-	case "Saga.Run":
-		return true
-	}
-	return false
+	return SDKDurableHelperName(named.Obj().Name() + "." + sel.Obj().Name())
+}
+
+// SDKDurableHelperName reports whether "Type.Method" names an SDK helper whose
+// durable host calls the analyzer has to import on the workflow's behalf.
+//
+// It takes the key rather than a *types.Selection for one reason: the gate and
+// the import table it decides whether to consult (wasm's sdkHelperImports) are
+// TWO hand lists that have to agree, and agreeing is only checkable by name. A
+// row whose key this refuses is never read, so it contributes no import, and
+// the module builds and returns a zero value at run time. cleat#2627 was the
+// first change that had to update both lists in lockstep.
+func SDKDurableHelperName(key string) bool {
+	return sdkDurableHelpers[key]
 }
 
 // PluginCallerMethod reports whether the given selection is a method call

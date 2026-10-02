@@ -197,74 +197,56 @@ func PlaceOrder(h cleat.HostCalls, input string) (string, error) {
 			h.SetQueryState("rejection_reason", reasonOr(sr.Payload, "rejected without a reason"))
 			return "", fmt.Errorf("order %s: rejected", in.OrderID)
 		}
+
+		// The decision is in and the order is no longer waiting on one, so this
+		// has to be published. It is app state -- the saga cannot know the order
+		// was gated -- and without it the published status stays
+		// "awaiting_approval" for the WHOLE saga, because the saga reports its
+		// progress as current_step and only writes status again at the end.
+		// Two things then read wrong: any poller sees an order that is being
+		// charged described as still awaiting a decision, and the demo UI, which
+		// offers the Approve/Reject controls whenever it sees that value, leaves
+		// them on screen for an order already approved. On develop the saga's
+		// own status writes ("charging", "dispatching") moved it on; cleat#2627
+		// removed those, so the app has to say so itself.
+		h.SetQueryState("status", "approved")
 	}
 
 	// ---- The saga ----
 	//
-	// THREE lists, and each pair of them is a distinction that would otherwise
-	// be published as a single word.
+	// NO BOOKKEEPING HERE. The three lists this block used to maintain --
+	// completed, unwound, unwindFailed -- are now what Saga.RunWithResult
+	// returns and publishes itself, so the per-step appends and the step-boundary
+	// SetQueryState calls are gone (cleat#2627). See SagaResult's doc comment
+	// for why they are three lists rather than two, and why "ran" is not
+	// "succeeded": that reasoning did not change, it just moved to where the
+	// mechanism that needs it lives.
 	//
-	// completed — which forwards finished. This is the saga's own bookkeeping,
-	// recorded for the READ AHEAD and not for the unwinding.
-	//
-	// unwound — which compensations RAN AND SUCCEEDED.
-	// unwindFailed — which compensations ran and FAILED.
-	//
-	// "What SHOULD have been undone" is not one of these. Deriving the
-	// compensation list from `completed` would publish an inference where the
-	// scenario needs evidence: a compensation that never ran would still be
-	// named, in exactly the case the scenario exists to show.
-	//
-	// And "ran" is not "succeeded". A compensation that runs and fails leaves
-	// the order in the state the saga existed to avoid, so it must NOT appear
-	// among the unwound — it is the line an operator has to act on, and it is
-	// the whole reason this is three lists rather than two.
-	var completed []string
-	var unwound []string
-	var unwindFailed []string
+	// What is left here is the app-specific state only: the order id, the
+	// total, the human-approval branch, and notify_failed.
 
 	s := cleat.NewSaga()
 
 	s.AddStep("reserve_inventory",
 		func(h cleat.HostCalls) (string, error) {
-			if err := reserveInventory(in); err != nil {
-				h.SetQueryState("failed_step", "reserve_inventory")
-				return "", err
-			}
-			completed = append(completed, "reserve_inventory")
-			return "", nil
+			return "", reserveInventory(in)
 		},
 		func(h cleat.HostCalls) error {
-			if err := releaseInventory(in); err != nil {
-				// Recorded, then returned: the saga joins compensation errors, and
-				// the run has to know the unwind did not complete. Dropping the
-				// error here would make a failed release indistinguishable from a
-				// successful one.
-				unwindFailed = append(unwindFailed, "reserve_inventory")
-				return err
-			}
-			unwound = append(unwound, "reserve_inventory")
-			return nil
+			// Returned, not only recorded: the saga joins compensation errors and
+			// the run has to know the unwind did not complete. Dropping it here
+			// would make a failed release indistinguishable from a successful one.
+			// Which list the step lands in is the saga's own bookkeeping now --
+			// see SagaResult.
+			return releaseInventory(in)
 		},
 	)
 
 	s.AddStep("charge_psp",
 		func(h cleat.HostCalls) (string, error) {
-			h.SetQueryState("status", "charging")
-			if err := chargePSP(in, total); err != nil {
-				h.SetQueryState("failed_step", "charge_psp")
-				return "", err
-			}
-			completed = append(completed, "charge_psp")
-			return "", nil
+			return "", chargePSP(in, total)
 		},
 		func(h cleat.HostCalls) error {
-			if err := refundPSP(in.OrderID, total); err != nil {
-				unwindFailed = append(unwindFailed, "charge_psp")
-				return err
-			}
-			unwound = append(unwound, "charge_psp")
-			return nil
+			return refundPSP(in.OrderID, total)
 		},
 	)
 
@@ -274,34 +256,17 @@ func PlaceOrder(h cleat.HostCalls, input string) (string, error) {
 	// that is the previous step's job.
 	s.AddStep("await_payment_confirmation",
 		func(h cleat.HostCalls) (string, error) {
-			h.SetQueryState("status", "awaiting_payment")
-			if err := awaitPaymentConfirmation(in.SourceID, in.OrderID); err != nil {
-				h.SetQueryState("failed_step", "await_payment_confirmation")
-				return "", err
-			}
-			completed = append(completed, "await_payment_confirmation")
-			return "", nil
+			return "", awaitPaymentConfirmation(in.SourceID, in.OrderID)
 		},
 		nil,
 	)
 
 	s.AddStep("dispatch_fulfilment",
 		func(h cleat.HostCalls) (string, error) {
-			h.SetQueryState("status", "dispatching")
-			if err := dispatchFulfilment(in); err != nil {
-				h.SetQueryState("failed_step", "dispatch_fulfilment")
-				return "", err
-			}
-			completed = append(completed, "dispatch_fulfilment")
-			return "", nil
+			return "", dispatchFulfilment(in)
 		},
 		func(h cleat.HostCalls) error {
-			if err := cancelDispatch(in.OrderID); err != nil {
-				unwindFailed = append(unwindFailed, "dispatch_fulfilment")
-				return err
-			}
-			unwound = append(unwound, "dispatch_fulfilment")
-			return nil
+			return cancelDispatch(in.OrderID)
 		},
 	)
 
@@ -324,74 +289,68 @@ func PlaceOrder(h cleat.HostCalls, input string) (string, error) {
 	// not told" is something an operator may need to act on.
 	s.AddStep("notify_customer",
 		func(h cleat.HostCalls) (string, error) {
-			h.SetQueryState("status", "notifying")
 			if err := notifyCustomer(in, total); err != nil {
 				// No err.Error(): a call through an interface is unresolvable
 				// dispatch to the analyzer (E008), and `error` is an interface.
 				h.Log("order placed, but the notification could not be sent",
 					"order_id", in.OrderID)
 				h.SetQueryState("notify_failed", "true")
-				completed = append(completed, "notify_customer")
-				return "", nil
 			}
-			completed = append(completed, "notify_customer")
+			// Returning nil either way is the whole of "best-effort": the step is
+			// COMPLETED as far as the saga is concerned, so it is never compensated.
 			return "", nil
 		},
 		nil,
 	)
 
-	if err := s.Run(h); err != nil {
+	res, err := s.RunWithResult(h)
+	if err != nil {
 		// The saga has already run the compensations, in reverse, for exactly
-		// the steps that completed. What is published here is the READ:
-		// which steps were there to unwind, newest first — the order they were
-		// undone in.
-		// Newest first: the order they were undone in.
-		h.SetQueryState("status", "failed")
-		h.SetQueryState("compensated", strings.Join(unwound, ","))
-		h.SetQueryState("compensated_count", fmt.Sprintf("%d", len(unwound)))
-		h.SetQueryState("unwind_failed", strings.Join(unwindFailed, ","))
-		h.SetQueryState("unwind_failed_count", fmt.Sprintf("%d", len(unwindFailed)))
+		// the steps that completed, and has published the READ itself: which
+		// steps were there to unwind, newest first -- the order they were undone
+		// in. There is nothing to publish here; this is the app-specific log.
+		//
 		// No err.Error() here, deliberately: the analyzer rejects a call through
 		// an interface as unresolvable dispatch (E008), and `error` is an
-		// interface. The text is not lost — it is in the error returned below,
+		// interface. The text is not lost -- it is in the error returned below,
 		// which the engine records against the run.
 		h.Log("order failed",
 			"order_id", in.OrderID,
-			"unwound", strings.Join(unwound, ","),
-			"unwind_failed", strings.Join(unwindFailed, ","),
+			"unwound", strings.Join(res.Unwound, ","),
+			"unwind_failed", strings.Join(res.UnwindFailed, ","),
 		)
 
-		// THE TRAIL IS IN THE ERROR, not only in the query state, and that is
-		// deliberate rather than belt-and-braces.
+		// THE TRAIL IS IN THE ERROR AS WELL AS THE QUERY STATE.
 		//
-		// Measured: a run that ends `failed` has its query state DISCARDED --
-		// `writeTerminalFailure` passes nil for it (cmd/cleat-worker/setup.go),
-		// while the success path passes the harvested map to
-		// FinalizeWorkflowSegment. So for exactly the runs that compensate, the
-		// published state a UI would poll does not exist. The run's `error`
-		// field is the one surface that survives, and an operator reading a
-		// failed order needs the unwind trail more than a successful one does.
+		// That used to be a necessity rather than belt-and-braces, and the
+		// comment here said so: a run ending `failed` had its query state
+		// DISCARDED, because `writeTerminalFailure` passed nil for it while the
+		// success path handed the harvested map to FinalizeWorkflowSegment. So
+		// for exactly the runs that compensate, the state a UI would poll did
+		// not exist, and the run's `error` field was the only surface left.
 		//
-		// Query state is still published below: it is correct, it is what a
-		// successful run's pollers read, and it is where this belongs once the
-		// failure path stops dropping it.
+		// cleat#2520 fixed that: writeTerminalFailure now takes the harvested
+		// map, so a failed run's published state survives and a poller sees the
+		// unwind trail in the same place it sees everything else. The error
+		// still carries it because it is genuinely useful there -- an operator
+		// reading one failed run should not have to go and query for it -- not
+		// because the published copy is missing.
 		return "", fmt.Errorf("order %s not completed (unwound: [%s]; could not unwind: [%s]): %w",
 			in.OrderID,
-			strings.Join(unwound, " "),
-			strings.Join(unwindFailed, " "),
+			strings.Join(res.Unwound, " "),
+			strings.Join(res.UnwindFailed, " "),
 			err)
 	}
 
-	h.SetQueryState("status", "done")
-	h.SetQueryState("compensated", "")
-	h.SetQueryState("compensated_count", "0")
+	// status=done and the cleared compensation fields are published by the saga
+	// itself -- see RunWithResult's doc comment for the full contract.
 	h.Log("order complete", "order_id", in.OrderID, "total_cents", total)
 
 	out, err := json.Marshal(OrderResult{
 		OrderID:    in.OrderID,
 		TotalCents: total,
 		Status:     "done",
-		Steps:      len(completed),
+		Steps:      len(res.Completed),
 	})
 	if err != nil {
 		return "", err

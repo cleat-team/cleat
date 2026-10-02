@@ -175,6 +175,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Plugin Clients" in [`docs/reference/sdk-api.md`](docs/reference/sdk-api.md) for what that promise
   currently commits to, and what is still an open policy question (cleat#2597, cleat#2660).
 
+- **A saga publishes its own progress, and `cleat.Saga.RunWithResult` returns what it did.**
+  `SagaResult` carries the steps completed, the compensations that ran and **succeeded**, and the
+  compensations that ran and **failed** — three lists rather than two because "ran" is not
+  "succeeded": a compensation that runs and fails has undone nothing, so reporting it as unwound
+  would say the opposite of what happened. `Run`'s signature is unchanged and it delegates, so no
+  existing caller is edited to get the publishing, and `RunWithResult` is there for a caller that
+  wants the result programmatically instead of as published text. (cleat#2627)
+
+### Changed
+
+- **A saga now writes query state as a side effect of running.** `Saga.Run`, unchanged in
+  signature, publishes `status` (`"done"` on success, `"failed"` on a forward error), `failed_step`,
+  and the `compensated` / `unwind_failed` lists — plus `current_step` before each step. **This is a
+  behaviour change for every existing caller**, and it is the thing to check on upgrade: a workflow
+  that maintains its own `status` around a saga will now see the saga's value where it previously
+  saw its own. Two in-tree examples needed correcting for it — `order-lifecycle`, which must now say
+  `"approved"` once the approval gate clears (otherwise an order being charged still reads as
+  awaiting a decision, and its UI keeps offering the Approve/Reject controls), and `travel`, whose
+  cancel-after-booking path must say `"canceled"` (otherwise a cancelled booking finalizes as
+  `"done"`). The published keys are the ones `order-lifecycle` already wrote by hand, with one
+  substitution: the step in progress is `current_step`, the step's own name, rather than an
+  app-chosen word — that word is app-specific vocabulary the saga cannot know, so an author who
+  wants it still writes it. (cleat#2627)
+
 ### Fixed
 
 - **The heartbeat fence could cancel the execution it had NOT judged, when this worker re-claimed its

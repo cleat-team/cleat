@@ -177,6 +177,12 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (string, error) {
 	// Check for cancellation after booking.
 	if cancelled, reason := h.PollCancellation(); cancelled {
 		cancelAll(h, flightRef, hotelRef, carRef)
+		// The status has to be corrected here, because the saga now writes it
+		// itself (cleat#2627): Run published "done" just above, and this branch
+		// then unwinds that work. Before cleat#2627 the saga wrote nothing, so
+		// the status stayed at the "booking" set before it -- stale, but not
+		// wrong. Left alone it would now report a cancelled booking as done.
+		h.SetQueryState("status", "canceled")
 		return canceled(bookingID, reason), nil
 	}
 

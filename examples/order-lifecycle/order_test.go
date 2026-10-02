@@ -72,6 +72,28 @@ func run(t *testing.T, env *cleattest.TestEnv, input OrderInput) (string, error)
 	}
 }
 
+// statusesSeen samples the workflow's published `status` until stop is closed,
+// returning every distinct non-empty value it observed.
+//
+// Sampled rather than asserted on the finished state, because the value under
+// test is only wrong DURING the run: an approved order ends at "done" whether
+// or not the gate cleared its own status, so reading the finished state cannot
+// see the difference. Only the in-flight value can.
+func statusesSeen(env *cleattest.TestEnv, stop <-chan struct{}) map[string]bool {
+	seen := map[string]bool{}
+	for {
+		select {
+		case <-stop:
+			return seen
+		default:
+		}
+		if s, ok := env.QueryState("status"); ok && s != "" {
+			seen[s] = true
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func smallOrder() OrderInput {
 	return OrderInput{
 		OrderID:    "ord-1001",
@@ -315,11 +337,27 @@ func TestPlaceOrder_WaitsForApprovalAboveTheThreshold(t *testing.T) {
 	input := smallOrder()
 	input.Items = []OrderItem{{SKU: "server", Quantity: 1, PriceCents: ApprovalThresholdCents + 1}}
 
+	stop := make(chan struct{})
+	statuses := make(chan map[string]bool, 1)
+	go func() { statuses <- statusesSeen(env, stop) }()
+
 	if _, err := run(t, env, input); err != nil {
 		t.Fatalf("PlaceOrder failed: %v", err)
 	}
+	close(stop)
+	seen := <-statuses
+
 	if got, _ := env.QueryState("status"); got != "done" {
 		t.Errorf("status = %q, want done", got)
+	}
+	// The gate has to clear its own status. The saga reports its progress as
+	// current_step and writes `status` only at the END, so without the write in
+	// order.go an approved order reads "awaiting_approval" for the whole saga --
+	// and the demo UI offers the Approve/Reject controls whenever it sees that
+	// value, for an order it is already charging. cleat#2627.
+	if !seen["approved"] {
+		t.Errorf("status was %v during the run, never \"approved\"; an approved order must stop "+
+			"reading \"awaiting_approval\" once the decision is made", seen)
 	}
 }
 

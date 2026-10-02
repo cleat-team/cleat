@@ -13,17 +13,47 @@ const TERMINAL = new Set(['done', 'failed', 'rejected']);
 
 // The stages the workflow publishes while it is still working, so a reader can
 // see where an order is rather than only that it is not finished.
+//
+// TWO SOURCES, because the workflow publishes two different things. `status`
+// carries the states only the app can know -- the approval gate and the
+// terminal outcomes. While the saga is running, the phase comes from
+// `current_step`, which the saga publishes itself at each boundary (cleat#2627)
+// rather than the app hand-writing a status word per step. The keys below mix
+// app statuses and saga step names on purpose: to the reader they are one
+// thing -- where the order is.
 const STAGE_LABEL = {
   validated: 'Validated',
   awaiting_approval: 'Awaiting approval',
-  charging: 'Charging the card',
-  awaiting_payment: 'Waiting for the payment webhook',
-  dispatching: 'Dispatching',
-  notifying: 'Notifying the customer',
+  reserve_inventory: 'Reserving inventory',
+  charge_psp: 'Charging the card',
+  await_payment_confirmation: 'Waiting for the payment webhook',
+  dispatch_fulfilment: 'Dispatching',
+  notify_customer: 'Notifying the customer',
   done: 'Completed',
   failed: 'Failed',
   rejected: 'Rejected',
 };
+
+// States that are a decision rather than a step in progress. A run that failed
+// still carries `current_step` = the step that failed, so `current_step` alone
+// would report "Charging the card" for an order that has already stopped and
+// unwound. These win over it.
+const DECIDED = new Set(['done', 'failed', 'rejected', 'awaiting_approval']);
+
+// stageLabel is what to show for a run: the decision or terminal state if there
+// is one, otherwise the step the saga is in.
+function stageLabel(state) {
+  const s = (state && state.status) || '';
+  if (state && state.current_step && !DECIDED.has(s)) {
+    return STAGE_LABEL[state.current_step] || state.current_step;
+  }
+  return (
+    STAGE_LABEL[s] ||
+    s ||
+    (state && (STAGE_LABEL[state.current_step] || state.current_step)) ||
+    ''
+  );
+}
 
 const POLL_MS = 900;
 const POLL_BUDGET_MS = 90_000; // the webhook wait is a durable step; give it room
@@ -209,7 +239,7 @@ function renderOutcome(state, runStatus, runError) {
     lede = 'Every step ran and nothing needed undoing.';
   } else {
     box = 'outcome';
-    title = STAGE_LABEL[status] || status || 'Running';
+    title = stageLabel(state) || 'Running';
     lede = 'The run is still working. This panel fills in when it finishes.';
   }
 
@@ -248,8 +278,8 @@ function stopPolling() {
   }
 }
 
-function setPill(node, status) {
-  node.textContent = STAGE_LABEL[status] || status || 'unknown';
+function setPill(node, status, state) {
+  node.textContent = stageLabel(state) || status || 'unknown';
   node.className = 'pill';
   if (status === 'done') node.classList.add('ok');
   else if (status === 'failed') node.classList.add('fail');
@@ -281,7 +311,7 @@ async function showRun(id, startedAt) {
     if (currentRun !== id) return; // a newer selection took over
 
     const state = detail.state || {};
-    setPill($('detail-status'), state.status || detail.status);
+    setPill($('detail-status'), state.status || detail.status, state);
     $('detail-run-status').textContent = `engine status: ${detail.status}`;
 
     // Only offer the decision while the workflow is actually waiting on it.
