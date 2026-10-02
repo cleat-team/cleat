@@ -249,6 +249,12 @@ def main():
         help="Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)",
     )
     parser.add_argument(
+        "--entry-points",
+        default=None,
+        dest="entry_points",
+        help="Comma-separated entry point names (or CLEAT_ENTRY_POINTS env var); cleat#2914",
+    )
+    parser.add_argument(
         "--skip-decompose",
         action="store_true",
         help="Skip the wasm-tools component decompose step. "
@@ -472,6 +478,7 @@ def main():
         stamp_abi = int(os.environ["CLEAT_ABI_VERSION"])
     stamp_deps = args.plugin_deps or os.environ.get("CLEAT_PLUGIN_DEPS")
     stamp_child_binding_policy = args.child_binding_policy or os.environ.get("CLEAT_CHILD_BINDING_POLICY")
+    stamp_entry_points = args.entry_points or os.environ.get("CLEAT_ENTRY_POINTS")
 
     # Always stamp at least the language so consumers can identify the source.
     stamp_args = [
@@ -492,6 +499,8 @@ def main():
         stamp_args.extend(["--plugin-deps", stamp_deps])
     if stamp_child_binding_policy is not None:
         stamp_args.extend(["--child-binding-policy", stamp_child_binding_policy])
+    if stamp_entry_points is not None:
+        stamp_args.extend(["--entry-points", stamp_entry_points])
     if args.verbose:
         stamp_args.append("--verbose")
 

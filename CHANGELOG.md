@@ -123,12 +123,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `encoding/json` resets these to `nil` on `null`, which is a real, distinct value these types
     can hold, not merely the absence of one.
   - **Definitions with no stored schema are unaffected and start untyped, as before** — this
-    includes every Python, Rust, Java and AssemblyScript build today (no non-Go entry-point schema
-    emitter exists yet) and any Go build from before cleat#1980.
+    includes Rust, Java and AssemblyScript (no entry-point schema emitter exists for these yet),
+    any Python build from before cleat#2914, and any Go build from before cleat#1980.
   - **Escape hatch:** `cleatctl deploy workflow <name> <wasm-file> --no-validate-input` disables
     validation for that one deployed version, even if it carries a schema. Per-definition only, set
     at deploy time — there is no per-request override, so a caller cannot switch validation off for
     its own requests.
+
+- **Python entry points now compute and validate against a JSON Schema too, from `@cleat_entry`'s
+  own type hints — two owner-ruled breaking changes, both stricter than the unmodified SDK.**
+  cleat#2914, the Python half of cleat#1980's typed invocation. `cleat build --target python` now
+  also writes a `<wasm>.schema.json` sidecar (via the new `cleat_sdk.jsonschema_emitter`), so a
+  Python workflow rebuilt and redeployed after this starts validating its input the same as a Go
+  one — the "unaffected" bullet above now covers Python builds from before this change only, not
+  Python in general. (Known limitation at the time of writing: this only takes effect once
+  cleat#2936 — a pre-existing bug independent of this change — is fixed; see that issue.)
+  - **Every Python parameter is nullable, not only the pointer/slice/map subset Go's binding
+    makes nullable.** `cleat_sdk.entry._from_dict`'s very first check is `if value is None: return
+    None`, unconditionally, for every declared type — so a plain required `str` or `int`
+    parameter sent JSON `null` is accepted (bound to Python `None`), unlike the equivalent Go
+    parameter, which the bullet above makes a 400.
+  - **Owner decision, 2026-10-01: a nested dataclass field's absence IS now enforced by the
+    schema, as a pre-start 400** — e.g. a declared `address: Address` where `Address` has a
+    required `city` field, and the caller's `address` object omits `city`, now gets
+    `{"error": "...", "field": "address.city", "rule": "required"}` with no run created. Before
+    this, the same payload got a 201: the resulting `TypeError` is raised *inside*
+    `export_wrapper`'s own exception boundary and reported as a completed run's
+    `{"error": "Address.__init__() missing 1 required positional argument: 'city'"}` — a run that
+    did exist, just failed immediately. A top-level parameter's absence was already enforced this
+    way since cleat#1690; this extends the same rule to every nesting level.
+  - **Owner decision, 2026-10-01: leaf and container parameter VALUES are validated by declared
+    type, and a mismatch is a 400 — broader than the null-only ruling two bullets up, and a
+    documented departure from what the unmodified SDK does.** Measured directly against
+    `_from_dict`: a `user_id: str` parameter sent the JSON number `42` was bound as the Python int
+    `42` unchanged (no coercion, no error); a `cart: list[int]` parameter sent the JSON string
+    `"notalist"` was bound as that raw string unchanged; a dataclass-typed parameter sent a
+    non-object value was passed through un-coerced the same way. All three are now a 400
+    (`"rule": "type"`) instead. "The schema must describe what the binding does, not what might be
+    nicer" (cleat#2914's own text) would have argued for the opposite — leaving these
+    unconstrained — but the owner ruled to ship strict, for the same reason as the null case: close
+    a permissiveness gap in the SDK rather than encode it permanently into the schema.
 
 ### Added
 

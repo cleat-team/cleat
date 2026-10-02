@@ -207,6 +207,47 @@ def _from_dict(
 
 
 # ---------------------------------------------------------------------------
+# Shared binding-shape derivation
+# ---------------------------------------------------------------------------
+
+
+def _classify_entry_params(
+    func: Callable, hints: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """Splits *func*'s parameters into workflow params and required params,
+    skipping the injected HostCalls parameter.
+
+    The SINGLE derivation of this binding shape -- ``_make_entry`` (runtime
+    dispatch, below) and ``cleat_sdk.jsonschema_emitter`` (cleat#2914, the
+    static JSON Schema emitter) both call this rather than each re-deriving
+    the field list independently, so the schema cannot drift from what the
+    binding actually does. ``internal/jsonschema``'s Go emitter states the
+    identical reason for reading ``analyzer.EntryPointFields`` rather than
+    recomputing it.
+
+    A parameter is "required" if it carries no default -- ``export_wrapper``
+    below refuses an input missing any name in this list
+    (``missing = [p for p in required_param_names if p not in input_data]``)
+    before the function is ever called; a parameter WITH a default is left
+    out of input_data-presence checking entirely and simply keeps its
+    Python-level default when absent.
+    """
+    sig = inspect.signature(func)
+    workflow_param_names: list[str] = []
+    required_param_names: list[str] = []
+    for pname in sig.parameters:
+        # The HostCalls parameter is injected by the framework and is never
+        # part of the serialised input JSON.
+        if pname in hints and hints[pname] is HostCalls:
+            continue
+        workflow_param_names.append(pname)
+        param = sig.parameters[pname]
+        if param.default is inspect.Parameter.empty:
+            required_param_names.append(pname)
+    return workflow_param_names, required_param_names
+
+
+# ---------------------------------------------------------------------------
 # Decorator
 # ---------------------------------------------------------------------------
 
@@ -414,17 +455,7 @@ def cleat_entry(name: str | None = None) -> Callable:
                     f"`from cleat_sdk.host_calls import HostCalls`."
                 )
 
-        workflow_param_names: list[str] = []
-        required_param_names: list[str] = []
-        for pname in all_param_names:
-            # The HostCalls parameter is injected by the framework and is never
-            # part of the serialised input JSON.
-            if pname in hints and hints[pname] is HostCalls:
-                continue
-            workflow_param_names.append(pname)
-            param = sig.parameters[pname]
-            if param.default is inspect.Parameter.empty:
-                required_param_names.append(pname)
+        workflow_param_names, required_param_names = _classify_entry_params(func, hints)
 
         workflow_name = name if name is not None else func.__name__
 

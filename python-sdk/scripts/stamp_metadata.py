@@ -179,6 +179,7 @@ def build_metadata(args: argparse.Namespace) -> dict:
     plugin_deps_str = env_or_arg("CLEAT_PLUGIN_DEPS", args.plugin_deps)
     child_binding_policy = env_or_arg("CLEAT_CHILD_BINDING_POLICY", args.child_binding_policy) or ""
     language = env_or_arg("CLEAT_LANGUAGE", args.language)
+    entry_points_str = env_or_arg("CLEAT_ENTRY_POINTS", args.entry_points)
 
     # Parse numeric values from env (they come as strings).
     version = int(version) if version is not None else 0
@@ -194,7 +195,7 @@ def build_metadata(args: argparse.Namespace) -> dict:
         except (json.JSONDecodeError, TypeError):
             plugin_deps = {}
 
-    return {
+    meta = {
         "workflow_name": name,
         "workflow_version": version,
         "min_compatible_version": min_version,
@@ -206,6 +207,48 @@ def build_metadata(args: argparse.Namespace) -> dict:
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "language": language or "python",
     }
+
+    # cleat#2914. wasm.Metadata.EntryPoints ("entry_points" below -- the Go
+    # field's json tag) exists so a worker can resolve which schema applies
+    # without the caller naming it (cmd/cleat-worker/setup.go's
+    # determineEntryPoint, case 2: exactly one declared entry point resolves
+    # on its own). Until this, Python never stamped it at all, so a deployed
+    # Python workflow fell through to determineEntryPoint's THIRD case --
+    # firstHandleExport, which scans the WASM export section for a name
+    # prefixed "handle_". componentize-py's Component Model output exports
+    # exactly "run" and "run-deferred" (wit/cleat.wit's cleat-workflow
+    # world), neither prefixed that way, so the scan always came back empty
+    # and entry-point resolution failed outright for every Python
+    # deployment unless a caller supplied __entry_point explicitly -- which
+    # meant cleat#2914's own schema, however accurate, could never be looked
+    # up by cleat-worker's validation path (server.go's
+    # def.EntryPointSchemas[entryPoint] lookup needs a resolved entryPoint
+    # first). This stamps the single name cleat_sdk.jsonschema_emitter
+    # already uses as that schema's map key, so the two can never disagree.
+    #
+    # The Go doc comment on EntryPoints describes it as naming "the WASM
+    # exports a caller may start this workflow at" -- true for a core-module
+    # build (Go/Rust/Java/AssemblyScript), where each entry point really is
+    # its own export. It is not literally true of a Component Model binary,
+    # which exports one "run" regardless of how many `@cleat_entry`
+    # functions exist in source; the value here is the entry's LOGICAL name
+    # (`@cleat_entry("X")`'s X, or the Python function name with no
+    # explicit one), used only to key a schema and to disambiguate --
+    # exactly what determineEntryPoint actually needs, never a literal WASM
+    # export name lookup. cmd/cleat build --target python only ever builds
+    # one entry function per artifact today, so there is exactly one name to
+    # stamp; a future multi-entry Python build would need its own resolution
+    # story (the __cleat_entry__ dispatch key entry.py's _select already
+    # supports is a different field name from __entry_point, and nothing
+    # currently reconciles the two) -- out of scope here, filed as cleat#2937
+    # rather than guessed at. Also note cleat#2936: this stamp does not yet
+    # survive on a real Component Model binary at all (see WASM_VERSION
+    # above) -- a separate, more urgent gap this comment's own reasoning
+    # does not depend on.
+    if entry_points_str:
+        meta["entry_points"] = [p for p in entry_points_str.split(",") if p]
+
+    return meta
 
 
 def main():
@@ -233,6 +276,11 @@ def main():
         default=None,
         dest="child_binding_policy",
         help="Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)",
+    )
+    parser.add_argument(
+        "--entry-points",
+        dest="entry_points",
+        help="Comma-separated entry point names (or CLEAT_ENTRY_POINTS env var); cleat#2914",
     )
     parser.add_argument("--output", "-o", help="Output WASM path (default: overwrite input)")
     parser.add_argument(
