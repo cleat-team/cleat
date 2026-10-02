@@ -57,7 +57,7 @@ What *is* real, and is the part the playbook is about:
 | Real | Where |
 |---|---|
 | Saga compensation, reverse order, declared per step | `cleat.NewSaga` / `AddStep` |
-| An undone-step list and a failed-undo list, as query state | `SetQueryState` in `order.go` |
+| The step a run is in, plus an undone-step list and a failed-undo list, as query state | published by the saga itself — `cleat.Saga.RunWithResult` (cleat#2627) |
 | A human approval signal above a threshold | `AwaitSignals` |
 | A webhook wait — a genuine `await_webhook` against the bundled plugin | `awaitPaymentConfirmation` |
 | Email delivery through the bundled `email-notify` plugin — **attempted**; see below | `notifyCustomer` |
