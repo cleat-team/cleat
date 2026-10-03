@@ -20,8 +20,32 @@
 # being checked out.
 set -euo pipefail
 
-: "${PR_NUMBER:?PR_NUMBER is required}"
-: "${REPO:?REPO is required}"
+# USAGE GUARD -- AND IT EXITS 2, WHICH IS THE WHOLE POINT (cleat#2992).
+#
+# The Python below defines three statuses: 0 no finding, 1 A FINDING, 2 could
+# not establish what it measures. This guard used to be
+# `: "${PR_NUMBER:?...}"`, which under `set -e` exits 1 -- the finding status --
+# so a caller could not tell "this PR negates a closing reference" from "I
+# invoked it without PR_NUMBER". That is the precise collapse the inner script's
+# three-way split exists to prevent, and the wrapper is the documented way to
+# run it. It matters most on the local path, because CI always sets both
+# variables and a person running it by hand does not.
+#
+# IT IS AN `if`, NOT A `||` ON THE PARAMETER EXPANSION. `: "${PR_NUMBER:?}" ||
+# exit 2` looks like the repair and cannot work: `${x:?}` exits the shell
+# itself, before any `||` on that line is reached. The property that MAKES the
+# defect is the one that defeats the obvious fix, so the guard has to test the
+# variables rather than ask the expansion to complain.
+#
+# The message carries the same `UNMEASURED:` prefix the Python uses for status
+# 2, so one grep finds every "I could not look" from either half.
+if [ -z "${PR_NUMBER-}" ] || [ -z "${REPO-}" ]; then
+  echo "UNMEASURED: PR_NUMBER and REPO must both be set." >&2
+  echo "            This wrapper reads the PR body, closing references and commits live," >&2
+  echo "            so it has nothing to measure without them. (This is the wrapper's own" >&2
+  echo "            precondition failing; it says nothing about the PR.)" >&2
+  exit 2
+fi
 
 pr_body=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body // ""')
 
