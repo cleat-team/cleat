@@ -540,6 +540,117 @@ func positionalArgsAfterFlags(fields []string, flagTakesValue map[string]bool) [
 // test below.
 var deployRunPositionalBaseline = map[string]string{}
 
+// pythonDocstrings returns the text a READER of path sees, by rendering every
+// docstring in it through Python itself. The second result is false when the
+// file does not parse as Python at all.
+//
+// WHY RENDERED RATHER THAN RAW. This scan used to substitute the whole raw
+// source for a .py file, and that is not what the file says: Python escapes are
+// interpreted inside string literals and nowhere else, so a docstring's `\\`
+// renders as ONE backslash while the raw text has two. The join loop below
+// strips one trailing backslash, so the second survived as a bare `\` and was
+// reported as a positional -- a FALSE POSITIVE against a file that was right,
+// which is how cleat#2984 was found and how it cost a CI cycle.
+//
+// Rendering is the fix that MODELS the format instead of approximating it. A Go
+// unescape (`\\` -> `\`) is a heuristic pretending to be Python's lexer: it gets
+// `r"""..."""` and `\N{...}` wrong while looking right, and the next escape form
+// becomes the next false positive. The price is the toolchain, and it is the
+// price this file already pays for `git` a few lines up -- a Python file cannot
+// be read correctly without Python, so a missing python3 is a FAILURE here
+// rather than a skip, which would silently drop every .py file from the corpus.
+//
+// A file that does not parse has no rendered docstring, and its raw text is not
+// what a reader sees either, so it is skipped rather than read. That covers
+// vendored and generated sources. The floor at the end of the test is what keeps
+// a broken renderer from turning that into a silent scan of nothing.
+func pythonDocstrings(t *testing.T, path string) (string, bool) {
+	t.Helper()
+	// ast.walk reaches module, function and class docstrings alike, and the
+	// order does not matter because every line is scanned independently.
+	// get_docstring CLEANS (dedents) by default, which is what a reader of the
+	// module's own docstring sees.
+	const script = `import ast, sys
+try:
+    tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+except SyntaxError:
+    sys.exit(3)
+out = []
+for node in ast.walk(tree):
+    if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        d = ast.get_docstring(node)
+        if d:
+            out.append(d)
+sys.stdout.write("\n".join(out))
+`
+	out, err := exec.Command("python3", "-c", script, path).Output()
+	if err != nil {
+		// Exit 3 is this script's own "does not parse" signal. Anything else is
+		// the toolchain failing, which must never be read as an empty file.
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 3 {
+			return "", false
+		}
+		t.Fatalf("rendering docstrings of %s: %v", path, err)
+	}
+	return string(out), true
+}
+
+// TestTheDocstringRendererResolvesPythonEscapes is the guard on the guard.
+//
+// The scan below passes whether or not the renderer works, as long as no tracked
+// .py file happens to contain an escape -- and that is exactly the state
+// cleat#2984 found, where the one file that had one was worked around in the
+// DOCUMENT rather than the scanner repaired. So this drives the renderer
+// directly, on a fixture whose answer is known, and asserts the difference
+// between the two readings rather than only the good one.
+func TestTheDocstringRendererResolvesPythonEscapes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wf.py")
+	// A shell continuation written the way PYTHON requires -- a doubled
+	// backslash renders as one, which is the form cleat#2984 was found on -- and
+	// an escaped quote, which renders as a bare one. Both are escape forms a
+	// correct docstring contains and a raw read gets wrong.
+	const src = `"""Usage:
+    cleat run --wasm a.wasm --entry-point e \\
+      --input '{\"topic\": 1}'
+"""
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture back: %v", err)
+	}
+	// THE POSITIVE CONTROL, and without it this test is satisfied by a raw
+	// read: the fixture must still contain the doubled forms, or there is
+	// nothing here for a renderer to do and the test cannot tell the two
+	// readings apart.
+	if !strings.Contains(string(raw), `\\`) || !strings.Contains(string(raw), `\"`) {
+		t.Fatalf("the fixture lost its escapes, so it cannot distinguish a renderer from a raw "+
+			"read:\n%s", raw)
+	}
+
+	rendered, ok := pythonDocstrings(t, path)
+	if !ok {
+		t.Fatal("the fixture did not parse as Python; it is valid by construction")
+	}
+	if strings.Contains(rendered, `\\`) {
+		t.Errorf("the rendered docstring still contains a DOUBLED backslash, so this reading is "+
+			"the raw file rather than what a reader sees (Python renders a doubled backslash as "+
+			"one):\n%q", rendered)
+	}
+	if !strings.Contains(rendered, `\`) {
+		t.Errorf("the rendered docstring has no backslash at all; after rendering, the fixture's "+
+			"continuation is exactly one:\n%q", rendered)
+	}
+	if strings.Contains(rendered, `\"`) {
+		t.Errorf("the rendered docstring still contains an ESCAPED quote, so escapes are not "+
+			"being resolved (Python renders an escaped quote as a bare one):\n%q", rendered)
+	}
+}
+
 func TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects(t *testing.T) {
 	root := repoRootForCLIScan(t)
 	deployFlags := subcommandFlagValueKinds(t, filepath.Join(root, "cmd/cleat/main.go"), "runDeploy")
@@ -554,8 +665,19 @@ func TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects(t *test
 		t.Fatalf("git ls-files matched %d files; the scan did not see the repo", len(docs))
 	}
 
+	// python3 renders the .py half of this corpus, and a missing one is a
+	// FAILURE here rather than a skip: the whole point of this guard is that a
+	// documented command gets checked, and a skip would silently drop every .py
+	// file from it while the run still printed ok. `git` a few lines up is
+	// treated the same way, for the same reason.
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Fatalf("python3 is required to read a .py file's docstrings the way a reader does " +
+			"(cleat#2984); without it this guard would report a clean run over half its corpus")
+	}
+
 	seen := map[string]bool{}
 	checked := 0
+	rendered := 0
 	for _, doc := range docs {
 		body, err := os.ReadFile(filepath.Join(root, doc))
 		if err != nil {
@@ -567,7 +689,17 @@ func TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects(t *test
 			// invocation in a module docstring, not a fenced markdown block --
 			// this test's whole reason to exist is that exactly this kind of
 			// doc-comment invocation goes unchecked otherwise (cleat#2048).
-			blocks = [][]string{{string(body), string(body)}}
+			//
+			// RENDERED, not raw. A docstring's escapes are PYTHON's, so the raw
+			// text of the file is not what the file says -- see pythonDocstrings
+			// for why that reported a correct `\\` continuation as a stray
+			// positional (cleat#2984).
+			text, ok := pythonDocstrings(t, filepath.Join(root, doc))
+			if !ok {
+				continue
+			}
+			rendered++
+			blocks = [][]string{{text, text}}
 		}
 		for _, block := range blocks {
 			lines := strings.Split(block[1], "\n")
@@ -642,6 +774,16 @@ func TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects(t *test
 	}
 	if checked == 0 {
 		t.Fatal("extracted 0 `cleat deploy`/`cleat run` invocations -- the scan did not see what it exists to check")
+	}
+	// A FLOOR, like len(docs) < 50 above and for the same reason: if the
+	// renderer stops working -- a python3 that cannot import ast, a script that
+	// exits 0 having printed nothing -- then every .py file scans as empty and
+	// this guard reports a clean run over half the corpus it names. Deliberately
+	// far below the real count, so it is stable as the repo grows: it exists to
+	// catch a renderer producing NOTHING, not to police the number of files.
+	if rendered < 50 {
+		t.Fatalf("rendered docstrings for only %d .py file(s); the tracked corpus is larger, so "+
+			"the renderer is broken and this guard is asserting nothing about Python", rendered)
 	}
 
 	for key, why := range deployRunPositionalBaseline {
