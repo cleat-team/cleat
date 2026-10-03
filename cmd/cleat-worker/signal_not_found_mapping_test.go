@@ -122,14 +122,21 @@ func TestPlainSignalUnknownWorkflowIs404(t *testing.T) {
 }
 
 // TestGetAllowedSignalsUnknownWorkflowIs404 covers handleGetAllowedSignals
-// (~server.go:1995), which has no callerOwnsTarget pre-check of its own -- this
-// is the FIRST and ONLY place a missing id is discovered on this endpoint, not
-// a narrow race window like the three handleSignal branches above. It is the
-// GET-side sibling of TestPutAllowedSignalsUnknownWorkflowIs404
-// (allowed_signals_api_test.go), which covers only the PUT half of this same
-// resource.
+// (~server.go:1995) mapping the STORE's ErrWorkflowNotFound to 404.
+//
+// The run exists here, and that is load-bearing since cleat#3003. That change
+// put an existence check in front of the handler, so a missing run is now
+// refused 404 before the store is consulted at all -- which would leave this
+// test passing on the check's status while the mapping it is named for is never
+// reached, the shape this repository keeps finding. Supplying the row keeps the
+// 404 coming from the store, which is the only thing this file tests. The
+// check's own refusal is covered in
+// an_internal_definition_is_not_reachable_over_http_test.go.
 func TestGetAllowedSignalsUnknownWorkflowIs404(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.getAllowedSignalCallersFn = func(_ context.Context, _ string) ([]string, error) {
 		return nil, engine.ErrWorkflowNotFound
 	}
@@ -149,6 +156,9 @@ func TestGetAllowedSignalsUnknownWorkflowIs404(t *testing.T) {
 // above, matching TestSignalAuthCheckStoreErrorIs500's reasoning.
 func TestGetAllowedSignalsStoreErrorIs500(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.getAllowedSignalCallersFn = func(_ context.Context, _ string) ([]string, error) {
 		return nil, errors.New("connection reset")
 	}

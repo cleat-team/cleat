@@ -23,6 +23,9 @@ import (
 
 func TestPutAllowedSignalsReachesTheStore(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/workflows/wf-1/allowed-signals",
@@ -48,6 +51,9 @@ func TestPutAllowedSignalsReachesTheStore(t *testing.T) {
 // take a caller's access away short of deleting the workflow.
 func TestPutAllowedSignalsEmptyListClearsRatherThanNoOps(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.setAllowedSignalCallersID = "untouched"
 	api := newTestAPIServer(ms)
 
@@ -72,6 +78,9 @@ func TestPutAllowedSignalsEmptyListClearsRatherThanNoOps(t *testing.T) {
 // the API. Both are 404. A 403 here would tell a caller that an id exists.
 func TestPutAllowedSignalsUnknownWorkflowIs404(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.setAllowedSignalCallersFn = func(_ context.Context, _ string, _ []string) error {
 		return engine.ErrWorkflowNotFound
 	}
@@ -90,6 +99,9 @@ func TestPutAllowedSignalsUnknownWorkflowIs404(t *testing.T) {
 
 func TestPutAllowedSignalsStoreErrorIs500(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.setAllowedSignalCallersFn = func(_ context.Context, _ string, _ []string) error {
 		return errors.New("connection reset")
 	}
@@ -111,6 +123,9 @@ func TestPutAllowedSignalsStoreErrorIs500(t *testing.T) {
 // ever permitting anybody. Refusing it is cheaper than debugging it.
 func TestPutAllowedSignalsRejectsEmptyEntry(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/workflows/wf-4/allowed-signals",
@@ -128,6 +143,9 @@ func TestPutAllowedSignalsRejectsEmptyEntry(t *testing.T) {
 
 func TestPutAllowedSignalsRejectsBadJSON(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/workflows/wf-5/allowed-signals",
@@ -145,6 +163,9 @@ func TestPutAllowedSignalsRejectsBadJSON(t *testing.T) {
 // without special-casing. The store returns nil for both.
 func TestGetAllowedSignalsAlwaysReturnsAnArray(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.getAllowedSignalCallersFn = func(_ context.Context, _ string) ([]string, error) {
 		return nil, nil
 	}
@@ -209,6 +230,14 @@ func TestAllowedSignalsRejectsOtherMethods(t *testing.T) {
 // from the right one.
 func TestPutAllowedSignalsUsesTheCallerTenantStore(t *testing.T) {
 	api, storeA, storeB, f := twoTenantServer(t, true)
+	// The run has to exist for the request to reach the store at all: the
+	// existence check runs first and answers 404 for a run it cannot see,
+	// which would make this pass without ever reaching the code under test
+	// (cleat#3003). Set on B only -- a store that supplies the row is the
+	// thing being distinguished from one that does not.
+	storeB.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, api)

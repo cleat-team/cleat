@@ -27,7 +27,8 @@ func TestARoutingRuleCanBeCreated(t *testing.T) {
 	var gotVersion int
 	var gotWeight float64
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		setRoutingRuleFn: func(_ context.Context, name string, version int, weight float64) error {
 			gotName, gotVersion, gotWeight = name, version, weight
 			return nil
@@ -55,7 +56,8 @@ func TestARoutingRuleCanBeCreated(t *testing.T) {
 func TestAnOmittedWeightMeansAllTrafficNotNone(t *testing.T) {
 	var gotWeight float64 = -1
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		setRoutingRuleFn: func(_ context.Context, _ string, _ int, weight float64) error {
 			gotWeight = weight
 			return nil
@@ -77,7 +79,8 @@ func TestAnOmittedWeightMeansAllTrafficNotNone(t *testing.T) {
 func TestAnExplicitZeroWeightIsPreserved(t *testing.T) {
 	gotWeight := -1.0
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		setRoutingRuleFn: func(_ context.Context, _ string, _ int, weight float64) error {
 			gotWeight = weight
 			return nil
@@ -102,7 +105,8 @@ func TestAnExplicitZeroWeightIsPreserved(t *testing.T) {
 func TestRoutingToADeprecatedVersionIsRefused(t *testing.T) {
 	called := false
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return false, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return false, nil },
 		setRoutingRuleFn: func(_ context.Context, _ string, _ int, _ float64) error {
 			called = true
 			return nil
@@ -175,6 +179,7 @@ func TestAnEmptyRoutingTableIsAnArrayNotNull(t *testing.T) {
 func TestARoutingRuleCanBeRemovedByID(t *testing.T) {
 	var removed string
 	ms := &mockStore{
+		listWorkflowDefsFn: deployedDef("checkout"),
 		removeRoutingRuleFn: func(_ context.Context, ruleID string) error {
 			removed = ruleID
 			return nil
@@ -261,13 +266,19 @@ func TestARunIDInTheNamePositionIsNotFound(t *testing.T) {
 // TestTheNameScopedReadsAndWritesAgreeOnAnUnknownName is the point of the
 // change: before it, the write refused the input the read accepted.
 //
-// The codes differ on purpose and that is not an inconsistency left behind.
-// The writers answer 409 because they are refusing a (name, version) pair --
+// The reads and the writes now agree on the CODE too, and cleat#3003 is why:
+// both answer 404 for a name that was never deployed, because both now ask the
+// same question -- does this NAME exist -- through the same call.
+//
+// Before #3003 the writers answered 409 here, on the reasoning that
 // ValidateVersion cannot distinguish "no such name" from "that version is
-// deprecated", and both are conflicts with deployment state. The readers name
-// no version, so the only thing they can be refusing is the name itself, and
-// 404 is what the rest of this API says for an identifier that resolves to
-// nothing. What matters is that neither answers success.
+// deprecated" and both are conflicts with deployment state. That conflated two
+// cases. A deprecated version of a DEPLOYED name is a conflict and still
+// answers 409 (TestPointingATagAtADeprecatedVersionIsRefused,
+// TestRoutingToADeprecatedVersionIsRefused). A name that is not deployed at all
+// is an identifier that resolves to nothing -- 404, as it is everywhere else in
+// this API. The 409 for it was also the observable difference from an internal
+// name's 404, which is the disclosure cleat#3003 exists to close.
 func TestTheNameScopedReadsAndWritesAgreeOnAnUnknownName(t *testing.T) {
 	ms := &mockStore{
 		listWorkflowDefsFn: deployedDef("checkout"),

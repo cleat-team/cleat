@@ -1757,7 +1757,7 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
 		return
 	}
 	var req struct {
@@ -1818,7 +1818,7 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
 		return
 	}
 	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
@@ -1894,7 +1894,7 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
 		return
 	}
 	var req struct {
@@ -1972,7 +1972,7 @@ func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalDef(w, r, st, name, 0, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
 		return
 	}
 	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
@@ -2226,7 +2226,7 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	callers, err := st.GetAllowedSignalCallers(r.Context(), id)
@@ -2263,7 +2263,7 @@ func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	var req struct {
@@ -2317,7 +2317,7 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalRun(w, r, st, id, "no such promise for this workflow") {
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "no such promise for this workflow") {
 		return
 	}
 	var req struct {
@@ -2350,7 +2350,7 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 	if !ok {
 		return
 	}
-	if s.refuseIfInternalRun(w, r, st, id, "no such promise for this workflow") {
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "no such promise for this workflow") {
 		return
 	}
 	var req struct {
