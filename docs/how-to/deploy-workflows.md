@@ -176,11 +176,18 @@ If your workflow calls child workflows, pin their versions at build time for rep
 # Resolve child versions from the database and write a lock file.
 cleat --db "$CLEAT_DATABASE_URL" build -o ./out ./path/to/workflow/
 
-# Or manually create/update the lock file.
+# Or write/refresh it as its own step.
 cleat lock --db "$CLEAT_DATABASE_URL" ./path/to/workflow/
 ```
 
 This generates a `cleat.lock` file that pins each child workflow to a specific version. During deployment, the lock file ensures the parent is paired with the correct child versions.
+
+> Corrected 2026-10-03 (cleat#3027). This read *"Or **manually** create/update the
+> lock file"* above the command that does it. `cleat lock` is a subcommand
+> (`cmd/cleat/main.go`'s `runLock`, with `--update` to re-resolve from the
+> database), so nothing here is manual -- and the wording implied a lock file a
+> reader maintains by hand, which is the shape this audit looks for: a step
+> justified by a limitation the tool does not have.
 
 ## Production deployment checklist
 
