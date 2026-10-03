@@ -698,7 +698,15 @@ func TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects(t *test
 			if !ok {
 				continue
 			}
-			rendered++
+			// NON-EMPTY TEXT, not merely a successful call. Incrementing on `ok`
+			// counts calls, so a renderer that succeeds and returns "" bumps the
+			// total once per .py file while the scan below reads nothing from any
+			// of them -- the floor passes on exactly the failure its comment names.
+			// Measured 2026-10-03: a renderer stubbed to `return "", true` left the
+			// scan GREEN with this counting the full parseable corpus (~134).
+			if text != "" {
+				rendered++
+			}
 			blocks = [][]string{{text, text}}
 		}
 		for _, block := range blocks {
@@ -781,6 +789,22 @@ func TestDeployAndRunDocumentedPositionalsAreTheKindTheSubcommandExpects(t *test
 	// this guard reports a clean run over half the corpus it names. Deliberately
 	// far below the real count, so it is stable as the repo grows: it exists to
 	// catch a renderer producing NOTHING, not to police the number of files.
+	//
+	// It must count files that rendered NON-EMPTY text to do that, which is why
+	// `rendered` is guarded rather than incremented on the call. Counting CALLS
+	// left this floor resting on ~134 under a renderer that printed nothing --
+	// the "exits 0 having printed nothing" case above, which is to say it passed
+	// on the very failure it exists to catch.
+	//
+	// Measured 2026-10-03 over the tracked corpus, which is the denominator this
+	// floor's 50 is safe under: `git ls-files '*.py' | wc -l` gives 136; of those
+	// 134 parse and 125 render non-empty, so the floor sits below ~125 and NOT
+	// below the ~134 that counting calls would have rested it on.
+	//
+	// This floor is LIVENESS; TestTheDocstringRendererResolvesPythonEscapes above
+	// is CORRECTNESS. That test drives one fixture and asserts the text it
+	// renders, so it catches a renderer producing the WRONG thing; no fixture can
+	// see a corpus-wide failure, which is this floor's whole job.
 	if rendered < 50 {
 		t.Fatalf("rendered docstrings for only %d .py file(s); the tracked corpus is larger, so "+
 			"the renderer is broken and this guard is asserting nothing about Python", rendered)
