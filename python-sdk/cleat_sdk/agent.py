@@ -70,10 +70,18 @@ class Tool:
             value = getattr(self, key)
             if value not in ("", None):
                 out[key] = value
-        # Truthiness, not `not in ("", None)`: 0 is a MEANINGFUL default here
-        # ("take the workflow's"), so an unset value must be absent rather than
-        # sent as an explicit zero -- the same rule the optional fields above
-        # follow, which 0 would otherwise break.
+        # Truthiness, not the `not in ("", None)` the fields above use. For
+        # these two, 0 is not an absence a receiver could misread: it IS the
+        # "take the workflow's default" value, and the workflow treats 0 and an
+        # absent key IDENTICALLY (`interval <= 0` and `maxPolls <= 0` both take
+        # the default). So this gate is CONSISTENCY with the rest of the
+        # payload -- unset fields are omitted -- and not a behaviour fix.
+        #
+        # Which means the tempting justification is false, and it was nearly
+        # shipped as a comment here, a docstring, a PR body and a memory note:
+        # "0 would make the approval tool wait no time at all." It would not.
+        # Caveat written down rather than deleted because the wrong reason is
+        # the one that reads well.
         for key in ("poll_interval_seconds", "max_polls"):
             value = getattr(self, key)
             if value:

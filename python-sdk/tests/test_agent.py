@@ -95,9 +95,16 @@ def test_run_agent_omits_unset_optional_fields():
 
 
 def test_an_approval_tool_sends_its_poll_settings():
-    """An ``approval`` tool's wait is the tool's, not the config's -- and an
-    UNSET one must be absent rather than sent as 0, which the workflow would
-    read as an explicit zero-second interval."""
+    """An ``approval`` tool's wait belongs to the tool, not the config.
+
+    The two settings are gated on TRUTHINESS rather than the
+    ``not in ("", None)`` the string fields use, because for these 0 IS the
+    "take the workflow's default" value rather than an absence. **The gate is
+    for consistency with this payload's own rule, not to prevent a behaviour
+    change**: the workflow applies the default for 0 and for an absent key
+    alike (``interval <= 0``, ``maxPolls <= 0``), so sending 0 explicitly would
+    be harmless. An earlier version of this docstring said otherwise.
+    """
     h = CleatTestHarness()
     h.register_child_stub(AGENT_WORKFLOW_NAME, '{"answer":"ok","steps":1}')
 
