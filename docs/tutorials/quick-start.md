@@ -3,28 +3,60 @@
 This guide walks you through deploying and running your first cleat workflow
 end-to-end. Every command is a copy-paste snippet.
 
-It runs from the root of a **checkout of this repository** -- steps 2 and 3
-read `docker-compose.partner.yml` and `migrations/`, which are repo-relative,
-and there is no packaged distribution of the migration files. If you have not
-cloned yet: `git clone https://github.com/cleat-team/cleat`.
+**No checkout is required.** The CLI comes from the tap, the database from plain
+Docker, and the schema from migrations **embedded in the `cleat-worker` binary**
+-- so nothing below reads `migrations/` or any other repo-relative path. A
+checkout is still needed if you would rather build the CLI from this tree than
+install the latest release, and step 1 gives both.
+
+> Corrected 2026-10-03. This previously opened by requiring a checkout, on the
+> grounds that steps 2 and 3 read `docker-compose.partner.yml` and `migrations/`
+> and that *"there is no packaged distribution of the migration files"*.
+> **The migration half was false, and the binary says so itself.**
+> `migrationsOverrideFS` (`cmd/cleat-worker/main.go`) returns `migrations.FS`,
+> the embedded tree, and `--migrations-dir`'s own help calls the embedded copy
+> *"what makes migrating work regardless of the worker's own working
+> directory"*. Only the compose file was ever repo-relative, and step 2 no
+> longer uses it (cleat#2995).
+>
+> Measured 2026-10-03 on an **empty** database, from a built `cleat-worker` with
+> no `--migrations-dir` and no checkout on the path: `cleat-worker
+> --migrate-only` applied every migration from the binary and left **122
+> tables**, `workflow_defs` among them.
 
 ---
 
 ## 1. Prerequisites
 
-- **Go 1.27+** -- [Download](https://go.dev/dl/)
+- **Go 1.27+** -- [Download](https://go.dev/dl/). Needed in step 5, which
+  compiles your workflow to WebAssembly.
 - **Docker** -- for running Postgres locally
-- **The `cleat` CLI and `cleat-worker`** -- install both from the checkout:
+- **The `cleat` CLI and `cleat-worker`** -- install both with Homebrew:
 
 ```bash
-go install ./cmd/cleat ./cmd/cleat-worker
+brew install cleat-team/tap/cleat
 ```
 
-Both land in `$(go env GOPATH)/bin` (usually `~/go/bin`), which is already on
-your `PATH`. Installing rather than building into the tree matters here: step
-7 asks you to open a **second terminal**, and neither an exported `PATH` nor a
-relative `./bin/...` would survive that -- and step 4 moves you into the
-project directory, where `./bin/...` does not resolve anyway.
+Installs `cleat`, `cleat-worker` and `cleat-gen` from source, and the tap is
+bumped on every release (cleat#2068), so there is no version to track by hand.
+macOS needs a from-source `cleat-worker` because no CGO worker is published for
+it; see [Installation](../../README.md#installation).
+
+> **Alternatively, install from a checkout of this repository.** The tree
+> tracks ahead of the last release (v0.3.2 at this writing), so this is the
+> right choice if you are working on cleat itself, or building against the SDK
+> in the tree:
+>
+> ```bash
+> git clone https://github.com/cleat-team/cleat && cd cleat
+> go install ./cmd/cleat ./cmd/cleat-worker
+> ```
+>
+> Both land in `$(go env GOPATH)/bin` (usually `~/go/bin`), which is already on
+> your `PATH`. Installing rather than building into the tree matters here: step
+> 7 asks you to open a **second terminal**, and neither an exported `PATH` nor
+> a relative `./bin/...` would survive that -- and step 4 moves you into the
+> project directory, where `./bin/...` does not resolve anyway.
 
 Verify the installation:
 
@@ -58,33 +90,61 @@ cleat build --help
 
 ## 2. Start Postgres
 
-Cleat uses Postgres as its durable store. Start a local instance with the
-partner compose file:
+Cleat uses Postgres as its durable store. Start one with Docker -- no checkout
+needed:
 
 ```bash
-docker compose -f docker-compose.partner.yml up -d postgres
+docker run -d --name cleat-postgres \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_PASSWORD=postgres \
+    -e POSTGRES_DB=cleat \
+    -p 5432:5432 \
+    postgres:16
 ```
 
-Wait a moment for the container to be ready, then verify:
+Wait a moment for it to be ready, then verify:
 
 ```bash
-docker compose -f docker-compose.partner.yml ps
-# Expected output:
-# NAME                   IMAGE               SERVICE
-# cleat-agent0-postgres-1  postgres:16        postgres   running (healthy)
+docker exec cleat-postgres pg_isready -U postgres
+# Expected output: /var/run/postgresql:5432 - accepting connections
 ```
+
+> These are the same settings `docker-compose.partner.yml` uses in this
+> repository -- `postgres:16`, user and password `postgres`, database `cleat`
+> -- so if you *are* in a checkout, `docker compose -f
+> docker-compose.partner.yml up -d postgres` is equivalent and the rest of this
+> guide is unchanged. Corrected 2026-10-03: this step gave only the compose
+> form, which is the one thing that actually required a checkout (cleat#2995).
 
 ## 3. Apply the database schema
 
 > Added 2026-08-09. No step in this guide previously did this at all, and
 > without it, `cleat deploy` (step 6) fails with `relation "workflow_defs"
 > does not exist` -- `cleat deploy` queries `workflow_defs` directly and does
-> not apply migrations itself. (`cleat-worker`, started later in step 7,
-> *does* apply `migrations/postgres/*.sql` automatically on boot -- but by
-> then it's too late, because deploy already ran and already failed. See
-> `migration/runner.go` and `cmd/cleat-worker/main.go`.) This was previously
-> mentioned only in `docs/explanation/postgresql-schema.md`, unlinked from
-> either quick start.
+> not apply migrations itself. This was previously mentioned only in
+> `docs/explanation/postgresql-schema.md`, unlinked from either quick start.
+>
+> Corrected 2026-10-03: this note used to end *"(`cleat-worker`, started later
+> in step 7, does apply `migrations/postgres/*.sql` automatically on boot -- but
+> by then it's too late, because deploy already ran and already failed)"*.
+> **That is now false, and it was the sentence a reader could act on wrongly**
+> -- someone who believed the worker migrates on boot would reasonably skip
+> this step. Since cleat#2117 migration is an explicit deploy step:
+> `--migrate-only` applies it and exits, and a normal start only **verifies**
+> and refuses. Measured 2026-10-03 against an empty database:
+>
+> ```
+> refusing to start: the database schema is behind this worker: the database has
+> no schema_migrations table: it has never been migrated, and all 10 migration(s)
+> this binary ships are pending.
+> A worker does not migrate the database on start. Run the migrations as a deploy step:
+>
+>     cleat-worker --migrate-only --db <dsn> [--migrate-db <owner dsn>]
+> ```
+>
+> Note what the message says in passing: *"all 10 migration(s) **this binary
+> ships**"* -- the migrations travel inside the binary, which is why this step
+> needs no checkout (cleat#2995).
 
 Run it through the migration runner:
 
@@ -107,6 +167,13 @@ cleat-worker --migrate-only --db "$CLEAT_OWNER_DSN"
 > which reads as *"you skipped this step"* at the moment you did it correctly.
 > Measured on a fresh database: the loop leaves **86 tables** and no
 > `schema_migrations`; `--migrate-only` leaves 3 rows in it.
+>
+> Those two counts are from 2026-09-27 and have grown since, because a migration
+> set only ever gains members. Re-measured 2026-10-03 on an empty database with a
+> develop build: `--migrate-only` leaves **122 tables** and **10 rows**, and the
+> refusal above quotes the same 10. Read the pair as the *shape* of the
+> difference -- many tables, and the `schema_migrations` the loop never writes --
+> rather than as constants.
 >
 > `--migrate-only` also runs as the owner. That matters for step 7: the worker
 > refuses a superuser connection, and the app role it wants instead has no DDL
@@ -348,8 +415,14 @@ that is the durability guarantee.
 Stop the worker (Ctrl+C in its terminal), then stop and remove the database:
 
 ```bash
-docker compose -f docker-compose.partner.yml down -v
+docker rm -f cleat-postgres
 ```
+
+The container has no named volume, so its data lives in the container's writable
+layer and `docker rm` takes it with it. **If you used the compose file instead**
+(step 2), use `docker compose -f docker-compose.partner.yml down -v` -- `-v` is
+what removes that file's `pgdata` volume, which a plain `docker rm` would leave
+behind.
 
 ## Next steps
 

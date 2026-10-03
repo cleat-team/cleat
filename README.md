@@ -59,9 +59,24 @@ database.
 
 ## Quick Start
 
-This walkthrough runs from the root of a **checkout of this repository** — steps 2
-and 3 read `migrations/` and `testdata/`, which are repo-relative. If you have not
-cloned yet: `git clone https://github.com/cleat-team/cleat && cd cleat`.
+> **Just want to run cleat, not work on it?** Skip to
+> [Installation](#installation) and the
+> [Quick Start Tutorial](docs/tutorials/quick-start.md) — `brew install
+> cleat-team/tap/cleat`, plain Docker for Postgres, no checkout. This
+> walkthrough is the other thing: it works **inside this tree**, using `make
+> setup`, a CLI built into `./bin`, and the in-tree fixture `./testdata/hello/`,
+> so what it exercises is the code you are reading.
+
+This walkthrough runs from the root of a **checkout of this repository** — step 3
+deploys `testdata/`, which is repo-relative. If you have not cloned yet:
+`git clone https://github.com/cleat-team/cleat && cd cleat`.
+
+> Corrected 2026-10-03: this used to say *"steps 2 and 3 read `migrations/` and
+> `testdata/`"*. Step 3 does read `testdata/`; **nothing here reads
+> `migrations/`** — step 2 applies the schema with `cleat-worker --migrate-only`,
+> which reads migrations **embedded in the binary** (cleat#2995/#2999). The only
+> other repo-relative reference was `docker-compose.partner.yml`, and the
+> tutorial's copy of this walkthrough no longer uses it.
 
 ```bash
 # 0. Verify your toolchain (one command)
@@ -69,12 +84,17 @@ make setup
 
 # 1. Build the CLI from THIS checkout, into ./bin.
 #    In this walkthrough, build rather than `go install .../cmd/cleat@latest`:
-#    the published CLI is v0.2.0, from a release branch this one has not
-#    merged, and its `deploy` has no --db flag -- step 4 then fails with a
-#    usage error instead of deploying. (That is a fact about THIS checkout
-#    tracking ahead of the last release, not about the published CLI being
-#    broken; for installing cleat outside a checkout, `@latest` is right --
-#    see Installation below.)
+#    the tree tracks ahead of the last release, and this walkthrough deploys an
+#    in-tree fixture, so the two are not the same code and the interfaces can
+#    differ. Measured 2026-10-03: develop is 288 commits ahead of v0.3.2.
+#    (Corrected 2026-10-03. This said the published CLI was v0.2.0, "from a
+#    release branch this one has not merged, and its `deploy` has no --db flag".
+#    All three parts are now false: v0.3.2 is the latest release, it IS on the
+#    develop line -- `git merge-base --is-ancestor v0.3.2 develop` succeeds --
+#    and its `deploy` declares --db, --name and --task-queue. The lineage
+#    problem was real and a later release fixed it; what remains is the 288
+#    commits, which is a version skew and not a fork. For installing cleat
+#    outside a checkout, `@latest` is right -- see Installation below.)
 #    Build into ./bin deliberately: `-o cleat` writes *inside* ./cleat/, which
 #    is a directory in this repo, so ./cleat stays a directory and is not
 #    runnable.
@@ -142,6 +162,14 @@ curl -X POST http://localhost:8080/api/workflows/hello/start \
      CLI has -db, -dry-run and -max-history-length, and deploys successfully. The
      published version is not an older snapshot of this tree: it is a different
      lineage, which is why the interfaces differ.
+
+     SUPERSEDED 2026-10-03, for the lineage claim only: the latest release is now
+     v0.3.2, it IS on the develop line (`git merge-base --is-ancestor v0.3.2
+     develop` succeeds), and its `deploy` declares --db, --name and --task-queue.
+     So `@latest` no longer resolves to the v0.2.0 CLI described here, and the
+     "different lineage" claim is false for it. Everything else in this block was
+     re-derived and still holds. What the checkout buys you now is 288 commits of
+     version skew, not a fork. See Installation, and cleat#2999.
 
      The `-o ./out` form could not be kept. It fails on BOTH CLIs with identical
      output, so it is not the version skew: with a `go.work` in scope that `use`s
@@ -271,6 +299,15 @@ go install github.com/cleat-team/cleat/cmd/cleat@latest
 go install github.com/cleat-team/cleat/cmd/cleat-worker@latest
 go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
 ```
+
+`@latest` resolves to the newest tagged release — **v0.3.2** at this writing —
+which is on the `develop` line, not a fork, and whose `deploy` accepts `--db`,
+`--name` and `--task-queue`. Re-derived 2026-10-03 for cleat#2999, which asked
+for the status to be stated here rather than only as a historical note: the
+earlier warning that `@latest` gave a v0.2.0 CLI with **no `--db`** belonged to
+that release and no longer applies. What does remain true is that the checkout
+tracks **ahead** of any release — 288 commits ahead of v0.3.2 — so build from a
+checkout rather than `@latest` when you are working in one.
 
 Or build from source: `git clone https://github.com/cleat-team/cleat.git && cd cleat && go install ./cmd/...`
 
