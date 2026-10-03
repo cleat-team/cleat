@@ -591,10 +591,21 @@ rows of one workflow may share.
 
 ### Current State
 
-Schema migrations are currently **manual**. There is no automated migration
-tool. Changes are applied by running `migrations/postgres/*.sql` (which use
-`CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
-for idempotent application).
+Migrations are **automated, and applied as a deploy step**. Every migration ships
+inside the `cleat-worker` binary (an embedded `migrations.FS`; cleat#1968) and is
+applied by `cleat-worker --migrate-only`, which exits when it is done. A normal
+worker start **does not migrate**: it verifies the schema and refuses if the
+binary ships a migration the database has not applied (cleat#2117).
+`--migrate-on-start` is the opt-in for a single node with no deploy step.
+
+> Corrected 2026-10-03 (cleat#2995). This read *"Schema migrations are currently
+> **manual**. There is no automated migration tool. Changes are applied by
+> running `migrations/postgres/*.sql`"* — which **contradicted the Future Plans
+> bullet directly below it**, the one saying auto-migration *"shipped, and then
+> made a deploy step (cleat#2117)"*. It also named the one method that does not
+> work: a `psql -f migrations/postgres/*.sql` loop builds the tables but never
+> writes `schema_migrations`, so a worker started against the result reports the
+> database as never migrated. And unlike the embedded copy, it needs a checkout.
 
 ### Future Plans
 
