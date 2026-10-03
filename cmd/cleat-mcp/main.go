@@ -614,7 +614,11 @@ func taskStatus(cleatStatus string) string {
 // ---- HTTP to cleat ------------------------------------------------------
 
 func (p *proxy) getOpenAPI(r *http.Request) (map[string]any, int, error) {
-	status, body, err := p.call(r, outbound{method: http.MethodGet, path: "/api/openapi.json"})
+	status, body, err := p.call(r, outbound{
+		method: http.MethodGet,
+		path:   "/api/openapi.json",
+		limit:  documentReadLimit,
+	})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -649,12 +653,38 @@ func (p *proxy) start(r *http.Request, workflow string, args map[string]any, key
 	})
 }
 
+// Read limits, and why they are not one number.
+//
+// Unifying the three outbound builders into call() also unified their read
+// limits, and the smallest won -- dropping the OpenAPI document from 8 MiB to
+// 1 MiB. cleat-review caught it on cleat#3011 with a 2.89 MiB document, where
+// tools/list failed ENTIRELY while blaming the JSON ("unexpected end of JSON
+// input") rather than the ceiling.
+//
+// They are different quantities and the difference is not tuning:
+//
+//   - A RUN RESULT is bounded by one workflow's output.
+//   - The OPENAPI DOCUMENT is bounded by the CUSTOMER'S DEPLOYMENT -- one entry
+//     per exposed workflow, each carrying its full schemas -- so it grows with
+//     use and has no shape-independent size.
+//
+// The truncation is made legible below rather than left to the decoder, because
+// a silent cut is what turned "the document is bigger than the cap" into a
+// message about malformed JSON.
+const (
+	defaultReadLimit  = 1 << 20
+	documentReadLimit = 8 << 20
+)
+
 // outbound is one request to cleat.
 type outbound struct {
 	method  string
 	path    string
 	body    []byte
 	headers map[string]string
+	// limit overrides defaultReadLimit for a response whose size is not
+	// bounded by a single workflow's output. Zero means defaultReadLimit.
+	limit int64
 }
 
 // call is the ONE place an outbound request to cleat is built. It exists so
@@ -698,7 +728,21 @@ func (p *proxy) call(r *http.Request, o outbound) (int, []byte, error) {
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	limit := o.limit
+	if limit == 0 {
+		limit = defaultReadLimit
+	}
+	// limit+1, so a body EXACTLY at the ceiling is not reported as truncated.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	if int64(len(b)) > limit {
+		// Legible truncation. Without this the cut surfaces later as whatever
+		// the DECODER says about the fragment -- for JSON, "unexpected end of
+		// JSON input", which blames the document rather than the ceiling.
+		return resp.StatusCode, nil, fmt.Errorf("response body exceeded the %d-byte read limit", limit)
+	}
 	return resp.StatusCode, b, nil
 }
 

@@ -139,6 +139,21 @@ func (f *fakeCleat) requestedPaths() []string {
 	return append([]string(nil), f.paths...)
 }
 
+// padDocument replaces the served document with one padded to roughly n bytes,
+// so a test can exceed a read limit deliberately.
+func (f *fakeCleat) padDocument(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.doc = map[string]any{"paths": map[string]any{
+		"/api/workflows/big/start": map[string]any{"post": map[string]any{
+			"description": strings.Repeat("x", n),
+			"requestBody": map[string]any{"content": map[string]any{"application/json": map[string]any{
+				"schema": map[string]any{"type": "object"},
+			}}},
+		}},
+	}}
+}
+
 func (f *fakeCleat) startKeys() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -568,6 +583,48 @@ func TestTheCallersTraceContinuesIntoCleat(t *testing.T) {
 	}
 	if parts[2] == callerSpan {
 		t.Errorf("the caller's span-id was forwarded verbatim; a proxy hop synthesises a new span for itself")
+	}
+}
+
+// ---- read limits: not one number ----------------------------------------
+
+// TestALargeDocumentIsNotTruncated is the regression test for cleat-review's
+// finding on #3011: unifying the three outbound builders also unified their
+// read limits and the smallest won, dropping the document from 8 MiB to 1 MiB.
+// The document grows with the CUSTOMER'S DEPLOYMENT -- one entry per exposed
+// workflow carrying its full schemas -- so it is the worst response to shrink.
+//
+// A 2 MiB document is over defaultReadLimit and under documentReadLimit, which
+// is exactly the band the regression lived in.
+func TestALargeDocumentIsNotTruncated(t *testing.T) {
+	p, f := newProxyPair(t)
+	f.padDocument(2 << 20)
+
+	got := toolNames(t, call(t, p, "tools/list", map[string]any{}, nil))
+	if len(got) != 1 || got[0] != "big" {
+		t.Fatalf("tools = %v, want [big]; a 2 MiB document must not be truncated", got)
+	}
+}
+
+// TestAnOverLimitBodySaysSoRatherThanBlamingTheJSON is the other half, and the
+// half that made the bug hard to read: a silent cut surfaces later as whatever
+// the DECODER says about the fragment -- here "unexpected end of JSON input",
+// which blames the document rather than the ceiling.
+func TestAnOverLimitBodySaysSoRatherThanBlamingTheJSON(t *testing.T) {
+	p, f := newProxyPair(t)
+	f.runResult = strings.Repeat("y", (1<<20)+1024)
+
+	resp := call(t, p, "tasks/get", map[string]any{"taskId": "run-1"}, nil)
+	e, _ := resp["error"].(map[string]any)
+	if e == nil {
+		t.Fatalf("expected an error for an over-limit body, got %v", resp)
+	}
+	msg, _ := e["message"].(string)
+	if !strings.Contains(msg, "read limit") {
+		t.Errorf("message = %q, want the byte ceiling named", msg)
+	}
+	if strings.Contains(msg, "unexpected end of JSON") {
+		t.Errorf("message = %q; the truncation is reported as malformed JSON, blaming the document", msg)
 	}
 }
 
