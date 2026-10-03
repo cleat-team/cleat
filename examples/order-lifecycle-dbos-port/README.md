@@ -38,7 +38,9 @@ port moves to the cleat side, not the reverse. Brought across by cleat#2997:
   describing an order as still awaiting a decision while it is being charged.
 
 **Four differences remain, and they are stated rather than left for a reader to
-find.** The first three are shape, not scope:
+find.** Items 1 and 2 are shape rather than scope; **item 3 is scope**, and it
+is the one that moves the number, because it is a step the *cleat* side has and
+this port does not; item 4 is the platform's:
 
 1. **No multi-signal wait.** `cleat`'s `AwaitSignals` takes a *list* of signal
    names; DBOS's `recv` takes a single topic, and `waitFirst`/`waitAll` operate
@@ -48,11 +50,18 @@ find.** The first three are shape, not scope:
    fast-forwards 24h of *simulated* time with `AdvanceTime`; DBOS has no
    simulated clock, so the timeout path is only reachable if the window can be
    shortened — and the durable input is the determinism-safe place for it.
-3. **No notification step.** `order.go`'s `notify_customer` calls the bundled
-   `email-notify` plugin. DBOS has no bundled equivalent, and it is
-   deliberately **not** imitated with a placeholder: a placeholder would move
-   the line-count comparison by an amount that measures nothing. So the step
-   counts are still 5 and 3, and that gap is real rather than closed.
+3. **No notification step, and this one is SCOPE rather than shape.**
+   `order.go`'s `notify_customer` calls the bundled `email-notify` plugin; DBOS
+   has no bundled equivalent. It is deliberately **not** imitated with a
+   placeholder — a placeholder would move the line-count comparison while
+   measuring nothing — but that is an argument against a *fake* step, not
+   against a real one, and a real one is expressible (a `runStep` POSTing to a
+   webhook). It is left out of this PR because a faithful port needs a receiver
+   on both sides rather than one line on this one, and the consequence is
+   stated rather than hidden: **the step counts are still 5 and 3, and because
+   the missing step is on the DBOS side, its absence makes this port SMALLER
+   and the ratio LARGER. 1.67x is therefore a slight overstatement of DBOS's
+   position, not a floor.**
 4. **And one that is the platform's, not the port's, and that favours cleat:**
    `recv`/`getEvent` timeouts are **not durably checkpointed**
    (dbos-inc/dbos-transact-ts#451), so a process that dies mid-wait restarts
@@ -144,14 +153,26 @@ Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,o
 on the same date: **731**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
 
-**What the scope fix did to the headline, and why that was the point.** Until
-cleat#2997 this table read **274**, and the ratio it produced was ~2.7x. Adding
-the approval gate and the query state took the port to **439** and the ratio to
-**1.67x**. That is the number cleat#2597 predicted from a *written but
-unexecuted* fair counterpart of **433** — it quoted "~1.7x, not ~2.7x". **The
-executed port lands within 6 code lines of that estimate, 1.4%.** Recorded
-because a prediction and its measurement agreeing is the thing the pair exists
-to produce, and it is only a fact now that the counterpart runs.
+**What the scope fix did to the headline.** Until cleat#2997 this table read
+**274**, and the ratio it produced was ~2.7x. Adding the approval gate and the
+query state took the port to **439**, and the ratio to **1.67x**.
+
+Two attributions, stated separately because an earlier version of this paragraph
+got the first one wrong and credited the second source with a sentence it does
+not contain:
+
+- **The fair figure of 433 is cleat#2597's.** Its body reads *"cleat is 729 code
+  lines and a fair DBOS TypeScript counterpart is 433"* — 729 being the count
+  before cleat#2627's later deletion; the tree counts 731 today.
+- **The arithmetic on it is cleat#2997's**, whose body reads *"Against 433 the
+  ratio is ~1.7x, not ~2.7x."*
+
+**The executed port lands within 6 code lines of the 433 estimate — 1.4%** —
+which is the closest thing this pair has to a prediction meeting its
+measurement, and it is a fact only now that the counterpart actually runs. Note
+the direction of the residual difference above (item 3): the missing
+notification step makes this port *smaller*, so 1.67x *overstates* DBOS's
+standing rather than flattering cleat.
 
 **The counter is checked, but NOT enforced — do not read these numbers as
 guarded.** `scripts/check-dbos-pair-loc.py` compares this table against the
