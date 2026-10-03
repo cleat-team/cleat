@@ -72,13 +72,20 @@ type Input struct {
 
 	// Budget is this run's spend ceiling in dollars, against the `cost` the
 	// llm plugin reports. Once the accumulated cost REACHES it the loop stops
-	// before the next paid call and the result carries
-	// StatusBudgetExceeded. Zero or negative means unbounded.
+	// and the result carries StatusBudgetExceeded. Zero or negative means
+	// unbounded.
 	//
-	// It is a ceiling rather than a report because it is checked BEFORE the
-	// call it guards: a budget checked afterwards would let the final turn
-	// overshoot by whatever that turn cost, which is the difference between
-	// bounding a run and describing one.
+	// WHAT IT CAN AND CANNOT DO, because the obvious sentence here is false
+	// and this field is where a caller would read it: the turn that REACHES
+	// the ceiling is always paid for, since a turn's cost is known only after
+	// it returns -- the ceiling is reached rather than predicted. What the
+	// check stops is the NEXT turn. So a budgeted run can end one turn's cost
+	// over its budget, and never two.
+	//
+	// Checking after the paid call instead spends the same turns and the same
+	// money, and moves only the reported Steps; the enforcement lives in the
+	// `>=`, not in where the check sits. Both were measured -- see the seam
+	// comment below, which says the same thing at the line it describes.
 	Budget float64 `json:"budget,omitempty"`
 
 	// TenantID is attribution and nothing else: the workflow echoes it into
