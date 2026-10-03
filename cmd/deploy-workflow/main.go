@@ -127,8 +127,25 @@ func main() {
 	// cmd/cleat's deploy has always read the metadata first and falls back the
 	// same way; this makes the two agree.
 	version := 0
-	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil && meta.WorkflowVersion > 0 {
-		version = meta.WorkflowVersion
+	// cleat#1986 slice 2c-ii: this binary has no --exposure flag, so the
+	// artifact's own source declaration is the only class it can honour. Before
+	// this it stored `auth` for every workflow, including one whose source
+	// declares `internal` -- a fail-open on a path that reads the metadata
+	// already, for the version.
+	declared := engine.ExposureClass("")
+	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
+		if meta.WorkflowVersion > 0 {
+			version = meta.WorkflowVersion
+		}
+		declared = engine.ExposureClass(meta.Exposure)
+	}
+	// requested is "" -- no manifest opinion -- so the declaration stands, and
+	// `auth` when the artifact declares nothing. A malformed stamp in the file is
+	// refused rather than read as an absence; see engine.ResolveExposure.
+	exposure, err := engine.ResolveDeployableExposure(declared, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Determine next version number.
@@ -158,6 +175,7 @@ func main() {
 		WASMBytes:  wasmBytes,
 		ABIVersion: 1,
 		MinVersion: minVersion,
+		Exposure:   exposure,
 		CreatedAt:  time.Now(),
 	}
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {

@@ -6,11 +6,16 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/wasm"
 )
 
-// cleat#1986, the deploy half of slice 2a: `--exposure` is the only way to set
-// a definition's exposure class today (the source-level declaration is a later
-// slice), and `public` is REFUSED rather than stored.
+// cleat#1986, the deploy half: slice 2a made `--exposure` the way to set a
+// definition's class and refused `public`; slice 2c-ii added the artifact's
+// SOURCE declaration and the tighten-only rule around it.
+//
+// The two halves are tested in this one file because they are one decision at
+// one call site: `--exposure` is now an OPINION that may tighten the declared
+// class, and the empty default is what lets the declaration stand.
 //
 // Driven through deployWorkflow directly with a nil *sql.DB, which is what the
 // neighbouring deploy tests do -- the `--db` / CLEAT_DB_URL check happens in the
@@ -97,6 +102,144 @@ func TestDeployWorkflowRefusesAnUnknownExposure(t *testing.T) {
 	for _, want := range []string{"auth", "public", "internal"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("the refusal does not list the accepted value %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// ---- cleat#1986 slice 2c-ii: the artifact's declaration, and tighten-only ----
+
+// artifactDeclaring returns the bytes of a valid module whose cleat.metadata
+// carries the given exposure class, which is what `cleat build` now stamps for
+// a source that declares one.
+func artifactDeclaring(t *testing.T, declared string) []byte {
+	t.Helper()
+	out, err := wasm.WriteMetadata([]byte(bareWASMExposureTest), &wasm.Metadata{Exposure: declared})
+	if err != nil {
+		t.Fatalf("WriteMetadata(exposure=%q): %v", declared, err)
+	}
+	// The control for every test below: if the stamp is not readable back, the
+	// "declared" half of each assertion is vacuous and the tests would be
+	// exercising the no-declaration path while claiming the opposite.
+	back, err := wasm.ReadMetadata(out)
+	if err != nil {
+		t.Fatalf("the artifact this helper built has no readable metadata: %v", err)
+	}
+	if back.Exposure != declared {
+		t.Fatalf("the artifact declares %q, want %q -- the helper is not building what the tests assume",
+			back.Exposure, declared)
+	}
+	return out
+}
+
+// deployArtifact runs deployWorkflow over an artifact declaring `declared`, and
+// reports what reached the store (nil when nothing did) plus stderr.
+func deployArtifact(t *testing.T, declared string, args ...string) (*engine.WorkflowDef, string) {
+	t.Helper()
+	path := writeWASM(t, t.TempDir(), artifactDeclaring(t, declared))
+
+	var captured *engine.WorkflowDef
+	store := &mockStore{
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
+			captured = def
+			return nil
+		},
+	}
+	stderr := withExitPanic(t, func() {
+		deployWorkflow(context.Background(), store, nil, append([]string{"wf", path}, args...))
+	})
+	return captured, stderr
+}
+
+// THE CENTRAL CASE OF 2c-ii. An artifact whose source declares `internal`
+// deploys as internal with no flag at all. Before this slice it deployed as
+// `auth` -- reachable from the HTTP API -- while its own source said otherwise,
+// which is the fail-open the whole feature exists to close.
+func TestDeployWorkflowHonoursAnArtifactsDeclaredExposure(t *testing.T) {
+	def, _ := deployArtifact(t, string(engine.ExposureInternal))
+	if def == nil {
+		t.Fatal("nothing was deployed, but this declaration is legal and needs no flag")
+	}
+	if def.Exposure != engine.ExposureInternal {
+		t.Errorf("Exposure = %q, want %q: the artifact declares internal and the deploy expressed no "+
+			"opinion, so the declaration is the answer", def.Exposure, engine.ExposureInternal)
+	}
+}
+
+// The default is empty rather than `auth`, and this is why: with `auth` as the
+// default, an OMITTED flag is indistinguishable from `--exposure auth`, so the
+// test above would read as a request to loosen and be refused. Asserted on the
+// default itself so a revert to `auth` fails here rather than only there.
+func TestDeployWorkflowOmittedFlagIsNotARequestForAuth(t *testing.T) {
+	def, stderr := deployArtifact(t, string(engine.ExposureInternal))
+	if def == nil {
+		t.Fatalf("an omitted --exposure was treated as a request to loosen a declared `internal`, "+
+			"which is what a default of `auth` does:\n%s", stderr)
+	}
+	if def.Exposure == engine.ExposureAuth {
+		t.Error("Exposure = auth for a deploy that passed no --exposure on an artifact declaring internal")
+	}
+}
+
+// Loosening is REFUSED, and the refusal names both classes. Clamping to the
+// declared class instead would leave the operator believing their own command
+// line, and the next thing they do is debug why the workflow is unreachable.
+func TestDeployWorkflowRefusesToLoosenADeclaredClass(t *testing.T) {
+	def, stderr := deployArtifact(t, string(engine.ExposureInternal), "--exposure", "auth")
+	if def != nil {
+		t.Errorf("--exposure auth deployed over a declared `internal`, as %q", def.Exposure)
+	}
+	for _, want := range []string{"internal", "auth"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the refusal does not name %q, so the operator cannot see which two classes "+
+				"disagree:\n%s", want, stderr)
+		}
+	}
+}
+
+// Tightening is allowed, in both directions of the order. `public` cannot be
+// DEPLOYED here (no per-tenant opt-in), so the declaration is built by hand --
+// which is exactly the artifact `cleat build` produces from
+// `//cleat:exposure public`, and the one this path has to tighten rather than
+// refuse.
+func TestDeployWorkflowMayTightenADeclaredClass(t *testing.T) {
+	for _, want := range []engine.ExposureClass{engine.ExposureAuth, engine.ExposureInternal} {
+		def, stderr := deployArtifact(t, string(engine.ExposurePublic), "--exposure", string(want))
+		if def == nil {
+			t.Fatalf("tightening a declared `public` to %q was refused:\n%s", want, stderr)
+		}
+		if def.Exposure != want {
+			t.Errorf("Exposure = %q, want %q", def.Exposure, want)
+		}
+	}
+}
+
+// A DECLARED `public` is refused too, with no flag involved. This is wider than
+// slice 2a, which checked only the flag: `//cleat:exposure public` is legal to
+// BUILD (the build knows no tenant), so the flag-only check let an artifact that
+// declared it be stored, and a definition stored as public becomes
+// world-readable the moment enforcement ships.
+func TestDeployWorkflowRefusesADeclaredPublic(t *testing.T) {
+	def, stderr := deployArtifact(t, string(engine.ExposurePublic))
+	if def != nil {
+		t.Errorf("an artifact declaring `public` was deployed as %q with no opt-in in existence", def.Exposure)
+	}
+	if !strings.Contains(stderr, "opt-in") {
+		t.Errorf("the refusal does not name the missing per-tenant opt-in:\n%s", stderr)
+	}
+}
+
+// A malformed stamp is refused, NOT read as an absence. The class comes out of
+// the artifact's metadata, which is untrusted at deploy time, so `"Internal"`
+// must not quietly become "no declaration" and deploy as `auth` the very
+// workflow whose source asked for protection.
+func TestDeployWorkflowRefusesAMalformedDeclaredClass(t *testing.T) {
+	for _, bad := range []string{"Internal", "internal ", "secrets"} {
+		def, stderr := deployArtifact(t, bad)
+		if def != nil {
+			t.Errorf("a metadata stamp of %q was accepted and deployed as %q", bad, def.Exposure)
+		}
+		if !strings.Contains(stderr, "not one of") {
+			t.Errorf("a stamp of %q was refused, but not as a malformed class:\n%s", bad, stderr)
 		}
 	}
 }
