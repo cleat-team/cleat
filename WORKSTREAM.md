@@ -358,6 +358,23 @@ a red develop is fixed at once:
 - A red `engine-race.yml` run opens a tracking issue on its own. A real `WARNING: DATA RACE` is
   treated the same way as a red develop.
 
+**R11 — Routing is two acts: post the trace, and send the message.** A routed PR and an unrouted
+one are the *same artifact* — `comments: 0`, `reviews: 0`, checks settled green (cleat#3007). So
+at routing time the author posts, as the **leading line** of a comment,
+
+    ROUTED — sent to <reviewer> for a verdict on <full sha>
+
+and sends the reviewer the ask in the same act — two acts, one moment. `ROUTED` is reserved for
+the request so it never collides with the answer's `NOT A VERDICT —` / `FINAL OK —`, and a trace
+expires with the head it names, so a moved head needs a fresh line rather than one that "carried
+over". **The token is a claim about an act the PR cannot observe, not proof of it** — the lane's
+queue is messages, not the PR feed — so the detector stays the population one: **a routed PR is
+served, or it is not**, and an unserved PR is evidence of a stall only once you have asked whose
+*other* PRs were served. **Two omissions, both measured on 2026-10-03:** a trace with no message
+(cleat#3013, #3017), and a message **to the coordinator** with no trace (cleat#3035). The second
+reads as routed to its own author, because reporting produces a transcript that the artifact does
+not — **the coordinator is a side channel for *state*; the lane is *the ask*.**
+
 ---
 
 ## Verification protocol
