@@ -9,20 +9,14 @@ Docker, and the schema from migrations **embedded in the `cleat-worker` binary**
 checkout is still needed if you would rather build the CLI from this tree than
 install the latest release, and step 1 gives both.
 
-> Corrected 2026-10-03. This previously opened by requiring a checkout, on the
-> grounds that steps 2 and 3 read `docker-compose.partner.yml` and `migrations/`
-> and that *"there is no packaged distribution of the migration files"*.
-> **The migration half was false, and the binary says so itself.**
-> `migrationsOverrideFS` (`cmd/cleat-worker/main.go`) returns `migrations.FS`,
-> the embedded tree, and `--migrations-dir`'s own help calls the embedded copy
-> *"what makes migrating work regardless of the worker's own working
-> directory"*. Only the compose file was ever repo-relative, and step 2 no
-> longer uses it (cleat#2995).
->
-> Measured 2026-10-03 on an **empty** database, from a built `cleat-worker` with
-> no `--migrations-dir` and no checkout on the path: `cleat-worker
-> --migrate-only` applied every migration from the binary and left **122
-> tables**, `workflow_defs` among them.
+> Corrected 2026-10-03 (cleat#2995). This previously required a checkout:
+> *"steps 2 and 3 read `docker-compose.partner.yml` and `migrations/` ... and
+> there is no packaged distribution of the migration files."* **The migration
+> half was false** — `cleat-worker` embeds its migration tree, and the refusal
+> quoted under step 3 says *"this binary ships"* — and only the compose file was
+> ever repo-relative, which step 2 no longer uses. Measured on an empty database:
+> `--migrate-only` with no `--migrations-dir` applied every migration from the
+> binary and left **122 tables**.
 
 ---
 
@@ -137,11 +131,12 @@ docker exec cleat-postgres pg_isready -U postgres
 > worker can migrate"* is true with a flag and false as written. It still cannot
 > be used here, and the reason is the split this guide has to live with:
 > measured 2026-10-03, `--migrate-on-start` on the **owner** DSN migrates (122
-> tables) and then **refuses to serve** -- *"the connecting role is a superuser"*
-> -- while on the **app** DSN it cannot migrate at all, because `cleat_app` has
-> neither schema nor database `CREATE`. Migration is a separate step because the
-> two roles are separate: one has DDL and cannot serve, the other serves and has
-> no DDL. The note under step 7 says the same thing from the other end.
+> tables) and then **refuses to serve**, for the reason step 7's note quotes
+> verbatim below (the owner connection is a superuser, and PostgreSQL never
+> applies row-level security to a superuser) -- while on the **app** DSN it
+> cannot migrate at all, because `cleat_app` has neither schema nor database
+> `CREATE`. Migration is a separate step because the two roles are separate: one
+> has DDL and cannot serve, the other serves and has no DDL.
 >
 > Measured against an empty database:
 >
