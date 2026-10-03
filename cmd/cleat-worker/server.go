@@ -194,10 +194,50 @@ func (s *apiServer) storeFor(r *http.Request) (engine.WorkflowStore, error) {
 	if s.factory == nil {
 		return nil, fmt.Errorf("no store factory configured, cannot scope request to tenant %s", tid)
 	}
+	return s.openTenantStore(r, tid.String())
+}
 
-	st, lease, err := s.factory.OpenStore(r.Context(), tid.String(), s.taskQueues...)
+// openTenantStore opens a store scoped to tenant, and arranges for its lease to
+// be released when the request ends.
+//
+// The tenant is a PARAMETER rather than read from the request context, and that
+// is the whole point of the function existing separately from storeFor. cleat's
+// operator credential has no tenant, and cleat#2169's tenant-named admin routes
+// open a store for a tenant the caller is *not* -- so the tenant has to be
+// passed in. What those routes must not do is scope by the caller as well, so
+// nothing else about the request is consulted here, and the caller's own tenant
+// is deliberately not merged in or checked.
+//
+// What makes that safe — rather than a cross-tenant read — is that the scope IS
+// the authorization: a workflow the named tenant does not own is simply not
+// visible, GetWorkflowByID returns nil, and the caller gets a 404.
+//
+// THAT IS THREE SEPARATE CLAIMS, one per dialect, and they are enforced by three
+// different mechanisms rather than by one property this package can assume:
+//
+//	PostgreSQL  row-level security, with cleat.tenant_id set per transaction
+//	            (engine/db.go's setRLSOnTx)
+//	MySQL       no RLS at all — the tenant's rows live in a different physical
+//	            database, so pointing the pool at it IS the scoping. The name is
+//	            built by engine/mysql_store.go's MySQLTenantDatabaseName, and
+//	            that file's OpenIsolatedStore comment is where the hazard is
+//	            stated: a bare pool on the base DSN "silently reaches a database
+//	            with none of the tenant's rows"
+//	            (cleat#2009 is the time exactly that shipped)
+//	SQL Server  SESSION_CONTEXT set per transaction, read by the shipped
+//	            tenant-filter predicates
+//	            (TestEveryShippedTenantPolicyExistsInTheBuiltDatabase)
+//
+// Each is established for the store's OWN reads, so every query below this point
+// carries it; the engine's per-dialect isolation suites are where the enforcement
+// itself is asserted, and this comment is deliberately not a substitute for
+// them. What this package contributes is only that it names a tenant and does not
+// also scope by the caller — which is the one way these routes could have been
+// wrong.
+func (s *apiServer) openTenantStore(r *http.Request, tenant string) (engine.WorkflowStore, error) {
+	st, lease, err := s.factory.OpenStore(r.Context(), tenant, s.taskQueues...)
 	if err != nil {
-		return nil, fmt.Errorf("open store for tenant %s: %w", tid, err)
+		return nil, fmt.Errorf("open store for tenant %s: %w", tenant, err)
 	}
 	// THE LEASE IS RELEASED WHEN THE REQUEST ENDS, not when this returns.
 	//
