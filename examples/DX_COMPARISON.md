@@ -22,9 +22,10 @@ readability and developer friction compared side-by-side.
 > argument is used *directly* as `timeoutSeconds` in `@dbos-inc/dbos-sdk@5.2.11`
 > (`resolveTimeoutSeconds` returns it unchanged; only `deadlineEpochMS` is
 > divided by 1000). An earlier revision passed millisecond literals, so a "3 day"
-> grace period (`3 * 24 * 60 * 60 * 1000`) was read by the API as roughly 3000
-> days, and a "24 hour" wait (`twentyFourHoursMs`) as roughly 2700 years. Nothing
-> caught it because the snippets are illustrative and are never executed — which
+> grace period (`3 * 24 * 60 * 60 * 1000` = 259,200,000, read as seconds) is
+> **3000 days — about 8.2 years** — and a "24 hour" wait (`twentyFourHoursMs` =
+> 86,400,000, likewise read as seconds) is **1000 days, about 2.7 years**. Nothing
+> caught it because the snippets are illustrative and are never executed, which
 > is the same reason the class/decorator drift survived as long as it did.
 
 ## Pattern 1: Subscription Billing
