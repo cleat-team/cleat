@@ -48,6 +48,9 @@ def test_run_agent_sends_the_message_and_tools_to_the_child():
             provider="openai",
             model="gpt-4o-mini",
             max_steps=3,
+            budget=1.5,
+            tenant_id="acme",
+            artifact_key="report",
             tools=[Tool(name="lookup", kind="workflow", workflow="summarise", description="d")],
         ),
         "go",
@@ -57,6 +60,9 @@ def test_run_agent_sends_the_message_and_tools_to_the_child():
     assert body["message"] == "go"
     assert body["system_prompt"] == "be terse"
     assert body["max_steps"] == 3
+    assert body["budget"] == 1.5
+    assert body["tenant_id"] == "acme"
+    assert body["artifact_key"] == "report"
     assert body["tools"] == [
         {"name": "lookup", "kind": "workflow", "workflow": "summarise", "description": "d"}
     ]
@@ -71,6 +77,15 @@ def test_run_agent_omits_unset_optional_fields():
     run_agent(h, AgentConfig(), "hi")
 
     body = json.loads(_child_call(h).request)
-    for absent in ("system_prompt", "provider", "model", "max_steps", "temperature"):
+    for absent in (
+        "system_prompt",
+        "provider",
+        "model",
+        "max_steps",
+        "temperature",
+        "budget",
+        "tenant_id",
+        "artifact_key",
+    ):
         assert absent not in body, f"{absent} was sent despite being unset"
     assert body["tools"] == []

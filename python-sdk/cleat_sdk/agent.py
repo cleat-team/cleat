@@ -79,6 +79,21 @@ class AgentConfig:
     max_steps: int = 0
     temperature: float = 0.0
 
+    # The run's spend ceiling in dollars, against the cost the llm plugin
+    # reports. 0.0 (the default) means unbounded. The workflow stops before
+    # starting a turn once the ceiling is REACHED, and reports
+    # ``status == "budget_exceeded"`` in the result.
+    budget: float = 0.0
+
+    # Attribution, echoed back in the result and never required by the
+    # workflow. A caller whose spend boundary must be named enforces that
+    # itself.
+    tenant_id: str = ""
+
+    # When set, the workflow writes the finished answer to the bundled
+    # blobstore plugin under this key and echoes it in the result.
+    artifact_key: str = ""
+
 
 def run_agent(h: Any, config: AgentConfig, message: str) -> dict[str, Any]:
     """Start the agent workflow as a child and return its result.
@@ -103,7 +118,7 @@ def run_agent(h: Any, config: AgentConfig, message: str) -> dict[str, Any]:
         If the agent workflow is not deployed under ``AGENT_WORKFLOW_NAME``.
     """
     payload: dict[str, Any] = {"message": message, "tools": [t.to_json() for t in config.tools]}
-    for key in ("system_prompt", "provider", "model"):
+    for key in ("system_prompt", "provider", "model", "tenant_id", "artifact_key"):
         value = getattr(config, key)
         if value:
             payload[key] = value
@@ -111,6 +126,10 @@ def run_agent(h: Any, config: AgentConfig, message: str) -> dict[str, Any]:
         payload["max_steps"] = config.max_steps
     if config.temperature:
         payload["temperature"] = config.temperature
+    # Falsy 0.0 means unbounded, which is also the workflow's own default, so
+    # an unset budget is correctly absent rather than an explicit zero.
+    if config.budget:
+        payload["budget"] = config.budget
 
     run_id = h.child_workflow(AGENT_WORKFLOW_NAME, json.dumps(payload, default=str))
     result_json = h.await_child(run_id)
