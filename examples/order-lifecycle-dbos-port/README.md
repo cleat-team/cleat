@@ -42,10 +42,12 @@ find.** Items 1 and 2 are shape rather than scope; **item 3 is scope**, and it
 is the one that moves the number, because it is a step the *cleat* side has and
 this port does not; item 4 is the platform's:
 
-1. **No multi-signal wait.** `cleat`'s `AwaitSignals` takes a *list* of signal
-   names; DBOS's `recv` takes a single topic, and `waitFirst`/`waitAll` operate
-   on workflow handles rather than on messages. The decision therefore arrives
-   as one topic whose payload names it.
+1. **No multi-signal wait, and this is IDIOMATIC rather than inherent.**
+   `cleat`'s `AwaitSignals` takes a *list* of signal names; DBOS's `recv` takes
+   a single topic, and `waitFirst`/`waitAll` operate on workflow handles rather
+   than on messages. A two-topic race is conceivable, but matching DBOS's own
+   idiom is the defensible port, so the decision arrives as one topic whose
+   payload names it.
 2. **The approval window is an input, not a constant.** cleat's test
    fast-forwards 24h of *simulated* time with `AdvanceTime`; DBOS has no
    simulated clock, so the timeout path is only reachable if the window can be
