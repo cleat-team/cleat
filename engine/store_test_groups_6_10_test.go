@@ -612,14 +612,24 @@ func TestReapStaleInstances(t *testing.T) {
 				t.Fatal("ClaimWorkflow returned nil")
 			}
 
-			// Reap with a 1-nanosecond timeout. The just-claimed workflow's
-			// heartbeat_at should already be stale at this granularity.
-			count, err := store.ReapStaleInstances(ctx, time.Nanosecond, 0)
+			// Reap with a NEGATIVE window, so the row is stale by construction
+			// rather than by luck.
+			//
+			// This passed time.Nanosecond until cleat#3032, and on MSSQL that is
+			// a ZERO: Duration.Milliseconds() truncates, so -1ns became 0 and
+			// the threshold became exactly SYSUTCDATETIME(). ClaimWorkflow
+			// stamps heartbeat_at = SYSUTCDATETIME() from the same server clock,
+			// so the row counted as stale only if that clock had ticked between
+			// the two statements -- and it advances in ~4ms steps. That is the
+			// ~2-in-13 failure observed on CI, and it is the identical value
+			// cleat#1448 had already taken out of the sibling in this package;
+			// reapEverythingNow's comment has the measurements.
+			count, err := store.ReapStaleInstances(ctx, reapEverythingNow, 0)
 			if err != nil {
-				t.Fatalf("ReapStaleInstances(1ns): %v", err)
+				t.Fatalf("ReapStaleInstances(%v): %v", reapEverythingNow, err)
 			}
 			if count < 0 {
-				t.Fatalf("ReapStaleInstances(1ns) returned negative count: %d", count)
+				t.Fatalf("ReapStaleInstances(%v) returned negative count: %d", reapEverythingNow, count)
 			}
 
 			// Reap with a zero timeout (reclaim any running workflow).
@@ -703,10 +713,12 @@ func TestListStaleHoldersAndReapExcept(t *testing.T) {
 				t.Fatalf("run B (%s) was not claimed by any of %v; claimed IDs: %v", runB, workerNames, claimedIDsFromMap(claims))
 			}
 
-			// Both are stale at 1ns granularity, same trick TestReapStaleInstances
-			// uses above. ListStaleHolders must name BOTH, with the holder and
+			// Both are stale by construction: reapEverythingNow, the same
+			// negative window TestReapStaleInstances uses above, which is what
+			// makes this independent of whether the server's clock ticked
+			// (cleat#3032). ListStaleHolders must name BOTH, with the holder and
 			// generation ClaimWorkflow actually recorded -- not just a count.
-			holders, err := reaper.ListStaleHolders(ctx, time.Nanosecond, 0)
+			holders, err := reaper.ListStaleHolders(ctx, reapEverythingNow, 0)
 			if err != nil {
 				t.Fatalf("ListStaleHolders: %v", err)
 			}
@@ -737,12 +749,12 @@ func TestListStaleHoldersAndReapExcept(t *testing.T) {
 
 			// Exclude A's real generation. setupTestData leaves its OWN
 			// already-running row (setup-running-1, claimed by "test-worker"
-			// before this test ever starts) stale at 1ns too, and one of
+			// before this test ever starts) stale too, and one of
 			// workerNames above may have also drained setup-ready-1 into
 			// running -- so the total reclaimed here is not pinned to a
 			// specific number; what matters is which ONE row did not move,
 			// checked below by status, not by count.
-			excluded, err := reaper.ReapStaleInstancesExcept(ctx, time.Nanosecond, 0, []GenerationKey{
+			excluded, err := reaper.ReapStaleInstancesExcept(ctx, reapEverythingNow, 0, []GenerationKey{
 				{WorkflowID: runA, Generation: hA.Key.Generation},
 			})
 			if err != nil {
@@ -773,7 +785,7 @@ func TestListStaleHoldersAndReapExcept(t *testing.T) {
 			// reclaimed on this call exactly as an empty exclude would reclaim
 			// it -- confirming empty-exclude parity with plain ReapStaleInstances
 			// at the same time.
-			stillExcluded, err := reaper.ReapStaleInstancesExcept(ctx, time.Nanosecond, 0, []GenerationKey{
+			stillExcluded, err := reaper.ReapStaleInstancesExcept(ctx, reapEverythingNow, 0, []GenerationKey{
 				{WorkflowID: runA, Generation: hA.Key.Generation + 999},
 			})
 			if err != nil {
