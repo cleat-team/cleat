@@ -11,8 +11,12 @@ import (
 // cleat#1986 slice 2b: an `internal` workflow definition is not reachable from
 // the EXTERNAL HTTP surface, on any route that addresses it or a run of it.
 //
-// The class is per definition VERSION (it is written at deploy), so every
-// question here resolves to a (name, version) pair and not to a name.
+// The class is per definition VERSION (it is written at deploy). The run routes
+// resolve the pair from the run they read. The routes that address a NAME cannot
+// -- two of them carry no version at all -- so they ask the name-level question
+// instead, treating a name as internal if ANY of its versions is; see
+// refuseIfAbsentOrInternalDef. A guard that passed 0 as "the definition" would
+// match no row and refuse nothing, which is what this file did until cleat#3003.
 //
 // Two properties this file exists to get right, both of which are easy to get
 // wrong in a way no test would notice:
@@ -63,12 +67,15 @@ func (s *apiServer) refuseIfInternalRunLoaded(w http.ResponseWriter, r *http.Req
 }
 
 // refuseIfInternalDef refuses with notFound when the definition NAMED name at
-// VERSION version is internal. It is for the routes that address a definition
-// rather than a run -- `start`, and the routing/tag routes.
+// VERSION version is internal, for the routes that address one definition
+// VERSION -- `start`, and the run routes, which learn the pair from the run.
 //
-// version 0 means "the definition" rather than a version of it; resolveDef
-// answers the same thing the routes themselves resolve to, so a name-addressed
-// route and the run it would create can never disagree.
+// version is the CONCRETE version those callers have already resolved. There is
+// no "version 0 means the latest" convention here and there never was:
+// every store's GetWorkflowDef is `WHERE name = ? AND version = ?`, so a 0
+// matches no row and would report "not internal" for a definition that is. The
+// version-free question -- "does this NAME exist, and is any version of it
+// internal" -- is a different one, answered by refuseIfAbsentOrInternalDef.
 func (s *apiServer) refuseIfInternalDef(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name string, version int, notFound string) bool {
 	if !s.definitionIsInternal(r.Context(), st, name, version) {
 		return false
@@ -97,14 +104,115 @@ func (s *apiServer) definitionIsInternal(ctx context.Context, st engine.Workflow
 	if err != nil {
 		return true
 	}
-	if def == nil {
-		return false
+	return rowIsInternal(def)
+}
+
+// rowIsInternal is the single definition of "this row is internal", applied to a
+// row the caller already holds.
+//
+// It exists so that the two callers below cannot disagree about what internal
+// MEANS -- one of them wants `nil` to be an ordinary "no such definition" and
+// the other wants it refused, but the class comparison is the same question in
+// both, and a second copy of it is a copy that drifts.
+//
+// OrDefault rather than a bare comparison: a row predating the column reads back
+// as the empty string on a store that does not normalise it, and "" must mean
+// `auth` here for the same reason it means `auth` at the write (cleat#1986
+// slice 2a). `nil` is NOT internal -- see the callers for why they differ about
+// what to do with it.
+func rowIsInternal(def *engine.WorkflowDef) bool {
+	return def != nil && def.Exposure.OrDefault() == engine.ExposureInternal
+}
+
+// refuseIfAbsentOrInternalDef refuses with notFound when the definition named
+// name is INTERNAL, and ALSO when no such definition exists at all (cleat#3003).
+//
+// # Why the two cases are one line
+//
+// These routes act on a definition WITHOUT verifying it is there: they answer
+// success, or a complaint about a version, for a target that was never deployed.
+// So a caller sending a request for an absent name and one for an internal name
+// got two different answers, and the difference told them "something is here and
+// it is refused" rather than "nothing is here" -- which defeats the reason
+// internal answers 404 rather than 403, without defeating reachability.
+//
+// Answering both from this one call is what makes them indistinguishable BY
+// CONSTRUCTION rather than by two behaviours happening to agree today. The
+// per-route `notFound` message is the route's own, so the absent answer and the
+// internal answer are the same bytes.
+//
+// # It asks the NAME, and that is forced rather than chosen
+//
+// This is the version-free question, and it takes a version-free read:
+// ListWorkflowDefs(ctx, name) is `WHERE name = ? ORDER BY version DESC`, so an
+// empty result means the name was never deployed. GetWorkflowDef cannot answer
+// it -- it is `WHERE name = ? AND version = ?`, so the only version a
+// name-addressed route could pass is 0, and no store has a version 0 row. A
+// guard built on that would report "not internal" for every definition that is,
+// and 404 for every definition that is not: it fails OPEN on exactly the case it
+// was written for while appearing, to a mock that ignores its version argument,
+// to be working.
+//
+// Two of the four callers -- handleRemoveWorkflowTag and
+// handleRemoveRoutingRule -- address a name with no version in the request at
+// all, so a version-scoped answer is not available to them even in principle.
+// The other two carry a version, and this deliberately does NOT use it: the name
+// is answered as internal if ANY of its versions is, which is coarser than the
+// per-version truth and matches internalDefinitionNames, the other bulk reader
+// of this class. Coarse here is the conservative direction -- it can refuse a
+// request for a public version of a name that also has an internal one, and that
+// is a refusal, not a disclosure.
+//
+// # Why this is here and not inside definitionIsInternal
+//
+// That predicate deliberately keeps a missing row as "not internal", because
+// most routes produce their own miss a moment later and widening it would change
+// them. Which routes need the miss to happen HERE is a property of the route,
+// not of the predicate -- and the eight that do are exactly the ones whose own
+// answer for an absent target is not a not-found.
+//
+// # It fails closed, and that is the deliberate direction
+//
+// A read error refuses rather than letting the handler proceed, for the reason
+// definitionIsInternal documents: a check that cannot determine the class must
+// not serve the request. The cost is the one already accepted there -- a store
+// blip answers not-found rather than 500 -- and it discloses nothing, because
+// not-found is already this family's designed answer for "not yours to see".
+func (s *apiServer) refuseIfAbsentOrInternalDef(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name, notFound string) bool {
+	defs, err := st.ListWorkflowDefs(r.Context(), name)
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, notFound)
+		return true
 	}
-	// OrDefault rather than a bare comparison: a row predating the column
-	// reads back as the empty string on a store that does not normalise it,
-	// and "" must mean `auth` here for the same reason it means `auth` at the
-	// write (cleat#1986 slice 2a).
-	return def.Exposure.OrDefault() == engine.ExposureInternal
+	// Both arms answer with this route's own notFound, byte for byte, so the
+	// absent answer and the internal answer are the same answer.
+	if len(defs) == 0 {
+		s.writeError(w, http.StatusNotFound, notFound)
+		return true
+	}
+	for i := range defs {
+		if rowIsInternal(&defs[i]) {
+			s.writeError(w, http.StatusNotFound, notFound)
+			return true
+		}
+	}
+	return false
+}
+
+// refuseIfAbsentOrInternalRun is the run-addressed twin of the above: it refuses
+// with notFound when the run does not exist, and when the definition it belongs
+// to is internal (cleat#3003).
+//
+// One read, reusing the row: the definition lookup then goes through
+// refuseIfInternalDef exactly as refuseIfInternalRun does, so the class
+// comparison has one home.
+func (s *apiServer) refuseIfAbsentOrInternalRun(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, runID, notFound string) bool {
+	wf, err := st.GetWorkflowByID(r.Context(), runID)
+	if err != nil || wf == nil {
+		s.writeError(w, http.StatusNotFound, notFound)
+		return true
+	}
+	return s.refuseIfInternalDef(w, r, st, wf.DefName, wf.DefVersion, notFound)
 }
 
 // withoutInternalDefs drops every internal definition from defs, for the routes

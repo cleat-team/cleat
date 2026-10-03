@@ -117,16 +117,23 @@ var everyInstanceRoute = []externalRoute{
 // refusal is observable on them. Making them indistinguishable means making them
 // verify their target first -- a behaviour change for absent targets, which
 // belongs in its own diff and not in this one. Filed as cleat#3003.
-var routesWithoutANotFound = map[string]string{
-	"handleSetRoutingRule":    "answers 409 about the VERSION before asking whether the name is deployed",
-	"handleSetWorkflowTag":    "same: 409 on the version before the name is considered",
-	"handleRemoveRoutingRule": "answers 200 removed for a rule on a definition that is not deployed",
-	"handleRemoveWorkflowTag": "answers 200 removed for a tag on a definition that is not deployed",
-	"handleResolvePromise":    "answers 200 resolved for a promise on a run that does not exist",
-	"handleRejectPromise":     "answers 200 rejected for a promise on a run that does not exist",
-	"handleGetAllowedSignals": "answers 200 with an empty list for a run that does not exist",
-	"handleSetAllowedSignals": "answers 200 and writes for a run that does not exist",
-}
+// IT IS EMPTY AS OF cleat#3003, AND EMPTY IS THE GOAL. The eight that were
+// listed here were fixed, so the loop below now asserts indistinguishability for
+// them exactly as it does for every other route -- which is the property this
+// file exists for, finally holding on all of them.
+//
+// The map is KEPT while empty, because it is the mechanism and not the list: the
+// test fails on a route whose absent answer is not a 404 unless its handler is
+// argued for here, so the day a ninth joins, its author has to write the reason.
+//
+// The eight, for the record, since a deleted list leaves nothing to read: they
+// all shared one cause. They acted on a run or a definition WITHOUT verifying it
+// exists, so they answered success, or a complaint about a version, for a target
+// that was never deployed -- and that difference from a genuine miss is what told
+// a caller "something is here and it is refused". Each now verifies its target
+// through refuseIfAbsentOrInternalDef / refuseIfAbsentOrInternalRun, which answer
+// the SAME not-found for an absent target as for an internal one.
+var routesWithoutANotFound = map[string]string{}
 
 // exposureTestTenant is the caller every request here is scoped to. It matters:
 // with no tenant in the context, callerOwnsTarget short-circuits to "trusted",
@@ -149,6 +156,18 @@ func excluded(name string, exclude []string) bool {
 
 // storeServing builds the store every request in this file is driven against.
 // serve=false means it serves NOTHING: every name and every run is unknown.
+//
+// ONE DELIBERATE BLINDNESS, named because it is the shape that hid cleat#3003:
+// getWorkflowDefFn below ignores BOTH of its arguments and answers for any name
+// and any version, where a real store is `WHERE name = ? AND version = ?`. That
+// is safe for every caller here -- they are name-addressed, or pass the version
+// they read off the run -- and it is NOT safe for a new test that asks a
+// version-scoped question, which must install its own double that honours the
+// version, as TestAnInternalDefinitionIsRefusedAtAVersionItDoesNotHave does.
+//
+// A double that discards an argument cannot exercise it: every value passes,
+// including one no store has. That is how a version-0 lookup that matched
+// nothing stayed invisible for two slices.
 func storeServing(class engine.ExposureClass, serve bool) *mockStore {
 	ms := &mockStore{}
 	if serve {
@@ -339,12 +358,97 @@ func TestTheRefusalIsIndistinguishableWhereTheRouteHasAMiss(t *testing.T) {
 					}
 					return
 				}
+				// A listed route that now answers 404 is a STALE exception, and
+				// this is the only place that can be seen: the map is consulted
+				// above only when the absent answer is not a 404, so an entry
+				// whose route has been fixed would otherwise sit there for ever,
+				// granting nothing. That is the shape of cleat#1746 -- a grant
+				// covering nothing is invisible -- and it is why the repair is
+				// one line here rather than a sweep later.
+				if reason, known := routesWithoutANotFound[r.handler]; known {
+					t.Errorf("%s is listed in routesWithoutANotFound (%q) but answers 404 for an absent "+
+						"target now, so the entry is stale.\n\n"+
+						"Remove it: the assertion below then covers this route like every other, and "+
+						"leaving it costs the next reader the one signal that says this route is no "+
+						"longer an exception.", r.handler, reason)
+				}
 				if gotCode != absentCode || gotBody != absentBody {
 					t.Errorf("%s is distinguishable from a genuine miss:\n  internal: %d %s\n  absent:   %d %s",
 						r.handler, gotCode, strings.TrimSpace(gotBody), absentCode, strings.TrimSpace(absentBody))
 				}
 			})
 		}
+	}
+}
+
+// TestAnInternalDefinitionIsRefusedAtAVersionItDoesNotHave pins the refusal as a
+// property of the NAME, and it is the regression test for the shape slice 2b
+// shipped with.
+//
+// A version-scoped answer is only right for the one version it names. Slice 2b's
+// guard asked the store for a concrete version -- a 0, which matches no row in
+// any dialect -- so it refused nothing at all; a guard that passed the request's
+// version instead would refuse only that version and carry on at the next one.
+// Either way a caller can find the version at which an internal definition stops
+// being refused, and on the two writers "carrying on" means WRITING a routing
+// rule or a tag for a definition that is supposed to be unreachable.
+//
+// THE FIXTURE HAS TO HONOUR THE VERSION ARGUMENT, and that is the whole reason
+// this test exists rather than being covered above. storeServing answers for any
+// version, which is precisely how the defect stayed invisible: a store double
+// that ignores the argument supplies the row the real store never returns. Here
+// it answers only for the version it holds, as `WHERE name = ? AND version = ?`
+// does on every dialect.
+func TestAnInternalDefinitionIsRefusedAtAVersionItDoesNotHave(t *testing.T) {
+	// 99 is the version the definition below does not have, so a version-scoped
+	// check of any kind finds nothing there.
+	serving := func(class engine.ExposureClass) *mockStore {
+		ms := storeServing(class, true)
+		ms.getWorkflowDefFn = func(_ context.Context, _ string, version int) (*engine.WorkflowDef, error) {
+			if version != 1 {
+				return nil, nil
+			}
+			return &engine.WorkflowDef{
+				Name: "wfd", Version: 1, ABIVersion: 1, MinVersion: 1,
+				WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, Exposure: class,
+			}, nil
+		}
+		return ms
+	}
+
+	for _, c := range []struct {
+		handler, body string
+	}{
+		{"handleSetRoutingRule", `{"target_version":99,"weight":1}`},
+		{"handleSetWorkflowTag", `{"tag":"t","version":99}`},
+	} {
+		c := c
+		t.Run(c.handler, func(t *testing.T) {
+			var route externalRoute
+			for _, r := range everyWorkflowRoute {
+				if r.handler == c.handler {
+					route = r
+				}
+			}
+			if route.handler == "" {
+				t.Fatalf("%s is not in everyWorkflowRoute, so this test is driving nothing", c.handler)
+			}
+			entry := entryFor(t, everyWorkflowRoute)
+
+			absentCode, absentBody := serve(t, entry, newTestAPIServer(storeServing("", false)),
+				route.method, route.path, c.body)
+			gotCode, gotBody := serve(t, entry, newTestAPIServer(serving(engine.ExposureInternal)),
+				route.method, route.path, c.body)
+
+			if gotCode != http.StatusNotFound || gotBody != absentBody {
+				t.Errorf("%s at version 99 -- a version the definition does not have -- answered %d %s.\n"+
+					"An absent target answers %d %s, so this is distinguishable from a genuine miss, and the "+
+					"caller can find the version at which an internal definition stops being refused.\n"+
+					"The refusal is a property of the NAME; every version of an internal definition is 404.",
+					c.handler, gotCode, strings.TrimSpace(gotBody),
+					absentCode, strings.TrimSpace(absentBody))
+			}
+		})
 	}
 }
 

@@ -2986,6 +2986,9 @@ func TestAPIListPromises_Nil(t *testing.T) {
 
 func TestAPIResolvePromise(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.resolvePromiseFn = func(ctx context.Context, promiseID, result string) error {
 		return nil
 	}
@@ -3011,6 +3014,9 @@ func TestAPIResolvePromise(t *testing.T) {
 
 func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	api := newTestAPIServer(ms)
 
 	body := `not-json`
@@ -3027,6 +3033,9 @@ func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
 
 func TestAPIRejectPromise(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
 		return nil
 	}
@@ -3052,6 +3061,9 @@ func TestAPIRejectPromise(t *testing.T) {
 
 func TestAPIRejectPromise_InvalidJSON(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/reject", nil)
