@@ -3,6 +3,15 @@
 Four common workflow patterns implemented in all three frameworks, with
 readability and developer friction compared side-by-side.
 
+> **The DBOS snippets below use the older class/decorator style.** The installed
+> `@dbos-inc/dbos-sdk` presents the **functional** style
+> (`DBOS.registerWorkflow`, `DBOS.runStep`) as canonical, which is what the
+> executed ports under `examples/*-dbos-port/` use — see
+> `examples/order-lifecycle-dbos-port/ISSUES.md`, which records the two styles.
+> Comparing against a superseded API overstates the other side's friction, so
+> read the DBOS column with that in mind. Re-baselining these patterns against
+> the ports is tracked in cleat#2996 and is deliberately not attempted here.
+
 ## Pattern 1: Subscription Billing
 
 ### Cleat (Go)
@@ -387,11 +396,12 @@ awaits the child's completion. Children are recovered automatically at
 
 2. **Signal handling is dead simple.** `AwaitSignals(names, timeout)` handles
    both the wait and the timeout in one call. Temporal requires `defineSignal`
-   + `setHandler` + `condition()`. DBOS requires `recv()` + `Promise.race`.
+   + `setHandler` + `condition()`. DBOS is one call too
+   (`DBOS.recv(topic, { timeoutSeconds })` — `examples/order-lifecycle-dbos-port/src/workflow.ts`
+   uses exactly that form), so here cleat **matches** DBOS rather than beating it.
 
 3. **Retry is inline.** `CallWithRetry` puts retry policy at the call
-   site. Temporal puts it on the activity proxy (separate file). DBOS puts
-   it in config YAML (even further away).
+   site. Temporal puts it on the activity proxy (separate file).
 
 4. **Saga is built in.** `cleat.NewSaga()` with forward/compensate pairs
    and automatic LIFO compensation. Temporal and DBOS require manual
@@ -403,32 +413,35 @@ awaits the child's completion. Children are recovered automatically at
 
 ### Cleat Disadvantages (Found During This Exercise)
 
-1. **Saga is sequential only.** Can't run parallel bookings with automated
-   compensation. Need `ChildWorkflow` for parallelism, but then compensation
-   is manual. **Fix: Add `Saga.AddParallel()`.**
+1. **Saga was sequential only**, so parallel bookings could not carry automated
+   compensation. **Since fixed:** `Saga.AddParallel` (`cleat/runtime_workflow.go`).
 
 2. **`ChildWorkflow` takes a string name, not a function reference.**
    No compile-time check that the child exists or has the right signature.
-   Temporal and DBOS pass actual function/class references. **Fix: Add a
-   typed child workflow registry or accept `interface{}` with runtime type
-   checking in `cleat-gen`.**
+   Temporal and DBOS pass actual function/class references. **Partly
+   addressed:** `ChildWorkflowTyped` (`cleat/runtime_children.go`) types the
+   *input*, but the name is still a string, so **the function-reference half —
+   and with it the compile-time check — is still open.**
 
-3. **`AwaitChild` is sequential per-child in the loop.** You can't
-   `Promise.all`-style await all children simultaneously. Each `AwaitChild`
-   blocks until that child completes. **Fix: Add `AwaitAllChildren(runIDs)`
-   that returns results when all complete, in completion order.**
+3. **Awaiting children was sequential per-child in the loop** — each
+   `AwaitChild` blocked until that child completed. **Since fixed:**
+   `AwaitAllChildren(runIDs)` (`cleat/runtime_children.go`).
 
-4. **`CallWithHeartbeat` doesn't compose with `CallTyped` or
-   `CallWithRetry`.** For heartbeated calls with retry, you must use
-   the raw string-based API and implement retry manually. **Fix: Add
-   `CallTypedWithHeartbeat` and `CallWithHeartbeatAndRetry`.**
+4. **`CallWithHeartbeat` did not compose with `CallTyped`.** **Half fixed:**
+   the typed heartbeated call now exists — `DurableCallTypedWithHeartbeat`
+   (`cleat/runtime.go`). **The other half stands:** there is still no
+   `CallWithHeartbeatAndRetry` in `cleat/`, so a heartbeated call *with retry*
+   has to be assembled from the raw string API.
 
 5. **No `AwaitSignals` variant that returns immediately if a signal is
    already pending.** The current API always blocks until timeout, even
    if the signal was delivered before `AwaitSignals` was called. **Fix:
    Ensure signal delivery before `AwaitSignals` is honored (check signal
    store before blocking), or add `PollSignal` equivalents that work
-   pre-AwaitSignals.**
+   pre-AwaitSignals.** The second option partly exists — `PollSignals` /
+   `PollSignal` are there for a non-blocking check — but whether the ordering
+   edge case itself is closed was **not re-checked for this revision**; the
+   table above says the same rather than implying either answer.
 
 6. **Can't cancel a running `Call` mid-execution.** Temporal's
    `CancellationScope` can cancel in-flight activities. DBOS checks
@@ -447,25 +460,41 @@ awaits the child's completion. Children are recovered automatically at
 
 ### Improvements to Action
 
-| Pri | Improvement | Effort | Why |
-|-----|-------------|--------|-----|
-| P0 | `Saga.AddParallel()` | ~1 day | Parallel booking is a top-3 use case; manual compensation at scale is error-prone |
-| P0 | `AwaitAllChildren(runIDs)` | ~1 day | Fan-in should be concurrent, not sequential per-child |
-| P1 | `CallTypedWithHeartbeat` | ~half day | Remove the typed/untyped mismatch in heartbeat API |
-| P1 | `Saga.AddStep` from typed clients | ~half day | Saga steps currently require raw `Call`; typed calls would eliminate boilerplate |
-| P2 | `ChildWorkflow` with function references | ~2 days | Compile-time safety for child workflow dispatch |
-| P2 | Ensure pending signals honored before `AwaitSignals` blocks | ~1 day | Fix signal ordering edge case |
+**Four of the rows below were implemented after this exercise was written**, and
+each names the symbol that closes it; the rest are open or explicitly not
+re-checked. The rows are kept rather than deleted so a reader can see both the
+gaps that were found and that they have since been closed — a table of completed
+work presented as backlog tells a reader the project knows about gaps it has
+already fixed.
+
+| Improvement | Status |
+|-------------|--------|
+| `Saga.AddParallel()` | **Implemented** — `Saga.AddParallel`, `cleat/runtime_workflow.go:705` |
+| `AwaitAllChildren(runIDs)` | **Implemented** — `cleat/runtime_children.go:66` |
+| typed heartbeated call | **Implemented** — `DurableCallTypedWithHeartbeat`, `cleat/runtime.go:1283`. The *retry* composition half is still open; see below |
+| typed saga steps | **Implemented** — `Saga.AddStepCall`, `cleat/runtime_workflow.go:530` |
+| `ChildWorkflow` with function references | **Open** — `ChildWorkflowTyped` (`cleat/runtime_children.go`) types the *input*; the name is still a string, so there is still no compile-time check that the child exists |
+| Pending signals honoured before `AwaitSignals` blocks | **Not re-checked here** — `PollSignals` exists for the non-blocking check, but whether the ordering edge case is closed was not verified for this revision |
+| Heartbeated call **with retry** in one call | **Open** — no `CallWithHeartbeatAndRetry` in `cleat/` |
 
 ## Verdict
 
-Cleat's developer experience is already cleaner than both Temporal and DBOS
-for the common patterns we tested. The signal/timeout pattern (`AwaitSignals`)
-and Saga API are genuinely better — they express intent more directly with
-fewer lines and less ceremony.
+Cleat's developer experience is cleaner for the common patterns we tested. The
+signal/timeout pattern (`AwaitSignals`) and the Saga API express intent
+directly, without the activity/workflow split or the queue and
+signal-registration boilerplate the other two require.
 
 The gaps we found (parallel Saga, concurrent child await, typed heartbeats)
-are additive — they don't change the core API, they extend it. Each is a few
-hundred lines of code, not a redesign.
+were **closed afterwards as additive changes** — they did not alter the core
+API, they extended it, which is what this list predicted. What remains open is
+named in the table above.
+
+**One caveat on this verdict.** It originally rested on a "~28% shorter"
+line-count exercise that the base measurement later found **false**. The
+sentence was removed; the conclusion is **not** re-derived from a replacement
+measurement here. What the verdict stands on is the pattern-by-pattern evidence
+above, not a line count — and this document still compares DBOS against the
+older class/decorator API, per the note at the top.
 
 The big differentiator: **cleat workflows are one file.** No activity/workflow
 split, no task queue configuration, no signal registration boilerplate, no
