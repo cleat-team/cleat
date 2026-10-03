@@ -7,8 +7,9 @@
 # WHY THIS EXISTS
 #
 # The DBOS port's own README states the claim this pair carries: a genuinely
-# executed, equally-scoped DBOS counterpart exists and is comparable to
-# cleat's by the same line counter. An unexecuted port is not evidence for
+# executed DBOS counterpart exists, comparable to cleat's by the same line
+# counter, carrying the same approval gate and query state (cleat#2997). An
+# unexecuted port is not evidence for
 # that claim -- see the measurement doc that started this direction,
 # cleat-internal/cleat-vs-dbos-build-and-operate-2026-09-28.md, which found
 # the DBOS side looking smaller BEFORE anyone had run it. `npm test`
@@ -17,16 +18,22 @@
 # (src/server.ts) -- the same way the cleat-side scenario drives cleat's
 # backend rather than only unit-testing the workflow package.
 #
-# WHAT IT ASSERTS, matched to the same four scenarios `order.test.ts` proves
-# at the workflow level, driven here through the HTTP surface instead:
+# WHAT IT ASSERTS, driven here through the HTTP surface (the workflow-level
+# equivalents are in order.test.ts):
 #
-#   1. a declined charge (simulatePaymentFailure) never reaches reservation
+#   1. a confirmed payment with a clean reservation ships;
+#   2. a declined charge (simulatePaymentFailure) never reaches reservation
 #      and reports "declined";
-#   2. a confirmed payment with a clean reservation ships;
 #   3. a charge that completed and then failed to reserve unwinds and reports
 #      "compensated";
-#   4. a reservation that was held and then failed to release reports
-#      "compensation_failed", distinct from a clean unwind.
+#   4. an OVER-THRESHOLD order that is approved ships (cleat#2997);
+#   5. an OVER-THRESHOLD order that is rejected reports "rejected" and spends
+#      nothing (cleat#2997).
+#
+# Note that this list has five entries and the script asserts five. Until
+# cleat#2997 it said four while asserting three: the compensation_failed case,
+# which needs the second workflow entry point, is covered by order.test.ts and
+# never was an HTTP scenario here.
 #
 # NOT A DIALECT MATRIX. cleat's own scenario runs three arms because this
 # project's defect history is concentrated in SQL dialect divergence
@@ -148,6 +155,29 @@ confirm_payment() {
     -H 'Content-Type: application/json' -d '{"event":"payment-confirmed"}' >/dev/null
 }
 
+# place_expensive_order is place_order with one item ONE CENT ABOVE the
+# workflow's approval threshold (50_000), so the order parks on its approval
+# gate. The window is short (5s) so the script is never the thing that makes a
+# run slow; the approval scenarios below decide explicitly rather than waiting
+# it out.
+place_expensive_order() {
+  local order_id="$1"
+  curl -fsS --max-time 10 -X POST "$API/orders" \
+    -H 'Content-Type: application/json' \
+    -d "{\"orderId\":\"$order_id\",\"customerId\":\"cust-1\",\"email\":\"a@example.com\",\"items\":[{\"sku\":\"server\",\"quantity\":1,\"priceCents\":50001}],\"approvalWindowSeconds\":5}"
+}
+
+# decide delivers the human decision -- the DBOS counterpart of cleat's
+# POST /api/orders/{id}/approve, which signals order_approved/order_rejected.
+# Here it is one topic carrying the decision, because DBOS has no
+# multi-signal wait; see DECISION_TOPIC in src/workflow.ts.
+decide() {
+  local wf="$1" approve="$2" reason="${3:-}"
+  curl -fsS --max-time 10 -X POST "$API/orders/$wf/approve" \
+    -H 'Content-Type: application/json' \
+    -d "{\"approve\":${approve},\"reason\":\"${reason}\"}" >/dev/null
+}
+
 poll_status() {
   # $1: workflowID  $2: field name to read with python
   local wf="$1" field="$2"
@@ -197,6 +227,23 @@ wf="$(echo "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["wo
 confirm_payment "$wf"
 status="$(poll_status "$wf" status)"
 assert_status "reservation fails after charge" "$status" "compensated"
+
+echo
+echo "==> scenario: over-threshold order is approved, then ships"
+resp="$(place_expensive_order order-http-approved)"
+wf="$(echo "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["workflowID"])')"
+decide "$wf" true
+confirm_payment "$wf"
+status="$(poll_status "$wf" status)"
+assert_status "approved over-threshold order" "$status" "shipped"
+
+echo
+echo "==> scenario: over-threshold order is rejected and spends nothing"
+resp="$(place_expensive_order order-http-rejected)"
+wf="$(echo "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["workflowID"])')"
+decide "$wf" false "over budget"
+status="$(poll_status "$wf" status)"
+assert_status "rejected over-threshold order" "$status" "rejected"
 
 if (( failures > 0 )); then
   echo >&2

@@ -34,7 +34,7 @@ once: an older class-based decorator style (`@DBOS.workflow()`,
 `@DBOS.step()` — the style `examples/DX_COMPARISON.md`'s existing DBOS
 snippet uses) and a newer functional style (`DBOS.registerWorkflow(fn)`,
 `DBOS.runStep(fn)`). This port uses the functional style, because it is the
-one `@dbos-inc/dbos-sdk@5.1.10`'s own `README.md` presents as canonical —
+one `@dbos-inc/dbos-sdk@5.2.11`'s own `README.md` presents as canonical —
 checked against the installed package's `node_modules/@dbos-inc/dbos-sdk/README.md`,
 not only what a documentation search returns. See the pair's own `README.md`
 for why the version is pinned rather than left to float.
@@ -50,8 +50,23 @@ than cleat's own saga declaration; two short functions is the more faithful
 port of "declare each path", even though cleat's single `PlaceOrder` entry
 point looks like one function from the outside.
 
+## Scope, after cleat#2997
+
+This port originally carried three saga steps and neither a human-approval gate
+nor published query state, while `order.go` carried five steps and both — so the
+pair's line-count headline was not like-for-like. cleat#2997 added the approval
+gate and the query state. Three differences remain and are stated in the pair's
+README rather than here, so there is one place to read them; the one that
+matters most for behaviour is that `recv`/`getEvent` timeouts are not durably
+checkpointed (dbos-inc/dbos-transact-ts#451), where cleat's `AwaitSignals` is.
+
 ## Not ported
 
+- **The notification step.** `order.go`'s `notify_customer` calls the bundled
+  `email-notify` plugin and is best-effort by design. DBOS ships no equivalent,
+  and a placeholder standing where an email would go would add lines to the
+  comparison without measuring anything, so it is left out and the step-count
+  difference is stated instead.
 - The web frontend (`examples/order-lifecycle/web/`). cleat's own
   four-role breakdown for this scenario (workflow/backend/tenancy/tests) in
   the measurement doc has no UI row for order-lifecycle either, so this is
