@@ -99,6 +99,16 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// Admin API endpoints: tenant-scoped (callerOwnsTarget, in api_admin.go), and gated like the rest.
 	mux.HandleFunc("/api/admin/instances/", api.adminAPIOnly(api.handleAdminRoutes))
 
+	// cleat#2169: the same operations addressed at a NAMED tenant, which is the
+	// form an operator credential uses to act on a tenant that is not its own.
+	// The id-only route above keeps its meaning and still refuses an operator, so
+	// the cross-tenant capability exists only where the URL says which tenant.
+	//
+	// Registered through adminAPIOnly like every other /api/admin/ route:
+	// TestEveryAdminRouteIsAbsentUntilTheAdminAPIIsEnabled reads this file for the
+	// registrations and fails on one that is not gated.
+	mux.HandleFunc("/api/admin/tenants/", api.adminAPIOnly(api.handleAdminRoutesForTenant))
+
 	// Plugin discovery, when the binary loaded plugins.
 	if api.plugins != nil {
 		mux.Handle("/api/plugins", api.plugins)
