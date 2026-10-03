@@ -51,6 +51,7 @@ def test_run_agent_sends_the_message_and_tools_to_the_child():
             budget=1.5,
             tenant_id="acme",
             artifact_key="report",
+            tool_error_mode="fail",
             tools=[Tool(name="lookup", kind="workflow", workflow="summarise", description="d")],
         ),
         "go",
@@ -63,6 +64,7 @@ def test_run_agent_sends_the_message_and_tools_to_the_child():
     assert body["budget"] == 1.5
     assert body["tenant_id"] == "acme"
     assert body["artifact_key"] == "report"
+    assert body["tool_error_mode"] == "fail"
     assert body["tools"] == [
         {"name": "lookup", "kind": "workflow", "workflow": "summarise", "description": "d"}
     ]
@@ -86,6 +88,40 @@ def test_run_agent_omits_unset_optional_fields():
         "budget",
         "tenant_id",
         "artifact_key",
+        "tool_error_mode",
     ):
         assert absent not in body, f"{absent} was sent despite being unset"
     assert body["tools"] == []
+
+
+def test_an_approval_tool_sends_its_poll_settings():
+    """An ``approval`` tool's wait is the tool's, not the config's -- and an
+    UNSET one must be absent rather than sent as 0, which the workflow would
+    read as an explicit zero-second interval."""
+    h = CleatTestHarness()
+    h.register_child_stub(AGENT_WORKFLOW_NAME, '{"answer":"ok","steps":1}')
+
+    run_agent(
+        h,
+        AgentConfig(
+            tools=[
+                Tool(name="approve", kind="approval", plugin="approvals", function="poll",
+                     poll_interval_seconds=5, max_polls=3),
+                Tool(name="defaulted", kind="approval", plugin="approvals", function="poll"),
+            ]
+        ),
+        "go",
+    )
+
+    body = json.loads(_child_call(h).request)
+    assert body["tools"][0] == {
+        "name": "approve",
+        "kind": "approval",
+        "plugin": "approvals",
+        "function": "poll",
+        "poll_interval_seconds": 5,
+        "max_polls": 3,
+    }
+    # The second tool takes the workflow's defaults, so neither key is sent.
+    assert "poll_interval_seconds" not in body["tools"][1]
+    assert "max_polls" not in body["tools"][1]

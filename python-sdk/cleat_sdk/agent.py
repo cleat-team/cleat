@@ -33,7 +33,7 @@ from typing import Any
 # resolved by name against a deployed definition.
 AGENT_WORKFLOW_NAME = "agent"
 
-TOOL_KINDS = ("service", "plugin", "workflow")
+TOOL_KINDS = ("service", "plugin", "workflow", "approval")
 
 
 @dataclass
@@ -46,7 +46,8 @@ class Tool:
     model being told which.
 
     ``kind`` is one of ``service`` (``service`` + ``operation``), ``plugin``
-    (``plugin`` + ``function``) or ``workflow`` (``workflow``).
+    (``plugin`` + ``function``), ``workflow`` (``workflow``) or ``approval``
+    (``plugin`` + ``function``, polled until the claim reports ``found``).
     """
 
     name: str
@@ -59,11 +60,23 @@ class Tool:
     function: str = ""
     workflow: str = ""
 
+    # An ``approval`` tool's wait. 0 takes the workflow's own default.
+    poll_interval_seconds: int = 0
+    max_polls: int = 0
+
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "kind": self.kind}
         for key in ("description", "parameters", "service", "operation", "plugin", "function", "workflow"):
             value = getattr(self, key)
             if value not in ("", None):
+                out[key] = value
+        # Truthiness, not `not in ("", None)`: 0 is a MEANINGFUL default here
+        # ("take the workflow's"), so an unset value must be absent rather than
+        # sent as an explicit zero -- the same rule the optional fields above
+        # follow, which 0 would otherwise break.
+        for key in ("poll_interval_seconds", "max_polls"):
+            value = getattr(self, key)
+            if value:
                 out[key] = value
         return out
 
@@ -94,6 +107,12 @@ class AgentConfig:
     # blobstore plugin under this key and echoes it in the result.
     artifact_key: str = ""
 
+    # What a failed tool -- or a tool the model invented -- does. ``""`` is the
+    # workflow's default (``"inject"``: the error goes back to the model as the
+    # tool's result). ``"fail"`` ends the run instead. This is a CONTRACT
+    # difference, not a preference, so it is stated rather than assumed.
+    tool_error_mode: str = ""
+
 
 def run_agent(h: Any, config: AgentConfig, message: str) -> dict[str, Any]:
     """Start the agent workflow as a child and return its result.
@@ -118,7 +137,7 @@ def run_agent(h: Any, config: AgentConfig, message: str) -> dict[str, Any]:
         If the agent workflow is not deployed under ``AGENT_WORKFLOW_NAME``.
     """
     payload: dict[str, Any] = {"message": message, "tools": [t.to_json() for t in config.tools]}
-    for key in ("system_prompt", "provider", "model", "tenant_id", "artifact_key"):
+    for key in ("system_prompt", "provider", "model", "tenant_id", "artifact_key", "tool_error_mode"):
         value = getattr(config, key)
         if value:
             payload[key] = value
