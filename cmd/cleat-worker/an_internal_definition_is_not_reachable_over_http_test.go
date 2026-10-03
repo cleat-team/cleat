@@ -135,6 +135,18 @@ var routesWithoutANotFound = map[string]string{
 // the guard. The stubbed run is owned by this tenant for the same reason.
 var exposureTestTenant = uuid.MustParse("00000000-0000-0000-0000-0000000000aa")
 
+// excluded reports whether name is in the exclusion set -- the store-side half
+// of the listing contract, modelled here so the fixture cannot pass by ignoring
+// the filter.
+func excluded(name string, exclude []string) bool {
+	for _, e := range exclude {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
+
 // storeServing builds the store every request in this file is driven against.
 // serve=false means it serves NOTHING: every name and every run is unknown.
 func storeServing(class engine.ExposureClass, serve bool) *mockStore {
@@ -157,10 +169,31 @@ func storeServing(class engine.ExposureClass, serve bool) *mockStore {
 		}
 		ms.listVersionsFn = func(_ context.Context, _ string) ([]int, error) { return []int{1}, nil }
 		ms.validateVersionFn = func(_ context.Context, _ string, _ int) (bool, error) { return true, nil }
-		ms.listWorkflowsFn = func(_ context.Context, _ engine.WorkflowFilter) ([]engine.WorkflowInstance, error) {
-			return []engine.WorkflowInstance{{ID: "RUN", DefName: "wfd", DefVersion: 1}}, nil
+		// The listing honours ExcludeDefNames, because that is the STORE's contract
+		// since cleat#3009 -- the handler no longer filters the page it fetched.
+		// A double that ignored the field would model a store that leaks, so it is
+		// part of the seam this fixture has to get right; the real dialects are
+		// covered by engine/workflow_list_query_test.go.
+		rows := []engine.WorkflowInstance{{ID: "RUN", DefName: "wfd", DefVersion: 1}}
+		ms.listWorkflowsFn = func(_ context.Context, f engine.WorkflowFilter) ([]engine.WorkflowInstance, error) {
+			var out []engine.WorkflowInstance
+			for _, wf := range rows {
+				if excluded(wf.DefName, f.ExcludeDefNames) {
+					continue
+				}
+				out = append(out, wf)
+			}
+			return out, nil
 		}
-		ms.countWorkflowsFn = func(_ context.Context, _ engine.WorkflowFilter) (int, error) { return 1, nil }
+		ms.countWorkflowsFn = func(_ context.Context, f engine.WorkflowFilter) (int, error) {
+			n := 0
+			for _, wf := range rows {
+				if !excluded(wf.DefName, f.ExcludeDefNames) {
+					n++
+				}
+			}
+			return n, nil
+		}
 	} else {
 		ms.getWorkflowDefFn = func(_ context.Context, _ string, _ int) (*engine.WorkflowDef, error) { return nil, nil }
 		ms.listWorkflowDefsFn = func(_ context.Context, _ string) ([]engine.WorkflowDef, error) { return nil, nil }

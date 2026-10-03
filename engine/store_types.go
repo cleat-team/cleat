@@ -565,6 +565,20 @@ type WorkflowFilter struct {
 	// DefName matches def_name exactly. Search is substring and spans four
 	// columns; this is the targeted form.
 	DefName string
+	// ExcludeDefNames removes runs whose def_name is in this set, and it is the
+	// INVERSE of DefName: a list of what not to show rather than what to show.
+	//
+	// It exists so an exclusion can be applied by the QUERY rather than by the
+	// caller filtering a page after it has been fetched (cleat#3009). That
+	// distinction is not cosmetic: a post-page filter is applied AFTER offset and
+	// limit, so pages come back shorter than the limit and any total the caller
+	// computes is approximate. Here the count and the page see the same rows,
+	// because both go through applyWorkflowFilters.
+	//
+	// Ordered and exact, matching def_name as DefName does. Empty means no
+	// exclusion, which is the pre-cleat#3009 behaviour and the default for every
+	// caller that does not set it.
+	ExcludeDefNames []string
 	// ErrorCode matches error_code exactly. Cancellation is an error code
 	// rather than a status, so without this a cancelled run cannot be selected
 	// as a class at all.
