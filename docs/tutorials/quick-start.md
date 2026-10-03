@@ -131,7 +131,19 @@ docker exec cleat-postgres pg_isready -U postgres
 > -- someone who believed the worker migrates on boot would reasonably skip
 > this step. Since cleat#2117 migration is an explicit deploy step:
 > `--migrate-only` applies it and exits, and a normal start only **verifies**
-> and refuses. Measured 2026-10-03 against an empty database:
+> and refuses.
+>
+> `--migrate-on-start` is the other flag that applies them at boot, so *"the
+> worker can migrate"* is true with a flag and false as written. It still cannot
+> be used here, and the reason is the split this guide has to live with:
+> measured 2026-10-03, `--migrate-on-start` on the **owner** DSN migrates (122
+> tables) and then **refuses to serve** -- *"the connecting role is a superuser"*
+> -- while on the **app** DSN it cannot migrate at all, because `cleat_app` has
+> neither schema nor database `CREATE`. Migration is a separate step because the
+> two roles are separate: one has DDL and cannot serve, the other serves and has
+> no DDL. The note under step 7 says the same thing from the other end.
+>
+> Measured against an empty database:
 >
 > ```
 > refusing to start: the database schema is behind this worker: the database has
