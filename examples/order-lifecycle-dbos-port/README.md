@@ -14,9 +14,9 @@ printed at the start of every test run): a genuinely executed DBOS port exists,
 measurable against cleat's by the same line counter and carrying the same
 approval gate and query state — not that DBOS wins forever, and **not that the
 two are step-for-step identical** (see the four differences in the next
-section). This pair asserts comparability, not an outcome, and not equality. If a future cleat feature
-changes which side is smaller, that is not a broken control; the control's
-job was honesty, and it is done either way.
+section). This pair asserts comparability, not an outcome, and not equality.
+If a future cleat feature changes which side is smaller, that is not a broken
+control; the control's job was honesty, and it is done either way.
 
 ## Scope: which side is the reference, and what still differs
 
@@ -175,7 +175,7 @@ not contain:
   lines and a fair DBOS TypeScript counterpart is 433"* — 729 being the count
   before cleat#2627's later deletion; the tree counts 731 today.
 - **The arithmetic on it is cleat#2997's**, whose body reads *"Against 433 the
-  ratio is ~1.7x, not ~2.7x."*
+  ratio is ~1.7×, not ~2.7×."*
 
 **The executed port lands within 6 code lines of the 433 estimate — 1.4%** —
 which is the closest thing this pair has to a prediction meeting its
