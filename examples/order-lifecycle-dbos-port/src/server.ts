@@ -1,8 +1,8 @@
 // HTTP backend for the order-lifecycle DBOS port. The DBOS counterpart to
-// examples/order-lifecycle/backend/main.go, at the same scope: an endpoint to
-// place an order, an endpoint the payment provider's webhook calls, an
-// endpoint to deliver the human approval decision, and a status read that
-// returns the order's published query state.
+// examples/order-lifecycle/backend/main.go: an endpoint to place an order, an
+// endpoint the payment provider's webhook calls, an endpoint to deliver the
+// human approval decision, and a status read that returns the order's published
+// query state.
 //
 // The approval endpoint and the query state were added by cleat#2997; before
 // that this backend had four routes and no decision path at all, while the

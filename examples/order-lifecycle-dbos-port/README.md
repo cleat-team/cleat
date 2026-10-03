@@ -10,9 +10,11 @@ to make that comparison real: both sides built, both sides run, both counted
 the same way, in CI.
 
 **The claim this pair carries** (see `src/order.test.ts`'s `CLAIM` constant,
-printed at the start of every test run): a genuinely executed, equally-scoped
-DBOS port exists and is comparable to cleat's — not that DBOS wins forever.
-This pair asserts comparability, not an outcome. If a future cleat feature
+printed at the start of every test run): a genuinely executed DBOS port exists,
+measurable against cleat's by the same line counter and carrying the same
+approval gate and query state — not that DBOS wins forever, and **not that the
+two are step-for-step identical** (see the four differences in the next
+section). This pair asserts comparability, not an outcome, and not equality. If a future cleat feature
 changes which side is smaller, that is not a broken control; the control's
 job was honesty, and it is done either way.
 
@@ -108,10 +110,11 @@ DBOS_SYSTEM_DATABASE_URL=postgres://postgres:PASSWORD@127.0.0.1:5432/order_lifec
   npm test
 ```
 
-runs four scenarios end to end against a real DBOS runtime and a real
+runs the scenarios end to end against a real DBOS runtime and a real
 Postgres: shipped, declined (no confirmation), compensated (a charge unwound
-after a failed reservation), and compensation-failed (a held reservation
-whose release itself fails).
+after a failed reservation), compensation-failed (a held reservation whose
+release itself fails), and the approval branch — approved, rejected, and the
+timeout an unapproved above-threshold order gives up on.
 
 ```bash
 DBOS_SYSTEM_DATABASE_URL=postgres://postgres:PASSWORD@127.0.0.1:5432/order_lifecycle_dbos_http \
@@ -122,7 +125,12 @@ starts the HTTP backend (`src/server.ts`):
 
 - `POST /orders` — place an order, returns `{orderId, workflowID}`.
 - `POST /webhooks/payment/:orderWorkflowId` — the PSP's confirmation webhook.
-- `GET /orders/:workflowId` — poll status.
+- `POST /orders/:workflowId/approve` — deliver the human decision
+  (`{approve, reason}`), the counterpart of cleat's `POST /api/orders/{id}/approve`.
+- `GET /orders/:workflowId` — poll status. `status` is the run's fate, and
+  `state` carries the workflow's published query state (`awaiting_approval`,
+  `approved`, `rejected`, …), kept separate for the reason cleat's backend keeps
+  them separate.
 
 `scripts/run-order-lifecycle-dbos-scenario.sh`, at the repo root, drives this
 exact HTTP surface end to end and is what CI runs.

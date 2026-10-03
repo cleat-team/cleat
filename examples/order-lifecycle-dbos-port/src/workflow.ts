@@ -1,12 +1,13 @@
 // Order lifecycle -- a saga over a payment provider, with compensation.
 //
-// The DBOS counterpart to cleat's examples/order-lifecycle/order.go, at the
-// same scope: a card charge, an inventory reservation, a shipment step,
-// compensation that unwinds completed steps when a later one fails, a
-// human-approval gate above a threshold, and query state a poller can read.
+// The DBOS counterpart to cleat's examples/order-lifecycle/order.go: a card
+// charge, an inventory reservation, a shipment step, compensation that unwinds
+// completed steps when a later one fails, a human-approval gate above a
+// threshold, and query state a poller can read.
 // The last two were added by cleat#2997: without them the pair's "same scope"
 // claim was false and the headline compared a 5-step application against a
-// 3-step one. Written against @dbos-inc/dbos-sdk 5.2.11, the version
+// 3-step one. Four differences remain and the pair's README states them -- this
+// port is comparable, not identical. Written against @dbos-inc/dbos-sdk 5.2.11, the version
 // package.json pins -- see the pair's README for why the version and the date
 // both matter.
 //
@@ -30,9 +31,9 @@ export const approvalThresholdCents = 50_000;
 // takes a SINGLE topic per call, and `waitFirst`/`waitAll` operate on workflow
 // handles rather than on messages. cleat's AwaitSignals takes a LIST of signal
 // names; the equivalent here is one topic whose payload names the decision,
-// which is the idiom DBOS's own human-in-the-loop example uses. Same scope,
-// different shape -- stated in the pair's README rather than left for a reader
-// to find.
+// which is the idiom DBOS's own human-in-the-loop example uses. Equivalent in
+// scope, different in shape -- stated in the pair's README rather than left for
+// a reader to find.
 export const DECISION_TOPIC = 'order-decision';
 
 // defaultApprovalWindowSeconds is 24h, matching cleat's ApprovalTimeout. It is
