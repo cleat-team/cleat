@@ -32,6 +32,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/cleat-team/cleat/cleat"
 )
@@ -43,6 +44,34 @@ const (
 	KindService  = "service"
 	KindPlugin   = "plugin"
 	KindWorkflow = "workflow"
+
+	// KindApproval is a plugin call that is POLLED until it reports a
+	// decision. It exists because cleat has no blocking await primitive yet
+	// (cleat#2998): a human approval is a wait, and the wait has to be a loop
+	// with durable sleeps in it. When the primitive lands, this kind becomes a
+	// single call -- see DefaultApprovalPollSeconds.
+	KindApproval = "approval"
+)
+
+// What a blocked tool call does when the model asks for a tool that does not
+// exist, or a tool fails.
+const (
+	// ToolErrorInject (the default, and what this workflow has always done)
+	// hands the error back to the model as the tool's result, so it can
+	// correct itself. The library this replaces chose this, and a model
+	// handles a tool error far better than a dead run does.
+	ToolErrorInject = "inject"
+
+	// ToolErrorFail returns the error to the caller and ends the run. A caller
+	// that treats any tool failure as an incident wants this; so does a
+	// workflow whose tools are the only untrusted part of it.
+	ToolErrorFail = "fail"
+)
+
+// Approval polling defaults, matching the example this kind was written for.
+const (
+	DefaultApprovalPollSeconds = 2
+	DefaultApprovalMaxPolls    = 15
 )
 
 // Input is the agent workflow's input.
@@ -101,6 +130,18 @@ type Input struct {
 	// written only when the model produced an answer, so a run stopped by its
 	// budget writes nothing.
 	ArtifactKey string `json:"artifact_key,omitempty"`
+
+	// ToolErrorMode says what a failed tool call -- or a request for a tool
+	// that does not exist -- does. Empty means ToolErrorInject.
+	//
+	// THIS IS NOT A PREFERENCE, IT IS A CONTRACT DIFFERENCE, which is why it is
+	// configurable rather than changed. examples/ai-agent-platform asserts
+	// that an unknown tool FAILS the run, and this workflow has always fed the
+	// error back to the model instead. Both are defensible, they are
+	// observably different, and a caller that migrated onto this workflow
+	// should not have to discover that its error handling changed by
+	// implication.
+	ToolErrorMode string `json:"tool_error_mode,omitempty"`
 }
 
 // Tool is one tool the model may call, and how to call it.
@@ -117,7 +158,7 @@ type Tool struct {
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 
-	// Kind is one of KindService, KindPlugin, KindWorkflow.
+	// Kind is one of KindService, KindPlugin, KindWorkflow, KindApproval.
 	Kind string `json:"kind"`
 
 	// Service and Operation dispatch a KindService tool via DurableCall.
@@ -133,6 +174,17 @@ type Tool struct {
 	// Workflow dispatches a KindWorkflow tool: it is started as a child and
 	// awaited.
 	Workflow string `json:"workflow,omitempty"`
+
+	// PollIntervalSeconds and MaxPolls tune a KindApproval tool's wait. A
+	// non-positive value takes the Default above.
+	//
+	// A TIMEOUT IS A RESULT, NOT AN ERROR. Exhausting MaxPolls returns a
+	// claim with found=false and timed_out=true to the model, so it can say
+	// "nobody approved this" and choose another action -- which is what the
+	// example this kind was written for asserts, and the opposite of failing
+	// the run.
+	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
+	MaxPolls            int `json:"max_polls,omitempty"`
 }
 
 // Defaults. MaxSteps matches the library this replaces, which the issue fixed
@@ -282,6 +334,20 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 		in.SystemPrompt = DefaultSystemPrompt
 	}
 
+	// A tool error is a CONTRACT choice, so an unrecognised mode is refused
+	// rather than silently treated as the default: a caller that asked for
+	// ToolErrorFail and got injection would see its run continue past a
+	// failure it meant to stop on.
+	failOnToolError := false
+	switch in.ToolErrorMode {
+	case "", ToolErrorInject:
+	case ToolErrorFail:
+		failOnToolError = true
+	default:
+		return "", fmt.Errorf("agent: unknown tool_error_mode %q (want %q or %q)",
+			in.ToolErrorMode, ToolErrorInject, ToolErrorFail)
+	}
+
 	// Lookup by name is a map, but NOTE: it is only ever INDEXED, never
 	// iterated. Order comes from in.Tools, which is a slice, because map
 	// iteration order differs between runs and replay is positional.
@@ -412,14 +478,34 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 			if !ok {
 				// A tool the model invented. Reported back to the model
 				// rather than failed, so it can correct itself -- and it is
-				// recorded, so an operator can see the model doing it.
-				rec.Error = fmt.Sprintf("no such tool %q", tc.Function.Name)
+				// recorded, so an operator can see the model doing it. Under
+				// ToolErrorFail it ends the run instead.
+				//
+				// rec.Result IS SET, not only rec.Error, and that is a fix
+				// rather than tidiness: Message.Content carries `omitempty`, so
+				// leaving Result empty sent the model a `role: tool` message
+				// with NO content at all. The error was recorded in the result
+				// struct -- which the CALLER reads, and which
+				// TestAnUnknownToolIsReportedToTheModel asserted -- while the
+				// model was told nothing and could not distinguish "that tool
+				// returned empty" from "there is no such tool". The failing-tool
+				// branch below always did set it, so the two disagreed.
+				msg := fmt.Sprintf("no such tool %q", tc.Function.Name)
+				if failOnToolError {
+					return "", fmt.Errorf("agent: %s", msg)
+				}
+				rec.Error = msg
+				rec.Result = "error: " + msg
 			} else {
 				out, cerr := callTool(h, tool, tc.Function.Arguments)
 				rec.Result = out
 				if cerr != nil {
 					// Same reasoning as the library this replaces: the model
 					// handles a tool error far better than a dead run does.
+					// ToolErrorFail is the caller saying it disagrees.
+					if failOnToolError {
+						return "", fmt.Errorf("agent: tool %q failed: %w", tc.Function.Name, cerr)
+					}
 					rec.Error = cerr.Error()
 					rec.Result = "error: " + cerr.Error()
 				}
@@ -498,9 +584,13 @@ func (t Tool) validate() error {
 		if t.Workflow == "" {
 			return fmt.Errorf("agent: workflow tool %q needs workflow", t.Name)
 		}
+	case KindApproval:
+		if t.Plugin == "" || t.Function == "" {
+			return fmt.Errorf("agent: approval tool %q needs plugin and function to poll", t.Name)
+		}
 	default:
-		return fmt.Errorf("agent: tool %q has unknown kind %q (want %q, %q or %q)",
-			t.Name, t.Kind, KindService, KindPlugin, KindWorkflow)
+		return fmt.Errorf("agent: tool %q has unknown kind %q (want %q, %q, %q or %q)",
+			t.Name, t.Kind, KindService, KindPlugin, KindWorkflow, KindApproval)
 	}
 	return nil
 }
@@ -542,8 +632,60 @@ func callTool(h cleat.HostCalls, t Tool, args string) (string, error) {
 			return "", fmt.Errorf("agent: start child %q: %w", t.Workflow, err)
 		}
 		return h.AwaitChild(runID)
+	case KindApproval:
+		return awaitApproval(h, t, args)
 	}
 	return "", fmt.Errorf("agent: tool %q has unknown kind %q", t.Name, t.Kind)
+}
+
+// awaitApproval polls a plugin function until it reports a decision.
+//
+// THE FUNCTION IS CLAIM-SHAPED: its JSON carries a boolean `found`, and the
+// decision itself is whatever else the payload holds. That split is deliberate
+// and it is the same one WS-1's blocking primitive uses (cleat#2998) -- the
+// callee reports whether it has an answer, never what the answer MEANS, because
+// the meaning belongs to the caller. It is also what makes the swap to that
+// primitive a deletion rather than a redesign: the loop goes, the shape stays.
+//
+// A TIMEOUT IS A RESULT. Exhausting the polls returns a claim with
+// found=false and timed_out=true, which the model receives as an ordinary tool
+// result and can reason about -- an agent that waits forever on a human who has
+// gone home is a held resource, and an agent whose run FAILS on a timeout
+// cannot say "nobody approved this" and pick another action.
+func awaitApproval(h cleat.HostCalls, t Tool, args string) (string, error) {
+	interval := t.PollIntervalSeconds
+	if interval <= 0 {
+		interval = DefaultApprovalPollSeconds
+	}
+	maxPolls := t.MaxPolls
+	if maxPolls <= 0 {
+		maxPolls = DefaultApprovalMaxPolls
+	}
+
+	for poll := 0; poll < maxPolls; poll++ {
+		out, err := h.PluginCall(t.Plugin, t.Function, args)
+		if err != nil {
+			// A plugin that cannot be REACHED is different from one that has
+			// no answer yet, and it is an error either way -- polling a broken
+			// plugin only spends the wait budget.
+			return "", fmt.Errorf("agent: approval tool %q: %w", t.Name, err)
+		}
+		var claim struct {
+			Found bool `json:"found"`
+		}
+		if err := json.Unmarshal([]byte(out), &claim); err != nil {
+			return "", fmt.Errorf("agent: approval tool %q returned unparsable JSON %q: %w", t.Name, out, err)
+		}
+		if claim.Found {
+			return out, nil
+		}
+		// Sleep only BETWEEN polls: a last sleep after the final miss would
+		// add the interval to every timeout for nothing.
+		if poll < maxPolls-1 {
+			h.DurableSleep(time.Duration(interval) * time.Second)
+		}
+	}
+	return `{"found":false,"timed_out":true}`, nil
 }
 
 func marshal(r Result) (string, error) {
