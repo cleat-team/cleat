@@ -1,5 +1,6 @@
 #!/bin/sh
-# cleat#3006: refuse a push whose BRANCH NAME is outside the six allowed prefixes.
+# cleat#3006: refuse a push whose BRANCH NAME is outside the prefixes the
+# branch-naming check accepts.
 #
 # WHY THIS IS A HOOK AND NOT A CI CHECK. `Validate branch name` fires after a PR
 # exists, and a PR's head branch cannot be renamed -- so a wrong prefix costs a
@@ -18,9 +19,8 @@
 # IT ALLOWS WHAT IT CANNOT CLASSIFY, DELIBERATELY. This hook is SHARED:
 # core.hooksPath points every checkout on the machine at this directory, so a
 # refusal it should not have made does not fail one PR -- it blocks every
-# stream's push. Tags are not branch names, a deletion is not a name, and
-# anything unrecognised is left alone. The narrow match is the safety property,
-# not a shortcut.
+# stream's push. Tags are not branch names, a deletion is not a name, anything
+# unrecognised is left alone, and a rule it cannot read is not enforced.
 #
 # The refs come from STDIN, not from `git branch --show-current`. pre-push is
 # handed the refs actually being pushed, one per line:
@@ -34,53 +34,85 @@
 
 set -u
 
-allowed='feature bugfix fix docs release hotfix'
+# THE RULE IS READ FROM THE CHECK, NOT REPEATED HERE.
+#
+# This hook shipped with its own copy of the six prefixes, and the drift was
+# there on day one: `Validate branch name` exempts main/master/develop and the
+# copy refused all three. Two lists drift, and the drift is silent in the
+# direction that matters -- a hook with a stale set refuses a name CI would have
+# accepted, and that looks like the hook is broken rather than out of date.
+#
+# So this reads the prefixes and the permanent-branch exemptions out of
+# .github/workflows/branch-naming.yml, which is the same arrangement
+# .githooks/prepare-commit-msg uses for its own set. tests/hooks asserts the two
+# values it extracts are the ones that workflow declares, so the day the
+# workflow's shape changes the test says so rather than this going quiet.
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || printf '.')
+CHECK="$ROOT/.github/workflows/branch-naming.yml"
+
+PREFIXES=''
+PERMANENT=''
+if [ -r "$CHECK" ]; then
+	PREFIXES=$(grep -E 'const validPrefixes' "$CHECK" | grep -oE "'[a-z]+/'" | tr -d "'")
+	PERMANENT=$(grep -E 'branch === ' "$CHECK" | grep -oE "'[a-z]+'" | tr -d "'")
+fi
+
+# FAIL OPEN. A checkout without .github, or a workflow whose shape has moved, is
+# not a reason to refuse every push on the machine. CI still catches a bad name,
+# and a hook that blocks everything because it could not read a workflow file is
+# a worse failure than the one it guards against.
+if [ -z "$PREFIXES" ]; then
+	exit 0
+fi
 
 bad=''
 while read -r local_ref local_sha remote_ref _; do
-    # A deletion push arrives as local_ref=(delete) with an all-zero local sha.
-    # Refusing it would block REMOVING a badly named branch -- enforcing the
-    # prefix on the attempt to undo the mistake, which is the opposite of the
-    # point. Both signals are checked because either identifies it on its own:
-    # git always sets the local ref, and a client that sent a zero sha with a
-    # refs/heads local ref is deleting too.
-    if [ "$local_ref" = '(delete)' ]; then continue; fi
-    case "$local_sha" in
-        0000000000000000000000000000000000000000) continue ;;
-    esac
+	# A deletion push arrives as local_ref=(delete) with an all-zero local sha.
+	# Refusing it would block REMOVING a badly named branch -- enforcing the
+	# prefix on the attempt to undo the mistake, which is the opposite of the
+	# point. Both signals are checked because either identifies it on its own.
+	if [ "$local_ref" = '(delete)' ]; then continue; fi
+	case "$local_sha" in
+		0000000000000000000000000000000000000000) continue ;;
+	esac
 
-    # Only branch names are in scope. A tag is not a branch; neither is
-    # anything else git might hand us.
-    case "$remote_ref" in
-        refs/heads/*) name=${remote_ref#refs/heads/} ;;
-        *) continue ;;
-    esac
+	# Only branch names are in scope. A tag is not a branch; neither is
+	# anything else git might hand us.
+	case "$remote_ref" in
+		refs/heads/*) name=${remote_ref#refs/heads/} ;;
+		*) continue ;;
+	esac
 
-    ok=0
-    for prefix in $allowed; do
-        case "$name" in
-            "$prefix"/*) ok=1; break ;;
-        esac
-    done
-    if [ "$ok" -ne 1 ]; then
-        bad="$bad
+	# A permanent branch is not a work branch and has no prefix to choose.
+	if printf '%s\n' "$PERMANENT" | grep -qx -- "$name"; then continue; fi
+
+	ok=0
+	for prefix in $PREFIXES; do
+		case "$name" in
+			"$prefix"*) ok=1; break ;;
+		esac
+	done
+	if [ "$ok" -ne 1 ]; then
+		bad="$bad
   $name"
-    fi
+	fi
 done
 
 [ -n "$bad" ] || exit 0
 
-cat >&2 <<EOF
-cleat: refusing to push a branch name outside the six allowed prefixes:$bad
-
-The prefixes are exactly: feature/ bugfix/ fix/ docs/ release/ hotfix/
-
-The prefix names the KIND OF CHANGE, not the kind of file: "this only touches
-_test.go files" is a statement about the files, and test-only, CI-only and
-tooling-only work is feature/. Validate branch name fails the whole PR and a
-head branch cannot be renamed, so this is the last moment the mistake is free.
-
-Bypass with: git push --no-verify
-This is a convenience. CI still decides.
-EOF
+{
+	echo "cleat: refusing to push a branch name outside the prefixes"
+	echo "       .github/workflows/branch-naming.yml accepts:$bad"
+	echo ""
+	echo "The prefixes are: $(printf '%s' "$PREFIXES" | tr '\n' ' ')"
+	echo ""
+	echo "The prefix names the KIND OF CHANGE, not the kind of file: \"this only"
+	echo "touches _test.go files\" is a statement about the files, and test-only,"
+	echo "CI-only and tooling-only work is feature/. Validate branch name fails the"
+	echo "whole PR and a head branch cannot be renamed, so this is the last moment"
+	echo "the mistake is free."
+	echo ""
+	echo "Bypass with: git push --no-verify"
+	echo "This is a convenience. CI still decides."
+} >&2
 exit 1
