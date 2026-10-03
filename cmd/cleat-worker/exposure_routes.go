@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"sort"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -140,7 +141,7 @@ func withoutInternalDefs(defs []engine.WorkflowDef) []engine.WorkflowDef {
 // other helpers use: a name with one internal version is treated as internal
 // for the whole list. That is the conservative direction, and the alternative
 // -- resolving every listed run's definition version -- is a query per row.
-func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.WorkflowStore) (map[string]bool, error) {
+func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.WorkflowStore) ([]string, error) {
 	defs, err := st.ListWorkflowDefs(ctx, "")
 	if err != nil {
 		// NOT nil-and-carry-on: an unreadable definition set would silently
@@ -148,11 +149,15 @@ func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.Workf
 		// closed and let the caller refuse the whole page.
 		return nil, err
 	}
-	internal := make(map[string]bool)
+	var internal []string
 	for _, d := range defs {
 		if d.Exposure.OrDefault() == engine.ExposureInternal {
-			internal[d.Name] = true
+			internal = append(internal, d.Name)
 		}
 	}
+	// Sorted, so the statement this feeds is deterministic: the exclusion is a
+	// list of placeholders, and a map's iteration order would change the SQL text
+	// run to run for no benefit.
+	sort.Strings(internal)
 	return internal, nil
 }

@@ -618,6 +618,19 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		*tf.dst = t
 	}
 
+	// cleat#3009: the exclusion is applied BY THE QUERY, before the count and the
+	// page, so both are computed over the same rows. The 2b workaround filtered
+	// the fetched page instead, which is why pages came back short and the total
+	// was approximate.
+	internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
+	if ierr != nil {
+		// Fail closed: an unreadable definition set cannot be excluded, and an
+		// unfiltered list would show every internal run.
+		s.writeError(w, 500, ierr.Error())
+		return
+	}
+	filter.ExcludeDefNames = internalNames
+
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
@@ -628,36 +641,11 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, 500, err.Error())
 		return
 	}
-	// cleat#1986 slice 2b: an `internal` run must not appear in this list.
-	//
-	// This route is EXTERNAL and addresses runs, so a 404 on the routes that
-	// address one run is undone by a list that still shows it. A list cannot
-	// answer 404 -- it is not addressing one definition -- so it OMITS them.
-	//
-	// KNOWN LIMITATION, stated rather than hidden: the store applies offset and
-	// limit BEFORE this filter, so a page can come back shorter than the limit,
-	// and X-Total-Count (adjusted below) is the count of what this caller can
-	// see rather than the count the store scanned. Filtering in SQL is the right
-	// repair and is not this slice; filed as cleat#3009. It is correct for the
-	// sizes at which a tenant lists runs and wrong at none of them in the
-	// direction that matters -- it never shows an internal run.
-	internal, ierr := s.internalDefinitionNames(r.Context(), st)
-	if ierr != nil {
-		// Fail closed: an unreadable definition set cannot be filtered, and an
-		// unfiltered list would show every internal run.
-		s.writeError(w, 500, ierr.Error())
-		return
-	}
-	if len(internal) > 0 {
-		kept := workflows[:0]
-		for _, wf := range workflows {
-			if !internal[wf.DefName] {
-				kept = append(kept, wf)
-			}
-		}
-		total -= len(workflows) - len(kept)
-		workflows = kept
-	}
+	// cleat#1986 slice 2b, moved into the query by cleat#3009: the internal
+	// exclusion is now a filter (filter.ExcludeDefNames above), so it is applied
+	// before offset and limit rather than to the page this handler fetched. Both
+	// the count and the rows therefore see the same set, and X-Total-Count is
+	// exact again.
 	// Header rather than an envelope: the body stays a bare array, so no
 	// existing caller breaks. handleGetInstanceEvents established this shape.
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // applyWorkflowFilters appends every WHERE clause a WorkflowFilter implies, and
@@ -28,6 +29,30 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter) {
 	}
 	if filter.DefName != "" {
 		qb.AddCondition("def_name = %s", filter.DefName)
+	}
+	if len(filter.ExcludeDefNames) > 0 {
+		// cleat#3009: the inverse of the DefName include above, rendered by the
+		// SAME builder -- which is the whole point. A caller-side post-page
+		// filter cannot do this, because it runs after offset and limit: the
+		// count and the page would be computed over different rows. Here both
+		// go through this function, so they cannot disagree.
+		//
+		// ONE PLACEHOLDER PER NAME, not an interpolated list. Two reasons, and
+		// the second is the one that bites: the names come from workflow_defs,
+		// so keeping them out of the SQL text is free; and MySQL binds `?` by
+		// APPEARANCE while PostgreSQL and SQL Server bind by NUMBER, so the
+		// numbers have to be written in the order the placeholders appear in the
+		// statement. NextPos/AddArgs is exactly that contract -- AddArgs advances
+		// the counter by the number of names written here.
+		n := qb.NextPos()
+		placeholders := make([]string, len(filter.ExcludeDefNames))
+		args := make([]any, len(filter.ExcludeDefNames))
+		for i, name := range filter.ExcludeDefNames {
+			placeholders[i] = d.placeholder(n + i)
+			args[i] = name
+		}
+		qb.AddRaw(" AND def_name NOT IN (" + strings.Join(placeholders, ", ") + ")")
+		qb.AddArgs(args...)
 	}
 	if filter.ErrorCode != "" {
 		qb.AddCondition("error_code = %s", filter.ErrorCode)
