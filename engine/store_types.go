@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -67,6 +68,134 @@ func (c ExposureClass) OrDefault() ExposureClass {
 		return ExposureAuth
 	}
 	return c
+}
+
+// exposureRank orders the closed set from loosest to strictest: public (0),
+// auth (1), internal (2). That order IS cleat#1986's rule -- a higher rank is a
+// stricter class, so "tighten" is a move upward and "loosen" is a move down.
+//
+// A value outside the set returns -1, and every caller has to treat that as a
+// refusal rather than as the loosest class. Returning 0 for an unrecognised
+// value would make a typo compare as `public` and pass a looseness test.
+func exposureRank(c ExposureClass) int {
+	switch c {
+	case ExposurePublic:
+		return 0
+	case ExposureAuth:
+		return 1
+	case ExposureInternal:
+		return 2
+	}
+	return -1
+}
+
+// ErrExposureLoosened reports a deploy that asked for a class less restrictive
+// than the one the artifact's source declares.
+type ErrExposureLoosened struct {
+	Declared  ExposureClass
+	Requested ExposureClass
+}
+
+func (e *ErrExposureLoosened) Error() string {
+	return fmt.Sprintf("the artifact declares exposure %q and this deploy requests %q, "+
+		"which is less restrictive: a deploy may tighten a source-declared class "+
+		"(%s -> %s -> %s) but never loosen it",
+		e.Declared, e.Requested, ExposurePublic, ExposureAuth, ExposureInternal)
+}
+
+// ResolveExposure returns the class a deploy should STORE, given the class the
+// artifact's SOURCE declared -- from its build metadata, "" for no declaration
+// -- and the class the deploy caller REQUESTED, "" for no opinion (cleat#1986
+// slice 2c-ii).
+//
+// # The rule
+//
+// A deploy may TIGHTEN a source-declared class (public -> auth -> internal) but
+// never LOOSEN it, so the result is the stricter of the two. Asking to loosen is
+// an error rather than a silent clamp: clamping would leave the caller believing
+// -- reasonably, from its own command line -- that the deployment is less
+// restrictive than it is, and the next thing they would do is debug why.
+// Refusing names both classes.
+//
+// # Why "" and no opinion are the same value
+//
+// Both arguments use "" for "not stated", which is NOT `auth`. The distinction
+// is the whole reason this function exists: a caller that cannot express "no
+// opinion" cannot be told apart from one that asked for `auth`, and those want
+// opposite results when the source declared `internal`. That is why the deploy
+// flag's default had to become empty in this slice -- it defaulted to `auth`,
+// so an omitted flag read as a request to loosen.
+//
+// # An unrecognised DECLARED class is an error, not an absence
+//
+// This is the fail-open case, and it is the reason the two checks below are
+// separate. The declared value comes out of the artifact's metadata, which is
+// UNTRUSTED input at deploy time -- anyone who can hand this path a file
+// chooses it. Treating `"internal "` (a stray space), `"Internal"` (a case
+// slip), or `"secrets"` as "no declaration" would deploy the workflow as `auth`,
+// which is exactly the loosening this function refuses when a caller asks for it
+// out loud. The build path validates the stamp, so a well-formed artifact
+// cannot carry one of these; a hand-edited one can.
+func ResolveExposure(declared, requested ExposureClass) (ExposureClass, error) {
+	if declared != "" && exposureRank(declared) < 0 {
+		return "", fmt.Errorf("the artifact's metadata declares exposure %q, which is not one of %q, %q or %q",
+			declared, ExposureAuth, ExposurePublic, ExposureInternal)
+	}
+	if requested != "" && exposureRank(requested) < 0 {
+		return "", fmt.Errorf("requested exposure %q is not one of %q, %q or %q",
+			requested, ExposureAuth, ExposurePublic, ExposureInternal)
+	}
+
+	// No declaration: the caller's class stands, and `auth` when they had no
+	// opinion either. This is the pre-existing behaviour, unchanged.
+	if declared == "" {
+		return requested.OrDefault(), nil
+	}
+	// Declared, with no manifest opinion: the declaration is the answer.
+	if requested == "" {
+		return declared, nil
+	}
+	if exposureRank(requested) < exposureRank(declared) {
+		return "", &ErrExposureLoosened{Declared: declared, Requested: requested}
+	}
+	// Equal or stricter. Stricter is a tighten, which is allowed.
+	return requested, nil
+}
+
+// ErrExposurePublicUnavailable reports a deploy whose resolved class is
+// `public`, which no deploy may store until the per-tenant opt-in exists.
+type ErrExposurePublicUnavailable struct{}
+
+func (e *ErrExposurePublicUnavailable) Error() string {
+	return "exposure class public is not available yet: it is only legal for a tenant an operator has " +
+		"opted in, and that per-tenant opt-in is not implemented (cleat#1986)"
+}
+
+// ResolveDeployableExposure is ResolveExposure plus the `public` gate, and it is
+// what every DEPLOY path should call.
+//
+// The gate is here rather than at each call site because it is policy, not
+// plumbing: when the per-tenant opt-in lands, the condition to relax is this
+// one, and a copy of it per deploy path is a copy that will be found and missed
+// in turn. Three paths store a definition -- `cleatctl deploy workflow`, the
+// worker's upload route, and `cmd/deploy-workflow` -- and all three must agree
+// about which classes may be stored.
+//
+// `public` is refused rather than stored. Storing it would create a definition
+// that becomes world-readable the moment enforcement ships, which is a
+// time bomb rather than a permissive default, and it is refused as the RESOLVED
+// class so that an artifact whose SOURCE declares it is caught too. That is
+// wider than slice 2a, which checked only the `--exposure` flag: `//cleat:exposure
+// public` is legal to BUILD, because the build knows no tenant.
+func ResolveDeployableExposure(declared, requested ExposureClass) (ExposureClass, error) {
+	resolved, err := ResolveExposure(declared, requested)
+	if err != nil {
+		return "", err
+	}
+	if resolved == ExposurePublic {
+		return "", &ErrExposurePublicUnavailable{}
+	}
+	return resolved, nil
 }
 
 type WorkflowDef struct {

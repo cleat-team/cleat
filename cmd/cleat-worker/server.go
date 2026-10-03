@@ -24,6 +24,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/jsonschema"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/wasm"
 	"golang.org/x/time/rate"
 )
 
@@ -2906,12 +2907,33 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// cleat#1986 slice 2c-ii. createDefRequest carries no exposure class -- the
+	// upload API has never had one -- so there is nothing a caller can TIGHTEN
+	// with, and the artifact's own source declaration is the only class this
+	// route can honour. Before this it stored `auth` for every upload, including
+	// one whose source declares `internal`, which is the fail-open half of the
+	// gap: the column said reachable while the source said otherwise. Adding a
+	// request field would be a decision about this API's surface, not a
+	// consequence of the rule, so it is deliberately not made here.
+	declared := engine.ExposureClass("")
+	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
+		declared = engine.ExposureClass(meta.Exposure)
+	}
+	exposure, expErr := engine.ResolveDeployableExposure(declared, "")
+	if expErr != nil {
+		// 400 rather than 500: this is the caller's artifact that cannot be
+		// stored, and the message names which class and why.
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": expErr.Error()})
+		return
+	}
+
 	def := &engine.WorkflowDef{
 		Name:       req.Name,
 		Version:    version,
 		WASMBytes:  wasmBytes,
 		ABIVersion: 1,
 		PluginDeps: req.PluginDeps,
+		Exposure:   exposure,
 	}
 
 	if err := st.DeployWorkflowDef(ctx, def); err != nil {

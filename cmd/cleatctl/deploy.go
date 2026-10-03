@@ -65,8 +65,17 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 	// later slice, so the deploy path is the only way to set it today -- and with
 	// nothing declaring a class yet there is nothing to tighten against, so this
 	// simply sets it.
-	exposureFlag := fs.String("exposure", string(engine.ExposureAuth),
-		"exposure class for this version: auth (default) or internal; public is not available until the per-tenant opt-in exists (cleat#1986)")
+	// cleat#1986 slice 2c-ii. The default is EMPTY, not `auth`, and that is the
+	// whole reason this slice works: an omitted flag has to mean "no manifest
+	// opinion" so the artifact's own declaration can stand. It used to default
+	// to `auth`, which is indistinguishable from `--exposure auth` -- so on an
+	// artifact declaring `internal`, a plain `cleatctl deploy workflow X x.wasm`
+	// read as a request to LOOSEN and was refused (or, before this rule, was
+	// silently obeyed).
+	exposureFlag := fs.String("exposure", "",
+		"exposure class for this version: auth, internal, or public (not available until the per-tenant opt-in exists). "+
+			"Omitted means no opinion: the class the artifact declares in its own source, or auth if it declares none. "+
+			"May tighten that class but never loosen it (cleat#1986)")
 	positional, err := parseFlagsAnywhere(fs, args)
 	if err != nil {
 		osExit(1)
@@ -77,20 +86,18 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		osExit(1)
 	}
 
-	// cleat#1986. 'public' is REFUSED rather than stored: it is only legal for a
-	// tenant an operator has opted in, and that per-tenant opt-in does not exist
-	// yet -- so accepting it here would store a definition that becomes
-	// world-readable the moment the enforcement slice lands. Refusing names the
-	// missing policy; storing it would not.
-	exposure, ok := engine.ParseExposure(*exposureFlag)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "error: --exposure must be one of %q, %q or %q, got %q\n",
-			engine.ExposureAuth, engine.ExposurePublic, engine.ExposureInternal, *exposureFlag)
-		osExit(1)
-	}
-	if exposure == engine.ExposurePublic {
-		fmt.Fprintln(os.Stderr, "error: --exposure=public is not available yet: it is only legal for a tenant an operator has opted in, and that per-tenant opt-in is not implemented (cleat#1986). Deploy as auth or internal.")
-		osExit(1)
+	// The REQUESTED class, validated here so a bad flag is named as a bad flag.
+	// "" means the caller expressed no opinion and the artifact's declaration
+	// decides; that is not a class, so it is not run through ParseExposure.
+	requested := engine.ExposureClass("")
+	if *exposureFlag != "" {
+		var ok bool
+		requested, ok = engine.ParseExposure(*exposureFlag)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "error: --exposure must be one of %q, %q or %q, got %q\n",
+				engine.ExposureAuth, engine.ExposurePublic, engine.ExposureInternal, *exposureFlag)
+			osExit(1)
+		}
 	}
 
 	name := positional[0]
@@ -104,6 +111,34 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 	}
 	if len(wasmBytes) == 0 {
 		fmt.Fprintln(os.Stderr, "error: empty WASM file")
+		osExit(1)
+	}
+
+	// cleat#1986 slice 2c-ii: the artifact's SOURCE declaration, then the
+	// tighten-only rule.
+	//
+	// A metadata read that FAILS is treated as no declaration, deliberately
+	// rather than laxly: wasm.ReadMetadata rejects a Component Model binary
+	// outright (see the note on restampWorkflowVersion below), so a Python
+	// artifact takes this path -- and the Python build writes no exposure section
+	// at all today, which is the separate slice cleat#1986 still tracks. But a
+	// read that SUCCEEDS and carries an unrecognised class is a different thing,
+	// and ResolveExposure refuses that one: the value came out of the file, and
+	// treating a malformed stamp as an absence would deploy as `auth` exactly
+	// what the source meant to protect.
+	declared := engine.ExposureClass("")
+	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
+		declared = engine.ExposureClass(meta.Exposure)
+	}
+
+	// ResolveDeployableExposure is the tighten-only rule AND the `public` gate,
+	// in one place so the three deploy paths cannot drift apart about which
+	// classes may be stored. See its doc comment; the gate is deliberately
+	// checked against the RESOLVED class, so an artifact whose source declares
+	// `public` is caught here as well as a flag that asks for it.
+	exposure, err := engine.ResolveDeployableExposure(declared, requested)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
 	}
 
