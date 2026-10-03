@@ -1278,6 +1278,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatAwaitSignals(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatWaitForEvent(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatSetQueryState(linker); err != nil {
 		return err
 	}

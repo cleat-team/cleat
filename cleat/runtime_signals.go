@@ -275,6 +275,44 @@ func (h *HostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int6
 	return h.durableAwaitSignals(signalNames, timeoutMs)
 }
 
+// WaitForEvent blocks until this workflow's claim on an external event
+// succeeds, and returns the claimed event, or returns an error when the total
+// timeout expires.
+//
+// IT REPLACES A LOOP, and the loop is why it exists. Waiting for an external
+// event used to mean: attempt the claim; if it fails, suspend on the signal the
+// registration wakes; attempt the claim again. The re-claim is not belt-and-
+// braces -- a publish's INSERT and its signalAwaiters call are two separate
+// steps, so a wake can arrive for an event an earlier wake already claimed --
+// and an author who copies the claim without the loop ships a workflow that
+// intermittently misses its own event. That invariant is a property of the
+// engine, so the loop lives in the engine and this is one call.
+//
+// The awaited function must be CLAIM-SHAPED: its JSON output carries a boolean
+// "found". found=true returns it here; found=false means this call registers
+// and waits. An output with no "found" field is an error rather than a longer
+// wait, because a function that never answers the question would otherwise
+// spend the whole timeout and then report a timeout.
+//
+// signalNames is what the registration wakes -- for a webhook await,
+// "__evt:"+eventType. timeout is the budget for the WHOLE wait, not per
+// attempt; the re-claim interval is the engine's business.
+func (h *HostCallsImpl) WaitForEvent(pluginName, functionName, inputJSON string, signalNames []string, timeout time.Duration) (string, error) {
+	if h.waitForEvent == nil {
+		return "", errors.New("durable: WaitForEvent can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	// Guard the CONVERTED value, not the Duration -- the same defect cleat#1331
+	// fixed for AwaitSignals: every value in (0, 1ms) truncates to 0, and a 0ms
+	// budget has no deadline to expire.
+	ms := timeout.Milliseconds()
+	if ms <= 0 {
+		return "", fmt.Errorf("WaitForEvent: a timeout of %s rounds to 0ms, and the durable wait has "+
+			"millisecond resolution -- a 0ms wait has no deadline to expire, so it would never "+
+			"return. Use at least 1ms.", timeout)
+	}
+	return h.waitForEvent(pluginName, functionName, inputJSON, signalNames, ms)
+}
+
 func (h *HostCallsImpl) PollSignal(signalName string) (string, bool, error) {
 	if h.pollSignal == nil {
 		return "", false, errors.New("durable: PollSignal can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")

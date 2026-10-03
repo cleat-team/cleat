@@ -152,6 +152,7 @@ var hostFunctions = []HostFunction{
 	{"cleat_reject_promise", "RejectPromise"},
 	{"cleat_schedule_invoke", "ScheduleInvoke"},
 	{"cleat_await_signals", "AwaitSignals"},
+	{"cleat_wait_for_event", "WaitForEvent"},
 	// Defer
 	{"cleat_defer", "DurableDefer"},
 	{"cleat_defer", "DurableDeferFunc"},

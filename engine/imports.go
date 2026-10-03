@@ -381,6 +381,45 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 			sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen))
 	}).Export("cleat_await_signals")
 
+	// cleat_wait_for_event: (ptr,len x4, i64, ptr,maxLen) -> i64
+	//
+	// The claim/register/re-claim loop lives in the engine rather than in every
+	// application. See WaitForEvent's doc comment for why that is a platform job
+	// and for the replay argument -- it writes the same record sequence the
+	// hand-written loop produced, and it routes every attempt through the
+	// fresh/replay dispatcher rather than choosing an arm itself.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		pluginPtr, pluginLen, funcPtr, funcLen, inputPtr, inputLen, namesPtr, namesLen uint32,
+		timeoutMs int64, outPtr, outMaxLen uint32) uint64 {
+		mem := m.Memory()
+		pluginName, ok := readServiceName(mem, pluginPtr, pluginLen)
+		if !ok {
+			return errBadParam
+		}
+		functionName, ok := readServiceName(mem, funcPtr, funcLen)
+		if !ok {
+			return errBadParam
+		}
+		// readWasmPayload, not readWasmStringValidated: a claim-shaped function
+		// may take no input and passes "" here.
+		inputJSON, ok := readWasmPayload(mem, inputPtr, inputLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		signalNames, ok := readWasmStringValidated(mem, namesPtr, namesLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		w, ok := handlerFromContext(ctx).(eventWaiter)
+		if !ok {
+			// A host that does not implement eventWaiter -- the test doubles,
+			// whose subject is other calls. Reported rather than returning a
+			// value the guest would read as a successful wait.
+			return errBadParam
+		}
+		return uint64(w.WaitForEvent(ctx, m, pluginName, functionName, inputJSON, signalNames, timeoutMs, outPtr, outMaxLen))
+	}).Export("cleat_wait_for_event")
+
 	// set_query_state: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		keyPtr, keyLen, valPtr, valLen uint32) uint64 {

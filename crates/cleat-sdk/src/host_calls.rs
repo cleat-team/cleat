@@ -168,6 +168,17 @@ mod imports {
             payload_ptr: *mut u8, payload_max_len: u32,
         ) -> i64;
 
+        // durablewait_for_event - 4 strings in, i64, 1 string out
+        //   (ptr,len x4, i64 timeout-ms, ptr, max-len) -> i64
+        pub fn cleat_wait_for_event(
+            plugin_ptr: *const u8, plugin_len: u32,
+            func_ptr: *const u8, func_len: u32,
+            input_ptr: *const u8, input_len: u32,
+            names_ptr: *const u8, names_len: u32,
+            timeout_ms: i64,
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
+
         // setquerystate - two strings in
         pub fn set_query_state(
             key_ptr: *const u8, key_len: u32,
@@ -781,6 +792,77 @@ impl HostCalls {
             None => (String::new(), payload),
         };
         Ok(AwaitedSignal { name, payload, timed_out, reply_to })
+    }
+
+    /// Block until this workflow claims an external event, or until the timeout
+    /// expires. Mirrors Go's WaitForEvent.
+    ///
+    /// The claim/register/re-claim loop lives in the host rather than in every
+    /// application: a wake is not proof of a claimable event, and the host
+    /// already knows that, so re-deciding it here would be a second copy of an
+    /// invariant the host owns.
+    ///
+    /// `function` must be claim-shaped -- its JSON output carries a boolean
+    /// `found`. `found` true returns the event; false means the host registers
+    /// the workflow as an awaiter and waits. An output with no boolean `found`
+    /// is reported as a failure rather than waited on, so a plugin that never
+    /// answers the question cannot burn the caller's whole budget.
+    pub fn wait_for_event(
+        &self,
+        plugin: &str,
+        function: &str,
+        input_json: &str,
+        signal_names: &[&str],
+        timeout: Duration,
+    ) -> Result<String, CallError> {
+        self.wait_for_event_ms(plugin, function, input_json, signal_names, timeout.as_millis() as i64)
+    }
+
+    /// Wait for an external event in milliseconds. Mirrors Go's WaitForEvent.
+    pub fn wait_for_event_ms(
+        &self,
+        plugin: &str,
+        function: &str,
+        input_json: &str,
+        signal_names: &[&str],
+        timeout_ms: i64,
+    ) -> Result<String, CallError> {
+        self.dispatch_updates(); // dispatch point; see updates::dispatch_updates
+        // JSON-marshal the signal names array, matching Go's adapter behavior and
+        // await_signals_ms above.
+        let names_json = serde_json::to_string(signal_names).unwrap_or_else(|e| {
+            eprintln!("warning: failed to serialize signal names: {}", e);
+            "[]".to_string()
+        });
+        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_wait_for_event(
+                plugin.as_ptr(), plugin.len() as u32,
+                function.as_ptr(), function.len() as u32,
+                input_json.as_ptr(), input_json.len() as u32,
+                names_json.as_ptr(), names_json.len() as u32,
+                timeout_ms,
+                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        // Ask BEFORE decoding, and the reason is the layout: the host marks a
+        // refusal with bit 31 (IMPROVEMENT-PLAN 3.84), and it returns that same
+        // word when the await it performed merely SUSPENDED the run. Bit 31 sits
+        // outside the durable-call packing, so a decoded stop reads as
+        // responseLen=0, errCode=0 -- an empty SUCCESSFUL event, which a caller
+        // would act on. Both cases mean the segment ends here.
+        if stop_requested(result) {
+            return Err(suspend());
+        }
+        let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
+        if err_code != 0 {
+            return Err(CallError::Failed(memory::host_message_or(
+                &out_buf,
+                response_len,
+                format!("wait_for_event({}/{}) failed: host error code {}. The awaited function must be claim-shaped, and its source must match the registration.", plugin, function, err_code),
+            )));
+        }
+        Ok(memory::read_result(&out_buf, response_len))
     }
 
     /// Set query state. Mirrors Go's SetQueryState.

@@ -246,6 +246,29 @@ var stopSurfaces = map[string]stopSurface{
 		wit:    nil,
 		witWhy: reasonWitIsStillCoreABI,
 	},
+	"WaitForEvent": {
+		// The claim/register/re-claim loop the application used to write by hand
+		// (cleat#2998). It consults stopBeforeNewWork for the same reason a
+		// fresh await does: it registers an awaiter and then suspends, so in a
+		// defer segment it would leave a terminated workflow waiting for a
+		// signal instead of finishing its cleanup.
+		//
+		// No WIT function, and the constant matters: cleat_wait_for_event has
+		// never been declared in cleat.wit, so a component guest cannot call it
+		// and there is no signature that could carry the refusal --
+		// reasonNotInTheComponentWorld. reasonWitIsStillCoreABI is the other
+		// shape, for a call the world DOES declare and declares with
+		// out-pointers; that is the state DurableAwaitSignals is in (§3.110),
+		// and it is not this one.
+		//
+		// No `py`, which follows rather than being an omission: `py` exists to
+		// substitute for the guarantee a result<...> return provides, and there
+		// is no WIT return here to substitute for. The Python SDK does not bind
+		// this call at all -- see pythonUnboundBaseline.
+		adapters: []string{"WaitForEvent"},
+		wit:      nil,
+		witWhy:   reasonNotInTheComponentWorld,
+	},
 }
 
 func repoFile(t *testing.T, rel string) string {

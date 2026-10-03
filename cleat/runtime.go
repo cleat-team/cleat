@@ -807,6 +807,7 @@ type HostCallsImpl struct {
 	durableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
 	durableSleep                  func(ms int64)
 	durableAwaitSignals           func(signalNames []string, timeoutMs int64) (string, string, bool, error)
+	waitForEvent                  func(pluginName, functionName, inputJSON string, signalNames []string, timeoutMs int64) (string, error)
 	createPromise                 func(name string) (promiseID string, err error)
 	awaitPromise                  func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
 	resolvePromise                func(id, value string) error
@@ -887,6 +888,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		durableCallWithHeartbeat:      opts.DurableCallWithHeartbeat,
 		durableSleep:                  opts.DurableSleep,
 		durableAwaitSignals:           opts.DurableAwaitSignals,
+		waitForEvent:                  opts.WaitForEvent,
 		createPromise:                 opts.CreatePromise,
 		awaitPromise:                  opts.AwaitPromise,
 		resolvePromise:                opts.ResolvePromise,
@@ -975,15 +977,20 @@ type HostCallsOptions struct {
 	DurableSleep                func(ms int64)
 	DurableSleepMs              func(ms int64)
 	DurableAwaitSignals         func(signalNames []string, timeoutMs int64) (string, string, bool, error)
-	CreatePromise               func(name string) (promiseID string, err error)
-	AwaitPromise                func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
-	ResolvePromise              func(id, value string) error
-	RejectPromise               func(id, errMsg string) error
-	DurableDefer                func(description string) (string, error)
-	DurableDeferFunc            func(fn func()) (string, error)
-	WorkflowID                  func() string
-	RunID                       func() string
-	DurableLog                  func(message string)
+	// WaitForEvent blocks until the workflow's claim on an external event succeeds or the
+	// total timeout expires, owning the claim/register/re-claim loop applications used to
+	// hand-write. The awaited function must be claim-shaped: its JSON output carries a
+	// boolean "found". See engine.WaitForEvent for the replay argument.
+	WaitForEvent     func(pluginName, functionName, inputJSON string, signalNames []string, timeoutMs int64) (string, error)
+	CreatePromise    func(name string) (promiseID string, err error)
+	AwaitPromise     func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+	ResolvePromise   func(id, value string) error
+	RejectPromise    func(id, errMsg string) error
+	DurableDefer     func(description string) (string, error)
+	DurableDeferFunc func(fn func()) (string, error)
+	WorkflowID       func() string
+	RunID            func() string
+	DurableLog       func(message string)
 	// SetScope/GetScope reach cleat_set_scope / cleat_get_scope. Wired
 	// 2026-09-09 (cleat#984): before that HostCallsImpl.SetScope set three
 	// local fields against a host call that was never generated, so a Go

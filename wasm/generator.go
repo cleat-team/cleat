@@ -125,6 +125,17 @@ var importDefs = map[string]importDef{
 			{"payload", kindOutString},
 		},
 	},
+	"cleat_wait_for_event": {
+		ImportName: "cleat_wait_for_event",
+		Params: []paramSpec{
+			{"pluginName", kindInString},
+			{"functionName", kindInString},
+			{"inputJSON", kindInString},
+			{"signalNames", kindInString},
+			{"timeoutMs", kindInt64},
+			{"event", kindOutString},
+		},
+	},
 	// The scope pair. cleat_set_scope takes both strings and hands back the
 	// PREVIOUS scope prefix; passing two empty strings is the documented
 	// "clear" call (engine/scope.go freshSetScope), so both inputs are

@@ -212,6 +212,26 @@ export declare function import_cleat_await_signals(
 ): i64;
 
 /**
+ * 13b. cleat_wait_for_event: Block until this workflow claims an external event.
+ * (import "env" "cleat_wait_for_event")
+ *   (param i32 i32 i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
+ */
+@external("env", "cleat_wait_for_event")
+export declare function import_cleat_wait_for_event(
+  pluginPtr: i32,
+  pluginLen: i32,
+  funcPtr: i32,
+  funcLen: i32,
+  inputPtr: i32,
+  inputLen: i32,
+  namesPtr: i32,
+  namesLen: i32,
+  timeoutMs: i64,
+  responsePtr: i32,
+  responseMaxLen: i32,
+): i64;
+
+/**
  * 14. set_query_state: Set a key-value pair in query state.
  * (import "env" "set_query_state") (param i32 i32 i32 i32) (result i64)
  */
@@ -1847,6 +1867,90 @@ export class HostCalls {
     }
 
     return new AwaitSignalsOutcome(sigName, payload, decoded.timedOut, null, replyTo);
+  }
+
+  // ────────────────────────────────────────────
+  // 13b. waitForEvent
+  // ────────────────────────────────────────────
+
+  /**
+   * Block until this workflow claims an external event, or until the timeout
+   * expires. Mirrors Go's WaitForEvent.
+   *
+   * The claim/register/re-claim loop lives in the host rather than in every
+   * application: a wake is not proof of a claimable event, and the host
+   * already knows that, so re-deciding it here would be a second copy of an
+   * invariant the host owns.
+   *
+   * `functionName` must be claim-shaped -- its JSON output carries a boolean
+   * `found`. `found` true returns the event; false means the host registers
+   * this workflow as an awaiter and waits. An output with no boolean `found`
+   * is reported as a failure rather than waited on, so a function that never
+   * answers the question cannot burn the whole budget reporting a timeout.
+   *
+   * @param pluginName   - Plugin owning the claim-shaped function.
+   * @param functionName - The claim-shaped function, e.g. await_webhook.
+   * @param inputJson    - The function's JSON input.
+   * @param namesJson    - JSON array of signal names, as awaitSignalsMs takes.
+   * @param timeoutMs    - Overall budget in milliseconds.
+   * @returns The claimed event's JSON, or an error.
+   */
+  waitForEventMs(
+    pluginName: string,
+    functionName: string,
+    inputJson: string,
+    namesJson: string,
+    timeoutMs: i64,
+  ): CleatCallOutcome {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
+    // Four strings packed sequentially into the scratch buffer, the same shape
+    // cleatCallMs uses for three.
+    let pluginLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, pluginName);
+    let fnOffset: usize = SCRATCH_BASE + pluginLen;
+    let remaining: i32 = OUT_BUF_SIZE - pluginLen;
+    let fnLen: i32 = this.writeScratch(fnOffset, remaining, functionName, "functionName");
+    let inOffset: usize = fnOffset + fnLen;
+    remaining -= fnLen;
+    let inLen: i32 = this.writeScratch(inOffset, remaining, inputJson, "inputJson");
+    let namesOffset: usize = inOffset + inLen;
+    remaining -= inLen;
+    let namesLen: i32 = this.writeScratch(namesOffset, remaining, namesJson, "namesJson");
+
+    let result: i64 = import_cleat_wait_for_event(
+      SCRATCH_BASE as i32,
+      pluginLen,
+      fnOffset as i32,
+      fnLen,
+      inOffset as i32,
+      inLen,
+      namesOffset as i32,
+      namesLen,
+      timeoutMs,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Ask BEFORE decoding: bit 31 sits outside the durable-call layout, so a
+    // decoded stop reads as errCode 0 with length 0 -- an empty successful
+    // event the caller would act on. See memory.ts stopRequested, which also
+    // marks the workflow suspended, ending the segment here.
+    if (stopRequested(result)) {
+      return new CleatCallOutcome("", "cleat: refused in a defer segment", 0);
+    }
+
+    let decoded = decodeCallResult(result);
+    let responseLen: i32 = decoded.responseLen as i32;
+
+    if (decoded.errCode !== 0) {
+      let errMsg: string =
+        responseLen > 0
+          ? this.memory.readString(OUTPUT_OFFSET, responseLen)
+          : "waitForEventMs(plugin='" + pluginName + "', function='" + functionName + "') failed: unknown error (code " + decoded.errCode.toString() + ")";
+      return new CleatCallOutcome("", errMsg, decoded.callErrorCode);
+    }
+
+    let resp: string = responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "";
+    return new CleatCallOutcome(resp, null, 0);
   }
 
   // ────────────────────────────────────────────

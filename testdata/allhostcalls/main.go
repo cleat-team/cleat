@@ -87,6 +87,7 @@ func Entry(h cleat.HostCalls, input string) (string, error) {
 	// ---- signals ----
 	_ = h.AwaitSignals([]string{"s"}, time.Second)
 	_, _ = h.AwaitSignalsWithQuorum([]string{"s"}, 1, 0, time.Second)
+	_, _ = h.WaitForEvent("webhook-ingest", "await_webhook", "{}", []string{"s"}, time.Second)
 	_, _, _, _ = h.DurableAwaitSignals([]string{"s"}, 1000)
 	_, _, _ = h.PollSignal("s")
 	_ = h.PollSignals([]string{"s"})
