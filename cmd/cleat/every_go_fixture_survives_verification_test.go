@@ -113,6 +113,14 @@ var goFixtureExpectations = map[string]string{
 	// pre-1614 message, which told the author to declare the very global that
 	// makes this panic.
 	"methodglobalh": "a method cannot reach the host through a package-level",
+
+	// cleat#1986 slice 2c. A workflow declaring its exposure class in source
+	// with //cleat:exposure. It must verify cleanly -- the directive is
+	// metadata, not a threading rule, and a fixture that declared an exposure
+	// and then failed verification would be reporting the wrong thing about
+	// the declaration path. The declaration itself is asserted by
+	// TestABuiltFixtureDeclaresItsExposureFromSource in wasm/.
+	"exposure": "",
 }
 
 // TestEveryGoFixtureMatchesItsExpectedVerification is cleat#1313.

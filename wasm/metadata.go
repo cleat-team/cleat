@@ -41,6 +41,22 @@ type Metadata struct {
 	// constrained ([]string, names only) so it cannot become the parameter
 	// list cleat#1065/#1705 documented the host as unable to validate against.
 	EntryPoints []string `json:"entry_points,omitempty"`
+
+	// Exposure is the workflow's declared exposure class, carried from the
+	// source declaration to deploy (cleat#1986 slice 2c).
+	//
+	// A plain string rather than engine.ExposureClass, deliberately: this
+	// package sits BELOW engine, so naming engine's type here would invert the
+	// dependency. The closed set is enforced where both are available -- the
+	// build path validates through engine.ParseExposure and fails the build on
+	// an unknown value, and the column's own CHECK is the last line.
+	//
+	// Empty means NO DECLARATION, which is not the same as `auth`: the deploy
+	// path treats absent as "no source opinion" and lets the requested class
+	// stand, where a declared class can only be tightened. Recording the empty
+	// string is therefore meaningful, and omitempty keeps it off the wire for
+	// every build that predates this field.
+	Exposure string `json:"exposure,omitempty"`
 }
 
 // EffectivePolicy returns the effective child binding policy after applying

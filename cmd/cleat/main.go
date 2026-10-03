@@ -508,6 +508,15 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// the metadata it had just read, and `cleat deploy --dry-run` on a fresh
 	// `cleat init` project printed `Would deploy workflow "my-workflow.wasm"`.
 	workflowName := workflowLogicalName(result)
+
+	// cleat#1986 slice 2c: the source's exposure declaration, validated here.
+	// The refusal itself is exposureDeclarationError, which is a function rather
+	// than straight-line code so that it can be tested; see its doc comment.
+	if msg := exposureDeclarationError(usage); msg != "" {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		os.Exit(1)
+	}
+
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
 		WorkflowVersion:      workflowVersion,
@@ -518,6 +527,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		ChildVersions:        childVersions,
 		ChildBindingPolicy:   channel,
 		EntryPoints:          entryPoints,
+		Exposure:             usage.Exposure,
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -1517,6 +1527,50 @@ func exportedEntryPointNames(result *analyzer.AnalysisResult) []string {
 		names = append(names, wasm.ToSnakeCase(short))
 	}
 	return names
+}
+
+// exposureDeclarationError reports why the source's `//cleat:exposure`
+// declaration cannot be stamped into build metadata, or "" when it can.
+//
+// WHY THIS IS A FUNCTION AND NOT STRAIGHT-LINE CODE IN runBuild. runBuild
+// reports a refusal by writing to stderr and calling os.Exit, so anything
+// inlined into it is untestable except by running the whole binary: a test that
+// drove it would take the test process down with it. Extracting the decision
+// keeps the refusal in one place and makes it a value a test can assert on.
+//
+// BOTH REFUSALS COULD BE LEFT TO DEPLOY, and deliberately are not. The column's
+// CHECK rejects the same two things, but the loop that would close is a slow
+// one: `cleat build` succeeds, `cleat deploy` fails, and the operator's next
+// step is to work out which artifact on disk carried the bad value. The
+// declaration is in SOURCE, and source is where a reader is looking when they
+// get it wrong.
+//
+// The CONFLICT case is the one that matters. Two files declaring different
+// classes have no correct merge -- see wasm.collectExposure -- and silently
+// taking one of them is how a workflow ends up less protected than its author
+// wrote. It is also the case `cleat deploy` CANNOT catch: both values are from
+// the closed set, so the column accepts whichever one the build happened to
+// stamp.
+//
+// Empty is not an error: it means the source declared nothing, which the deploy
+// path distinguishes from a declared class, since only a declared one can be
+// tightened.
+func exposureDeclarationError(usage *wasm.UsageInfo) string {
+	if usage == nil {
+		return ""
+	}
+	if usage.ExposureConflict != "" {
+		return fmt.Sprintf("//cleat:exposure declares conflicting classes (%s). "+
+			"A package may declare at most one; remove all but the intended one.", usage.ExposureConflict)
+	}
+	if usage.Exposure == "" {
+		return ""
+	}
+	if _, ok := engine.ParseExposure(usage.Exposure); !ok {
+		return fmt.Sprintf("//cleat:exposure must be one of %q, %q or %q, got %q",
+			engine.ExposureAuth, engine.ExposurePublic, engine.ExposureInternal, usage.Exposure)
+	}
+	return ""
 }
 
 // workflowLogicalName returns the workflow's declared or derived name, with
