@@ -29,6 +29,7 @@
 package agentworkflow
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -68,6 +69,38 @@ type Input struct {
 
 	// Message is the user's message. Required.
 	Message string `json:"message"`
+
+	// Budget is this run's spend ceiling in dollars, against the `cost` the
+	// llm plugin reports. Once the accumulated cost REACHES it the loop stops
+	// and the result carries StatusBudgetExceeded. Zero or negative means
+	// unbounded.
+	//
+	// WHAT IT CAN AND CANNOT DO, because the obvious sentence here is false
+	// and this field is where a caller would read it: the turn that REACHES
+	// the ceiling is always paid for, since a turn's cost is known only after
+	// it returns -- the ceiling is reached rather than predicted. What the
+	// check stops is the NEXT turn. So a budgeted run can end one turn's cost
+	// over its budget, and never two.
+	//
+	// Checking after the paid call instead spends the same turns and the same
+	// money, and moves only the reported Steps; the enforcement lives in the
+	// `>=`, not in where the check sits. Both were measured -- see the seam
+	// comment below, which says the same thing at the line it describes.
+	Budget float64 `json:"budget,omitempty"`
+
+	// TenantID is attribution and nothing else: the workflow echoes it into
+	// Result and never requires or interprets it. A caller whose spend
+	// boundary must be named -- examples/ai-agent-platform is one -- enforces
+	// that before starting the run, because one caller's constraint is not
+	// this workflow's contract, and requiring it here would refuse every
+	// caller that does not have a tenant.
+	TenantID string `json:"tenant_id,omitempty"`
+
+	// ArtifactKey, when non-empty, writes the finished answer to the bundled
+	// blobstore plugin under this key and echoes the key into Result. It is
+	// written only when the model produced an answer, so a run stopped by its
+	// budget writes nothing.
+	ArtifactKey string `json:"artifact_key,omitempty"`
 }
 
 // Tool is one tool the model may call, and how to call it.
@@ -123,13 +156,38 @@ type ToolCallRecord struct {
 
 // Result is the agent workflow's output.
 type Result struct {
+	// Status is the run's outcome: StatusDone when the model answered, or
+	// StatusBudgetExceeded when the spend ceiling stopped it first.
+	//
+	// A budget stop is an OUTCOME, not a failure, which is why it is reported
+	// here rather than as an error. A caller must not have to parse an error
+	// string to tell "this run spent its budget" from "the LLM broke", and
+	// those are the two things a caller of a budgeted agent needs to tell
+	// apart.
+	Status string `json:"status"`
+
 	Answer    string           `json:"answer"`
 	Steps     int              `json:"steps"`
 	ToolCalls []ToolCallRecord `json:"tool_calls"`
 	Model     string           `json:"model,omitempty"`
 	Tokens    int              `json:"total_tokens,omitempty"`
-	Cost      float64          `json:"cost,omitempty"`
+
+	// Cost is what the run spent, in dollars: input.Budget is measured against
+	// this. It is the same quantity the example this replaces calls SpentUSD,
+	// under this type's own name -- one field, not two for one number.
+	Cost float64 `json:"cost,omitempty"`
+
+	// TenantID echoes Input.TenantID, and ArtifactKey is set only when an
+	// artifact was written.
+	TenantID    string `json:"tenant_id,omitempty"`
+	ArtifactKey string `json:"artifact_key,omitempty"`
 }
+
+// Result.Status's only two values.
+const (
+	StatusDone           = "done"
+	StatusBudgetExceeded = "budget_exceeded"
+)
 
 // ---- LLM wire types (the llm plugin's `chat` contract) ----
 
@@ -255,9 +313,30 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 		{Role: "user", Content: in.Message},
 	}
 
-	res := Result{Model: in.Model}
+	res := Result{Model: in.Model, TenantID: in.TenantID}
 
 	for step := 0; step < in.MaxSteps; step++ {
+		// THE SEAM. The ceiling is enforced before a turn is STARTED, so a run
+		// that has already spent its budget does not begin another one.
+		//
+		// THE COMPARISON IS `>=`, AND THAT IS THE ENFORCEMENT. With `>` the
+		// loop makes one more paid call past the ceiling -- measured at $2.00
+		// against a $1.50 budget by the test that pins this.
+		//
+		// WHAT THE CEILING CANNOT DO, stated because the obvious sentence here
+		// is wrong: the turn that REACHES the ceiling is unavoidable. A turn's
+		// cost is known only after it returns, so the crossing turn is always
+		// paid for and the ceiling is reached rather than predicted. What is
+		// enforced is that nothing is spent AFTER it is reached -- so a
+		// budgeted run can end one turn's cost over its budget, and never two.
+		//
+		// res.Cost starts at zero, so a budget of zero means "unbounded"
+		// (see Input.Budget), never "do nothing".
+		if in.Budget > 0 && res.Cost >= in.Budget {
+			res.Status = StatusBudgetExceeded
+			res.Steps = step
+			return marshal(res)
+		}
 		req := chatRequest{
 			Provider:    in.Provider,
 			Model:       in.Model,
@@ -307,6 +386,13 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 		if len(choice.Message.ToolCalls) == 0 {
 			res.Answer = choice.Message.Content
 			res.Steps = step + 1
+			res.Status = StatusDone
+			if in.ArtifactKey != "" {
+				if err := writeArtifact(h, in.ArtifactKey, res.Answer); err != nil {
+					return "", err
+				}
+				res.ArtifactKey = in.ArtifactKey
+			}
 			return marshal(res)
 		}
 
@@ -415,6 +501,28 @@ func (t Tool) validate() error {
 	default:
 		return fmt.Errorf("agent: tool %q has unknown kind %q (want %q, %q or %q)",
 			t.Name, t.Kind, KindService, KindPlugin, KindWorkflow)
+	}
+	return nil
+}
+
+// writeArtifact puts the run's answer in the bundled blobstore plugin, in the
+// shape that plugin's `put` takes: {"key": ..., "data": <base64>}. It is the
+// same call examples/ai-agent-platform's saveReport makes, so an artifact
+// written by a migrated example lands under the same contract it did before.
+//
+// A failed write is an ERROR rather than a warning, and deliberately: the
+// caller asked for an artifact, so a run that reported success while the
+// artifact was missing would be the worse outcome of the two.
+func writeArtifact(h cleat.HostCalls, key, body string) error {
+	req, err := json.Marshal(map[string]string{
+		"key":  key,
+		"data": base64.StdEncoding.EncodeToString([]byte(body)),
+	})
+	if err != nil {
+		return fmt.Errorf("agent: marshal artifact for %q: %w", key, err)
+	}
+	if _, err := h.PluginCall("blobstore", "put", string(req)); err != nil {
+		return fmt.Errorf("agent: write artifact %q: %w", key, err)
 	}
 	return nil
 }
