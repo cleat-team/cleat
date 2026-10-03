@@ -1,0 +1,86 @@
+#!/bin/sh
+# cleat#3006: refuse a push whose BRANCH NAME is outside the six allowed prefixes.
+#
+# WHY THIS IS A HOOK AND NOT A CI CHECK. `Validate branch name` fires after a PR
+# exists, and a PR's head branch cannot be renamed -- so a wrong prefix costs a
+# close-and-reopen plus a whole fresh CI run. The prefix is chosen HERE, at push
+# time, which is the one moment the mistake is still free. The rule has been
+# applied wrongly twice in a week (#2314 `chore/`, #3004 `test/`), both times
+# with the rule already written down: what failed was applying it, because the
+# rule and the action live in different places.
+#
+# WHAT IT IS NOT. `git push --no-verify` bypasses it, and a clone with
+# core.hooksPath unset never runs it. It converts a round trip into a refusal;
+# `Validate branch name` remains the enforcement. A guard described as
+# enforcement that cannot enforce is worse than no guard, because the next
+# person relies on it.
+#
+# IT ALLOWS WHAT IT CANNOT CLASSIFY, DELIBERATELY. This hook is SHARED:
+# core.hooksPath points every checkout on the machine at this directory, so a
+# refusal it should not have made does not fail one PR -- it blocks every
+# stream's push. Tags are not branch names, a deletion is not a name, and
+# anything unrecognised is left alone. The narrow match is the safety property,
+# not a shortcut.
+#
+# The refs come from STDIN, not from `git branch --show-current`. pre-push is
+# handed the refs actually being pushed, one per line:
+#
+#     <local ref> <local sha> <remote ref> <remote sha>
+#
+# and the checked-out branch is a different object. A hook keyed on
+# --show-current passes a bad name pushed while sitting on a good branch (fails
+# OPEN) and refuses a good one pushed from a bad branch. Measured on a scratch
+# repo when this was specified.
+
+set -u
+
+allowed='feature bugfix fix docs release hotfix'
+
+bad=''
+while read -r local_ref local_sha remote_ref _; do
+    # A deletion push arrives as local_ref=(delete) with an all-zero local sha.
+    # Refusing it would block REMOVING a badly named branch -- enforcing the
+    # prefix on the attempt to undo the mistake, which is the opposite of the
+    # point. Both signals are checked because either identifies it on its own:
+    # git always sets the local ref, and a client that sent a zero sha with a
+    # refs/heads local ref is deleting too.
+    if [ "$local_ref" = '(delete)' ]; then continue; fi
+    case "$local_sha" in
+        0000000000000000000000000000000000000000) continue ;;
+    esac
+
+    # Only branch names are in scope. A tag is not a branch; neither is
+    # anything else git might hand us.
+    case "$remote_ref" in
+        refs/heads/*) name=${remote_ref#refs/heads/} ;;
+        *) continue ;;
+    esac
+
+    ok=0
+    for prefix in $allowed; do
+        case "$name" in
+            "$prefix"/*) ok=1; break ;;
+        esac
+    done
+    if [ "$ok" -ne 1 ]; then
+        bad="$bad
+  $name"
+    fi
+done
+
+[ -n "$bad" ] || exit 0
+
+cat >&2 <<EOF
+cleat: refusing to push a branch name outside the six allowed prefixes:$bad
+
+The prefixes are exactly: feature/ bugfix/ fix/ docs/ release/ hotfix/
+
+The prefix names the KIND OF CHANGE, not the kind of file: "this only touches
+_test.go files" is a statement about the files, and test-only, CI-only and
+tooling-only work is feature/. Validate branch name fails the whole PR and a
+head branch cannot be renamed, so this is the last moment the mistake is free.
+
+Bypass with: git push --no-verify
+This is a convenience. CI still decides.
+EOF
+exit 1
