@@ -38,6 +38,10 @@ type fakeCleat struct {
 	runResult string
 	// cancels counts POSTs to a /cancel path.
 	cancels int
+	// traceparents records the inbound-visible header on every request, so a
+	// test can assert what the proxy actually SENT rather than that it calls a
+	// helper.
+	traceparents []string
 }
 
 func newFakeCleat() *fakeCleat {
@@ -79,6 +83,7 @@ func (f *fakeCleat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.paths = append(f.paths, r.URL.Path)
+	f.traceparents = append(f.traceparents, r.Header.Get("traceparent"))
 
 	switch {
 	case r.URL.Path == "/api/openapi.json":
@@ -527,6 +532,42 @@ func TestATaskRequestWithoutAnIdIsRefused(t *testing.T) {
 	}
 	if code, _ := e["code"].(float64); int(code) != codeInvalidPar {
 		t.Fatalf("error code = %v, want %d", e["code"], codeInvalidPar)
+	}
+}
+
+// TestTheCallersTraceContinuesIntoCleat is the known-positive for the required
+// check that was red on the first push. That check accepts a MENTION of
+// SetTraceparent, so a call wired to nothing satisfies it while the trace still
+// ends at this hop -- which is the exact shape it exists to prevent. So this
+// asserts the OUTBOUND HEADER, not the call.
+func TestTheCallersTraceContinuesIntoCleat(t *testing.T) {
+	p, f := newProxyPair(t)
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const callerSpan = "00f067aa0ba902b7"
+	inbound := "00-" + traceID + "-" + callerSpan + "-01"
+
+	call(t, p, "tools/call", map[string]any{"name": "checkout",
+		"arguments": map[string]any{"input": map[string]any{}}},
+		map[string]string{"traceparent": inbound})
+
+	var got string
+	f.mu.Lock()
+	for _, tp := range f.traceparents {
+		if tp != "" {
+			got = tp
+		}
+	}
+	f.mu.Unlock()
+
+	if got == "" {
+		t.Fatalf("no traceparent reached cleat: the caller's trace ended at this hop")
+	}
+	parts := strings.Split(got, "-")
+	if len(parts) != 4 || parts[1] != traceID {
+		t.Fatalf("outbound traceparent = %q, want the caller's trace-id %s", got, traceID)
+	}
+	if parts[2] == callerSpan {
+		t.Errorf("the caller's span-id was forwarded verbatim; a proxy hop synthesises a new span for itself")
 	}
 }
 

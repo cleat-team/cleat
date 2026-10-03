@@ -74,6 +74,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // protocolVersion is the MCP revision this proxy speaks. cleat#1982 required
@@ -612,53 +614,69 @@ func taskStatus(cleatStatus string) string {
 // ---- HTTP to cleat ------------------------------------------------------
 
 func (p *proxy) getOpenAPI(r *http.Request) (map[string]any, int, error) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.api+"/api/openapi.json", nil)
+	status, body, err := p.call(r, outbound{method: http.MethodGet, path: "/api/openapi.json"})
 	if err != nil {
 		return nil, 0, err
 	}
-	for _, h := range credHeaders {
-		if v := r.Header.Get(h); v != "" {
-			req.Header.Set(h, v)
-		}
-	}
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if resp.StatusCode != http.StatusOK {
-		return nil, resp.StatusCode, nil
+	if status != http.StatusOK {
+		return nil, status, nil
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("decoding document: %w", err)
+		return nil, status, fmt.Errorf("decoding document: %w", err)
 	}
-	return doc, resp.StatusCode, nil
+	return doc, status, nil
 }
 
 func (p *proxy) getRun(r *http.Request, runID string) (int, []byte, error) {
-	return p.cleatRequest(r, http.MethodGet, "/api/workflows/"+url.PathEscape(runID), nil)
+	return p.call(r, outbound{method: http.MethodGet, path: "/api/workflows/" + url.PathEscape(runID)})
 }
 
 func (p *proxy) cancelRun(r *http.Request, runID string) (int, []byte, error) {
-	return p.cleatRequest(r, http.MethodPost, "/api/workflows/"+url.PathEscape(runID)+"/cancel", nil)
+	return p.call(r, outbound{method: http.MethodPost, path: "/api/workflows/" + url.PathEscape(runID) + "/cancel"})
 }
 
-// cleatRequest is the one place credentials are attached, so a new call site
-// cannot forget them -- an unauthenticated call would be answered as the
-// DEFAULT tenant, which reads as a working request returning someone else's
-// data rather than as a failure.
-func (p *proxy) cleatRequest(r *http.Request, method, path string, body []byte) (int, []byte, error) {
-	var rdr io.Reader
-	if body != nil {
-		rdr = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(r.Context(), method, p.api+path, rdr)
+func (p *proxy) start(r *http.Request, workflow string, args map[string]any, key string) (int, []byte, error) {
+	payload, err := json.Marshal(map[string]any{"input": args})
 	if err != nil {
 		return 0, nil, err
 	}
-	if body != nil {
+	return p.call(r, outbound{
+		method:  http.MethodPost,
+		path:    "/api/workflows/" + url.PathEscape(workflow) + "/start",
+		body:    payload,
+		headers: map[string]string{"Idempotency-Key": key},
+	})
+}
+
+// outbound is one request to cleat.
+type outbound struct {
+	method  string
+	path    string
+	body    []byte
+	headers map[string]string
+}
+
+// call is the ONE place an outbound request to cleat is built. It exists so
+// that two things a new call site would otherwise have to remember are attached
+// in one place, and both fail QUIETLY when forgotten:
+//
+//   - CREDENTIALS. An unauthenticated call is not refused -- it is answered as
+//     the DEFAULT tenant -- so forgetting them reads as a working request
+//     returning someone else's data rather than as a failure.
+//   - THE CALLER'S TRACE. A proxy is a hop, and a hop that does not pass the
+//     trace on is where a customer's chain ends: cleat appears in a collector
+//     as a leaf that swallowed everything downstream (cleat#1596).
+func (p *proxy) call(r *http.Request, o outbound) (int, []byte, error) {
+	var rdr io.Reader
+	if o.body != nil {
+		rdr = bytes.NewReader(o.body)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), o.method, p.api+o.path, rdr)
+	if err != nil {
+		return 0, nil, err
+	}
+	if o.body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	for _, h := range credHeaders {
@@ -666,6 +684,15 @@ func (p *proxy) cleatRequest(r *http.Request, method, path string, body []byte) 
 			req.Header.Set(h, v)
 		}
 	}
+	for k, v := range o.headers {
+		req.Header.Set(k, v)
+	}
+	// The caller's trace continues into cleat. The trace-ID comes from the
+	// caller's inbound traceparent and a fresh span-id is synthesised for this
+	// hop by plugin.SetTraceparent -- the same helper the plugin path uses, and
+	// cleat keeps only the trace-ID from an inbound header (cleat#1597), so
+	// re-deriving here is that policy rather than a second one invented here.
+	plugin.SetTraceparent(req, traceIDFromTraceparent(r.Header.Get(plugin.TraceparentHeader)))
 	resp, err := p.http.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -675,28 +702,20 @@ func (p *proxy) cleatRequest(r *http.Request, method, path string, body []byte) 
 	return resp.StatusCode, b, nil
 }
 
-func (p *proxy) start(r *http.Request, workflow string, args map[string]any, key string) (int, []byte, error) {
-	payload, err := json.Marshal(map[string]any{"input": args})
-	if err != nil {
-		return 0, nil, err
+// traceIDFromTraceparent returns the 32-hex trace-ID of a W3C traceparent
+// header, or "" when the header is absent or malformed.
+//
+// It only has to avoid INVENTING one: plugin.SetTraceparent validates again and
+// ignores an invalid ID, so a malformed header degrades to "no trace to
+// propagate" -- the honest answer for a caller that sent no usable trace. That
+// is also why this need not agree with that validator exactly.
+func traceIDFromTraceparent(tp string) string {
+	parts := strings.Split(tp, "-")
+	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 {
+		return ""
 	}
-	url := p.api + "/api/workflows/" + workflow + "/start"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return 0, nil, err
+	if _, err := hex.DecodeString(parts[1]); err != nil {
+		return ""
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", key)
-	for _, h := range credHeaders {
-		if v := r.Header.Get(h); v != "" {
-			req.Header.Set(h, v)
-		}
-	}
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return resp.StatusCode, body, nil
+	return parts[1]
 }
