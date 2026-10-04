@@ -784,18 +784,35 @@ jobs:
       # each playbook's own body and never touched docs/playbooks/README.md,
       # the shared table all four point back to -- so its routes row still
       # said `RegisterRoutes(*http.ServeMux)` eleven days after cleat#2232
-      # changed the real interface to `plugin.Router` (cleat#2511). No network
-      # needed: both the documented interfaces and the Built? table's example
-      # dirs/CI job names are checked against this same tree.
+      # changed the real interface to `plugin.Router` (cleat#2511). The
+      # documented interfaces and the Built? table's example dirs/CI job names
+      # are checked against this same tree and need no network.
       #
-      # --self-test first, and its known-positive is the real cleat#2511 text
-      # (`RegisterRoutes(*http.ServeMux)`), not a synthetic mutation -- see the
-      # script's self_test() for the restore-and-diff falsification this was
-      # verified with before being wired in here.
-      - name: Playbook README interface and build claims
+      # cleat#2603 ADDS ONE THAT DOES, which is why this step now carries
+      # GH_TOKEN: the four bodies' own "still to build" claims are checked
+      # against the tracker, so their `cleat#N` citations cannot drift the way
+      # #2513's did. Same token the readiness-scorecard step above supplies for
+      # the same reason; a `gh` that cannot reach the API exits 2 (UNMEASURED)
+      # rather than passing, which is what keeps a network outage from reading
+      # as a clean playbook.
+      #
+      # --self-test first, and its known-positives are real text -- cleat#2511's
+      # `RegisterRoutes(*http.ServeMux)` and, for the bodies, a shipped claim
+      # marked unbuilt -- not synthetic mutations. See self_test() for the
+      # restore-and-diff falsification each was verified with.
+      #
+      # This file is WS-3's zone, and this step edits it under the zone's
+      # documented exception -- another stream may add here when leaving the
+      # mechanism unwired would be worse. That is exactly the case: the only
+      # alternative is a body-claim check with no step running it, which is the
+      # defect class CLAUDE.md names -- "a mechanism that exists and is wired to
+      # nothing reads as done".
+      - name: Playbook interface, build and body-claim checks
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          bash -e <<'LINT_GUARD_EOF' || echo "Playbook README interface and build claims" >> "$LINT_FAILURES_FILE"
+          bash -e <<'LINT_GUARD_EOF' || echo "Playbook interface, build and body-claim checks" >> "$LINT_FAILURES_FILE"
           scripts/check-playbook-claims.py --self-test
           scripts/check-playbook-claims.py
           LINT_GUARD_EOF

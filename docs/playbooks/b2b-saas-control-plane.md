@@ -327,16 +327,17 @@ thing you have to route through a workflow for the history to answer it.
 
 **Two items this list used to carry have shipped, and the issue that asked for them to be added here
 was overtaken by the same thing** — the quota admin surface (cleat#2046, now `cleatctl quota`) and
-the audit export (cleat#2047, now `cleatctl audit export`) are in the assembly table above, not here.
+the audit export (cleat#2047, now `cleatctl audit export`) have **shipped** and are in the assembly
+table above, not here.
 Re-check a "still to build" list against the tree before acting on it; this one drifted in the
 direction that costs you work you did not have to do.
 
-1. **A terminator, if a customer needs SAML** — but **not** the issuer support. Generic OIDC shipped
-   in cleat#1582 (`providerOIDC`), so a customer's SAML proxy terminates SAML itself and presents
-   OIDC to cleat, with no per-vendor code. cleat does not implement SAML by decision, not by omission
+1. **A terminator, if a customer needs SAML** — but **not** the issuer support. Generic OIDC **shipped**
+   in cleat#1582 (`providerOIDC`), so a customer's SAML proxy terminates SAML itself and presents OIDC
+   to cleat, with no per-vendor code. cleat does not implement SAML by decision, not by omission
    — [`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md). **SCIM remains
    genuinely absent**, deferred rather than declined, and is still yours to build or buy.
-2. **Per-tenant TLS**, if tenants get their own domains. The host-to-tenant *binding* is shipped
+2. **Per-tenant TLS**, if tenants get their own domains. The host-to-tenant *binding* is **shipped**
    (`auth/host_binding.go`, cleat#1568); this is the certificate and its renewal, not the mapping.
 3. **A user-level authorization model.** `SessionInfo` carries `TenantID`, `SessionID` and
    `UserEmail` (`SessionInfo`, `plugins/oauthprovider/middleware.go`), so a principal below the tenant
