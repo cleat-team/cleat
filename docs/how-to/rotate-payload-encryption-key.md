@@ -102,10 +102,12 @@ that was this doc's old claim, and it was wrong.
 > the hazard this section rests on -- see cleat#3090.** A worker that cannot
 > open a run's history now **releases it** rather than destroying or corrupting
 > it: `cmd/cleat-worker/setup.go:3319-3325` calls
-> `releaseForAnotherWorker(wf, …, "history_decrypt")`, whose own comment says
-> *"It is NOT terminated, which is the property that matters."* So the failure
-> mode above is historical, not current — a mixed fleet now costs a release and
-> a backoff, not the run. **Whether the two-phase procedure below is still
+> `releaseForAnotherWorker(wf, …, "history_decrypt")`, whose own doc comment
+> states the property directly — the run is *"deliberately a QUIESCENT STUCK
+> STATE rather than a terminal one"*, served the moment a capable worker is
+> deployed. So the failure mode above is historical, not current — a mixed fleet
+> now costs a claim-and-release per backoff interval across the cluster, not the
+> run. **Whether the two-phase procedure below is still
 > required is open** (cleat#3090); it is left exactly as written until that is
 > answered, because withdrawing a safety recommendation is not something a
 > prose audit should do on its own.
