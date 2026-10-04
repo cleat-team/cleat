@@ -596,12 +596,26 @@ var pythonUnboundBaseline = []string{
 	// (python-sdk/cleat_sdk/host_calls.py), so it is the wrong-VALUE mode, live
 	// rather than latent. That is the shape §3.431's body records.
 	//
-	// ONE RESPECT IN WHICH IT DIFFERS FROM cleat_start_detached, and it is why
-	// the two carry different stopSurfaces constants: that call IS declared in
-	// cleat.wit, with the core-ABI shape (reasonWitIsStillCoreABI -- a world
-	// that declares the wrong thing). This one has no WIT declaration at all
-	// (reasonNotInTheComponentWorld -- a world that declares nothing), so its
-	// fix starts with writing the declaration: `durable-wait-for-event:
+	// THE SAME AS cleat_start_detached in the respect that matters here, not
+	// different from it: neither has a WIT declaration of its own, and neither
+	// is bound. An earlier draft of this paragraph claimed the opposite about
+	// cleat_start_detached -- that it WAS declared, with the core-ABI shape.
+	// That was false on both halves, and cleat-review re-derived it during
+	// #3049's review: cleat.wit declares durable-run-detached for
+	// cleat_run_detached (:396) and has no start-detached entry at all, and
+	// reasonWitIsStillCoreABI appears as an entry value exactly once, on
+	// DurableAwaitSignals.
+	//
+	// THAT is what both of these contrast with -- the one call of the three
+	// that is declared (cleat.wit:163) AND bound in Python
+	// (python-sdk/cleat_sdk/host_calls.py), which is why it is the one whose
+	// guest reads whatever sat at OUTPUT_OFFSET. A world that declares the
+	// wrong thing, against this one, where the world declares nothing. The
+	// detached-run site needs no such constant because it names
+	// durable-run-detached, the declaration cleat_run_detached uses;
+	// cleat_start_detached rides on that without a declaration of its own.
+	//
+	// So the fix here starts with writing the declaration: `durable-wait-for-event:
 	// func(...) -> result<string, call-failure>`, a dispatcher in
 	// component_cgo.go, and regenerated componentize-py bindings, whose
 	// regeneration must first reproduce the unmodified tree byte-identically

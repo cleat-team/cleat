@@ -459,13 +459,19 @@ var sdkUnreachedBaseline = map[string][]string{
 		// IS bound in Python, so its guest reads whatever sat at
 		// OUTPUT_OFFSET. That is the shape §3.431's body records.
 		//
-		// It differs from cleat_start_detached in one respect that decides how
-		// it is guarded. That call IS declared in cleat.wit, with the core-ABI
-		// shape -- stopSurfaces records it as reasonWitIsStillCoreABI, a world
-		// that declares the wrong thing. This one has no WIT declaration at
-		// all, so it sits behind reasonNotInTheComponentWorld, a world that
-		// declares nothing, and its fix begins with writing the declaration.
-		// Both are the out-pointer state §3.431's body records.
+		// THE SAME as cleat_start_detached in the respect that matters here,
+		// not different from it: neither has a WIT declaration of its own, and
+		// neither is bound. What both contrast with is durable-await-signals --
+		// the one call of the three that is declared AND bound, and so the only
+		// one whose guest reads whatever sat at OUTPUT_OFFSET.
+		//
+		// stopSurfaces carries reasonNotInTheComponentWorld here, because
+		// cleat_wait_for_event has no WIT declaration of its own to name,
+		// against reasonWitIsStillCoreABI on DurableAwaitSignals. The
+		// detached-run site carries neither: it names durable-run-detached, the
+		// declaration cleat_run_detached uses, so cleat_start_detached rides on
+		// it without one of its own. All of it is the out-pointer state
+		// §3.431's body records.
 		//
 		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
 		// engine/python_wasm_e2e_test.go records the same fact from
