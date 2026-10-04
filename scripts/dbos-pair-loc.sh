@@ -28,6 +28,16 @@
 # platform-enforcement asymmetry, and no ROLE asymmetry either -- both sides
 # are one workflow file, one server/backend file, one test file.
 #
+# `web/` IS OUTSIDE THAT SET, and it is NOT the same size on the two sides.
+# cleat serves examples/order-lifecycle/web/app.js -- 458 lines at 2026-10-04
+# (`wc -l examples/order-lifecycle/web/app.js`) -- while the DBOS port has no
+# page at all (`git ls-files examples/order-lifecycle-dbos-port` is
+# src/{workflow,server,order.test}.ts plus manifests and docs). A change to
+# the page therefore moves neither number below, and a reader pricing what
+# this pair excludes needs to know the excluded page exists on one side only.
+# Recorded so it is not re-derived; whether the page belongs in the count is
+# cleat#2952's question, not this script's to settle by silence.
+#
 # integration-hub is NOT role-symmetric by file count, and this script has
 # been corrected twice by cleat-review's review of #2621 (see git blame):
 # once to add the app/platform split, once to make the four roles
