@@ -613,11 +613,25 @@ part of that gap themselves.
 
 `package.json` pins:
 
-- `@dbos-inc/dbos-sdk` to `5.1.10` — the latest stable release as of
-  **2026-09-28**, confirmed with `npm view @dbos-inc/dbos-sdk version` on
-  the same day this port was written, and the same version the
-  order-lifecycle pair already pins. No drift between the two pairs to
-  record.
+- `@dbos-inc/dbos-sdk` to `5.2.11` — the version **all three** DBOS ports now
+  pin (`order-lifecycle-dbos-port`, this one, `b2b-saas-control-plane-dbos-port`),
+  in `package.json` and in `package-lock.json`'s resolver entry alike.
+  **Corrected 2026-10-04 (cleat#2955):** this bullet said `5.1.10` — the
+  version current when the port was written, confirmed then with
+  `npm view @dbos-inc/dbos-sdk version` — and closed with "the same version
+  the order-lifecycle pair already pins. No drift between the two pairs to
+  record." That closing clause is the part that had gone false while the rest
+  of the bullet stayed true and unremarkable: `order-lifecycle-dbos-port`'s
+  README had already been updated when the siblings were bumped, and the
+  claim left behind here was that no drift needed recording. **Two sites
+  still carried it** — this bullet and `src/workflow.ts`'s header comment —
+  and a first pass of this correction fixed only this one, because the sweep
+  behind it searched `*.md` and `workflow.ts` is not markdown. That pass also
+  wrote, here, that "this file was the last one still asserting the drift was
+  absent" — a claim about a search that had not been run, which the second
+  pass falsified. Both are corrected; the *sweep* is the part worth naming,
+  because a scoped search and a whole-tree claim look identical in the
+  sentence they produce.
 - `isolated-vm` to `6.1.2`, paired with **Node 24** ("Krypton", the current
   LTS line as of 2026-09-28) in both CI (`.github/workflows/ci.yml`) and
   `@types/node`. Both were verified empirically in this PR, not chosen from
