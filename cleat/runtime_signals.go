@@ -286,7 +286,10 @@ func (h *HostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int6
 // steps, so a wake can arrive for an event an earlier wake already claimed --
 // and an author who copies the claim without the loop ships a workflow that
 // intermittently misses its own event. That invariant is a property of the
-// engine, so the loop lives in the engine and this is one call.
+// mechanism rather than of an application, so the loop is written once on each
+// side of the boundary: in engine/wait_for_event.go for a WASM guest on a
+// worker, and in this method's fallback below for a workflow run in-process.
+// Neither is an application's business, and a caller here gets one call.
 //
 // The awaited function must be CLAIM-SHAPED: its JSON output carries a boolean
 // "found". found=true returns it here; found=false means this call registers
@@ -298,9 +301,6 @@ func (h *HostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int6
 // "__evt:"+eventType. timeout is the budget for the WHOLE wait, not per
 // attempt; the re-claim interval is the engine's business.
 func (h *HostCallsImpl) WaitForEvent(pluginName, functionName, inputJSON string, signalNames []string, timeout time.Duration) (string, error) {
-	if h.waitForEvent == nil {
-		return "", errors.New("durable: WaitForEvent can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
-	}
 	// Guard the CONVERTED value, not the Duration -- the same defect cleat#1331
 	// fixed for AwaitSignals: every value in (0, 1ms) truncates to 0, and a 0ms
 	// budget has no deadline to expire.
@@ -310,7 +310,75 @@ func (h *HostCallsImpl) WaitForEvent(pluginName, functionName, inputJSON string,
 			"millisecond resolution -- a 0ms wait has no deadline to expire, so it would never "+
 			"return. Use at least 1ms.", timeout)
 	}
-	return h.waitForEvent(pluginName, functionName, inputJSON, signalNames, ms)
+	if h.waitForEvent != nil {
+		return h.waitForEvent(pluginName, functionName, inputJSON, signalNames, ms)
+	}
+
+	// FALLBACK: the same loop, composed from hooks an in-process host already
+	// wires. This is AwaitSignalsWithQuorum's shape and its reason -- a hook
+	// whose absence has a correct answer should not be a required field that
+	// every host must remember. A host that knows better provides the hook above
+	// and never reaches this: the engine's WASM export does (engine/imports.go),
+	// where a suspension is a sentinel the guest decodes rather than a blocking
+	// return.
+	//
+	// The budget is the host's OWN clock (NowMs), not time.Now. An in-process
+	// host that simulates time -- cleattest advances a virtual clock -- must see
+	// the same deadline its AwaitSignals honours, or the two disagree about when
+	// the budget is spent and the loop outlives its timeout.
+	deadline := h.NowMs() + ms
+	for {
+		out, err := h.PluginCall(pluginName, functionName, inputJSON)
+		if err != nil {
+			return "", err
+		}
+		found, wellFormed := claimShapedFound(out)
+		if !wellFormed {
+			return "", fmt.Errorf("WaitForEvent: %s/%s returned an output with no boolean \"found\" field, "+
+				"so this call cannot tell a claimed event from an unclaimed one. The awaited function must be "+
+				"claim-shaped; see this method's doc comment. Output was: %s", pluginName, functionName, out)
+		}
+		if found {
+			return out, nil
+		}
+		remaining := deadline - h.NowMs()
+		if remaining <= 0 {
+			return "", fmt.Errorf("WaitForEvent: no event for %s/%s within %v", pluginName, functionName, timeout)
+		}
+		// ONE wait over the whole remaining budget rather than a slice of it: an
+		// in-process AwaitSignals BLOCKS, so it returns either on a wake -- which
+		// the loop re-checks, since a wake is not proof of a claimable event --
+		// or when the budget is spent, which reports TimedOut. A re-check
+		// interval would only add wakeups to a wait that already ends by itself.
+		result := h.AwaitSignals(signalNames, time.Duration(remaining)*time.Millisecond)
+		if result.Err != nil {
+			return "", result.Err
+		}
+		if result.TimedOut {
+			return "", fmt.Errorf("WaitForEvent: no event for %s/%s within %v", pluginName, functionName, timeout)
+		}
+	}
+}
+
+// claimShapedFound reports whether a claim-shaped output carries found=true, and
+// whether it carries a boolean "found" field at all.
+//
+// A POINTER distinguishes the two, and that is the reason for it: an absent key
+// and an explicit false both unmarshal to the zero value of a plain bool, so a
+// struct with `Found bool` cannot tell a function that answered "not yet" from
+// one that did not answer the question. See WaitForEvent's doc comment for why
+// that distinction is a failure rather than a longer wait.
+func claimShapedFound(out string) (found bool, wellFormed bool) {
+	var v struct {
+		Found *bool `json:"found"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		return false, false
+	}
+	if v.Found == nil {
+		return false, false
+	}
+	return *v.Found, true
 }
 
 func (h *HostCallsImpl) PollSignal(signalName string) (string, bool, error) {

@@ -26,6 +26,19 @@ import (
 // a constant zero UUID in every workflow, and a workflow whose whole body was
 // h.Log(...) plus h.Call(...) compiled with no host calls wired at all.
 //
+// WHY A SOURCE CHECK IS THE RIGHT INSTRUMENT HERE, rather than a weaker
+// substitute for running one. The failure it stands in for is a nil adapter at
+// run time, and a check that observed that nil could not say why it was nil --
+// the declaration this test reads IS the why. So it catches the CAUSE, which is
+// the half that carries the diagnosis and the half a source scan can see.
+//
+// cleat#2998 is where that distinction earned its place. Giving WaitForEvent an
+// in-process fallback made the method composite IN SOURCE, while the hook's
+// nil-check keeps that fallback unreachable in a compiled guest. The source is
+// composite either way, so the declaration has to be there either way, and this
+// test said so -- from the source, which is where the missing declaration
+// lives.
+//
 // This walks the SDK for methods that call another h.X(...) and fails if the
 // wrapper does not end up with the inner method's import -- via its own
 // hostFunctions row, or via compositeRequires. It is deliberately

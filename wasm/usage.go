@@ -327,13 +327,22 @@ var compositeRequires = map[string][]string{
 	// cleat_now is enough: info.Funcs is hostFunctions filtered by Used, so
 	// marking the import used pulls in {"cleat_now", "Now"} and the emitted Now
 	// field is what populates h.now. IMPROVEMENT-PLAN 3.234.
-	"NowMs":                  {"cleat_now"},
-	"NewUUID":                {"cleat_random"},
-	"NewUUIDv7":              {"cleat_random", "cleat_now"},
-	"UUID":                   {"cleat_workflow_id"},
-	"Log":                    {"cleat_log"},
-	"Call":                   {"cleat_call"},
-	"AwaitCondition":         {"cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"NowMs":          {"cleat_now"},
+	"NewUUID":        {"cleat_random"},
+	"NewUUIDv7":      {"cleat_random", "cleat_now"},
+	"UUID":           {"cleat_workflow_id"},
+	"Log":            {"cleat_log"},
+	"Call":           {"cleat_call"},
+	"AwaitCondition": {"cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	// WaitForEvent's claim/register/re-claim loop is composed in
+	// cleat/runtime_signals.go from PluginCall, AwaitSignals and NowMs, so a
+	// workflow that calls it reaches all three -- plugin_call for the claim,
+	// and AwaitCondition's own set for the wait it loops on. Without this row
+	// AnalyzeUsage (which does not follow into the SDK) generates none of them,
+	// the adapter fields stay nil, and WaitForEvent returns a ZERO VALUE at run
+	// time in a compiled workflow: the failure #775 records, present in the
+	// shipped artefact rather than at build time.
+	"WaitForEvent":           {"plugin_call", "cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
 	"AwaitSignalsWithQuorum": {"cleat_await_signals", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
 	// Delegates to AwaitPromise, which is the dispatch point, so it reaches the
 	// update imports too. Merged into the existing row rather than added as a

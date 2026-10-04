@@ -1272,6 +1272,14 @@ func TestEveryHostCallIsWired(t *testing.T) {
 		"HandleUpdate":                "falls back to the registered handlers",
 		"PluginCallStreaming":         "guarded with != nil, so nil is a no-op path",
 		"AwaitSignalsWithQuorum":      "falls back to the plain await",
+		// The claim/register/re-claim loop, composed in
+		// cleat/runtime_signals.go's WaitForEvent from PluginCall and
+		// DurableAwaitSignals -- both wired in this harness, so the fallback
+		// has everything it needs. Same shape as AwaitSignalsWithQuorum
+		// directly above, and the reason it is a fallback rather than a wired
+		// hook: a host that knows better overrides it, and the engine's WASM
+		// export does.
+		"WaitForEvent": "falls back to the composed loop over PluginCall and DurableAwaitSignals",
 	}
 
 	opts := NewTestEnv().hostCallsOptions()
