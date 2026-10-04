@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -111,6 +113,11 @@ type tutorialFragment struct {
 type tutorialSnippet struct {
 	src     string
 	support string
+	// label names the source block in a failure message. A perBlock document has
+	// one file per block, and `vet: ./snippet.go:32:12` identifies nothing on a
+	// page with twenty-four of them -- the line number is a property of the
+	// ASSEMBLED file, not of the document. cleat#3112 grew this table fivefold.
+	label string
 }
 
 type tutorialDoc struct {
@@ -158,18 +165,113 @@ type tutorialDoc struct {
 // (perBlock) rather than joined, each block carrying its own package clause and
 // import set.
 //
-// THREE PAGES ARE COVERED HERE: use-plugins.md and use-secrets.md (9 blocks)
-// since cleat#3097, and test-workflows.md (17) since cleat#3112. That last page
-// needed a second kind of scaffolding: its blocks call the READER's own workflow
-// (ApprovalWorkflow, MyWorkflow) and its "Complete example" carries its own
-// package clause, so a fragment header cannot wrap it -- an import the block's
-// own body does not use would fail the page's example for a reader. Those blocks
-// take a SIBLING support file instead; see tutorialFragment.support.
+// FOUR PAGES ARE COVERED HERE: use-plugins.md and use-secrets.md (9 blocks)
+// since cleat#3097, and test-workflows.md (17) and common-patterns.md (24) since
+// cleat#3112. The LINK half below still covers docs/tutorials/ only.
 //
-// common-patterns.md (24 blocks) is NOT yet covered: its blocks reference
-// page-local types (PipelineInput, ChildInput, OrderItem) and page-local helpers
-// (extractID, processOrderSmall), which is a stub table of its own. The LINK half
-// below still covers docs/tutorials/ only.
+// The two added in cleat#3112 needed scaffolding the first two did not, and both
+// are why a block is not simply "fragments or nothing":
+//
+//   - test-workflows.md's blocks call the READER's own workflow (ApprovalWorkflow,
+//     MyWorkflow), and its "Complete example" carries its own package clause -- a
+//     fragment header cannot wrap that, because an import the block's own body
+//     does not use would fail the page's example for a reader, whose workflow
+//     lives in another file. Those blocks take a SIBLING support file; see
+//     tutorialFragment.support.
+//   - common-patterns.md's 24 blocks share page-local types and helpers
+//     (PipelineInput, ChildInput, extractID, processOrderSmall), so ONE sibling
+//     file per page carries them and each fragment supplies only its own package,
+//     import set and wrapper; see commonPatternsSupport.
+//
+// Both pages carry their own known-positive, so their tables cannot stop matching
+// unnoticed.
+
+// Import sets shared by common-patterns.md's fragment headers. Each block is its
+// own file, so a block may import only what its own body uses -- an import a
+// block does not use fails it, which is why these are separate constants rather
+// than one prelude.
+const (
+	cpCleat           = "package main\n\nimport \"github.com/cleat-team/cleat/cleat\""
+	cpCleatFmt        = "package main\n\nimport (\n\t\"fmt\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatTime       = "package main\n\nimport (\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatFmtTime    = "package main\n\nimport (\n\t\"fmt\"\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatFmtStrings = "package main\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatJSON       = "package main\n\nimport (\n\t\"encoding/json\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+)
+
+// commonPatternsSupport is the sibling support file shared by every
+// common-patterns.md block: the page-local types it names (PipelineInput,
+// ChildInput, OrderItem), the page-local helpers it calls (extractID,
+// processOrderSmall, checkPickupStatus) and the values the surrounding prose
+// assumes (inputJSON, driverID, items). Every one is derived from the page's own
+// usage -- `ChildInput{Item: item, JobID: jobID, Index: i}` fixes the field names
+// and types, `processOrderSmall(h, userID, items)` fixes the signature -- rather
+// than invented. One file for the whole page, because these are shared, and
+// unused package-level declarations are legal where unused imports are not.
+//
+// It deliberately declares neither `h` nor `processOrder`: block 20 declares
+// both itself, and a duplicate would fail that block alone.
+const commonPatternsSupport = `package main
+
+import "github.com/cleat-team/cleat/cleat"
+
+type (
+	PipelineInput  struct{ Items []string }
+	PipelineResult struct{ Succeeded, Failed int }
+	ChildInput     struct {
+		Item  string
+		JobID string
+		Index int
+	}
+	ChildResult       struct{}
+	SubscriptionInput struct{}
+	OrderItem         struct{}
+)
+
+var (
+	inputJSON   string
+	requestJSON string
+	flightJSON  string
+	hotelJSON   string
+	flightRef   string
+	hotelRef    string
+	driverID    string
+	runID       string
+	items       []string
+	item        string
+	jobID       string
+	i           int
+	driver      struct {
+		DriverName string
+		ETAMinutes string
+	}
+)
+
+func extractID(s string) string { return "" }
+
+func processOrderSmall(h cleat.HostCalls, userID string, items []OrderItem) (string, error) {
+	return "", nil
+}
+
+func checkPickupStatus(driverID string) (string, error) { return "", nil }
+
+func isComplete(s string) bool { return false }
+
+func chargeWithRetry(h cleat.HostCalls, input SubscriptionInput) error { return nil }
+
+func enterGracePeriod(h cleat.HostCalls, input SubscriptionInput) (string, error) {
+	return "", nil
+}
+
+func toJSON(v interface{}) string { return "" }
+
+func stepJSON(i int) string { return "" }
+
+func placeOrderV2(input string) error { return nil }
+
+func placeOrderV1(input string) error { return nil }
+`
+
 var tutorialDocs = []tutorialDoc{
 	{
 		path: "docs/tutorials/quick-start.md",
@@ -411,6 +513,140 @@ var tutorialDocs = []tutorialDoc{
 				support: "package myworkflow_test\n\nimport \"github.com/cleat-team/cleat/cleat\"\n\nfunc ApprovalWorkflow(h cleat.HostCalls, input string) error { return nil }",
 			},
 		},
+		// This page's own known-positive. Without it, a fragment table that had
+		// stopped matching -- or an assembly that vetted as an empty file -- would
+		// still report seventeen blocks clean. The replacement keeps its fragment's
+		// marker and uses each of that fragment's imports, so the only error it can
+		// produce is the one this guard exists to catch.
+		knownBroken: &tutorialFragment{marker: "func TestReplayWorkflow(t *testing.T) {"},
+		brokenText: "func TestReplayWorkflow(t *testing.T) {\n" +
+			"\tenv := cleattest.NewTestEnv()\n" +
+			"\t_ = env\n" +
+			"\tunusedLocal := 1\n}\n",
+		brokenWant: "declared and not used: unusedLocal",
+	},
+	{
+		// cleat#3112. common-patterns.md is a CATALOGUE, not a program: 24
+		// independent blocks, none carrying a package clause, several of them
+		// excerpts from the middle of a function (they `return` with no signature)
+		// and several naming types and helpers the page never defines. Each block
+		// gets a fragment for its own package, import set and wrapper; the types and
+		// helpers are SHARED through one sibling support file, because they are
+		// shared -- see commonPatternsSupport.
+		//
+		// The wrappers close over the same convention the tutorial fragments do: a
+		// block that returns `"", fmt.Errorf(...)` mid-function is wrapped in a
+		// function with those results, and a footer supplies the trailing return and
+		// consumes any local the excerpt declares but does not use. That second job
+		// is scaffolding rather than a page defect: `status, err := cleat.PollUntil(
+		// ...)` followed by `if err != nil` is exactly what a reader writes, and the
+		// `status` they would go on to use is simply outside the excerpt.
+		path:     "docs/how-to/common-patterns.md",
+		perBlock: true,
+		fragments: []tutorialFragment{
+			{marker: "var chargeID, driverID string", header: cpCleat, support: commonPatternsSupport},
+			{marker: "h.DurableDeferFunc(func() {", header: cpCleat, support: commonPatternsSupport},
+			{marker: "func RunPipeline(", header: cpCleatFmt, support: commonPatternsSupport},
+			{
+				// The block's failure path is `return nil, fmt.Errorf(...)`, so the
+				// result type must be nilable: `(string, error)` would not compile
+				// against the page as written. interface{} is the least the page's own
+				// code admits.
+				marker:  "s.AddParallel(",
+				header:  cpCleatFmt + "\n\nfunc _saga(h cleat.HostCalls) (interface{}, error) {",
+				footer:  "\n\treturn \"\", nil\n}",
+				support: commonPatternsSupport,
+			},
+			{marker: "func WaitForPayment(", header: cpCleatFmtTime, support: commonPatternsSupport},
+			{
+				marker:  "// Wait for one of several signals.",
+				header:  cpCleatTime + "\n\nfunc _signalSet(h cleat.HostCalls) {",
+				footer:  "}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "sig := h.AwaitSignals(",
+				header:  cpCleatTime + "\n\nfunc _reply(h cleat.HostCalls) {",
+				footer:  "}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "// Start a child workflow -- does not block.",
+				header:  cpCleatFmt + "\n\nfunc _child(h cleat.HostCalls) (string, error) {",
+				footer:  "\n\t_ = result\n\treturn \"\", nil\n}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "[TERMINATED]",
+				header:  cpCleatFmtStrings + "\n\nfunc _childErr(h cleat.HostCalls) (string, error) {",
+				footer:  "\n\t_ = result\n\treturn \"\", nil\n}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "ChildInput{Item: item, JobID: jobID, Index: i}",
+				header:  cpCleat + "\n\nfunc _typedChild(h cleat.HostCalls) {",
+				footer:  "\n\t_, _ = runID, err\n}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "runIDs := make([]string, len(items))",
+				header:  cpCleat + "\n\nfunc _fanIn(h cleat.HostCalls) {",
+				footer:  "\n\t_, _ = results, err\n}",
+				support: commonPatternsSupport,
+			},
+			{marker: "func ProcessItem(", header: cpCleatFmtTime, support: commonPatternsSupport},
+			{marker: "func ManageSubscription(", header: cpCleatFmtTime, support: commonPatternsSupport},
+			{marker: "// PlaceLargeOrder uses ContinueAsNew", header: cpCleatJSON, support: commonPatternsSupport},
+			{
+				marker:  "status, err := cleat.PollUntil(",
+				header:  cpCleatFmtTime + "\n\nfunc _pollUntil(h cleat.HostCalls) (string, error) {",
+				footer:  "\n\t_ = status\n\treturn \"\", nil\n}",
+				support: commonPatternsSupport,
+			},
+			{marker: "func PollUntilCustom(", header: cpCleatFmtTime, support: commonPatternsSupport},
+			{
+				marker:  "result, err := h.DurableCallWithOptions(",
+				header:  cpCleatTime + "\n\nfunc _retryOptions(h cleat.HostCalls) {",
+				footer:  "\n\t_, _ = result, err\n}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "NonRetryableErrors:",
+				header:  cpCleatTime + "\n\nfunc _nonRetryable(h cleat.HostCalls) {",
+				footer:  "\n\t_ = policy\n}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "policy := cleat.DefaultRetryPolicy()",
+				header:  cpCleat + "\n\nfunc _defaultPolicy(h cleat.HostCalls) {",
+				footer:  "\n\t_ = policy\n}",
+				support: commonPatternsSupport,
+			},
+			{
+				marker:  "deadline := h.Now().Add(30 * time.Second)",
+				header:  cpCleatFmtTime + "\n\nfunc _deadlineLoop(h cleat.HostCalls) (string, error) {",
+				footer:  "}",
+				support: commonPatternsSupport,
+			},
+			{marker: "// Package-level declaration -- the transformer detects this.", header: cpCleat, support: commonPatternsSupport},
+			{marker: "func LongRunningProcess(", header: cpCleatFmt, support: commonPatternsSupport},
+			{marker: "// Declare minimum version this code supports.", header: cpCleat, support: commonPatternsSupport},
+			{
+				marker:  "order_status",
+				header:  cpCleat + "\n\nfunc _queryState(h cleat.HostCalls) {",
+				footer:  "}",
+				support: commonPatternsSupport,
+			},
+		},
+		// This page's known-positive, and it exercises the wrapper AND the shared
+		// support file: the replacement keeps its fragment's marker, and the failure
+		// it must produce is a local the wrapper's footer does not consume. A table
+		// that had stopped matching would leave this compiling, which the test
+		// reports as "the known-positive compiled" rather than as a silent pass.
+		knownBroken: &tutorialFragment{marker: "policy := cleat.DefaultRetryPolicy()"},
+		brokenText: "policy := cleat.DefaultRetryPolicy()\n" +
+			"unusedLocal := 1\n",
+		brokenWant: "declared and not used: unusedLocal",
 	},
 }
 
@@ -497,7 +733,15 @@ var packageClauseRe = regexp.MustCompile(`(?m)^package `)
 func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []tutorialSnippet {
 	t.Helper()
 	if !doc.perBlock {
-		return []tutorialSnippet{{src: assemble(t, doc, markdown, override)}}
+		return []tutorialSnippet{{src: assemble(t, doc, markdown, override), label: "the joined program"}}
+	}
+	firstLine := func(s string) string {
+		for _, l := range strings.Split(s, "\n") {
+			if t := strings.TrimSpace(l); t != "" {
+				return t
+			}
+		}
+		return "(empty block)"
 	}
 	blocks := goBlocks(t, markdown)
 	// EVERY FRAGMENT MUST MATCH EXACTLY ONE BLOCK, asserted here rather than left to
@@ -539,11 +783,12 @@ func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []tu
 		if override != "" && doc.knownBroken != nil && strings.Contains(b, doc.knownBroken.marker) {
 			text = override
 		}
+		label := fmt.Sprintf("block %d: %s", i, firstLine(text))
 		switch frag := matchingFragment(doc, text); {
 		case frag != nil:
-			out = append(out, tutorialSnippet{src: frag.header + "\n" + text + frag.footer, support: frag.support})
+			out = append(out, tutorialSnippet{src: frag.header + "\n" + text + frag.footer, support: frag.support, label: label})
 		case packageClauseRe.MatchString(text):
-			out = append(out, tutorialSnippet{src: text}) // a complete example: nothing to add
+			out = append(out, tutorialSnippet{src: text, label: label}) // a complete example: nothing to add
 		default:
 			t.Fatalf("%s block %d has neither a package clause nor a fragment stub, so it "+
 				"could never compile -- add a tutorialFragment for it rather than letting the "+
@@ -560,11 +805,95 @@ func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []tu
 // vetSnippet writes an assembled file into a scratch module that resolves the
 // SDK from the PUBLISHED release -- what a reader following the tutorial gets --
 // and returns `go vet`'s combined output.
+// snippetModule resolves the published SDK ONCE per test binary and returns the
+// go.mod and go.sum every snippet is vetted against.
+//
+// Resolve the SDK the way a reader following the tutorial does: the PUBLISHED
+// release, from the module proxy -- not this checkout.
+//
+// `@latest` rather than a pinned version, so this tracks the release instead of
+// rotting at the next tag. Before cleat#3083 this module had no dependency at all
+// and relied on resolveScaffoldAgainstThisCheckout to supply one, so the guard was
+// compiling snippets against the working tree rather than against what a reader
+// resolves.
+//
+// ⚠ A PAGE NOW LEANS ON THIS CHOICE. docs/how-to/test-workflows.md's note on the
+// timeout pair (cleat#3098) explains that its two blocks cannot be joined yet
+// because the primitive that orders them is not in the published SDK -- true only
+// while this resolves `@latest`. If the resolution ever changes to a pin, or to
+// this checkout, that sentence goes stale with it, and the page would be citing
+// this guard for a policy it no longer holds.
+//
+// ONCE, NOT PER SNIPPET. Resolution is a module-proxy round trip, and cleat#3112
+// took this guard from 9 snippets to 50. Fifty round trips a run is slower and,
+// worse, fifty chances to lose the run to a transient proxy error -- which is
+// exactly what a `go get` failure here does, since it `Fatalf`s. Resolving once
+// keeps the property this guard deliberately chose (a network failure FAILS,
+// rather than skipping and reporting clean over nothing -- see the file header's
+// "not guarded on network availability") while shrinking the exposure to a single
+// call. The failure is still loud; it is just no longer unpredictable which
+// snippet it lands on, or how often.
+var (
+	snippetModuleOnce sync.Once
+	snippetModFile    []byte
+	snippetSumFile    []byte
+	snippetModuleErr  error
+)
+
+func snippetModule() ([]byte, []byte, error) {
+	snippetModuleOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "cleat-snippet-module")
+		if err != nil {
+			snippetModuleErr = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+			[]byte("module tutorial_snippet\n\ngo 1.27.0\n"), 0o644); err != nil {
+			snippetModuleErr = err
+			return
+		}
+		// A seed file that imports the SDK, so `go mod tidy` KEEPS the require
+		// instead of pruning a module nothing in the directory imports.
+		if err := os.WriteFile(filepath.Join(dir, "seed.go"),
+			[]byte("package tutorial_snippet\n\nimport _ \"github.com/cleat-team/cleat/cleat\"\n"), 0o644); err != nil {
+			snippetModuleErr = err
+			return
+		}
+		for _, args := range [][]string{
+			{"get", "github.com/cleat-team/cleat/cleat@latest"},
+			{"mod", "tidy"},
+		} {
+			cmd := exec.Command("go", args...)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				snippetModuleErr = fmt.Errorf("go %s: %w\n%s", strings.Join(args, " "), err, out)
+				return
+			}
+		}
+		if snippetModFile, err = os.ReadFile(filepath.Join(dir, "go.mod")); err != nil {
+			snippetModuleErr = err
+			return
+		}
+		snippetSumFile, _ = os.ReadFile(filepath.Join(dir, "go.sum"))
+	})
+	return snippetModFile, snippetSumFile, snippetModuleErr
+}
+
 func vetSnippet(t *testing.T, src, support string) string {
 	t.Helper()
+	mod, sum, err := snippetModule()
+	if err != nil {
+		t.Fatalf("resolve the published SDK: %v", err)
+	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module tutorial_snippet\n\ngo 1.27.0\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), mod, 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
+	}
+	if len(sum) > 0 {
+		if err := os.WriteFile(filepath.Join(dir, "go.sum"), sum, 0o644); err != nil {
+			t.Fatalf("write go.sum: %v", err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(dir, "snippet.go"), []byte(src), 0o644); err != nil {
 		t.Fatalf("write snippet.go: %v", err)
@@ -579,27 +908,12 @@ func vetSnippet(t *testing.T, src, support string) string {
 			t.Fatalf("write support.go: %v", err)
 		}
 	}
-	// Resolve the SDK the way a reader following the tutorial does: the
-	// PUBLISHED release, from the module proxy -- not this checkout.
-	//
-	// `@latest` rather than a pinned version, so this tracks the release instead
-	// of rotting at the next tag. Before cleat#3083 this module had no
-	// dependency at all and relied on resolveScaffoldAgainstThisCheckout to
-	// supply one, so the guard was compiling snippets against the working tree
-	// rather than against what a reader resolves.
-	get := exec.Command("go", "get", "github.com/cleat-team/cleat/cleat@latest")
-	get.Dir = dir
-	if out, err := get.CombinedOutput(); err != nil {
-		t.Fatalf("go get the published SDK: %v\n%s", err, out)
-	}
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
-		t.Fatalf("go mod tidy: %v\n%s", err, out)
-	}
-
 	cmd := exec.Command("go", "vet", "./...")
 	cmd.Dir = dir
+	// -mod=mod so a snippet whose import set is a SUBSET of the seed's does not
+	// fail on a go.mod it would otherwise want to rewrite. It cannot reach the
+	// network for a version: the module is already required and summed.
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return ""
@@ -619,7 +933,7 @@ func TestTutorialGoSnippetsCompile(t *testing.T) {
 
 			for _, snip := range snippetFiles(t, doc, markdown, "") {
 				if out := vetSnippet(t, snip.src, snip.support); out != "" {
-					t.Errorf("a Go snippet in %s does not type-check, so a reader copying it gets a build failure:\n%s", doc.path, out)
+					t.Errorf("a Go snippet in %s does not type-check, so a reader copying it gets a build failure.\n%s\n%s", doc.path, snip.label, out)
 				}
 			}
 
