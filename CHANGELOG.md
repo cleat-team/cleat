@@ -223,6 +223,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`cleat build` could warn `error scanning WASM imports: invalid section size at offset N` on a
+  module that builds, deploys and runs correctly.** `ScanWasmImports` (`wasm/scan.go`) walked
+  sections with an "align to next section boundary" step that advanced one byte whenever the byte
+  after a section's content was `0x00` — but `0x00` is not padding, it is the **custom section's
+  id**, and Go emits custom sections (the `name` and `producers` sections, DWARF) on every
+  non-trivial module. The step ate the id of the first custom section that followed another
+  section, and from there the walk read section *content* as section headers. The symptom depends
+  on the trailing bytes, and both directions were measured on one artifact: on the reported module
+  the misread ends in a truncated LEB (the warning above), and on the tutorial's own module the
+  walk instead **fabricated two imports out of DWARF text** (`runtime.mallocgcSmallScanNoHeader…`,
+  `runtime.persistentalloc1…`) and returned 23 imports for a binary that declares 21. The step is
+  removed, so the walk stays synchronised across custom sections. Nothing about the produced
+  module, its schema sidecar or the deploy path was ever affected — this scanner's only caller is
+  the post-build orphan-import diagnostic (`cmd/cleat/main.go`), which prints warnings and changes
+  no exit code — but a desynchronised read that lands on an `env` + `cleat_*` pair makes that
+  diagnostic report a call path the closure analysis never missed, and on the other layout it
+  silently skips the check entirely. (cleat#3069)
+
 - **`slack-notify`'s leftover-`slack_signing_secret` boot WARN said the key "has no effect",
   which was false** — its presence is exactly what makes `slacknotify.signing_secret` required at
   boot (`RequiredDeploymentSecrets`, twenty lines below the WARN, keys on the same signal). An
