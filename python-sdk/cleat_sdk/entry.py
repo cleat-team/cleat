@@ -205,16 +205,29 @@ def _from_dict(
         # lists and __init__ does not accept -- passing one used to raise
         # "unexpected keyword argument" from the call below.
         #
-        # One consequence in the QUIET direction, recorded rather than left to
-        # be discovered: for `@dataclass(init=False)` with no hand-written
-        # `__init__`, the signature is empty, so the payload is dropped and the
-        # class is built from its defaults -- where reading fields() raised
-        # "takes no arguments". A hand-written `__init__` is honoured either
-        # way, because its parameters ARE this signature. That is the rule
-        # below applied uniformly rather than a new one; the silent-drop
-        # direction in general is cleat#3058.
+        # A payload the constructor takes NOTHING from is refused rather than
+        # tolerated, and the line between the two is the point: a key the
+        # signature does not have is a stray key, but a payload from which
+        # nothing at all was read is loss -- the object would be built
+        # entirely from its defaults and nothing would say so.
+        #
+        # This is the one shape cleat#2940 turned from loud to quiet. For
+        # `@dataclass(init=False)` with no hand-written `__init__` the
+        # signature is empty, and reading fields() used to raise "takes no
+        # arguments" -- by accident, because it passed a keyword the class did
+        # not accept. Restoring the failure, with a message naming the type and
+        # the keys, is scoped to what that change altered; the stray-key rule
+        # below is left exactly as it was (cleat#3058).
+        params = inspect.signature(target_type).parameters
+        if not params and value:
+            raise TypeError(
+                f"{target_type.__name__}() takes no constructor arguments, so "
+                f"none of the payload keys {sorted(value)} can be supplied; "
+                f"refusing to build it from its defaults alone"
+            )
+
         kwargs = {}
-        for name, param in inspect.signature(target_type).parameters.items():
+        for name, param in params.items():
             if name not in value:
                 # Absent from input -- rely on the dataclass default, or let
                 # __init__ raise TypeError for a required one. An ordinary

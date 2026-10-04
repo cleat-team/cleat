@@ -533,19 +533,61 @@ class TestFromDictDataclassConversion:
         # constructor parameter, so the payload's value for it is ignored.
         assert built.total == 0
 
-    def test_a_dataclass_that_disables_init_is_built_from_defaults_and_the_payload_dropped(self):
-        """``@dataclass(init=False)`` with no hand-written ``__init__`` has
-        an EMPTY signature, so there is nothing to pass and the payload is
-        ignored -- reading ``fields()`` used to raise "takes no arguments"
-        here instead. Pinned rather than left incidental: the direction is
-        the quiet one, where a value of the right type comes back from a
-        payload nothing read. Filed as cleat#3058."""
+    def test_a_payload_the_constructor_takes_nothing_from_is_refused(self):
+        """``@dataclass(init=False)`` with no hand-written ``__init__`` has an
+        EMPTY signature, so nothing in the payload can be supplied and the
+        class would be built entirely from its defaults. cleat#2940 left that
+        silent -- this version of the test pinned the silence; cleat#3058
+        refuses it, naming the type and the keys.
+
+        The refusal is the NARROW one: only a payload from which nothing can
+        be read is loss. The three tests below pin the boundaries that keep it
+        narrow, so a later reader can see the scope was chosen rather than
+        overlooked."""
 
         @dataclass(init=False)
         class NoInit:
             a: int = 0
 
-        assert _from_dict({"a": 1}, NoInit).a == 0
+        with pytest.raises(TypeError, match=r"NoInit\(\) takes no constructor arguments"):
+            _from_dict({"a": 1}, NoInit)
+
+    def test_an_empty_payload_against_a_constructor_taking_nothing_still_constructs(self):
+        """Nothing was dropped, because there was nothing to drop -- so the
+        guard must not fire. This is what keeps it from becoming "init=False
+        dataclasses are refused"."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int = 0
+
+        assert _from_dict({}, NoInit).a == 0
+
+    def test_a_stray_key_on_an_ordinary_dataclass_is_still_tolerated(self):
+        """The pre-existing rule, deliberately untouched: a forward-compatible
+        client, or a server that added a field, sends a key this dataclass does
+        not know, and that has to keep working."""
+
+        @dataclass
+        class Order:
+            sku: str
+
+        built = _from_dict({"sku": "a", "added_by_a_newer_client": 1}, Order)
+        assert built.sku == "a"
+
+    def test_a_payload_of_only_unknown_keys_on_an_ordinary_dataclass_is_still_ignored(self):
+        """Deliberately NOT changed, and pinned so the choice is visible
+        rather than an oversight. The guard refuses only a payload from which
+        nothing CAN be read; here the constructor HAS parameters, so the
+        payload is tolerated and the object built from defaults -- exactly as
+        before cleat#3058. This is the case that option 1 as written in that
+        issue would have made fail for every forward-compatible client."""
+
+        @dataclass
+        class Order:
+            sku: str = "unset"
+
+        assert _from_dict({"nope": 1}, Order).sku == "unset"
 
     def test_a_dataclass_that_disables_init_but_writes_one_still_receives_keywords(self):
         """The companion case, and the one that keeps the test above from
