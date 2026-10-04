@@ -269,3 +269,38 @@ func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.Workf
 	sort.Strings(internal)
 	return internal, nil
 }
+
+// hideInternalScheduleTargets blanks the target's name on every schedule that
+// points at an `internal` definition, so GET /api/schedules does not disclose
+// the name the 404 on the per-definition routes exists to hide (cleat#3001).
+//
+// The schedule is KEPT and only its DefName is hidden -- the reverse of the run
+// list, which omits internal rows entirely. The difference is the reason: a
+// cron-triggered internal workflow is legitimate and its schedule is an
+// operational object its owner must still see, so the disclosure is the NAME,
+// not the schedule's existence.
+//
+// Hiding the NAME still discloses the CLASS, and that is deliberate rather than
+// an oversight: handleCreateSchedule rejects an empty def_name, so a `""` here
+// can only mean "hidden" -- a reader can tell a schedule targets an internal
+// definition, just not which. That matches the sibling surfaces, which also say
+// something internal exists without naming it (the run list omits the row;
+// /metrics drops the series). Do not "fix" it by trying to make the two cases
+// indistinguishable; there is nothing to distinguish them with.
+//
+// The caller resolves the names with internalDefinitionNames, so this surface
+// and the run list cannot disagree about which names are internal.
+func hideInternalScheduleTargets(internal []string, schedules []engine.Schedule) {
+	if len(internal) == 0 {
+		return
+	}
+	hidden := make(map[string]struct{}, len(internal))
+	for _, n := range internal {
+		hidden[n] = struct{}{}
+	}
+	for i := range schedules {
+		if _, ok := hidden[schedules[i].DefName]; ok {
+			schedules[i].DefName = ""
+		}
+	}
+}
