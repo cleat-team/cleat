@@ -577,13 +577,24 @@ var pythonUnboundBaseline = []string{
 	// run id.
 	"cleat_start_detached",
 
-	// The second of the same family, added with cleat#2998: the blocking
-	// durable wait takes out-pointers for the claimed event, and an
-	// out-pointer addresses the guest's own linear memory while component
-	// dispatch writes into a HOST buffer. So Python would read whatever sat at
-	// OUTPUT_OFFSET and take it for an event -- the §3.431 defect stopSurfaces
-	// records as OPEN for durable-await-signals, which is declared with
-	// out-pointers and has therefore never worked on a component.
+	// The second of the same family, added with cleat#2998 -- and a DIFFERENT
+	// FAILURE MODE from the entry above, which is worth separating because
+	// aggregating the two misdescribes this one. cleat#3051 is where that was
+	// worked out; this paragraph follows it rather than the other way round.
+	//
+	// cleat_start_detached has no Python binding, and this one has neither a
+	// binding nor a WIT declaration, so a guest cannot call EITHER: the failure
+	// is an absent call, not a wrong answer.
+	//
+	// The out-pointer shape is still why a table row alone would not fix it.
+	// The call takes out-pointers for the claimed event; an out-pointer
+	// addresses the guest's own linear memory while component dispatch writes
+	// into a HOST buffer. Bind it in that shape and the guest reads whatever
+	// sat at OUTPUT_OFFSET and takes it for an event -- which is not
+	// hypothetical, it is what durable-await-signals does TODAY: that one IS
+	// declared (cleat.wit:163) and IS bound in Python
+	// (python-sdk/cleat_sdk/host_calls.py), so it is the wrong-VALUE mode, live
+	// rather than latent. That is the shape §3.431's body records.
 	//
 	// ONE RESPECT IN WHICH IT DIFFERS FROM cleat_start_detached, and it is why
 	// the two carry different stopSurfaces constants: that call IS declared in

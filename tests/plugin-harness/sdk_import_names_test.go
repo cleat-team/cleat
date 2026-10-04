@@ -443,13 +443,21 @@ var sdkUnreachedBaseline = map[string][]string{
 		// OUTPUT_OFFSET and return it as a run id.
 		"cleat_start_detached",
 
-		// The second of the same family, added with cleat#2998. The blocking
-		// durable wait takes out-pointers for the claimed event -- the same
-		// shape as durable-await-signals and cleat_start_detached above, and
-		// for the same reason it cannot cross a component boundary: the
-		// dispatch writes into a HOST buffer while the signature addresses the
-		// guest's own linear memory, so the guest reads whatever sat at
-		// OUTPUT_OFFSET and takes it for an event.
+		// The second of the same family, added with cleat#2998 -- and a
+		// DIFFERENT FAILURE MODE from the entry above, kept separate because
+		// aggregating the two misdescribes this one. cleat#3051 worked that
+		// out; this paragraph follows it rather than the other way round.
+		//
+		// cleat_start_detached has no Python binding, and this one has neither
+		// a binding nor a WIT declaration, so a guest cannot call EITHER: the
+		// failure is an ABSENT CALL, not a wrong answer.
+		//
+		// The out-pointer shape is why a table row alone would not fix it: an
+		// out-pointer addresses the guest's own linear memory while component
+		// dispatch writes into a HOST buffer. And the wrong-answer mode is not
+		// hypothetical in this family -- durable-await-signals IS declared and
+		// IS bound in Python, so its guest reads whatever sat at
+		// OUTPUT_OFFSET. That is the shape §3.431's body records.
 		//
 		// It differs from cleat_start_detached in one respect that decides how
 		// it is guarded. That call IS declared in cleat.wit, with the core-ABI
@@ -457,7 +465,7 @@ var sdkUnreachedBaseline = map[string][]string{
 		// that declares the wrong thing. This one has no WIT declaration at
 		// all, so it sits behind reasonNotInTheComponentWorld, a world that
 		// declares nothing, and its fix begins with writing the declaration.
-		// Both are the §3.431 defect underneath.
+		// Both are the out-pointer state §3.431's body records.
 		//
 		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
 		// engine/python_wasm_e2e_test.go records the same fact from
