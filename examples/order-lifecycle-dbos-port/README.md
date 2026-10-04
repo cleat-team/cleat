@@ -163,6 +163,35 @@ Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,o
 on the same date: **731**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
 
+**Both totals exclude each side's scenario harness, and the two harnesses are
+not the same size — a reader should be able to price that rather than assume
+the exclusion is neutral.** The app total above is three files per side
+(workflow, backend/server, test file); the scenario harness each side runs in
+CI is a fourth, excluded on both sides, and the exclusion is not even:
+
+| scenario harness — excluded from BOTH totals above | code lines |
+|---|---:|
+| cleat — `scripts/run-order-lifecycle-scenario.sh` | **438** |
+| DBOS — `scripts/run-order-lifecycle-dbos-scenario.sh` | **165** |
+
+So that paired exclusion withholds **273 more lines of cleat's work than of
+DBOS's**, and with both counted the ratio is **1.94x** rather than the 1.67x
+the totals above give — `(731+438)/(439+165)`. **The direction is worth stating
+because it is easy to write backwards: the exclusion is the arrangement that
+favours cleat**, i.e. counting both harnesses makes cleat look *worse*, not
+better. Both figures are re-derived by `scripts/dbos-pair-loc.sh
+order-lifecycle`, in the same command as the totals above (cleat#2642 added the
+two rows there for exactly this reason).
+
+This is cleat#2642's class — a cost landing outside the rows being compared —
+reached by the **magnitude of an excluded row** rather than by placement inside
+the counted ones. **This pair's answer to that issue's "decide (a) or (b) for
+both pairs" is (b), state it**, not (a): the placement premise does not hold
+here, because both sides already sum their own test file inside the app total,
+so there is no asymmetric row to re-home — only an asymmetric exclusion to
+disclose. The wedge pair discloses its equivalent rows directly (`e2e harness
+machinery`, 154 vs 42) for the same reason.
+
 **What the scope fix did to the headline.** Until cleat#2997 this table read
 **274**, and the ratio it produced was ~2.7x. Adding the approval gate and the
 query state took the port to **439**, and the ratio to **1.67x**.

@@ -420,6 +420,16 @@ SUM:                             3            125            403            729
 Language                     files          blank        comment           code
 TypeScript                       3             43            109            274
 SUM:                             3             43            109            274
+
+== cleat: scenario harness (own line -- never summed into the app total) ==
+Language                     files          blank        comment           code
+Bourne Shell                     1             63            343            438
+SUM:                             1             63            343            438
+
+== DBOS: scenario harness (own line -- never summed into the app total) ==
+Language                     files          blank        comment           code
+Bourne Shell                     1             26             63            165
+SUM:                             1             26             63            165
 """
 
 SELF_TEST_README_MATCHED = """

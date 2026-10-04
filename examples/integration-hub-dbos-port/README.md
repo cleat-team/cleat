@@ -457,7 +457,8 @@ in the table anyway because pulling it out is a second design question
 (what counts as "the test file" on a side with no test runner), and this
 PR answers only the behaviour-assertion asymmetry cleat#2642 names;
 stating the residual lets a reader subtract it rather than be misled by a
-silence. Flagged to cleat-review for exactly that reason.
+silence. It is filed as **cleat#3041** rather than left to this paragraph
+alone.
 
 | role | cleat | DBOS-isolated |
 |---|---:|---:|

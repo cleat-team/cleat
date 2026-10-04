@@ -181,11 +181,31 @@ case "$pair" in
       "$repo_root/examples/order-lifecycle-dbos-port/src/server.ts"
       "$repo_root/examples/order-lifecycle-dbos-port/src/order.test.ts"
     )
-    for f in "${cleat_app_files[@]}" "${dbos_app_files[@]}"; do
+    # cleat#2642: both sides' scenario harnesses are EXCLUDED from the app
+    # total, and they are NOT the same size -- cleat's is well over twice
+    # DBOS's, so that paired exclusion removes far more of cleat's work than
+    # of DBOS's. Same class as the wedge's behaviour-assertion defect, by
+    # MAGNITUDE of an excluded row rather than by placement inside the
+    # counted ones (cleat-review's finding on PR #3040). Printed here, in the
+    # wedge's own shape, so a reader can price the exclusion from the script
+    # rather than from a sentence in the README.
+    #
+    # These two sections are printed AFTER "== DBOS: app ==" deliberately:
+    # scripts/check-dbos-pair-loc.py reads the FIRST "SUM:" line in each
+    # side's part, so appending here leaves the app totals it compares
+    # untouched while making the excluded rows visible in the same command.
+    cleat_scenario_harness="$repo_root/scripts/run-order-lifecycle-scenario.sh"
+    dbos_scenario_harness="$repo_root/scripts/run-order-lifecycle-dbos-scenario.sh"
+    for f in "${cleat_app_files[@]}" "${dbos_app_files[@]}" \
+             "$cleat_scenario_harness" "$dbos_scenario_harness"; do
       [ -f "$f" ] || { echo "UNMEASURED: expected file is missing: $f" >&2; exit 2; }
     done
     print_group "cleat: app" "${cleat_app_files[@]}"
     print_group "DBOS: app" "${dbos_app_files[@]}"
+    print_group "cleat: scenario harness (own line -- never summed into the app total)" \
+      "$cleat_scenario_harness"
+    print_group "DBOS: scenario harness (own line -- never summed into the app total)" \
+      "$dbos_scenario_harness"
     ;;
 
   b2b-saas-control-plane)
