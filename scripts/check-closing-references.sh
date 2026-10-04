@@ -98,10 +98,19 @@
 #   scripts/check-closing-references.sh --self-test
 set -euo pipefail
 
+# The pattern this check applies. Named, and passed to check_body as an argument,
+# so the self-test can exercise the ERROR path with a deliberately invalid one
+# (cleat#3103): a pattern this grep cannot compile has to be a visible UNMEASURED,
+# and a self-test that could only ever call the real pattern could not show that.
+BAD_REF_PATTERN='\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[^[:space:]#/]*[A-Za-z0-9_.-]#[0-9]+'
+
 # Runs the check against $1 (a PR body) and prints the same report the real
-# invocation would. Returns 0 (nothing to flag) or 1 (a bad reference found).
+# invocation would. $2 overrides the pattern and is used by the self-test alone.
+# Returns 0 (nothing to flag), 1 (a bad reference found) or 2 (the pattern did not
+# compile, so nothing was searched -- cleat#3103).
 check_body() {
   local body="$1"
+  local pattern="${2-$BAD_REF_PATTERN}"
 
   # Code is not a claim. GitHub links nothing inside a fenced block or an inline
   # code span, so `Closes cleat#N` written as code -- a PR QUOTING the bad form,
@@ -129,12 +138,27 @@ check_body() {
     s/(["\x27])(?:(?!\1).)*?\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(?:(?!\1).)*?\b[A-Za-z0-9_.-]*#[0-9]+(?:(?!\1).)*?\1/ /gs;
   ')
 
-  # grep exits 1 on no match; under pipefail that would abort the script, so the
-  # no-match case is taken explicitly rather than swallowed with `|| true` around
-  # the whole pipeline (which would also hide a grep that failed to run).
-  local bad
-  if ! bad=$(printf '%s\n' "$prose" |
-    grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[^[:space:]#/]*[A-Za-z0-9_.-]#[0-9]+'); then
+  # grep exits 0 on a match, 1 on no match, and 2 or more on an ERROR -- an invalid
+  # pattern among them. `if ! bad=$(... | grep ...)` folded all three into "the
+  # branch is taken", so a pattern grep could not compile reported a CLEAN PR, with
+  # the failure visible only on stderr inside a green step. Measured on develop with
+  # one stray parenthesis, and again through a lookbehind repair: exit 0, with
+  # `Fixes cleat#5.` passing. The comment that used to stand here said the no-match
+  # case was taken explicitly "rather than swallowed with `|| true` ... (which would
+  # also hide a grep that failed to run)" -- the intent was exactly right and the
+  # construct reintroduced the hazard it names. This is a REQUIRED check, so a
+  # pattern that cannot be applied is its own status and not a pass (cleat#3103).
+  local bad rc
+  bad=$(printf '%s\n' "$prose" | grep -oiE "$pattern") && rc=0 || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "UNMEASURED: grep could not apply this check's pattern (rc=$rc)."
+    echo "            This is a failure of the CHECK, not a finding about the PR:"
+    echo "            no body was searched, so nothing was measured."
+    echo ""
+    echo "            pattern: $pattern"
+    return 2
+  fi
+  if [ "$rc" -eq 1 ]; then
     echo "No closing keyword names an issue as <repo>#N."
     return 0
   fi
@@ -198,6 +222,23 @@ self_test() {
     fi
     echo "ok   [$name]"
   done
+
+  # cleat#3103: a pattern grep cannot compile must be UNMEASURED (2), never a pass.
+  # Taken through check_body ITSELF, with the bad pattern as its argument, rather
+  # than by repeating the pipeline here -- a copy of the construct would test the
+  # copy, and this case exists precisely because the construct was the defect.
+  local bad_pat_rc=0 bad_pat_out
+  bad_pat_out=$(check_body "Fixes cleat#5." '(') || bad_pat_rc=$?
+  if [ "$bad_pat_rc" != "2" ]; then
+    echo "FAIL [an uncompilable pattern is UNMEASURED, not a pass (cleat#3103)]: exit=$bad_pat_rc want=2"
+    failures=$((failures + 1))
+  elif [[ "$bad_pat_out" != *"UNMEASURED"* ]]; then
+    echo "FAIL [an uncompilable pattern is UNMEASURED, not a pass (cleat#3103)]: output lacks UNMEASURED:"
+    printf '%s\n' "$bad_pat_out" | sed 's/^/    /'
+    failures=$((failures + 1))
+  else
+    echo "ok   [an uncompilable pattern is UNMEASURED, not a pass (cleat#3103)]"
+  fi
 
   if [ "$failures" -gt 0 ]; then
     echo "$failures self-test failure(s)"
