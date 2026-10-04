@@ -114,8 +114,22 @@ Watching workflow wf-abc123 (12 events so far)...
 Watch mode exits when:
 - You press Ctrl+C
 - No new events arrive for 60 seconds
-- The workflow reaches a terminal state and stops producing events
-- The DB connection fails
+- The database is unreachable when watch **starts** — the opening event count fails and the command exits with an error
+
+> This list used to carry two more conditions, and neither is one (cleat#3027).
+> *"The workflow reaches a terminal state and stops producing events"* describes
+> the 60-second idle rule above, not a separate check: `runDebugWatch` never
+> looks at the instance status, so a finished workflow, a stuck one, and a live
+> one that is merely quiet all end the same way, by the idle timer.
+>
+> *"The DB connection fails"* is true only at startup. Once the poll loop is
+> running, a failed `CountEventHistory` is written to stderr and the loop
+> **continues** — a watch left running against a dead database prints a poll
+> error every two seconds indefinitely rather than exiting. Both halves are
+> what the tests assert: `TestDebugWatch_CountError` requires the startup path
+> to return an error, and `TestDebugWatch_LoadPaginatedError` requires a
+> mid-loop failure to be logged and the loop to keep running
+> (`cmd/cleatctl/cleatctl_debug_test.go`).
 
 ## Common scenarios
 
@@ -155,7 +169,7 @@ debug> n
 ## Limitations
 
 - **Read-only**: the debugger replays existing event history and never modifies the database.
-- **Requires DB access**: you must have a working PostgreSQL connection with the `--db` flag or `CLEAT_DB_URL` environment variable.
+- **Requires DB access**: you must have a working database connection with the `--db` flag or `CLEAT_DB_URL` environment variable. This said "PostgreSQL" (cleat#3027); `cleatctl` declares `debug` available on all three supported dialects (`cmd/cleatctl/ported.go`), so a MySQL or SQL Server DSN works too.
 - **Replay only**: the debugger replays recorded history, it does not run fresh execution. If the replay diverges (causing the WASM module to make a call not in the history), the debugger reports the divergence error.
 - **Module must be available**: the WASM binary for the workflow's definition and version must still exist in the database.
 - **Large histories**: for workflows with more than ~10K events, consider using watch mode or replay instead.
