@@ -2574,6 +2574,21 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 	if schedules == nil {
 		schedules = []engine.Schedule{}
 	}
+	// cleat#3001: a schedule names its target, so this route discloses an
+	// `internal` definition's NAME without addressing a workflow -- and it is a
+	// collection, so it cannot answer 404 for one member. The schedule is kept
+	// and only its target's name is hidden: a cron-triggered internal workflow
+	// is legitimate and its schedule must stay visible.
+	if len(schedules) > 0 {
+		internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
+		if ierr != nil {
+			// Fail closed, as the run list does: an unreadable set would blank
+			// nothing and disclose every internal name in the list.
+			s.writeError(w, 500, ierr.Error())
+			return
+		}
+		hideInternalScheduleTargets(internalNames, schedules)
+	}
 	s.writeJSON(w, 200, schedules)
 }
 
