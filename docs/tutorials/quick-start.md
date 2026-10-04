@@ -262,6 +262,26 @@ func Hello(h cleat.HostCalls, input string) (string, error) {
 > require github.com/cleat-team/cleat/cleat v0.0.0-20260927035713-a30e57693613
 > ```
 >
+> Refined 2026-10-04 (cleat#3027): that version is a **pseudo-version**, and
+> today's is a **tag**. The SDK submodule
+> (`github.com/cleat-team/cleat/cleat`) had never been tagged when the note above
+> was written; `cleat/v0.3.1` and `cleat/v0.3.2` were cut on 2026-09-27 alongside
+> the release, and `cleat init` resolves the scaffold's dependencies with `go mod
+> tidy`, which now selects the tag:
+>
+> ```
+> module my-workflow
+> go 1.27.1
+> require github.com/cleat-team/cleat/cleat v0.3.2
+> ```
+>
+> So a scaffolded project builds against the **latest released SDK**, not the
+> tree the CLI was built from -- worth knowing if you are working on cleat
+> itself and expected the project to track your checkout. Confirm what your
+> toolchain sees with
+> `go list -m -versions github.com/cleat-team/cleat/cleat` (measured 2026-10-04:
+> `v0.3.1 v0.3.2`).
+>
 > Following the old workaround is now actively harmful. `go mod init my-workflow`
 > fails outright (`go.mod already exists`), and `go get
 > github.com/cleat-team/cleat@latest` **succeeds while adding the wrong thing**:

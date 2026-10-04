@@ -379,18 +379,28 @@ func stripScaffoldBuildTag(data []byte) []byte {
 // tidyScaffold resolves the scaffold's dependencies and writes its go.sum.
 //
 // WHY THE SCAFFOLD DOES NOT PIN A VERSION ITSELF. The generated code imports
-// github.com/cleat-team/cleat/cleat, which is its own Go module (cleat/go.mod)
-// and HAS NEVER BEEN TAGGED -- `go list -m -versions` on it returns nothing,
-// while the parent module has v0.1.0 and v0.2.0. cleat#1888 shipped a version
-// stamped into a require for the PARENT module, which the scaffold does not
-// import, so `go mod tidy` rewrote it anyway and a scaffold that skipped tidy
-// failed with "missing go.sum entry".
+// github.com/cleat-team/cleat/cleat, which is its own Go module (cleat/go.mod).
+// cleat#1888 shipped a version stamped into a require for the PARENT module,
+// which the scaffold does not import, so `go mod tidy` rewrote it anyway and a
+// scaffold that skipped tidy failed with "missing go.sum entry".
 //
 // So the go.mod written above carries `module` and `go` and nothing else, and
 // this resolves the rest. That is correct whether or not the SDK is ever
 // tagged: with a tag, tidy selects it; without one, tidy selects a
 // pseudo-version off the default branch. Either way the scaffold builds, which
 // stamping a version of a module it does not import never achieved.
+//
+// This paragraph used to say the SDK submodule "HAS NEVER BEEN TAGGED --
+// `go list -m -versions` on it returns nothing", which is what made the
+// no-tag branch the live one. That stopped being true on 2026-09-27, when
+// cleat/v0.3.1 and cleat/v0.3.2 were cut alongside the release, so tidy now
+// takes the tag branch instead. Measured 2026-10-04:
+//
+//	go list -m -versions github.com/cleat-team/cleat/cleat   ->  v0.3.1 v0.3.2
+//	`cleat init` writes  require github.com/cleat-team/cleat/cleat v0.3.2
+//
+// The decision above is unaffected -- it was written to hold either way, and
+// the fact that has changed is the one that selects which way.
 //
 // NOT FATAL ON FAILURE. tidy needs the network, and a user behind a proxy or
 // offline should get a project plus one instruction, not no project. The
