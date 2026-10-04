@@ -411,6 +411,16 @@ def interface_failures(pair, runner):
 # --------------------------------------------------------------------------
 
 
+# MODELS cloc's real output, including its single-file quirk: cloc omits the
+# "SUM:" line when a section is one file, so the two scenario-harness sections
+# cleat#2642 appended to scripts/dbos-pair-loc.sh order-lifecycle carry NO
+# "SUM:" line (measured: those sections print 0 of them, the two app sections
+# print 1 each). A first version of this fixture gave them a SUM line anyway --
+# which made the fixture disagree with the program it models, so a
+# falsification run against it (switch the parser to the LAST SUM) "caught" a
+# defect in the fixture rather than in the parse. cleat-review's GAP on PR
+# #3040. The trailing-SUM case that control was reaching for is now its own
+# deliberately-unfaithful fixture below, where it can actually discriminate.
 SELF_TEST_SCRIPT_OUT_MATCHED = """== cleat: app ==
 Language                     files          blank        comment           code
 Go                               3            125            403            729
@@ -424,13 +434,29 @@ SUM:                             3             43            109            274
 == cleat: scenario harness (own line -- never summed into the app total) ==
 Language                     files          blank        comment           code
 Bourne Shell                     1             63            343            438
-SUM:                             1             63            343            438
 
 == DBOS: scenario harness (own line -- never summed into the app total) ==
 Language                     files          blank        comment           code
 Bourne Shell                     1             26             63            165
-SUM:                             1             26             63            165
 """
+
+# DELIBERATELY UNFAITHFUL, and that is the point: the matched fixture above
+# models what cloc prints today, so it cannot test what happens if a trailing
+# section ever DOES print a "SUM:" -- and that is the only thing that would
+# put a second SUM in a side's part and make the parser's first-vs-last choice
+# matter. This variant adds those two SUM lines back and is fed to the parser
+# in its own self-test case: the app totals must still come out, which fails
+# for a last-SUM read. Its job is to disagree, like the loose parse in
+# CLAUDE.md's second-reading table -- not to model the program.
+SELF_TEST_SCRIPT_OUT_TRAILING_SUM = SELF_TEST_SCRIPT_OUT_MATCHED.replace(
+    "Bourne Shell                     1             63            343            438",
+    "Bourne Shell                     1             63            343            438\n"
+    "SUM:                             1             63            343            438",
+).replace(
+    "Bourne Shell                     1             26             63            165",
+    "Bourne Shell                     1             26             63            165\n"
+    "SUM:                             1             26             63            165",
+)
 
 SELF_TEST_README_MATCHED = """
 | role | file | code lines |
@@ -537,6 +563,21 @@ def self_test():
     problems, status = check_pair("order-lifecycle", SELF_TEST_README_MATCHED, matched_runner)
     if problems or status != "ok":
         failures.append(f"  FALSE POSITIVE on a matched fixture: {problems}")
+
+    # cleat#2642 / cleat-review's GAP on PR #3040: sections appended AFTER
+    # "== DBOS: app ==" must not displace the totals the parser reports. The
+    # matched fixture above cannot test this -- its trailing sections carry no
+    # SUM line (cloc prints none for a single file), so each side's part holds
+    # exactly one SUM however the parse is written. This case feeds the
+    # deliberately-unfaithful variant that DOES give them SUM lines, which is
+    # the only shape where a last-SUM read would return the harness's figure
+    # instead of the app total. Falsified by switching the parser to the last
+    # SUM: this case then reports DBOS as 165, not 274.
+    problems, status = check_pair("order-lifecycle", SELF_TEST_README_MATCHED,
+                                    lambda pair: (0, SELF_TEST_SCRIPT_OUT_TRAILING_SUM, ""))
+    if problems or status != "ok":
+        failures.append(f"  MISSED: a SUM line appended below the app sections displaced the parsed "
+                        f"totals (a trailing section must not become the total): {problems}")
 
     # Known negative #1 -- the actual cleat#2622 bug: README stuck at 261/57.
     stale_readme = SELF_TEST_README_MATCHED.replace("**70**", "**57**") \

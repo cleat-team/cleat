@@ -190,10 +190,17 @@ case "$pair" in
     # wedge's own shape, so a reader can price the exclusion from the script
     # rather than from a sentence in the README.
     #
-    # These two sections are printed AFTER "== DBOS: app ==" deliberately:
-    # scripts/check-dbos-pair-loc.py reads the FIRST "SUM:" line in each
-    # side's part, so appending here leaves the app totals it compares
-    # untouched while making the excluded rows visible in the same command.
+    # These two sections are printed AFTER "== DBOS: app ==", and what makes
+    # that safe is that they carry no "SUM:" line of their own: cloc omits
+    # SUM for a single-file section (measured -- these print 0, the two app
+    # sections print 1 each), so each side's part still holds exactly one SUM
+    # and the parser reads the app total whichever end it takes. A first
+    # version of this comment claimed the parser's FIRST-SUM rule was what
+    # protected it; that rule is real but was untested, because a
+    # hand-written fixture had invented SUM lines these sections never print
+    # (cleat-review's GAP on PR #3040). The counter's self-test now feeds a
+    # separate, deliberately-unfaithful fixture WITH those SUM lines, so the
+    # property the append depends on is one the control can actually fail.
     cleat_scenario_harness="$repo_root/scripts/run-order-lifecycle-scenario.sh"
     dbos_scenario_harness="$repo_root/scripts/run-order-lifecycle-dbos-scenario.sh"
     for f in "${cleat_app_files[@]}" "${dbos_app_files[@]}" \
