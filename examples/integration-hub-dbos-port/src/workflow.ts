@@ -10,9 +10,13 @@
 // Building an upload endpoint here would attribute infrastructure this
 // author wrote to a platform capability DBOS does not have.
 //
-// Written against @dbos-inc/dbos-sdk 5.1.10, the current stable version as
-// of 2026-09-28 -- the same version and date as the order-lifecycle pair;
-// re-check both before trusting either if this file is read later.
+// Written against @dbos-inc/dbos-sdk 5.2.11, which all three DBOS ports now
+// pin (cleat#2955). This comment said 5.1.10 -- the version current when the
+// port was written, 2026-09-28 -- and closed by asking a later reader to
+// "re-check both before trusting either". That instruction is what caught it,
+// one pass later than it should have: a sweep for the old pin searched only
+// *.md, so this file, which is not markdown, was missed by the correction
+// that was supposed to be complete.
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import * as fs from 'node:fs';
 
