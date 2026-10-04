@@ -2556,6 +2556,7 @@ func (w *Worker) Run() {
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
 	initLoopCtx("memory_reload")
+	initLoopCtx("internal_defs_sweep")
 	initLoopCtx("plugin_health")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
@@ -2661,6 +2662,13 @@ func (w *Worker) Run() {
 	// Memory estimate reload loop.
 	w.registerLoopFunc("memory_reload", w.memoryReloadLoop)
 	w.launchLoop("memory_reload", w.memoryReloadLoop)
+
+	// Internal-definition sweep loop (cleat#3001). Re-resolves each tenant's
+	// internal definition names for the /metrics filter, so a definition
+	// TIGHTENED to internal after its last execution is still hidden rather than
+	// named until the process restarts. See sweepInternalDefs.
+	w.registerLoopFunc("internal_defs_sweep", w.internalDefsSweepLoop)
+	w.launchLoop("internal_defs_sweep", w.internalDefsSweepLoop)
 
 	// Memory sample cleanup loop.
 	w.registerLoopFunc("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })

@@ -1749,6 +1749,13 @@ func dropInternalSeries(rm *metricdata.ResourceMetrics, isInternal func(string) 
 			case metricdata.Histogram[float64]:
 				data.DataPoints = keepPublicHistogramPoints(data.DataPoints, isInternal)
 				m.Data = data
+			default:
+				// A metric type not listed above would pass through UNFILTERED --
+				// fail-open. Nothing emits one today (every instrument in this file
+				// is a Sum, Gauge or Histogram), so this is unreachable rather than
+				// merely unhandled; a new instrument of another type
+				// (ExponentialHistogram, say) must add its case HERE, not assume
+				// this comment covers it. cleat-review, on #3123.
 			}
 		}
 	}
