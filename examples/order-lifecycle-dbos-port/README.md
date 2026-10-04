@@ -163,6 +163,35 @@ Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,o
 on the same date: **731**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
 
+**Both totals exclude each side's scenario harness, and the two harnesses are
+not the same size — a reader should be able to price that rather than assume
+the exclusion is neutral.** The app total above is three files per side
+(workflow, backend/server, test file); the scenario harness each side runs in
+CI is a fourth, excluded on both sides, and the exclusion is not even:
+
+| scenario harness — excluded from BOTH totals above | code lines |
+|---|---:|
+| cleat — `scripts/run-order-lifecycle-scenario.sh` | **438** |
+| DBOS — `scripts/run-order-lifecycle-dbos-scenario.sh` | **165** |
+
+So that paired exclusion withholds **273 more lines of cleat's work than of
+DBOS's**, and with both counted the ratio is **1.94x** rather than the 1.67x
+the totals above give — `(731+438)/(439+165)`. **The direction is worth stating
+because it is easy to write backwards: the exclusion is the arrangement that
+favours cleat**, i.e. counting both harnesses makes cleat look *worse*, not
+better. Both figures are re-derived by `scripts/dbos-pair-loc.sh
+order-lifecycle`, in the same command as the totals above (cleat#2642 added the
+two rows there for exactly this reason).
+
+This is cleat#2642's class — a cost landing outside the rows being compared —
+reached by the **magnitude of an excluded row** rather than by placement inside
+the counted ones. **This pair's answer to that issue's "decide (a) or (b) for
+both pairs" is (b), state it**, not (a): the placement premise does not hold
+here, because both sides already sum their own test file inside the app total,
+so there is no asymmetric row to re-home — only an asymmetric exclusion to
+disclose. The wedge pair discloses its equivalent rows directly (`e2e harness
+machinery`, 154 vs 42) for the same reason.
+
 **What the scope fix did to the headline.** Until cleat#2997 this table read
 **274**, and the ratio it produced was ~2.7x. Adding the approval gate and the
 query state took the port to **439**, and the ratio to **1.67x**.
@@ -250,20 +279,30 @@ and are recorded separately so neither is mistaken for the other.
 
 ## The pair whose headline this is not
 
-**1.67x is this measurement set's WORST case, and the better case is already
+**1.67x is this measurement set's WORST case, and the better cases are already
 built, already executed and already in CI.** That belongs here, where the
-number is read, and not only in the other pair's README.
+number is read, and not only in the other pairs' READMEs.
 
 On the **integration-hub** pair — the one that exercises the WASM sandbox, the
-differentiator #2597 names — **cleat's app code is SMALLER**: `app total` is
-cleat **130** against DBOS **200**
-(`examples/integration-hub-dbos-port/README.md:427`). cleat carries a one-off
-124-line platform cost for it and DBOS carries none, because DBOS has no
-primitive for tenant-supplied code at all. See that README's table for the
-per-row breakdown, and `scripts/dbos-pair-loc.sh integration-hub` to re-derive
-it.
+differentiator #2597 names — the two sides' application code is all but equal:
+`app total` is cleat **215** against DBOS **200**, a ratio of **1.075x**. The
+third pair (`b2b-saas-control-plane`) is 641 against 468, **1.37x**. cleat
+carries a one-off 124-line platform cost on the sandbox pair that DBOS carries
+nothing for, because DBOS has no primitive for tenant-supplied code at all. See
+that README's "Counting this pair, role-symmetric" table for the per-row
+breakdown, and `scripts/dbos-pair-loc.sh integration-hub` to re-derive it.
 
-**A measurement set whose headline is its worst case, while a better case is
+**An earlier version of this section claimed cleat's app code was SMALLER on
+that pair — 130 against 200 — and that number was an artefact, not a result.**
+It counted the same behaviour's test code on one side of the comparison only
+(cleat#2642): cleat's assertions live inside its e2e harness, a row the app
+total excludes, while DBOS's live in its test file, a row it sums. The pair now
+extracts each side's behaviour assertions into their own row and sums it on
+both sides, which moves cleat's total to **215** and removes the inversion. The
+correction makes this section's claim *weaker* than it was, which is the
+direction a correction should move it.
+
+**A measurement set whose headline is its worst case, while better cases are
 already built and CI-run, under-sells the demonstrated advantage** — the
 opposite of the failure cleat#2595/#2596 were filed for.
 

@@ -345,7 +345,7 @@ the same discipline as the cost this pair cannot measure directly.
 ## Counting this pair, role-symmetric
 
 **Re-derive with `scripts/dbos-pair-loc.sh integration-hub`** (`cloc` 2.10).
-Snapshot dated **2026-09-29** — re-run the command rather than re-quoting
+Snapshot dated **2026-10-03** — re-run the command rather than re-quoting
 these rows, per CLAUDE.md's rule on numbers in prose.
 
 **This is the fourth shape this table has taken, and each move fixed a
@@ -407,11 +407,12 @@ self-inflicted `SIGKILL` back into an exit code, which cleat's side has no
 equivalent problem to solve: `wait_for_terminal`'s HTTP poll never has to
 distinguish a genuine result from a process that killed itself to avoid
 hanging. **Where those costs get COUNTED, not their size, is what actually
-moved this table**: DBOS's +50 landed in **unit tests**, which the app
-total sums; cleat's +41 landed in **e2e harness**, which it does not (see
-"Why the two harness scripts get their own excluded row" below) — so the
-app-total gap widened even though the underlying test-writing effort did
-not, in either direction, meaningfully diverge.
+moved this table, and it is the defect cleat#2642 fixes**: DBOS's +50
+landed in **unit tests**, a row the app total sums; cleat's +41 landed in
+**e2e harness**, a row it does not (see "Why the two harness scripts get
+their own excluded row" below) — so the app-total gap widened even though
+the underlying test-writing effort did not, in either direction,
+meaningfully diverge.
 
 Adding the third behaviour also moved the smaller rows a small, genuinely
 asymmetric amount: cleat's tenant code (a third `main.go`, +6) and
@@ -419,14 +420,55 @@ DBOS-isolated's tenant code (a third template literal, +5) and host
 runner (the new wrapper function and `switch` case, +5) — noise at this
 size, the same read the table already gives the pre-existing rows below.
 
+**This is the sixth shape, and it removes that placement difference
+rather than describing it.** cleat#2642's finding — that the same work was
+summed on one side and not the other — is fixed by extracting each side's
+**behaviour assertions** into their own row and summing that row on BOTH
+sides. The extraction is mechanical and bounded by each source's own
+structure (`scripts/dbos-pair-loc-extract.py`, its `sh-banner-block` and
+`ts-func` modes): cleat's three `# ---- <behaviour>` banner blocks out of
+`run-integration-hub-tenant-sandbox-scenario.sh`, and DBOS-isolated's three
+`test…()` functions out of `isolated-wedge.test.ts`. Each side's file is
+then what it always was minus those blocks — cleat's e2e harness machinery
+(the real-worker driver, still excluded, see below) and DBOS's remaining
+test file (its `main()` driver and helpers, still summed).
+
+**Every row moves the way the fix implies, and in the direction that costs
+cleat rather than flattering it.** cleat's app total goes **130 → 215**;
+DBOS-isolated's is **unchanged at 200**, because its 122-line test file
+simply splits into 72 machinery + 50 behaviour — the DBOS side was never
+the one missing a row. **So cleat's app code is no longer *smaller* on
+this pair. It is larger: 215 against 200.** That claim ("cleat's app code
+is SMALLER") was read as evidence in
+`examples/order-lifecycle-dbos-port/README.md`, and is corrected there in
+this same PR.
+
+**One residual asymmetry of the same class remains, and it is named here
+rather than smoothed over — but this PR does not remove it.** DBOS's
+counted `unit tests` row is its test file minus the three behaviour
+functions, and that remainder still includes the hand-rolled `main()`
+driver, config/launch and exit-code plumbing `isolated-wedge.test.ts`
+needs because the port runs `node run-tests.js` rather than a test
+framework, where Go's `testing` package supplies cleat's equivalent for
+free. So part of that 72 is scaffolding cleat's side excludes, and
+**leaving it in the sum flatters cleat by up to those lines** — the wrong
+direction for a pair whose whole purpose is to be the CONTROL. It is left
+in the table anyway because pulling it out is a second design question
+(what counts as "the test file" on a side with no test runner), and this
+PR answers only the behaviour-assertion asymmetry cleat#2642 names;
+stating the residual lets a reader subtract it rather than be misled by a
+silence. It is filed as **cleat#3041** rather than left to this paragraph
+alone.
+
 | role | cleat | DBOS-isolated |
 |---|---:|---:|
 | tenant code | **55** | **24** |
 | host runner | **25** | **54** |
-| unit tests | **50** | **122** |
-| **app total** (tenant + host + unit tests) | **130** | **200** |
+| unit tests | **50** | **72** |
+| behaviour assertions | **85** | **50** |
+| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **200** |
 | platform (own line — not summed above) | **124** | **0** |
-| e2e harness (own line — not summed above, see below) | **239** | **42** |
+| e2e harness machinery (own line — not summed above, see below) | **154** | **42** |
 
 *Bare `DBOS.runStep` (no sandbox) is deliberately not a row or a column
 here either — it is the CONTROL, reported separately below, at **104**
@@ -459,24 +501,40 @@ tracks edits rather than silently drifting):
 - **unit tests**: cleat's two `hub_test.go` functions that exercise
   `TenantStepName` (`TestSyncCustomer_RunsTheTenantsOwnStep`,
   `TestSyncCustomer_ATenantStepThatFailsNamesItsStep`). DBOS-isolated's is
-  `isolated-wedge.test.ts` in full — this row is genuinely like-for-like,
-  which is why it is the one counted in the app total.
+  `isolated-wedge.test.ts` **minus its three `test…()` behaviour
+  functions**, which are counted in the row below instead — what remains
+  is that file's `main()` driver, config/launch, helpers and exit-code
+  plumbing (see the "sixth shape" paragraph above for why that remainder
+  stays in the sum, and for the residual it carries).
+- **behaviour assertions**: the three tenant behaviours each side tests —
+  positive control, `read-host-file` refusal, and the `infinite-loop`
+  timeout. cleat's are the three `# ---- <behaviour>` banner blocks inside
+  `scripts/run-integration-hub-tenant-sandbox-scenario.sh`; DBOS-isolated's
+  are `testPositiveControlNormalizeOrderSucceedsThroughIsolate`,
+  `testReadHostFileIsRefusedByTheIsolate` and
+  `testRunawayLoopIsInterruptedByTheTimeout` in `isolated-wedge.test.ts`.
+  This is the row cleat#2642 added, and the one that is genuinely
+  like-for-like: the same three behaviours, tested at the same scope, on
+  both sides — which is why it is counted in the app total.
 - **platform**: `engine/wasi_policy.go` + `engine/wasi_policy_wasmtime.go`
   for cleat, nothing for DBOS-isolated (see below).
-- **e2e harness**: `scripts/run-integration-hub-tenant-sandbox-scenario.sh`
-  for cleat, `scripts/run-integration-hub-dbos-scenario.sh` for
-  DBOS-isolated — see immediately below for why these are shown but not
-  summed.
+- **e2e harness machinery**: `scripts/run-integration-hub-tenant-sandbox-scenario.sh`
+  **minus** the three behaviour blocks counted above (so the two rows do
+  not double-count it) for cleat, and `scripts/run-integration-hub-dbos-scenario.sh`
+  for DBOS-isolated — see immediately below for why these are shown but
+  not summed.
 
 **Why the two harness scripts get their own excluded row instead of being
-folded into "unit tests" or dropped.** cleat's harness (~198 lines) starts
-a real `cleat-worker`, provisions a tenant, and uploads a WASM module
-through `POST /api/definitions` over HTTP — it is the only place this pair
+folded into "unit tests" or dropped.** cleat's harness script is 239 lines
+in full; the **154** shown is that file minus the three behaviour blocks
+counted above, so nothing is counted twice. It starts a real
+`cleat-worker`, provisions a tenant, and uploads a WASM module through
+`POST /api/definitions` over HTTP — it is the only place this pair
 exercises **runtime code intake**, because that is how a tenant's code
-actually reaches a cleat deployment. DBOS's harness (~42 lines) is an npm
-install/build/test wrapper with no assertions of its own; the equivalent
-end-to-end proof on that side lives entirely inside `isolated-wedge.test.ts`
-(already counted, in full, under "unit tests"), calling
+actually reaches a cleat deployment. DBOS's harness script (~42 lines) is
+an npm install/build/test wrapper with no assertions of its own; the
+equivalent end-to-end proof on that side lives inside `isolated-wedge.test.ts`
+— its three behaviour assertions, counted above — calling
 `DBOS.startWorkflow` **in-process** — there is nothing analogous to upload
 over HTTP, because "tenant code" here is a string evaluated inside the same
 process. Neither harness is doing unnecessary work; they reflect two
@@ -497,21 +555,19 @@ rather than receive it from DBOS.
 **So the honest reading of this table is not a single number — it is
 several separate claims, each real:**
 
-1. **The like-for-like application-code TOTAL is no longer roughly equal,
-   but that is a placement artefact of this table, not a real cost
-   difference** — see the "fifth shape" paragraph above for the full
-   correction. 130 vs. 200, tenant code + host runner + unit tests on both
+1. **The like-for-like application-code TOTAL is roughly equal — cleat
+   larger by 215 to 200 — and that near-parity is a real reading now, not
+   a placement artefact.** An earlier version of this table reported
+   **130 vs. 200, with cleat SMALLER**; that gap was a placement artefact
+   rather than a cost difference, and cleat#2642 removed it (see "the
+   sixth shape" above for the mechanism and the direction). 215 vs. 200 is
+   tenant code + host runner + unit tests + behaviour assertions on both
    sides, up from 124 vs. 140 before cleat#2628's third tenant behaviour.
-   Almost all of that growth is DBOS-isolated's unit-tests row (72 → 122),
-   and the like-for-like comparison is against cleat's e2e-harness row (198
-   → 239, not summed into this total at all) — both are the SAME new
-   behaviour's test code, at nearly the same code-line cost (+50 vs. +41),
-   just counted in different sections of this table. Read this as "the
-   pair's case for cleat does not rest on line-count arithmetic" — it rests
-   on the three capability claims this README states with their
-   mechanisms: platform-enforced isolation (this section), durable tenant
-   code ("The tenant step's own durability"), and runtime code intake (the
-   e2e-harness note above).
+   Read this as "the pair's case for cleat does not rest on line-count
+   arithmetic" — it rests on the three capability claims this README
+   states with their mechanisms: platform-enforced isolation (this
+   section), durable tenant code ("The tenant step's own durability"), and
+   runtime code intake (the e2e-harness note above).
 2. **cleat ships an isolation boundary as a platform capability** (124
    lines, on its own line, written once, in `engine/`) that every tenant
    step gets automatically. Those 124 lines are not free — someone at
@@ -527,21 +583,19 @@ several separate claims, each real:**
    `ChildWorkflow`/`AwaitChild` call plus the struct-field wiring around
    it). Largely Go-program-vs-JS-string and library-plumbing differences,
    not a cleat-vs-DBOS platform difference — read them as noisy at this
-   size, not as a trend. **The unit-tests row (50 vs. 122) looks like the
-   exception, but the actual test-writing cost is not the exception — only
-   where it is counted is.** Both sides paid almost the same code cost to
-   test the new behaviour and falsify that test: DBOS-isolated's
-   `isolated-wedge.test.ts` +50 lines, cleat's
-   `run-integration-hub-tenant-sandbox-scenario.sh` +41. The residual
-   9-line difference is `isolated-wedge.test.ts` alone needing a
-   result-sentinel mechanism (see "the fifth shape" above) that cleat's
-   HTTP-polling harness has no equivalent problem to solve. The row's full
-   72-line gap (122 − 50) is not this PR's doing on its own — 22 of it
-   predates cleat#2628, and only +50 is new. What turned that +50 into a
-   72-line gap in this ONE row is that DBOS's cost landed in
-   **unit tests**, which this app total sums, while cleat's landed in
-   **e2e harness**, which it does not — a placement difference, not a
-   difference in how much each side had to write.
+   size, not as a trend. **The behaviour-assertions row (85 vs. 50) is the
+   one genuinely like-for-like row, and cleat#2642 is what makes it so**:
+   the SAME three tenant behaviours, extracted from each side's own file
+   by the same counter on both sides. cleat's figure is the larger because
+   each of its shell blocks carries the HTTP-and-JSON plumbing for its own
+   assertion where DBOS's TypeScript calls a helper — a shape difference,
+   not a proportional difference in how much testing each side had to
+   write. The evidence is cleat#2628's new behaviour: both sides paid
+   nearly the same code cost for it, DBOS-isolated's `isolated-wedge.test.ts`
+   +50 lines and cleat's `run-integration-hub-tenant-sandbox-scenario.sh`
+   +41 (see "the fifth shape" above), and the residual 9-line gap is
+   `isolated-wedge.test.ts` alone needing a result-sentinel mechanism
+   cleat's HTTP-polling harness has no equivalent problem to solve.
 4. **Neither counterpart's line count captures the durability-boundary
    cost** ("What this counterpart costs") or the tenant-step-as-workflow
    difference ("The tenant step's own durability"), because both are

@@ -31,17 +31,26 @@
 # integration-hub is NOT role-symmetric by file count, and this script has
 # been corrected twice by cleat-review's review of #2621 (see git blame):
 # once to add the app/platform split, once to make the four roles
-# role-symmetric with the bare variant as a CONTROL row. Five groups now, on
-# both cleat and the DBOS-ISOLATED counterpart specifically:
+# role-symmetric with the bare variant as a CONTROL row, and once more for
+# cleat#2642 (the behaviour-assertions row). Six groups now, on both cleat
+# and the DBOS-ISOLATED counterpart specifically:
 #
 #   tenant code   what a tenant AUTHORS -- the transform/read itself
 #   host runner   the plumbing that INVOKES tenant code (dispatch, isolate
 #                 setup/teardown) -- not written by the tenant, but written
 #                 once per application, not once per platform
-#   unit tests    like-for-like test code, counted in the APP TOTAL
+#   unit tests    the test FILE on each side minus its behaviour assertions
+#                 -- counted in the APP TOTAL
+#   behaviour     the three tenant behaviours EACH side tests, extracted
+#    assertions   from its own file and SUMMED ON BOTH SIDES (cleat#2642).
+#                 Before this row, the same work was summed on DBOS's side
+#                 and not on cleat's -- cleat's assertions live inside its
+#                 e2e harness, a row never summed -- so identical cost
+#                 moved the comparison in one direction only.
 #   e2e harness   shown for BOTH sides but EXCLUDED from any total -- see
-#                 below for why this is its own group rather than folded
-#                 into "unit tests" or dropped
+#    machinery    below for why this is its own group rather than folded
+#                 into "unit tests" or dropped. cleat's is its harness
+#                 script MINUS the behaviour blocks counted above.
 #   platform      what the PLATFORM contributes once, for every tenant step
 #                 it will ever run -- reported on ITS OWN LINE, never summed
 #                 into the app total, because doing so is exactly the
@@ -50,14 +59,17 @@
 # WHY "unit tests" AND "e2e harness" ARE SEPARATE, not one "tests" group as
 # an earlier version of this script had it. cleat's proof of the sandbox
 # boundary needs `scripts/run-integration-hub-tenant-sandbox-scenario.sh`
-# (~198 lines) -- a real HTTP-deployed worker, receiving a WASM upload
-# through the SAME runtime-code-intake path a tenant actually uses. DBOS's
-# analogous end-to-end proof lives ENTIRELY inside `isolated-wedge.test.ts`
-# (calling `DBOS.startWorkflow` in-process); `run-integration-hub-dbos-
-# scenario.sh` (~42 lines) is just an npm install/build/test wrapper with no
-# assertions of its own. Counting cleat's harness inside "tests" while DBOS
-# has no comparable line to count previously double-counted cleat's cost
-# without a DBOS-side counterpart to compare it against. Both harness
+# (239 lines in full, of which 85 is the behaviour blocks counted in their
+# own row above and 154 the remaining machinery) -- a real HTTP-deployed
+# worker, receiving a WASM upload through the SAME runtime-code-intake path
+# a tenant actually uses. DBOS's analogous end-to-end proof lives inside
+# `isolated-wedge.test.ts` (calling `DBOS.startWorkflow` in-process) -- its
+# three behaviour assertions, counted in the row above --
+# `run-integration-hub-dbos-scenario.sh` (~42 lines) is just an npm
+# install/build/test wrapper with no assertions of its own. Counting
+# cleat's harness inside "tests" while DBOS had no comparable line to count
+# previously double-counted cleat's cost without a DBOS-side counterpart to
+# compare it against. Both harness
 # scripts are shown, neither is summed into the app total, and the prose
 # says what the size difference is actually about (runtime code intake,
 # which only cleat's side exercises) rather than letting a bare number
@@ -136,6 +148,27 @@ print_group() {
   echo
 }
 
+# remove_blocks <src> <dest> <block>... -- writes <src> with each <block>'s
+# text removed, once, verbatim. Used for every "this row is that file MINUS
+# the parts counted in another row" computation, so the remainder is derived
+# from the blocks themselves rather than from a second, independently-drifting
+# line range. Fails UNMEASURED if a block is not found verbatim, because a
+# silent no-op removal would put the block in BOTH rows.
+remove_blocks() {
+  python3 - "$@" <<'EOF'
+import sys
+src, dest = sys.argv[1], sys.argv[2]
+whole = open(src).read()
+for extracted_path in sys.argv[3:]:
+    block = open(extracted_path).read()
+    if block not in whole:
+        print(f"UNMEASURED: extracted block from {extracted_path} not found verbatim in {src}", file=sys.stderr)
+        sys.exit(2)
+    whole = whole.replace(block, '', 1)
+open(dest, 'w').write(whole)
+EOF
+}
+
 case "$pair" in
   order-lifecycle)
     cleat_app_files=(
@@ -148,11 +181,38 @@ case "$pair" in
       "$repo_root/examples/order-lifecycle-dbos-port/src/server.ts"
       "$repo_root/examples/order-lifecycle-dbos-port/src/order.test.ts"
     )
-    for f in "${cleat_app_files[@]}" "${dbos_app_files[@]}"; do
+    # cleat#2642: both sides' scenario harnesses are EXCLUDED from the app
+    # total, and they are NOT the same size -- cleat's is well over twice
+    # DBOS's, so that paired exclusion removes far more of cleat's work than
+    # of DBOS's. Same class as the wedge's behaviour-assertion defect, by
+    # MAGNITUDE of an excluded row rather than by placement inside the
+    # counted ones (cleat-review's finding on PR #3040). Printed here, in the
+    # wedge's own shape, so a reader can price the exclusion from the script
+    # rather than from a sentence in the README.
+    #
+    # These two sections are printed AFTER "== DBOS: app ==", and what makes
+    # that safe is that they carry no "SUM:" line of their own: cloc omits
+    # SUM for a single-file section (measured -- these print 0, the two app
+    # sections print 1 each), so each side's part still holds exactly one SUM
+    # and the parser reads the app total whichever end it takes. A first
+    # version of this comment claimed the parser's FIRST-SUM rule was what
+    # protected it; that rule is real but was untested, because a
+    # hand-written fixture had invented SUM lines these sections never print
+    # (cleat-review's GAP on PR #3040). The counter's self-test now feeds a
+    # separate, deliberately-unfaithful fixture WITH those SUM lines, so the
+    # property the append depends on is one the control can actually fail.
+    cleat_scenario_harness="$repo_root/scripts/run-order-lifecycle-scenario.sh"
+    dbos_scenario_harness="$repo_root/scripts/run-order-lifecycle-dbos-scenario.sh"
+    for f in "${cleat_app_files[@]}" "${dbos_app_files[@]}" \
+             "$cleat_scenario_harness" "$dbos_scenario_harness"; do
       [ -f "$f" ] || { echo "UNMEASURED: expected file is missing: $f" >&2; exit 2; }
     done
     print_group "cleat: app" "${cleat_app_files[@]}"
     print_group "DBOS: app" "${dbos_app_files[@]}"
+    print_group "cleat: scenario harness (own line -- never summed into the app total)" \
+      "$cleat_scenario_harness"
+    print_group "DBOS: scenario harness (own line -- never summed into the app total)" \
+      "$dbos_scenario_harness"
     ;;
 
   b2b-saas-control-plane)
@@ -183,6 +243,10 @@ case "$pair" in
     hub_go="$repo_root/examples/integration-hub/hub.go"
     hub_test_go="$repo_root/examples/integration-hub/hub_test.go"
     isolated_workflow_ts="$repo_root/examples/integration-hub-dbos-port/src/isolated-workflow.ts"
+    # cleat#2642: the two files holding each side's behaviour ASSERTIONS, as
+    # opposed to its harness machinery.
+    cleat_scenario="$repo_root/scripts/run-integration-hub-tenant-sandbox-scenario.sh"
+    isolated_wedge_test="$repo_root/examples/integration-hub-dbos-port/src/isolated-wedge.test.ts"
 
     for f in "$hub_go" "$hub_test_go" "$isolated_workflow_ts" \
              "$repo_root/examples/integration-hub/tenant-steps/normalize-order/main.go" \
@@ -236,6 +300,36 @@ case "$pair" in
     extract ts-const-template "$isolated_workflow_ts" INFINITE_LOOP_SOURCE dbos-tenant3.ts
     dbos_tenant3="$scratch/dbos-tenant3.ts"
 
+    # cleat#2642: the BEHAVIOUR ASSERTIONS -- the three tenant behaviours each
+    # side tests -- extracted into ONE group, summed into BOTH app totals.
+    #
+    # Before this, a behaviour's test cost landed in cleat's e2e harness (a row
+    # deliberately NOT summed) and in DBOS's unit-test file (a row that IS), so
+    # work that cost the two sides the SAME moved the comparison by its full
+    # size in one direction only. The two extractions are mechanically
+    # different because the harnesses are in different languages; they are the
+    # same three behaviours, which is what makes this row like-for-like where
+    # the whole files are not.
+    extract sh-banner-block "$cleat_scenario" '^# ---- the positive control' cleat-behaviour-1.sh
+    extract sh-banner-block "$cleat_scenario" '^# ---- the adversarial case' cleat-behaviour-2.sh
+    extract sh-banner-block "$cleat_scenario" '^# ---- the bilateral bound' cleat-behaviour-3.sh
+    cleat_behaviour1="$scratch/cleat-behaviour-1.sh"
+    cleat_behaviour2="$scratch/cleat-behaviour-2.sh"
+    cleat_behaviour3="$scratch/cleat-behaviour-3.sh"
+    extract ts-func "$isolated_wedge_test" testPositiveControlNormalizeOrderSucceedsThroughIsolate dbos-behaviour-1.ts
+    extract ts-func "$isolated_wedge_test" testReadHostFileIsRefusedByTheIsolate dbos-behaviour-2.ts
+    extract ts-func "$isolated_wedge_test" testRunawayLoopIsInterruptedByTheTimeout dbos-behaviour-3.ts
+    dbos_behaviour1="$scratch/dbos-behaviour-1.ts"
+    dbos_behaviour2="$scratch/dbos-behaviour-2.ts"
+    dbos_behaviour3="$scratch/dbos-behaviour-3.ts"
+
+    # Each side's MACHINERY is its assertions file with the behaviour blocks
+    # removed, so nothing is counted in two rows.
+    remove_blocks "$cleat_scenario" "$scratch/cleat-harness-machinery.sh" \
+      "$cleat_behaviour1" "$cleat_behaviour2" "$cleat_behaviour3"
+    remove_blocks "$isolated_wedge_test" "$scratch/dbos-unit-machinery.ts" \
+      "$dbos_behaviour1" "$dbos_behaviour2" "$dbos_behaviour3"
+
     # isolated-workflow.ts's "host runner" is everything in the file EXCEPT
     # the three tenant-code template literals just extracted above -- computed
     # by removing those blocks' TEXT from a copy of the file, rather
@@ -268,12 +362,18 @@ EOF
     print_group "cleat: unit tests (extracted from hub_test.go)" "$cleat_test1" "$cleat_test2"
     print_group "DBOS-isolated: tenant code (extracted template literals)" "$dbos_tenant1" "$dbos_tenant2" "$dbos_tenant3"
     print_group "DBOS-isolated: host runner (isolated-workflow.ts minus tenant code)" "$scratch/dbos-host-runner.ts"
-    print_group "DBOS-isolated: unit tests" \
-      "$repo_root/examples/integration-hub-dbos-port/src/isolated-wedge.test.ts"
+    print_group "DBOS-isolated: unit tests (isolated-wedge.test.ts -- its three behaviour functions are counted in the behaviour row below)" \
+      "$scratch/dbos-unit-machinery.ts"
 
-    echo "== E2E HARNESS, both sides -- shown, NOT summed into either app total (see header comment) =="
-    print_group "cleat: e2e harness (drives a real deployed worker over HTTP -- exercises runtime code intake)" \
-      "$repo_root/scripts/run-integration-hub-tenant-sandbox-scenario.sh"
+    echo "== BEHAVIOUR ASSERTIONS, both sides -- SUMMED INTO BOTH APP TOTALS (cleat#2642) =="
+    print_group "cleat: behaviour assertions (the three behaviour blocks of the e2e harness)" \
+      "$cleat_behaviour1" "$cleat_behaviour2" "$cleat_behaviour3"
+    print_group "DBOS-isolated: behaviour assertions (the three test functions of isolated-wedge.test.ts)" \
+      "$dbos_behaviour1" "$dbos_behaviour2" "$dbos_behaviour3"
+
+    echo "== E2E HARNESS MACHINERY, both sides -- shown, NOT summed into either app total (see header comment) =="
+    print_group "cleat: e2e harness machinery (the harness minus its three behaviour blocks -- drives a real deployed worker over HTTP)" \
+      "$scratch/cleat-harness-machinery.sh"
     print_group "DBOS-isolated: e2e harness (npm install/build/test wrapper -- the assertions live in the unit test above; no runtime code intake to exercise)" \
       "$repo_root/scripts/run-integration-hub-dbos-scenario.sh"
 
