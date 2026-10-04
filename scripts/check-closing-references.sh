@@ -108,8 +108,26 @@ check_body() {
   # as this check's own PR did, and failed its own first run for it -- is inert
   # and must pass. Both are removed before matching; unclosed fences and
   # backticks are left alone, which errs toward flagging.
+  #
+  # A QUOTED CLAUSE IS THE SAME KIND OF THING (cleat#3095, and the shape this
+  # check's own PR hit a second time). A body that DESCRIBES this defect has to
+  # write `does not close cleat#N` down, and that sentence is usually quoted --
+  # *"This procedure does not close cleat#2311; it only avoids triggering it."*
+  # The keyword there is the quoted author's, not this body's, and flagging it
+  # refuses a body for describing the thing the check is about.
+  #
+  # WHAT DECIDES IS THE KEYWORD'S POSITION, NOT THE QUOTE. A span is blanked only
+  # when it contains the whole closing phrase, keyword included. `Fixes
+  # "cleat#12".` quotes the REFERENCE while the keyword stays outside and remains
+  # the body's own attempt, so it is still flagged -- which cleat#2807 R2's two
+  # fixtures pin, and which is why blanking quoted spans outright would have been
+  # wrong: it buys this false positive's repair by losing two true positives.
   local prose
-  prose=$(printf '%s\n' "$body" | perl -0pe 's/^[ \t]*```.*?^[ \t]*```[^\n]*$//gms; s/`[^`\n]*`//g')
+  prose=$(printf '%s\n' "$body" | perl -0pe '
+    s/^[ \t]*```.*?^[ \t]*```[^\n]*$//gms;
+    s/`[^`\n]*`//g;
+    s/(["\x27])(?:(?!\1).)*?\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(?:(?!\1).)*?\b[A-Za-z0-9_.-]*#[0-9]+(?:(?!\1).)*?\1/ /gs;
+  ')
 
   # grep exits 1 on no match; under pipefail that would abort the script, so the
   # no-match case is taken explicitly rather than swallowed with `|| true` around
@@ -157,6 +175,9 @@ self_test() {
     "double-quoted cleat#N must still be caught (cleat#2807 R2)|Fixes \"cleat#12\".|1|cleat#12"
     "single-quoted cleat#N must still be caught (cleat#2807 R2)|Fixes 'cleat#12'.|1|cleat#12"
     "a valid ref alongside a bad one, one keyword each|Resolves: cleat#7 and fixes #8|1|cleat#7"
+    "a whole closing phrase inside quotes is inert (cleat#3095)|It says \"this procedure does not close cleat#2311\" and that is all.|0|No closing keyword"
+    "the same phrase unquoted is still caught (cleat#3095)|Deliberately does not close cleat#2311.|1|cleat#2311"
+    "a quoted phrase keeps its neighbours caught (cleat#3095)|See \"does not close cleat#2311\", and fixes cleat#9.|1|cleat#9"
   )
 
   local case name body want_exit want_substr got_out got_exit
