@@ -131,11 +131,56 @@ check_body() {
   # the body's own attempt, so it is still flagged -- which cleat#2807 R2's two
   # fixtures pin, and which is why blanking quoted spans outright would have been
   # wrong: it buys this false positive's repair by losing two true positives.
+  #
+  # KNOWN FALSE NEGATIVE, left in place deliberately (cleat#3102). Because this
+  # rule keys on the QUOTE and not on quotation-versus-assertion, a whole phrase
+  # scare-quoted is blanked:
+  #
+  #     The commit "fixes cleat#5" as required.      -- exit 0, missed
+  #
+  # cleat-review tried to build a NATURAL instance and could not: scare-quoting
+  # normally keeps the keyword outside the span (`Fixes "cleat#5"`), which is
+  # still flagged and is what the R2 fixtures pin. Recorded here because a known
+  # false negative belongs beside the check rather than only in a review thread.
+  #
+  # MARKDOWN EMPHASIS IS NOT PART OF THE KEYWORD (cleat#3102). `_` is a word
+  # character to `\b`, so `_Fixes cleat#5_` -- italic text, and the body's own
+  # closing attempt -- had no boundary before `Fixes` and went unflagged. Two
+  # things argue for normalising it HERE rather than in the pattern. One: an `_`
+  # is an emphasis delimiter unless it is INTRA-WORD, which is markdown's own
+  # rule -- so `_Fixes` loses its underscore while `a_Fixes` keeps it, being
+  # neither emphasis nor a closing attempt. Two: the quoted-span rule below needs
+  # the same view of what the keyword is, or a body QUOTING `_Fixes cleat#5_` is
+  # refused, which is cleat#3095's false positive arriving again in the `_` form.
+  #
+  # THE RULE IS AN ALTERNATION, AND BOTH HALVES ARE LOAD-BEARING. It removes an
+  # `_` that cannot OPEN emphasis AND one that cannot CLOSE it; leading-only would
+  # leave `fixes_ cleat#5` unflagged. That is a real looseness -- markdown leaves a
+  # lone closer literal, so the emphasised form it "fixes" is one the author did
+  # not write -- and it is kept deliberately: this check's documented posture is
+  # to err toward flagging, and a reader meeting `fixes_ cleat#5` reads a typo'd
+  # closing attempt beside a reference that will not link. The fixture is here so
+  # the half cannot be dropped silently; cleat-review measured that dropping it
+  # left every other case green.
+  #
+  # Changing only the pattern cannot do the second one: the `_` there sits
+  # immediately after the opening quote, where the blanker's lazy prefix cannot
+  # reach it. Normalising first gives both rules a single answer.
+  #
+  # AND THE TWO RULES MUST AGREE ABOUT CASE. The grep below runs `-i`; this
+  # blanker did not, so a QUOTED but CAPITALISED whole phrase was blanked by
+  # neither and flagged by the checker -- measured on develop, which flags
+  # `It says "Fixes cleat#12" as an example.` while the same sentence in lower
+  # case passes. Pre-existing rather than this change's doing, and it is the same
+  # shape as the paragraph above: two rules that must agree about what a closing
+  # keyword IS, disagreeing. The new `_`-form makes it reachable a second way, so
+  # the `/i` is added rather than the fixture adjusted around it.
   local prose
   prose=$(printf '%s\n' "$body" | perl -0pe '
     s/^[ \t]*```.*?^[ \t]*```[^\n]*$//gms;
     s/`[^`\n]*`//g;
-    s/(["\x27])(?:(?!\1).)*?\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(?:(?!\1).)*?\b[A-Za-z0-9_.-]*#[0-9]+(?:(?!\1).)*?\1/ /gs;
+    s/(?<![[:alnum:]])_|_(?![[:alnum:]])//g;
+    s/(["\x27])(?:(?!\1).)*?\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(?:(?!\1).)*?\b[A-Za-z0-9_.-]*#[0-9]+(?:(?!\1).)*?\1/ /gsi;
   ')
 
   # grep exits 0 on a match, 1 on no match, and 2 or more on an ERROR -- an invalid
@@ -202,6 +247,12 @@ self_test() {
     "a whole closing phrase inside quotes is inert (cleat#3095)|It says \"this procedure does not close cleat#2311\" and that is all.|0|No closing keyword"
     "the same phrase unquoted is still caught (cleat#3095)|Deliberately does not close cleat#2311.|1|cleat#2311"
     "a quoted phrase keeps its neighbours caught (cleat#3095)|See \"does not close cleat#2311\", and fixes cleat#9.|1|cleat#9"
+    "an emphasised keyword must still be caught (cleat#3102)|_Fixes cleat#5_|1|cleat#5"
+    "an intra-word underscore is not emphasis, and stays clean (cleat#3102)|a_Fixes cleat#5|0|No closing keyword"
+    "an intra-word underscore must not be JOINED into a keyword (cleat#3102)|fix_es cleat#5|0|No closing keyword"
+    "a trailing emphasis marker is stripped, and that half is pinned (cleat#3102)|fixes_ cleat#5|1|cleat#5"
+    "a quoted emphasised phrase is inert, as quoted phrases are (cleat#3102)|It says \"_Fixes cleat#12_\" as an example.|0|No closing keyword"
+    "a quoted capitalised phrase is inert too (cleat#3102, pre-existing)|It says \"Fixes cleat#12\" as an example.|0|No closing keyword"
   )
 
   local case name body want_exit want_substr got_out got_exit
