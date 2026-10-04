@@ -44,14 +44,106 @@ import (
 	"time"
 )
 
-func freeTCPPort(t *testing.T) int {
+// holdTCPPort reserves a kernel-assigned TCP port and returns it WITH ITS
+// LISTENER STILL OPEN, plus the release the caller owes it. The contract is two
+// lines and both matter:
+//
+//   - hold the port across every OTHER port this test picks, so no two picks can
+//     come back with one number;
+//   - release it BEFORE the consumer binds it -- not after. On Linux a live hold
+//     refuses the bind outright, whatever the consumer's address.
+//
+// WHY A HELD LISTENER RATHER THAN freeTCPPort's RELEASED ONE (cleat#3122). The
+// previous helper closed its listener before returning, so the number was free
+// again the moment it was handed back, and two sequential calls could come back
+// with the same one. That is the mechanism the report's evidence points at: in a
+// merge-group run, postgres bound the port and reached Healthy, and then the
+// worker -- the only other service publishing it -- failed with
+//
+//	Bind for 0.0.0.0:45265 failed: port is already allocated
+//
+// Holding makes the duplicate impossible by construction: the first port is still
+// bound when the second is chosen. It also narrows the other branch -- the kernel
+// will not hand 127.0.0.1:P to another allocator while this listener holds it, and
+// every allocator here asks for 127.0.0.1:0 -- though see below for what it does
+// not close.
+//
+// WHY THE RELEASE IS BEFORE THE BIND, AND NOT AFTER: THE PLATFORMS DIFFER, AND
+// LINUX IS THE ONE CI RUNS. Measured with SO_REUSEADDR set on both sides, by
+// binding 127.0.0.1:P and then attempting each of these on the same stack:
+//
+//	                               macOS (Darwin)   Linux (in a container)
+//	wildcard after specific         ADMITTED         REFUSED (EADDRINUSE, 98)
+//	specific after wildcard         ADMITTED         REFUSED (98)
+//	same address, either order      REFUSED          REFUSED
+//
+// So the overlap is BSD behaviour, NOT a property of SO_REUSEADDR -- and on Linux
+// a live hold refuses EVERY consumer's bind, wildcard included. A first version of
+// this helper held through the consumer's bind and said "CI is Linux, where
+// SO_REUSEADDR has the same effect"; that was wrong, and on Linux it would have
+// produced the very `port is already allocated` failure this change exists to
+// remove, on compose's 0.0.0.0:P publish and on the workers' ":P" alike. Found in
+// review by cleat-review and reproduced here.
+//
+// The macOS docker measurement that appeared to support holding through the bind
+// was vacuous, and it is worth recording why so nobody re-derives it: on macOS the
+// docker VM is a SEPARATE NETWORK STACK, so a `docker run -p $P:80` publishing
+// inside it cannot observe a host listener at all. Measure both sockets on one
+// stack or measure nothing.
+//
+// WHAT IT DOES NOT DO: close the cross-allocator race. Releasing before the bind
+// leaves a gap on every platform, and no local hold can close it for a wildcard
+// consumer on Linux. What closes it is having the consumer allocate the port and
+// report it back (compose's own random host port, say) -- a change this is not.
+func holdTCPPort(t *testing.T) (port int, release func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("finding a free port: %v", err)
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	// A leak-guard, not the release point: it only matters if the test Fatals
+	// before its own release(). Closing twice is harmless.
+	t.Cleanup(func() { ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port, func() { ln.Close() }
+}
+
+// TestHoldTCPPortKeepsThePortReservedUntilReleased asserts the property the helper
+// is FOR: while a port is held the kernel will not hand it to anyone else, and
+// once released a consumer can bind it.
+//
+// The first assertion is the load-bearing one and it is a direct observation of
+// the state the fix creates -- release-on-return reddens it, which was verified.
+// What it buys is stated as a consequence rather than asserted separately: a
+// number the kernel will not hand out cannot be handed out TWICE, so two picks
+// with the first hold still live cannot collide -- which is the branch of
+// cleat#3122 holding closes.
+//
+// A distinctness assertion ("pick twice, expect different ports") was written
+// first and REMOVED, on cleat-review's objection and my own measurement: the
+// kernel walks its ephemeral range rather than re-offering the number just freed
+// (2000 sequential listen/close draws reused a port zero times on macOS), so that
+// assertion stays GREEN through the release-on-return mutation it would exist to
+// catch. An assertion over a draw the system almost never takes reports the code
+// as correct for reasons that have nothing to do with the code. The construction
+// above is the honest form, and this paragraph is here so it is not re-added.
+func TestHoldTCPPortKeepsThePortReservedUntilReleased(t *testing.T) {
+	port, release := holdTCPPort(t)
+
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+		ln.Close()
+		t.Errorf("port %d was still bindable while it was held, so nothing is reserved: "+
+			"a second caller -- or a container -- can take it, and two picks can return one "+
+			"number, which is cleat#3122", port)
+	}
+
+	release()
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Errorf("port %d was not released by release(): %v", port, err)
+		return
+	}
+	ln.Close()
 }
 
 func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
@@ -112,7 +204,17 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	}
 	t.Cleanup(func() { exec.Command("docker", "rmi", "-f", image).Run() })
 
-	pgPort, apiPort := freeTCPPort(t), freeTCPPort(t)
+	// Both picked while the earlier one is still held, so the two CANNOT be one number -- the
+	// same-number branch of cleat#3122, where postgres bound the port and the worker then failed
+	// to publish it. Released immediately afterwards and BEFORE `make up`, which is the part the
+	// first version of this change got wrong: on Linux a live hold refuses compose's wildcard
+	// publish outright, so holding until the containers bind would produce the very
+	// `port is already allocated` failure this exists to remove. See holdTCPPort.
+	pgPort, releasePG := holdTCPPort(t)
+	apiPort, releaseAPI := holdTCPPort(t)
+	releasePG()
+	releaseAPI()
+
 	env := append(os.Environ(),
 		"PATH="+filepath.Dir(cleatBinary)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"COMPOSE_PROJECT_NAME=cleat-template-test-"+suffix,
@@ -205,7 +307,12 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 // driveTheProxy runs the scaffold's own `make web` and drives it the way index.html does.
 func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
 	t.Helper()
-	webPort := freeTCPPort(t)
+	// Released before Start, per holdTCPPort's contract -- the same shape as every other site now.
+	// It is worth naming why it must be BEFORE and not merely soon after: the proxy binds
+	// `-listen 127.0.0.1:$(CLEAT_WEB_PORT)` (templates/fullstack/Makefile), the SAME specific
+	// address the hold occupies, and a held port refuses a bind on its own address on BOTH
+	// platforms. So a hold that outlived `cmd.Start()` would make `make web` fail to start.
+	webPort, releaseWeb := holdTCPPort(t)
 	webEnv := append(append([]string{}, env...), fmt.Sprintf("CLEAT_WEB_PORT=%d", webPort))
 
 	// First, no key: it must refuse to start, not start and answer 401 to everything.
@@ -222,6 +329,7 @@ func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
 	cmd.Env = webEnv
 	cmd.Stdout, cmd.Stderr = &proxyLog, &proxyLog
 	inOwnProcessGroup(cmd)
+	releaseWeb() // before Start, because the proxy binds this exact address; see the note above
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("make web: %v", err)
 	}
