@@ -137,9 +137,18 @@ func TestTutorialQuickStartReachesADoneWorkflow(t *testing.T) {
 		t.Fatalf("could not derive the app DSN from the owner DSN %q (expected a cleat:cleat@ userinfo)", ownerDSN)
 	}
 
-	apiPort := freeTCPPort(t)
+	// Picked by holdTCPPort and released before the worker starts, per its contract: on Linux a
+	// live hold refuses the worker's `:PORT` bind outright, so holding through it would stop the
+	// daemon coming up. (A first version released after the health wait instead, on the strength
+	// of a macOS measurement that `localhost` reaches the worker over ::1 whether or not an IPv4
+	// listener holds the port. That observation only holds on macOS, where the specific/wildcard
+	// overlap is admitted -- on Linux this test would have failed outright. See holdTCPPort.)
+	apiPort, releaseAPI := holdTCPPort(t)
 	base := fmt.Sprintf("http://localhost:%d", apiPort)
 	worker := exec.Command(workerBin, "--db", appDSN, "--api-addr", fmt.Sprintf(":%d", apiPort))
+	// BEFORE Start, not after -- see the note in readme_quick_start_reaches_done_test.go: Start
+	// returns before the child binds, so releasing after it is the race this contract removes.
+	releaseAPI()
 	if err := worker.Start(); err != nil {
 		t.Fatalf("start cleat-worker: %v", err)
 	}

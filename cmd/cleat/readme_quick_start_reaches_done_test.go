@@ -38,8 +38,11 @@
 //     cmd/cleat/db.go's doc comment) instead of shelling out to `psql` -- CI does not install psql by
 //     default (ci.yml installs it explicitly for the one job that needs it), and a Go test asserting a
 //     Go-documented SQL statement should not need a second binary on PATH to issue it.
-//   - A free, kernel-assigned TCP port (freeTCPPort) instead of the README's literal :8080, so a
-//     runner with something already bound to it does not fail a test about the walkthrough.
+//   - A free, kernel-assigned TCP port (holdTCPPort) instead of the README's literal :8080, so a
+//     runner with something already bound to it does not fail a test about the walkthrough. The
+//     helper holds each port while the test picks its others, so no two picks can return one
+//     number, and releases before the consumer binds -- which is required, not stylistic: on
+//     Linux a live hold refuses the consumer's bind (cleat#3122).
 //
 // Step 0 (`make setup`, toolchain verification) is not run: it has no effect on whether steps 1-7
 // work, and this test already requires everything it would check (go, and docker via the
@@ -125,9 +128,20 @@ func TestREADMEQuickStartReachesADoneWorkflow(t *testing.T) {
 
 	// Step 6: start the worker daemon against the app DSN, with an explicit --api-addr (the README's
 	// point: it has no default).
-	apiPort := freeTCPPort(t)
+	// Picked by holdTCPPort and released before the worker starts, per its contract -- on Linux a
+	// live hold refuses the worker's `:PORT` bind outright, so holding through it would stop the
+	// daemon from coming up at all. There is one port here and nothing for the hold to keep it
+	// distinct from, so the helper is used for the contract rather than for a guarantee it
+	// cannot give at a single-pick site. See holdTCPPort.
+	apiPort, releaseAPI := holdTCPPort(t)
 	base := fmt.Sprintf("http://localhost:%d", apiPort)
 	worker := exec.Command(workerBin, "--db", appDSN, "--api-addr", fmt.Sprintf(":%d", apiPort))
+	// BEFORE Start, not after: Start returns before the child has bound anything, so a release
+	// there is the race this helper exists to remove -- the hold would still be up when the worker
+	// tried to bind, and on Linux that bind fails. (This was after Start in the first version,
+	// with a comment above the pick saying "before the worker starts" -- the code did the opposite
+	// of its own comment. Found in review.)
+	releaseAPI()
 	if err := worker.Start(); err != nil {
 		t.Fatalf("start cleat-worker: %v", err)
 	}
