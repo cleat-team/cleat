@@ -107,19 +107,18 @@ type tutorialDoc struct {
 }
 
 // SCOPE, STATED RATHER THAN LEFT AS AN OMISSION. Every file under
-// docs/tutorials/ is link-checked (below), but only these two are
-// SNIPPET-compiled. The third, signals-and-human-loop.md, is excluded because it
-// is currently WRONG in a way that is a documentation defect rather than a
-// guard's business: all three of its AwaitSignals calls disagree with the SDK,
-// which declares
+// docs/tutorials/ is link-checked (below), and every one is now SNIPPET-compiled
+// too. The third, signals-and-human-loop.md, was excluded until cleat#3079
+// repaired it: all three of its AwaitSignals calls disagreed with the SDK, which
+// declares
 //
 //	AwaitSignals(signalNames []string, timeout time.Duration) SignalResult
 //
-// -- one return value, no option functions. The document shows one call
+// -- one return value, no option functions. The document showed one call
 // assigning to a single `err` with `cleat.WithTimeout`/`cleat.WithSignalPayload`
 // (neither exists), and another taking two values from three string arguments.
-// Repairing that is a change to what a tutorial TEACHES and belongs in its own
-// change, filed as cleat#3079; adding the doc here is then a one-line entry.
+// Repairing that was a change to what a tutorial TEACHES; the exclusion naming
+// it was deleted with the repair, which is the expiry excludedDocs asserts.
 var tutorialDocs = []tutorialDoc{
 	{
 		path: "docs/tutorials/quick-start.md",
@@ -157,6 +156,28 @@ var tutorialDocs = []tutorialDoc{
 			"if err := s.Run(h); err != nil {\n    return \"\", err\n}\n",
 		brokenWant: "declared and not used: reservation",
 	},
+	{
+		path: "docs/tutorials/signals-and-human-loop.md",
+		// Its first block is the whole example -- package clause, imports,
+		// types and submitExpense -- so only the two the prose draws out of it
+		// need stubs. Each marker is deliberately NOT text that occurs in that
+		// complete block: assemble wraps the FIRST fragment whose marker it
+		// finds, so a marker shared with block 0 would wrap block 0 instead,
+		// and the failure would look like a broken document rather than a
+		// broken table entry.
+		fragments: []tutorialFragment{
+			{
+				marker: "escalating to on-call",
+				header: "func _timeoutFragment(h cleat.HostCalls, reportID string) (string, error) {",
+				footer: "return \"\", nil\n}",
+			},
+			{
+				marker: "switch res.Name",
+				header: "func _multiSignalFragment(h cleat.HostCalls) {",
+				footer: "}",
+			},
+		},
+	},
 }
 
 // excludedDocs are tutorials that do NOT compile today, each with the error that
@@ -181,18 +202,12 @@ type excludedDoc struct {
 	issue     string
 }
 
-var excludedDocs = []excludedDoc{
-	{
-		path:  "docs/tutorials/signals-and-human-loop.md",
-		whole: 0, // package clause, imports, types and submitExpense -- complete
-		// Measured: vet: ./main.go:49:15: undefined: cleat.WithTimeout.
-		// Every AwaitSignals call in the file uses option helpers that occur
-		// nowhere under cleat/, and the real signature is
-		// AwaitSignals([]string, time.Duration) SignalResult -- one value.
-		wantError: "undefined: cleat.WithTimeout",
-		issue:     "cleat#3079",
-	},
-}
+// EMPTY, and the entry that was here is why it can be: signals-and-human-loop.md
+// was the last exclusion, and cleat#3079 repaired it, so the document moved up
+// into tutorialDocs. The machinery stays for the next document that needs it
+// rather than being removed with its only user -- an empty list is what the
+// expiry test reports as "nothing to expire", not as a gap in coverage.
+var excludedDocs = []excludedDoc{}
 
 var goFenceRe = regexp.MustCompile("(?ms)^```go\\s*$\\n(.*?)^```\\s*$")
 
