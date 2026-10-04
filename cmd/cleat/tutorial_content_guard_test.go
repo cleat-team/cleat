@@ -185,93 +185,6 @@ type tutorialDoc struct {
 //
 // Both pages carry their own known-positive, so their tables cannot stop matching
 // unnoticed.
-
-// Import sets shared by common-patterns.md's fragment headers. Each block is its
-// own file, so a block may import only what its own body uses -- an import a
-// block does not use fails it, which is why these are separate constants rather
-// than one prelude.
-const (
-	cpCleat           = "package main\n\nimport \"github.com/cleat-team/cleat/cleat\""
-	cpCleatFmt        = "package main\n\nimport (\n\t\"fmt\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
-	cpCleatTime       = "package main\n\nimport (\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
-	cpCleatFmtTime    = "package main\n\nimport (\n\t\"fmt\"\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
-	cpCleatFmtStrings = "package main\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
-	cpCleatJSON       = "package main\n\nimport (\n\t\"encoding/json\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
-)
-
-// commonPatternsSupport is the sibling support file shared by every
-// common-patterns.md block: the page-local types it names (PipelineInput,
-// ChildInput, OrderItem), the page-local helpers it calls (extractID,
-// processOrderSmall, checkPickupStatus) and the values the surrounding prose
-// assumes (inputJSON, driverID, items). Every one is derived from the page's own
-// usage -- `ChildInput{Item: item, JobID: jobID, Index: i}` fixes the field names
-// and types, `processOrderSmall(h, userID, items)` fixes the signature -- rather
-// than invented. One file for the whole page, because these are shared, and
-// unused package-level declarations are legal where unused imports are not.
-//
-// It deliberately declares neither `h` nor `processOrder`: block 20 declares
-// both itself, and a duplicate would fail that block alone.
-const commonPatternsSupport = `package main
-
-import "github.com/cleat-team/cleat/cleat"
-
-type (
-	PipelineInput  struct{ Items []string }
-	PipelineResult struct{ Succeeded, Failed int }
-	ChildInput     struct {
-		Item  string
-		JobID string
-		Index int
-	}
-	ChildResult       struct{}
-	SubscriptionInput struct{}
-	OrderItem         struct{}
-)
-
-var (
-	inputJSON   string
-	requestJSON string
-	flightJSON  string
-	hotelJSON   string
-	flightRef   string
-	hotelRef    string
-	driverID    string
-	runID       string
-	items       []string
-	item        string
-	jobID       string
-	i           int
-	driver      struct {
-		DriverName string
-		ETAMinutes string
-	}
-)
-
-func extractID(s string) string { return "" }
-
-func processOrderSmall(h cleat.HostCalls, userID string, items []OrderItem) (string, error) {
-	return "", nil
-}
-
-func checkPickupStatus(driverID string) (string, error) { return "", nil }
-
-func isComplete(s string) bool { return false }
-
-func chargeWithRetry(h cleat.HostCalls, input SubscriptionInput) error { return nil }
-
-func enterGracePeriod(h cleat.HostCalls, input SubscriptionInput) (string, error) {
-	return "", nil
-}
-
-func toJSON(v interface{}) string { return "" }
-
-func stepJSON(i int) string { return "" }
-
-func placeOrderV2(input string) error { return nil }
-
-func placeOrderV1(input string) error { return nil }
-`
-
 var tutorialDocs = []tutorialDoc{
 	{
 		path: "docs/tutorials/quick-start.md",
@@ -649,6 +562,92 @@ var tutorialDocs = []tutorialDoc{
 		brokenWant: "declared and not used: unusedLocal",
 	},
 }
+
+// Import sets shared by common-patterns.md's fragment headers. Each block is its
+// own file, so a block may import only what its own body uses -- an import a
+// block does not use fails it, which is why these are separate constants rather
+// than one prelude.
+const (
+	cpCleat           = "package main\n\nimport \"github.com/cleat-team/cleat/cleat\""
+	cpCleatFmt        = "package main\n\nimport (\n\t\"fmt\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatTime       = "package main\n\nimport (\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatFmtTime    = "package main\n\nimport (\n\t\"fmt\"\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatFmtStrings = "package main\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+	cpCleatJSON       = "package main\n\nimport (\n\t\"encoding/json\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)"
+)
+
+// commonPatternsSupport is the sibling support file shared by every
+// common-patterns.md block: the page-local types it names (PipelineInput,
+// ChildInput, OrderItem), the page-local helpers it calls (extractID,
+// processOrderSmall, checkPickupStatus) and the values the surrounding prose
+// assumes (inputJSON, driverID, items). Every one is derived from the page's own
+// usage -- `ChildInput{Item: item, JobID: jobID, Index: i}` fixes the field names
+// and types, `processOrderSmall(h, userID, items)` fixes the signature -- rather
+// than invented. One file for the whole page, because these are shared, and
+// unused package-level declarations are legal where unused imports are not.
+//
+// It deliberately declares neither `h` nor `processOrder`: block 20 declares
+// both itself, and a duplicate would fail that block alone.
+const commonPatternsSupport = `package main
+
+import "github.com/cleat-team/cleat/cleat"
+
+type (
+	PipelineInput  struct{ Items []string }
+	PipelineResult struct{ Succeeded, Failed int }
+	ChildInput     struct {
+		Item  string
+		JobID string
+		Index int
+	}
+	ChildResult       struct{}
+	SubscriptionInput struct{}
+	OrderItem         struct{}
+)
+
+var (
+	inputJSON   string
+	requestJSON string
+	flightJSON  string
+	hotelJSON   string
+	flightRef   string
+	hotelRef    string
+	driverID    string
+	runID       string
+	items       []string
+	item        string
+	jobID       string
+	i           int
+	driver      struct {
+		DriverName string
+		ETAMinutes string
+	}
+)
+
+func extractID(s string) string { return "" }
+
+func processOrderSmall(h cleat.HostCalls, userID string, items []OrderItem) (string, error) {
+	return "", nil
+}
+
+func checkPickupStatus(driverID string) (string, error) { return "", nil }
+
+func isComplete(s string) bool { return false }
+
+func chargeWithRetry(h cleat.HostCalls, input SubscriptionInput) error { return nil }
+
+func enterGracePeriod(h cleat.HostCalls, input SubscriptionInput) (string, error) {
+	return "", nil
+}
+
+func toJSON(v interface{}) string { return "" }
+
+func stepJSON(i int) string { return "" }
+
+func placeOrderV2(input string) error { return nil }
+
+func placeOrderV1(input string) error { return nil }
+`
 
 // excludedDocs are tutorials that do NOT compile today, each with the error that
 // must STILL be present and the issue tracking the repair.
