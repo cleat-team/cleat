@@ -260,9 +260,10 @@ func TestJavaBuildRefusesAStaleManifest(t *testing.T) {
 	}
 
 	outDir := t.TempDir()
-	buildCmd := exec.Command(cleatBinary, "build", "--target", "java", "-o", outDir, javaDir)
-	buildCmd.Dir = repoRoot
-	out, buildErr := buildCmd.CombinedOutput()
+	// javaBuild fails, naming the resource, when the Gradle wrapper could not
+	// fetch its distribution -- otherwise this test reports that environment
+	// failure as its own. See java_build_wrapper_fetch_test.go.
+	out, buildErr := javaBuild(t, repoRoot, javaDir, outDir)
 	if buildErr == nil {
 		t.Fatalf("build with a suppressed manifest write and a stale one planted must fail, but exited 0 -- "+
 			"it silently embedded the stale, incomplete entry point list instead of refusing:\n%s", out)
@@ -392,9 +393,7 @@ func TestJavaBuildRefusesMultipleManifests(t *testing.T) {
 	}
 
 	outDir := t.TempDir()
-	buildCmd := exec.Command(cleatBinary, "build", "--target", "java", "-o", outDir, javaDir)
-	buildCmd.Dir = repoRoot
-	out, buildErr := buildCmd.CombinedOutput()
+	out, buildErr := javaBuild(t, repoRoot, javaDir, outDir)
 	if buildErr == nil {
 		t.Fatalf("build that produced two entry-point manifests must fail, but exited 0 -- "+
 			"it must not silently pick one of two disagreeing manifests:\n%s", out)
