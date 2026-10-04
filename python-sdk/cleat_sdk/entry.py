@@ -190,15 +190,35 @@ def _from_dict(
                 type_hints = {}
             _cache[target_type] = type_hints
 
-        # Build kwargs from the input dict, recursing per field.
+        # Build kwargs from the input dict, recursing per parameter.
+        #
+        # The source is `inspect.signature`, NOT `dataclasses.fields`. fields()
+        # omits InitVar pseudo-fields -- they are not stored attributes -- so
+        # an InitVar was invisible here, and a dataclass with a REQUIRED one
+        # could not be constructed through this binding at all, whatever the
+        # payload carried (cleat#2940). signature() is the callable that
+        # `target_type(**kwargs)` below actually invokes, and it is the same
+        # source `jsonschema_emitter.py` reads, so the emitted schema and this
+        # binding agree by construction rather than by coincidence.
+        #
+        # The same source also excludes `field(init=False)`, which fields()
+        # lists and __init__ does not accept -- passing one used to raise
+        # "unexpected keyword argument" from the call below.
         kwargs = {}
-        for f in dataclasses.fields(target_type):
-            if f.name not in value:
-                # Field absent from input -- rely on dataclass field
-                # default, or let __init__ raise TypeError.
+        for name, param in inspect.signature(target_type).parameters.items():
+            if name not in value:
+                # Absent from input -- rely on the dataclass default, or let
+                # __init__ raise TypeError for a required one. An ordinary
+                # required field and a required InitVar fail identically
+                # there, because the payload is equally incomplete for both.
                 continue
-            field_type = type_hints.get(f.name, f.type)
-            kwargs[f.name] = _from_dict(value[f.name], field_type, _cache)
+            field_type = type_hints.get(name, param.annotation)
+            # An InitVar's annotation is the WRAPPER -- `InitVar[int]`, not
+            # `int` -- so recursing with it would convert against a non-type.
+            # Unwrap through the public `.type` attribute.
+            if isinstance(field_type, dataclasses.InitVar):
+                field_type = field_type.type
+            kwargs[name] = _from_dict(value[name], field_type, _cache)
 
         return target_type(**kwargs)
 
