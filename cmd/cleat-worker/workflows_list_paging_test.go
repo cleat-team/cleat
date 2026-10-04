@@ -114,8 +114,8 @@ func TestTheTargetedFiltersReachTheStore(t *testing.T) {
 // data, which is the direction nobody checks" -- and it covers these equally.
 //
 // Asserting every field in one request also keeps the guard honest as filters
-// are added: a new one is unprotected until it appears here, and this test is
-// where a reader looks to find out which are covered.
+// are added: a new caller-settable one is unprotected until it appears here,
+// and this test is where a reader looks to find out which are covered.
 func TestEveryListFilterReachesTheStore(t *testing.T) {
 	sp := newListSpy(nil, 0)
 	get(t, sp, "/api/workflows?"+
