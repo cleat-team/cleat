@@ -212,10 +212,13 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 
 	// AND A SHARED TABLE IS A REFUSAL. Plugin tables live in one flat namespace
 	// (cleat#1288), so two plugins can declare the same name and this function
-	// cannot tell whose rows a DROP would take. admin.plugin_tables exists to
-	// answer exactly that and is never populated -- RegisterPluginTables has no
-	// production caller -- so the check is made against the loaded set, which
-	// is the information actually available.
+	// cannot tell whose rows a DROP would take. admin.plugin_tables is
+	// populated -- plugin.RunMigrations records the tables migrations declare
+	// TenantScoped (cleat#1289) -- but only with that subset:
+	// RegisterPluginTables, the writer of the rest, has no production caller.
+	// So the check is made against the loaded set, which is the information
+	// actually available here. This said "is never populated" until cleat#3081,
+	// which RunMigrations had already stopped making true.
 	claimed := map[string][]string{}
 	for _, m := range applied {
 		for _, t := range m.TenantScoped {
