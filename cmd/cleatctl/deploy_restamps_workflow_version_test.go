@@ -76,9 +76,11 @@ func artifactWithRawMetadata(t *testing.T, payload string) []byte {
 // run looped between claim and release and never executed.
 //
 // The input must differ from the stored row in its BODY, not just its version:
-// an identical file is caught by the dedup guard and never reaches the insert,
-// which is a different behaviour (and one that does not fire against a real
-// store -- cleat#2947).
+// an identical file is caught by the dedup guard and never reaches the
+// insert. (Until cleat#2947 that guard compared against
+// WorkflowDef.WASMBytes, which no dialect's ListWorkflowDefs selects -- so it
+// never fired against a real store and this input reached the insert for a
+// reason other than the one stated here.)
 func TestDeployWorkflow_RestampsTheBinaryToTheVersionItRecords(t *testing.T) {
 	dir := t.TempDir()
 
@@ -100,8 +102,19 @@ func TestDeployWorkflow_RestampsTheBinaryToTheVersionItRecords(t *testing.T) {
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
 				{Name: name, Version: 1, ABIVersion: wasm.CurrentABIVersion,
-					WASMBytes: deployedV1, CreatedAt: time.Now().Add(-24 * time.Hour)},
+					CreatedAt: time.Now().Add(-24 * time.Hour)},
 			}, nil
+		},
+		// Where the dedup guard reads the stored bytes since cleat#2947.
+		// Supplied so the guard genuinely compares and genuinely finds a
+		// difference -- the premise stated above. Left out, the deploy would
+		// still proceed, but because LoadWASM returned nothing rather than
+		// because the bodies differ.
+		loadWASMFn: func(_ context.Context, _ string, version int) ([]byte, error) {
+			if version != 1 {
+				t.Errorf("LoadWASM asked for v%d, want the latest (v1)", version)
+			}
+			return deployedV1, nil
 		},
 		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			capturedDef = def

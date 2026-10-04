@@ -50,10 +50,14 @@ Subcommands:
 
 // deployWorkflow reads a WASM binary from a file and deploys it as a new
 // workflow version. It computes the new version number automatically by
-// incrementing the latest deployed version. If an exact version already
-// exists with the same SHA256 hash, the deployment is skipped -- except that
-// the skip has never fired against a real store, which is cleat#2947 rather
-// than a property of this comment.
+// incrementing the latest deployed version. If the LATEST version already
+// holds the same binary, the deployment is skipped and nothing is written.
+//
+// Until cleat#2947 that skip had never fired against a real store: it compared
+// against WorkflowDef.WASMBytes, and no dialect's ListWorkflowDefs selects
+// wasm_bytes, so the field was always empty. It reads through LoadWASM now,
+// against the latest version only. The check carries its own reasons -- both
+// for reading at all and for reading one version rather than all of them.
 func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	fs := flag.NewFlagSet("deploy workflow", flag.ContinueOnError)
 	// cleat#1981: the one escape hatch validate-input-at-start asks for, for
@@ -142,18 +146,11 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		osExit(1)
 	}
 
-	// Compute SHA256 hash for dedup.
-	//
-	// The guard this feeds is DEAD: it compares against def.WASMBytes, and no
-	// store's ListWorkflowDefs selects wasm_bytes on any dialect
-	// (engine/store_deployment.go:288, engine/mysql_ops.go:905/911,
-	// engine/mssql_deployment.go:387/392), so the field is always empty and the
-	// "already has the same binary (skipped)" branch below never runs. Filed as
-	// cleat#2947 rather than fixed here: wiring it up means deciding which
-	// versions to load (LoadWASM is per-version, and a Python artifact is ~19MB),
-	// which is its own change. NOTED THERE: once it is wired, the comparison must
-	// normalise cleat.metadata's workflow_version out of both sides, because the
-	// restamp above makes stored bytes carry a version the file on disk does not.
+	// SHA256 of the artifact exactly as it sits on disk. Used only for the
+	// success line at the end. The dedup check further down does NOT use this
+	// value: it hashes both sides after normalising cleat.metadata's
+	// workflow_version out, because the restamp assigns a version the file on
+	// disk does not carry.
 	hash := sha256.Sum256(wasmBytes)
 
 	// Determine next version number.
@@ -168,15 +165,6 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 			if def.Version >= nextVersion {
 				nextVersion = def.Version + 1
 			}
-			// Check for duplicate WASM. Dead against every real store -- see
-			// the note on `hash` above and cleat#2947.
-			if len(def.WASMBytes) > 0 {
-				existingHash := sha256.Sum256(def.WASMBytes)
-				if existingHash == hash {
-					fmt.Printf("WASM unchanged: %s v%d already has the same binary (skipped)\n", name, def.Version)
-					return
-				}
-			}
 		}
 	}
 
@@ -188,6 +176,52 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 	// If there's an existing latest version, use its ABI version and compute minVersion.
 	if len(existingDefs) > 0 {
 		latest := existingDefs[0] // ListWorkflowDefs returns ordered by version DESC.
+
+		// cleat#2947. Skip when the binary about to be deployed is the one the
+		// LATEST version already holds.
+		//
+		// Read through LoadWASM rather than WorkflowDef.WASMBytes, which is why
+		// the comparison that used to sit in the loop above never once fired: no
+		// dialect's ListWorkflowDefs selects wasm_bytes
+		// (engine/store_deployment.go:288, engine/mysql_ops.go:905/911,
+		// engine/mssql_deployment.go:387/392), so that field was always empty.
+		//
+		// THE LATEST VERSION ONLY, and it is a decision rather than a shortcut.
+		// Checking every listed def costs one LoadWASM per version, and LoadWASM
+		// returns the whole binary -- ~19MB for a Python component -- so a
+		// genuinely new artifact, which matches nothing and therefore reads every
+		// version, would pay N x 19MB on every deploy, growing without bound as
+		// the workflow accumulates versions. One read covers the case this guard
+		// exists for: re-deploying the binary you just built.
+		//
+		// It is also the CORRECT semantic rather than merely the cheap one. The
+		// chain is linear (MinVersion = latest.Version), so re-deploying an
+		// artifact matching an OLDER version is a deliberate move forward -- a
+		// rollback expressed as a new version. A guard that skipped on any
+		// version's match would refuse that silently and leave the previous
+		// binary current, which is the failure class this repo files as "an
+		// operation that reports success without doing the thing".
+		//
+		// Both sides are normalised because restampWorkflowVersion (below) writes
+		// the version this command ASSIGNS into the stored binary, while the file
+		// on disk still carries whatever `cleat build --version` wrote. Compared
+		// as stored, an identical artifact could never match its own copy.
+		if storedBytes, loadErr := store.LoadWASM(ctx, name, latest.Version); loadErr == nil {
+			incoming := sha256.Sum256(normaliseWorkflowVersion(wasmBytes))
+			stored := sha256.Sum256(normaliseWorkflowVersion(storedBytes))
+			if stored == incoming {
+				fmt.Printf("WASM unchanged: %s v%d already has the same binary (skipped)\n", name, latest.Version)
+				return
+			}
+		} else {
+			// Not fatal -- the deploy proceeds and creates a new version, which
+			// is exactly what it did before this guard worked at all. But NOT
+			// silent: a guard that fails without saying so is cleat#2947's own
+			// subject, one layer down.
+			fmt.Fprintf(os.Stderr, "warning: could not read %s v%d to check for an unchanged binary, deploying a new version: %v\n",
+				name, latest.Version, loadErr)
+		}
+
 		abiVersion = latest.ABIVersion
 		// New version's MinVersion = previous version (linear migration chain).
 		minVersion = latest.Version
@@ -313,6 +347,40 @@ func restampWorkflowVersion(wasmBytes []byte, version int) ([]byte, error) {
 		return nil, fmt.Errorf("could not stamp the binary with workflow_version %d: %w", version, err)
 	}
 	return out, nil
+}
+
+// normaliseWorkflowVersion returns wasmBytes with cleat.metadata's
+// workflow_version set to a fixed value, so two binaries differing only in that
+// stamp hash the same. cleat#2947.
+//
+// The deploy dedup check needs this because restampWorkflowVersion above writes
+// the version this command ASSIGNS into the stored binary, while the file on
+// disk still carries whatever `cleat build --version` wrote. Comparing the two
+// as stored would therefore never match, so the guard would not merely fail to
+// fire -- it would be wrong, and would look wired while doing nothing.
+//
+// Setting both sides to the same constant removes the stamp from the
+// comparison without removing it from the artifact. The rewrite is
+// deterministic, which is what makes it usable as a normaliser: SetMetadataField
+// decodes the payload into a map and re-encodes it, and encoding/json sorts map
+// keys, so equal content yields equal bytes. See its doc comment for what else
+// changes (interior whitespace) and why nothing depends on that.
+//
+// A binary with no readable cleat.metadata comes back unchanged, and that is
+// correctness rather than a fallback: restampWorkflowVersion leaves exactly that
+// shape alone too, so the stored bytes and the file on disk are already the same
+// and there is nothing to normalise. ErrNotAJSONObject -- valid JSON with no
+// keys to patch -- is the same case, and is deliberately not distinguished.
+func normaliseWorkflowVersion(wasmBytes []byte) []byte {
+	meta, err := wasm.ReadMetadata(wasmBytes)
+	if err != nil || meta == nil {
+		return wasmBytes
+	}
+	out, err := wasm.SetMetadataField(wasmBytes, "workflow_version", json.RawMessage("0"))
+	if err != nil {
+		return wasmBytes
+	}
+	return out
 }
 
 // deployPlugin reads a plugin WASM binary and writes it to plugin_defs.
