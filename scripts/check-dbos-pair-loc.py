@@ -28,6 +28,21 @@ independently and never notice. Only running the REAL check against the
 tree (this file's own `main()`, not `--self-test`) caught it, reporting
 UNMEASURED rather than a false pass.
 
+BOTH HALVES OF THAT ARE NOW CHECKED, and the second was added later
+(cleat#3042) because #2597 only argued for the first. interface_failures
+runs the real script and asks whether this file's PARSER still finds its
+markers there -- the PROGRAM -> PARSER seam. It deliberately does not
+compare against a copy, so nothing noticed the copy drifting in the other
+direction: PR #3040 appended two sections and gave them "SUM:" lines that
+real cloc does not print for a single-file section, and when the parser was
+then flipped to read the LAST "SUM" the real check stayed green and only the
+self-test failed -- the fixture was the one that disagreed. So
+fixture_shape_failures compares each faithful fixture's SHAPE (section
+labels, and per section whether a "SUM:" line follows) against what the
+script prints today: the PROGRAM -> FIXTURE seam. Numbers are excluded on
+purpose -- the fixtures quote stale figures, and a control that failed on
+every upstream code change would be disabled, which is worse than absent.
+
 cleat#2632: `order-lifecycle` (the control pair) prints one section per
 side -- "== cleat: app ==", "== DBOS: app ==" -- so its app total IS that
 one section's SUM. `integration-hub` (the wedge) is not that shape: each
@@ -408,6 +423,80 @@ def interface_failures(pair, runner):
     return [], []
 
 
+def section_shape(text):
+    """Return [(label, has_sum), ...] in encounter order.
+
+    The two properties this file's parsing depends on: which sections exist,
+    and per section whether a "SUM:" line follows. Numbers are deliberately
+    NOT included -- SELF_TEST_SCRIPT_OUT_MATCHED quotes stale figures on
+    purpose (729/274 against a real 731/439), and a check that demanded equal
+    numbers would fail on every upstream code change and get disabled, which
+    is worse than not having the check."""
+    headers = [(m.start(), m.group(1)) for m in SECTION_HEADER_RE.finditer(text)]
+    shape = []
+    for i, (start, label) in enumerate(headers):
+        end = headers[i + 1][0] if i + 1 < len(headers) else len(text)
+        shape.append((label, SUM_RE.search(text[start:end]) is not None))
+    return shape
+
+
+def fixture_shape_failures(pair, runner):
+    """Compare the SHAPE of `runner(pair)`'s output against the pair's fixture.
+
+    This is the PROGRAM -> FIXTURE seam, and it is the counterpart of
+    interface_failures above rather than a duplicate of it. That one runs the
+    real script and asks whether this file's PARSER still finds its markers --
+    and it deliberately never compares against a copy, because a copy is what
+    cleat#2621 drifted from. This one asks the opposite question about the same
+    two things: does the copy still look like what the program prints today.
+    Both are needed because a parser can be right about the real output while
+    the fixture every self-test case is built on has stopped modelling it.
+
+    WHY IT MATTERS, measured rather than argued: PR #3040 appended two sections
+    and gave them "SUM:" lines that real cloc does not print for a single-file
+    section. Flipping this file's parser to read the LAST "SUM" then kept the
+    real check green and failed only the self-test -- the fixture was the thing
+    that disagreed, so a control written against it could only fail for a
+    reason that was about the fixture (cleat#3042).
+
+    Returns (failures, unmeasured), the same two channels as
+    interface_failures: `failures` only when the runner produced output whose
+    shape the fixture no longer matches; `unmeasured` only when the runner
+    could not produce output at all. A pair with no fixture is skipped --
+    nothing to compare is not the same as a pass, and FIXTURES records which
+    pairs have one."""
+    fixture_text = FIXTURES.get(pair)
+    if fixture_text is None:
+        return [], []
+    rc, out, err = runner(pair)
+    if rc == 2:
+        return [], [f"UNMEASURED calling scripts/dbos-pair-loc.sh {pair}: {err.strip()}"]
+    if rc != 0:
+        return [], [f"scripts/dbos-pair-loc.sh {pair} exited {rc} unexpectedly: {err.strip()}"]
+    real, fixture = section_shape(out), section_shape(fixture_text)
+    if real == fixture:
+        return [], []
+    lines = [
+        f"FIXTURE DRIFTED: the {pair} fixture no longer has the shape "
+        f"scripts/dbos-pair-loc.sh prints. Every self-test case for this pair is built on "
+        f"that fixture, so a control written against it can only fail for a reason about the "
+        f"fixture rather than about this checker (cleat#3042)."
+    ]
+    real_labels = [label for label, _ in real]
+    fixture_labels = [label for label, _ in fixture]
+    for label in real_labels:
+        if label not in fixture_labels:
+            lines.append(f"  printed by the script, MISSING from the fixture: {label!r}")
+    for label in fixture_labels:
+        if label not in real_labels:
+            lines.append(f"  in the fixture, NOT printed by the script: {label!r}")
+    for (rlabel, rsum), (flabel, fsum) in zip(real, fixture):
+        if rlabel == flabel and rsum != fsum:
+            lines.append(f"  {rlabel!r}: the script prints a SUM line={rsum}, the fixture "
+                         f"has one={fsum}")
+    return lines, []
+
+
 # --------------------------------------------------------------------------
 
 
@@ -552,6 +641,19 @@ SELF_TEST_WEDGE_README_MATCHED = """
 | platform (own line -- not summed above) | **124** | **0** |
 | e2e harness machinery (own line -- not summed above, see below) | **154** | **42** |
 """
+
+
+# pair -> its hand-written copy of scripts/dbos-pair-loc.sh's output, for
+# fixture_shape_failures(). Only the FAITHFUL fixtures are listed:
+# SELF_TEST_SCRIPT_OUT_TRAILING_SUM is built by ADDING two "SUM:" lines the
+# program does not print, and that divergence is its job -- it exists to be a
+# hazard, so comparing it against the program would report a deliberate
+# unfaithfulness as drift. A pair with no entry (b2b-saas-control-plane) has no
+# fixture to check.
+FIXTURES = {
+    "order-lifecycle": SELF_TEST_SCRIPT_OUT_MATCHED,
+    "integration-hub": SELF_TEST_WEDGE_SCRIPT_OUT_MATCHED,
+}
 
 
 def self_test():
@@ -723,7 +825,11 @@ def self_test():
     # So this checks the INTERFACE rather than the fixture: run the REAL
     # dbos-pair-loc.sh for every registered pair and confirm this file's
     # parser can still find the markers it needs in what that script
-    # ACTUALLY prints today -- never comparing against a copy of it.
+    # ACTUALLY prints today -- never comparing against a copy of it. The copy
+    # is checked by fixture_shape_failures, called immediately below in the
+    # same loop, which asks the opposite question about the same two things:
+    # this one must NOT compare against a copy, and that one exists precisely
+    # because this one does not.
     #
     # DELIBERATELY DOES NOT CHECK WHETHER THE NUMBERS AGREE. That is
     # main()'s job, and it is allowed to fail on a genuinely stale README
@@ -760,6 +866,23 @@ def self_test():
         f, u = interface_failures(pair, real_script_runner)
         failures.extend(f)
         all_unmeasured.extend(u)
+        # The other side of the same two things: the fixtures the self-test
+        # cases above are built on, against what the script prints now. Runs the
+        # script a second time per pair rather than caching the first call --
+        # cloc is invoked several times per pair elsewhere in this file, and a
+        # caching wrapper would be one more thing to get wrong for no measured
+        # gain.
+        #
+        # It also inherits the third status this self-test already carries for
+        # interface_failures: a self-test whose inputs reach OUTSIDE itself
+        # (here, a real cloc invocation) can fail to establish them, and must
+        # say so as UNMEASURED rather than present a missing toolchain as a
+        # finding about the fixture. That is why this file's --self-test exits
+        # 2 at all, which a self-test that only builds its own fixtures must
+        # never do.
+        f, u = fixture_shape_failures(pair, real_script_runner)
+        failures.extend(f)
+        all_unmeasured.extend(u)
         pairs_checked += 1
     if not PAIRS:
         failures.append("  PAIRS is empty -- the interface check has nothing to run against")
@@ -791,6 +914,32 @@ def self_test():
     if f or not u:
         failures.append("  MISSED: an UNMEASURED interface-check runner was not propagated "
                         "as unmeasured (got failures=%r unmeasured=%r)" % (f, u))
+
+    # cleat#3042 -- known negative for the fixture seam: a fixture that has
+    # drifted from the program in the direction PR #3040 actually drifted it
+    # (sections that print a "SUM:" line no longer carrying one). This must be
+    # a FAILURE and not unmeasured: the script ran fine, the fixture is what no
+    # longer matches it. Replays the shape of the real defect, so the case fails
+    # if the check is ever reduced to "did the script run".
+    def sum_lines_dropped_runner(pair):
+        kept = [line for line in SELF_TEST_SCRIPT_OUT_MATCHED.splitlines(True)
+                if not line.startswith("SUM:")]
+        return 0, "".join(kept), ""
+    f, u = fixture_shape_failures("order-lifecycle", sum_lines_dropped_runner)
+    if not f or u:
+        failures.append("  MISSED: a fixture whose SUM lines no longer match the program was "
+                        "not reported as fixture drift (got failures=%r unmeasured=%r)" % (f, u))
+    if f and not any("SUM" in p for p in f):
+        failures.append("  the fixture-drift finding does not name the SUM property it is "
+                        "about: %r" % (f,))
+
+    # Known negative -- same precondition failure as the interface check's, on
+    # this seam: cloc missing when the script runs for real is UNMEASURED, never
+    # a finding about the fixture.
+    f, u = fixture_shape_failures("order-lifecycle", cloc_missing_runner)
+    if f or not u:
+        failures.append("  MISSED: an UNMEASURED fixture-shape runner was not propagated as "
+                        "unmeasured (got failures=%r unmeasured=%r)" % (f, u))
 
     if failures:
         print("self-test FAILED:\n" + "\n".join(failures), file=sys.stderr)
