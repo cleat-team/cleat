@@ -1366,14 +1366,20 @@ func TestDeployWorkflow_SameHash(t *testing.T) {
 
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			// WASMBytes is deliberately LEFT UNSET. The guard used to compare
+			// against it, and no dialect's ListWorkflowDefs selects wasm_bytes,
+			// so it never fired against a real store (cleat#2947). It reads
+			// through LoadWASM now -- so a test that supplied the bytes here
+			// would be passing on a field the deployed code no longer looks at.
 			return []engine.WorkflowDef{
-				{
-					Name:      name,
-					Version:   1,
-					WASMBytes: wasmBytes,
-					CreatedAt: time.Now().Add(-24 * time.Hour),
-				},
+				{Name: name, Version: 1, CreatedAt: time.Now().Add(-24 * time.Hour)},
 			}, nil
+		},
+		loadWASMFn: func(_ context.Context, _ string, version int) ([]byte, error) {
+			if version != 1 {
+				t.Errorf("LoadWASM asked for v%d, want the latest (v1)", version)
+			}
+			return wasmBytes, nil
 		},
 		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			t.Error("DeployWorkflowDef should not be called for unchanged WASM")
@@ -1393,20 +1399,41 @@ func TestDeployWorkflow_SameHash(t *testing.T) {
 	}
 }
 
-func TestDeployWorkflow_SameHashSecondIteration(t *testing.T) {
+// The converse of the test above, and the semantic this change deliberately
+// pins: the guard compares against the LATEST version, not every listed one.
+//
+// v1 holds the binary being deployed and v2 does not, and the deploy PROCEEDS.
+// That is the point rather than a limitation. The chain is linear
+// (MinVersion = latest.Version), so re-deploying an artifact that matches an
+// OLDER version is a deliberate move forward -- a rollback expressed as a new
+// version -- and a guard that skipped here would refuse it silently, leaving
+// v2 current while reporting success.
+//
+// It replaces a test that asserted the opposite ("a match on any listed version
+// skips"), which passed only because the fake returned WASMBytes; no real store
+// supplies that field, so the behaviour it described had never once run.
+// cleat#2947.
+func TestDeployWorkflow_SameHashOnANonLatestVersionStillDeploys(t *testing.T) {
 	dir := t.TempDir()
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	path := writeWASM(t, dir, wasmBytes)
 
+	var deployed *engine.WorkflowDef
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: name, Version: 2, WASMBytes: []byte{0, 1, 2}, CreatedAt: time.Now()},
-				{Name: name, Version: 1, WASMBytes: wasmBytes, CreatedAt: time.Now().Add(-24 * time.Hour)},
+				{Name: name, Version: 2, CreatedAt: time.Now()},
+				{Name: name, Version: 1, CreatedAt: time.Now().Add(-24 * time.Hour)},
 			}, nil
 		},
+		loadWASMFn: func(_ context.Context, _ string, version int) ([]byte, error) {
+			if version == 1 {
+				return wasmBytes, nil // the binary being deployed -- but not the latest
+			}
+			return []byte{0, 1, 2}, nil
+		},
 		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
-			t.Error("DeployWorkflowDef should not be called for unchanged WASM")
+			deployed = def
 			return nil
 		},
 	}
@@ -1414,8 +1441,14 @@ func TestDeployWorkflow_SameHashSecondIteration(t *testing.T) {
 	stdout := captureStdout(t, func() {
 		deployWorkflow(context.Background(), store, nil, []string{"existing-wf", path})
 	})
-	if !strings.Contains(stdout, "WASM unchanged") {
-		t.Errorf("expected 'WASM unchanged' in stdout, got: %s", stdout)
+	if deployed == nil {
+		t.Fatal("expected DeployWorkflowDef to be called: v1 holds this binary, but v1 is not the latest")
+	}
+	if deployed.Version != 3 {
+		t.Errorf("expected version=3, got %d", deployed.Version)
+	}
+	if !strings.Contains(stdout, "Deployed existing-wf v3") {
+		t.Errorf("expected the deploy to proceed and say so, got: %s", stdout)
 	}
 }
 
