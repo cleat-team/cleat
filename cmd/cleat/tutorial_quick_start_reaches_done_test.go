@@ -19,9 +19,13 @@
 // tutorial's step 4 runs `cleat init <name>` to SCAFFOLD A FRESH PROJECT, the
 // same command cmd/cleat/a_scaffold_builds_test.go and
 // fullstack_template_run_starts_a_workflow_test.go already exercise for the
-// same reason resolveScaffoldAgainstThisCheckout exists: a scaffold's go.mod
-// pins an unpublished pseudo-version of the SDK, which only resolves against
-// THIS checkout, not the module proxy -- reused here rather than re-derived.
+// same reason resolveScaffoldAgainstThisCheckout exists: that helper writes
+// `replace` directives so the scaffold is built against THIS checkout's SDK
+// rather than the release the proxy serves -- reused here rather than
+// re-derived. (It used to say a scaffold "pins an unpublished pseudo-version of
+// the SDK, which only resolves against THIS checkout": the submodule has been
+// tagged since 2026-09-27, so a scaffold resolves a release from the proxy now,
+// and it is the helper that points it back at the tree. cleat#3078.)
 //
 // EXTRACTED, NOT RETYPED (same discipline as #2798's own R2 fix, applied from
 // the start here rather than added after an initial hardcoded version).
