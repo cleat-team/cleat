@@ -317,13 +317,14 @@ func TestApprovalWorkflow_Rejected(t *testing.T) {
 > "to yield to the goroutine scheduler" before signalling. The sleep does not
 > do that job. `AssertCalled` reads the call history **once** and fails if the
 > call is not there yet, so it races the workflow goroutine -- and a sleep
-> before `Signal` cannot order an event that happens after it. Measured by
-> running this block as a real test, `-count=20 -race`: **the example above
-> fails most runs with the sleep in place, and every run with it deleted.**
-> Joining the goroutine takes it to **zero failures in 20 runs**, every time,
-> and that is also what the harness's own `AdvanceTimeAndDrain` comment
-> recommends (*"use a `sync.WaitGroup` or other explicit synchronization"*).
-> The `time` import stays: `TestApprovalWorkflow_Timeout` needs `time.Hour`.
+> before `Signal` cannot order an event that happens after it. Running this
+> block as a real test, `-count=20 -race`: it **fails most runs with the sleep
+> in place**, and **0 runs out of 20 once the goroutine is joined**, in every
+> sample. Only the second is a stable number -- the failure rate with the sleep
+> is a draw, which moved 15-17 across runs here and 12-19 in review. Joining is
+> also what the harness's own `AdvanceTimeAndDrain` comment recommends (*"use a
+> `sync.WaitGroup` or other explicit synchronization"*). The `time` import
+> stays: `TestApprovalWorkflow_Timeout` needs `time.Hour`.
 
 > Corrected 2026-10-04 (cleat#3027): this example imported `encoding/json` and
 > never used it, so it did not compile as published. Found by compiling the
