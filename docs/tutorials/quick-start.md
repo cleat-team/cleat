@@ -110,6 +110,12 @@ docker exec cleat-postgres pg_isready -U postgres
 > guide is unchanged. Corrected 2026-10-03: this step gave only the compose
 > form, which is the one thing that actually required a checkout (cleat#2995).
 
+> Verified 2026-10-04 (cleat#3027): the `docker run` above starts cleanly, and
+> `docker exec cleat-postgres pg_isready -U postgres` prints exactly the line
+> below it. Still needed -- there is no packaged Postgres, and this container is
+> what makes the rest of the guide checkout-free (and, in step 7, supplies the
+> `psql` a reader without a local client would otherwise lack).
+
 ## 3. Apply the database schema
 
 > Added 2026-08-09. No step in this guide previously did this at all, and
@@ -185,6 +191,19 @@ cleat-worker --migrate-only --db "$CLEAT_OWNER_DSN"
 > `--migrate-only` also runs as the owner. That matters for step 7: the worker
 > refuses a superuser connection, and the app role it wants instead has no DDL
 > rights, so it cannot migrate.
+
+> Re-verified 2026-10-04 (cleat#3027), against an empty database, and **the
+> step is still needed, for the reason given**. A bare `cleat-worker --db <dsn>`
+> start neither migrated nor served: it exited 1 with *"the database has no
+> schema_migrations table: it has never been migrated, and all 10 migration(s)
+> this binary ships are pending. A worker does not migrate the database on
+> start"*, and it left **0** tables behind. `--migrate-only` then left the 10
+> `schema_migrations` rows the worker checks for -- so the missing row is what
+> is checked, not the table count.
+>
+> The table counts in the notes above are censuses and have drifted (130 here
+> against the 122 recorded 2026-10-03). Read them as the *shape* of the
+> difference, exactly as they ask.
 
 See [postgresql-schema.md](../explanation/postgresql-schema.md) for what
 each migration file does and why applying only `001_schema.sql` is not
@@ -287,6 +306,24 @@ Wrote workflow.wasm/my-workflow.wasm ...
 > scaffold-build-deploy sequence and caught the mismatch at the deploy step
 > (`no such file or directory` for the documented `hello.wasm`).
 
+> **Measured 2026-10-04 (cleat#3027), by building the v0.3.2 tag itself: the
+> name above is the TREE's, and a CLI from before cleat#2692 writes a different
+> one.** v0.3.2's `cleat init` writes `project:` where the tree writes `name:`,
+> so `wasmOutputName` falls back to the entry point and these same three
+> commands produce `workflow.wasm/hello.wasm`. Step 6, which names
+> `my-workflow.wasm`, then fails with `no such file or directory` -- the *same*
+> error the note above records the guard catching, reached from the other side.
+>
+> This is the reader's path rather than an edge case: **step 1's Homebrew
+> install is v0.3.2** (`cleat-team/homebrew-tap`'s `Formula/cleat.rb` pins that
+> tag; last bumped 2026-09-27), so the install this guide recommends is the one
+> whose artifact carries the other name. Nothing in step 1's `cleat build
+> --help` check can tell the two apart, and a Homebrew source build reports its
+> version as `(devel)`. It self-corrects at the next release that carries
+> cleat#2692; until then, `grep '^name:' my-workflow/cleat.yaml` is silent on
+> the older form, and the build's own `Wrote <path>` line names the artifact
+> either way. Use what that line printed in step 6.
+
 You should now see a `workflow.wasm` directory containing a `my-workflow.wasm`
 file:
 
@@ -314,7 +351,11 @@ Expected output includes a line like:
 ```
 
 If you see `connection refused`, make sure Postgres is running (step 2). If
-you see `relation "workflow_defs" does not exist`, go back to step 3.
+you see `relation "workflow_defs" does not exist`, go back to step 3. If you see
+`Error reading WASM file ...: no such file or directory`, the artifact is named
+something other than `my-workflow.wasm` -- which is a version difference rather
+than a mistake on your part; see step 5's 2026-10-04 note (a CLI from before
+cleat#2692, including the current Homebrew release, writes `hello.wasm`).
 
 ## 7. Start the worker
 
@@ -342,18 +383,49 @@ cleat-worker --db "$CLEAT_APP_DSN" --api-addr :8080
 > cannot migrate: it has no DDL rights, so `--migrate-only` (step 3) stays on
 > the owner DSN.
 
+> Re-verified 2026-10-04 (cleat#3027), and **two things about the line above**.
+>
+> **The `ALTER ROLE` is still needed, and the reason is checkable.** `cleat_app`
+> is created `NOLOGIN` on purpose (`migrations/postgres/001_schema.sql:29`), and
+> after step 3 alone the database reports `rolcanlogin = f` for it -- so without
+> this line the role cannot authenticate and the worker's app-DSN connection
+> fails. The step's premise holds.
+>
+> **But `psql` is not a prerequisite this guide lists.** Step 1 names Go, Docker
+> and the CLI; on a machine without a PostgreSQL client the line above is
+> unrunnable, and the container from step 2 already has a client that needs
+> nothing extra:
+>
+> ```bash
+> docker exec cleat-postgres psql -U postgres -d cleat \
+>     -c "ALTER ROLE cleat_app LOGIN PASSWORD 'cleat_app'"
+> ```
+>
+> Equivalently `-U postgres -d cleat` are the same credentials the DSN carries,
+> because step 2's container *is* the server. CI's guard for this tutorial
+> already substitutes for `psql` on exactly this ground -- *"not installed on
+> every CI runner"* (`cmd/cleat/tutorial_quick_start_reaches_done_test.go`) --
+> which is where the hazard was recorded, and not where a reader meets it.
+
 Leave this terminal running and open a new one for the next steps.
 
 ## 8. Run the workflow
 
 Every `/api/workflows/*` route requires an API key. Mint one for the default
-tenant -- the command prints it to stderr and shows it only once:
+tenant -- the command prints it to **stdout** and shows it only once:
 
 ```bash
 cleat-worker --db "$CLEAT_APP_DSN" \
     --generate-api-key 00000000-0000-0000-0000-000000000000
 export CLEAT_API_KEY='cleat_sk_...'   # paste the key it printed
 ```
+
+> Corrected 2026-10-04 (cleat#3027): this said the key is printed to **stderr**.
+> It is printed to **stdout** -- `fmt.Printf`, `cmd/cleat-worker/main.go:777` --
+> and the only thing on stderr is the worker's own startup log lines. Measured
+> on the same binary at the v0.3.2 tag and on the current tree, so the claim was
+> wrong on both rather than true before a change. It matters if you capture or
+> discard a stream: `2>/dev/null` keeps the key, `>/dev/null` loses it.
 
 Then trigger a workflow execution via the REST API:
 
