@@ -96,14 +96,19 @@ the fourth lives in `src/server.ts`.
 **2026-10-02**. Criterion 1 (cleat#2597) requires "written from current docs",
 and "current" is a moving target, so the date is part of the pin.
 
-The two sibling ports pin **5.1.10**, and this port deliberately does not:
-before writing anything, the sibling's `order-lifecycle-dbos-port` source was
-built and run unchanged against 5.2.11 here, and it passed all four scenarios.
-The functional style (`DBOS.registerWorkflow`, `DBOS.runStep`, `DBOS.sleep`,
-`DBOS.recv`) is therefore stable across that bump, so pinning current costs no
-idiom divergence from the ports beside it. **If the siblings are later bumped,
-they should move together with this one rather than leaving three ports on two
-versions by neglect.**
+**All three ports now pin `5.2.11`, and this paragraph used to explain why
+this one deliberately did not.** When it was written the two siblings were on
+**5.1.10** and this port ran ahead on purpose; the siblings were then bumped
+(cleat#2955), so the divergence that justified the separation is gone. Kept
+rather than deleted, corrected 2026-10-04, because the *evidence* below is
+still load-bearing: before writing anything, the sibling's
+`order-lifecycle-dbos-port` source was built and run unchanged against 5.2.11
+here, and it passed all four scenarios. The functional style
+(`DBOS.registerWorkflow`, `DBOS.runStep`, `DBOS.sleep`, `DBOS.recv`) is
+therefore stable across that bump, which is why running ahead cost no idiom
+divergence from the ports beside it. **The bump is what the old closing
+sentence asked for — the three ports moved together rather than drifting
+apart by neglect.**
 
 ## Build and run
 

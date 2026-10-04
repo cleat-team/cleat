@@ -74,12 +74,13 @@ are both still visible in `docs.dbos.dev`. This port uses the functional
 style, for the sibling's reason: it is what the installed package's own
 `README.md` presents as canonical.
 
-The SDK has moved since the sibling was written — this port pins **5.2.11**
-against the siblings' **5.1.10** — and the functional API is unchanged across
-that bump, verified by building and running the sibling port's code unchanged
-against 5.2.11 before writing any of this. See the pair's `README.md` for the
-full reasoning, including why the three ports should be bumped together from
-here rather than drifting apart.
+The SDK has moved since the sibling was written: this port pinned **5.2.11**
+while the siblings were on **5.1.10**, and the functional API is unchanged
+across that bump, verified by building and running the sibling port's code
+unchanged against 5.2.11 before writing any of this. **The siblings have since
+been bumped (cleat#2955), so all three ports now pin 5.2.11 and the divergence
+this note recorded is closed** — corrected 2026-10-04. See the pair's
+`README.md` for the full reasoning.
 
 ## No rate limiting either: platform feature vs. application code
 
