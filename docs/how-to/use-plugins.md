@@ -2,9 +2,15 @@
 
 ## Overview
 
-Plugins are external services that workflows call via `h.PluginCall(pluginName, functionName, inputJSON)`. Unlike built-in `DurableCall` operations that target a service+operation pair registered with the worker, plugins are independently versioned WASM modules that can be installed, updated, and deprecated without restarting the worker.
+Plugins are external services that workflows call via `h.PluginCall(pluginName, functionName, inputJSON)`. Unlike built-in `DurableCall` operations that target a service+operation pair registered with the worker, plugins are independently versioned WASM modules, designed so that installing, updating or deprecating one does not require restarting the worker.
 
-Available built-in plugins:
+> That is the design, and it is why the resolution path reads the database per
+> call. **It is not yet true end to end**: the *installing* half is unwired, so
+> a community plugin can be installed but not run. Everything this guide teaches
+> uses the plugins bundled into the binary, which need no install at all -- see
+> [Installing community plugins](#installing-community-plugins).
+
+Plugins a workflow is most likely to call:
 
 | Plugin name         | Purpose            | Functions                        |
 |---------------------|--------------------|----------------------------------|
@@ -12,6 +18,13 @@ Available built-in plugins:
 | `slack-notify`      | Slack messaging    | `send_message`                   |
 | `pagerduty-alert`   | Incident management| `trigger_incident`               |
 | `webhook-ingest`    | Webhook sourcing   | `await_webhook`                  |
+
+> This table used to be headed *"Available built-in plugins"*, which reads as
+> the complete set. It is four of them: the worker links **22**. What the four
+> have in common is that this guide uses them, not that they are all there are.
+> For the set the binary in front of you actually carries, ask it --
+> `cleat-worker --list-plugins` -- because that is a build-time fact and a number
+> written here would be a census that drifts.
 
 ## Configuring plugins
 
@@ -57,7 +70,14 @@ To switch LLM providers, change the `provider` field:
 }
 ```
 
-The worker picks up the config at startup. A subset of plugins (like `llm`) are bundled with the worker binary; others (like `slack-notify`) are installed via `cleat plugin install`.
+The worker picks up the config at startup.
+
+> Corrected (cleat#3027): this said *"a subset of plugins (like `llm`) are
+> bundled ... others (like `slack-notify`) are installed via `cleat plugin
+> install`"*, and the example chosen for the second half is bundled. Measured on
+> a tree build, `cleat-worker --list-plugins` reports 22 linked plugins and
+> `slack-notify` is one of them -- along with all four in the table above. So
+> nothing in this guide requires an install.
 
 ## Calling a plugin
 
@@ -314,10 +334,30 @@ cleat plugin list
 cleat plugin update --all
 ```
 
-Installed plugins are stored in the `plugin_defs` database table and loaded by `cleat-worker` at startup.
+Installed plugins are recorded in the `plugin_defs` database table.
+
+> **They are not executed yet** (found by cleat#3027's audit). The install path
+> is real -- `cleat plugin install` resolves a definition and stores it, and
+> `cleat plugin list` reads it back -- but the worker does not load a plugin
+> from that table: `engine.PluginLoader.LoadPlugin` has no caller outside tests,
+> and `cmd/cleat-worker` constructs no loader.
+>
+> The sentence that used to close this section said installed plugins are
+> *"loaded by `cleat-worker` at startup"*. It was wrong twice over: it claimed a
+> capability that is not wired, and it contradicted this page's own Overview,
+> where installing without restarting the worker is given as a property. **The
+> Overview is the side that matches the design** -- `PluginLoader.ResolvePlugin`
+> queries `plugin_defs` live, per call -- but that is moot while nothing calls
+> it.
+>
+> What works is everything above: **bundled** plugins are linked into the binary
+> and callable, which is every plugin in this guide. The gap is only for plugins
+> that are not bundled. See [the plugin
+> system](../explanation/plugin-system.md) for the mechanism, and
+> IMPROVEMENT-PLAN §3.315 for the repair.
 
 ## Next steps
 
-- See the [plugin developer guide](../plugin-developer-guide.md) for writing custom plugins
-- See the [plugin security guide](../plugin-security.md) for security considerations
+- See the [plugin developer guide](../contributor/plugins/plugin-developer-guide.md) for writing custom plugins
+- See the [plugin security guide](../contributor/plugins/plugin-security.md) for security considerations
 - See the [common patterns guide](common-patterns.md) for combining plugins with Saga, signals, and child workflows
