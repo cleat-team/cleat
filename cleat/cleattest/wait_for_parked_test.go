@@ -2,6 +2,8 @@ package cleattest
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -72,6 +74,34 @@ func TestWaitForParkedFailsWhenNothingParks(t *testing.T) {
 	if !strings.Contains(msgs[0], "WaitForParked") || !strings.Contains(msgs[0], "parked") {
 		t.Fatalf("the failure does not name what was awaited, so it cannot be told "+
 			"from any other timeout:\n%s", msgs[0])
+	}
+}
+
+// The nil-t escape exists for the Example functions, which have no *testing.T.
+// A branch that reports and returns without failing anything is the easiest
+// kind to leave dead, so assert on the text it emits (cleat-review, PR #3124).
+func TestWaitForParkedWithNoTestingTSaysSoOnStderr(t *testing.T) {
+	env := NewTestEnv()
+	env.parkedTimeout = 50 * time.Millisecond
+
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	env.WaitForParked(nil)
+
+	w.Close()
+	os.Stderr = orig
+	out, _ := io.ReadAll(r)
+	r.Close()
+
+	if !strings.Contains(string(out), "WaitForParked") {
+		t.Fatalf("the nil-t expiry emitted nothing on stderr, so a stalled Example "+
+			"is indistinguishable from one that parked and wrote wrong output:\n%q", out)
 	}
 }
 
