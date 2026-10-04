@@ -82,6 +82,17 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: scripts/check-closing-references.sh
 
+      # --self-test, same reason as the step above it. cleat#2992 moved this
+      # wrapper's usage guard from exit 1 to exit 2, and NOTHING would have
+      # gone red had it moved back: the step below always sets PR_NUMBER and
+      # REPO, so CI never exercises the guard, and the guard's whole job is the
+      # case CI does not have. The fixture pins both the status and the
+      # `UNMEASURED:` text, since exit 2 with the finding's wording is the same
+      # collapse arriving by a different door. cleat#3024.
+      - name: Negated closing-reference wrapper self-test
+        if: github.event_name != 'merge_group'
+        run: scripts/check-negated-closing-references.sh --self-test
+
       - name: Check for a negated closing reference
         if: github.event_name != 'merge_group'
         env:
