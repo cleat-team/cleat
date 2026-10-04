@@ -744,6 +744,98 @@ until curl -fsS "$WEB/" >/dev/null 2>&1; do
   sleep 1
 done
 
+# THE PAGE'S OWN VOCABULARY IS CHECKED AGAINST THE CODE THAT WRITES IT.
+#
+# It runs HERE, outside the `failures == 0` block below, because it is static:
+# it reads files, not the running server. A failure further up must not be able
+# to hide it.
+#
+# Nothing else in this scenario executes app.js. Every other assertion reads
+# JSON the backend produced, so the assets can be served, the numbers right, and
+# the page wrong -- and this is the CONTROL pair (cleat#2597), the one a reader
+# is most likely to point at, which makes an unguarded page here the worst place
+# to leave one.
+#
+# THE EXTRACTOR IS NOT THE SIBLINGS'. run-integration-hub-scenario.sh and
+# run-ai-agent-platform-scenario.sh both pull `case "..."` labels; this page has
+# NONE (measured 2026-10-04: order-lifecycle 0, integration-hub 6,
+# ai-agent-platform 5), so either of theirs ported verbatim extracts nothing and
+# fails immediately. Here the words the page paints are the KEYS of STAGE_LABEL
+# plus the members of the TERMINAL and DECIDED sets.
+#
+# The relation is a MIX, and that is most of the reason this is not the
+# siblings' rule: some of these words are statuses the app publishes
+# (`h.SetQueryState("status", ...)`) and some are step Descriptions the saga
+# declares (`s.AddStep(...)`), because the page maps the saga's published
+# `current_step` (cleat#2627, cleat#2951). BOTH OF THOSE ARE IN order.go. The
+# second source file is for the RUN vocabulary, which `s.AddStep` does not
+# carry: a finished run is "done", never "completed".
+#
+# It FAILS when any one of the three extractions comes back empty, per source,
+# so a refactor that renames STAGE_LABEL or drops a set reports itself instead of
+# going quiet. That is the siblings' control, and it is what stops this check
+# passing by finding nothing.
+#
+# TWO WAYS THIS COULD STILL HAVE GONE QUIET, both closed below because a check
+# whose subject is "did the page drift from the code" is the last place to keep
+# one of its own:
+#   - an extractor that DIES is not an empty extraction, and the shell cannot
+#     tell them apart from stdout alone;
+#   - a word class of [a-z_] never sees `paid_v2`, so a legal key containing a
+#     digit would be painted by the page and guarded by nothing.
+missing="$(python3 - "$EXAMPLE_DIR/web/app.js" <<'PY'
+import pathlib, re, sys
+
+page = pathlib.Path(sys.argv[1]).read_text()
+
+# Admits digits. `paid_v2` is a legal key the page could paint, and a class of
+# [a-z_] would never see it -- silently, because the emptiness control needs all
+# three sources empty and the other two would still be intact.
+WORD = r'[a-z][a-z0-9_]*'
+
+block = re.search(r'const STAGE_LABEL = \{(.*?)\n\};', page, re.S)
+keys = re.findall(r'^\s*(' + WORD + r'):', block.group(1), re.M) if block else []
+
+
+def members(name):
+    m = re.search(r'const ' + name + r' = new Set\(\[([^\]]*)\]\)', page, re.S)
+    return re.findall(r"[\"'](" + WORD + r")[\"']", m.group(1)) if m else []
+
+
+terminal = members('TERMINAL')
+decided = members('DECIDED')
+
+empty = [n for n, v in (('STAGE_LABEL', keys),
+                        ('TERMINAL', terminal),
+                        ('DECIDED', decided)) if not v]
+if empty:
+    # The string is what `check` compares; the non-zero status is so that a
+    # future caller reading the exit code cannot pass on this either.
+    print('EXTRACTED-NOTHING-FROM-THE-PAGE:' + '+'.join(empty))
+    raise SystemExit(1)
+
+words = sorted(set(keys) | set(terminal) | set(decided))
+
+sources = ' '.join(p.read_text() for p in [
+    pathlib.Path('engine/status_vocabulary.go'),        # the RUN vocabulary: done, failed
+    pathlib.Path('examples/order-lifecycle/order.go'),  # the app statuses and the step names
+])
+print(','.join(w for w in words
+               if f'"{w}"' not in sources and f"'{w}'" not in sources))
+PY
+)"
+# An extractor that DIES is not an empty extraction, and stdout cannot tell the
+# two apart: python's traceback goes to stderr, so a crash leaves stdout EMPTY
+# and `check` would compare "" against "" and print ok -- this guard's own
+# fail-open, one level down. The deliberate sentinel above always PRINTS, so
+# "non-zero status with no sentinel on stdout" is a crash, and it is named as
+# one instead of passing for a clean page.
+guard_rc=$?
+if (( guard_rc != 0 )) && [[ "$missing" != EXTRACTED-NOTHING-FROM-THE-PAGE:* ]]; then
+  missing="GUARD-FAILED-TO-RUN:rc=$guard_rc"
+fi
+check "every stage the page declares is one the workflow writes" "$missing" ""
+
 if (( failures == 0 )); then
   # The page and its stylesheet are both referenced by index.html and both
   # served under a CSP with no inline allowance -- a missing /app.css renders a
