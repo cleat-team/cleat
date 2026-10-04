@@ -124,11 +124,13 @@ Watch mode exits when:
 >
 > *"The DB connection fails"* is true only at startup. Once the poll loop is
 > running, a failed `CountEventHistory` is written to stderr and the loop
-> **continues** — a watch left running against a dead database prints a poll
-> error every two seconds indefinitely rather than exiting. Both halves are
-> what the tests assert: `TestDebugWatch_CountError` requires the startup path
-> to return an error, and `TestDebugWatch_LoadPaginatedError` requires a
-> mid-loop failure to be logged and the loop to keep running
+> **continues** (`cmd/cleatctl/debug.go:417-421`) — a watch left running against
+> a dead database prints a poll error every two seconds indefinitely rather than
+> exiting. The two halves rest on different evidence, and the distinction is
+> worth keeping: `TestDebugWatch_CountError` asserts the startup path returns an
+> error, but the in-loop half rests on the code's `continue` rather than on a
+> test — `TestDebugWatch_LoadPaginatedError` asserts only that the error reaches
+> stderr, and a version that returned instead would satisfy it identically
 > (`cmd/cleatctl/cleatctl_debug_test.go`).
 
 ## Common scenarios
@@ -169,7 +171,7 @@ debug> n
 ## Limitations
 
 - **Read-only**: the debugger replays existing event history and never modifies the database.
-- **Requires DB access**: you must have a working database connection with the `--db` flag or `CLEAT_DB_URL` environment variable. This said "PostgreSQL" (cleat#3027); `cleatctl` declares `debug` available on all three supported dialects (`cmd/cleatctl/ported.go`), so a MySQL or SQL Server DSN works too.
+- **Requires DB access**: you must have a working database connection with the `--db` flag or `CLEAT_DB_URL` environment variable. This said "PostgreSQL" (cleat#3027); `cleatctl` declares `debug` available on all three supported dialects (`cmd/cleatctl/ported.go`), so a MySQL or SQL Server DSN is **accepted**, not refused — `requirePortedFor` exits on an unsupported dialect before any statement runs. That declaration is a gate on which dialects are allowed, not a claim that every dialect's path has been exercised.
 - **Replay only**: the debugger replays recorded history, it does not run fresh execution. If the replay diverges (causing the WASM module to make a call not in the history), the debugger reports the divergence error.
 - **Module must be available**: the WASM binary for the workflow's definition and version must still exist in the database.
 - **Large histories**: for workflows with more than ~10K events, consider using watch mode or replay instead.
