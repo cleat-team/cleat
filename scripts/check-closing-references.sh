@@ -152,6 +152,17 @@ check_body() {
   # neither emphasis nor a closing attempt. Two: the quoted-span rule below needs
   # the same view of what the keyword is, or a body QUOTING `_Fixes cleat#5_` is
   # refused, which is cleat#3095's false positive arriving again in the `_` form.
+  #
+  # THE RULE IS AN ALTERNATION, AND BOTH HALVES ARE LOAD-BEARING. It removes an
+  # `_` that cannot OPEN emphasis AND one that cannot CLOSE it; leading-only would
+  # leave `fixes_ cleat#5` unflagged. That is a real looseness -- markdown leaves a
+  # lone closer literal, so the emphasised form it "fixes" is one the author did
+  # not write -- and it is kept deliberately: this check's documented posture is
+  # to err toward flagging, and a reader meeting `fixes_ cleat#5` reads a typo'd
+  # closing attempt beside a reference that will not link. The fixture is here so
+  # the half cannot be dropped silently; cleat-review measured that dropping it
+  # left every other case green.
+  #
   # Changing only the pattern cannot do the second one: the `_` there sits
   # immediately after the opening quote, where the blanker's lazy prefix cannot
   # reach it. Normalising first gives both rules a single answer.
@@ -239,6 +250,7 @@ self_test() {
     "an emphasised keyword must still be caught (cleat#3102)|_Fixes cleat#5_|1|cleat#5"
     "an intra-word underscore is not emphasis, and stays clean (cleat#3102)|a_Fixes cleat#5|0|No closing keyword"
     "an intra-word underscore must not be JOINED into a keyword (cleat#3102)|fix_es cleat#5|0|No closing keyword"
+    "a trailing emphasis marker is stripped, and that half is pinned (cleat#3102)|fixes_ cleat#5|1|cleat#5"
     "a quoted emphasised phrase is inert, as quoted phrases are (cleat#3102)|It says \"_Fixes cleat#12_\" as an example.|0|No closing keyword"
     "a quoted capitalised phrase is inert too (cleat#3102, pre-existing)|It says \"Fixes cleat#12\" as an example.|0|No closing keyword"
   )
