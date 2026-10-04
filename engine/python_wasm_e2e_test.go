@@ -581,7 +581,7 @@ var pythonUnboundBaseline = []string{
 	// durable wait takes out-pointers for the claimed event, and an
 	// out-pointer addresses the guest's own linear memory while component
 	// dispatch writes into a HOST buffer. So Python would read whatever sat at
-	// OUTPUT_OFFSET and take it for an event -- the §3.110 defect stopSurfaces
+	// OUTPUT_OFFSET and take it for an event -- the §3.431 defect stopSurfaces
 	// records as OPEN for durable-await-signals, which is declared with
 	// out-pointers and has therefore never worked on a component.
 	//

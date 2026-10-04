@@ -202,7 +202,7 @@ func TestAFreshWaitForEventThatFindsNothingSuspendsRatherThanSpinning(t *testing
 			"reads as responseLen=0, errCode=0 -- an empty successful event -- so the "+
 			"workflow runs on with an event that never arrived, exactly as a suspecting "+
 			"guest cannot tell a suspending await from a timeout (cleat#933).",
-			packed, int64(callSuspendSentinel))
+			packed, callSuspendSentinel)
 	}
 }
 

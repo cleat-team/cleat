@@ -457,7 +457,7 @@ var sdkUnreachedBaseline = map[string][]string{
 		// that declares the wrong thing. This one has no WIT declaration at
 		// all, so it sits behind reasonNotInTheComponentWorld, a world that
 		// declares nothing, and its fix begins with writing the declaration.
-		// Both are the §3.110 defect underneath.
+		// Both are the §3.431 defect underneath.
 		//
 		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
 		// engine/python_wasm_e2e_test.go records the same fact from
