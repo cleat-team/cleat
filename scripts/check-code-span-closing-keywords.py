@@ -115,7 +115,11 @@ def main():
     print("  point and is not flagged. (That is what both sibling guards do in their")
     print("  own comments, for this reason.)")
     print()
-    print(f"  Discriminator: {sorted(hits)} {'is' if len(hits) == 1 else 'are'} named in")
+    # "is NOT named in that list" -- the whole point, and an early draft of this
+    # line printed the negation-less form, which read as the exact opposite of
+    # the discriminator it was describing. Caught by running the check on the
+    # first PR that exhibited this class: this one.
+    print(f"  Discriminator: {sorted(hits)} {'is' if len(hits) == 1 else 'are'} NOT named in")
     print("  closingIssuesReferences, so nothing live is closing it.")
     return 1
 
