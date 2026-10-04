@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,32 +8,12 @@ import (
 	"testing"
 )
 
-// requireTheCheckerRan asserts that the build reached the determinism checker, so
-// that the ABSENCE assertions it guards mean "the checker looked and found
-// nothing" rather than "nothing ran".
-//
-// cleat#3056. An absence is satisfied by a build that never got as far as the
-// vet, and that is the COMMONER way to fool these arms rather than an exotic one:
-// runVetJava is the first gate (build_java.go), and it runs where Gradle cannot,
-// so anything that stops the build before it leaves "no finding was reported"
-// true with nothing behind it. Measured by making the build never start -- the
-// two absence-asserting arms passed on empty output, while the six
-// presence-asserting arms failed.
-//
-// The marker is the vet's own opening line. It is printed by a build that
-// started and reached the checker, and by nothing else, so it fires for every
-// never-started build -- including a Gradle wrapper fetch failure, which the vet
-// PRECEDES and which therefore does not make these arms vacuous in the first
-// place.
-func requireTheCheckerRan(t *testing.T, out string) {
-	t.Helper()
-	if !strings.Contains(out, "Vetting Java project") {
-		t.Fatalf("the build never reached the determinism checker, so the absence asserted below "+
-			"has nothing behind it -- this arm would have passed having measured nothing.\n\n"+
-			"An absence-asserting arm is satisfied by empty output, which is also what a build "+
-			"that never started produces. cleat#3056.\noutput:\n%s", out)
-	}
-}
+// The two absence-arms below call requireReachedStage(t, out, javaVetMarker); both
+// it and requireBuildStarted live in build_reached_the_stage_test.go, shared with
+// the Rust and AssemblyScript siblings. This file used to carry its own
+// requireTheCheckerRan -- written first, in cleat#3056, and generalised once the
+// siblings landed (cleat#3075). The rationale that used to sit here is on the shared
+// helper, which is now the one place a reader has to look.
 
 // TestJavaBuildRefusesNondeterminism is the Java half of what
 // rust_build_refuses_nondeterminism_test.go asserts for Rust, and its doc
@@ -117,24 +96,14 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 			t.Fatalf("copied 0 files from %s -- the fixture is missing or empty, "+
 				"so neither arm below would be measuring the checker", src)
 		}
-		// The exit status is NOT discarded (cleat#3056). A build that never
-		// started -- exec failed, so there is no ExitError -- produces EMPTY
-		// output, and every absence-assertion in this file then holds for a
-		// reason that has nothing to do with the checker. That is a failed
-		// measurement rather than a result, so it is fatal here.
-		//
-		// A non-zero exit is NOT a failure at this level: most of these fixtures
-		// have no TeaVM plugin, so the build would fail on its own, and the arms
-		// below assert on the REASON in the output.
+		// The exit status is NOT discarded. A build that never started produces
+		// EMPTY output, and every absence-assertion below then holds for a reason
+		// with nothing behind it -- a failed measurement rather than a result. A
+		// NON-ZERO exit is fine: most of these fixtures have no TeaVM plugin, so
+		// the build fails on its own and the arms assert on the REASON in the
+		// output. See requireBuildStarted in build_reached_the_stage_test.go.
 		out, err := exec.Command(cleatBinary, "build", "--target", "java", "-o", t.TempDir(), dst).CombinedOutput()
-		if err != nil {
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
-				t.Fatalf("the build never started: %v\n\n"+
-					"Nothing ran, so every assertion below would be about the absence of output "+
-					"rather than about the checker. cleat#3056.", err)
-			}
-		}
+		requireBuildStarted(t, err)
 		return string(out)
 	}
 
@@ -165,7 +134,7 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 	// thing and appears nowhere in the pattern table.
 	t.Run("known limit escapes the checker, and says so out loud", func(t *testing.T) {
 		out := build(t, "known_limit_nio")
-		requireTheCheckerRan(t, out)
+		requireReachedStage(t, out, javaVetMarker)
 
 		if strings.Contains(out, "determinism check failed") || strings.Contains(out, "Error [J0") {
 			t.Errorf("the Java checker now CATCHES the java.nio fixture.\n\n"+
@@ -212,7 +181,7 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 	// arm is the one that catches a resolver refusing something fine.
 	t.Run("pure_byte_array_stream is NOT refused", func(t *testing.T) {
 		out := build(t, "pure_byte_array_stream")
-		requireTheCheckerRan(t, out)
+		requireReachedStage(t, out, javaVetMarker)
 
 		if strings.Contains(out, "determinism check failed") || strings.Contains(out, "Error [J0") {
 			t.Errorf("the build refused a pure, in-memory byte stream.\n\noutput:\n%s", out)

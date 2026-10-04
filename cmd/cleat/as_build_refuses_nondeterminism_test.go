@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,24 +72,14 @@ func TestASBuildRefusesNondeterminism(t *testing.T) {
 	// first and wrote 001.wasm into cmd/cleat, which is how it was found.
 	build := func(t *testing.T) string {
 		t.Helper()
-		// The exit status is NOT discarded (cleat#3063). A build that never
-		// started -- exec failed, so there is no ExitError -- produces EMPTY
-		// output, and every absence-assertion below then holds for a reason that
-		// has nothing to do with the checker. That is a failed measurement rather
-		// than a result, so it is fatal here.
-		//
-		// A non-zero exit is NOT a failure at this level: an AS build fails for a
-		// missing toolchain, a failed npm install or a syntax error, and the arms
-		// assert on the TEXT (an E00x code, or `Wrote `).
+		// The exit status is NOT discarded. A build that never started produces
+		// EMPTY output, and every absence-assertion below then holds for a reason
+		// with nothing behind it -- a failed measurement rather than a result. A
+		// NON-ZERO exit is fine: an AS build fails for a missing toolchain, a
+		// failed npm install or a syntax error, and the arms assert on the TEXT.
+		// See requireBuildStarted in build_reached_the_stage_test.go.
 		out, err := exec.Command(cleatBinary, "build", "--target", "assemblyscript", "-o", t.TempDir(), dir).CombinedOutput()
-		if err != nil {
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
-				t.Fatalf("the build never started: %v\n\n"+
-					"Nothing ran, so every assertion below would be about the absence of "+
-					"output rather than about the checker. cleat#3063.", err)
-			}
-		}
+		requireBuildStarted(t, err)
 		return string(out)
 	}
 
