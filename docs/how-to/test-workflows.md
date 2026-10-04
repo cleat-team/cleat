@@ -245,16 +245,22 @@ func TestApprovalWorkflow_Success(t *testing.T) {
 
     h := env.H()
 
+    // Join the goroutine before asserting. AssertCalled reads the call history
+    // once, so it races the workflow goroutine unless that goroutine has
+    // finished -- and a sleep placed BEFORE Signal cannot order an event that
+    // happens AFTER it.
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount":5000,"requested_by":"user_42"}`)
         if err != nil {
             t.Errorf("workflow failed: %v", err)
         }
     }()
 
-    // Advance time slightly and send approval signal.
-    time.Sleep(10 * time.Millisecond) // yield to goroutine scheduler
     env.Signal("approved", `{"reviewer":"alice","note":"approved"}`)
+
+    <-done
 
     // Verify ledger was updated.
     env.AssertCalled(t, "ledger", "RecordApproval")
@@ -289,20 +295,35 @@ func TestApprovalWorkflow_Rejected(t *testing.T) {
 
     h := env.H()
 
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount":5000,"requested_by":"user_42"}`)
         if err != nil {
             t.Errorf("workflow failed: %v", err)
         }
     }()
 
-    time.Sleep(10 * time.Millisecond)
     env.Signal("rejected", `{"reviewer":"bob","reason":"budary limit exceeded"}`)
+
+    <-done
 
     // Verify no ledger update was made on rejection.
     env.AssertNotCalled(t, "ledger", "RecordApproval")
 }
 ```
+
+> Corrected 2026-10-04 (cleat#3087): both tests above used to sleep for 10 ms
+> "to yield to the goroutine scheduler" before signalling. The sleep does not
+> do that job. `AssertCalled` reads the call history **once** and fails if the
+> call is not there yet, so it races the workflow goroutine -- and a sleep
+> before `Signal` cannot order an event that happens after it. Measured by
+> running this block as a real test, `-count=20 -race`: **the example above
+> fails most runs with the sleep in place, and every run with it deleted.**
+> Joining the goroutine takes it to **zero failures in 20 runs**, every time,
+> and that is also what the harness's own `AdvanceTimeAndDrain` comment
+> recommends (*"use a `sync.WaitGroup` or other explicit synchronization"*).
+> The `time` import stays: `TestApprovalWorkflow_Timeout` needs `time.Hour`.
 
 > Corrected 2026-10-04 (cleat#3027): this example imported `encoding/json` and
 > never used it, so it did not compile as published. Found by compiling the
