@@ -128,16 +128,17 @@ func TestApprovalTimeout(t *testing.T) {
 }
 ```
 
-> **These two are still *not* joined, and the reason is now the SDK version the
-> tutorial compiles against rather than the harness** (cleat#3098). The missing
-> piece exists: `env.WaitForParked(t)` landed in **cleat#3091** and is on
-> `develop`. But `cmd/cleat/tutorial_content_guard_test.go` compiles every snippet
-> against the **published** SDK — `go get github.com/cleat-team/cleat/cleat@latest`,
-> by design, because that is what a reader following the tutorial resolves — and
-> `WaitForParked` is not in the current release (`git show
-> v0.3.2:cleat/cleattest/cleattest.go | grep -c WaitForParked` → `0`). A joined
-> block here would therefore not compile for the reader it is written for.
-> **These two join when a release carrying `WaitForParked` is published.**
+> **`TestApprovalTimeout` above and `TestApprovalWorkflow_Timeout` below are still
+> *not* joined, and the reason is now the SDK a reader resolves rather than the
+> harness** (cleat#3098). The missing piece exists: `env.WaitForParked(t)` landed
+> in **cleat#3091** and is on `develop`. But this page is written for someone
+> following the tutorial, who resolves the **published** SDK — `go get
+> github.com/cleat-team/cleat/cleat@latest` — and `WaitForParked` is not in the
+> current release (`git show v0.3.2:cleat/cleattest/cleattest.go | grep -c
+> WaitForParked` → `0`). A joined block here would therefore not compile for the
+> reader it is written for, and the snippet guard resolves the same `@latest`, so
+> it would fail there too once these pages are covered (cleat#3112). **These two
+> join when a release carrying `WaitForParked` is published.**
 >
 > The mechanism behind that is worth knowing on its own, because it is what a
 > join alone runs into. `AdvanceTime` moves a clock that the deadline is measured
