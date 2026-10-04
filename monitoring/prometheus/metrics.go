@@ -1688,6 +1688,33 @@ func (m *Metrics) RecordHTTPRequestDuration(ctx context.Context, duration time.D
 
 // ServeHTTP returns an http.Handler that serves the current metrics in
 // Prometheus exposition format (text/plain; version=0.0.4).
+func (m *Metrics) ServeHTTP() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Use a shorter timeout for collecting metrics to avoid
+		// blocking the HTTP handler.
+		collectCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		var rm metricdata.ResourceMetrics
+		if err := m.reader.Collect(collectCtx, &rm); err != nil {
+			http.Error(w, "metrics collection error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// cleat#3001: an `internal` definition's NAME must not reach this
+		// unauthenticated scrape. The series are process-global while the class
+		// is per-tenant, so the decision is made here -- one place -- over the
+		// names the worker has noted, rather than at the sixteen record sites.
+		dropInternalSeries(&rm, m.isInternalDef)
+
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		if err := writePrometheusText(w, &rm); err != nil {
+			// Partial write may have occurred; nothing we can do.
+			return
+		}
+	})
+}
+
 // NoteInternalDefs records definition names this process has learned are
 // `internal`, so ServeHTTP drops their series. Additive and safe for concurrent
 // use; an empty name is ignored.
@@ -1792,33 +1819,6 @@ func seriesNamesInternal(attrs attribute.Set, isInternal func(string) bool) bool
 		}
 	}
 	return false
-}
-
-func (m *Metrics) ServeHTTP() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Use a shorter timeout for collecting metrics to avoid
-		// blocking the HTTP handler.
-		collectCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-
-		var rm metricdata.ResourceMetrics
-		if err := m.reader.Collect(collectCtx, &rm); err != nil {
-			http.Error(w, "metrics collection error: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// cleat#3001: an `internal` definition's NAME must not reach this
-		// unauthenticated scrape. The series are process-global while the class
-		// is per-tenant, so the decision is made here -- one place -- over the
-		// names the worker has noted, rather than at the sixteen record sites.
-		dropInternalSeries(&rm, m.isInternalDef)
-
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		if err := writePrometheusText(w, &rm); err != nil {
-			// Partial write may have occurred; nothing we can do.
-			return
-		}
-	})
 }
 
 // --- Lifecycle ---
