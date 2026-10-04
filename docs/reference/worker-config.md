@@ -24,11 +24,21 @@ existing database; it does not manage it. Example:
     --db "sqlserver://user:pass@localhost:1433?database=cleat"
 
 The MySQL form carries no `mysql://` scheme prefix, and that is deliberate: `go-sql-driver/mysql`
-has no concept of a scheme and does not strip one, so it is read as the start of the username and
-the connection is refused as that literal user (`Access denied for user 'mysql'@…`).
-`cleatctl`'s and `cleat`'s dialect detection *do* recognise a `mysql://` prefix — as a heuristic
-for what someone may paste, not as a claim that the DSN connects — so a recognised shape is not a
-working one here (cleat#2938).
+has no concept of a scheme and does not strip one, so a `mysql://` DSN is unusable — in two
+different ways, depending on its shape:
+
+- `mysql://user:pass@host:3306/db` is rejected by the driver's own parser, which reads the address
+  as a network name and reports `default addr for network 'host:3306' unknown`. It never reaches a
+  server, so the message names neither the DSN nor the scheme.
+- `mysql://user:pass@tcp(host:3306)/db` parses, with `mysql` read as the username, so the connection
+  is attempted as that literal user and refused as one (`Access denied for user 'mysql'@…`).
+
+Neither message names the scheme, which is why the tools refuse such a DSN rather than letting it
+through. `cleatctl` rejects a `mysql://`-prefixed DSN before any driver sees it, naming the scheme
+and giving the correct form (cleat#2962); `cleat`'s PostgreSQL-only subcommands refuse a MySQL-shaped
+DSN too, naming the dialect. Dialect detection still *recognises* a `mysql://` prefix — as a
+heuristic for what someone may paste, not as a claim that the DSN connects — so a recognised shape
+is not a working one here (cleat#2938).
 
 A MySQL session whose `time_zone` is not UTC introduces a DST-sized blind spot in
 `--idempotency-key-retention`'s bound — see `docs/durable-calls.md`'s "Compared against the
