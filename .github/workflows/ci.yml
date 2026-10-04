@@ -351,6 +351,41 @@ jobs:
           scripts/check-skips.sh
           LINT_GUARD_EOF
 
+      # cleat#3119. The SDK calls the bare `@cleat_entry` LEGACY and the
+      # parenthesised `@cleat_entry("name")` preferred -- in cleat_sdk/entry.py's
+      # module docstring, in its comment, and in `_resolve_dual_form`, which
+      # exists to accept both. cleat#3115 converted the 21 sites that showed a
+      # reader the legacy form, and THIS STEP is the thing that keeps them
+      # converted. Nothing read those pages before: `grep -rln "docs/migration"
+      # .github/ scripts/` returned nothing, which is how python-sdk/README.md
+      # ended up 14 examples behind.
+      #
+      # .---- THIS STEP IS IN WS-3's ZONE (.github/workflows/) UNDER THE
+      # | DOCUMENTED EXCEPTION: "another stream may add there when leaving the
+      # | mechanism unwired would be worse -- say so in the comment", the way
+      # | ci.yml and cmd/cleat-worker's setup.go already do. A guard with no CI
+      # | step is a check nobody runs, which is exactly that case. WS-3 was told.
+      # '----------------------------------------------------------------------
+      #
+      # --self-test FIRST, and here it asserts the two failure modes this class
+      # actually has. First, that the pattern is ANCHORED: the package and
+      # decorator docstrings INDENT their examples, so a pattern without the
+      # leading-whitespace class reports ZERO for them while looking correct --
+      # the false-clean this whole class is made of, and the reason the loose
+      # form reads 57 where the anchored one reads 54 (the three extra being
+      # comment SUFFIXES that describe the decorator rather than use it).
+      # Second, that the ALLOWLIST suppresses a bare form inside a coverage
+      # surface: python-sdk/tests/** and testdata/vet-checks/python/** exercise
+      # the dual form DELIBERATELY, and a guard that flagged them would push the
+      # next author into deleting coverage rather than moving a preference.
+      - name: Bare @cleat_entry guard
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Bare @cleat_entry guard" >> "$LINT_FAILURES_FILE"
+          python3 scripts/check-bare-entry-decorator.py --self-test
+          python3 scripts/check-bare-entry-decorator.py
+          LINT_GUARD_EOF
+
       # A test double that never reads the parameter its test is named after
       # cannot fail for the reason the test exists. That is not hypothetical:
       # reprocess never read Idempotency-Key (cleat#1167), and the two tests
