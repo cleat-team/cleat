@@ -128,27 +128,34 @@ func TestApprovalTimeout(t *testing.T) {
 }
 ```
 
-> **This one and `TestApprovalWorkflow_Timeout` below are deliberately *not* joined**
-> (cleat#3098). Joining is correct everywhere else on this page and is what the
-> harness's own comment recommends — but applied here it **hangs the test binary**,
-> because the join and the clock advance have no correct ordering. `AdvanceTime`
-> moves a clock that the deadline is measured **from**, not one it is measured
-> *against*: `AwaitSignals(…, 24*time.Hour)` computes `deadline = now + 24h` at the
-> instant the workflow reaches it, so an advance that lands first is **included in**
-> the deadline rather than passing it — a `25h` advance leaves the deadline at
-> `+49h`, nothing fires, and `<-done` blocks forever. Joining *before* the advance
-> is the same deadlock from the other side: the workflow parks on a timer only the
-> advance can fire, and the join waits for the workflow.
+> **`TestApprovalTimeout` above and `TestApprovalWorkflow_Timeout` below are still
+> *not* joined, and the reason is now the SDK a reader resolves rather than the
+> harness** (cleat#3098). The missing piece exists: `env.WaitForParked(t)` landed
+> in **cleat#3091** and is on `develop`. But this page is written for someone
+> following the tutorial, who resolves the **published** SDK — `go get
+> github.com/cleat-team/cleat/cleat@latest` — and `WaitForParked` is not in the
+> current release (`git show v0.3.2:cleat/cleattest/cleattest.go | grep -c
+> WaitForParked` → `0`). A joined block here would therefore not compile for the
+> reader it is written for, and the snippet guard resolves the same `@latest`, so
+> it would fail there too once these pages are covered (cleat#3112). **These two
+> join when a release carrying `WaitForParked` is published.**
 >
-> Measured 2026-10-04, this block assembled as a real test: with `<-done` added it
-> **hangs** — the goroutine parks in `durableAwaitSignalsImpl` and nothing fires its
-> deadline. Un-joined it passes, and it is **near-vacuous rather than occasionally
-> so**: instrumented, the workflow had not reached `AwaitSignals` at the moment the
-> test function returned in **9 of 10 runs**, and the test passed all ten. The
-> `t.Error` in the goroutine is therefore almost never reached — the assertion is
-> real code that the test does not run. Repairing the two needs a harness primitive
-> that establishes the waiter is parked *before* advancing the clock; that is
-> **cleat#3091**.
+> The mechanism behind that is worth knowing on its own, because it is what a
+> join alone runs into. `AdvanceTime` moves a clock that the deadline is measured
+> **from**, not one it is measured *against*: `AwaitSignals(…, 24*time.Hour)`
+> computes `deadline = now + 24h` at the instant the workflow reaches it, so an
+> advance that lands first is **included in** the deadline rather than passing
+> it — a `25h` advance leaves the deadline at `+49h`, nothing fires, and `<-done`
+> blocks forever. `WaitForParked` is the barrier that orders the park before the
+> advance, and with it the two blocks join and pass.
+>
+> Measured 2026-10-04, this block assembled as a real test: with `<-done` added and
+> no barrier it **hangs** — the goroutine parks in `durableAwaitSignalsImpl` and
+> nothing fires its deadline. Un-joined it passes, and it is **near-vacuous rather
+> than occasionally so**: instrumented, the workflow had not reached `AwaitSignals`
+> at the moment the test function returned in **9 of 10 runs**, and the test passed
+> all ten. The `t.Error` in the goroutine is therefore almost never reached — the
+> assertion is real code that the test does not run.
 
 ## Testing timeouts with AdvanceTime
 
