@@ -90,26 +90,38 @@ worker (tests/crash, #2308): while the rollout is in progress, a worker
 still on the old flags (key A only, no previous) can pick up or replay a
 run whose event was already sealed under B by a worker that had already
 rolled. The A-only worker has no way to open a B-sealed field, and what
-happens next is worse than "an error" -- see cleat#2311, still open at
-this writing: with checksum verification on (the default), the run ends
-**FAILED permanently**, not released for a worker that does hold the key;
-with `--disable-checksum-verification`, it ends **DONE**, with
+happened next was worse than "an error" -- see cleat#2311: with checksum
+verification on (the default), the run ended **FAILED permanently**, not
+released for a worker that did hold the key; with
+`--disable-checksum-verification`, it ended **DONE**, with
 `[DECRYPTION_FAILED]` silently persisted into `workflow_instances.result`
-in place of the real value. Neither is "fails closed, no stale data" --
+in place of the real value. Neither was "fails closed, no stale data" --
 that was this doc's old claim, and it was wrong.
+
+> **cleat#2311 was closed `COMPLETED` on 2026-09-25 by #2325, and that removes
+> the hazard this section rests on -- see cleat#3090.** A worker that cannot
+> open a run's history now **releases it** rather than destroying or corrupting
+> it: `cmd/cleat-worker/setup.go:3319-3325` calls
+> `releaseForAnotherWorker(wf, …, "history_decrypt")`, whose own comment says
+> *"It is NOT terminated, which is the property that matters."* So the failure
+> mode above is historical, not current — a mixed fleet now costs a release and
+> a backoff, not the run. **Whether the two-phase procedure below is still
+> required is open** (cleat#3090); it is left exactly as written until that is
+> answered, because withdrawing a safety recommendation is not something a
+> prose audit should do on its own.
 
 The fix is to never let a worker that cannot open a B-sealed field coexist
 with an already-B-sealed field. Do that by rolling every worker to a
 **read-only** stage first, so the whole fleet can already decrypt B before
 any worker starts writing it:
 
-0. **This procedure does not close cleat#2311; it only avoids triggering
-   it.** It works if every worker's phase-1 rollout genuinely completes,
-   fleet-wide, before phase 2 starts. If your rollout tooling cannot
-   guarantee that ordering -- a canary that might get bypassed, a worker
-   that might restart on stale flags mid-rollout -- prefer the
-   stop-the-world procedure above; #2311 is what a gap in this sequencing
-   turns into.
+0. **This procedure is about sequencing, not about a poisoned run.** It works
+   if every worker's phase-1 rollout genuinely completes, fleet-wide, before
+   phase 2 starts. It was written to avoid cleat#2311, which **#2325 has since
+   fixed** -- a worker that cannot open a B-sealed field now releases the run
+   instead of failing it permanently, so a gap in this sequencing costs a
+   release and a backoff rather than the run. Whether the two-phase sequence is
+   still *required* is open (**cleat#3090**); it is kept here unchanged.
 1. Generate key B.
 2. **Phase 1 -- read-only rollout.** Roll every worker to
    `--encryption-key-file A --encryption-key-file-previous B`. Current stays
@@ -181,7 +193,8 @@ any worker starts writing it:
   `--encryption-key-file-previous` refuses to start, and a worker crashed
   mid-flight under key A then restarted under key B with A as previous
   decrypts A's in-flight event and completes the workflow.
-- cleat#2311 -- open, pre-existing on develop, not fixed by this doc or by
-  #2308: a decrypt failure on replay is swallowed rather than returned as
-  an error, which is what makes an incomplete phase-1 rollout above
-  dangerous rather than merely inconvenient.
+- cleat#2311 -- **fixed**: closed `COMPLETED` on 2026-09-25 by #2325, which
+  turned a swallowed decrypt failure on replay into an error the worker acts
+  on (the run is released for another worker) instead of one the store
+  discarded. The "dangerous rather than merely inconvenient" framing above was
+  written before that fix; cleat#3090 asks what replaces it.
