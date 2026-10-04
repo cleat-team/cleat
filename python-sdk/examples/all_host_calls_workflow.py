@@ -136,7 +136,7 @@ def _exercise_every_host_call(h: HostCalls) -> None:
     h.release_lock("k")
 
 
-@cleat_entry
+@cleat_entry("all_host_calls_workflow")
 def all_host_calls_workflow(h: HostCalls, request: Request) -> str:
     """Compiles every host call; runs none of them unless asked."""
     if request.exercise:

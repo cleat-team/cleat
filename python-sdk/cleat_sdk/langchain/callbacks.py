@@ -7,7 +7,7 @@ Usage::
     from langchain.agents import create_openai_functions_agent
     from langchain_openai import ChatOpenAI
 
-    @cleat_entry
+    @cleat_entry("research_agent")
     def research_agent(h: HostCalls, topic: str) -> str:
         callback = CleatCallbackHandler(h)
         llm = ChatOpenAI(model="gpt-4o", callbacks=[callback])

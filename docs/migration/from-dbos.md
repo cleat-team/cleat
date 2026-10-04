@@ -103,7 +103,7 @@ export class MyWorkflow {
 ```python
 from cleat_sdk import HostCalls, cleat_entry
 
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     pass
 ```
@@ -219,7 +219,7 @@ static async myWorkflow(input: MyInput): Promise<void> {
 
 **Cleat (Python):**
 ```python
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     wfid = h.current_workflow_id()
     run_id = h.current_run_id()
@@ -291,7 +291,7 @@ export class OrderWorkflow {
 from cleat_sdk import HostCalls, cleat_entry, Saga
 import json
 
-@cleat_entry
+@cleat_entry("process_order")
 def process_order(h: HostCalls, input: dict) -> str:
     saga = Saga(h)
     order_id = input["orderId"]

@@ -66,7 +66,7 @@ func MyWorkflow(ctx *cleat.HostCalls, input MyInput) (MyOutput, error) {
 ```python
 from cleat_sdk import HostCalls, cleat_entry
 
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     pass
 ```
@@ -239,7 +239,7 @@ func PaymentWorkflow(h cleat.HostCalls, order Order) error {
 
 **Cleat (Python):**
 ```python
-@cleat_entry
+@cleat_entry("payment_workflow")
 def payment_workflow(h: HostCalls, order: dict) -> str:
     # Reserve inventory
     reserve_resp = h.call("inventory", "Reserve", order.get("items"))
