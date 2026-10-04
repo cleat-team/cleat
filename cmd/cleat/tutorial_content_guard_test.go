@@ -23,15 +23,30 @@ import (
 // already has a defect class for mechanisms that exist and are wired to
 // nothing.
 //
-// WHY `go vet` AND NOT `go build`, since that distinction is load-bearing
-// elsewhere in this package (see a_scaffold_builds_test.go's header, which
-// refuses to weaken "does the documented command work" into "does the module
-// graph resolve"). `vet` runs the compiler's type-checking and catches every
-// error a copy-pasting reader would hit, including the two above. What it does
-// not do is LINK -- and `func main` is supplied by `cleat build` for exactly
-// this project shape, which is why cleat#1888's notes say a basic or agent
-// scaffold cannot be `go build`-ed and must not be. Injecting a main here would
-// be testing a file the tutorials never show.
+// WHY `go vet` AND NOT `go build` -- AND WHY THIS IS NOT THE WEAKENING ITS
+// NEIGHBOUR REFUSES. a_scaffold_builds_test.go's header records that its
+// predecessor "ran `go vet` rather than `cleat build`" and calls that misstep
+// "easy to make again"; the same fact (a `package main` with no `main`) is
+// present here, so the resemblance is real and this choice has to be argued
+// rather than assumed.
+//
+// The distinction that saves it is the SUBJECT, not the command's strength: the
+// rejected test's subject was a real generated project, on which `cleat build`
+// has something to operate. Here the subject is a synthetic assembly that no
+// `cleat build` invocation could be pointed at -- the document's own file is not
+// what gets compiled. `vet` is therefore the strongest check available for the
+// artifact under test, which is what that rule actually asks for. (It also runs
+// the compiler's type-checking, so it reports everything a copying reader would
+// hit, `declared and not used` included -- measured, not assumed.)
+//
+// WHAT IT CANNOT SEE, stated rather than implied: it stops short of the link and
+// emit stages, so a collision only those reject would pass here. The mitigation
+// for that is a separate gap and not this test's business -- quick-start.md's
+// documented path IS run for real by TestTutorialQuickStartReachesADoneWorkflow,
+// while NOTHING in this repository runs your-first-workflow.md's `cleat build`:
+// that file is referenced by no Go, shell or workflow file other than this
+// guard. So the weaker-command objection lands hardest exactly where there is no
+// other check at all, and that is worth recording rather than papering over.
 //
 // NOT GUARDED ON NETWORK AVAILABILITY, for the reason a_scaffold_builds_test.go
 // gives: `go mod tidy` is a real dependency of the thing under test, and
@@ -51,9 +66,26 @@ import (
 // THIS IS THE PART THAT CANNOT BE AUTOMATED AWAY, so it is stated rather than
 // inferred. A tutorial presents the Saga step as a block to place inside an
 // entry point the document declares elsewhere, so the block's enclosing
-// signature is in the prose, not in the block. The stub supplies that context,
-// taken from the document's own function -- for your-first-workflow.md, from
-// PlaceOrder's parameter list.
+// signature is in the prose, not in the block. The stub supplies that context.
+//
+// ★ THE RULE, AND THIS FILE GOT IT WRONG FIRST: a stub's signature must be the
+// signature of a function the DOCUMENT declares. Nothing in a stub may be
+// invented, because an invented parameter hides a defect of precisely the class
+// this guard exists for -- and it hides it in the most convincing way available,
+// by making the document compile.
+//
+// The counter-example is real and was caught in review. Both stubs used to
+// declare `totalCents int`, and the document declares `totalCents` NOWHERE: its
+// PlaceOrder computes the total as `reservation.TotalCents`, and processPayment's
+// parameter is `amountCents`. So the stubs were not reproducing the document's
+// context, they were supplying an identifier it did not have -- and a reader
+// pasting the block got `undefined: totalCents`. Worse, the same stub footer
+// returned the typed block's `err`, hiding a second defect of the same class:
+// as published, that block declared an error and never used it.
+//
+// Each stub is now the signature of the document's own function -- PlaceOrder
+// for the Saga block, processPayment (whose body the typed block replaces) for
+// the other -- and both snippets were repaired to use what they declare.
 //
 // Keyed by a MARKER rather than by index, so inserting a block above does not
 // silently re-point a stub at the wrong text.
@@ -99,15 +131,16 @@ var tutorialDocs = []tutorialDoc{
 		fragments: []tutorialFragment{
 			{
 				marker: "s := cleat.NewSaga()",
-				header: "func _sagaFragment(h cleat.HostCalls, userID string, cart []CartItem, totalCents int) (string, error) {",
+				// PlaceOrder's own signature (your-first-workflow.md).
+				header: "func _sagaFragment(h cleat.HostCalls, userID string, cart []CartItem) (string, error) {",
 				footer: "return \"\", nil\n}",
 			},
 			{
 				marker: "h.DurableCallTyped(",
-				header: "func _typedCallFragment(h cleat.HostCalls, userID string, totalCents int) (string, error) {",
-				// Ends by USING err, which the fragment declares and would
-				// otherwise leave unused.
-				footer: "return \"\", err\n}",
+				// processPayment's own signature -- the block is presented as a
+				// replacement for that function's body.
+				header: "func _typedCallFragment(h cleat.HostCalls, userID string, amountCents int) (Charge, error) {",
+				footer: "return Charge{}, nil\n}",
 			},
 		},
 		knownBroken: &tutorialFragment{marker: "s := cleat.NewSaga()"},
@@ -123,6 +156,41 @@ var tutorialDocs = []tutorialDoc{
 			"        return releaseReservation(h, reservation.ReservationID)\n    },\n)\n" +
 			"if err := s.Run(h); err != nil {\n    return \"\", err\n}\n",
 		brokenWant: "declared and not used: reservation",
+	},
+}
+
+// excludedDocs are tutorials that do NOT compile today, each with the error that
+// must STILL be present and the issue tracking the repair.
+//
+// THE ENTRY RETIRES ITSELF, which is why it exists rather than a comment saying
+// the same thing. When the document is repaired the expected error disappears
+// and this assertion fails -- the prompt to move the document into tutorialDocs.
+// An exclusion recorded only as an explanation is a SKIP WITH NO EXPIRY: nothing
+// fails if the document is fixed and never re-added, so the guard quietly covers
+// less than its name claims. Same shape as the testdata fixture table's recorded
+// expected failure, which is likewise the entry that proves its own guard can
+// report at all.
+//
+// `whole` names the block that stands alone as a file, so the expiry needs no
+// per-fragment stubs: a tutorial's complete example is self-contained, and the
+// blocks the prose draws out of it are fragments of that one.
+type excludedDoc struct {
+	path      string
+	whole     int    // index into the document's fenced ```go blocks
+	wantError string // must still appear, or the exclusion has gone stale
+	issue     string
+}
+
+var excludedDocs = []excludedDoc{
+	{
+		path:  "docs/tutorials/signals-and-human-loop.md",
+		whole: 0, // package clause, imports, types and submitExpense -- complete
+		// Measured: vet: ./main.go:49:15: undefined: cleat.WithTimeout.
+		// Every AwaitSignals call in the file uses option helpers that occur
+		// nowhere under cleat/, and the real signature is
+		// AwaitSignals([]string, time.Duration) SignalResult -- one value.
+		wantError: "undefined: cleat.WithTimeout",
+		issue:     "cleat#3079",
 	},
 }
 
@@ -289,6 +357,41 @@ func TestTutorialRelativeLinksResolve(t *testing.T) {
 			}
 			if dead := deadLinks(filepath.Dir(abs), string(raw)); len(dead) > 0 {
 				t.Errorf("%s links to %v, which do not exist", rel, dead)
+			}
+		})
+	}
+}
+
+// TestExcludedTutorialsStillFailForTheRecordedReason is what stops an exclusion
+// from being a silent, permanent hole in the coverage above.
+func TestExcludedTutorialsStillFailForTheRecordedReason(t *testing.T) {
+	root := repoRoot(t)
+	if len(excludedDocs) == 0 {
+		t.Log("no tutorials are excluded; nothing to expire")
+		return
+	}
+	for _, doc := range excludedDocs {
+		t.Run(doc.path, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(root, doc.path))
+			if err != nil {
+				t.Fatalf("read %s: %v", doc.path, err)
+			}
+			blocks := goBlocks(t, string(raw))
+			if doc.whole >= len(blocks) {
+				t.Fatalf("%s has %d fenced ```go block(s) and the exclusion names block %d -- the file has "+
+					"moved on, so this check is looking in the wrong place", doc.path, len(blocks), doc.whole)
+			}
+			out := vetSnippet(t, blocks[doc.whole])
+			if out == "" {
+				t.Errorf("%s compiles now. Move it into tutorialDocs and delete it from excludedDocs: its "+
+					"exclusion (%s) has lapsed, and leaving the entry here means this guard silently covers "+
+					"less than it claims.", doc.path, doc.issue)
+				return
+			}
+			if !strings.Contains(out, doc.wantError) {
+				t.Errorf("%s no longer fails for the recorded reason.\nwant an error containing %q\ngot:\n%s\n"+
+					"Either the repair is partial or the file moved on for another reason; check %s.",
+					doc.path, doc.wantError, out, doc.issue)
 			}
 		})
 	}
