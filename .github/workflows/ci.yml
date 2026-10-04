@@ -607,27 +607,36 @@ jobs:
       # that made "delete the closed sections" unimplementable, so the split is
       # only safe while every reference still lands somewhere.
       #
-      # THE SELF-TEST IS THE GATED HALF, for the same reason as the marker guard
-      # above rather than by analogy with it: the full check reports five
-      # references that resolve to nothing on develop TODAY -- §2.59, §3.93,
-      # §3.170, §3.889, §7.4 -- and all five predate the split. Measured by
-      # running the identical checker against the pre-split tree in a worktree:
-      # 18 dangling before, 17 after, and ZERO introduced. Two of them (§3.170,
-      # §3.889) look like a duplicated digit for sections that do exist (3.17,
-      # 3.89), but fixing a reference means knowing where its author meant it to
-      # point, and guessing would invent a link rather than repair one.
+      # BOTH MODES RUN HERE NOW, and they are different checks rather than a
+      # strong one and a weak one. The self-test asserts the checker can still
+      # tell the plan's TWO namespaces apart: a §N.M does not always name a
+      # `### N.M` heading -- the Phase 2 table carries rows in the same shape,
+      # and §2.4/§2.5/§2.7 are cited from code and resolve to rows. It drives a
+      # deliberately headings-only reading and FAILS if that reading stops
+      # disagreeing, so a regression to one namespace cannot pass.
       #
-      # The self-test is not a weaker check, it is a different one: it asserts
-      # the checker can still tell the plan's TWO namespaces apart. A §N.M does
-      # not always name a `### N.M` heading -- the Phase 2 table carries rows in
-      # the same shape, and §2.4/§2.5/§2.7 are cited from code and resolve to
-      # rows. It drives a deliberately headings-only reading and FAILS if that
-      # reading stops disagreeing, so a regression to one namespace cannot pass.
-      - name: Plan cross-reference guard (self-test only, see above)
+      # The FULL mode used to be the half that could not run. It reported five
+      # references that resolve to nothing -- §2.59, §3.93, §3.170, §3.889,
+      # §7.4 -- and all five predate the split, measured by running the
+      # identical checker against the pre-split tree in a worktree: 18 dangling
+      # before, 17 after, and ZERO introduced. Two of them (§3.170, §3.889) look
+      # like a duplicated digit for sections that do exist (3.17, 3.89), but
+      # fixing a reference means knowing where its author meant it to point, and
+      # guessing would invent a link rather than repair one.
+      #
+      # So they are recorded in scripts/plan-references-baseline.txt instead, in
+      # the shape the skip ledger and the dead-export baseline already use, and
+      # the full mode now fails on anything NOT listed and on any listed
+      # reference that starts resolving -- shrink-only, so a repair is progress
+      # that cannot be undone. Until cleat#2441 that was the gap: only the
+      # self-test ran here, so a NEW dangling reference went unreported by the
+      # job whose whole subject is references that resolve to nothing.
+      - name: Plan cross-reference guard
         if: always()
         run: |
-          bash -e <<'LINT_GUARD_EOF' || echo "Plan cross-reference guard (self-test only, see above)" >> "$LINT_FAILURES_FILE"
+          bash -e <<'LINT_GUARD_EOF' || echo "Plan cross-reference guard" >> "$LINT_FAILURES_FILE"
           scripts/check-plan-references.py --self-test
+          scripts/check-plan-references.py
           LINT_GUARD_EOF
 
 
