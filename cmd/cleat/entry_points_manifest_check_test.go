@@ -29,7 +29,6 @@ func TestBuildRefusesAnEntryPointsManifestMismatch(t *testing.T) {
 		t.Fatalf("cleat init --template basic failed: %v\n%s", err, out)
 	}
 	proj := filepath.Join(root, name)
-	resolveScaffoldAgainstThisCheckout(t, proj)
 
 	// scaffoldBasic's own entry point is Hello (main.go), so writeYAML wrote
 	// "entry_points: [hello]". Corrupt it to a name the build cannot
@@ -89,7 +88,6 @@ func TestBuildRefusesTheOldMapShapedManifest(t *testing.T) {
 		t.Fatalf("cleat init --template basic failed: %v\n%s", err, out)
 	}
 	proj := filepath.Join(root, name)
-	resolveScaffoldAgainstThisCheckout(t, proj)
 
 	// A real pre-#2812 agent scaffold's cleat.yaml, transplanted onto
 	// scaffoldBasic's Hello entry point -- the map form always named
@@ -136,7 +134,6 @@ func TestBuildRefusesACleatYAMLThatFailsToParseAsYAMLAtAll(t *testing.T) {
 		t.Fatalf("cleat init --template basic failed: %v\n%s", err, out)
 	}
 	proj := filepath.Join(root, name)
-	resolveScaffoldAgainstThisCheckout(t, proj)
 
 	// An unterminated flow sequence -- not a wrong-shape value for a known
 	// key (that is TestBuildRefusesTheOldMapShapedManifest's case), a file
@@ -177,7 +174,6 @@ func TestBuildIgnoresAnAbsentEntryPointsManifest(t *testing.T) {
 		t.Fatalf("cleat init --template basic failed: %v\n%s", err, out)
 	}
 	proj := filepath.Join(root, name)
-	resolveScaffoldAgainstThisCheckout(t, proj)
 
 	if rmErr := os.Remove(filepath.Join(proj, "cleat.yaml")); rmErr != nil {
 		t.Fatalf("removing scaffolded cleat.yaml: %v", rmErr)

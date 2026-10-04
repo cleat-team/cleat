@@ -75,7 +75,6 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 		t.Fatalf("cleat init --template fullstack: %v\n%s", err, out)
 	}
 	proj := filepath.Join(root, "my-fullstack-app")
-	resolveScaffoldAgainstThisCheckout(t, proj)
 
 	// The default image is what a newcomer pulls; the test substitutes it, so pin the default here.
 	compose, err := os.ReadFile(filepath.Join(proj, "docker-compose.yml"))
