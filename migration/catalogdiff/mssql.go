@@ -107,7 +107,8 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 
 		colRows, err := db.QueryContext(ctx, `
 			SELECT c.name, ty.name, c.is_nullable,
-			       COALESCE(OBJECT_DEFINITION(c.default_object_id), '')
+			       COALESCE(OBJECT_DEFINITION(c.default_object_id), ''),
+			       COALESCE(c.collation_name, '')
 			FROM sys.columns c
 			JOIN sys.types ty ON ty.user_type_id = c.user_type_id
 			WHERE c.object_id = @p1
@@ -119,12 +120,12 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		for colRows.Next() {
 			var name, dtype string
 			var nullable bool
-			var def string
-			if err := colRows.Scan(&name, &dtype, &nullable, &def); err != nil {
+			var def, collation string
+			if err := colRows.Scan(&name, &dtype, &nullable, &def, &collation); err != nil {
 				colRows.Close()
 				return nil, fmt.Errorf("catalogdiff: scanning column for %s: %w", qname, err)
 			}
-			t.Columns = append(t.Columns, Column{Name: name, DataType: dtype, Nullable: nullable, Default: def})
+			t.Columns = append(t.Columns, Column{Name: name, DataType: dtype, Nullable: nullable, Default: def, Collation: collation})
 		}
 		if err := colRows.Err(); err != nil {
 			return nil, fmt.Errorf("catalogdiff: columns for %s: %w", qname, err)

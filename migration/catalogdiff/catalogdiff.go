@@ -59,6 +59,18 @@ type Column struct {
 	DataType string
 	Nullable bool
 	Default  string
+	// Collation is the column's collation, empty when the dialect reports
+	// none. cleat#2882: it is a FIELD rather than folded into DataType, and
+	// that requires the canonicalize line below to render it -- a field this
+	// struct carries but that line does not print reaches no comparison at
+	// all. mysql.go's autoIncrementAttribute comment records the same trap
+	// from the other side, where folding was the chosen repair.
+	//
+	// A collation change is otherwise invisible to this instrument on every
+	// dialect, and on PostgreSQL and MySQL to anything: only MSSQL has a
+	// check, and it lives in gen-mssql-baseline's manual acceptance script,
+	// which does not run in CI.
+	Collation string
 }
 
 // Index is one index, keyed by name with its full definition text.
@@ -238,8 +250,8 @@ func canonicalize(c *Catalog) []string {
 		cols := append([]Column(nil), t.Columns...)
 		sort.Slice(cols, func(i, j int) bool { return cols[i].Name < cols[j].Name })
 		for _, col := range cols {
-			lines = append(lines, fmt.Sprintf("TABLE %s COLUMN %s type=%s nullable=%t default=%s",
-				tname, col.Name, col.DataType, col.Nullable, oneLine(col.Default)))
+			lines = append(lines, fmt.Sprintf("TABLE %s COLUMN %s type=%s nullable=%t default=%s collation=%s",
+				tname, col.Name, col.DataType, col.Nullable, oneLine(col.Default), col.Collation))
 		}
 
 		idxs := append([]Index(nil), t.Indexes...)

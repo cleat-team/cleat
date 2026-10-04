@@ -50,7 +50,8 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		t := &Table{Name: name}
 
 		colRows, err := db.QueryContext(ctx, `
-			SELECT column_name, column_type, is_nullable, COALESCE(column_default, ''), extra
+			SELECT column_name, column_type, is_nullable, COALESCE(column_default, ''), extra,
+			       COALESCE(collation_name, '')
 			FROM information_schema.columns
 			WHERE table_schema = DATABASE() AND table_name = ?
 			ORDER BY ordinal_position
@@ -59,8 +60,8 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 			return nil, fmt.Errorf("catalogdiff: columns for %s: %w", name, err)
 		}
 		for colRows.Next() {
-			var cname, ctype, nullable, def, extra string
-			if err := colRows.Scan(&cname, &ctype, &nullable, &def, &extra); err != nil {
+			var cname, ctype, nullable, def, extra, collation string
+			if err := colRows.Scan(&cname, &ctype, &nullable, &def, &extra, &collation); err != nil {
 				colRows.Close()
 				return nil, fmt.Errorf("catalogdiff: scanning column for %s: %w", name, err)
 			}
@@ -83,7 +84,7 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 			if autoInc := autoIncrementAttribute(extra); autoInc != "" {
 				ctype += " " + autoInc
 			}
-			t.Columns = append(t.Columns, Column{Name: cname, DataType: ctype, Nullable: nullable == "YES", Default: def})
+			t.Columns = append(t.Columns, Column{Name: cname, DataType: ctype, Nullable: nullable == "YES", Default: def, Collation: collation})
 		}
 		if err := colRows.Err(); err != nil {
 			return nil, fmt.Errorf("catalogdiff: columns for %s: %w", name, err)
