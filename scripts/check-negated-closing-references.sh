@@ -47,6 +47,16 @@ self_test() {
   trap "rm -rf '$stub_dir'" EXIT
 
   check() { # <label> <want-rc> <want-text> <got-rc> <got-text>
+    # AN EMPTY want-text MAKES THE TEXT ASSERTION BELOW VACUOUS: `grep -qF -- ""`
+    # matches every input, so the case would pass on any output whatever. This is
+    # not hypothetical -- the clean-path case shipped with `""` and asserted
+    # nothing about the text (found by cleat-review on cleat#3045, measured both
+    # ways). Refused at the call rather than left to the caller's memory.
+    if [ -z "$3" ]; then
+      echo "  FAIL $1: caller passed an EMPTY want-text, which matches any output at all" >&2
+      failures=$((failures + 1))
+      return
+    fi
     if [ "$4" -ne "$2" ]; then
       echo "  FAIL $1: rc=$4 want=$2" >&2
       failures=$((failures + 1))
@@ -90,10 +100,17 @@ STUB_GH
 
   # 3b. Nothing to flag -- status 0, so the pass-through is asserted in both
   # directions rather than only where a non-zero status happens to appear.
+  #
+  # The expected TEXT is the inner script's clean-path line, not "". An empty
+  # expectation would match any output and assert nothing -- which is what this
+  # case shipped with until cleat-review measured it. Asserting the wording
+  # positive side out also catches the mirror of a missed finding: a wrapper
+  # that reported a FINDING on a clean body would fail here on both the status
+  # and the text.
   rc=0; out=$(PATH="$stub_dir:$PATH" PR_NUMBER=1 REPO=owner/repo \
       STUB_BODY='Adds the audit.' STUB_CLOSING='[]' STUB_COMMITS='' \
       bash "$self_path" 2>&1) || rc=$?
-  check "both set, nothing to flag" 0 "" "$rc" "$out"
+  check "both set, nothing to flag" 0 "No closing issue references on this PR." "$rc" "$out"
 
   if [ "$failures" -ne 0 ]; then
     echo "self-test: $failures case(s) failed" >&2
