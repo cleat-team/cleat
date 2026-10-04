@@ -2186,6 +2186,12 @@ type Worker struct {
 	backoffUntil        time.Time
 	circuitOpen         atomic.Bool
 
+	// internalDefsRefreshed records, per tenant, when this worker last resolved
+	// that tenant's internal definition names for the /metrics filter
+	// (cleat#3001). Keyed on cacheTenantFor, so it tracks storeForTenant's own
+	// first condition. See noteInternalDefs.
+	internalDefsRefreshed sync.Map
+
 	// Compaction settings.
 	Metrics                 *prometheus.Metrics
 	compactionThreshold     int
@@ -2550,6 +2556,7 @@ func (w *Worker) Run() {
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
 	initLoopCtx("memory_reload")
+	initLoopCtx("internal_defs_sweep")
 	initLoopCtx("plugin_health")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
@@ -2655,6 +2662,13 @@ func (w *Worker) Run() {
 	// Memory estimate reload loop.
 	w.registerLoopFunc("memory_reload", w.memoryReloadLoop)
 	w.launchLoop("memory_reload", w.memoryReloadLoop)
+
+	// Internal-definition sweep loop (cleat#3001). Re-resolves each tenant's
+	// internal definition names for the /metrics filter, so a definition
+	// TIGHTENED to internal after its last execution is still hidden rather than
+	// named until the process restarts. See sweepInternalDefs.
+	w.registerLoopFunc("internal_defs_sweep", w.internalDefsSweepLoop)
+	w.launchLoop("internal_defs_sweep", w.internalDefsSweepLoop)
 
 	// Memory sample cleanup loop.
 	w.registerLoopFunc("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
@@ -3123,6 +3137,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))
 		}
 	}()
+	// cleat#3001: teach the /metrics filter this tenant's internal definition
+	// names before any name-carrying series for this run is recorded.
+	w.noteInternalDefs(context.Background(), wf)
 	w.Metrics.RecordWorkflowStarted(context.Background(), wf.DefName)
 	w.Metrics.AddWorkflowActive(context.Background(), 1, wf.DefName)
 	defer w.Metrics.AddWorkflowActive(context.Background(), -1, wf.DefName)
