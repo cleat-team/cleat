@@ -55,9 +55,10 @@ const (
 	// reasonWitIsStillCoreABI: an OPEN FINDING, not a safe exemption. The WIT
 	// signature still takes out-pointers into linear memory, so the call has
 	// never worked on a component at all and cannot express `suspended` until
-	// it is redesigned. Tracked in IMPROVEMENT-PLAN §3.431 -- its BODY, which
-	// is where the out-pointer state is recorded; the heading is about the
-	// detached-run id §3.431 fixed.
+	// it is redesigned. Tracked in IMPROVEMENT-PLAN §3.267, which is that
+	// state's own heading -- until 2026-10-04 this pointed at §3.431's BODY,
+	// because the state had no heading and lived as a passage inside a section
+	// about the detached-run id.
 	//
 	// This cited §3.110 until 2026-10-04, and that was wrong in the way this
 	// file exists to prevent: §3.110 was FIXED on 2026-09-04 (the WIT says a
@@ -252,7 +253,7 @@ var stopSurfaces = map[string]stopSurface{
 		// component dispatch writes into a HOST buffer. So the Python SDK reads
 		// whatever was at OUTPUT_OFFSET: this call has never worked on a
 		// component, and the missing `result<string, call-failure>` is a symptom
-		// of that rather than a separate omission. §3.431's body records it --
+		// of that rather than a separate omission. §3.267 records it --
 		// not §3.110, which cited here until 2026-10-04 and was FIXED on
 		// 2026-09-04, i.e. had stopped describing a live defect.
 		wit:    nil,
@@ -270,8 +271,8 @@ var stopSurfaces = map[string]stopSurface{
 		// and there is no signature that could carry the refusal --
 		// reasonNotInTheComponentWorld. reasonWitIsStillCoreABI is the other
 		// shape, for a call the world DOES declare and declares with
-		// out-pointers; that is the state DurableAwaitSignals is in (§3.431's
-		// body), and it is not this one.
+		// out-pointers; that is the state DurableAwaitSignals is in (§3.267), and
+		// it is not this one.
 		//
 		// No `py`, which follows rather than being an omission: `py` exists to
 		// substitute for the guarantee a result<...> return provides, and there
@@ -547,7 +548,7 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 			t.Errorf("stopSurfaces[%q] names WIT functions %v AND carries the exemption %q.\n\n"+
 				"The exemption is stale: the thing it excuses is present. If this is "+
 				"%q, the signature has been redesigned -- so the exemption is stale, and "+
-				"the record to update is §3.431's body (this said \"§3.110 can be closed\" "+
+				"the record to update is §3.267 (this said \"§3.110 can be closed\" "+
 				"until 2026-10-04, by which time §3.110 had been closed for a month).",
 				site, s.wit, s.witWhy, reasonWitIsStillCoreABI)
 		}
