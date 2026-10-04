@@ -35,10 +35,12 @@ func Example_awaitSignals_basic() {
 		close(received)
 	}()
 
-	// Give the goroutine time to reach AwaitSignals.
-	time.Sleep(5 * time.Millisecond)
-
-	// Deliver the signal from the test goroutine.
+	// Deliver the signal from the test goroutine. No sleep is needed to let
+	// the goroutine reach AwaitSignals first: a signal that arrives before it
+	// parks is consumed on entry (durableAwaitSignalsImpl checks pendingSignals
+	// before registering a waiter), so both orderings are equivalent.
+	// cleat#3091 measured the example 20/20 either way; the sleep that used to
+	// sit here was not doing anything.
 	env.Signal("greeting", `{"msg":"hello"}`)
 
 	// Wait for the workflow goroutine to finish.
@@ -104,14 +106,17 @@ func ExampleTestEnv_AdvanceTime_basic() {
 		close(done)
 	}()
 
-	// Allow the goroutine to reach DurableSleep.
-	time.Sleep(5 * time.Millisecond)
+	// Wait for the goroutine to park in DurableSleep before moving the clock.
+	// An advance that lands first does not count: the deadline is computed off
+	// the clock at the moment the goroutine reaches the call. WaitForParked
+	// replaces the race-y time.Sleep this example used to teach (cleat#3091).
+	env.WaitForParked(nil)
 
 	// Advance past the 1-hour sleep.
 	env.AdvanceTime(1 * time.Hour)
 
-	// Allow the goroutine to wake, print, and enter AwaitSignals.
-	time.Sleep(50 * time.Millisecond)
+	// The goroutine wakes, prints, and parks in AwaitSignals.
+	env.WaitForParked(nil)
 
 	// Advance past the 1-hour signal timeout.
 	env.AdvanceTime(1 * time.Hour)

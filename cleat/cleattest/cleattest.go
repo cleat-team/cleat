@@ -327,10 +327,14 @@ type TestEnv struct {
 	detachedRuns   []DetachedRun
 	sleepRecs      []sleepRecord
 	signalWaiters  []signalWaiter
-	randomSeq      []int64
-	randomIdx      int
-	deferCounter   int
-	promises       map[string]promiseState // keyed by promiseID
+	// parkedTimeout bounds WaitForParked. Unexported and set in NewTestEnv
+	// rather than a const, so this package's own tests can shrink it and
+	// exercise the expiry path without a five-second test.
+	parkedTimeout time.Duration
+	randomSeq     []int64
+	randomIdx     int
+	deferCounter  int
+	promises      map[string]promiseState // keyed by promiseID
 	// Virtual object scope. Modelled here because HostCallsImpl no longer
 	// keeps it locally when the host hooks are wired (cleat#984): a test
 	// double that left these nil would make GetScope fall back to the
@@ -415,6 +419,7 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		retryBehaviors:           make(map[string]*retryBehavior),
 		childWorkflowCallHistory: make([]ChildWorkflowCallRecord, 0),
 		ConcurrencyKeys:          make(map[string]string),
+		parkedTimeout:            5 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -588,11 +593,25 @@ func (e *TestEnv) AdvanceTime(d time.Duration) {
 // serviced. It spins with runtime.Gosched for up to 100 iterations or
 // until no sleepers/waiters remain.
 //
-// This is best-effort: in edge cases where a workflow immediately
-// re-enters a sleep or signal loop, the count may never reach zero,
-// and the function returns after the spin limit. Tests that need
-// deterministic drain should use a sync.WaitGroup or other explicit
-// synchronization.
+// PRECONDITION: a workflow goroutine must ALREADY be parked when this is
+// called. The loop below exits on len(sleepRecs)+len(signalWaiters) == 0,
+// and that is true in two states which are not the same — everything has
+// drained, and NOTHING HAS REGISTERED YET. So when the clock moves before
+// the goroutine reaches its DurableSleep or AwaitSignals, this returns on
+// its FIRST iteration having already advanced the clock; the goroutine then
+// computes its deadline off the moved clock (see durableAwaitSignalsImpl's
+// `deadline := nowTime.Add(...)`) and parks until the test's own timeout.
+//
+// Measured on cleat#3091: a goroutine whose only call is AwaitSignals
+// stalls 20 of 20 runs, in both orderings, and a *second* advance recovers
+// only 5 of 10 — it succeeds exactly when the goroutine happened to
+// register first. The count is not a census to trust; the point is that the
+// exit test cannot separate the two states at all.
+//
+// Establish the precondition with WaitForParked when the workflow is not
+// known to have parked. Draining is not joining: a sync.WaitGroup or a
+// plain `done` channel still joins the goroutine afterwards, and is the
+// ordinary idiom — this primitive does not replace it.
 func (e *TestEnv) AdvanceTimeAndDrain(d time.Duration) {
 	e.AdvanceTime(d)
 	for i := 0; i < 100; i++ {
@@ -604,6 +623,62 @@ func (e *TestEnv) AdvanceTimeAndDrain(d time.Duration) {
 			return
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// WaitForParked blocks until at least one goroutine started by the test has
+// parked on a durable sleep or an AwaitSignals wait, then returns.
+//
+// It is the precondition AdvanceTime and AdvanceTimeAndDrain need and cannot
+// establish for themselves (cleat#3091). Both move the simulated clock, and
+// a workflow that has not reached its sleep or its AwaitSignals yet computes
+// its deadline off the moved clock — so the advance does not count and the
+// goroutine parks until the test's own timeout. A `time.Sleep` before the
+// advance is the idiom that replaces this today, and it is a race: 5ms is
+// usually enough and says nothing about when it is not.
+//
+// Call it before each advance:
+//
+//	go func() {
+//		err := ApprovalWorkflow(h, `{"amount": 5000}`)
+//		if err == nil {
+//			t.Error("expected a timeout")
+//		}
+//		done <- struct{}{}
+//	}()
+//	env.WaitForParked(t)               // the goroutine is now inside AwaitSignals
+//	env.AdvanceTime(25 * time.Hour)    // the timeout it is waiting for fires
+//	<-done                             // joined, and no longer racing the clock
+//
+// It is bounded rather than blocking forever, and FAILS the test on expiry:
+// a caller that waits for a park the workflow never performs would otherwise
+// hang until the package timeout with nothing saying what was awaited, and
+// the failure mode this primitive exists to remove — advancing with no
+// parked goroutine — is silent, so the two must not be made to look alike.
+//
+// t may be nil, for callers that have no *testing.T: the Example functions
+// in this package have none. A nil t makes the expiry silent, and the
+// caller's own assertion — an example's Output comment — is what fails
+// instead; a test that can pass a t should always pass one.
+func (e *TestEnv) WaitForParked(t TestingT) {
+	const poll = 100 * time.Microsecond
+	bound := e.parkedTimeout
+	deadline := time.Now().Add(bound)
+	for {
+		e.mu.Lock()
+		n := len(e.sleepRecs) + len(e.signalWaiters)
+		e.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			if t != nil {
+				t.Fatalf("cleattest: WaitForParked: no goroutine parked on a durable "+
+					"sleep or AwaitSignals within %s", bound)
+			}
+			return
+		}
+		time.Sleep(poll)
 	}
 }
 
