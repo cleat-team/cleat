@@ -817,6 +817,31 @@ jobs:
           scripts/check-playbook-claims.py
           LINT_GUARD_EOF
 
+      # cleat#3111: a workflow that runs a repo file BY PATH needs the execute
+      # bit in the tree, and nothing else in the toolchain checks it. Measured
+      # 2026-10-04 on cleat#2603: a commit dropped
+      # scripts/check-playbook-claims.py from 100755 to 100644, the step died
+      # with `Permission denied` (exit 126), and Lint -- a required context --
+      # could not pass. `diff` compares bytes, so a mode-only change is
+      # byte-identical to its predecessor, and `python3 <path>` names the
+      # interpreter, so it cannot observe the bit either. Those are the two
+      # readings that WERE used on that PR, and both were blind the same way.
+      #
+      # --self-test first, and its KNOWN-POSITIVE comes before its known-
+      # negative on purpose: a by-path script recorded at 100644 must be
+      # REPORTED and the same tree at 100755 must be silent. A check that
+      # matches nothing reports a clean tree, so the positive is what makes the
+      # negative mean anything.
+      #
+      # No network: the modes come from the checkout's own index.
+      - name: Workflow by-path invocations are executable
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Workflow by-path invocations are executable" >> "$LINT_FAILURES_FILE"
+          scripts/check-workflow-invoked-executables.py --self-test
+          scripts/check-workflow-invoked-executables.py
+          LINT_GUARD_EOF
+
       # The guard above can only ever run against a pre-merge base, so the
       # post-merge run on develop is the only place a merge-created collision
       # is visible. This one keeps that run from being cancelled by the next
