@@ -142,12 +142,13 @@ func TestApprovalTimeout(t *testing.T) {
 >
 > Measured 2026-10-04, this block assembled as a real test: with `<-done` added it
 > **hangs** — the goroutine parks in `durableAwaitSignalsImpl` and nothing fires its
-> deadline. Un-joined it passes, and on the runs where the advance lands first it
-> passes **without the workflow having reached the clock at all**, so the `t.Error`
-> in the goroutine never runs. That is the weakness these two blocks keep: the
-> assertion is a `t.Error` inside a goroutine nothing joins. Repairing them needs a
-> harness primitive that establishes the waiter is parked *before* advancing the
-> clock; that is **cleat#3091**.
+> deadline. Un-joined it passes, and it is **near-vacuous rather than occasionally
+> so**: instrumented, the workflow had not reached `AwaitSignals` at the moment the
+> test function returned in **9 of 10 runs**, and the test passed all ten. The
+> `t.Error` in the goroutine is therefore almost never reached — the assertion is
+> real code that the test does not run. Repairing the two needs a harness primitive
+> that establishes the waiter is parked *before* advancing the clock; that is
+> **cleat#3091**.
 
 ## Testing timeouts with AdvanceTime
 
