@@ -711,11 +711,16 @@ func TestReapStaleInstances(t *testing.T) {
 			// fails the status assertion above first. Measured: dropping
 			// `heartbeat_at = NULL` from the UPDATE left this test green.
 			//
-			// What zero means IS a real question and is not covered elsewhere:
-			// the window is "now", so a row claimed a moment ago is stale under
-			// it. Claiming this run again puts it back in that state, and the
-			// reap must take it -- a reaper that reads timeout <= 0 as "no
-			// deadline, reap nothing" passes the first call and fails here.
+			// What the second call tests is that a row claimed SINCE the last
+			// reap is reclaimable too -- the reap is not one-shot. It must use
+			// the same negative window as the first call, and NOT a zero one:
+			// on MSSQL a zero window is the coin flip cleat#3032 fixed, because
+			// Duration.Milliseconds() truncates and `now() - 0` is
+			// SYSUTCDATETIME(), the same clock the claim stamped -- so a row
+			// claimed milliseconds ago is reclaimed only if that clock ticked.
+			// A first version of this call asserted exactly that and failed on
+			// the SQL Server CI job at ~2-in-13, which is the identical value
+			// the sibling above records for the same mistake.
 			reclaimedAgain := false
 			for _, w := range workerNames {
 				c, err := store.ClaimWorkflow(ctx, w)
@@ -734,24 +739,24 @@ func TestReapStaleInstances(t *testing.T) {
 				t.Fatalf("run %s could not be claimed again after being reclaimed; a reclaimed row must be runnable work", runID)
 			}
 
-			count, err = store.ReapStaleInstances(ctx, 0, 0)
+			count, err = store.ReapStaleInstances(ctx, reapEverythingNow, 0)
 			if err != nil {
-				t.Fatalf("ReapStaleInstances(0): %v", err)
+				t.Fatalf("ReapStaleInstances(%v) after re-claiming: %v", reapEverythingNow, err)
 			}
 			if count < 1 {
-				t.Fatalf("ReapStaleInstances(0) reclaimed %d rows; the run claimed a moment ago is stale under a zero window, so a reap that means \"everything running\" takes it",
-					count)
+				t.Fatalf("ReapStaleInstances(%v) reclaimed %d rows; this test's run was claimed again since the first reap and is stale by construction, so a second reap takes it",
+					reapEverythingNow, count)
 			}
 			again, err := store.GetWorkflowByID(ctx, runID)
 			if err != nil {
-				t.Fatalf("GetWorkflowByID(after the zero-window reap): %v", err)
+				t.Fatalf("GetWorkflowByID(after the second reap): %v", err)
 			}
 			if again.ReclaimCount != after.ReclaimCount+1 {
-				t.Fatalf("run %s reclaim_count = %d after the zero-window reap, want %d; the row was claimed again and the zero window is wide enough to reach it",
+				t.Fatalf("run %s reclaim_count = %d after the second reap, want %d; the row was claimed again since the first reap, so the reap must take it a second time",
 					runID, again.ReclaimCount, after.ReclaimCount+1)
 			}
 			if again.Status != "ready" {
-				t.Fatalf("run %s is %q after the zero-window reap, want \"ready\"", runID, again.Status)
+				t.Fatalf("run %s is %q after the second reap, want \"ready\"", runID, again.Status)
 			}
 		})
 	}
