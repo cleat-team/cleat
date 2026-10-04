@@ -457,7 +457,7 @@ var sdkUnreachedBaseline = map[string][]string{
 		// dispatch writes into a HOST buffer. And the wrong-answer mode is not
 		// hypothetical in this family -- durable-await-signals IS declared and
 		// IS bound in Python, so its guest reads whatever sat at
-		// OUTPUT_OFFSET. That is the shape §3.431's body records.
+		// OUTPUT_OFFSET. That is the shape §3.267 records.
 		//
 		// THE SAME as cleat_start_detached in the respect that matters here,
 		// not different from it: neither has a WIT declaration of its own, and
@@ -471,7 +471,7 @@ var sdkUnreachedBaseline = map[string][]string{
 		// detached-run site carries neither: it names durable-run-detached, the
 		// declaration cleat_run_detached uses, so cleat_start_detached rides on
 		// it without one of its own. All of it is the out-pointer state
-		// §3.431's body records.
+		// §3.267 records it.
 		//
 		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
 		// engine/python_wasm_e2e_test.go records the same fact from

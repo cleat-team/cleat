@@ -594,7 +594,7 @@ var pythonUnboundBaseline = []string{
 	// hypothetical, it is what durable-await-signals does TODAY: that one IS
 	// declared (cleat.wit:163) and IS bound in Python
 	// (python-sdk/cleat_sdk/host_calls.py), so it is the wrong-VALUE mode, live
-	// rather than latent. That is the shape §3.431's body records.
+	// rather than latent. That is the shape §3.267 records.
 	//
 	// THE SAME AS cleat_start_detached in the respect that matters here, not
 	// different from it: neither has a WIT declaration of its own, and neither
