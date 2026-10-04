@@ -273,6 +273,7 @@ migration	mssqlDSNAsSA	1
 migration	newMSSQLScratchDB	1
 migration	newMySQLScratchDB	1
 migration	newScratchDB	1
+migration/catalogdiff	TestAColumnCollationChangeIsReportedLivePostgres	1
 migration/catalogdiff	TestDiffCatchesADroppedForce	1
 migration/catalogdiff	TestDiffCatchesAPartitionedParentsDifference	1
 migration/catalogdiff	TestDiffCatchesAWrongRoutineBody	1
