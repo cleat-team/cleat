@@ -205,7 +205,7 @@ if status != "confirmed" {
 
 ```go
 env.SetVersion(2)
-err := MyWorkflow(env.H(), input)
+err := MyWorkflow(env.H(), `{"order_id":"ord_1"}`)
 // ... assertions ...
 
 env.AssertCalled(t, "new_service", "NewOp")
@@ -226,7 +226,6 @@ env.AssertContinued(t, `{"user_id":"usr_1","items":["item_3","item_4"]}`)
 package myworkflow_test
 
 import (
-    "encoding/json"
     "strings"
     "testing"
     "time"
@@ -305,6 +304,11 @@ func TestApprovalWorkflow_Rejected(t *testing.T) {
 }
 ```
 
+> Corrected 2026-10-04 (cleat#3027): this example imported `encoding/json` and
+> never used it, so it did not compile as published. Found by compiling the
+> block -- assembled into a test module and run through `go vet` -- which is the
+> same check that found the Saga snippet in the tutorials. The import is gone.
+
 ## Replay testing
 
 For advanced test scenarios, `cleattest` supports recording and replay:
@@ -315,14 +319,14 @@ func TestReplayWorkflow(t *testing.T) {
 
     // Phase 1: record.
     env.EnableReplay()
-    err := MyWorkflow(env.H(), input)
+    err := MyWorkflow(env.H(), `{"order_id":"ord_1"}`)
     if err != nil {
         t.Fatalf("recording run failed: %v", err)
     }
 
     // Phase 2: replay.
     env.StartReplay()
-    err = MyWorkflow(env.H(), input)
+    err = MyWorkflow(env.H(), `{"order_id":"ord_1"}`)
     if err != nil {
         t.Fatalf("replay run failed: %v", err)
     }
@@ -331,6 +335,11 @@ func TestReplayWorkflow(t *testing.T) {
     env.AssertReplayDivergence(t, 0)
 }
 ```
+
+> Corrected 2026-10-04 (cleat#3027): this block called `MyWorkflow(env.H(),
+> input)` and never declared `input` -- `undefined: input`, from compiling the
+> block as published. Every other call in this page passes an inline literal, so
+> that is what it does now.
 
 ## Running tests
 
