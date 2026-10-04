@@ -539,13 +539,29 @@ well-formed, not its contents).
 
 ### List by tenant
 
-To see which plugins a tenant uses:
+To see which plugins a tenant uses, ask what its role has been **granted**.
+Enablement is a privilege, not a row in a mapping table -- there is no
+`admin.tenant_plugins`. `admin.plugin_tables` says which tables each plugin
+manages, and `admin.grant_plugin_to_tenant` is what grants the tenant's role
+access to them:
 
 ```sql
-SELECT plugin_name, plugin_version
-FROM admin.tenant_plugins
-WHERE tenant_id = '<uuid>';
+SELECT DISTINCT pt.plugin_name
+FROM admin.plugin_tables pt
+JOIN information_schema.role_table_grants g
+  ON g.table_schema = pt.schema_name
+ AND g.table_name = pt.table_name
+WHERE g.grantee = (SELECT role_name FROM admin.tenant_roles
+                   WHERE tenant_id = '<uuid>')
+  AND g.privilege_type = 'SELECT';
 ```
+
+The join is against `information_schema.role_table_grants` rather than a
+`has_table_privilege()` predicate, and that is deliberate: measured against a
+schema where one `admin.plugin_tables` row named a table that had since been
+dropped, `has_table_privilege` raised `relation "…" does not exist` and aborted
+the whole query, while the `information_schema` view simply has no row for a
+table that is not there. A single stale row should not blank the audit.
 
 ### SQL queries for audit
 
