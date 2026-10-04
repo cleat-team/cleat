@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,7 +73,24 @@ func TestASBuildRefusesNondeterminism(t *testing.T) {
 	// first and wrote 001.wasm into cmd/cleat, which is how it was found.
 	build := func(t *testing.T) string {
 		t.Helper()
-		out, _ := exec.Command(cleatBinary, "build", "--target", "assemblyscript", "-o", t.TempDir(), dir).CombinedOutput()
+		// The exit status is NOT discarded (cleat#3063). A build that never
+		// started -- exec failed, so there is no ExitError -- produces EMPTY
+		// output, and every absence-assertion below then holds for a reason that
+		// has nothing to do with the checker. That is a failed measurement rather
+		// than a result, so it is fatal here.
+		//
+		// A non-zero exit is NOT a failure at this level: an AS build fails for a
+		// missing toolchain, a failed npm install or a syntax error, and the arms
+		// assert on the TEXT (an E00x code, or `Wrote `).
+		out, err := exec.Command(cleatBinary, "build", "--target", "assemblyscript", "-o", t.TempDir(), dir).CombinedOutput()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("the build never started: %v\n\n"+
+					"Nothing ran, so every assertion below would be about the absence of "+
+					"output rather than about the checker. cleat#3063.", err)
+			}
+		}
 		return string(out)
 	}
 
@@ -158,6 +176,7 @@ function myWorkflow(h: HostCalls, input: string): string {
 }
 `)
 		out := build(t)
+		requireReachedStage(t, out, asBuildMarker)
 
 		if strings.Contains(out, "E002") {
 			t.Errorf("a CALLER of durable code was reported as non-deterministic.\n\n"+
@@ -200,6 +219,7 @@ function myWorkflow(h: HostCalls, input: string): string {
 }
 `)
 		out := build(t)
+		requireReachedStage(t, out, asBuildMarker)
 
 		if strings.Contains(out, "E005") {
 			t.Errorf("a pure helper was told it is missing a HostCalls parameter.\n\n"+
@@ -236,6 +256,7 @@ function myWorkflow(h: HostCalls, input: string): string {
 }
 `)
 		out := build(t)
+		requireReachedStage(t, out, asBuildMarker)
 
 		if strings.Contains(out, "E00") {
 			t.Errorf("the AS transform now CATCHES an aliased non-deterministic call.\n\n"+
