@@ -53,6 +53,16 @@ import (
 // sets no collation at all, so without it the non-empty path has no control on
 // this dialect and a consistently-wrong read would be invisible.
 func TestAColumnCollationChangeIsReportedLivePostgres(t *testing.T) {
+	// REQUIRED, and its absence was a regression on this PR's first head:
+	// scratchPostgresDB has no skip guard of its own -- it t.Fatalf's -- so
+	// without this the test FAILS where PostgreSQL is absent rather than
+	// skipping, and takes the whole package down. Every other PostgreSQL test
+	// in this package wraps it in exactly this check (catalogdiff_test.go, six
+	// times); this file had zero. It broke multi-db/mysql and multi-db/mssql,
+	// which set only their own dialect's DSN.
+	if postgresAdminDSN() == "" {
+		t.Skip("CLEAT_TEST_POSTGRES/CLEAT_TEST_DB not set, skipping")
+	}
 	a := scratchPostgresDB(t)
 	b := scratchPostgresDB(t)
 	ctx := context.Background()
