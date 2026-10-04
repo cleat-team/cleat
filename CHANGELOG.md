@@ -223,6 +223,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`slack-notify`'s leftover-`slack_signing_secret` boot WARN said the key "has no effect",
+  which was false** — its presence is exactly what makes `slacknotify.signing_secret` required at
+  boot (`RequiredDeploymentSecrets`, twenty lines below the WARN, keys on the same signal). An
+  operator who read only the WARN would conclude they could ignore the boot refusal that key's own
+  presence caused. The message now says the value is ignored but the presence still requires a
+  secret, and names removing the key as the one thing an outbound-only deployment needs to do.
+  `slack-notify` also now implements `plugin.HasDeploymentSecretRemedyHint`, so that
+  removal alternative is appended to the boot-refusal error itself rather than living only in a
+  WARN. (cleat#2235)
+
 - **The heartbeat fence could cancel the execution it had NOT judged, when this worker re-claimed its
   own run after a suspend.** `heartbeatAndFenceInFlight` snapshots the in-flight set and only then asks
   the store which runs were superseded; a suspend makes the worker re-claim its OWN run milliseconds

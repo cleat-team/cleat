@@ -85,8 +85,14 @@ provider. Omitted, it defaults to `true`, today's behavior for every
 enabled provider except `ollama`.
 
 **A leftover `sendgrid_api_key`, `providers.*.api_key`, `slack_signing_secret`,
-or `dsn` in `--plugin-config` does nothing** — none of the four structs has a
-field for it anymore. What a worker does about a leftover one differs by
+or `dsn` in `--plugin-config` is no longer read as a credential** — none of the
+four structs has a field for it anymore, so its value is dead. For
+`slack-notify` and `scheduled-backup` that is not the whole story: their
+**presence** is still load-bearing, because it is what makes
+`slacknotify.signing_secret` / `scheduledbackup.dsn` required at boot (each
+re-reads the raw bytes through a small leftover-only struct to decide that —
+see above). So removing the key is the non-secret fix for a refusal it caused,
+not merely tidying. What a worker does about a leftover one differs by
 plugin:
 
 - `llm` always logs a WARN naming the dead field and the
@@ -169,10 +175,11 @@ implement it unconditionally, `slack-notify` and `scheduled-backup`
 conditionally, gated on a leftover legacy field in `--plugin-config` (see
 above), and `blobstore` conditionally too but on a different axis — gated on
 `backend`/`use_iam_credentials` alone, not on any leftover field. A plugin
-that also implements `plugin.HasDeploymentSecretRemedyHint` (`blobstore`
-does) gets its hint text appended to the boot-refusal error, naming a
-non-secret way to avoid the requirement (`use_iam_credentials: true`, for
-`blobstore`) alongside the missing secret's name.
+that also implements `plugin.HasDeploymentSecretRemedyHint` (`blobstore` and
+`slack-notify` do) gets its hint text appended to the boot-refusal error,
+naming a non-secret way to avoid the requirement (`use_iam_credentials: true`
+for `blobstore`, removing the leftover `slack_signing_secret` for
+`slack-notify`) alongside the missing secret's name.
 
 ## Set up a master key, once
 

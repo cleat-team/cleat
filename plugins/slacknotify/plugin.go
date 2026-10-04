@@ -123,8 +123,11 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		var legacy legacySlackConfig
 		if err := json.Unmarshal(env.Config, &legacy); err == nil && legacy.SlackSigningSecret != "" {
 			p.logger.Warn("slack-notify: slack_signing_secret in --plugin-config is no longer read " +
-				"(cleat#2172); it has no effect. Use " +
-				"`cleatctl set-deployment-secret --name slacknotify.signing_secret` instead.")
+				"(cleat#2172); it does not verify anything, and its value is ignored. Its PRESENCE " +
+				"is not ignored: it is what makes `slacknotify.signing_secret` required at boot, " +
+				"because a deployment that set it has served /slack/interactive before. Set that " +
+				"secret with `cleatctl set-deployment-secret --name slacknotify.signing_secret`, or " +
+				"remove the legacy key to run outbound-only, where no signing secret is required.")
 		}
 	}
 
@@ -159,6 +162,15 @@ func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
 		return []string{"slacknotify.signing_secret"}, nil
 	}
 	return nil, nil
+}
+
+// DeploymentSecretRemedyHint implements plugin.HasDeploymentSecretRemedyHint:
+// the boot refusal RequiredDeploymentSecrets triggers has a second fix besides
+// setting slacknotify.signing_secret -- and here it is also the only way the
+// operator can see WHY the secret is required at all, because the refusal
+// names the secret and not the legacy key whose presence made it necessary.
+func (p *Plugin) DeploymentSecretRemedyHint() string {
+	return "alternatively, remove slack_signing_secret from --plugin-config: its presence is what makes slacknotify.signing_secret required, and an outbound-only slack-notify needs no signing secret"
 }
 
 // DeploymentSecretPrefix implements plugin.HasDeploymentSecretPrefix:
