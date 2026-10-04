@@ -67,6 +67,7 @@ function exerciseEveryHostCall(h: HostCalls): void {
   h.awaitSignalsMs('["s"]', 1000);
   h.awaitSignalsWithQuorum('["s"]', 1, 0, 1);
   h.awaitSignalsWithQuorumMs('["s"]', 1, 0, 1000);
+  h.waitForEventMs("webhook-ingest", "await_webhook", "{}", '["s"]', 1000);
   h.signalWorkflow("run-1", "s", "{}");
   h.sendSignalAndWait("run-1", "s", "{}", 1);
   h.sendSignalAndWaitMs("run-1", "s", "{}", 1000);

@@ -576,6 +576,56 @@ var pythonUnboundBaseline = []string{
 	// the guest would read whatever sat at OUTPUT_OFFSET and return it as a
 	// run id.
 	"cleat_start_detached",
+
+	// The second of the same family, added with cleat#2998 -- and a DIFFERENT
+	// FAILURE MODE from the entry above, which is worth separating because
+	// aggregating the two misdescribes this one. cleat#3051 is where that was
+	// worked out; this paragraph follows it rather than the other way round.
+	//
+	// cleat_start_detached has no Python binding, and this one has neither a
+	// binding nor a WIT declaration, so a guest cannot call EITHER: the failure
+	// is an absent call, not a wrong answer.
+	//
+	// The out-pointer shape is still why a table row alone would not fix it.
+	// The call takes out-pointers for the claimed event; an out-pointer
+	// addresses the guest's own linear memory while component dispatch writes
+	// into a HOST buffer. Bind it in that shape and the guest reads whatever
+	// sat at OUTPUT_OFFSET and takes it for an event -- which is not
+	// hypothetical, it is what durable-await-signals does TODAY: that one IS
+	// declared (cleat.wit:163) and IS bound in Python
+	// (python-sdk/cleat_sdk/host_calls.py), so it is the wrong-VALUE mode, live
+	// rather than latent. That is the shape §3.431's body records.
+	//
+	// THE SAME AS cleat_start_detached in the respect that matters here, not
+	// different from it: neither has a WIT declaration of its own, and neither
+	// is bound. An earlier draft of this paragraph claimed the opposite about
+	// cleat_start_detached -- that it WAS declared, with the core-ABI shape.
+	// That was false on both halves, and cleat-review re-derived it during
+	// #3049's review: cleat.wit declares durable-run-detached for
+	// cleat_run_detached (:396) and has no start-detached entry at all, and
+	// reasonWitIsStillCoreABI appears as an entry value exactly once, on
+	// DurableAwaitSignals.
+	//
+	// THAT is what both of these contrast with -- the one call of the three
+	// that is declared (cleat.wit:163) AND bound in Python
+	// (python-sdk/cleat_sdk/host_calls.py), which is why it is the one whose
+	// guest reads whatever sat at OUTPUT_OFFSET. A world that declares the
+	// wrong thing, against this one, where the world declares nothing. The
+	// detached-run site needs no such constant because it names
+	// durable-run-detached, the declaration cleat_run_detached uses;
+	// cleat_start_detached rides on that without a declaration of its own.
+	//
+	// So the fix here starts with writing the declaration: `durable-wait-for-event:
+	// func(...) -> result<string, call-failure>`, a dispatcher in
+	// component_cgo.go, and regenerated componentize-py bindings, whose
+	// regeneration must first reproduce the unmodified tree byte-identically
+	// (3.253).
+	//
+	// Bound by Go, Rust, Java and AssemblyScript, each carrying the stop-bit
+	// guard its SDK's list requires -- the host can refuse this call in a defer
+	// segment. tests/plugin-harness/sdk_import_names_test.go records the same
+	// fact from the other source; the two move together.
+	"cleat_wait_for_event",
 }
 
 // NOTE: this baseline and sdkUnreachedBaseline in

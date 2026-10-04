@@ -81,6 +81,9 @@ var rustCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"plugin_call", "PluginCall"},
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	{"await_signals_ms", "DurableAwaitSignals"},
+	// wait_for_event_ms, not wait_for_event: the latter delegates, so the stop
+	// guard lives in the _ms form -- the same shape as await_signals_ms above.
+	{"wait_for_event_ms", "WaitForEvent"},
 	{"acquire_lock_ms", "AcquireLock"},
 	{"poll_update", "DurablePollUpdate"},
 	{"complete_update", "DurableCompleteUpdate"},

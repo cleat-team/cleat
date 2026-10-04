@@ -89,6 +89,9 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCallOutcome", "PluginCall"},
 	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
+	// waitForEventMs, not waitForEvent: the latter delegates, so the stop guard
+	// lives in the _ms form -- the same shape as awaitSignalsMs above.
+	{"waitForEventMs", "WaitForEvent"},
 	{"acquireLockMs", "AcquireLock"},
 	{"signalWorkflow", "SignalWorkflow"},
 	{"cleatSend", "DurableSend"},

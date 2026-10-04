@@ -55,7 +55,17 @@ const (
 	// reasonWitIsStillCoreABI: an OPEN FINDING, not a safe exemption. The WIT
 	// signature still takes out-pointers into linear memory, so the call has
 	// never worked on a component at all and cannot express `suspended` until
-	// it is redesigned. Tracked in IMPROVEMENT-PLAN §3.110.
+	// it is redesigned. Tracked in IMPROVEMENT-PLAN §3.431 -- its BODY, which
+	// is where the out-pointer state is recorded; the heading is about the
+	// detached-run id §3.431 fixed.
+	//
+	// This cited §3.110 until 2026-10-04, and that was wrong in the way this
+	// file exists to prevent: §3.110 was FIXED on 2026-09-04 (the WIT says a
+	// stop in the type, and `python` joined deferSegmentLanguages), so it had
+	// stopped being the record of a live defect while this comment still
+	// pointed at it. Two prose passages in cleat#2998 copied the stale pointer
+	// from here before review caught it, which is the cost of a citation that
+	// is not re-derived with the thing it describes.
 	reasonWitIsStillCoreABI exemptReason = "open-finding-wit-is-core-abi"
 
 	// reasonNotInTheComponentWorld: the host function has no WIT declaration at
@@ -242,9 +252,34 @@ var stopSurfaces = map[string]stopSurface{
 		// component dispatch writes into a HOST buffer. So the Python SDK reads
 		// whatever was at OUTPUT_OFFSET: this call has never worked on a
 		// component, and the missing `result<string, call-failure>` is a symptom
-		// of that rather than a separate omission. §3.110 records it.
+		// of that rather than a separate omission. §3.431's body records it --
+		// not §3.110, which cited here until 2026-10-04 and was FIXED on
+		// 2026-09-04, i.e. had stopped describing a live defect.
 		wit:    nil,
 		witWhy: reasonWitIsStillCoreABI,
+	},
+	"WaitForEvent": {
+		// The claim/register/re-claim loop the application used to write by hand
+		// (cleat#2998). It consults stopBeforeNewWork for the same reason a
+		// fresh await does: it registers an awaiter and then suspends, so in a
+		// defer segment it would leave a terminated workflow waiting for a
+		// signal instead of finishing its cleanup.
+		//
+		// No WIT function, and the constant matters: cleat_wait_for_event has
+		// never been declared in cleat.wit, so a component guest cannot call it
+		// and there is no signature that could carry the refusal --
+		// reasonNotInTheComponentWorld. reasonWitIsStillCoreABI is the other
+		// shape, for a call the world DOES declare and declares with
+		// out-pointers; that is the state DurableAwaitSignals is in (§3.431's
+		// body), and it is not this one.
+		//
+		// No `py`, which follows rather than being an omission: `py` exists to
+		// substitute for the guarantee a result<...> return provides, and there
+		// is no WIT return here to substitute for. The Python SDK does not bind
+		// this call at all -- see pythonUnboundBaseline.
+		adapters: []string{"WaitForEvent"},
+		wit:      nil,
+		witWhy:   reasonNotInTheComponentWorld,
 	},
 }
 
@@ -511,7 +546,9 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 		} else if s.witWhy != "" {
 			t.Errorf("stopSurfaces[%q] names WIT functions %v AND carries the exemption %q.\n\n"+
 				"The exemption is stale: the thing it excuses is present. If this is "+
-				"%q, the signature has been redesigned and §3.110 can be closed.",
+				"%q, the signature has been redesigned -- so the exemption is stale, and "+
+				"the record to update is §3.431's body (this said \"§3.110 can be closed\" "+
+				"until 2026-10-04, by which time §3.110 had been closed for a month).",
 				site, s.wit, s.witWhy, reasonWitIsStillCoreABI)
 		}
 		for _, w := range s.wit {

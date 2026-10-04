@@ -115,6 +115,30 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&signalNameBuf[0], int(signalNameLen)), unsafe.String(&payloadBuf[0], int(payloadLen)), timedOut, nil",
 		),
 	},
+	"WaitForEvent": {
+		FieldName:  "WaitForEvent",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"pluginName", "string"},
+			{"functionName", "string"},
+			{"inputJSON", "string"},
+			{"signalNames", "[]string"},
+			{"timeoutMs", "int64"},
+		},
+		// The cleat_call layout, because WaitForEvent returns
+		// packDurableCallResult: responseLen 40-63, callErrorCode 8-39,
+		// errCode 0-7. A plugin failure and an exhausted timeout both arrive
+		// as a non-zero code with the message already in the buffer.
+		ResultStmts: withSuspendCheck(
+			"responseLen := uint32(uint64(result) >> 40)",
+			"callErrCode := byte(uint64(result) >> 8)",
+			"errCode := byte(result)",
+			"if errCode != 0 || callErrCode != 0 {",
+			`	return "", fmt.Errorf("cleat_wait_for_event: %s", hostErrMessage(eventBuf[:], responseLen))`,
+			"}",
+			"return unsafe.String(&eventBuf[0], int(responseLen)), nil",
+		),
+	},
 	// The scope pair. ClearScope deliberately has NO entry here: it is
 	// SetScope("", "") -- the documented empty-pair call -- so it is a Go-side
 	// wrapper like DurableFetch over DurableCall, and its hostFunctions row
