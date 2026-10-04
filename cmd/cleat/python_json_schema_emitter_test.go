@@ -118,10 +118,15 @@ def place_order(h: HostCalls, user_id: str, cart: list[int], address: Address, p
 
 // TestComputePythonEntryPointSchemaWorksForTheBareDecoratorForm is cleat#2976.
 //
-// `@cleat_entry` WITH NO PARENTHESES is the form `python-sdk/README.md`
-// documents and NINE OF THE ELEVEN `python-sdk/examples/*.py` use -- the other
-// two pass an explicit name, which is exactly the case the parenthesised form
-// exists for. It was also the form that produced no schema at all: the
+// `@cleat_entry` WITH NO PARENTHESES is what NINE OF THE ELEVEN
+// `python-sdk/examples/*.py` still use -- the other two pass an explicit name,
+// which is exactly the case the parenthesised form exists for. It also remains
+// fully supported: `cleat_sdk/entry.py` accepts both, calling the bare form
+// legacy and the parenthesised one preferred -- which is why cleat#3015 moved
+// the README's own examples to the parenthesised form, and why this test must
+// keep the bare form working. (This paragraph used to say the README documents
+// the bare form; it does not any more, and the count beside it is unaffected.)
+// It was also the form that produced no schema at all: the
 // decorator's dual-form branch passed the decorated FUNCTION into the slot the
 // workflow NAME is read from, so the registry was keyed by a function object,
 // and `cleat build --target python` reported Build SUCCESS while writing no
@@ -172,7 +177,7 @@ def place_order(h: HostCalls, user_id: str, priority: int = 1) -> str:
 			"This is cleat#2976. `cleat build --target python` treats a schema-computation "+
 			"failure as NON-FATAL (see runBuildPython), so this error does not fail the "+
 			"build -- it silently drops the .schema.json sidecar and turns start-input "+
-			"validation off for the form every documented example uses.", err)
+			"validation off for the form nine of the eleven bundled examples use.", err)
 	}
 	if bareName != "place_order" {
 		t.Errorf("bare form resolved the entry point as %q, want %q -- the decorator "+
