@@ -800,6 +800,13 @@ jobs:
       # `RegisterRoutes(*http.ServeMux)` and, for the bodies, a shipped claim
       # marked unbuilt -- not synthetic mutations. See self_test() for the
       # restore-and-diff falsification each was verified with.
+      #
+      # This file is WS-3's zone, and this step edits it under the zone's
+      # documented exception -- another stream may add here when leaving the
+      # mechanism unwired would be worse. That is exactly the case: the only
+      # alternative is a body-claim check with no step running it, which is the
+      # defect class CLAUDE.md names -- "a mechanism that exists and is wired to
+      # nothing reads as done".
       - name: Playbook interface, build and body-claim checks
         if: always()
         env:

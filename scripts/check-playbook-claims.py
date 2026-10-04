@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Refuse docs/playbooks/README.md when it documents a signature or a build
-claim the tree no longer backs.
+claim the tree no longer backs -- and the four playbook bodies' own "still to
+build" claims when they disagree with the tracker.
 
 cleat#2513: nothing re-checked the playbooks' factual claims against the tree,
 and cleat#2511 is what that cost -- the "four hitch points" table's routes row
@@ -621,6 +622,32 @@ def self_test():
     problems = check_all_bodies(nothing, fake_state)
     if not any("measured nothing" in p for p in problems):
         failures.append(f"  MISSED the measured-nothing case: {problems}")
+
+    # Two marks on one claim. The branch that complains about a self-
+    # contradicting claim had no case at all until this one, and a branch with no
+    # case is one whose message has never been read.
+    two_marks = [("docs/playbooks/x.md",
+                  f"{BODY_SECTION}\n\n1. **Streaming.** cleat#900, **shipped** but **unbuilt**.\n")]
+    problems = check_all_bodies(two_marks, fake_state)
+    if not problems or "two claims about one state" not in problems[0]:
+        failures.append(f"  MISSED two marks on one block: {problems}")
+
+    # A renamed section heading. The lookup must not fail open -- silently
+    # checking nothing is the outcome this whole file exists to prevent.
+    renamed = [("docs/playbooks/x.md",
+                "## What you still have to buy or build\n\n1. **Streaming.** cleat#900, **shipped**.\n")]
+    problems = check_all_bodies(renamed, fake_state)
+    if not any(f"no '{BODY_SECTION}' section" in p for p in problems):
+        failures.append(f"  MISSED a renamed section heading: {problems}")
+
+    # The reported line is the FILE line, not an offset into the section. The
+    # first version reported the offset, so a claim at file line 7 was announced
+    # as :3 -- specific-looking and wrong.
+    offset = [("docs/playbooks/x.md",
+               "intro line\n\n" + BODY_SECTION + "\n\nlead-in\n\n1. **Streaming.** cleat#900, **unbuilt**.\n")]
+    problems = check_all_bodies(offset, fake_state)
+    if not problems or ":7:" not in problems[0]:
+        failures.append(f"  section offset leaked into the reported line number: {problems}")
 
     if failures:
         print("self-test FAILED:\n" + "\n".join(failures), file=sys.stderr)
