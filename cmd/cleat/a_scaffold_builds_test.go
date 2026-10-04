@@ -20,8 +20,9 @@ import (
 //   - after that was corrected to a stamped version, the require still named
 //     the PARENT module while the generated code imports
 //     github.com/cleat-team/cleat/cleat -- a separate module (cleat/go.mod)
-//     which has never been tagged at all, so no version string could work and
-//     the build failed on a missing go.sum entry;
+//     which was untagged AT THE TIME (cleat/v0.3.1 and cleat/v0.3.2 were cut
+//     on 2026-09-27, after this), so no version string could work and the
+//     build failed on a missing go.sum entry;
 //   - and underneath both, workflow and fullstack declared `func main() {}`
 //     plus a raw //go:wasmexport directive, which collide with the stub
 //     `cleat build` generates ("other declaration of main", "symbol process
@@ -123,17 +124,28 @@ func runCleatIn(t *testing.T, dir string, args ...string) (string, error) {
 //
 // A freshly scaffolded project's go.mod names no SDK at all -- `module X` and
 // `go 1.24`, nothing else -- so `go mod tidy` (tidyScaffold, init.go) resolves
-// `github.com/cleat-team/cleat/cleat` from the proxy. That module has never
-// been tagged, so its `@latest` is a PSEUDO-VERSION OF THE DEFAULT BRANCH:
+// `github.com/cleat-team/cleat/cleat` from the proxy.
+//
+// WHEN THIS HELPER WAS WRITTEN, that module had never been tagged, so its
+// `@latest` was a PSEUDO-VERSION OF THE DEFAULT BRANCH:
 //
 //	proxy …/cleat/cleat/@latest -> v0.0.0-...-<develop head>
 //
-// which means the version a scaffold resolves to is whatever `cleat/go.mod`
-// says AT THE CURRENT PUSHED HEAD -- not at the revision under test. A pull
-// request therefore cannot validate anything on this path: set the require to
-// an unpublished version and the failure lands on the NEXT commit, while the
-// PR that made the change stays green. That is exactly what cleat#2452 did,
-// and it is what made the develop red un-gateable.
+// which meant the version a scaffold resolved to was whatever `cleat/go.mod`
+// said AT THE CURRENT PUSHED HEAD -- not at the revision under test. A pull
+// request therefore could not validate anything on this path: set the require
+// to an unpublished version and the failure landed on the NEXT commit, while
+// the PR that made the change stayed green. That is exactly what cleat#2452
+// did, and it is what made the develop red un-gateable.
+//
+// THAT IS NO LONGER THE CURRENT STATE, and the past tense above is deliberate
+// rather than stylistic. The submodule was tagged on 2026-09-27, so `@latest`
+// is now a release rather than a moving head. Measured 2026-10-04:
+//
+//	go list -m -versions github.com/cleat-team/cleat/cleat  ->  v0.3.1 v0.3.2
+//	`cleat init` writes  require github.com/cleat-team/cleat/cleat v0.3.2
+//
+// This paragraph said "has never been tagged", present tense, until cleat#3078.
 //
 // So the tests below build from this checkout instead. THAT IS A REDUCTION IN
 // COVERAGE AND IT IS RECORDED AS ONE: they no longer prove a user's scaffold
@@ -142,10 +154,15 @@ func runCleatIn(t *testing.T, dir string, args ...string) (string, error) {
 // checkout's own cleat/go.mod rather than the pushed head, and so fails on the
 // branch that introduces the bad version rather than the one after it.
 //
-// The durable fix is to tag the SDK submodule (Go needs `cleat/vX.Y.Z` for a
-// module in a subdirectory, and this repo has only ever cut root tags). Once
-// it is tagged, `@latest` is a release rather than a moving head and the
-// network path becomes testable again; this helper can then go.
+// THE PRESCRIPTION THIS COMMENT USED TO CARRY -- "once it is tagged ... the
+// network path becomes testable again; this helper can then go" -- IS NOW LIVE,
+// and is filed as cleat#3083 rather than executed here. Not because it is
+// unwelcome but because it is not this change: the helper has SEVEN call sites
+// across FIVE test files, and removing it swaps what is under test from THIS
+// checkout's SDK to the published release the proxy serves. That is a coverage
+// decision in both directions, so it gets a change that argues for it, and the
+// stale sentence gets this one. Deciding it here would be fixing the sweep
+// where I happened to be looking -- which is what cleat#3066 did.
 func resolveScaffoldAgainstThisCheckout(t *testing.T, proj string) {
 	t.Helper()
 	root := repoRoot(t)

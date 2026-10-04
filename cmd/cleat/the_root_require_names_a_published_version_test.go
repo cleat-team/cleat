@@ -21,11 +21,16 @@ import (
 //
 // IT READS THIS CHECKOUT'S FILE, NOT THE DEFAULT BRANCH'S, and that is what
 // makes it able to stop the change that breaks the rule. The template tests
-// resolve the SDK through the module proxy, whose @latest for an UNTAGGED
-// module is a pseudo-version of the DEFAULT BRANCH -- so a bad require fails
-// there on the commit AFTER the one that introduced it, and the introducing PR
-// stays green. cleat#2452 is the worked example: green itself, red for the two
-// commits following it, and not gatable by the PR that caused it.
+// used to resolve the SDK through the module proxy, whose @latest for an
+// untagged module is a pseudo-version of the DEFAULT BRANCH -- so a bad require
+// failed there on the commit AFTER the one that introduced it, and the
+// introducing PR stayed green. cleat#2452 is the worked example: green itself,
+// red for the two commits following it, and not gatable by the PR that caused
+// it. (The past tense is deliberate: the paragraph below says those tests now
+// build against this checkout, so a present-tense "resolve through the proxy"
+// here contradicted it. The submodule carrying cleat/v0.3.1 and cleat/v0.3.2
+// since 2026-09-27 removes the pseudo-version for this module, which is a
+// second reason. cleat#3078.)
 //
 // IT ALSO CARRIES WHAT THIS CHANGE GAVE UP. The template tests above now build
 // against this checkout rather than the proxy, because a pull request cannot
