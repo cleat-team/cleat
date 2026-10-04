@@ -573,6 +573,21 @@ def self_test():
     # the only shape where a last-SUM read would return the harness's figure
     # instead of the app total. Falsified by switching the parser to the last
     # SUM: this case then reports DBOS as 165, not 274.
+    #
+    # THE DERIVATION ITSELF NEEDS THE ASSERTION BELOW, and this case is the
+    # only one that does. SELF_TEST_SCRIPT_OUT_TRAILING_SUM is built by
+    # .replace() on the faithful fixture, and this case asserts a PASS -- so an
+    # edit to those harness rows makes the derivation a NO-OP, leaves the
+    # variant identical to the faithful one, and the case then passes on a
+    # fixture with no trailing SUM at all: a control that silently stopped
+    # controlling, which is the same shape as the defect it exists to catch.
+    # Every other derived fixture in this self-test asserts a MISMATCH, so a
+    # no-op makes those fail loudly and they need no such guard. cleat-review's
+    # note on PR #3040.
+    if SELF_TEST_SCRIPT_OUT_TRAILING_SUM == SELF_TEST_SCRIPT_OUT_MATCHED:
+        failures.append("  the trailing-SUM fixture is identical to the faithful one -- the "
+                        "derivation no-opped, so the case below is testing nothing")
+
     problems, status = check_pair("order-lifecycle", SELF_TEST_README_MATCHED,
                                     lambda pair: (0, SELF_TEST_SCRIPT_OUT_TRAILING_SUM, ""))
     if problems or status != "ok":
