@@ -98,6 +98,19 @@ type tutorialFragment struct {
 type tutorialDoc struct {
 	path      string
 	fragments []tutorialFragment
+	// perBlock compiles each fenced block as its OWN file instead of joining
+	// them into one. A tutorial is one program whose blocks are parts of it; a
+	// how-to page is a collection of independent illustrations, so joining them
+	// cannot compile -- measured on cleat#3097, 48 of the 50 blocks under
+	// docs/how-to/ carry no package clause, and common-patterns.md has two blocks
+	// that both open `func CreateOrder(...)`.
+	//
+	// Every block then needs a fragment or its own package clause, because a bare
+	// fragment has nothing to compile as a file. That is enforced rather than
+	// skipped -- see snippetFiles. And the fragments carry package clauses and
+	// IMPORT SETS, not shared preludes: each block is its own file, so an import
+	// a block does not use fails it ("imported and not used").
+	perBlock bool
 	// knownBroken replaces one block so the guard can be shown to FAIL. A guard
 	// that only ever passes is indistinguishable from a guard that stopped
 	// checking, which is the same defect this whole file is about.
@@ -119,6 +132,20 @@ type tutorialDoc struct {
 // (neither exists), and another taking two values from three string arguments.
 // Repairing that was a change to what a tutorial TEACHES; the exclusion naming
 // it was deleted with the repair, which is the expiry excludedDocs asserts.
+//
+// cleat#3097 WIDENED IT TO THE HOW-TO PAGES, in the mode they need. docs/how-to/
+// is a different SHAPE from a tutorial -- measured: 48 of its 50 Go blocks carry
+// no package clause, and common-patterns.md has two blocks that both open
+// `func CreateOrder(...)` -- so those pages are compiled one file per block
+// (perBlock) rather than joined, each block carrying its own package clause and
+// import set.
+//
+// TWO PAGES ARE COVERED HERE, use-plugins.md and use-secrets.md (9 blocks).
+// common-patterns.md (24 blocks) and test-workflows.md (17) are NOT: their
+// blocks reference page-local types (PipelineInput, ChildInput) and the reader's
+// own functions (ApprovalWorkflow, MyWorkflow), so covering them is a stub table
+// of its own and is filed as a follow-up that names this change as its
+// dependency. The LINK half below still covers docs/tutorials/ only.
 var tutorialDocs = []tutorialDoc{
 	{
 		path: "docs/tutorials/quick-start.md",
@@ -174,6 +201,80 @@ var tutorialDocs = []tutorialDoc{
 			{
 				marker: "switch res.Name",
 				header: "func _multiSignalFragment(h cleat.HostCalls) {",
+				footer: "}",
+			},
+		},
+	},
+	{
+		// cleat#3097. A how-to page is a different SHAPE from a tutorial: each
+		// block is an independent illustration rather than a part of one program,
+		// so it is compiled one file per block (perBlock).
+		path:     "docs/how-to/use-plugins.md",
+		perBlock: true,
+		// Each fragment is that block's package clause AND IMPORT SET. They are per
+		// block rather than a shared prelude because a block is its own file, so an
+		// import it does not use fails it -- and these blocks use different ones.
+		fragments: []tutorialFragment{
+			{
+				marker: "func SummarizeOrder(",
+				header: "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)",
+			},
+			{
+				marker: "func NotifyOnSlack(",
+				header: "package main\n\nimport (\n\t\"strings\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)",
+			},
+			{
+				// A bare statement pair: it needs the function around it as well as
+				// the package, and a use for the two values the prose never reads.
+				marker: "policy := cleat.RetryPolicy{",
+				header: "package main\n\nimport (\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)\n\nfunc _retryFragment(h cleat.HostCalls, requestJSON string) error {",
+				footer: "_, _ = resp, err\n\treturn nil\n}",
+			},
+			{
+				marker: "func GenerateResponse(",
+				header: "package main\n\nimport (\n\t\"encoding/json\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)",
+			},
+			{
+				marker: "func SendAlert(",
+				header: "package main\n\nimport (\n\t\"encoding/json\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)",
+			},
+			{
+				marker: "func EscalateToOnCall(",
+				header: "package main\n\nimport (\n\t\"encoding/json\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)",
+			},
+			{
+				marker: "func AwaitWebhookEvent(",
+				header: "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)",
+			},
+		},
+		// THE MODE'S OWN KNOWN-POSITIVE. A per-block walk that had stopped yielding
+		// snippets would report every block clean, so one block is replaced with
+		// text that MUST fail, and for the recorded reason. The replacement uses
+		// both of its fragment's imports, so the only error it can produce is the
+		// one this guard exists to catch.
+		knownBroken: &tutorialFragment{marker: "func SummarizeOrder("},
+		brokenText: "func SummarizeOrder(h cleat.HostCalls, input string) error {\n" +
+			"\tunusedLocal := 1\n" +
+			"\t_ = json.RawMessage{}\n" +
+			"\t_ = fmt.Sprint(\"\")\n" +
+			"\treturn nil\n}\n",
+		brokenWant: "declared and not used: unusedLocal",
+	},
+	{
+		path:     "docs/how-to/use-secrets.md",
+		perBlock: true,
+		fragments: []tutorialFragment{
+			{
+				// Both blocks are a bare `h.DurableCall(...)` whose results the prose
+				// never reads, so each needs a package, the SDK import and a function
+				// to stand in.
+				marker: "h.DurableCall(\"llm\", \"chat\"",
+				header: "package main\n\nimport \"github.com/cleat-team/cleat/cleat\"\n\nfunc _secretFragment(h cleat.HostCalls) {",
+				footer: "}",
+			},
+			{
+				marker: "h.DurableCall(\"http\", \"fetch\"",
+				header: "package main\n\nimport \"github.com/cleat-team/cleat/cleat\"\n\nfunc _secretFragment(h cleat.HostCalls) {",
 				footer: "}",
 			},
 		},
@@ -236,20 +337,91 @@ func assemble(t *testing.T, doc tutorialDoc, markdown, override string) string {
 		if override != "" && doc.knownBroken != nil && strings.Contains(b, doc.knownBroken.marker) {
 			text = override
 		}
-		var frag *tutorialFragment
-		for i := range doc.fragments {
-			if strings.Contains(text, doc.fragments[i].marker) {
-				frag = &doc.fragments[i]
-				break
-			}
+		if frag := matchingFragment(doc, text); frag != nil {
+			text = frag.header + "\n" + text + frag.footer
 		}
-		if frag == nil {
-			parts = append(parts, text)
-			continue
-		}
-		parts = append(parts, frag.header+"\n"+text+frag.footer)
+		parts = append(parts, text)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// matchingFragment returns the fragment whose marker the text contains, or nil.
+// A marker matched by two blocks wraps both, which is why the tables below pick
+// markers that occur in exactly one.
+func matchingFragment(doc tutorialDoc, text string) *tutorialFragment {
+	for i := range doc.fragments {
+		if strings.Contains(text, doc.fragments[i].marker) {
+			return &doc.fragments[i]
+		}
+	}
+	return nil
+}
+
+var packageClauseRe = regexp.MustCompile(`(?m)^package `)
+
+// snippetFiles returns the files to compile for one document, with `override`
+// substituted for the block its marker identifies when `override` is non-empty.
+func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []string {
+	t.Helper()
+	if !doc.perBlock {
+		return []string{assemble(t, doc, markdown, override)}
+	}
+	blocks := goBlocks(t, markdown)
+	// EVERY FRAGMENT MUST MATCH EXACTLY ONE BLOCK, asserted here rather than left to
+	// the tables' habit of picking markers that occur once. A marker matching two
+	// blocks wraps both in the same scaffolding, which refuses a CORRECT document:
+	// the block's own text is still compiled verbatim, so a collision is a false RED
+	// rather than a false green -- cleat-review built one to check the direction and
+	// found no hole -- but it costs a debugging session on a page that was fine. A
+	// marker matching none is wrong the same way. Worth a loop rather than a comment
+	// because cleat#3112 is about to grow this table fivefold.
+	// The known-positive's marker is checked too, not only the fragments': the
+	// substitution it drives is what the negative control rests on, and a marker
+	// there that matched no block is exactly the "unexercised control reads as a
+	// clean run" failure.
+	markers := make([]string, 0, len(doc.fragments)+1)
+	for _, f := range doc.fragments {
+		markers = append(markers, f.marker)
+	}
+	if doc.knownBroken != nil {
+		markers = append(markers, doc.knownBroken.marker)
+	}
+	for _, marker := range markers {
+		n := 0
+		for _, b := range blocks {
+			if strings.Contains(b, marker) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("%s: the marker %q matches %d block(s), want exactly one. A marker matching "+
+				"two wraps both blocks in the same scaffolding and refuses a correct document; "+
+				"one matching none leaves a block with no package clause.",
+				doc.path, marker, n)
+		}
+	}
+	var out []string
+	for i, b := range blocks {
+		text := b
+		if override != "" && doc.knownBroken != nil && strings.Contains(b, doc.knownBroken.marker) {
+			text = override
+		}
+		switch frag := matchingFragment(doc, text); {
+		case frag != nil:
+			out = append(out, frag.header+"\n"+text+frag.footer)
+		case packageClauseRe.MatchString(text):
+			out = append(out, text) // a complete example: nothing to add
+		default:
+			t.Fatalf("%s block %d has neither a package clause nor a fragment stub, so it "+
+				"could never compile -- add a tutorialFragment for it rather than letting the "+
+				"walk skip it.\nblock:\n%s", doc.path, i, text)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s declares perBlock and yielded no snippet at all -- the extractor or the "+
+			"document has drifted, so this guard would pass over nothing", doc.path)
+	}
+	return out
 }
 
 // vetSnippet writes an assembled file into a scratch module that resolves the
@@ -302,8 +474,10 @@ func TestTutorialGoSnippetsCompile(t *testing.T) {
 			}
 			markdown := string(raw)
 
-			if out := vetSnippet(t, assemble(t, doc, markdown, "")); out != "" {
-				t.Errorf("a Go snippet in %s does not type-check, so a reader copying it gets a build failure:\n%s", doc.path, out)
+			for _, src := range snippetFiles(t, doc, markdown, "") {
+				if out := vetSnippet(t, src); out != "" {
+					t.Errorf("a Go snippet in %s does not type-check, so a reader copying it gets a build failure:\n%s", doc.path, out)
+				}
 			}
 
 			// The known-positive. Without it, a guard that had stopped
@@ -311,7 +485,22 @@ func TestTutorialGoSnippetsCompile(t *testing.T) {
 			if doc.knownBroken == nil {
 				return
 			}
-			out := vetSnippet(t, assemble(t, doc, markdown, doc.brokenText))
+			// Find the snippet the replacement actually landed in. Its ABSENCE is
+			// its own failure: a marker that matched no block means the negative
+			// control was never exercised, and an unexercised control reads
+			// exactly like a clean run.
+			var broken string
+			for _, src := range snippetFiles(t, doc, markdown, doc.brokenText) {
+				if strings.Contains(src, doc.brokenText) {
+					broken = src
+				}
+			}
+			if broken == "" {
+				t.Fatalf("the known-positive for %s did not land in any snippet: its marker %q "+
+					"matched no block, so this guard's negative control measured nothing.",
+					doc.path, doc.knownBroken.marker)
+			}
+			out := vetSnippet(t, broken)
 			if out == "" {
 				t.Errorf("the known-positive in %s compiled. This guard cannot report a failure at all, "+
 					"so its pass above is not evidence.", doc.path)
