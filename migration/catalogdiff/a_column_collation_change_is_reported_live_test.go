@@ -19,19 +19,87 @@ package catalogdiff
 // difference from the catalogue independently of the snapshot, and require Diff
 // to report it -- so the snapshots are not both the evidence and the subject.
 //
-// PostgreSQL has no case here, and that is a stated gap rather than an implied
-// one: this package builds its Postgres scratch databases through the migration
-// chain (catalogdiff_test.go) rather than through a DDL helper of the shape the
-// other two use. The Postgres collation read is exercised by the existing
-// snapshot tests running the modified query, and their columns do carry a
-// collation (`C` on this chain). A Postgres case of this shape would need the
-// chain builder, which is a larger change than this one.
+// ALL THREE DIALECTS HAVE A CASE, and the first version of this file said
+// PostgreSQL could not have one. That was wrong twice over, and both halves are
+// worth keeping because the second is the interesting one:
+//
+//   - The obstacle was not real. scratchPostgresDB (catalogdiff_test.go:75)
+//     exists and is already used to build a PAIR -- two calls, in
+//     TestSnapshotIsIdenticalForTwoBuildsOfTheSameChain. Only a DDL-pair helper
+//     was absent, which is ~30 lines, not a larger change than this one.
+//   - The justification was false. This header claimed the existing Postgres
+//     tests cover the read because "their columns do carry a collation (C on
+//     this chain)". They do not: `grep -ri collate migrations/postgres/`
+//     returns NOTHING, and Postgres reports collation_name as EMPTY for a
+//     column with no explicit COLLATE (measured: `s text COLLATE "C"` -> `C`,
+//     `s text` -> `''`). So the chain's columns report the empty string, and
+//     the pre-existing tests exercise the EMPTY PATH ONLY -- on PostgreSQL, a
+//     snapshot that read the wrong collation *consistently* would have passed
+//     every test in this package. The case below is what pins the non-empty
+//     path.
+//
+// Both were found by cleat-review on PR #3121, which also wrote the case.
 
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
+
+	"github.com/cleat-team/cleat/migration"
 )
+
+// PostgreSQL, and this is the case that matters most of the three: the chain
+// sets no collation at all, so without it the non-empty path has no control on
+// this dialect and a consistently-wrong read would be invisible.
+func TestAColumnCollationChangeIsReportedLivePostgres(t *testing.T) {
+	a := scratchPostgresDB(t)
+	b := scratchPostgresDB(t)
+	ctx := context.Background()
+
+	if _, err := a.ExecContext(ctx, `CREATE TABLE t (s text COLLATE "C" NOT NULL)`); err != nil {
+		t.Fatalf("build A: %v", err)
+	}
+	if _, err := b.ExecContext(ctx, `CREATE TABLE t (s text NOT NULL)`); err != nil {
+		t.Fatalf("build B: %v", err)
+	}
+
+	// The difference is established from the catalogue directly, so the
+	// snapshots below are not both the evidence and the subject.
+	const q = `SELECT COALESCE(collation_name, '') FROM information_schema.columns
+	           WHERE table_name = 't' AND column_name = 's'`
+	var ca, cb string
+	if err := a.QueryRowContext(ctx, q).Scan(&ca); err != nil {
+		t.Fatalf("read A's collation: %v", err)
+	}
+	if err := b.QueryRowContext(ctx, q).Scan(&cb); err != nil {
+		t.Fatalf("read B's collation: %v", err)
+	}
+	if ca == cb {
+		t.Fatalf("both databases report %q, so a zero diff would prove nothing", ca)
+	}
+	t.Logf("established independently: A=%q B=%q", ca, cb)
+
+	catA, err := Snapshot(ctx, a, migration.DialectPostgres)
+	if err != nil {
+		t.Fatalf("snapshot A: %v", err)
+	}
+	catB, err := Snapshot(ctx, b, migration.DialectPostgres)
+	if err != nil {
+		t.Fatalf("snapshot B: %v", err)
+	}
+	d := Diff(catA, catB)
+	if len(d) == 0 {
+		t.Fatalf("Diff reported ZERO differences over a pair that demonstrably differs in " +
+			"column collation.\n\nThe column is selected but does not reach the rendered " +
+			"line, so the comparator is still blind on this dialect.")
+	}
+	joined := strings.Join(d, "\n")
+	if !strings.Contains(joined, "collation=C") {
+		t.Fatalf("Diff reported differences but none names the collation:\n%s", joined)
+	}
+	t.Logf("Diff reported %d line(s), including %q", len(d), "collation=C")
+}
 
 func TestAColumnCollationChangeIsReportedLiveMySQL(t *testing.T) {
 	mysqlDiffCase(t, "column-collation",
