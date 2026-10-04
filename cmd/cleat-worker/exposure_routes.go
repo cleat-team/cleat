@@ -280,6 +280,14 @@ func (s *apiServer) internalDefinitionNames(ctx context.Context, st engine.Workf
 // operational object its owner must still see, so the disclosure is the NAME,
 // not the schedule's existence.
 //
+// Hiding the NAME still discloses the CLASS, and that is deliberate rather than
+// an oversight: handleCreateSchedule rejects an empty def_name, so a `""` here
+// can only mean "hidden" -- a reader can tell a schedule targets an internal
+// definition, just not which. That matches the sibling surfaces, which also say
+// something internal exists without naming it (the run list omits the row;
+// /metrics drops the series). Do not "fix" it by trying to make the two cases
+// indistinguishable; there is nothing to distinguish them with.
+//
 // The caller resolves the names with internalDefinitionNames, so this surface
 // and the run list cannot disagree about which names are internal.
 func hideInternalScheduleTargets(internal []string, schedules []engine.Schedule) {
