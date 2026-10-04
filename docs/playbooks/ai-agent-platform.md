@@ -347,12 +347,13 @@ tells you what happened; it does not tell you whether it was any good.
 2. **Nothing — but configure it.** Fleet-wide rate limiting already exists as `ratelimiter` in
    `db` mode, and the default is `memory`. Listed here because an unconfigured default looks
    identical to a missing feature. **You no longer have to verify it took by reading a log line**:
-   since cleat#1581 a `mode: "db"` that cannot be honoured refuses to start, so a silent downgrade is
-   no longer possible — see the note in *Per-tenant budgets*, which this list used to contradict.
-3. **Nothing, for token streaming — it shipped.** `GET /api/workflows/{id}/stream`, cleat#1572,
+   since cleat#1581 (**shipped**) a `mode: "db"` that cannot be honoured refuses to start, so a
+   silent downgrade is no longer possible — see the note in *Per-tenant budgets*, which this list
+   used to contradict.
+3. **Nothing, for token streaming.** It **shipped**: `GET /api/workflows/{id}/stream`, cleat#1572,
    and it works on every worker as of cleat#1639, so no load-balancer stickiness is yours to
-   arrange. What is still yours is a sizing decision: `--stream-poll-interval` is latency your
-   users see and `--max-stream-poll-readers` is load your database takes.
+   arrange. What is still yours is a sizing decision: `--stream-poll-interval` is latency your users
+   see and `--max-stream-poll-readers` is load your database takes.
 4. **An eval and prompt-regression harness.** Entirely absent, and entirely your problem.
 5. **The front-end.** As designed.
 

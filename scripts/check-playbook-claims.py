@@ -32,9 +32,22 @@ positive check-readiness-doc.py's self-test caught on its first run (an
 incidental word read as a status). The two tables above are what a mechanical
 check can do safely; the prose is not filed here as done, it is left to a
 future issue rather than to this one closing.
+
+UPDATE (cleat#2603, that future issue): the prose is now checked, but NOT by
+loosening the pattern above -- which that note was right to refuse. The four
+bodies' `## What you still have to build or buy` sections are a STRUCTURAL
+surface (every playbook has one, and it is a list of live claims), so the check
+is scoped to those sections and requires each `cleat#N` citation in them to
+carry an explicit `**shipped**` / `**unbuilt**` / `**declined**` mark, verified
+against the tracker. Everything the paragraph above worried about -- "was shipped
+and unmentioned when this table was written", "**nothing shipped**", an order
+"shipped and uncharged" -- lives OUTSIDE those sections and stays unguarded on
+purpose. See check_body_claims().
 """
 
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -242,6 +255,178 @@ def real_path_exists(repo_root, href):
     return (repo_root / "docs" / "playbooks" / href).resolve().exists()
 
 
+# ---------------------------------------------------------------------------
+# cleat#2603: the four bodies' OWN "shipped"/"unbuilt" prose.
+#
+# Everything above reads docs/playbooks/README.md. This reads the four bodies,
+# and it is bounded deliberately -- this file's header already deferred it, in
+# those words, to "a future issue rather than to this one closing". That issue
+# is #2603.
+#
+# WHY A SECTION AND A MARKER, NOT THE WORD. "shipped" appears in these bodies as
+# history ("was shipped and unmentioned when this table was written"), as
+# load-bearing NEGATION ("**nothing shipped**"), and in an unrelated sense
+# entirely (an order "shipped and uncharged"). A pattern keyed on the word flags
+# all three, which is the false positive check-readiness-doc.py's own self-test
+# caught on its first run with an incidental "Long done". So the surface is the
+# one section that is STRUCTURAL -- every playbook has it and it is a list of
+# live claims -- and within it a citation must carry the same `**shipped**` mark
+# docs/full-stack-readiness.md uses.
+BODY_SECTION = "## What you still have to build or buy"
+BODIES = [
+    "docs/playbooks/ai-agent-platform.md",
+    "docs/playbooks/b2b-saas-control-plane.md",
+    "docs/playbooks/integration-hub.md",
+    "docs/playbooks/order-lifecycle.md",
+]
+CLEAT_ISSUE = re.compile(r"cleat#(\d+)")
+BODY_SHIPPED = re.compile(r"\*\*\s*shipped\s*\*\*", re.IGNORECASE)
+BODY_UNBUILT = re.compile(r"\*\*\s*(unbuilt|not shipped|still to build)\s*\*\*", re.IGNORECASE)
+BODY_DECLINED = re.compile(r"\*\*\s*(declined|not planned|out of scope)\s*\*\*", re.IGNORECASE)
+
+# What each mark ASSERTS, so the comparison is one line rather than a branch per
+# pair of (mark, state). check-readiness-doc.py spells its three branches out
+# because a row's absence of a mark is itself meaningful there; here the issue
+# asks every citation to carry one, so the mark is always present and the
+# question is only whether it is TRUE.
+MARK_ASSERTS = {"shipped": "shipped", "unbuilt": "unbuilt", "declined": "declined"}
+
+
+def section_text(text, heading):
+    """(body, first_line) for the section at `heading`, up to the next `## `.
+
+    `first_line` is the 1-based FILE line number of the body's first line. The
+    caller needs it because `claim_blocks` counts from the section's own start: a
+    bare offset reported as `path:N` looks perfectly specific and points a reader
+    at the wrong line, which is worse than saying nothing.
+    """
+    lines = text.split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            start = i + 1
+            break
+    if start is None:
+        return None, None
+    out = []
+    for line in lines[start:]:
+        if line.startswith("## "):
+            break
+        out.append(line)
+    return "\n".join(out), start + 1
+
+
+def claim_blocks(section):
+    """Yield (line_number, block_text) for each list item or paragraph.
+
+    A claim is an ITEM or a PARAGRAPH, not a line. The sentences wrap, and one
+    item routinely cites two issues -- ai-agent-platform's token-streaming entry
+    names cleat#1572 and cleat#1639 on two different lines of the same item -- so
+    a per-line rule would demand a marker on each line of one claim.
+    """
+    blocks, cur, cur_start = [], [], None
+    for i, line in enumerate(section.split("\n"), start=1):
+        if not line.strip():
+            if cur:
+                blocks.append((cur_start, "\n".join(cur)))
+                cur, cur_start = [], None
+            continue
+        if re.match(r"^\s*(\d+\.|[-*])\s", line):
+            if cur:
+                blocks.append((cur_start, "\n".join(cur)))
+            cur, cur_start = [line], i
+        else:
+            if cur_start is None:
+                cur_start = i
+            cur.append(line)
+    if cur:
+        blocks.append((cur_start, "\n".join(cur)))
+    return blocks
+
+
+def check_body_claims(path, text, state_of):
+    """(complaints, citations_seen) for one playbook's live claims."""
+    problems = []
+    section, base = section_text(text, BODY_SECTION)
+    if section is None:
+        problems.append(
+            f"{path}: no '{BODY_SECTION}' section. Either the playbook was restructured "
+            f"or BODY_SECTION no longer names it."
+        )
+        return problems, 0
+
+    seen = 0
+    for block_line, block in claim_blocks(section):
+        lineno = base + block_line - 1  # report the FILE line, not a section offset
+        issues = CLEAT_ISSUE.findall(block)
+        if not issues:
+            continue
+        seen += len(issues)
+        cited = ", ".join("cleat#" + i for i in issues)
+        marks = [
+            m for m, pat in (("shipped", BODY_SHIPPED), ("unbuilt", BODY_UNBUILT),
+                             ("declined", BODY_DECLINED))
+            if pat.search(block)
+        ]
+        if not marks:
+            problems.append(
+                f"{path}:{lineno}: cites {cited} but carries no explicit marker.\n"
+                f"    This section lists live claims, so a citation here asserts a state. "
+                f"Mark it **shipped**, **unbuilt** or **declined** so the assertion is "
+                f"checkable rather than inferred from the sentence around it.\n"
+                f"    {block.splitlines()[0].strip()}"
+            )
+            continue
+        if len(marks) > 1:
+            problems.append(
+                f"{path}:{lineno}: cites {cited} and marks it {' and '.join(marks)} -- two "
+                f"claims about one state."
+            )
+            continue
+        mark = marks[0]
+        for issue in issues:
+            state, reason = state_of(issue)
+            if state != "CLOSED":
+                actual = "unbuilt"
+            elif reason == "NOT_PLANNED":
+                actual = "declined"
+            else:
+                actual = "shipped"
+            if MARK_ASSERTS[mark] != actual:
+                problems.append(
+                    f"{path}:{lineno}: cleat#{issue} is {state}"
+                    f"{'/' + reason if reason else ''} -- {actual} -- but this claim marks "
+                    f"it **{mark}**.\n"
+                    f"    A reader deciding what to build is being told the opposite of what "
+                    f"the tracker says.\n"
+                    f"    {block.splitlines()[0].strip()}"
+                )
+    return problems, seen
+
+
+def check_all_bodies(paths_texts, state_of):
+    """Complaints across every playbook body.
+
+    The "matched nothing" guard is CROSS-FILE on purpose: two of the four
+    sections carry no cleat# citations at all, so a per-file emptiness check
+    would fire on correct files -- see check-readiness-doc.py's own note that a
+    scan which measures nothing reads identically to success, applied one level
+    up rather than one level down.
+    """
+    problems, total = [], 0
+    for path, text in paths_texts:
+        found, seen = check_body_claims(path, text, state_of)
+        problems += found
+        total += seen
+    if total == 0:
+        problems.append(
+            f"no cleat#N citations were found in any playbook's '{BODY_SECTION}'. "
+            f"That section is a list of live claims; matching none of them means this "
+            f"check measured nothing, not that the playbooks are clean."
+        )
+    return problems
+
+
 # --------------------------------------------------------------------------
 
 
@@ -390,11 +575,73 @@ def self_test():
     if any("B2B" in p for p in problems):
         failures.append("  FALSE POSITIVE: a 'no' row was checked as though it claimed a directory/job")
 
+    # cleat#2603: the four bodies' own live claims. state_of is INJECTED, so the
+    # self-test needs no network -- the same shape check-readiness-doc.py uses,
+    # and the reason its own self-test can assert on text and status together.
+    def fake_state(issue):
+        return {
+            "900": ("CLOSED", "COMPLETED"),
+            "901": ("OPEN", ""),
+            "902": ("CLOSED", "NOT_PLANNED"),
+        }.get(issue, ("OPEN", ""))
+
+    matched_bodies = [("docs/playbooks/x.md", f"""
+{BODY_SECTION}
+
+1. **Streaming -- it shipped.** cleat#900, **shipped**.
+2. **An eval harness.** cleat#901, **unbuilt**.
+3. **SCIM.** cleat#902, **declined**.
+""")]
+    problems = check_all_bodies(matched_bodies, fake_state)
+    if problems:
+        failures.append(f"  FALSE POSITIVE on matched body claims: {problems}")
+
+    # Known positive, and it is the drift cleat#2603 names: a claim that was true
+    # when written and was never revisited after the issue shipped.
+    drifted = [("docs/playbooks/x.md", f"{BODY_SECTION}\n\n1. **Streaming.** cleat#900, **unbuilt**.\n")]
+    problems = check_all_bodies(drifted, fake_state)
+    if not problems or "cleat#900" not in problems[0]:
+        failures.append(f"  MISSED the shipped/unbuilt drift: {problems}")
+
+    # The word is not the mark. "shipped" in prose earns nothing; the marker does.
+    unmarked = [("docs/playbooks/x.md", f"{BODY_SECTION}\n\n1. **Streaming.** cleat#900 shipped.\n")]
+    problems = check_all_bodies(unmarked, fake_state)
+    if not problems or "no explicit marker" not in problems[0]:
+        failures.append(f"  MISSED the unmarked citation: {problems}")
+
+    # A marker asserting the opposite of the tracker, in the other direction.
+    overclaimed = [("docs/playbooks/x.md", f"{BODY_SECTION}\n\n1. **SCIM.** cleat#902, **shipped**.\n")]
+    problems = check_all_bodies(overclaimed, fake_state)
+    if not problems or "cleat#902" not in problems[0]:
+        failures.append(f"  MISSED a declined issue marked shipped: {problems}")
+
+    # The cross-file emptiness guard: two of the four real sections cite nothing,
+    # so this is deliberately NOT a per-file check.
+    nothing = [("docs/playbooks/x.md", f"{BODY_SECTION}\n\n1. Nothing cited here.\n")]
+    problems = check_all_bodies(nothing, fake_state)
+    if not any("measured nothing" in p for p in problems):
+        failures.append(f"  MISSED the measured-nothing case: {problems}")
+
     if failures:
         print("self-test FAILED:\n" + "\n".join(failures), file=sys.stderr)
         return 1
     print("self-test passed")
     return 0
+
+
+def github_state(issue):
+    """(STATE, STATEREASON) for a cited issue, in the shape check_all_bodies wants.
+
+    The same call check-readiness-doc.py makes. Its CI step carries GH_TOKEN and
+    so must this one's now -- a `gh` that cannot reach the API raises, and the
+    caller below turns that into UNMEASURED rather than into a pass.
+    """
+    out = subprocess.run(
+        ["gh", "issue", "view", str(issue), "--json", "state,stateReason"],
+        capture_output=True, text=True, check=True,
+    )
+    d = json.loads(out.stdout)
+    return d["state"].upper(), (d.get("stateReason") or "").upper()
 
 
 def main():
@@ -427,18 +674,46 @@ def main():
         ci_workflow_text=ci_text,
     )
 
+    body_texts = []
+    for path in BODIES:
+        p = repo_root / path
+        if not p.exists():
+            print(f"UNMEASURED: {path} does not exist", file=sys.stderr)
+            return 2
+        body_texts.append((path, p.read_text(encoding="utf-8")))
+    try:
+        problems += check_all_bodies(body_texts, github_state)
+    except subprocess.CalledProcessError as exc:
+        # stderr carries the discriminator -- a transport failure and a citation to
+        # an issue that does not exist both exit 1, and CalledProcessError does not
+        # keep the message on its own.
+        detail = (exc.stderr or "").strip() or str(exc)
+        print(
+            f"UNMEASURED: `gh` could not be asked for an issue's state ({detail}), so the "
+            f"playbook bodies' claims were NOT checked. This is a failure of the check, "
+            f"not a finding about the documents.",
+            file=sys.stderr,
+        )
+        return 2
+
     if problems:
         print("\n".join(problems), file=sys.stderr)
         print(
             f"\n{README} is the entry point every playbook points back to. A stale "
             f"signature here is one a reader copies into code that will not compile "
             f"(cleat#2511); a stale Built? row is one a reader trusts as CI-verified "
-            f"when it is not.",
+            f"when it is not. A playbook body's own 'still to build' list is where a "
+            f"reader decides what work is left, so a citation there that disagrees with "
+            f"the tracker -- or that carries no checkable mark at all -- costs them work "
+            f"they did not have to do, or hides work they do (cleat#2603).",
             file=sys.stderr,
         )
         return 1
 
-    print(f"OK: {README} agrees with the interfaces and CI it cites")
+    print(
+        f"OK: {README} agrees with the interfaces and CI it cites, and the four playbook "
+        f"bodies' live 'still to build' claims agree with the tracker"
+    )
     return 0
 
 
