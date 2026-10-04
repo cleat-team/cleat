@@ -57,7 +57,6 @@ func TestEveryTemplateDocumentedCommandActuallyRuns(t *testing.T) {
 				t.Fatalf("cleat init --template %s: %v\n%s", template, err, out)
 			}
 			proj := filepath.Join(root, name)
-			resolveScaffoldAgainstThisCheckout(t, proj)
 
 			cmds := documentedCleatCommands(t, proj)
 			// A scaffold whose documentation contains no runnable command

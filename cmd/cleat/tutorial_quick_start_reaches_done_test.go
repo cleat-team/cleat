@@ -18,14 +18,15 @@
 // builds a fixture directory already in the repo (testdata/hello); this
 // tutorial's step 4 runs `cleat init <name>` to SCAFFOLD A FRESH PROJECT, the
 // same command cmd/cleat/a_scaffold_builds_test.go and
-// fullstack_template_run_starts_a_workflow_test.go already exercise for the
-// same reason resolveScaffoldAgainstThisCheckout exists: that helper writes
-// `replace` directives so the scaffold is built against THIS checkout's SDK
-// rather than the release the proxy serves -- reused here rather than
-// re-derived. (It used to say a scaffold "pins an unpublished pseudo-version of
-// the SDK, which only resolves against THIS checkout": the submodule has been
-// tagged since 2026-09-27, so a scaffold resolves a release from the proxy now,
-// and it is the helper that points it back at the tree. cleat#3078.)
+// fullstack_template_run_starts_a_workflow_test.go already exercise -- reused
+// here rather than re-derived. The scaffold resolves the SDK from the module
+// proxy, as a reader's would. This paragraph has needed two corrections in one
+// day and is worth keeping honest: it first said a scaffold "pins an
+// unpublished pseudo-version of the SDK, which only resolves against THIS
+// checkout" (the submodule has been tagged since 2026-09-27, so that stopped
+// being true -- cleat#3078), and then said a helper pointed the scaffold back
+// at the tree (that helper was removed once the tag made it unnecessary --
+// cleat#3083).
 //
 // EXTRACTED, NOT RETYPED (same discipline as #2798's own R2 fix, applied from
 // the start here rather than added after an initial hardcoded version).
@@ -102,7 +103,6 @@ func TestTutorialQuickStartReachesADoneWorkflow(t *testing.T) {
 		t.Fatalf("cleat init %s: %v\n%s", qs.scaffoldName, err, out)
 	}
 	proj := filepath.Join(scaffoldParent, qs.scaffoldName)
-	resolveScaffoldAgainstThisCheckout(t, proj)
 
 	// Step 5: compile the scaffolded project under its own documented output
 	// directory name, from inside the project (the tutorial's own step 4 "cd

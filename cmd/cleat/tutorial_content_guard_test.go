@@ -253,7 +253,8 @@ func assemble(t *testing.T, doc tutorialDoc, markdown, override string) string {
 }
 
 // vetSnippet writes an assembled file into a scratch module that resolves the
-// SDK from this checkout, and returns `go vet`'s combined output.
+// SDK from the PUBLISHED release -- what a reader following the tutorial gets --
+// and returns `go vet`'s combined output.
 func vetSnippet(t *testing.T, src string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -263,7 +264,24 @@ func vetSnippet(t *testing.T, src string) string {
 	if err := os.WriteFile(filepath.Join(dir, "snippet.go"), []byte(src), 0o644); err != nil {
 		t.Fatalf("write snippet.go: %v", err)
 	}
-	resolveScaffoldAgainstThisCheckout(t, dir)
+	// Resolve the SDK the way a reader following the tutorial does: the
+	// PUBLISHED release, from the module proxy -- not this checkout.
+	//
+	// `@latest` rather than a pinned version, so this tracks the release instead
+	// of rotting at the next tag. Before cleat#3083 this module had no
+	// dependency at all and relied on resolveScaffoldAgainstThisCheckout to
+	// supply one, so the guard was compiling snippets against the working tree
+	// rather than against what a reader resolves.
+	get := exec.Command("go", "get", "github.com/cleat-team/cleat/cleat@latest")
+	get.Dir = dir
+	if out, err := get.CombinedOutput(); err != nil {
+		t.Fatalf("go get the published SDK: %v\n%s", err, out)
+	}
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
 
 	cmd := exec.Command("go", "vet", "./...")
 	cmd.Dir = dir

@@ -26,18 +26,20 @@ import (
 // failed there on the commit AFTER the one that introduced it, and the
 // introducing PR stayed green. cleat#2452 is the worked example: green itself,
 // red for the two commits following it, and not gatable by the PR that caused
-// it. (The past tense is deliberate: the paragraph below says those tests now
-// build against this checkout, so a present-tense "resolve through the proxy"
-// here contradicted it. The submodule carrying cleat/v0.3.1 and cleat/v0.3.2
-// since 2026-09-27 removes the pseudo-version for this module, which is a
-// second reason. cleat#3078.)
+// it. (The past tense is deliberate, and it has been earned twice in one day:
+// the sentence used to be present tense while the paragraph below said those
+// same tests built against this checkout -- cleat#3078 -- and the helper that
+// made them do so was itself removed in cleat#3083, once the tag removed the
+// pseudo-version this file is about.)
 //
-// IT ALSO CARRIES WHAT THIS CHANGE GAVE UP. The template tests above now build
-// against this checkout rather than the proxy, because a pull request cannot
-// validate a property that depends on the default branch's content. Measured:
-// with that change they pass on a tree whose require is still v0.3.0. This is
-// what says so instead, and it fails on the branch that introduces a bad
-// version rather than the one after it.
+// IT ALSO CARRIED WHAT A CHANGE GAVE UP, AND THAT HAS SINCE BEEN GIVEN BACK.
+// For a while the template tests built against this checkout rather than the
+// proxy, because a pull request cannot validate a property that depends on the
+// default branch's content. They no longer do -- cleat#3083 removed that helper,
+// once the submodule was tagged and `@latest` stopped being a moving head -- so
+// a bad require fails in the template tests again. This test is kept because it
+// fails EARLIER and reads this checkout's own cleat/go.mod rather than a pushed
+// head, not because nothing else would catch the version any more.
 func TestTheRootRequireNamesAPublishedVersion(t *testing.T) {
 	mod := filepath.Join(repoRoot(t), "cleat", "go.mod")
 	data, err := os.ReadFile(mod)

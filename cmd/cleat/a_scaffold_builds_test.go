@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -86,7 +85,6 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 			}
 
 			proj := filepath.Join(root, name)
-			resolveScaffoldAgainstThisCheckout(t, proj)
 			out, err = runCleatIn(t, proj, "build", "-o", "./out", ".")
 			if err != nil {
 				t.Fatalf("a scaffolded %s project does not build.\n"+
@@ -117,78 +115,51 @@ func runCleatIn(t *testing.T, dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// resolveScaffoldAgainstThisCheckout rewrites a scaffolded project's go.mod so
-// the SDK resolves from this checkout rather than from the module proxy.
+// resolveScaffoldAgainstThisCheckout WAS HERE, and went in cleat#3083.
 //
-// WHY THIS EXISTS, AND WHY IT IS NOT A COSMETIC CHANGE TO THE TESTS.
+// It rewrote each scaffolded project's go.mod with `replace` directives so the
+// SDK resolved from this checkout rather than the proxy. That existed for one
+// reason, recorded in its own comment: the SDK submodule had never been tagged,
+// so a scaffold's `@latest` was a pseudo-version of the DEFAULT BRANCH -- which
+// made the version a scaffold resolved to whatever the pushed head said, so a
+// pull request could not validate that path at all (cleat#2452).
 //
-// A freshly scaffolded project's go.mod names no SDK at all -- `module X` and
-// `go 1.24`, nothing else -- so `go mod tidy` (tidyScaffold, init.go) resolves
-// `github.com/cleat-team/cleat/cleat` from the proxy.
+// The submodule was tagged on 2026-09-27 (cleat/v0.3.1, cleat/v0.3.2), and the
+// helper's own comment predicted what would follow: "once it is tagged ... the
+// network path becomes testable again; this helper can then go". Measured on
+// 2026-10-04 before removing it, with every call site disabled:
 //
-// WHEN THIS HELPER WAS WRITTEN, that module had never been tagged, so its
-// `@latest` was a PSEUDO-VERSION OF THE DEFAULT BRANCH:
+//	the eight scaffold/template/tutorial suites  ->  8 PASS, GO_TEST_RC=0
+//	the snippet guard, its scratch module given
+//	`go get ...@latest` instead of the helper    ->  passes, and its
+//	                                                  known-positive still
+//	                                                  fires for its recorded
+//	                                                  reason
 //
-//	proxy …/cleat/cleat/@latest -> v0.0.0-...-<develop head>
+// WHAT THIS COSTS, and it is MORE than "no longer caught here", which is what
+// this note said first and why it was corrected during review.
 //
-// which meant the version a scaffold resolved to was whatever `cleat/go.mod`
-// said AT THE CURRENT PUSHED HEAD -- not at the revision under test. A pull
-// request therefore could not validate anything on this path: set the require
-// to an unpublished version and the failure landed on the NEXT commit, while
-// the PR that made the change stayed green. That is exactly what cleat#2452
-// did, and it is what made the develop red un-gateable.
+// These tests now build against the PUBLISHED release rather than this
+// checkout's SDK. And because every source file under templates/ carries
+// `//go:build ignore` -- seven of them, nothing enables the tag, and `go list
+// ./cmd/cleat/templates/...` matches no packages -- THESE SUITES WERE THE ONLY
+// IN-REPO COMPILATION OF THE TEMPLATE SOURCE AGAINST THE TREE. After this there
+// is none, so an SDK change that breaks a template is green in its own PR and
+// lands at the next tag, on an unrelated commit. That is the cleat#2452 shape
+// ("the introducing PR stayed green") reproduced for a new property, and it is
+// a worse outcome than losing a check -- losing THIS check is what makes it
+// land far from its cause.
 //
-// THAT IS NO LONGER THE CURRENT STATE, and the past tense above is deliberate
-// rather than stylistic. The submodule was tagged on 2026-09-27, so `@latest`
-// is now a release rather than a moving head. Measured 2026-10-04:
+// IT MAY NOT NEED TO BE A TRADE. A check on the template SOURCE rather than on
+// a scaffolded project holds both: copy a template's .go file to a scratch
+// module, strip the `//go:build ignore` line, add `replace ... => <checkout>/cleat`,
+// and `go vet ./...` compiles it against the tree with no generated files and no
+// `cleat build`. Measured to return rc=0 with no output while genuinely naming
+// cleat.HostCalls. That is a separate change and is not made here; it is
+// recorded because this note would otherwise read as though the property were
+// gone, and it is available.
 //
-//	go list -m -versions github.com/cleat-team/cleat/cleat  ->  v0.3.1 v0.3.2
-//	`cleat init` writes  require github.com/cleat-team/cleat/cleat v0.3.2
-//
-// This paragraph said "has never been tagged", present tense, until cleat#3078.
-//
-// So the tests below build from this checkout instead. THAT IS A REDUCTION IN
-// COVERAGE AND IT IS RECORDED AS ONE: they no longer prove a user's scaffold
-// resolves over the network. The property is kept, in a form a pull request
-// CAN check, by TestTheRootRequireNamesAPublishedVersion -- which reads this
-// checkout's own cleat/go.mod rather than the pushed head, and so fails on the
-// branch that introduces the bad version rather than the one after it.
-//
-// THE PRESCRIPTION THIS COMMENT USED TO CARRY -- "once it is tagged ... the
-// network path becomes testable again; this helper can then go" -- IS NOW LIVE,
-// and is filed as cleat#3083 rather than executed here. Not because it is
-// unwelcome but because it is not this change: the helper has SEVEN call sites
-// across FIVE test files, and removing it swaps what is under test from THIS
-// checkout's SDK to the published release the proxy serves. That is a coverage
-// decision in both directions, so it gets a change that argues for it, and the
-// stale sentence gets this one. Deciding it here would be fixing the sweep
-// where I happened to be looking -- which is what cleat#3066 did.
-func resolveScaffoldAgainstThisCheckout(t *testing.T, proj string) {
-	t.Helper()
-	root := repoRoot(t)
-	sdkDir := filepath.Join(root, "cleat")
-
-	mod := filepath.Join(proj, "go.mod")
-	existing, err := os.ReadFile(mod)
-	if err != nil {
-		t.Fatalf("read the scaffolded go.mod: %v", err)
-	}
-	if strings.Contains(string(existing), "replace github.com/cleat-team/cleat ") {
-		return
-	}
-	added := string(existing)
-	if !strings.Contains(added, "require github.com/cleat-team/cleat ") {
-		added += "\nrequire github.com/cleat-team/cleat v0.0.0\n"
-	}
-	added += "\nreplace github.com/cleat-team/cleat => " + root + "\n" +
-		"replace github.com/cleat-team/cleat/cleat => " + sdkDir + "\n"
-	if err := os.WriteFile(mod, []byte(added), 0o644); err != nil {
-		t.Fatalf("write the scaffolded go.mod: %v", err)
-	}
-
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = proj
-	if out, err := tidy.CombinedOutput(); err != nil {
-		t.Fatalf("go mod tidy in the scaffolded project: %v\n%s", err, out)
-	}
-}
+// What is bought is the property the helper's own comment said was given up --
+// these tests prove a user's scaffold resolves over the network.
+// TestTheRootRequireNamesAPublishedVersion still guards the version the
+// template names, which is a different property.
