@@ -342,6 +342,17 @@ Installed plugins are recorded in the `plugin_defs` database table.
 > from that table: `engine.PluginLoader.LoadPlugin` has no caller outside tests,
 > and `cmd/cleat-worker` constructs no loader.
 >
+> You can check this without taking anyone's word for it -- `cleat plugin list`
+> says the same thing about its own output:
+>
+> ```
+> NOTE: STATUS above reflects plugin_defs only. No cleat-worker today loads an
+> installed WASM plugin (IMPROVEMENT-PLAN 3.315); none of the rows above run.
+> ```
+>
+> So the sentence this section used to end with contradicted the output of a
+> command the page had already taught.
+>
 > The sentence that used to close this section said installed plugins are
 > *"loaded by `cleat-worker` at startup"*. It was wrong twice over: it claimed a
 > capability that is not wired, and it contradicted this page's own Overview,
