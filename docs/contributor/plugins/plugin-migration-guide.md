@@ -268,9 +268,8 @@ ones. If a test fails, check:
 
 ### Step 1: Run the tenant roles migration
 
-Most of these tables and functions ship in `migrations/postgres/001_schema.sql`
-(the two exceptions are tracked separately, cleat#2932), not
-a dedicated migration -- the schema rebaseline before 0.3.0 folded what was
+These tables and functions all ship in `migrations/postgres/001_schema.sql`,
+not a dedicated migration -- the schema rebaseline before 0.3.0 folded what was
 once a separate numbered migration into the initial schema, and "migration
 009" is the wrong citation either way now: that number names
 `009_worker_address.sql` (cleat#2196), an unrelated migration. Applying the
@@ -290,12 +289,19 @@ This adds:
 
 - `admin.tenants` table (tenants with their UUIDs and metadata)
 - `admin.tenant_api_keys` table (API keys for each tenant)
-- `admin.tenant_plugins` table (which plugins each tenant has enabled)
-- `admin.plugin_tables` table (which tables each plugin manages)
+- `admin.plugin_tables` table (which tables each plugin manages -- the
+  registry `admin.grant_plugin_to_tenant` reads to decide what to grant)
 - `admin.tenant_roles` table (tracks which PostgreSQL role each tenant uses)
-- `create_tenant_role(uuid)` function (creates a login role + schema for a
-  tenant)
-- `drop_tenant_role(uuid)` function (drops the role and schema)
+- `admin.create_tenant_role(uuid, text)` function (creates a login role +
+  schema for a tenant)
+- `admin.drop_tenant(uuid, text)` function (deletes the tenant's rows and
+  drops its role and schema)
+
+There is no `admin.tenant_plugins` table and no `drop_tenant_role` function.
+Per-tenant plugin enablement is recorded as **privileges, not as a mapping
+table**: `admin.grant_plugin_to_tenant(plugin_name, tenant_id)` grants the
+tenant's role access to every table registered for that plugin in
+`admin.plugin_tables`, and `admin.revoke_plugin_from_tenant` takes it back.
 
 ### Step 2: Enable tenant roles (opt-in)
 
