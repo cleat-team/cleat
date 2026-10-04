@@ -250,20 +250,30 @@ and are recorded separately so neither is mistaken for the other.
 
 ## The pair whose headline this is not
 
-**1.67x is this measurement set's WORST case, and the better case is already
+**1.67x is this measurement set's WORST case, and the better cases are already
 built, already executed and already in CI.** That belongs here, where the
-number is read, and not only in the other pair's README.
+number is read, and not only in the other pairs' READMEs.
 
 On the **integration-hub** pair — the one that exercises the WASM sandbox, the
-differentiator #2597 names — **cleat's app code is SMALLER**: `app total` is
-cleat **130** against DBOS **200**
-(`examples/integration-hub-dbos-port/README.md:427`). cleat carries a one-off
-124-line platform cost for it and DBOS carries none, because DBOS has no
-primitive for tenant-supplied code at all. See that README's table for the
-per-row breakdown, and `scripts/dbos-pair-loc.sh integration-hub` to re-derive
-it.
+differentiator #2597 names — the two sides' application code is all but equal:
+`app total` is cleat **215** against DBOS **200**, a ratio of **1.075x**. The
+third pair (`b2b-saas-control-plane`) is 641 against 468, **1.37x**. cleat
+carries a one-off 124-line platform cost on the sandbox pair that DBOS carries
+nothing for, because DBOS has no primitive for tenant-supplied code at all. See
+that README's "Counting this pair, role-symmetric" table for the per-row
+breakdown, and `scripts/dbos-pair-loc.sh integration-hub` to re-derive it.
 
-**A measurement set whose headline is its worst case, while a better case is
+**An earlier version of this section claimed cleat's app code was SMALLER on
+that pair — 130 against 200 — and that number was an artefact, not a result.**
+It counted the same behaviour's test code on one side of the comparison only
+(cleat#2642): cleat's assertions live inside its e2e harness, a row the app
+total excludes, while DBOS's live in its test file, a row it sums. The pair now
+extracts each side's behaviour assertions into their own row and sums it on
+both sides, which moves cleat's total to **215** and removes the inversion. The
+correction makes this section's claim *weaker* than it was, which is the
+direction a correction should move it.
+
+**A measurement set whose headline is its worst case, while better cases are
 already built and CI-run, under-sells the demonstrated advantage** — the
 opposite of the failure cleat#2595/#2596 were filed for.
 

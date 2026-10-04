@@ -46,6 +46,19 @@ Modes:
       e.g. a composite-literal field assignment -- that go-struct-field's
       declaration-only pattern does not match.
 
+  sh-banner-block <file> <start-regex>
+      From the banner line matching start-regex (inclusive) up to the NEXT
+      banner or the "if (( failures > 0 ))" summary trailer, exclusive.
+      Refuses to run to EOF, which is how the harness's own machinery
+      would otherwise be counted as behaviour assertions (cleat#2642).
+
+  ts-func <file> <func-name>
+      From "(export )?(async )?function <func-name>(" (inclusive) through
+      the closing "}" at column 0 (inclusive). Not brace-counted on
+      purpose: a TS test body can carry "${...}" inside a template
+      literal, which a counter that does not model strings would close
+      early on, returning a fragment rather than failing.
+
 Prints the extracted text to stdout. Exits 2 (UNMEASURED) if the start
 marker or the closing boundary is not found -- never prints a partial or
 empty extraction as if it were the real thing.
@@ -198,6 +211,85 @@ def go_line(path, regex):
     return '\n'.join(lines[start:match_line + 1]) + '\n'
 
 
+# A banner is the shell harness's equivalent of a `func` line: the rule that
+# separates one behaviour's assertions from the next.
+#
+# ONLY the opening line is required to look like a banner (`#` then dashes).
+# A banner that WRAPS -- `# ---- the bilateral bound: a runaway tenant step
+# must be bounded, not left / # running forever (cleat#2628) ----` -- has no
+# trailing dashes on its first line and does not begin with dashes on its
+# second, so a both-ends-anchored pattern matches NEITHER line. The first
+# version of this regex was both-ends-anchored and it silently made one
+# behaviour block run past the next banner and swallow it.
+BANNER_RE = re.compile(r'^#\s*-{2,}')
+
+# Both scenario harnesses end their assertion blocks with this trailer, which
+# is the failure counter and the exit status -- machinery, not a behaviour.
+SH_TRAILER_RE = re.compile(r'^if \(\( failures > 0 \)\)')
+
+
+def sh_banner_block(path, start_regex):
+    """One behaviour's assertions in a shell harness: from the banner line
+    matching start_regex up to the NEXT banner, or up to the summary trailer.
+
+    It REFUSES to run to EOF. The last behaviour block is followed by the
+    failure-count/exit trailer, so "no terminator found" means the harness's
+    shape changed -- and the failure mode of guessing there is that machinery
+    is counted as assertions, i.e. the count goes UP on the side that already
+    looked worse. A loud exit 2 costs a re-run; a silent inflation costs the
+    comparison, which is the whole artefact.
+    """
+    lines = open(path).read().split('\n')
+    pat = re.compile(start_regex)
+    start = None
+    for i, l in enumerate(lines):
+        if pat.search(l):
+            start = i
+            break
+    if start is None:
+        fail(f"no line in {path} matches {start_regex!r}")
+    end = None
+    for i in range(start + 1, len(lines)):
+        if BANNER_RE.match(lines[i]) or SH_TRAILER_RE.match(lines[i]):
+            end = i
+            break
+    if end is None:
+        fail(
+            f"the banner block in {path} starting at line {start + 1} reaches neither the next "
+            f"banner nor the `if (( failures > 0 ))` trailer before EOF -- refusing to run it to "
+            f"EOF, which would count the harness's own machinery as behaviour assertions"
+        )
+    return '\n'.join(lines[start:end]) + '\n'
+
+
+def ts_func(path, func_name):
+    """A TypeScript function, by the same rule go_func uses: the declaration
+    line, through the column-0 closing brace.
+
+    Deliberately NOT brace-counted. A TS test body can carry `${...}` inside a
+    template literal, and a brace counter that does not model strings would
+    close the block early on one -- returning a fragment rather than failing,
+    which is the shape that reads as a result.
+    """
+    lines = open(path).read().split('\n')
+    pat = re.compile(r'^(export\s+)?(async\s+)?function\s+' + re.escape(func_name) + r'\s*\(')
+    start = None
+    for i, l in enumerate(lines):
+        if pat.match(l):
+            start = i
+            break
+    if start is None:
+        fail(f"no function {func_name!r} found in {path}")
+    end = None
+    for i in range(start + 1, len(lines)):
+        if lines[i] == '}':
+            end = i
+            break
+    if end is None:
+        fail(f"function {func_name!r} in {path} never reaches a column-0 closing brace")
+    return '\n'.join(lines[start:end + 1]) + '\n'
+
+
 def _write(path, text):
     with open(path, 'w') as fh:
         fh.write(text)
@@ -274,10 +366,60 @@ def self_test():
     check("go-line", lambda: go_line(p, r'^\s*ResultField:'), "why this line exists")
     check_fails("go-line (marker missing)", lambda: go_line(p, r'^\s*NopeField:'))
 
+    # sh-banner-block -- known-positive, marker-missing, and the case that
+    # matters most: a block that never terminates must exit 2 rather than run
+    # to EOF, because running to EOF counts the harness's machinery as
+    # behaviour assertions.
+    p = f"{tmpdir}/harness.sh"
+    _write(
+        p,
+        "setup() {\n  true\n}\n\n"
+        "# ---- first behaviour ----\necho asserting-a\n\n"
+        "# ---- second behaviour ----\necho asserting-b\n\n"
+        "if (( failures > 0 )); then\n  exit 1\nfi\n",
+    )
+    check("sh-banner-block", lambda: sh_banner_block(p, r'^# ---- first behaviour'), "asserting-a")
+    check("sh-banner-block (stops at the trailer)",
+          lambda: sh_banner_block(p, r'^# ---- second behaviour'), "asserting-b")
+    if 'failures > 0' in sh_banner_block(p, r'^# ---- second behaviour'):
+        failures.append("sh-banner-block: the block ran past the trailer into the summary machinery")
+    check_fails("sh-banner-block (marker missing)",
+                lambda: sh_banner_block(p, r'^# ---- no such banner'))
+    unterminated = f"{tmpdir}/harness_unterminated.sh"
+    _write(unterminated, "# ---- lonely behaviour ----\necho asserting\n# no next banner, no trailer\n")
+    check_fails("sh-banner-block (never terminates)",
+                lambda: sh_banner_block(unterminated, r'^# ---- lonely behaviour'))
+
+    # A banner that WRAPS across two lines must still terminate the block
+    # before it. Without this case the one-line fixtures above pass while the
+    # real harness -- whose third banner wraps -- fails, which is how the
+    # first version of BANNER_RE shipped: the fixture did not model the
+    # format, so it could not disagree.
+    p = f"{tmpdir}/harness_wrapped.sh"
+    _write(
+        p,
+        "# ---- first behaviour ----\necho asserting-a\n\n"
+        "# ---- second behaviour: a rule that does not fit on one line\n"
+        "# and continues here ----\necho asserting-b\n\n"
+        "if (( failures > 0 )); then\n  exit 1\nfi\n",
+    )
+    if 'asserting-b' in sh_banner_block(p, r'^# ---- first behaviour'):
+        failures.append("sh-banner-block (wrapped banner): the first block ran past a wrapped banner "
+                        "and swallowed the second behaviour")
+    check("sh-banner-block (wrapped banner)",
+          lambda: sh_banner_block(p, r'^# ---- second behaviour'), "asserting-b")
+
+    # ts-func
+    p = f"{tmpdir}/t.test.ts"
+    _write(p, "async function testSomething() {\n  assertEqual(1, 1);\n}\n")
+    check("ts-func", lambda: ts_func(p, "testSomething"), "assertEqual(1, 1);")
+    check_fails("ts-func (marker missing)", lambda: ts_func(p, "testNope"))
+
     # FileNotFoundError -> UNMEASURED (2), for every mode, not a traceback
     for mode, arg in [
         ('go-brace-block', 'x'), ('go-func', 'x'),
         ('ts-const-template', 'x'), ('go-struct-field', 'x'), ('go-line', 'x'),
+        ('sh-banner-block', '^# ---- x'), ('ts-func', 'x'),
     ]:
         try:
             run_mode(mode, f"{tmpdir}/does-not-exist.go", arg)
@@ -309,6 +451,10 @@ def run_mode(mode, path, arg):
             return go_struct_field(path, arg)
         elif mode == 'go-line':
             return go_line(path, arg)
+        elif mode == 'sh-banner-block':
+            return sh_banner_block(path, arg)
+        elif mode == 'ts-func':
+            return ts_func(path, arg)
         print(f"unknown mode {mode!r}", file=sys.stderr)
         sys.exit(2)
     except FileNotFoundError:
@@ -320,7 +466,7 @@ def main():
         sys.exit(self_test())
     if len(sys.argv) != 4:
         print(
-            f"usage: {sys.argv[0]} go-brace-block|go-func|ts-const-template|go-struct-field|go-line <file> <name-or-regex>",
+            f"usage: {sys.argv[0]} go-brace-block|go-func|ts-const-template|go-struct-field|go-line|sh-banner-block|ts-func <file> <name-or-regex>",
             file=sys.stderr,
         )
         sys.exit(2)
