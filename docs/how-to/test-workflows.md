@@ -89,7 +89,9 @@ func TestApprovalWorkflow(t *testing.T) {
     h := env.H()
 
     // Start the workflow in a goroutine; it will block on AwaitSignals.
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount": 5000}`)
         if err != nil {
             t.Errorf("workflow failed: %v", err)
@@ -98,6 +100,12 @@ func TestApprovalWorkflow(t *testing.T) {
 
     // Simulate a manager approving the request.
     env.Signal("approved", `{"reviewer": "alice", "note": "looks good"}`)
+
+    // Wait for the workflow before the test returns. Without this the test
+    // passes whether or not the workflow ever ran, and a failure reported by
+    // the goroutine after the test has completed panics rather than failing
+    // one test.
+    <-done
 }
 ```
 
@@ -119,6 +127,28 @@ func TestApprovalTimeout(t *testing.T) {
     env.AdvanceTime(25 * time.Hour)
 }
 ```
+
+> **This one and `TestApprovalWorkflow_Timeout` below are deliberately *not* joined**
+> (cleat#3098). Joining is correct everywhere else on this page and is what the
+> harness's own comment recommends — but applied here it **hangs the test binary**,
+> because the join and the clock advance have no correct ordering. `AdvanceTime`
+> moves a clock that the deadline is measured **from**, not one it is measured
+> *against*: `AwaitSignals(…, 24*time.Hour)` computes `deadline = now + 24h` at the
+> instant the workflow reaches it, so an advance that lands first is **included in**
+> the deadline rather than passing it — a `25h` advance leaves the deadline at
+> `+49h`, nothing fires, and `<-done` blocks forever. Joining *before* the advance
+> is the same deadlock from the other side: the workflow parks on a timer only the
+> advance can fire, and the join waits for the workflow.
+>
+> Measured 2026-10-04, this block assembled as a real test: with `<-done` added it
+> **hangs** — the goroutine parks in `durableAwaitSignalsImpl` and nothing fires its
+> deadline. Un-joined it passes, and it is **near-vacuous rather than occasionally
+> so**: instrumented, the workflow had not reached `AwaitSignals` at the moment the
+> test function returned in **9 of 10 runs**, and the test passed all ten. The
+> `t.Error` in the goroutine is therefore almost never reached — the assertion is
+> real code that the test does not run. Repairing the two needs a harness primitive
+> that establishes the waiter is parked *before* advancing the clock; that is
+> **cleat#3091**.
 
 ## Testing timeouts with AdvanceTime
 
@@ -325,6 +355,10 @@ func TestApprovalWorkflow_Rejected(t *testing.T) {
 > also what the harness's own `AdvanceTimeAndDrain` comment recommends (*"use a
 > `sync.WaitGroup` or other explicit synchronization"*). The `time` import
 > stays: `TestApprovalWorkflow_Timeout` needs `time.Hour`.
+>
+> `TestApprovalWorkflow_Timeout` is the one test here that is **not** joined,
+> unlike the two around it: joining it hangs. See the note under
+> `TestApprovalTimeout` above (cleat#3098).
 
 > Corrected 2026-10-04 (cleat#3027): this example imported `encoding/json` and
 > never used it, so it did not compile as published. Found by compiling the
