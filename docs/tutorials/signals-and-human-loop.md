@@ -129,8 +129,8 @@ func submitExpense(h cleat.HostCalls, input ReportInput) (string, error) {
 | Line(s) | What it does |
 |---------|--------------|
 | `AwaitSignals([]string{"approval"}, 72*time.Hour)` | Pauses the workflow until the `approval` signal arrives, or 72 hours pass |
-| `res.Err` | A failure while waiting — distinct from the wait expiring |
-| `res.TimedOut` | True when the window closes with no signal |
+| `res.Err` | Set when the wait failed. Test it **first** — a call the runtime rejects sets both this and `TimedOut` |
+| `res.TimedOut` | Set when the window closes with no signal, and also on a rejected call, which is why `Err` is tested first |
 | `json.Unmarshal([]byte(res.Payload), &status)` | Deserialises the signal payload into the `ApprovalStatus` struct |
 | `h.SetQueryState(...)` | Stores queryable state so external systems can check workflow status without polling the signal |
 
@@ -199,6 +199,11 @@ rounds to 0 milliseconds — anything under 1ms — is **rejected** rather than
 treated as "wait forever": a 0ms await has no deadline to expire and would
 never return, so the runtime returns an error instead of hanging. For a
 non-blocking check, use `h.PollSignals` instead.
+
+**Test `Err` before `TimedOut`.** When the window merely closes, `Err` is nil
+and `TimedOut` is set — but that rejection sets **both**, so `TimedOut` alone
+cannot tell "nobody decided" from "the call was refused". The example above
+checks `Err` first for that reason: the ordering is load-bearing, not style.
 
 ## Awaiting multiple signals
 
