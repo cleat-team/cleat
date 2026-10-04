@@ -100,3 +100,35 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: scripts/check-negated-closing-references.sh
+
+      - name: Code-span closer that will not fire
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: scripts/check-code-span-closing-keywords.sh
+
+      # In .github/workflows/, which WORKSTREAM.md's shared-files table gives to
+      # WS-3 -- added under that row's exception, "another stream may add there
+      # when leaving the mechanism unwired would be worse, say so in the
+      # comment", and WS-3 was notified BEFORE the diff rather than after.
+      #
+      # WHY THE MECHANISM WOULD BE UNWIRED WITHOUT IT (cleat#3028). A closing
+      # keyword inside a code span is INERT -- GitHub does not read it -- so
+      # `Closes #3018` in backticks closes nothing, the PR merges green, and the
+      # issue stays open with no detector but a person asking why. Two of the
+      # last forty merged PR bodies carry one, and they are the two possible
+      # cases: #3021 (nothing live, issue stayed open) and #3038 (a QUOTE, with a
+      # live closer elsewhere, closed correctly). `closingIssuesReferences`
+      # separates them, which is what makes the check safe to have.
+      #
+      # No new check context: this is another step in the existing job, and
+      # GitHub creates one check-run per job, not per step. The
+      # `!= 'merge_group'` guard means it never runs in the queue, so it cannot
+      # block an enqueue, though it IS part of the required `Closing References`
+      # context on the ordinary path -- by design, since a match stops a PR whose
+      # closer would silently do nothing.
+      - name: Code-span closing-keyword self-test
+        if: github.event_name != 'merge_group'
+        run: scripts/check-code-span-closing-keywords.sh --self-test
