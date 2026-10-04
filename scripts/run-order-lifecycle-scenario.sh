@@ -763,29 +763,43 @@ done
 # fails immediately. Here the words the page paints are the KEYS of STAGE_LABEL
 # plus the members of the TERMINAL and DECIDED sets.
 #
-# The relation is a MIX, which is why the sources are two files: some of these
-# are statuses the app publishes (`h.SetQueryState("status", ...)` in order.go)
-# and some are step Descriptions the saga declares (`s.AddStep(...)`), because
-# the page maps the saga's published `current_step` (cleat#2627, cleat#2951).
-# `done` and `failed` come from the engine's RUN vocabulary instead -- a
-# finished run is "done", never "completed".
+# The relation is a MIX, and that is most of the reason this is not the
+# siblings' rule: some of these words are statuses the app publishes
+# (`h.SetQueryState("status", ...)`) and some are step Descriptions the saga
+# declares (`s.AddStep(...)`), because the page maps the saga's published
+# `current_step` (cleat#2627, cleat#2951). BOTH OF THOSE ARE IN order.go. The
+# second source file is for the RUN vocabulary, which `s.AddStep` does not
+# carry: a finished run is "done", never "completed".
 #
 # It FAILS when any one of the three extractions comes back empty, per source,
 # so a refactor that renames STAGE_LABEL or drops a set reports itself instead of
 # going quiet. That is the siblings' control, and it is what stops this check
 # passing by finding nothing.
+#
+# TWO WAYS THIS COULD STILL HAVE GONE QUIET, both closed below because a check
+# whose subject is "did the page drift from the code" is the last place to keep
+# one of its own:
+#   - an extractor that DIES is not an empty extraction, and the shell cannot
+#     tell them apart from stdout alone;
+#   - a word class of [a-z_] never sees `paid_v2`, so a legal key containing a
+#     digit would be painted by the page and guarded by nothing.
 missing="$(python3 - "$EXAMPLE_DIR/web/app.js" <<'PY'
 import pathlib, re, sys
 
 page = pathlib.Path(sys.argv[1]).read_text()
 
+# Admits digits. `paid_v2` is a legal key the page could paint, and a class of
+# [a-z_] would never see it -- silently, because the emptiness control needs all
+# three sources empty and the other two would still be intact.
+WORD = r'[a-z][a-z0-9_]*'
+
 block = re.search(r'const STAGE_LABEL = \{(.*?)\n\};', page, re.S)
-keys = re.findall(r'^\s*([a-z_]+):', block.group(1), re.M) if block else []
+keys = re.findall(r'^\s*(' + WORD + r'):', block.group(1), re.M) if block else []
 
 
 def members(name):
     m = re.search(r'const ' + name + r' = new Set\(\[([^\]]*)\]\)', page, re.S)
-    return re.findall(r"[\"']([a-z_]+)[\"']", m.group(1)) if m else []
+    return re.findall(r"[\"'](" + WORD + r")[\"']", m.group(1)) if m else []
 
 
 terminal = members('TERMINAL')
@@ -810,7 +824,17 @@ print(','.join(w for w in words
                if f'"{w}"' not in sources and f"'{w}'" not in sources))
 PY
 )"
-check "every stage the page paints is one the workflow writes" "$missing" ""
+# An extractor that DIES is not an empty extraction, and stdout cannot tell the
+# two apart: python's traceback goes to stderr, so a crash leaves stdout EMPTY
+# and `check` would compare "" against "" and print ok -- this guard's own
+# fail-open, one level down. The deliberate sentinel above always PRINTS, so
+# "non-zero status with no sentinel on stdout" is a crash, and it is named as
+# one instead of passing for a clean page.
+guard_rc=$?
+if (( guard_rc != 0 )) && [[ "$missing" != EXTRACTED-NOTHING-FROM-THE-PAGE:* ]]; then
+  missing="GUARD-FAILED-TO-RUN:rc=$guard_rc"
+fi
+check "every stage the page declares is one the workflow writes" "$missing" ""
 
 if (( failures == 0 )); then
   # The page and its stylesheet are both referenced by index.html and both
