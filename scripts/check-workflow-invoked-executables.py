@@ -33,6 +33,18 @@ and the first version reported that as a by-path invocation of a script named
 workflow -- the command name is on the FIRST line, not the last -- and it is
 pinned by a self-test case now.
 
+ONE KNOWN FALSE POSITIVE, latent, with no instance in the tree today: a heredoc
+whose payload is DATA rather than a command -- `cat > report.txt <<'EOF'` followed
+by a line beginning with a script path -- is read as an invocation. It is in the
+flagging direction, which is this check's documented posture, and closing it
+needs heredoc tracking that a line-oriented reader does not have. Recorded so the
+next reader meets it as known rather than as a bug to re-find.
+
+Two things this check does NOT cover, both deliberate: a by-path invocation
+reached through a shell variable or a `for` list (the join makes those first
+tokens `for`/`if`, not a path), and any path outside the covered directories --
+see the INVOKABLE comment for why that boundary is a signal rather than a gap.
+
 Exit is three-valued, per this repo's convention: 0 pass, 1 a finding, 2
 UNMEASURED -- the workflows or the index could not be read, so nothing was
 checked. A check that measures nothing agrees with every tree, correct or not.
@@ -46,9 +58,18 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOW_DIR = REPO / ".github" / "workflows"
 
-# A repo-relative path under a directory that holds runnable things. Deliberately
-# NOT "any tracked path": a workflow that names a document in an argument is not
-# invoking it, and widening the pattern to every tracked file would flag those.
+# A repo-relative path under a directory that holds runnable things. There are
+# TWO narrowings here and they need separate reasons:
+#
+#   * the PATH shape, rather than "any tracked path" -- a workflow that names a
+#     document in an argument is not invoking it, and widening to every tracked
+#     file would flag those;
+#   * the DIRECTORY, which that reason does not cover. cleat-review asked for the
+#     second one explicitly: these are the places this repo keeps runnable
+#     things, and every by-path invocation in the tree is under one of them
+#     (measured today: 97 sites across 11 workflows). A by-path command from
+#     anywhere else would be a structural surprise worth looking at, not one to
+#     fold in silently -- so the narrow list is a deliberate signal.
 INVOKABLE = re.compile(r"^(?:\./)?((?:scripts|bin|hack|tools|tests)/[A-Za-z0-9_./-]+)$")
 
 
@@ -59,8 +80,18 @@ class Unmeasured(Exception):
 def first_token(line):
     """The command token of a workflow line, or '' if the line has none."""
     s = line.strip()
+    # A `- ` item is a STEP only when it introduces a `run:`/`shell:` key. A bare
+    # `- scripts/x.sh` is a YAML sequence VALUE -- precisely the shape of a
+    # `paths:` trigger entry -- so stripping the dash unconditionally makes the
+    # trigger list read as a list of commands. Found in review of cleat#3111;
+    # today the only covered-directory trigger entry in the tree happens to be
+    # quoted, which is the sole reason it was not already firing. The quoted form
+    # was never affected, so the guard's correctness on trigger lists rested on a
+    # quoting habit rather than on anything checked here.
     if s.startswith("- "):
-        s = s[2:].lstrip()
+        rest = s[2:].lstrip()
+        if rest.startswith(("run:", "shell:")):
+            s = rest
     for prefix in ("run:", "shell:"):
         if s.startswith(prefix):
             s = s[len(prefix):].lstrip()
@@ -185,7 +216,8 @@ def self_test():
     # are properties of taking the FIRST token, so they are pinned here.
     cases = [
         ("      scripts/example.sh --flag", "scripts/example.sh", "a plain invocation"),
-        ("        - scripts/example.sh", "scripts/example.sh", "a YAML list item"),
+        ("        - scripts/example.sh", None, "a YAML list value, e.g. a paths: trigger entry"),
+        ("        - run: scripts/example.sh", "scripts/example.sh", "a step's inline run:"),
         ("        run: scripts/example.sh", "scripts/example.sh", "the inline run: form"),
         ("          ./scripts/example.sh", "scripts/example.sh", "an explicit ./ prefix"),
         ("      # scripts/example.sh is described here", None, "a YAML comment"),
