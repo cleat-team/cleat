@@ -306,6 +306,11 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 			// has -- so this reduces the false-failure rate without quantifying it, and every
 			// attempt's numbers are kept in the failure message rather than summarised away.
 			const maxAttempts = 3
+			// The bound's constants, hoisted out of the loop because the failure message below quotes
+			// them too -- a message naming a value the code no longer uses is the stale-prose failure
+			// this repo keeps paying for. Their calibration note sits beside the `bound :=` line.
+			const boundFactor = 4.0
+			const boundFloor = 100 * time.Millisecond
 			var (
 				attemptsRun int
 				withinBound bool
@@ -438,8 +443,6 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 				// was 1.3x) while staying far enough below "no bound at all"
 				// to still catch #2138 regressing -- see the falsification
 				// below, which confirms it does.
-				const boundFactor = 4.0
-				const boundFloor = 100 * time.Millisecond
 				bound := time.Duration(float64(basP99)*boundFactor) + boundFloor
 				perAttempt = append(perAttempt, fmt.Sprintf(
 					"attempt %d: baseline P99=%v, treatment(in-window) P99=%v, bound=%v (%+.0f%% of bound)",
@@ -459,11 +462,11 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 				}
 			}
 			if !withinBound {
-				t.Errorf("%s: concurrent-writer P99 under the sweep exceeded the stated bound (4.0x the "+
+				t.Errorf("%s: concurrent-writer P99 under the sweep exceeded the stated bound (%.1fx the "+
 					"same attempt's baseline P99 + %v floor) on ALL %d attempt(s) -- the sweep is materially "+
 					"slowing ordinary writes, which is what cleat#2138's row-chunking fix exists to prevent. "+
 					"Per attempt:\n  %s",
-					arm.name, 100*time.Millisecond, attemptsRun, strings.Join(perAttempt, "\n  "))
+					arm.name, boundFactor, boundFloor, attemptsRun, strings.Join(perAttempt, "\n  "))
 			}
 		})
 	}
