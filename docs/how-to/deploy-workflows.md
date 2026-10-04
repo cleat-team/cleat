@@ -89,10 +89,14 @@ to run in a script that has neither:
 
 ```bash
 $ cleat deploy --dry-run --name place_order ./out/place_order.wasm
-Would deploy workflow "place_order" (version 1) from ./out/place_order.wasm (2.3 MB) to queue "default"
+Would deploy workflow "place_order" (version 1) from ./out/place_order.wasm (2457600 bytes) to queue "default"
   Metadata: place_order v1 (ABI: 1, min ver: 1)
 Dry run: no changes were made.
 ```
+
+> The size is printed in **raw bytes** (`%d`), not the `formatSize` MB/GB form that
+> `cleat build` uses above — this block showed `2.3 MB`, which is what `build`
+> prints and `deploy` does not (cleat#3027).
 
 ### Database role and tenant
 
@@ -135,8 +139,13 @@ cleat --db "$CLEAT_DATABASE_URL" versions place_order
 ```bash
 cleat --db "$CLEAT_DATABASE_URL" rollback place_order 1
 # Rolled back "place_order" to version 1.
-# New instances will use version 1.
+# New runs will use version 1 until 'cleat rollback --clear place_order'.
 ```
+
+A rollback is a **pin, not a one-off**: it holds that version for new runs until
+you clear it, and the tool's own message names the command that does. This
+section used to stop at *"New instances will use version 1"*, which reads as
+finished — the tool says `New runs`, and says what ends the pin (cleat#3027).
 
 The WASM blob IS the version. Rolling back changes which WASM binary new workflow instances execute. Existing in-flight instances continue with the version they started on.
 
@@ -202,6 +211,11 @@ Before deploying to production:
 
 ## Next steps
 
-- See the [zero-downtime deployment guide](zero-downtime-deploy.md) for blue/green worker pool replacement
-- See the [production ops guide](../guide/deploying-to-production.md) for monitoring, scaling, and configuration
-- See the [disaster recovery guide](../guide/disaster-recovery.md) for recovery procedures
+- See the [zero-downtime deployment guide](../operations/zero-downtime-deploy.md) for blue/green worker pool replacement
+- See the [production ops guide](../operations/deploying-to-production.md) for monitoring, scaling, and configuration
+- See the [disaster recovery guide](../operations/disaster-recovery.md) for recovery procedures
+
+> All three links were dead (cleat#3027). The first resolved to
+> `docs/how-to/zero-downtime-deploy.md`; the other two resolved to `docs/guide/`,
+> which does not exist in this tree at all. All three targets live under
+> `docs/operations/`.
