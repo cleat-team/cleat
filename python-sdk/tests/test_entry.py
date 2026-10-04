@@ -602,3 +602,37 @@ class TestFromDictDataclassConversion:
                 self.a = a
 
         assert _from_dict({"a": 1}, NoInit).a == 1
+
+    def test_a_var_keyword_constructor_receives_the_payload_keys(self):
+        """A ``**kw`` parameter accepts keywords the signature does not name,
+        so unmatched payload keys belong to it. Measured before this fix: the
+        ``fields()`` loop passed a field-matching key and ``**kw`` took it, and
+        reading the signature made that key look unmatched so it STOPPED
+        arriving -- working to quiet loss, with no error on either side
+        (cleat#3058)."""
+
+        @dataclass(init=False)
+        class KWOnly:
+            a: int = 0
+
+            def __init__(self, **kw):
+                self.received = dict(kw)
+
+        assert _from_dict({"a": 1}, KWOnly).received == {"a": 1}
+
+    def test_a_named_parameter_is_not_also_passed_through_as_a_var_keyword(self):
+        """The companion, and the one that keeps the pass-through from being a
+        blanket forward: a key that matched a NAMED parameter is that
+        parameter's, and must not be duplicated into ``**kw`` as well."""
+
+        @dataclass(init=False)
+        class Mixed:
+            a: int = 0
+
+            def __init__(self, a: int = 0, **kw):
+                self.a = a
+                self.received = dict(kw)
+
+        built = _from_dict({"a": 1, "other": 2}, Mixed)
+        assert built.a == 1
+        assert built.received == {"other": 2}

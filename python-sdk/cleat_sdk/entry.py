@@ -211,7 +211,8 @@ def _from_dict(
         # nothing at all was read is loss -- the object would be built
         # entirely from its defaults and nothing would say so.
         #
-        # This is the one shape cleat#2940 turned from loud to quiet. For
+        # This is ONE of the two shapes cleat#2940 changed for the worse -- the
+        # other is the VAR_KEYWORD case handled below. For
         # `@dataclass(init=False)` with no hand-written `__init__` the
         # signature is empty, and reading fields() used to raise "takes no
         # arguments" -- by accident, because it passed a keyword the class did
@@ -241,6 +242,17 @@ def _from_dict(
             if isinstance(field_type, dataclasses.InitVar):
                 field_type = field_type.type
             kwargs[name] = _from_dict(value[name], field_type, _cache)
+
+        # A VAR_KEYWORD parameter accepts keywords the signature does not name,
+        # so payload keys it did not match above belong to it. Measured on
+        # three revisions: the fields() loop passed a field-matching key here
+        # and `**kw` took it; reading the signature made that key look
+        # unmatched and it STOPPED arriving -- working -> quiet loss, with no
+        # error either side. Restoring it is what the parameter is for
+        # (cleat#3058). Their types are unknown to this binding, so they are
+        # passed exactly as they came.
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            kwargs.update({k: v for k, v in value.items() if k not in params})
 
         return target_type(**kwargs)
 
