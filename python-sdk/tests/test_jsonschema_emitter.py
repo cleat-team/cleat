@@ -214,16 +214,21 @@ def test_nested_dataclass_initvar_is_a_required_property_not_a_field():
     assert "secret" not in schema["required"]
 
 
-def test_a_required_initvar_is_reported_but_uninstantiable_by_any_payload():
-    """cleat-review A2 on #2933, pinned rather than only documented. A
-    required (no-default) InitVar is a real __init__ parameter, so this
-    module correctly reports it as present and required -- but
-    _from_dict's own kwargs-building loop iterates dataclasses.fields(),
-    which excludes InitVar, so NO payload this binding builds can ever
-    supply one. The schema is an honest description of __init__'s
-    signature; it is not a promise that some payload satisfies it. Fixing
-    that belongs in _from_dict, not here -- tracked as a follow-up, not
-    attempted in this module."""
+def test_a_required_initvar_is_reported_and_now_instantiable_by_the_payload_that_carries_it():
+    """cleat-review A2 on #2933, corrected by cleat#2940. A required
+    (no-default) InitVar is a real __init__ parameter, so this module
+    correctly reports it as present and required. Until #2940 that was
+    only half a repair: _from_dict's own kwargs-building loop iterated
+    dataclasses.fields(), which excludes InitVar, so NO payload the
+    binding built could supply one -- the schema described a signature
+    nothing could satisfy. Both now read inspect.signature, so the
+    reported field IS passable.
+
+    The asymmetry that remains is asserted here rather than assumed: a
+    payload that OMITS the required InitVar still raises, exactly as
+    omitting a required ordinary field does. That case is the one that
+    keeps the fix honest -- a binding that invented a value for it would
+    construct a dataclass from a payload the caller never completed."""
 
     @dataclass
     class Order:
@@ -231,7 +236,10 @@ def test_a_required_initvar_is_reported_but_uninstantiable_by_any_payload():
         seed: InitVar[int]
 
         def __post_init__(self, seed):
-            pass
+            # Recorded so the assertion below proves the value reached
+            # __init__'s own initialiser, not merely that the keyword was
+            # accepted without complaint.
+            self.seed_seen = seed
 
     @cleat_entry
     def wf(h: HostCalls, order: Order) -> str:
@@ -240,9 +248,14 @@ def test_a_required_initvar_is_reported_but_uninstantiable_by_any_payload():
     schema = entry_point_param_schema(_func(wf))["properties"]["order"]
     assert schema["required"] == ["sku", "seed"]
 
-    for payload in ({"sku": "a", "seed": 3}, {"sku": "a"}):
-        with pytest.raises(TypeError, match="missing 1 required positional argument: 'seed'"):
-            _from_dict(payload, Order)
+    # Carrying it -- the case cleat#2940 fixed.
+    built = _from_dict({"sku": "a", "seed": 3}, Order)
+    assert (built.sku, built.seed_seen) == ("a", 3)
+
+    # Omitting it -- still a TypeError naming the missing parameter, the
+    # same failure that omitting a required ordinary field produces.
+    with pytest.raises(TypeError, match="missing 1 required positional argument: 'seed'"):
+        _from_dict({"sku": "a"}, Order)
 
 
 def test_self_referential_dataclass_does_not_recurse_forever():

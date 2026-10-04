@@ -9,12 +9,13 @@ bytearray before each test.
 """
 
 import json
+from dataclasses import InitVar, dataclass, field
 
 import pytest
 
 try:
     from cleat_sdk import memory
-    from cleat_sdk.entry import _unwrap_result, cleat_entry
+    from cleat_sdk.entry import _from_dict, _unwrap_result, cleat_entry
     from cleat_sdk.host_calls import HostCalls
 except ImportError as e:
     pytest.skip(
@@ -440,3 +441,122 @@ class TestTheRegistryKeyIsTheWorkflowName:
             "TestComputePythonEntryPointSchemaUsesTheDecoratorsOwnName asserts on the "
             "build side"
         )
+
+
+class TestFromDictDataclassConversion:
+    """``_from_dict``'s dataclass branch, focused on the source of the kwargs.
+
+    The loop reads ``inspect.signature`` and not ``dataclasses.fields``,
+    because fields() omits InitVar pseudo-fields and lists ``init=False``
+    fields that ``__init__`` will not accept. The version that read fields()
+    was wrong in both directions (cleat#2940):
+
+    * an InitVar was invisible, so a dataclass with a REQUIRED one could not
+      be built through this binding whatever the payload carried;
+    * an ``init=False`` field was listed, so a payload value for one was
+      passed as a keyword and crashed construction.
+    """
+
+    def test_a_required_initvar_is_supplied_and_reaches_the_initialiser(self):
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[int]
+
+            def __post_init__(self, seed):
+                self.seed_seen = seed
+
+        built = _from_dict({"sku": "a", "seed": 3}, Order)
+        assert (built.sku, built.seed_seen) == ("a", 3)
+
+    def test_an_initvar_with_a_default_still_takes_it_when_the_payload_omits_it(self):
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[int] = 7
+
+            def __post_init__(self, seed):
+                self.seed_seen = seed
+
+        assert _from_dict({"sku": "a"}, Order).seed_seen == 7
+
+    def test_omitting_a_required_initvar_still_raises_and_names_it(self):
+        """The case that keeps the fix honest: the payload really is
+        incomplete, and no reflection can invent the value."""
+
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[int]
+
+            def __post_init__(self, seed):
+                pass
+
+        with pytest.raises(
+            TypeError, match="missing 1 required positional argument: 'seed'"
+        ):
+            _from_dict({"sku": "a"}, Order)
+
+    def test_an_initvar_annotation_is_unwrapped_before_recursing(self):
+        """``InitVar[X]`` is a WRAPPER, not a type -- recursing with it
+        would convert against a non-type, so the inner type is what the
+        payload has to satisfy."""
+
+        @dataclass
+        class Inner:
+            n: int
+
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[Inner]
+
+            def __post_init__(self, seed):
+                self.seed_seen = seed
+
+        built = _from_dict({"sku": "a", "seed": {"n": 3}}, Order)
+        assert isinstance(built.seed_seen, Inner)
+        assert built.seed_seen.n == 3
+
+    def test_an_init_false_field_is_ignored_rather_than_passed_as_a_keyword(self):
+        @dataclass
+        class Order:
+            sku: str
+            total: int = field(init=False)
+
+            def __post_init__(self):
+                self.total = 0
+
+        built = _from_dict({"sku": "a", "total": 99}, Order)
+        assert built.sku == "a"
+        # 0 from __post_init__, not 99 from the payload: the field is not a
+        # constructor parameter, so the payload's value for it is ignored.
+        assert built.total == 0
+
+    def test_a_dataclass_that_disables_init_is_built_from_defaults_and_the_payload_dropped(self):
+        """``@dataclass(init=False)`` with no hand-written ``__init__`` has
+        an EMPTY signature, so there is nothing to pass and the payload is
+        ignored -- reading ``fields()`` used to raise "takes no arguments"
+        here instead. Pinned rather than left incidental: the direction is
+        the quiet one, where a value of the right type comes back from a
+        payload nothing read. Filed as cleat#3058."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int = 0
+
+        assert _from_dict({"a": 1}, NoInit).a == 0
+
+    def test_a_dataclass_that_disables_init_but_writes_one_still_receives_keywords(self):
+        """The companion case, and the one that keeps the test above from
+        reading as "init=False is broken": a hand-written ``__init__`` IS
+        the signature, so its keywords arrive as they always did."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int
+
+            def __init__(self, a: int = 5):
+                self.a = a
+
+        assert _from_dict({"a": 1}, NoInit).a == 1
