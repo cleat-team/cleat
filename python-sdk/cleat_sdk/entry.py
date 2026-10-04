@@ -204,6 +204,15 @@ def _from_dict(
         # The same source also excludes `field(init=False)`, which fields()
         # lists and __init__ does not accept -- passing one used to raise
         # "unexpected keyword argument" from the call below.
+        #
+        # One consequence in the QUIET direction, recorded rather than left to
+        # be discovered: for `@dataclass(init=False)` with no hand-written
+        # `__init__`, the signature is empty, so the payload is dropped and the
+        # class is built from its defaults -- where reading fields() raised
+        # "takes no arguments". A hand-written `__init__` is honoured either
+        # way, because its parameters ARE this signature. That is the rule
+        # below applied uniformly rather than a new one; the silent-drop
+        # direction in general is cleat#3058.
         kwargs = {}
         for name, param in inspect.signature(target_type).parameters.items():
             if name not in value:

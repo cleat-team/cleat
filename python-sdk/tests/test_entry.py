@@ -532,3 +532,31 @@ class TestFromDictDataclassConversion:
         # 0 from __post_init__, not 99 from the payload: the field is not a
         # constructor parameter, so the payload's value for it is ignored.
         assert built.total == 0
+
+    def test_a_dataclass_that_disables_init_is_built_from_defaults_and_the_payload_dropped(self):
+        """``@dataclass(init=False)`` with no hand-written ``__init__`` has
+        an EMPTY signature, so there is nothing to pass and the payload is
+        ignored -- reading ``fields()`` used to raise "takes no arguments"
+        here instead. Pinned rather than left incidental: the direction is
+        the quiet one, where a value of the right type comes back from a
+        payload nothing read. Filed as cleat#3058."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int = 0
+
+        assert _from_dict({"a": 1}, NoInit).a == 0
+
+    def test_a_dataclass_that_disables_init_but_writes_one_still_receives_keywords(self):
+        """The companion case, and the one that keeps the test above from
+        reading as "init=False is broken": a hand-written ``__init__`` IS
+        the signature, so its keywords arrive as they always did."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int
+
+            def __init__(self, a: int = 5):
+                self.a = a
+
+        assert _from_dict({"a": 1}, NoInit).a == 1

@@ -265,18 +265,25 @@ def _schema_from_type(target_type: Any, visiting: frozenset[Any] = frozenset()) 
         # confirmed with a throwaway probe (field(init=False), no explicit
         # default). An InitVar pseudo-field is the opposite mismatch -- it
         # IS a constructor keyword but fields() never lists it -- so
-        # reading the signature makes this module AWARE of one for the
-        # first time (see module docstring for why that is only a partial
-        # fix: _from_dict can never actually supply a required InitVar's
-        # value, independent of what this schema says).
+        # reading the signature makes this module AWARE of one -- which
+        # fields() alone cannot do. The other half of that mismatch was
+        # _from_dict's, and cleat#2940 closed it: it reads this same
+        # signature, so a required InitVar is now both REPORTED here and
+        # SUPPLIED there. Until that landed this comment said the opposite
+        # ("_from_dict can never actually supply a required InitVar's
+        # value") and pointed at the module docstring for the reason -- so
+        # the two were contradicting each other for as long as the
+        # correction sat in one place and not the other (module docstring,
+        # point 3).
         sig = inspect.signature(target_type)
         for name, param in sig.parameters.items():
             field_type = field_hints.get(name, param.annotation)
             # InitVar[X] is dataclasses' own wrapper, not a real type --
             # typing.get_type_hints returns it UNwrapped (confirmed
-            # empirically), so unwrap it the same way _from_dict would
-            # never need to (it never sees InitVar at all; __init__ already
-            # consumed it by the time a value reaches a stored field).
+            # empirically), so this module unwraps it to derive the
+            # property's schema. _from_dict unwraps it identically before
+            # recursing (cleat#2940), for the same reason: the wrapper is
+            # not something a value can be converted against.
             if isinstance(field_type, dataclasses.InitVar):
                 field_type = field_type.type
             properties[name] = _schema_from_type(field_type, nested_visiting)
