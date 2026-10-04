@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -53,24 +52,14 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	build := func(t *testing.T, fixture string) string {
 		t.Helper()
 		dir := filepath.Join("..", "..", "testdata", "vet-checks", "rust", fixture)
-		// The exit status is NOT discarded (cleat#3063). A build that never
-		// started -- exec failed, so there is no ExitError -- produces EMPTY
-		// output, and every absence-assertion below then holds for a reason that
-		// has nothing to do with the checker. That is a failed measurement rather
-		// than a result, so it is fatal here.
-		//
-		// A non-zero exit is NOT a failure at this level: these fixtures keep
-		// their sources at the crate root, so cargo rejects the manifest and the
-		// build fails on its own. The arms assert on the TEXT.
+		// The exit status is NOT discarded. A build that never started produces
+		// EMPTY output, and every absence-assertion below then holds for a reason
+		// with nothing behind it -- a failed measurement rather than a result. A
+		// NON-ZERO exit is fine: these fixtures keep their sources at the crate
+		// root, so cargo rejects the manifest and the build fails on its own. See
+		// requireBuildStarted in build_reached_the_stage_test.go.
 		out, err := exec.Command(cleatBinary, "build", "--target", "rust", "-o", t.TempDir(), dir).CombinedOutput()
-		if err != nil {
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
-				t.Fatalf("the build never started: %v\n\n"+
-					"Nothing ran, so every assertion below would be about the absence of "+
-					"output rather than about the checker. cleat#3063.", err)
-			}
-		}
+		requireBuildStarted(t, err)
 		return string(out)
 	}
 
