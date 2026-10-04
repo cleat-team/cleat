@@ -29,7 +29,7 @@ class ApprovalRequest:
     requires_approval: bool = True
 
 
-@cleat_entry
+@cleat_entry("approval_workflow")
 def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
     """A workflow that registers an update handler for external approval."""
     h.log(f"Starting approval workflow for task {request.task_id}")

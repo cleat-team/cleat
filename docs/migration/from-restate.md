@@ -67,7 +67,7 @@ public class MyService {
 ```python
 from cleat_sdk import HostCalls, cleat_entry
 
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     pass
 ```
@@ -311,7 +311,7 @@ func PlaceOrder(h cleat.HostCalls, order OrderInput) (OrderResult, error) {
 
 **Cleat (Python) — after:**
 ```python
-@cleat_entry
+@cleat_entry("place_order")
 def place_order(h: HostCalls, order: dict) -> str:
     h.log(f"Placing order {order['orderId']}")
 

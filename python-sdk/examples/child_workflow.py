@@ -12,7 +12,7 @@ class OrderInput:
     items: list[str]
 
 
-@cleat_entry
+@cleat_entry("process_item")
 def process_item(h: HostCalls, item: str) -> str:
     """Child workflow: process a single item."""
     h.log(f"Processing item: {item}")
@@ -20,7 +20,7 @@ def process_item(h: HostCalls, item: str) -> str:
     return response
 
 
-@cleat_entry
+@cleat_entry("process_order")
 def process_order(h: HostCalls, input: OrderInput) -> str:
     """Parent workflow: fan out item processing to child workflows."""
     h.log(f"Processing order {input.order_id} with {len(input.items)} items")

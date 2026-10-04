@@ -22,7 +22,7 @@ a log line would have been discarded and the bug preserved.
 from cleat_sdk import HostCalls, cleat_entry
 
 
-@cleat_entry
+@cleat_entry("short_results_workflow")
 def short_results_workflow(h: HostCalls, _unused: str) -> str:
     """Call host functions whose results are short, and return them."""
     # Both are short (a workflow ID and a run ID), and both are dispatched

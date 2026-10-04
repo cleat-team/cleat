@@ -22,7 +22,7 @@ class BookingResult:
     status: str
 
 
-@cleat_entry
+@cleat_entry("book_travel")
 def book_travel(h: HostCalls, request: BookingRequest) -> BookingResult:
     """Book a flight + hotel + payment as a saga."""
     h.log(f"Starting travel booking for user {request.user_id}")

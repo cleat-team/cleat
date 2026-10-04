@@ -8,7 +8,7 @@ helpers for the Cleat ABI.
 Quick start:
     from cleat_sdk import HostCalls, cleat_entry
 
-    @cleat_entry
+    @cleat_entry("my_workflow")
     def my_workflow(h: HostCalls, name: str) -> str:
         h.log(f"Hello, {name}!")
         resp = h.call("my-service", "DoThing", {"name": name})

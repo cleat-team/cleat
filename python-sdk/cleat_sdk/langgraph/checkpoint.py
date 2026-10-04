@@ -6,7 +6,7 @@ Usage::
     from cleat_sdk.langgraph import CleatCheckpointer
     from langgraph.graph import StateGraph
 
-    @cleat_entry
+    @cleat_entry("my_agent")
     def my_agent(h: HostCalls, input: str) -> str:
         checkpointer = CleatCheckpointer(h)
         graph = StateGraph(MyState)

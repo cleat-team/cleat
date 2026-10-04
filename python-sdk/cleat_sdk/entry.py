@@ -482,7 +482,7 @@ def cleat_entry(name: str | None = None) -> Callable:
             amount: float
             shipping_address: Address
 
-        @cleat_entry
+        @cleat_entry("place_order")
         def place_order(h: HostCalls, input: OrderInput) -> str:
             # ``input`` is an ``OrderInput`` instance, not a raw dict.
             # ``input.shipping_address`` is an ``Address`` instance.
