@@ -93,12 +93,14 @@ as though it had been.
 What is true: `admin.create_tenant` does create a `tenant_<uuid>` schema and a
 login role, and `admin.grant_plugin_to_tenant` exists to `GRANT` plugin tables
 to that role. It reads `admin.plugin_tables`, which `plugin.RunMigrations`
-**does** populate at boot: `registerTenantScopedTables`
+**does** populate as it applies plugin migrations: `registerTenantScopedTables`
 (`plugin/migration.go:1074`, called from `:700`) records every table a plugin
 migration declares `TenantScoped`, which cleat#1289 added so a table carrying
-a policy cannot outlive its tenant. So in production the registry holds
-**exactly the declared `TenantScoped` tables** and the grant loop runs over
-that subset -- **not** over everything a plugin manages.
+a policy cannot outlive its tenant. So in production the registry holds **the
+declared `TenantScoped` tables** and the grant loop runs over that set --
+**not** over everything a plugin manages. Read that from the registry's
+*contents*, not from a predicate: the loop itself does not filter on
+`tenant_scoped`, and the rows are what make it a subset.
 `plugin.RegisterPluginTables` (`:751`), the older GRANT-oriented writer, still
 has no production caller, so a managed table nobody declared `TenantScoped` is
 absent from the registry. That subset/whole distinction is the one that
