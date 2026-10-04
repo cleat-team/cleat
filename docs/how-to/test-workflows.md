@@ -359,8 +359,9 @@ func TestApprovalWorkflow_Rejected(t *testing.T) {
 > in place**, and **0 runs out of 20 once the goroutine is joined**, in every
 > sample. Only the second is a stable number -- the failure rate with the sleep
 > is a draw, which moved 15-17 across runs here and 12-19 in review. Joining is
-> also what the harness's own `AdvanceTimeAndDrain` comment recommends (*"use a
-> `sync.WaitGroup` or other explicit synchronization"*). The `time` import
+> also what the harness's own `AdvanceTimeAndDrain` comment recommends: draining
+> is not joining, and joining stays the caller's job — a `sync.WaitGroup` or a
+> plain `done` channel. The `time` import
 > stays: `TestApprovalWorkflow_Timeout` needs `time.Hour`.
 >
 > `TestApprovalWorkflow_Timeout` is the one test here that is **not** joined,
