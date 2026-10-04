@@ -442,6 +442,28 @@ var sdkUnreachedBaseline = map[string][]string{
 		// nothing: the guest would read whatever happened to sit at
 		// OUTPUT_OFFSET and return it as a run id.
 		"cleat_start_detached",
+
+		// The second of the same family, added with cleat#2998. The blocking
+		// durable wait takes out-pointers for the claimed event -- the same
+		// shape as durable-await-signals and cleat_start_detached above, and
+		// for the same reason it cannot cross a component boundary: the
+		// dispatch writes into a HOST buffer while the signature addresses the
+		// guest's own linear memory, so the guest reads whatever sat at
+		// OUTPUT_OFFSET and takes it for an event.
+		//
+		// It differs from cleat_start_detached in one respect that decides how
+		// it is guarded. That call IS declared in cleat.wit, with the core-ABI
+		// shape -- stopSurfaces records it as reasonWitIsStillCoreABI, a world
+		// that declares the wrong thing. This one has no WIT declaration at
+		// all, so it sits behind reasonNotInTheComponentWorld, a world that
+		// declares nothing, and its fix begins with writing the declaration.
+		// Both are the §3.110 defect underneath.
+		//
+		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
+		// engine/python_wasm_e2e_test.go records the same fact from
+		// python-sdk/cleat_sdk/host_calls.py, deliberately from the other
+		// source; the two move together.
+		"cleat_wait_for_event",
 	},
 
 	// assemblyscript: deliberately absent. It reaches every workflow-facing

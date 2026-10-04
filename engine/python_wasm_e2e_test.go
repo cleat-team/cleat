@@ -576,6 +576,31 @@ var pythonUnboundBaseline = []string{
 	// the guest would read whatever sat at OUTPUT_OFFSET and return it as a
 	// run id.
 	"cleat_start_detached",
+
+	// The second of the same family, added with cleat#2998: the blocking
+	// durable wait takes out-pointers for the claimed event, and an
+	// out-pointer addresses the guest's own linear memory while component
+	// dispatch writes into a HOST buffer. So Python would read whatever sat at
+	// OUTPUT_OFFSET and take it for an event -- the §3.110 defect stopSurfaces
+	// records as OPEN for durable-await-signals, which is declared with
+	// out-pointers and has therefore never worked on a component.
+	//
+	// ONE RESPECT IN WHICH IT DIFFERS FROM cleat_start_detached, and it is why
+	// the two carry different stopSurfaces constants: that call IS declared in
+	// cleat.wit, with the core-ABI shape (reasonWitIsStillCoreABI -- a world
+	// that declares the wrong thing). This one has no WIT declaration at all
+	// (reasonNotInTheComponentWorld -- a world that declares nothing), so its
+	// fix starts with writing the declaration: `durable-wait-for-event:
+	// func(...) -> result<string, call-failure>`, a dispatcher in
+	// component_cgo.go, and regenerated componentize-py bindings, whose
+	// regeneration must first reproduce the unmodified tree byte-identically
+	// (3.253).
+	//
+	// Bound by Go, Rust, Java and AssemblyScript, each carrying the stop-bit
+	// guard its SDK's list requires -- the host can refuse this call in a defer
+	// segment. tests/plugin-harness/sdk_import_names_test.go records the same
+	// fact from the other source; the two move together.
+	"cleat_wait_for_event",
 }
 
 // NOTE: this baseline and sdkUnreachedBaseline in
