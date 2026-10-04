@@ -92,6 +92,13 @@ func main() {
 		}
 	}
 
+	// Refused BEFORE the driver sees it (cleat#2962). Left to the driver, a
+	// mysql:// DSN surfaces as whichever of two unrelated symptoms the shape
+	// happens to produce, and neither names the scheme -- see rejectMySQLScheme.
+	if err := rejectMySQLScheme(*dsn); err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	db, err := sql.Open(d.driver, *dsn)
 	if err != nil {
 		log.Fatalf("failed to connect to %s database: %v — check the --db flag or CLEAT_DB_URL environment variable", d.name, err)

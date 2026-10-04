@@ -85,6 +85,54 @@ func detectDialect(dsn string) dialect {
 	}
 }
 
+// mysqlSchemePrefix is the one URL scheme cleatctl's DSN heuristic recognises
+// but no driver it can select accepts.
+const mysqlSchemePrefix = "mysql://"
+
+// rejectMySQLScheme refuses a mysql://-prefixed DSN before any driver sees it
+// (cleat#2962).
+//
+// go-sql-driver/mysql has no concept of a scheme and does not strip one, so the
+// prefix becomes part of the userinfo. Which way that fails depends on the
+// shape, and neither way tells the operator what is wrong -- measured against
+// v1.10.1, and reproduced end-to-end through this binary, on cleat#2962:
+//
+//	mysql://u:p@host:3306/db       rejected INSIDE sql.Open with
+//	                               "default addr for network 'host:3306' unknown"
+//	                               -- a message about a NETWORK, never about the DSN
+//	mysql://u:p@tcp(host:3306)/db  parses cleanly as User="mysql", so it reaches the
+//	                               server and is refused as that literal user
+//	                               ("Access denied for user 'mysql'")
+//
+// The check keys on the PREFIX rather than on either symptom, because a guard
+// written around the second one -- the one that reads as "this would misparse as
+// a user" -- misses the first, and the first is the commoner shape: it is what
+// someone writes when they turn a PostgreSQL URL into a MySQL one by editing the
+// scheme. Keying on the prefix also puts the refusal before sql.Open, which is
+// the only place it can go, since shape 1's error is raised by sql.Open itself.
+//
+// PostgreSQL's and SQL Server's drivers DO take a scheme, so this is the one
+// scheme that cannot be inferred away -- which is why the three examples in
+// docs/reference/worker-config.md look parallel and are not.
+//
+// The scheme is REFUSED, not stripped: nothing here rewrites the operator's
+// input (cleat#2918). A tool that quietly repairs a malformed DSN hides the
+// mistake and teaches the wrong shape.
+func rejectMySQLScheme(dsn string) error {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(dsn)), mysqlSchemePrefix) {
+		return nil
+	}
+	return fmt.Errorf(
+		"the --db DSN carries a %s scheme, which the MySQL driver does not understand: "+
+			"go-sql-driver/mysql has no concept of a scheme, so the prefix is read as part of the "+
+			"username and the connection is refused as that literal user.\n\n"+
+			"Drop the scheme and put the address inside tcp(...):\n"+
+			"    mysql://user:pass@host:3306/db   ->   user:pass@tcp(host:3306)/db\n\n"+
+			"(PostgreSQL's and SQL Server's drivers do take a scheme; MySQL's does not -- "+
+			"see docs/reference/worker-config.md.)",
+		mysqlSchemePrefix)
+}
+
 // dialectByName resolves an explicit --driver value.
 func dialectByName(name string) (dialect, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
