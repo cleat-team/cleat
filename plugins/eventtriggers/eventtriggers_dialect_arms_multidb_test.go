@@ -86,8 +86,21 @@ func TestEveryQueryArmRunsOnItsOwnDialect(t *testing.T) {
 //
 // Both statements ARE exercised for real, under correct tenant scoping, by
 // TestPluginMigrations_AllDialects (the schema they write into, on all three
-// dialects) and TestPublishEventCarriesItsOwnTenant (PublishEvent, which
+// dialects) and by TestPublishEventCarriesItsOwnTenant (PublishEvent, which
 // calls insertEventIdempotent, under real RLS enforcement) -- and by the
 // worker's own Multi-DB/Layer-3 CI jobs once this lands, which run
 // PublishEvent/registerAwaiter through the real tenant-scoped connection
 // path End to end.
+//
+// THAT SECOND CITATION IS POSTGRES-ONLY, AND THIS PARAGRAPH USED TO LEAVE
+// THAT OUT. TestPublishEventCarriesItsOwnTenant runs against
+// testutil.DialectPostgres with OpenPostgresRLSTestDB, because the property it
+// pins is that a TENANTLESS READ RAISES -- cleat.assert_tenant_set(). SQL
+// Server cannot raise from a filter predicate, so on MSSQL that assertion is
+// unfalsifiable rather than merely unwritten, and the test could not be
+// widened by changing a dialect constant. Read in a file whose whole subject
+// is dialects, the citation above reads as covering them. It does not.
+// cleat#2920's ground truth is `grep -rn 'insertEventIdempotent' --include='*_test.go'`:
+// before that issue, nothing named it and nothing ran it on SQL Server.
+//
+// TestInsertEventIdempotentRunsOnEveryDialect is what does now.
