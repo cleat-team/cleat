@@ -48,23 +48,32 @@ import (
 	"testing"
 )
 
-// gradleWrapperCouldNotFetch is the discriminator, and it is
-// deliberately ONE stack-frame name rather than a pattern for "network error".
+// gradleWrapperCouldNotFetch is the discriminator. It matches the wrapper
+// PACKAGE rather than one class, and the width is the point.
 //
-// `org.gradle.wrapper.Download` appears in the output only when the wrapper's
-// own downloader raises -- the class name is what Java prints in the frame, and
-// it is unreachable from a build that got far enough to compile. That is what
-// makes this safe to skip on: the wrapper fetches its distribution BEFORE any
-// task runs, so a build that reaches the manifest assertions the tests below
-// exist for cannot also contain this frame. The two are disjoint by ordering,
-// not by luck.
+// The first draft matched `org.gradle.wrapper.Download` -- the class named in
+// the incident's stack trace -- on the reasoning that a narrower match is the
+// safer error direction. That reasoning was wrong for THIS branch, and
+// cleat-review's reading is what showed it: every failure the wrapper can have
+// is raised from `org.gradle.wrapper.*` -- the fetch, its checksum, DNS, TLS, a
+// timeout, a 5xx -- so matching one class leaves this exact defect in place for
+// all the rest, to be rediscovered as a new bug the next time one of them fires.
+// A false NEGATIVE here is the original defect; a false positive only makes a
+// message less precise.
 //
-// A narrower match is the right error direction. Over-matching would let a
-// genuine refusal -- a stale manifest, two manifests, a determinism violation --
-// be skipped as "environment", which is the defect this file exists to close,
-// arrived at from the other side.
+// It stays ORDERING-SAFE at this width. Those frames appear only inside a stack
+// trace, and the wrapper package runs BEFORE Gradle itself starts -- so a build
+// that got far enough to reach the manifest assertions cannot also carry one.
+// Widening within the package does not weaken that: nothing in the package
+// executes after a task.
+//
+// The nearest over-match to guard against is a class name in a MESSAGE rather
+// than a frame. `Downloading https://services.gradle.org/...` and `Welcome to
+// Gradle 7.6.4!` are what a SUCCESSFUL fetch prints, and neither contains
+// `org.gradle.wrapper.` -- pinned as a negative control below, because that is
+// the case a wider pattern is most likely to swallow.
 func gradleWrapperCouldNotFetch(out []byte) bool {
-	return bytes.Contains(out, []byte("org.gradle.wrapper.Download"))
+	return bytes.Contains(out, []byte("org.gradle.wrapper."))
 }
 
 // javaBuild runs `cleat build --target java` and returns its combined output and
@@ -146,10 +155,32 @@ Error: gradle build failed: exit status 1
 		})
 	}
 
+	// KNOWN POSITIVE 1 -- the failing run's verbatim output.
 	if !gradleWrapperCouldNotFetch([]byte(wrapperFailed)) {
 		t.Error("the verbatim output from the run that filed cleat#3039 was NOT recognised as a " +
-			"Gradle-wrapper fetch failure.\n\n" +
+			"Gradle-wrapper failure.\n\n" +
 			"This is the known positive: without it the negative controls above pass on a predicate " +
 			"that can never be true, which is a green measuring nothing.")
+	}
+
+	// KNOWN POSITIVE 2 -- SYNTHETIC, and labelled as such because it is: this
+	// text was CONSTRUCTED from the wrapper's exception shape, not copied from a
+	// run, so it says nothing about any real incident. It exists for exactly one
+	// reason -- to pin the WIDTH. The predicate matched
+	// `org.gradle.wrapper.Download` in an earlier draft; against that version
+	// this case is NOT recognised, so this assertion fails if the match is ever
+	// narrowed back to a single class.
+	const wrapperChecksumFailed = `Downloading https://services.gradle.org/distributions/gradle-7.6.4-bin.zip
+Exception in thread "main" java.lang.RuntimeException: Could not verify the checksum of gradle-7.6.4-bin.zip
+	at org.gradle.wrapper.Install.forceFetch(Install.java:120)
+	at org.gradle.wrapper.Install.access$200(Install.java:37)
+Error: gradle build failed: exit status 1
+`
+	if !gradleWrapperCouldNotFetch([]byte(wrapperChecksumFailed)) {
+		t.Error("a wrapper failure raised outside `Download` was NOT recognised.\n\n" +
+			"SYNTHETIC case (see the comment above), so this asserts nothing about a real run -- " +
+			"but it does assert that the predicate is matching the wrapper PACKAGE rather than one " +
+			"class. Narrowed back to `Download`, every other wrapper failure -- a checksum, DNS, TLS, " +
+			"a timeout -- reports as a failure of the test under it, which is cleat#3039 still in place.")
 	}
 }
