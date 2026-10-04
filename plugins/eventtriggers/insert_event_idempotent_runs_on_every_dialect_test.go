@@ -35,6 +35,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestInsertEventIdempotentRunsOnEveryDialect(t *testing.T) {
@@ -80,10 +81,12 @@ func TestInsertEventIdempotentRunsOnEveryDialect(t *testing.T) {
 			// Postgres and fail here for a reason that is not the statement.
 			readConn := be.CrossTenantConn(t, ctx,
 				"cleat#2920: reading ingested_events, which SQL Server filters silently through be.DB")
+			// QueryRowRebound, not Rebind: Rebind is the identity for MySQL
+			// (plugin/query.go:94) and the $N -> ? rewrite is in RebindArgs,
+			// so the portable form would reach MySQL literally (cleat#2259).
 			var n int
-			if err := readConn.QueryRowContext(ctx,
-				plugin.Rebind("SELECT COUNT(*) FROM ingested_events WHERE id = $1", dialect),
-				eventID).Scan(&n); err != nil {
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				"SELECT COUNT(*) FROM ingested_events WHERE id = $1", eventID).Scan(&n); err != nil {
 				t.Fatalf("count ingested_events on %s: %v", be.Name, err)
 			}
 			if n == 0 {
@@ -100,9 +103,8 @@ func TestInsertEventIdempotentRunsOnEveryDialect(t *testing.T) {
 				eventID, tenantID, "cleat2920.test", json.RawMessage(`{"k":"v"}`), nil); err != nil {
 				t.Fatalf("second PublishEvent on %s: %v", be.Name, err)
 			}
-			if err := readConn.QueryRowContext(ctx,
-				plugin.Rebind("SELECT COUNT(*) FROM ingested_events WHERE id = $1", dialect),
-				eventID).Scan(&n); err != nil {
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				"SELECT COUNT(*) FROM ingested_events WHERE id = $1", eventID).Scan(&n); err != nil {
 				t.Fatalf("re-count ingested_events on %s: %v", be.Name, err)
 			}
 			if n != 1 {

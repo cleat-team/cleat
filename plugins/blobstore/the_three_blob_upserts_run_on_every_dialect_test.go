@@ -23,6 +23,12 @@
 // row check on be.DB would find the row on Postgres and nothing on SQL Server,
 // for a reason having nothing to do with the statement. Every read below goes
 // through CrossTenantConn.
+//
+// WHICH ASSERTION WOULD EXPOSE THAT IS NOT UNIFORM, and it is worth knowing
+// before trusting a green: workflow_blob_refs has no tenant column and no
+// policy, so reading it through be.DB works and assertion 1 would pass. Only
+// the blob_index read in assertion 2 is tenant-scoped, so only that one
+// reddens. Measured by cleat-review at review time on PostgreSQL + SQL Server.
 package blobstore
 
 import (
@@ -39,6 +45,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestTheThreeBlobUpsertsRunOnEveryDialect(t *testing.T) {
@@ -82,10 +89,15 @@ func TestTheThreeBlobUpsertsRunOnEveryDialect(t *testing.T) {
 					t.Fatalf("blobPut(%s) on %s: %v", in.Key, be.Name, err)
 				}
 			}
+			// QueryRowRebound, NOT QueryRowContext(ctx, plugin.Rebind(...)):
+			// Rebind is the IDENTITY for MySQL (plugin/query.go:94) and the
+			// $N -> ? rewrite lives in RebindArgs, which it never calls, so
+			// the portable form reaches the server literally and every MySQL
+			// run dies on "Unknown column '$1'" (cleat#2259).
 			count := func(t *testing.T, query string, args ...any) int {
 				t.Helper()
 				var n int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(query, dialect), args...).Scan(&n); err != nil {
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect, query, args...).Scan(&n); err != nil {
 					t.Fatalf("count on %s (%s): %v", be.Name, query, err)
 				}
 				return n

@@ -38,6 +38,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestUpsertQueryRunsOnEveryDialect(t *testing.T) {
@@ -83,9 +84,12 @@ func TestUpsertQueryRunsOnEveryDialect(t *testing.T) {
 
 			readConn := be.CrossTenantConn(t, ctx,
 				"cleat#2920: reading rate_limits, which SQL Server filters silently through be.DB")
+			// QueryRowRebound, not Rebind: Rebind is the IDENTITY for MySQL
+			// (plugin/query.go:94) and the $N -> ? rewrite is in RebindArgs,
+			// so the portable form would reach MySQL literally (cleat#2259).
+			const selRate = `SELECT max_requests, window_seconds FROM rate_limits WHERE tenant_id = $1 AND limit_key = $2`
 			var maxReq, window int
-			if err := readConn.QueryRowContext(ctx,
-				plugin.Rebind(`SELECT max_requests, window_seconds FROM rate_limits WHERE tenant_id = $1 AND limit_key = $2`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect, selRate,
 				tenantID, key).Scan(&maxReq, &window); err != nil {
 				t.Fatalf("read rate_limits on %s: %v -- handlePut reported success (%d) but the row is not there",
 					be.Name, err, http.StatusOK)
@@ -101,8 +105,7 @@ func TestUpsertQueryRunsOnEveryDialect(t *testing.T) {
 			if rec := put(t, 25, 30); rec.Code != http.StatusOK {
 				t.Fatalf("second handlePut on %s: status %d, body %s", be.Name, rec.Code, rec.Body.String())
 			}
-			if err := readConn.QueryRowContext(ctx,
-				plugin.Rebind(`SELECT max_requests, window_seconds FROM rate_limits WHERE tenant_id = $1 AND limit_key = $2`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect, selRate,
 				tenantID, key).Scan(&maxReq, &window); err != nil {
 				t.Fatalf("re-read rate_limits on %s: %v", be.Name, err)
 			}
@@ -110,8 +113,8 @@ func TestUpsertQueryRunsOnEveryDialect(t *testing.T) {
 				t.Errorf("upsertQuery UPDATE branch on %s: row is (%d, %d), want (25, 30)", be.Name, maxReq, window)
 			}
 			var rows int
-			if err := readConn.QueryRowContext(ctx,
-				plugin.Rebind(`SELECT COUNT(*) FROM rate_limits WHERE tenant_id = $1 AND limit_key = $2`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				`SELECT COUNT(*) FROM rate_limits WHERE tenant_id = $1 AND limit_key = $2`,
 				tenantID, key).Scan(&rows); err != nil {
 				t.Fatalf("count rate_limits on %s: %v", be.Name, err)
 			}
