@@ -422,8 +422,14 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
         return nil, fmt.Errorf("fetch failed: %w", err)
     }
     // ...
+    return &ChildResult{}, nil
 }
 ```
+
+> Corrected 2026-10-04 (cleat#3112): the function body ended in `// ...` with no
+> return, so it did not compile as published (`missing return`). Found by the
+> snippet guard compiling every block on this page. The placeholder comment is
+> kept and the return it stood for is supplied.
 
 The heartbeat interval (5 seconds in this example) controls how often the host
 updates progress. On the worker side, stale heartbeats are detected by the
