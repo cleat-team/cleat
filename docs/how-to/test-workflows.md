@@ -23,6 +23,7 @@ func TestMyWorkflow(t *testing.T) {
 
     h := env.H() // returns the HostCalls interface
     // ... run your workflow via h
+    _ = h // the point above is the call, not a use of its result
 }
 ```
 
@@ -237,6 +238,7 @@ if status != "confirmed" {
 env.SetVersion(2)
 err := MyWorkflow(env.H(), `{"order_id":"ord_1"}`)
 // ... assertions ...
+_ = err // the assertions below report on calls, not on this error
 
 env.AssertCalled(t, "new_service", "NewOp")
 env.AssertNotCalled(t, "old_service", "LegacyOp")

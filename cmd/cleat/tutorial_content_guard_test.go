@@ -93,6 +93,24 @@ type tutorialFragment struct {
 	marker string // a substring that identifies the block
 	header string // the function header the document implies for it
 	footer string // what closes it, including any use its locals need
+	// support is a SIBLING Go file in the same package, written beside the
+	// snippet, for a block that is a complete example -- its own package clause,
+	// so nothing may be prepended -- yet still calls code the page assumes the
+	// reader has written. A header cannot serve that: the block's package clause
+	// is already there, and an import the block's own body does not use would make
+	// the page's example fail for a READER, whose workflow lives in another file.
+	// The sibling is the shape Go itself uses for the same relationship, which is
+	// why it is a file rather than a trick: measured on cleat#3112,
+	// test-workflows.md's "Complete example" calls ApprovalWorkflow, which the page
+	// declares nowhere, and the stub that stands in for it needs `cleat` in scope.
+	support string
+}
+
+// tutorialSnippet is one file to compile: the snippet, plus an optional sibling
+// support file in the same package.
+type tutorialSnippet struct {
+	src     string
+	support string
 }
 
 type tutorialDoc struct {
@@ -140,12 +158,18 @@ type tutorialDoc struct {
 // (perBlock) rather than joined, each block carrying its own package clause and
 // import set.
 //
-// TWO PAGES ARE COVERED HERE, use-plugins.md and use-secrets.md (9 blocks).
-// common-patterns.md (24 blocks) and test-workflows.md (17) are NOT: their
-// blocks reference page-local types (PipelineInput, ChildInput) and the reader's
-// own functions (ApprovalWorkflow, MyWorkflow), so covering them is a stub table
-// of its own and is filed as a follow-up that names this change as its
-// dependency. The LINK half below still covers docs/tutorials/ only.
+// THREE PAGES ARE COVERED HERE: use-plugins.md and use-secrets.md (9 blocks)
+// since cleat#3097, and test-workflows.md (17) since cleat#3112. That last page
+// needed a second kind of scaffolding: its blocks call the READER's own workflow
+// (ApprovalWorkflow, MyWorkflow) and its "Complete example" carries its own
+// package clause, so a fragment header cannot wrap it -- an import the block's
+// own body does not use would fail the page's example for a reader. Those blocks
+// take a SIBLING support file instead; see tutorialFragment.support.
+//
+// common-patterns.md (24 blocks) is NOT yet covered: its blocks reference
+// page-local types (PipelineInput, ChildInput, OrderItem) and page-local helpers
+// (extractID, processOrderSmall), which is a stub table of its own. The LINK half
+// below still covers docs/tutorials/ only.
 var tutorialDocs = []tutorialDoc{
 	{
 		path: "docs/tutorials/quick-start.md",
@@ -279,6 +303,115 @@ var tutorialDocs = []tutorialDoc{
 			},
 		},
 	},
+	{
+		// cleat#3112. A collection of test fragments: every block but the two
+		// complete examples needs a package, an import set, a function to live in
+		// and stubs for the workflow entry points the page names but does not
+		// define.
+		//
+		// THE STUBS COME FROM THE PAGE, NOT FROM ME. `MyWorkflow` and
+		// `ApprovalWorkflow` are declared nowhere on the page, and its own usage
+		// fixes their shape -- `err := ApprovalWorkflow(h, `{"amount": 5000}`)` with
+		// a single error return, and the prose above the first snippet states
+		// `func MyWorkflow(h cleat.HostCalls, input string) error`. A stub shaped
+		// `(string, error)` would not compile against the page as written, which is
+		// the point: the page is the only thing that says which.
+		path:     "docs/how-to/test-workflows.md",
+		perBlock: true,
+		fragments: []tutorialFragment{
+			{
+				// A bare call and an assertion: needs a package, a function, and the
+				// workflow the page's prose defines.
+				marker: "err := MyWorkflow(env.H(), `{\"key\": \"value\"}`)",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc MyWorkflow(h cleat.HostCalls, input string) error { return nil }\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "env.OnCall(\"payments\", \"Charge\", nil).Return(`{\"status\":\"ok\"",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "// Match by predicate.",
+				header: "package myworkflow_test\n\nimport (\n\t\"strings\"\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "env.OnCall(\"payments\", \"Charge\", nil).ReturnJSON(",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "env.OnPluginCall(\"llm\", \"chat\").Return(",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "func TestApprovalWorkflow(t *testing.T) {",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc ApprovalWorkflow(h cleat.HostCalls, input string) error { return nil }",
+			},
+			{
+				marker: "func TestApprovalTimeout(t *testing.T) {",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\t\"time\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc ApprovalWorkflow(h cleat.HostCalls, input string) error { return nil }",
+			},
+			{
+				marker: "func TestPollingWorkflow(t *testing.T) {",
+				header: "package myworkflow_test\n\nimport (\n\t\"strings\"\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc PollForDelivery(h cleat.HostCalls, input string) error { return nil }",
+			},
+			{
+				marker: "env.SetCancelled(\"manual override\")",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "env.AssertCalled(t, \"payments\", \"Charge\")",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "history := env.CallHistory()",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				// `err := MyWorkflow(env.H(), \`{"order_id":"ord_1"}\`)` opens this
+				// block, the SetVersion block AND the replay block, so the marker is
+				// the QueryState line -- the only text all three do not share.
+				marker: "status, ok := env.QueryState(",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc MyWorkflow(h cleat.HostCalls, input string) error { return nil }\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "env.SetVersion(2)",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc MyWorkflow(h cleat.HostCalls, input string) error { return nil }\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "env.AssertContinued(t,",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc _snippet(t *testing.T) {\n\tenv := cleattest.NewTestEnv()",
+				footer: "}",
+			},
+			{
+				marker: "func TestReplayWorkflow(t *testing.T) {",
+				header: "package myworkflow_test\n\nimport (\n\t\"testing\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n\t\"github.com/cleat-team/cleat/cleat/cleattest\"\n)\n\nfunc MyWorkflow(h cleat.HostCalls, input string) error { return nil }",
+			},
+			{
+				// The page's "Complete example: approval workflow test". It carries
+				// its OWN package clause, so nothing may be prepended -- and it calls
+				// ApprovalWorkflow, which the page declares nowhere and which fixes
+				// its own shape (`err := ApprovalWorkflow(h, ...)`, single error
+				// return). So the workflow goes in a SIBLING file: the block keeps the
+				// page's exact text and import set, and the stub is a second file in
+				// the package, which is what a reader has anyway -- their workflow
+				// lives beside their test. An empty header is the whole point: the
+				// block supplies its own package and imports, and adding `cleat` to
+				// THEM would make the page's example fail for a reader, whose own
+				// workflow file is where that import belongs.
+				marker:  "func TestApprovalWorkflow_Rejected(t *testing.T) {",
+				support: "package myworkflow_test\n\nimport \"github.com/cleat-team/cleat/cleat\"\n\nfunc ApprovalWorkflow(h cleat.HostCalls, input string) error { return nil }",
+			},
+		},
+	},
 }
 
 // excludedDocs are tutorials that do NOT compile today, each with the error that
@@ -361,10 +494,10 @@ var packageClauseRe = regexp.MustCompile(`(?m)^package `)
 
 // snippetFiles returns the files to compile for one document, with `override`
 // substituted for the block its marker identifies when `override` is non-empty.
-func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []string {
+func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []tutorialSnippet {
 	t.Helper()
 	if !doc.perBlock {
-		return []string{assemble(t, doc, markdown, override)}
+		return []tutorialSnippet{{src: assemble(t, doc, markdown, override)}}
 	}
 	blocks := goBlocks(t, markdown)
 	// EVERY FRAGMENT MUST MATCH EXACTLY ONE BLOCK, asserted here rather than left to
@@ -400,7 +533,7 @@ func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []st
 				doc.path, marker, n)
 		}
 	}
-	var out []string
+	var out []tutorialSnippet
 	for i, b := range blocks {
 		text := b
 		if override != "" && doc.knownBroken != nil && strings.Contains(b, doc.knownBroken.marker) {
@@ -408,9 +541,9 @@ func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []st
 		}
 		switch frag := matchingFragment(doc, text); {
 		case frag != nil:
-			out = append(out, frag.header+"\n"+text+frag.footer)
+			out = append(out, tutorialSnippet{src: frag.header + "\n" + text + frag.footer, support: frag.support})
 		case packageClauseRe.MatchString(text):
-			out = append(out, text) // a complete example: nothing to add
+			out = append(out, tutorialSnippet{src: text}) // a complete example: nothing to add
 		default:
 			t.Fatalf("%s block %d has neither a package clause nor a fragment stub, so it "+
 				"could never compile -- add a tutorialFragment for it rather than letting the "+
@@ -427,7 +560,7 @@ func snippetFiles(t *testing.T, doc tutorialDoc, markdown, override string) []st
 // vetSnippet writes an assembled file into a scratch module that resolves the
 // SDK from the PUBLISHED release -- what a reader following the tutorial gets --
 // and returns `go vet`'s combined output.
-func vetSnippet(t *testing.T, src string) string {
+func vetSnippet(t *testing.T, src, support string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module tutorial_snippet\n\ngo 1.27.0\n"), 0o644); err != nil {
@@ -435,6 +568,16 @@ func vetSnippet(t *testing.T, src string) string {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "snippet.go"), []byte(src), 0o644); err != nil {
 		t.Fatalf("write snippet.go: %v", err)
+	}
+	// A sibling file for a block that is a complete example yet consumes code the
+	// page assumes the reader has written -- see tutorialFragment.support. It is a
+	// separate file rather than more text on the snippet because the snippet has
+	// its own package clause and its own import set, and neither may be edited
+	// without changing what the page shows.
+	if support != "" {
+		if err := os.WriteFile(filepath.Join(dir, "support.go"), []byte(support), 0o644); err != nil {
+			t.Fatalf("write support.go: %v", err)
+		}
 	}
 	// Resolve the SDK the way a reader following the tutorial does: the
 	// PUBLISHED release, from the module proxy -- not this checkout.
@@ -474,8 +617,8 @@ func TestTutorialGoSnippetsCompile(t *testing.T) {
 			}
 			markdown := string(raw)
 
-			for _, src := range snippetFiles(t, doc, markdown, "") {
-				if out := vetSnippet(t, src); out != "" {
+			for _, snip := range snippetFiles(t, doc, markdown, "") {
+				if out := vetSnippet(t, snip.src, snip.support); out != "" {
 					t.Errorf("a Go snippet in %s does not type-check, so a reader copying it gets a build failure:\n%s", doc.path, out)
 				}
 			}
@@ -489,10 +632,10 @@ func TestTutorialGoSnippetsCompile(t *testing.T) {
 			// its own failure: a marker that matched no block means the negative
 			// control was never exercised, and an unexercised control reads
 			// exactly like a clean run.
-			var broken string
-			for _, src := range snippetFiles(t, doc, markdown, doc.brokenText) {
-				if strings.Contains(src, doc.brokenText) {
-					broken = src
+			var broken, brokenSupport string
+			for _, snip := range snippetFiles(t, doc, markdown, doc.brokenText) {
+				if strings.Contains(snip.src, doc.brokenText) {
+					broken, brokenSupport = snip.src, snip.support
 				}
 			}
 			if broken == "" {
@@ -500,7 +643,7 @@ func TestTutorialGoSnippetsCompile(t *testing.T) {
 					"matched no block, so this guard's negative control measured nothing.",
 					doc.path, doc.knownBroken.marker)
 			}
-			out := vetSnippet(t, broken)
+			out := vetSnippet(t, broken, brokenSupport)
 			if out == "" {
 				t.Errorf("the known-positive in %s compiled. This guard cannot report a failure at all, "+
 					"so its pass above is not evidence.", doc.path)
@@ -603,7 +746,7 @@ func TestExcludedTutorialsStillFailForTheRecordedReason(t *testing.T) {
 				t.Fatalf("%s has %d fenced ```go block(s) and the exclusion names block %d -- the file has "+
 					"moved on, so this check is looking in the wrong place", doc.path, len(blocks), doc.whole)
 			}
-			out := vetSnippet(t, blocks[doc.whole])
+			out := vetSnippet(t, blocks[doc.whole], "")
 			if out == "" {
 				t.Errorf("%s compiles now. Move it into tutorialDocs and delete it from excludedDocs: its "+
 					"exclusion (%s) has lapsed, and leaving the entry here means this guard silently covers "+
