@@ -573,8 +573,14 @@ func TestSendSignalAndWaitTimeout(t *testing.T) {
 		errCh <- err
 	}()
 
-	// Give the goroutine time to reach the select and create the sleep record
-	// before advancing time.
+	// Deliberately NOT a WaitForParked site. SendSignalAndWait parks on
+	// neither a sleep record nor a signal waiter -- measured on cleat#3091,
+	// where WaitForParked here failed with "no goroutine parked on a durable
+	// sleep or AwaitSignals within 5s". Its wait is awaitPromiseImpl's channel
+	// backed by a real time.Timer, so this sleep is not a park race and the
+	// comment that stood here ("create the sleep record") was wrong about the
+	// mechanism. Left as it is: what this sleep actually holds up has not been
+	// measured, and changing it is not this change's subject.
 	time.Sleep(50 * time.Millisecond)
 	env.AdvanceTime(20 * time.Millisecond)
 
@@ -671,8 +677,9 @@ func TestAwaitConditionTimeout(t *testing.T) {
 		resultCh <- met
 	}()
 
-	// Give the goroutine time to enter durableSleepImpl.
-	time.Sleep(20 * time.Millisecond)
+	// AwaitCondition parks in durableSleepImpl's poll interval, so the sleep
+	// record is what the advance below is supposed to wake.
+	env.WaitForParked(t)
 
 	// Advance time past the deadline.
 	env.AdvanceTime(200 * time.Millisecond)
