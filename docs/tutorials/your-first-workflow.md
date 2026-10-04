@@ -494,7 +494,7 @@ s.AddStep("reserve_inventory",
 s.AddStep("charge_payment",
     func(h cleat.HostCalls) (string, error) {
         var err error
-        charge, err = processPayment(h, userID, totalCents)
+        charge, err = processPayment(h, userID, reservation.TotalCents)
         return "", err
     },
     func(h cleat.HostCalls) error {
@@ -535,10 +535,12 @@ type chargeResponse struct {
 }
 
 var resp chargeResponse
-err := h.DurableCallTyped("payments", "Charge",
-    chargeRequest{UserID: userID, AmountCents: totalCents},
+if err := h.DurableCallTyped("payments", "Charge",
+    chargeRequest{UserID: userID, AmountCents: amountCents},
     &resp,
-)
+); err != nil {
+    return Charge{}, err
+}
 ```
 
 This eliminates magic strings and reduces boilerplate. For a fully typed

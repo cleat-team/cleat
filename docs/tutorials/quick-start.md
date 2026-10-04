@@ -535,5 +535,5 @@ behind.
   approval steps to your workflows
 - [Common patterns](../how-to/common-patterns.md) -- Saga, fan-out, child
   workflows, retry policies
-- [Deploying to production](../guide/deploying-to-production.md) --
+- [Deploying to production](../operations/deploying-to-production.md) --
   configuration, monitoring, scaling
