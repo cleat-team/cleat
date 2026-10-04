@@ -343,6 +343,10 @@ Wrote workflow.wasm/my-workflow.wasm ...
 > cleat#2692; until then, `grep '^name:' my-workflow/cleat.yaml` is silent on
 > the older form, and the build's own `Wrote <path>` line names the artifact
 > either way. Use what that line printed in step 6.
+>
+> Filed as **cleat#3065** -- that is where to check whether this still applies
+> to what you installed, since the durable fix is a release and this note is
+> what a reader has until one carries it.
 
 You should now see a `workflow.wasm` directory containing a `my-workflow.wasm`
 file:
