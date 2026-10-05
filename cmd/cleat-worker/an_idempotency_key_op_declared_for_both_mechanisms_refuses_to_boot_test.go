@@ -65,7 +65,7 @@ func TestWorkerRefusesToBootWithAMisconfiguredIdempotencyKeyOp(t *testing.T) {
 			"--driver=postgres",
 			"--db=" + dsn,
 			"--migrate-db=" + ownerDSN,
-			fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t)),
+			"--api-addr=127.0.0.1:0",
 		}
 	}
 

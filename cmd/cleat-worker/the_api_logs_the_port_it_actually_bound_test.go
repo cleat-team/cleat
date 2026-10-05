@@ -31,7 +31,6 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -151,23 +150,6 @@ func startAPIWorker(t *testing.T, bin string, env []string, dsn, ownerDSN, apiAd
 	stop()
 	t.Fatalf(`no "HTTP API listening" line within 90s:`+"\n%s", out.String())
 	return "", stop
-}
-
-// boundAPIAddr returns the addr field of the first "HTTP API listening" JSON
-// log line in s, or "" if no such line has been written yet. The worker logs
-// JSON on stderr (slog.NewJSONHandler), so a line that does not parse, or whose
-// msg is something else, is skipped rather than guessed at.
-func boundAPIAddr(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		var rec struct {
-			Msg  string `json:"msg"`
-			Addr string `json:"addr"`
-		}
-		if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "HTTP API listening" {
-			return rec.Addr
-		}
-	}
-	return ""
 }
 
 // getStatus GETs url and returns the status code, or 0 if the request failed.

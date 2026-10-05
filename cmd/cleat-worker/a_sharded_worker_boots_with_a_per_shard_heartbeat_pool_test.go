@@ -51,7 +51,7 @@ func TestAShardedWorkerBootsWithAPerShardHeartbeatPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"--driver=postgres", "--db=" + dsn, "--migrate-db=" + ownerDSN, "--shards-file=" + sf,
-		fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t))}
+		"--api-addr=127.0.0.1:0"}
 	code, out := runBootSubprocess(t, args, "")
 	if code != -1 {
 		t.Fatalf("sharded worker exited %d instead of being killed while serving:\n%s", code, out)

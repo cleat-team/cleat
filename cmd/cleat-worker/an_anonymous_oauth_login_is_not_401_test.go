@@ -33,7 +33,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -114,8 +113,7 @@ func TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth(t *testing.T) {
 		t.Fatalf("seed oauth_config: %v", err)
 	}
 
-	port := freePort(t)
-	args := []string{"--driver=postgres", "--db=" + dsn, "--migrate-db=" + ownerDSN, fmt.Sprintf("--api-addr=127.0.0.1:%d", port)}
+	args := []string{"--driver=postgres", "--db=" + dsn, "--migrate-db=" + ownerDSN, "--api-addr=127.0.0.1:0"}
 	cmd := exec.Command(bin, args...)
 	// NO --require-auth flag: the default is true, and this whole test is
 	// about what the DEFAULT does, not an opt-in flag.
@@ -132,7 +130,7 @@ func TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth(t *testing.T) {
 		<-exited
 	}()
 
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	var base string
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -146,6 +144,15 @@ func TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth(t *testing.T) {
 		case <-exited:
 			t.Fatalf("worker exited before becoming healthy:\n%s", out.String())
 		default:
+		}
+		// Learn the port from the worker's own "HTTP API listening" line rather
+		// than pre-choosing one with freePort and racing for it (cleat#3138).
+		if a := boundAPIAddr(out.String()); a != "" {
+			base = "http://" + a
+		}
+		if base == "" {
+			time.Sleep(300 * time.Millisecond)
+			continue
 		}
 		resp, err := client.Get(base + "/healthz")
 		if err == nil {

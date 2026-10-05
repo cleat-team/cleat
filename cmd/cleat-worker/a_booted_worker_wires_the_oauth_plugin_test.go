@@ -252,8 +252,7 @@ func TestABootedWorkerSweepsAnAbandonedLogin(t *testing.T) {
 		return nil
 	}
 
-	args := []string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN,
-		fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t))}
+	args := []string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN}
 	var key string
 	var probeErr error
 	ok, out := hostMatchServes(t, bin, args, &key, func(_, _ string) { probeErr = observe() })
@@ -403,8 +402,7 @@ func TestABootedWorkerDisablesAnExpiredOAuthMintedKey(t *testing.T) {
 		return nil
 	}
 
-	args := []string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN,
-		fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t))}
+	args := []string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN}
 	var key string
 	var probeErr error
 	ok, out := hostMatchServes(t, bin, args, &key, func(_, _ string) { probeErr = observe() })
@@ -582,7 +580,7 @@ func TestABootedWorkerBindsLoginToTheHost(t *testing.T) {
 	}
 
 	args := []string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN,
-		"--require-host-match", fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t))}
+		"--require-host-match"}
 	var key string
 	var probeErr error
 	ok, out := hostMatchServes(t, bin, args, &key, func(b, _ string) { probeErr = observe(b) })
