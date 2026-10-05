@@ -22,14 +22,10 @@ const (
 	ExposureAuth ExposureClass = "auth"
 
 	// ExposurePublic is reachable WITHOUT authentication, and only for a tenant an
-	// operator has opted in. A deploy that asks for it without that opt-in is
-	// refused rather than silently downgraded.
-	//
-	// NOTHING MAY SET THIS YET: the per-tenant opt-in it depends on does not exist
-	// (it is the last item of cleat#1986), so the deploy path refuses this class
-	// with a message naming the missing policy. That is deliberate rather than an
-	// oversight -- storing 'public' with no opt-in to check would be a definition
-	// that is one enforcement slice away from being world-readable.
+	// operator has opted in (cleatctl allow-public-exposure). A deploy whose
+	// resolved class is public and whose tenant carries no such grant is
+	// refused rather than silently downgraded -- see ResolveDeployableExposure
+	// and engine.TenantExposurePolicyReader, which is the opt-in read side.
 	ExposurePublic ExposureClass = "public"
 
 	// ExposureInternal is not reachable from the external HTTP surface at all, for
@@ -162,38 +158,76 @@ func ResolveExposure(declared, requested ExposureClass) (ExposureClass, error) {
 	return requested, nil
 }
 
-// ErrExposurePublicUnavailable reports a deploy whose resolved class is
-// `public`, which no deploy may store until the per-tenant opt-in exists.
-type ErrExposurePublicUnavailable struct{}
+// ErrExposurePublicNotOptedIn reports a deploy whose resolved class is
+// `public`, for a tenant the operator has not opted in.
+//
+// Named and typed separately from ErrExposureLoosened for the same reason
+// TestResolveDeployableExposureKeepsTheTwoRefusalsApart gives: the two sends
+// a caller to different places. A loosening means the deploy request
+// contradicts the artifact's own declaration; this means the artifact and
+// the request agree, and the OPERATOR has not granted this tenant the class
+// either of them is asking for.
+//
+// Called ErrExposurePublicUnavailable until cleat#1986's enforcement slice.
+// That name was accurate while the per-tenant opt-in did not exist at all --
+// every deploy was refused regardless of any tenant's state -- and became
+// wrong the moment this file started consulting one: "unavailable" reads as
+// a property of the feature, and it is now a property of the TENANT.
+type ErrExposurePublicNotOptedIn struct {
+	// TenantID is empty when the caller could not resolve one -- see
+	// ResolveDeployableExposure's doc comment on why that still refuses
+	// rather than defaulting to permissive.
+	TenantID string
+}
 
-func (e *ErrExposurePublicUnavailable) Error() string {
-	return "exposure class public is not available yet: it is only legal for a tenant an operator has " +
-		"opted in, and that per-tenant opt-in is not implemented (cleat#1986)"
+func (e *ErrExposurePublicNotOptedIn) Error() string {
+	who := "this tenant"
+	if e.TenantID != "" {
+		who = "tenant " + e.TenantID
+	}
+	return "exposure class public is refused: " + who + " has no operator opt-in for it " +
+		"(grant one with `cleatctl allow-public-exposure <tenant-id>`); a deploy may not store public until then (cleat#1986)"
 }
 
 // ResolveDeployableExposure is ResolveExposure plus the `public` gate, and it is
 // what every DEPLOY path should call.
 //
 // The gate is here rather than at each call site because it is policy, not
-// plumbing: when the per-tenant opt-in lands, the condition to relax is this
-// one, and a copy of it per deploy path is a copy that will be found and missed
-// in turn. Three paths store a definition -- `cleatctl deploy workflow`, the
+// plumbing: three paths store a definition -- `cleatctl deploy workflow`, the
 // worker's upload route, and `cmd/deploy-workflow` -- and all three must agree
 // about which classes may be stored.
 //
-// `public` is refused rather than stored. Storing it would create a definition
-// that becomes world-readable the moment enforcement ships, which is a
-// time bomb rather than a permissive default, and it is refused as the RESOLVED
-// class so that an artifact whose SOURCE declares it is caught too. That is
-// wider than slice 2a, which checked only the `--exposure` flag: `//cleat:exposure
-// public` is legal to BUILD, because the build knows no tenant.
-func ResolveDeployableExposure(declared, requested ExposureClass) (ExposureClass, error) {
+// tenantAllowsPublic is the per-tenant operator opt-in
+// (engine.TenantExposurePolicyReader.AllowsPublicExposure), resolved by the
+// CALLER for the tenant this deploy is for -- this function takes a bool
+// rather than a reader and a tenant id so it stays a pure function, testable
+// without a database. A caller that cannot determine the tenant, or whose
+// store does not implement the reader at all (MySQL, which is single-tenant
+// by construction and has no cross-tenant operator policy to consult), MUST
+// pass false: an unresolved policy is not a granted one, and the fail-closed
+// direction is the one cleat#1986's owner decision requires ("refused at
+// deploy otherwise"). See TenantExposurePolicyReader's own doc comment,
+// which states this same contract from the read side.
+//
+// `public` is refused rather than stored when tenantAllowsPublic is false.
+// Storing it anyway would create a definition that becomes world-readable
+// the moment enforcement ships elsewhere, which is a time bomb rather than a
+// permissive default, and it is refused as the RESOLVED class so that an
+// artifact whose SOURCE declares it is caught too. That is wider than slice
+// 2a, which checked only the `--exposure` flag: `//cleat:exposure public` is
+// legal to BUILD, because the build knows no tenant.
+//
+// tenantID is carried into the refusal message only -- every current caller
+// has one in hand (two hardcode the default tenant, the worker's upload
+// route reads it from the request) -- so a reader of the error sees which
+// tenant needs the grant without the caller formatting it in.
+func ResolveDeployableExposure(declared, requested ExposureClass, tenantAllowsPublic bool, tenantID string) (ExposureClass, error) {
 	resolved, err := ResolveExposure(declared, requested)
 	if err != nil {
 		return "", err
 	}
-	if resolved == ExposurePublic {
-		return "", &ErrExposurePublicUnavailable{}
+	if resolved == ExposurePublic && !tenantAllowsPublic {
+		return "", &ErrExposurePublicNotOptedIn{TenantID: tenantID}
 	}
 	return resolved, nil
 }

@@ -161,10 +161,26 @@ func main() {
 			}
 		}
 	}
+	// The per-tenant operator opt-in (cleat#1986's enforcement slice). This
+	// binary always deploys for engine.DefaultTenantUUID -- every OpenStore
+	// call above passes that literal -- so that is the tenant whose grant is
+	// checked. A store that does not implement the reader (MySQL; see
+	// TenantExposurePolicyReader's own doc comment) is treated as "not opted
+	// in", never as "nothing to check".
+	tenantAllowsPublic := false
+	if reader, ok := store.(engine.TenantExposurePolicyReader); ok {
+		allowed, aerr := reader.AllowsPublicExposure(ctx, engine.DefaultTenantUUID)
+		if aerr != nil {
+			fmt.Fprintf(os.Stderr, "error: checking public exposure opt-in for tenant %s: %v\n", engine.DefaultTenantUUID, aerr)
+			os.Exit(1)
+		}
+		tenantAllowsPublic = allowed
+	}
+
 	// requested is "" -- no manifest opinion -- so the declaration stands, and
 	// `auth` when the artifact declares nothing. A malformed stamp in the file is
 	// refused rather than read as an absence; see engine.ResolveExposure.
-	exposure, err := engine.ResolveDeployableExposure(declared, "")
+	exposure, err := engine.ResolveDeployableExposure(declared, "", tenantAllowsPublic, engine.DefaultTenantUUID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

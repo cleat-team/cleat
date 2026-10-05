@@ -77,7 +77,7 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 	// read as a request to LOOSEN and was refused (or, before this rule, was
 	// silently obeyed).
 	exposureFlag := fs.String("exposure", "",
-		"exposure class for this version: auth, internal, or public (not available until the per-tenant opt-in exists). "+
+		"exposure class for this version: auth, internal, or public (public requires an operator opt-in -- cleatctl allow-public-exposure). "+
 			"Omitted means no opinion: the class the artifact declares in its own source, or auth if it declares none. "+
 			"May tighten that class but never loosen it (cleat#1986)")
 	positional, err := parseFlagsAnywhere(fs, args)
@@ -175,12 +175,31 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		declared = schemaDeclared
 	}
 
+	// The per-tenant operator opt-in (cleat#1986's enforcement slice).
+	// deployWorkflow always deploys for defaultTenantID -- main.go opens the
+	// store for that tenant once, for every subcommand -- so that is the
+	// tenant whose grant is checked. A store that does not implement the
+	// reader (there is none on this path today; the type assertion exists so
+	// this compiles unchanged if a future WorkflowStore implementation does
+	// not) is treated as "not opted in", never as "nothing to check" -- see
+	// TenantExposurePolicyReader's own doc comment for why that is the only
+	// safe default.
+	tenantAllowsPublic := false
+	if reader, ok := store.(engine.TenantExposurePolicyReader); ok {
+		allowed, aerr := reader.AllowsPublicExposure(ctx, defaultTenantID)
+		if aerr != nil {
+			fmt.Fprintf(os.Stderr, "error: checking public exposure opt-in for tenant %s: %v\n", defaultTenantID, aerr)
+			osExit(1)
+		}
+		tenantAllowsPublic = allowed
+	}
+
 	// ResolveDeployableExposure is the tighten-only rule AND the `public` gate,
 	// in one place so the three deploy paths cannot drift apart about which
 	// classes may be stored. See its doc comment; the gate is deliberately
 	// checked against the RESOLVED class, so an artifact whose source declares
 	// `public` is caught here as well as a flag that asks for it.
-	exposure, err := engine.ResolveDeployableExposure(declared, requested)
+	exposure, err := engine.ResolveDeployableExposure(declared, requested, tenantAllowsPublic, defaultTenantID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
