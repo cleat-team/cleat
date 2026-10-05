@@ -2,6 +2,7 @@ package cleat
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -136,6 +137,66 @@ func TestARunThatIgnoresTheResultStillPublishes(t *testing.T) {
 	}
 }
 
+// cleat#2967. current_step self-heals across a second saga on the same
+// HostCalls -- the next run overwrites it on its own first step -- but
+// failed_step and unwind_failed had nothing that overwrote them, so a saga
+// that ran and succeeded AFTER an earlier failed one published status=done
+// beside the FIRST saga's failed_step and unwind_failed. A poller reading
+// that combination got a confident wrong answer.
+//
+// lastValue, not contains: a real query-state store overwrites a key on
+// every SetQueryState, so what a poller sees after both runs is the LAST
+// published value for each key, not whether some value was ever published --
+// and "failed_step=dispatch" is in the log from the first run regardless of
+// whether the bug this test exists for is fixed.
+func TestASagaThatSucceedsAfterAFailedOneClearsTheEarlierFailureKeys(t *testing.T) {
+	h, published := collectQueryState()
+
+	failing := NewSaga()
+	failing.AddStep("reserve", func(HostCalls) (string, error) { return "", nil },
+		func(HostCalls) error { return nil })
+	failing.AddStep("charge", func(HostCalls) (string, error) { return "", nil },
+		// Compensate FAILS, so unwind_failed is non-empty -- the exact shape
+		// that must be cleared by the second, successful saga below.
+		func(HostCalls) error { return errors.New("refund declined") })
+	failing.AddStep("dispatch", func(HostCalls) (string, error) { return "", errors.New("no driver") }, nil)
+
+	if _, err := failing.RunWithResult(h); err == nil {
+		t.Fatal("the dispatch step failed, so RunWithResult should have returned an error")
+	}
+	// PRECONDITION: the first saga must actually have published the stale
+	// values the second half of this test checks are cleared -- a seed that
+	// silently failed would make the assertions below pass for no reason.
+	if last := lastValue(*published, "failed_step"); last != "failed_step=dispatch" {
+		t.Fatalf("PRECONDITION FAILED: last published failed_step is %q, want \"failed_step=dispatch\"", last)
+	}
+	if last := lastValue(*published, "unwind_failed"); last != "unwind_failed=charge" {
+		t.Fatalf("PRECONDITION FAILED: last published unwind_failed is %q, want \"unwind_failed=charge\"", last)
+	}
+
+	succeeding := NewSaga()
+	succeeding.AddStep("ship", func(HostCalls) (string, error) { return "", nil }, nil)
+
+	if _, err := succeeding.RunWithResult(h); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if last := lastValue(*published, "status"); last != "status=done" {
+		t.Errorf("last published status is %q, want \"status=done\"", last)
+	}
+	if last := lastValue(*published, "failed_step"); last != "failed_step=" {
+		t.Errorf("last published failed_step is %q, want it cleared to \"failed_step=\" -- "+
+			"a poller would otherwise see the FIRST saga's failed step beside a status that says "+
+			"the run is fine", last)
+	}
+	if last := lastValue(*published, "unwind_failed"); last != "unwind_failed=" {
+		t.Errorf("last published unwind_failed is %q, want it cleared to \"unwind_failed=\"", last)
+	}
+	if last := lastValue(*published, "unwind_failed_count"); last != "unwind_failed_count=0" {
+		t.Errorf("last published unwind_failed_count is %q, want \"unwind_failed_count=0\"", last)
+	}
+}
+
 // contains is an EXACT match, deliberately. Every published pair this file
 // asserts on is published in full, so a prefix or substring match would be
 // looser than the claim being made -- "failed_step=dispatch_extra" would satisfy
@@ -148,4 +209,19 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// lastValue returns the last "key=value" entry in haystack for the given key,
+// or "" if the key was never published -- the last-write-wins read a real
+// query-state store would give a poller, as opposed to contains' "was this
+// ever published" question.
+func lastValue(haystack []string, key string) string {
+	prefix := key + "="
+	var last string
+	for _, s := range haystack {
+		if strings.HasPrefix(s, prefix) {
+			last = s
+		}
+	}
+	return last
 }
