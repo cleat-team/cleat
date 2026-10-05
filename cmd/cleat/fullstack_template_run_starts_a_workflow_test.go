@@ -97,21 +97,24 @@ import (
 // WHAT IT DOES NOT DO: close the cross-allocator race. Releasing before the bind
 // leaves a gap on every platform, and no local hold can close it for a wildcard
 // consumer on Linux. What closes it is having the consumer allocate the port and
-// report it back, and three sites now do that -- none of them needing this helper:
+// report it back, and every real site now does that -- none of them needing this
+// helper any more:
 //
 //   - the fullstack template test, via compose's own random host port (cleat#3131);
 //   - both quick-start tests, via startWorkerWithDiscoveredPort: the worker binds
-//     `127.0.0.1:0` and the test reads `ln.Addr()` back from its log.
+//     `127.0.0.1:0` and the test reads `ln.Addr()` back from its log;
+//   - driveTheProxy, via discoverProxyAddr: the scratch proxy binds `127.0.0.1:0`
+//     and the test reads its bound address back from its own log.
 //
-// The worker half is what made the second possible. Before cleat#3136 (#3137) it
-// logged the CONFIGURED `--api-addr`, so `":0"` reported `":0"` and no caller could
-// read back the bound port -- a REPORTING gap, not an absent consumer, which is what
-// this comment said until cleat-review read the source.
+// The worker and proxy halves both needed a REPORTING fix first, not an absent
+// consumer. Before cleat#3136 (#3137) the worker logged its CONFIGURED `--api-addr`,
+// so `":0"` reported `":0"` and no caller could read back the bound port -- which is
+// what this comment said until cleat-review read the source. The proxy carried the
+// identical gap -- `-listen 127.0.0.1:$(CLEAT_WEB_PORT)`, handed a number and
+// reporting it nowhere -- until this change (cleat#3131).
 //
-// Two sites still need it: TestHoldTCPPortKeepsThePortReservedUntilReleased, which
-// exercises the helper itself, and driveTheProxy, which binds
-// `-listen 127.0.0.1:$(CLEAT_WEB_PORT)` -- handed a number and reporting it nowhere,
-// the same shape the worker had until cleat#3137.
+// One site still needs it: TestHoldTCPPortKeepsThePortReservedUntilReleased, which
+// exercises the helper itself.
 func holdTCPPort(t *testing.T) (port int, release func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -362,16 +365,31 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	driveTheProxy(t, proj, env, keyMatch[1])
 }
 
+// discoverProxyAddr reads the scratch proxy's own "proxy listening on" log line to learn the
+// address it actually bound -- the same shape startWorkerWithDiscoveredPort reads the worker's,
+// and for the same reason: with CLEAT_WEB_PORT=0 the kernel allocates the port and the proxy
+// binds it as one act, closing the cross-allocator gap a pre-chosen, held port cannot (cleat#3131).
+// It cannot wait on waitForHealthzAt first, because that needs the address to poll.
+func discoverProxyAddr(t *testing.T, log *lockedBuffer, within time.Duration) string {
+	t.Helper()
+	addrRe := regexp.MustCompile(`proxy listening on (\S+)`)
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if m := addrRe.FindStringSubmatch(log.String()); m != nil {
+			return m[1]
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("the proxy never logged its bound address within %v -- that is a startup failure, "+
+		"not a slow start; its log:\n%s", within, log.String())
+	return ""
+}
+
 // driveTheProxy runs the scaffold's own `make web` and drives it the way index.html does.
 func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
 	t.Helper()
-	// Released before Start, per holdTCPPort's contract -- the same shape as every other site now.
-	// It is worth naming why it must be BEFORE and not merely soon after: the proxy binds
-	// `-listen 127.0.0.1:$(CLEAT_WEB_PORT)` (templates/fullstack/Makefile), the SAME specific
-	// address the hold occupies, and a held port refuses a bind on its own address on BOTH
-	// platforms. So a hold that outlived `cmd.Start()` would make `make web` fail to start.
-	webPort, releaseWeb := holdTCPPort(t)
-	webEnv := append(append([]string{}, env...), fmt.Sprintf("CLEAT_WEB_PORT=%d", webPort))
+	// CLEAT_WEB_PORT=0, discovered via discoverProxyAddr below -- see its doc comment.
+	webEnv := append(append([]string{}, env...), "CLEAT_WEB_PORT=0")
 
 	// First, no key: it must refuse to start, not start and answer 401 to everything.
 	noKey := exec.Command("make", "web")
@@ -387,13 +405,13 @@ func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
 	cmd.Env = webEnv
 	cmd.Stdout, cmd.Stderr = &proxyLog, &proxyLog
 	inOwnProcessGroup(cmd)
-	releaseWeb() // before Start, because the proxy binds this exact address; see the note above
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("make web: %v", err)
 	}
 	t.Cleanup(func() { killProcessGroup(cmd) })
-	web := fmt.Sprintf("http://127.0.0.1:%d", webPort)
-	waitForHealthzAt(t, web+"/", 90*time.Second, &proxyLog) // `go run` compiles first
+	addr := discoverProxyAddr(t, &proxyLog, 90*time.Second) // `go run` compiles first
+	web := "http://" + addr
+	waitForHealthzAt(t, web+"/", 90*time.Second, &proxyLog)
 
 	call := func(method, path string, hdr map[string]string, body string) (int, http.Header, string) {
 		t.Helper()
