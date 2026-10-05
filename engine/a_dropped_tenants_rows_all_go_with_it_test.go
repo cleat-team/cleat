@@ -48,12 +48,43 @@ import (
 //
 // 'public' rather than the --schema value because that is what this test drops
 // from; see the p_schema argument below.
+//
+// EXCLUDES a table registered in admin.plugin_tables with tenant_scoped =
+// true, and that exclusion is load-bearing rather than cosmetic -- cleat#2959.
+// This test's own setup (testutil.SetupFullSchema + apply032DropTenantMigration)
+// never runs a plugin's migrations, so whether e.g. plugins/tenantquota's
+// tenant_quota exists here at all depends entirely on whether something ELSE
+// has run plugin.RunMigrations against this physical database before this
+// test did -- a fresh `createdb` passes, a long-lived shared database that
+// cmd/cleat-worker or a plugin-harness test has booted against does not, with
+// no code change between the two. That is the identical "a census of a
+// growing population is guaranteed to be wrong" class CLAUDE.md names, with
+// the population being whichever plugins happened to run first.
+//
+// The exclusion does not weaken the ratchet: admin.drop_tenant's own body
+// (migrations/postgres/001_schema.sql) deletes from every table
+// `admin.plugin_tables` names with tenant_scoped, generically, by schema- and
+// table-qualified name -- and that generic mechanism is independently proven,
+// for an arbitrary plugin table, by TestRunMigrationsRegistersATenantScopedTable
+// and TestDropTenantDeletesAPluginsTenantRows two files over. A plugin table
+// that IS correctly registered is therefore already covered by a test whose
+// pass/fail does not depend on which other plugins happen to be loaded. A
+// plugin table that carries tenant_id but was NOT registered TenantScoped
+// (the exact #1289 class of bug) is NOT excluded by this clause -- it has no
+// admin.plugin_tables row to match, so it still surfaces here and still
+// forces the same decision this ratchet has always forced.
 const tenantOwnedTablesSQL = `
-	SELECT table_schema, table_name
-	FROM information_schema.columns
-	WHERE column_name = 'tenant_id'
-	  AND table_schema IN ('public', 'admin')
-	ORDER BY table_schema, table_name`
+	SELECT c.table_schema, c.table_name
+	FROM information_schema.columns c
+	WHERE c.column_name = 'tenant_id'
+	  AND c.table_schema IN ('public', 'admin')
+	  AND NOT EXISTS (
+	        SELECT 1 FROM admin.plugin_tables pt
+	        WHERE pt.tenant_scoped
+	          AND pt.schema_name = c.table_schema
+	          AND pt.table_name = c.table_name
+	      )
+	ORDER BY c.table_schema, c.table_name`
 
 // tenantOwnedTables reads the universe from the live catalogue.
 func tenantOwnedTables(t *testing.T, ctx context.Context, db *sql.DB) []string {
