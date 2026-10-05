@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
@@ -2631,8 +2632,11 @@ func main() {
 			handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
 		}
 
+		// No Addr field: this server is bound by the explicit net.Listen
+		// below, not by srv.ListenAndServe, so an Addr here would be read by
+		// nothing and would put *apiAddr in two places with only one of them
+		// honoured (cleat#3136).
 		srv := &http.Server{
-			Addr:         *apiAddr,
 			Handler:      handler,
 			ReadTimeout:  *httpReadTimeout,
 			WriteTimeout: *httpWriteTimeout,
@@ -2640,8 +2644,28 @@ func main() {
 		}
 		go func() {
 			defer recoverBackgroundGoroutine(logger, workerID, "http-api-listener")
-			logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", workerID, "addr", *apiAddr)
-			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			// Listen explicitly, then Serve on the listener, so the log can
+			// report the address the socket ACTUALLY bound rather than the one
+			// that was configured. srv.ListenAndServe did the listen
+			// internally, so `--api-addr ":0"` logged `addr=:0` -- not an
+			// address any caller can connect to, while the kernel had already
+			// chosen the real port and the only record of it was a socket
+			// nobody read. A caller that asks for an ephemeral port needs to
+			// read the bound one back, and this is where it is published: the
+			// quick-start tests (cleat#3131) can then start the worker on ":0"
+			// and stop pre-choosing a number, which is the race they had.
+			//
+			// This is a behaviour change to a working path in WS-3's zone
+			// (cmd/cleat-worker/, WORKSTREAM.md), so it was requested from
+			// WS-3 rather than taken under the "unwired mechanism" exception,
+			// and recorded on cleat#3136.
+			ln, err := net.Listen("tcp", *apiAddr)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "HTTP server listen error", "worker_id", workerID, "addr", *apiAddr, "error", err)
+				return
+			}
+			logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", workerID, "addr", ln.Addr().String())
+			if err := srv.Serve(ln); err != http.ErrServerClosed {
 				logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", workerID, "error", err)
 			}
 		}()
