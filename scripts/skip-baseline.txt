@@ -16,7 +16,9 @@ cmd/cleat	TestBuildRefusesAnEntryPointsManifestMismatch	1
 cmd/cleat	TestBuildRefusesTheOldMapShapedManifest	1
 cmd/cleat	TestBuildStillAcceptsTheDocumentedOrder	1
 cmd/cleat	TestDeployDryRunNeedsNoDatabaseAndExitsZero	1
+cmd/cleat	TestDeployReadsSchemaSidecar	1
 cmd/cleat	TestDeployUnderTheAppRoleSetsTenantContext	1
+cmd/cleat	TestDeployWithNoSidecarLeavesSchemasNull	1
 cmd/cleat	TestDeployWithoutDatabaseFailsRatherThanSilentlyDoingNothing	1
 cmd/cleat	TestEveryDocumentedCleatInvocationClearsFlagParsing	1
 cmd/cleat	TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds	1
