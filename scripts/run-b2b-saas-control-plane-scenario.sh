@@ -206,20 +206,77 @@ check() {
   fi
 }
 
-poll_provisioning() {
-  local run_id="$1" want_status="$2" key="$3" out
+# json_at prints the value at a dotted PATH in the JSON on stdin, or "" if any part is
+# absent -- so a caller can ask for the exact field an assertion reads, rather than
+# guessing which of a document's several status-like fields will be populated when.
+json_at() {
+  python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    print("")
+    sys.exit(0)
+for k in sys.argv[1].split("."):
+    d = d.get(k) if isinstance(d, dict) else None
+    if d is None:
+        break
+print("" if d is None else d)' "$1"
+}
+
+# poll_field waits until the JSON document at /api/provisioning/<run> has PATH == WANT,
+# and returns THE DOCUMENT IT MATCHED ON, so the caller's assertion reads a value the wait
+# established rather than one it hoped for.
+#
+# PATH IS THE FIELD THE CALLER'S ASSERTION READS. That is the whole point of the function
+# and it is not interchangeable: this document is assembled by
+# examples/b2b-saas-control-plane/backend/main.go's getProvisioningStatus from TWO separate
+# calls -- GetWorkflow (the run row -> the top-level "status") and GetWorkflowState (the
+# workflow's published query state -> "state") -- so fields on either side of that seam
+# describe different objects and do not become true at the same moment.
+#
+# cleat#2966 is what that costs. The run-1 check used to wait on state.status (the
+# workflow's provisioning stage) and then read the run's top-level status, and the failing
+# run's log shows the assertion reading a response that had been stale for its whole
+# interval:
+#
+#   23:12:49.401  GET /api/provisioning/<run> 200    <- the response it would assert on
+#   23:12:49.4229 "workflow completed"               (22 ms after that GET)
+#   23:12:49.460  FAIL: run 1 worker status: got running, want done   (38 ms later)
+#
+# The run-2 check had the same shape one level in, and it is the subtler of the two,
+# because there the two fields come from the SAME call and it is still not safe:
+# cleat/runtime_workflow.go:661-662 writes them as two host calls, status FIRST --
+#
+#   h.SetQueryState("status", "failed")
+#   h.SetQueryState(sagaFailedStep, step.Description)
+#
+# -- so a snapshot taken between them has state.status=failed with failed_step empty, and
+# a wait on "failed" matches exactly that snapshot. The two fields are not published
+# together; they are published AS IT GOES, which is a different claim.
+poll_field() {
+  local run_id="$1" path="$2" want="$3" key="$4" out polls=0
   local deadline=$((SECONDS + 30))
   while (( SECONDS < deadline )); do
     out="$(curl -fsS --max-time 5 "$BACKEND/api/provisioning/$run_id" -H "Authorization: Bearer $key")"
-    local stage
-    stage="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("state") or {}).get("status") or d.get("status") or "")' <<<"$out")"
-    if [[ "$stage" == "$want_status" ]]; then
+    polls=$((polls + 1))
+    local got
+    got="$(json_at "$path" <<<"$out")"
+    if [[ "$got" == "$want" ]]; then
+      # Printed only when it HAD to wait: a run that hit the race and one that finished
+      # before the first look are identical from the verdict, and the first is the thing
+      # this wait exists for. STDERR ON PURPOSE -- this function's stdout IS the JSON
+      # document it returns, and a first version that logged to stdout made the caller's
+      # json.load die on a line beginning "(run ..." ("Expecting value: line 1 column 5"),
+      # reporting the race as malformed JSON.
+      if (( polls > 1 )); then
+        echo "    (run $run_id reached $path=$want after $polls polls -- the wait cleat#2966 needed)" >&2
+      fi
       echo "$out"
       return 0
     fi
     sleep 1
   done
-  echo "FAIL: run $run_id did not reach status=$want_status within 30s; last state: $out" >&2
+  echo "FAIL: run $run_id did not reach $path=$want within 30s; last state: $out" >&2
   failures=$((failures + 1))
   echo "$out"
 }
@@ -234,8 +291,12 @@ TENANT1_KEY="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["api_key"
 RUN1_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' <<<"$signup1")"
 echo "    tenant: $TENANT1_ID  run: $RUN1_ID"
 
-detail1="$(poll_provisioning "$RUN1_ID" active "$TENANT1_KEY")"
-check "run 1 worker status" "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$detail1")" "done"
+detail1="$(poll_field "$RUN1_ID" status "done" "$TENANT1_KEY")"
+# Reads through json_at, the same reader the wait used: a bare ["status"] subscript raises
+# KeyError on a missing field, and the command substitution then reports it as an empty
+# string -- the exact way a stale or truncated document reads as "". One reader means the
+# assertion and the wait can only disagree about the VALUE, never about where to look.
+check "run 1 worker status" "$(json_at status <<<"$detail1")" "done"
 
 # ---- 2: a workspace failure still records the failure milestone ---------
 
@@ -247,8 +308,8 @@ echo "    tenant: $TENANT2_ID"
 TENANT2_KEY="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["api_key"])' <<<"$signup2")"
 RUN2_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' <<<"$signup2")"
 
-detail2="$(poll_provisioning "$RUN2_ID" failed "$TENANT2_KEY")"
-check "run 2 failed_step" "$(python3 -c 'import json,sys; print((json.load(sys.stdin).get("state") or {}).get("failed_step",""))' <<<"$detail2")" provision_workspace
+detail2="$(poll_field "$RUN2_ID" state.failed_step provision_workspace "$TENANT2_KEY")"
+check "run 2 failed_step" "$(json_at state.failed_step <<<"$detail2")" provision_workspace
 
 # ---- 3: /api/tenant/lifecycle answers for the CALLER's own tenant -------
 
