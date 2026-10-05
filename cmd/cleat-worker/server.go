@@ -2934,7 +2934,31 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
 		declared = engine.ExposureClass(meta.Exposure)
 	}
-	exposure, expErr := engine.ResolveDeployableExposure(declared, "")
+
+	// The per-tenant operator opt-in (cleat#1986's enforcement slice). This is
+	// a one-line call-site update forced by ResolveDeployableExposure's
+	// signature change, scoped to exactly that -- cmd/cleat-worker/ is WS-3's
+	// zone, and leaving this call uncompilable (or, worse, silently hardcoding
+	// false forever) would be strictly worse than the one-line touch. Cleared
+	// with WS-3 before this landed. tid is already in scope from the request's
+	// auth context; a store that does not implement the reader is treated as
+	// "not opted in" (see TenantExposurePolicyReader's doc comment).
+	tidUUID, tidOK := auth.TenantIDFromContext(r.Context())
+	tid := ""
+	if tidOK {
+		tid = tidUUID.String()
+	}
+	tenantAllowsPublic := false
+	if reader, ok := st.(engine.TenantExposurePolicyReader); ok && tid != "" {
+		allowed, aerr := reader.AllowsPublicExposure(r.Context(), tid)
+		if aerr != nil {
+			s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "checking public exposure opt-in: " + aerr.Error()})
+			return
+		}
+		tenantAllowsPublic = allowed
+	}
+
+	exposure, expErr := engine.ResolveDeployableExposure(declared, "", tenantAllowsPublic, tid)
 	if expErr != nil {
 		// 400 rather than 500: this is the caller's artifact that cannot be
 		// stored, and the message names which class and why.

@@ -772,6 +772,20 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 				EXECUTE 'GRANT EXECUTE ON FUNCTION admin.in_flight_workflow_ids() TO ` + PostgresRLSTestRole + `';
 			END IF;
 		END $$;`,
+
+		// SELECT, not the fuller cleat_app grant (001_schema.sql's
+		// `GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE admin.tenants`). Two
+		// real request-handling paths read this table under RLS today --
+		// IsTenantSuspended (handleStart) and AllowsPublicExposure
+		// (handleCreateDefinition, cleat#1986) -- and both only ever read it;
+		// writing admin.tenants is cleatctl's job (suspend-tenant,
+		// allow-public-exposure), not the worker's own request handling. This
+		// role exists to model a worker RLS actually applies to, so it needs
+		// what the worker's read paths need -- IsTenantSuspended went
+		// untested against a real database under this role until
+		// AllowsPublicExposure's falsification found the gap, because the
+		// only test exercising IsTenantSuspended over HTTP uses a mock store.
+		`GRANT SELECT ON admin.tenants TO ` + PostgresRLSTestRole,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
