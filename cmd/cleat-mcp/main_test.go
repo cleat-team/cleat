@@ -114,6 +114,19 @@ func (f *fakeCleat) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(fmt.Sprintf(`{"id":%q}`, id)))
 	case strings.HasSuffix(r.URL.Path, "/cancel") && r.Method == http.MethodPost:
+		// Mirrors cmd/cleat-worker/server.go's handleCancel, which decodes the
+		// body with decodeJSONBody -- the STRICT variant -- so an empty body
+		// is read as malformed JSON and refused with 400 before the route
+		// looks at anything else. A fake that accepted a missing body here
+		// could not have caught cleat#1982's cancelRun shipping with none:
+		// every existing test passed against the real defect.
+		body, _ := io.ReadAll(r.Body)
+		var decoded map[string]any
+		if len(body) == 0 || json.Unmarshal(body, &decoded) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid JSON: EOF"}`))
+			return
+		}
 		f.cancels++
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"run-1","status":"cancelled"}`))

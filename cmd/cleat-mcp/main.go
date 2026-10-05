@@ -636,8 +636,20 @@ func (p *proxy) getRun(r *http.Request, runID string) (int, []byte, error) {
 	return p.call(r, outbound{method: http.MethodGet, path: "/api/workflows/" + url.PathEscape(runID)})
 }
 
+// cancelBody is the cancel route's own request shape (cleat#1975/D3): both
+// fields are optional and the zero value is the non-preemptive cancel every
+// existing caller already gets. It is sent explicitly, rather than omitted,
+// because handleCancel decodes with decodeJSONBody -- the STRICT variant,
+// not decodeOptionalJSONBody -- so an empty body is read as malformed JSON
+// (io.EOF) and refused with 400 before the route ever looks at the run.
+var cancelBody = []byte("{}")
+
 func (p *proxy) cancelRun(r *http.Request, runID string) (int, []byte, error) {
-	return p.call(r, outbound{method: http.MethodPost, path: "/api/workflows/" + url.PathEscape(runID) + "/cancel"})
+	return p.call(r, outbound{
+		method: http.MethodPost,
+		path:   "/api/workflows/" + url.PathEscape(runID) + "/cancel",
+		body:   cancelBody,
+	})
 }
 
 func (p *proxy) start(r *http.Request, workflow string, args map[string]any, key string) (int, []byte, error) {
