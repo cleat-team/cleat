@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -138,6 +139,27 @@ func main() {
 			version = meta.WorkflowVersion
 		}
 		declared = engine.ExposureClass(meta.Exposure)
+	}
+	// cleat#1986, Python half: a language with no wasm.Metadata write path of
+	// its own declares exposure through its <wasm>.schema.json sidecar instead
+	// (cmd/cleatctl/deploy.go's own read is the reference; see
+	// engine.DeclaredExposureFromSchemas's doc comment for the refusal shape).
+	// This binary is a test harness for Go workflows on MySQL/SQL Server, not
+	// a documented Python deploy path, but the fallback costs nothing to keep
+	// in step with cleatctl's -- and leaving it out would silently stop
+	// honouring a Python artifact's declaration if one were ever pointed here.
+	if declared == "" {
+		if schemaBytes, serr := os.ReadFile(wasmPath + ".schema.json"); serr == nil {
+			var entryPointSchemas map[string]engine.EntryPointSchema
+			if jerr := json.Unmarshal(schemaBytes, &entryPointSchemas); jerr != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s.schema.json is not valid JSON, deploying without it: %v\n", wasmPath, jerr)
+			} else if schemaDeclared, derr := engine.DeclaredExposureFromSchemas(entryPointSchemas); derr != nil {
+				fmt.Fprintf(os.Stderr, "error: %s.schema.json: %v\n", wasmPath, derr)
+				os.Exit(1)
+			} else {
+				declared = schemaDeclared
+			}
+		}
 	}
 	// requested is "" -- no manifest opinion -- so the declaration stands, and
 	// `auth` when the artifact declares nothing. A malformed stamp in the file is

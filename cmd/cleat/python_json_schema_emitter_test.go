@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // cleat#2914. computePythonEntryPointSchema is the Go-side half of the
@@ -220,5 +222,65 @@ func TestComputePythonEntryPointSchemaIsNonFatalOnAnUnimportableFile(t *testing.
 
 	if _, _, err := computePythonEntryPointSchema(path, "broken"); err == nil {
 		t.Fatal("want an error for a file that cannot be imported, got nil")
+	}
+}
+
+// TestComputePythonEntryPointSchemaCarriesTheExposureClass is cleat#1986's
+// Python half: @cleat_entry(expose=...) has nowhere to go but this same
+// sidecar (wasm.Metadata is barred from carrying per-entry-point data), so
+// this is the other end of the round trip cleatctl deploy's own
+// DeclaredExposureFromSchemas reads. Decoded with the REAL
+// engine.EntryPointSchema type, not an ad-hoc struct, so a tag mismatch
+// between the two sides of the JSON boundary fails here rather than only in
+// a deploy test that happens to use the same type.
+func TestComputePythonEntryPointSchemaCarriesTheExposureClass(t *testing.T) {
+	skipIfNoCleatSDKPython(t)
+	t.Setenv("PYTHONPATH", filepath.Join(repoRoot(t), "python-sdk"))
+
+	declaredPath := writePythonFixture(t, `
+from cleat_sdk.entry import cleat_entry
+from cleat_sdk.host_calls import HostCalls
+
+
+@cleat_entry("InventorySync", expose="internal")
+def inventory_sync(h: HostCalls, item_id: str) -> str:
+    return "{}"
+`)
+	name, schemaJSON, err := computePythonEntryPointSchema(declaredPath, "inventory_sync")
+	if err != nil {
+		t.Fatalf("computePythonEntryPointSchema: %v", err)
+	}
+	var decoded map[string]engine.EntryPointSchema
+	if err := json.Unmarshal(schemaJSON, &decoded); err != nil {
+		t.Fatalf("schemaJSON does not unmarshal as map[string]engine.EntryPointSchema: %v\n%s", err, schemaJSON)
+	}
+	if got := decoded[name].Exposure; got != engine.ExposureInternal {
+		t.Errorf("Exposure = %q, want %q", got, engine.ExposureInternal)
+	}
+
+	// The control: an undeclared entry point must leave the field at its
+	// zero value, not a literal "auth" -- engine.DeclaredExposureFromSchemas
+	// treats "" as "no opinion from this entry" and `omitempty` on the Go
+	// side depends on the same thing on the way out, so a round trip through
+	// the real type is what proves the two conventions actually agree.
+	undeclaredPath := writePythonFixture(t, `
+from cleat_sdk.entry import cleat_entry
+from cleat_sdk.host_calls import HostCalls
+
+
+@cleat_entry
+def plain_one(h: HostCalls, item_id: str) -> str:
+    return "{}"
+`)
+	name, schemaJSON, err = computePythonEntryPointSchema(undeclaredPath, "plain_one")
+	if err != nil {
+		t.Fatalf("computePythonEntryPointSchema: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(schemaJSON, &decoded); err != nil {
+		t.Fatalf("schemaJSON does not unmarshal: %v\n%s", err, schemaJSON)
+	}
+	if got := decoded[name].Exposure; got != "" {
+		t.Errorf("Exposure = %q for an undeclared entry point, want \"\" (no declaration)", got)
 	}
 }

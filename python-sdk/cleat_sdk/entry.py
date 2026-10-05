@@ -444,12 +444,29 @@ def _resolve_dual_form(
     return lambda func: make_entry(func, name)
 
 
-def cleat_entry(name: str | None = None) -> Callable:
+_EXPOSURE_CLASSES = frozenset({"public", "auth", "internal"})
+"""The closed set of exposure classes (cleat#1986). Must match the three
+``engine.ExposureClass`` values on the Go side (``engine/store_types.go``) --
+there is nothing to import across the language boundary, so this is a
+deliberate, hand-kept mirror rather than a shared source."""
+
+
+def cleat_entry(name: str | None = None, expose: str | None = None) -> Callable:
     """Mark a function as a Cleat workflow entry point.
 
     The decorated function **must** accept a :class:`HostCalls` instance as
     its first parameter.  Additional parameters are deserialised from the
     workflow input JSON by name.
+
+    **Exposure class (cleat#1986):** ``expose`` declares this entry point's
+    exposure class -- one of ``"public"``, ``"auth"`` or ``"internal"``. This
+    is the Python counterpart of Go's ``//cleat:exposure <class>`` directive,
+    and it is validated here, at decoration time, for the same reason Go
+    validates at build time: an unrecognised value should fail loudly where it
+    is written, not ride silently into a deploy that reads it as "no
+    declaration" (``auth``) and enforces nothing. Omitted means no
+    declaration -- today's behaviour, deployed as ``auth`` unless a deploy
+    flag overrides it.
 
     **Typed parameter construction:** If a parameter's type annotation is a
     :func:`dataclasses.dataclass`, the decorator automatically constructs an
@@ -493,6 +510,9 @@ def cleat_entry(name: str | None = None) -> Callable:
     name:
         Optional explicit export name for the workflow.  Defaults to the
         Python function name.
+    expose:
+        Optional exposure class declaration: ``"public"``, ``"auth"`` or
+        ``"internal"``.  Omitted means no declaration.
 
     Returns
     -------
@@ -639,11 +659,38 @@ def cleat_entry(name: str | None = None) -> Callable:
         # Mark the wrapper for introspection tooling.
         export_wrapper._is_cleat_entry = True  # type: ignore[attr-defined]
 
+        # cleat#1986. Read by jsonschema_emitter._find_entry and carried into
+        # the <wasm>.schema.json sidecar it emits -- None (no declaration)
+        # is omitted there, never written as a literal "auth". See the
+        # validation above for why this is never anything but a class in
+        # _EXPOSURE_CLASSES or None.
+        export_wrapper._cleat_expose = expose  # type: ignore[attr-defined]
+
         # Inject WitWorld into the decorated function's module so
         # componentize-py can discover the entry point at build time.
         _inject_witworld(func, export_wrapper, workflow_name)
 
         return export_wrapper
+
+    # "" means the same as omitted -- matching engine.ExposureClass's own
+    # convention on the Go side, where "" is "no declaration" and every
+    # other value is validated. _make_entry's closure over `expose` sees
+    # this normalised value: Python resolves a closure variable when the
+    # closure RUNS, not when it is defined, and _make_entry runs later,
+    # from _resolve_dual_form below.
+    if expose == "":
+        expose = None
+
+    # expose is a cleat_entry(...)-level argument, not part of the bare-vs-
+    # parenthesised ambiguity _resolve_dual_form exists for, so it is
+    # validated here -- once, at the point @cleat_entry(expose=...) is
+    # actually evaluated -- rather than inside _make_entry, which runs once
+    # per decoration either way and would validate at the same moment.
+    if expose is not None and expose not in _EXPOSURE_CLASSES:
+        raise ValueError(
+            f"@cleat_entry(expose={expose!r}): expose must be one of "
+            f"{sorted(_EXPOSURE_CLASSES)} or omitted, got {expose!r}."
+        )
 
     # Support both ``@cleat_entry`` (without parentheses, legacy) and
     # ``@cleat_entry(...)`` (with parentheses, preferred). See

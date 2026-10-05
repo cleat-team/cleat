@@ -443,6 +443,88 @@ class TestTheRegistryKeyIsTheWorkflowName:
         )
 
 
+class TestExposureDeclaration:
+    """cleat#1986, Python half: ``@cleat_entry(expose=...)``.
+
+    Go validates ``//cleat:exposure <class>`` at BUILD time (cleat#1986 slice
+    2c-i) and refuses an unrecognised value before it ever reaches a sidecar
+    or a deploy. This is the Python equivalent, validated at DECORATION
+    time (which for Python *is* build time -- the decorator runs the moment
+    the module is imported, the same import ``cleat build`` performs to
+    compute a schema at all) for the identical reason: a bad value must fail
+    loudly where it is written, not ride a deploy that reads it as "no
+    declaration" and enforces nothing.
+    """
+
+    def test_a_valid_class_is_stamped_on_the_wrapper(self):
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry("InventorySync", expose="internal")
+        def inventory_sync(h: HostCalls, item_id: str) -> str:
+            return "{}"
+
+        assert inventory_sync._cleat_expose == "internal"
+
+    def test_omitted_expose_stamps_none_not_auth(self):
+        """None means "no declaration", not a literal "auth" -- the
+        distinction jsonschema_emitter's omitempty-equivalent depends on to
+        tell "declared auth" apart from "declared nothing" (see that
+        module's main()).
+        """
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry
+        def undeclared_workflow(h: HostCalls) -> str:
+            return "{}"
+
+        assert undeclared_workflow._cleat_expose is None
+
+    @pytest.mark.parametrize("bad", ["Internal", "internal ", "secrets", ""])
+    def test_an_unrecognised_class_is_refused_at_decoration_time(self, bad):
+        from cleat_sdk.entry import cleat_entry
+
+        if bad == "":
+            # "" is not a real case ("" means omitted at the Python call
+            # site -- there is no way to type a literal empty expose= that
+            # differs from leaving it out), included to document that fact
+            # rather than to assert a refusal: it is the same code path as
+            # "omitted".
+            @cleat_entry(expose=bad)
+            def empty_is_omitted(h: HostCalls) -> str:
+                return "{}"
+
+            assert empty_is_omitted._cleat_expose is None
+            return
+
+        with pytest.raises(ValueError, match="expose must be one of"):
+
+            @cleat_entry(expose=bad)
+            def refused_workflow(h: HostCalls) -> str:
+                return "{}"
+
+    def test_the_parenthesised_name_form_and_expose_compose(self):
+        """expose is captured by cleat_entry's own closure, outside
+        _resolve_dual_form's name/bare-form dispatch entirely -- this pins
+        that an explicit name and an expose declaration do not interfere
+        with each other: the registry key is still the explicit name, and
+        the wrapper still carries the expose value.
+        """
+        import sys
+
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry("ExplicitName", expose="public")
+        def composed_workflow(h: HostCalls) -> str:
+            return "{}"
+
+        registry = getattr(sys.modules[__name__], "_cleat_entry_wrappers", {})
+        assert registry.get("ExplicitName") is composed_workflow, (
+            "the explicit name must still be the registry key with expose set, "
+            f"got keys {list(registry)}"
+        )
+        assert composed_workflow._cleat_expose == "public"
+
+
 class TestFromDictDataclassConversion:
     """``_from_dict``'s dataclass branch, focused on the source of the kwargs.
 

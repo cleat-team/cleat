@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -241,5 +242,132 @@ func TestDeployWorkflowRefusesAMalformedDeclaredClass(t *testing.T) {
 		if !strings.Contains(stderr, "not one of") {
 			t.Errorf("a stamp of %q was refused, but not as a malformed class:\n%s", bad, stderr)
 		}
+	}
+}
+
+// ---- cleat#1986, Python half: the <wasm>.schema.json sidecar fallback ----
+//
+// Python has no wasm.Metadata write path of its own (see
+// wasm/metadata_carries_no_entry_point_parameters_test.go), so its
+// declaration rides the same sidecar cleatctl already reads for
+// EntryPointSchemas. These tests use bareWASMExposureTest UNDECLARED (no
+// wasm.Metadata.Exposure stamped at all) so only the sidecar can be the
+// source of the declaration -- the same "control" discipline
+// artifactDeclaring's own self-check applies to the metadata path.
+
+// deployArtifactWithSchema runs deployWorkflow over an artifact with no
+// wasm.Metadata declaration, next to a hand-written .schema.json sidecar, and
+// reports what reached the store (nil when nothing did) plus stderr.
+func deployArtifactWithSchema(t *testing.T, schemaJSON string, args ...string) (*engine.WorkflowDef, string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := writeWASM(t, dir, []byte(bareWASMExposureTest))
+	if err := os.WriteFile(path+".schema.json", []byte(schemaJSON), 0o644); err != nil {
+		t.Fatalf("writing sidecar: %v", err)
+	}
+
+	var captured *engine.WorkflowDef
+	store := &mockStore{
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
+			captured = def
+			return nil
+		},
+	}
+	stderr := withExitPanic(t, func() {
+		deployWorkflow(context.Background(), store, nil, append([]string{"wf", path}, args...))
+	})
+	return captured, stderr
+}
+
+// THE CENTRAL CASE OF THE PYTHON SLICE, mirroring
+// TestDeployWorkflowHonoursAnArtifactsDeclaredExposure for the sidecar instead
+// of wasm.Metadata. Before this, a Python artifact's exposure declaration had
+// nowhere to be read from at deploy at all -- every Python workflow deployed
+// as `auth` regardless of what its source declared.
+func TestDeployWorkflowHonoursAPythonSidecarsDeclaredExposure(t *testing.T) {
+	def, stderr := deployArtifactWithSchema(t, `{"InventorySync":{"params":{},"result":{},"exposure":"internal"}}`)
+	if def == nil {
+		t.Fatalf("nothing was deployed, but this declaration is legal and needs no flag:\n%s", stderr)
+	}
+	if def.Exposure != engine.ExposureInternal {
+		t.Errorf("Exposure = %q, want %q: the sidecar declares internal and the deploy expressed no "+
+			"opinion, so the declaration is the answer", def.Exposure, engine.ExposureInternal)
+	}
+}
+
+// An entry with no "exposure" key at all is the same as no declaration --
+// omitted, never read as a literal "auth" that would then look like a real
+// declaration to a reader comparing it against wasm.Metadata's own absence.
+func TestDeployWorkflowSidecarWithNoExposureKeyIsNoDeclaration(t *testing.T) {
+	def, stderr := deployArtifactWithSchema(t, `{"PlainOne":{"params":{},"result":{}}}`)
+	if def == nil {
+		t.Fatalf("a sidecar with no exposure key should deploy exactly as if there were no sidecar "+
+			"at all:\n%s", stderr)
+	}
+	if def.Exposure != engine.ExposureAuth {
+		t.Errorf("Exposure = %q, want %q (the default)", def.Exposure, engine.ExposureAuth)
+	}
+}
+
+// Two entry points disagreeing on their declared class is refused, not
+// merged -- the sidecar equivalent of Go's "two different classes in one
+// package are refused" rule for //cleat:exposure (slice 2c-i). No live
+// Python build produces this (exactly one entry point per sidecar), but the
+// deploy path must not silently pick one if a hand-edited or future
+// multi-entry sidecar ever does.
+func TestDeployWorkflowRefusesConflictingSidecarExposures(t *testing.T) {
+	def, stderr := deployArtifactWithSchema(t,
+		`{"A":{"params":{},"result":{},"exposure":"internal"},"B":{"params":{},"result":{},"exposure":"auth"}}`)
+	if def != nil {
+		t.Errorf("deployed despite two entry points disagreeing on exposure, as %q", def.Exposure)
+	}
+	if !strings.Contains(stderr, "disagree") {
+		t.Errorf("the refusal does not say the entries disagree:\n%s", stderr)
+	}
+}
+
+// A malformed value in the sidecar is refused, not read as an absence -- same
+// posture as TestDeployWorkflowRefusesAMalformedDeclaredClass for
+// wasm.Metadata. The sidecar is as untrusted at deploy time as the binary's
+// own metadata: anyone who can hand this path a .wasm chooses the
+// .schema.json beside it too.
+func TestDeployWorkflowRefusesAMalformedSidecarExposure(t *testing.T) {
+	def, stderr := deployArtifactWithSchema(t, `{"A":{"params":{},"result":{},"exposure":"sideways"}}`)
+	if def != nil {
+		t.Errorf("a sidecar exposure of %q was accepted and deployed as %q", "sideways", def.Exposure)
+	}
+	if !strings.Contains(stderr, "none of") {
+		t.Errorf("a stamp of %q was refused, but not as a malformed class:\n%s", "sideways", stderr)
+	}
+}
+
+// wasm.Metadata wins when present, even with a sidecar also in play -- today
+// this cannot happen in practice (Go stamps metadata and has no emitter that
+// writes "exposure" into its own sidecar), but the precedence must hold if it
+// ever does, so the fallback is pinned as a FALLBACK rather than a merge.
+func TestDeployWorkflowMetadataWinsOverSidecarWhenBothDeclare(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWASM(t, dir, artifactDeclaring(t, string(engine.ExposureInternal)))
+	if err := os.WriteFile(path+".schema.json",
+		[]byte(`{"A":{"params":{},"result":{},"exposure":"auth"}}`), 0o644); err != nil {
+		t.Fatalf("writing sidecar: %v", err)
+	}
+
+	var captured *engine.WorkflowDef
+	store := &mockStore{
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
+			captured = def
+			return nil
+		},
+	}
+	withExitPanic(t, func() {
+		deployWorkflow(context.Background(), store, nil, []string{"wf", path})
+	})
+	if captured == nil {
+		t.Fatal("nothing was deployed")
+	}
+	if captured.Exposure != engine.ExposureInternal {
+		t.Errorf("Exposure = %q, want %q: wasm.Metadata declares internal and must win over the "+
+			"sidecar's auth", captured.Exposure, engine.ExposureInternal)
 	}
 }
