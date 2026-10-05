@@ -2084,6 +2084,11 @@ jobs:
       - name: Count lines for both sides of the pair
         run: scripts/dbos-pair-loc.sh integration-hub
 
+      - name: README line counts agree with the pair's own counter
+        run: |
+          python3 scripts/check-dbos-pair-loc.py --self-test
+          python3 scripts/check-dbos-pair-loc.py
+
       # No "dump logs on failure" step after this one, for the same reason
       # as the sibling scenario jobs.
       - name: Run the scenario end to end
