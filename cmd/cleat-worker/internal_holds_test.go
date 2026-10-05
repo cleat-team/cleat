@@ -26,7 +26,7 @@ func TestInternalHoldsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := newInternalHoldsServer("", secret, w)
+	srv := newInternalHoldsServer(secret, w)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
