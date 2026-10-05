@@ -118,21 +118,61 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		osExit(1)
 	}
 
-	// cleat#1986 slice 2c-ii: the artifact's SOURCE declaration, then the
+	// cleat#1980: `cleat build` writes a schema sidecar next to the WASM
+	// binary when it computed one -- wasm.Metadata itself is deliberately
+	// barred from carrying this (see wasm/metadata_carries_no_entry_point_parameters_test.go),
+	// so there is nowhere inside wasmBytes to read it back from. Its absence
+	// is not an error: an older build, or a build from a language
+	// internal/jsonschema has no emitter for yet, simply has none, and this
+	// deploy proceeds exactly as it did before cleat#1980.
+	//
+	// Read here, before the exposure block below, rather than down beside
+	// EntryPointSchemas where it used to live: cleat#1986's Python half rides
+	// this same sidecar for its exposure declaration (DeclaredExposureFromSchemas
+	// below), so the declared-class read needs it already in hand.
+	//
+	// UNLIKE pluginDeps above, this is never carried forward from the
+	// previous version on a redeploy that doesn't supply one: a schema
+	// describes THIS wasm file's actual entry points, and copying the prior
+	// version's would describe a binary that is no longer what's being
+	// deployed.
+	var entryPointSchemas map[string]engine.EntryPointSchema
+	if schemaBytes, err := os.ReadFile(wasmPath + ".schema.json"); err == nil {
+		if err := json.Unmarshal(schemaBytes, &entryPointSchemas); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s.schema.json is not valid JSON, deploying without entry point schemas: %v\n", wasmPath, err)
+			entryPointSchemas = nil
+		}
+	}
+
+	// cleat#1986 slice 2c-ii (Go/wasm.Metadata) and the Python slice (the
+	// sidecar fallback below): the artifact's SOURCE declaration, then the
 	// tighten-only rule.
 	//
 	// A metadata read that FAILS is treated as no declaration, deliberately
 	// rather than laxly: wasm.ReadMetadata rejects a Component Model binary
 	// outright (see the note on restampWorkflowVersion below), so a Python
-	// artifact takes this path -- and the Python build writes no exposure section
-	// at all today, which is the separate slice cleat#1986 still tracks. But a
-	// read that SUCCEEDS and carries an unrecognised class is a different thing,
-	// and ResolveExposure refuses that one: the value came out of the file, and
-	// treating a malformed stamp as an absence would deploy as `auth` exactly
-	// what the source meant to protect.
+	// artifact takes this path. But a read that SUCCEEDS and carries an
+	// unrecognised class is a different thing, and ResolveExposure refuses
+	// that one: the value came out of the file, and treating a malformed
+	// stamp as an absence would deploy as `auth` exactly what the source
+	// meant to protect.
 	declared := engine.ExposureClass("")
 	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
 		declared = engine.ExposureClass(meta.Exposure)
+	}
+
+	// wasm.Metadata wins when present (every Go build has it); a language with
+	// no metadata write path of its own -- today, Python -- falls back to its
+	// entry-point-schema sidecar's own "exposure" key. See
+	// DeclaredExposureFromSchemas's doc comment for the refusal shape when
+	// entries disagree or carry an unparseable class.
+	if declared == "" && entryPointSchemas != nil {
+		schemaDeclared, derr := engine.DeclaredExposureFromSchemas(entryPointSchemas)
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "error: %s.schema.json: %v\n", wasmPath, derr)
+			osExit(1)
+		}
+		declared = schemaDeclared
 	}
 
 	// ResolveDeployableExposure is the tighten-only rule AND the `public` gate,
@@ -228,27 +268,6 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		pluginDeps = latest.PluginDeps
 		if pluginDeps == nil {
 			pluginDeps = map[string]string{}
-		}
-	}
-
-	// cleat#1980: `cleat build` writes a schema sidecar next to the WASM
-	// binary when it computed one -- wasm.Metadata itself is deliberately
-	// barred from carrying this (see wasm/metadata_carries_no_entry_point_parameters_test.go),
-	// so there is nowhere inside wasmBytes to read it back from. Its absence
-	// is not an error: an older build, or a build from a language
-	// internal/jsonschema has no emitter for yet, simply has none, and this
-	// deploy proceeds exactly as it did before cleat#1980.
-	//
-	// UNLIKE pluginDeps above, this is never carried forward from the
-	// previous version on a redeploy that doesn't supply one: a schema
-	// describes THIS wasm file's actual entry points, and copying the prior
-	// version's would describe a binary that is no longer what's being
-	// deployed.
-	var entryPointSchemas map[string]engine.EntryPointSchema
-	if schemaBytes, err := os.ReadFile(wasmPath + ".schema.json"); err == nil {
-		if err := json.Unmarshal(schemaBytes, &entryPointSchemas); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s.schema.json is not valid JSON, deploying without entry point schemas: %v\n", wasmPath, err)
-			entryPointSchemas = nil
 		}
 	}
 

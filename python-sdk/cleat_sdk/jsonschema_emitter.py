@@ -370,9 +370,9 @@ def _load_module(filepath: str):
     return module
 
 
-def _find_entry(module, func_name: str) -> tuple[str, Callable]:
-    """Returns (workflow_name, undecorated_func) for the ``@cleat_entry``
-    function named *func_name* in *module*.
+def _find_entry(module, func_name: str) -> tuple[str, Callable, str | None]:
+    """Returns (workflow_name, undecorated_func, expose) for the
+    ``@cleat_entry`` function named *func_name* in *module*.
 
     Reads ``module._cleat_entry_wrappers`` (populated by
     ``entry._inject_witworld`` as a side effect of decoration, which has
@@ -385,11 +385,16 @@ def _find_entry(module, func_name: str) -> tuple[str, Callable]:
     find the right entry even though *func_name* is the Python identifier
     cleat_sdk.vet's AST-based ``--detect-entry`` reports, not necessarily
     the registered workflow name.
+
+    *expose* (cleat#1986) is read off the WRAPPER's ``_cleat_expose``
+    attribute before unwrapping -- the undecorated function returned
+    alongside it never carried that attribute, only the decorator did.
     """
     wrappers = getattr(module, "_cleat_entry_wrappers", {})
     for workflow_name, wrapper in wrappers.items():
         if wrapper.__name__ == func_name:
-            return workflow_name, getattr(wrapper, "__wrapped__", wrapper)
+            expose = getattr(wrapper, "_cleat_expose", None)
+            return workflow_name, getattr(wrapper, "__wrapped__", wrapper), expose
     raise LookupError(
         f"no @cleat_entry function named {func_name!r} found "
         f"(registered: {sorted(wrappers)})"
@@ -417,7 +422,7 @@ def main() -> int:
         return 1
 
     try:
-        workflow_name, func = _find_entry(module, func_name)
+        workflow_name, func, expose = _find_entry(module, func_name)
     except LookupError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -436,7 +441,18 @@ def main() -> int:
 
     result = entry_point_result_schema(func)
 
-    print(json.dumps({workflow_name: {"params": params, "result": result}}))
+    # cleat#1986. "exposure" rides this same sidecar document because Python
+    # has nowhere else to put it -- see entry.py's _EXPOSURE_CLASSES comment
+    # and the issue's own per-SDK table. Omitted (not written as "auth") when
+    # expose is None, matching engine.EntryPointSchema.Exposure's
+    # `json:"exposure,omitempty"`: the Go-side reader has to tell "no
+    # declaration" apart from "declared auth", which it can only do if an
+    # absent key and an absent declaration mean the same thing.
+    schema: dict = {"params": params, "result": result}
+    if expose is not None:
+        schema["exposure"] = expose
+
+    print(json.dumps({workflow_name: schema}))
     return 0
 
 

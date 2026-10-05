@@ -290,3 +290,87 @@ def test_extra_properties_are_allowed():
 
     schema = entry_point_param_schema(_func(wf))
     assert schema["additionalProperties"] is True
+
+
+# ---------------------------------------------------------------------------
+# cleat#1986: exposure rides this same sidecar document.
+# ---------------------------------------------------------------------------
+
+
+class TestFindEntryReturnsExposure:
+    """``_find_entry`` is what the build actually calls (via ``main()``), so
+    this exercises the real lookup path rather than reading ``_cleat_expose``
+    off a decorated function directly, the way TestExposureDeclaration in
+    test_entry.py does for the decorator's own behaviour.
+    """
+
+    def test_a_declared_class_round_trips_through_find_entry(self):
+        import sys
+
+        from cleat_sdk.jsonschema_emitter import _find_entry
+
+        @cleat_entry("InventorySync", expose="internal")
+        def inventory_sync(h: HostCalls, item_id: str) -> str:
+            return "{}"
+
+        module = sys.modules[__name__]
+        workflow_name, func, expose = _find_entry(module, "inventory_sync")
+        assert workflow_name == "InventorySync"
+        assert func is _func(inventory_sync)
+        assert expose == "internal"
+
+    def test_no_declaration_returns_none_not_a_missing_key(self):
+        import sys
+
+        from cleat_sdk.jsonschema_emitter import _find_entry
+
+        @cleat_entry
+        def undeclared_for_find_entry(h: HostCalls) -> str:
+            return "{}"
+
+        module = sys.modules[__name__]
+        _, _, expose = _find_entry(module, "undeclared_for_find_entry")
+        assert expose is None
+
+
+def test_main_writes_the_exposure_key_only_when_declared(tmp_path, capsys, monkeypatch):
+    """The end-to-end path main() drives: a source file on disk, through
+    _load_module and _find_entry, to the printed document cleat build writes
+    straight to ``<wasm>.schema.json``.
+    """
+    import json
+    import sys
+
+    from cleat_sdk.jsonschema_emitter import main
+
+    declared = tmp_path / "declared.py"
+    declared.write_text(
+        "from cleat_sdk.entry import cleat_entry\n"
+        "from cleat_sdk.host_calls import HostCalls\n\n"
+        '@cleat_entry("InventorySync", expose="internal")\n'
+        "def inventory_sync(h: HostCalls, item_id: str) -> str:\n"
+        '    return "{}"\n'
+    )
+    monkeypatch.setattr(sys, "argv", ["jsonschema_emitter", str(declared), "inventory_sync"])
+    rc = main()
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["InventorySync"]["exposure"] == "internal"
+
+    undeclared = tmp_path / "undeclared.py"
+    undeclared.write_text(
+        "from cleat_sdk.entry import cleat_entry\n"
+        "from cleat_sdk.host_calls import HostCalls\n\n"
+        "@cleat_entry\n"
+        "def plain_one(h: HostCalls, item_id: str) -> str:\n"
+        '    return "{}"\n'
+    )
+    monkeypatch.setattr(sys, "argv", ["jsonschema_emitter", str(undeclared), "plain_one"])
+    rc = main()
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "exposure" not in doc["plain_one"], (
+        'engine.EntryPointSchema.Exposure\'s `json:"exposure,omitempty"` -- writing a '
+        'literal "auth" here would be indistinguishable on the Go side from a real '
+        "declaration, so an undeclared entry point must OMIT the key"
+    )

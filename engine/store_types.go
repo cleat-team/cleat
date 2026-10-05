@@ -291,6 +291,63 @@ type WorkflowDef struct {
 type EntryPointSchema struct {
 	Params json.RawMessage `json:"params"`
 	Result json.RawMessage `json:"result"`
+
+	// Exposure is this entry point's SOURCE-declared exposure class (cleat#1986),
+	// for a language with no wasm.Metadata write path of its own -- Python's
+	// `@cleat_entry(expose=...)` has nowhere else to put it, since
+	// wasm.Metadata is deliberately barred from carrying per-entry-point data
+	// (see wasm/metadata_carries_no_entry_point_parameters_test.go). Go never
+	// sets this: its declaration already rides wasm.Metadata.Exposure, read
+	// directly, and does not need this field at all.
+	//
+	// Empty string means no declaration, same meaning as an absent
+	// wasm.Metadata.Exposure -- omitempty so the two stay indistinguishable
+	// on the wire, never written as a literal "auth". See
+	// DeclaredExposureFromSchemas, which is what reads this across every
+	// entry point a sidecar carries.
+	Exposure ExposureClass `json:"exposure,omitempty"`
+}
+
+// DeclaredExposureFromSchemas returns the single declared exposure class
+// across every entry point in schemas, for a deploy path whose artifact has
+// no wasm.Metadata.Exposure of its own to read (cleat#1986) -- today, any
+// non-Go language.
+//
+// Mirrors the rule 2c-i already enforces for Go's package-level
+// `//cleat:exposure` directive: a build declares one class for the
+// definition, not one per function, so more than one DISTINCT non-empty
+// class across the entries is a conflicting declaration and is refused
+// rather than merged -- the same posture as Go's "two different classes in
+// one package are refused, not merged". A class that fails ParseExposure is
+// refused the same way a malformed wasm.Metadata stamp is: it came from the
+// file, and reading it as an absence would deploy as `auth` exactly what the
+// source meant to protect.
+//
+// In practice this is a 0-or-1 question for Python today: `cleat build
+// --target python` computes exactly one entry point per sidecar
+// (jsonschema_emitter.main itself asserts len(schemas) == 1), so the
+// conflict branch has no live caller yet. It is included anyway because the
+// rule is a property of the declaration model, not of today's one caller.
+func DeclaredExposureFromSchemas(schemas map[string]EntryPointSchema) (ExposureClass, error) {
+	var declared ExposureClass
+	var declaredBy string
+	for name, schema := range schemas {
+		if schema.Exposure == "" {
+			continue
+		}
+		class, ok := ParseExposure(string(schema.Exposure))
+		if !ok {
+			return "", fmt.Errorf("entry point %q declares exposure class %q, which is none of %q, %q or %q",
+				name, schema.Exposure, ExposureAuth, ExposurePublic, ExposureInternal)
+		}
+		if declaredBy != "" && class != declared {
+			return "", fmt.Errorf("entry points disagree on exposure class: %q declares %q, %q declares %q -- "+
+				"a build declares one class for the whole definition, not one per entry point",
+				declaredBy, declared, name, class)
+		}
+		declared, declaredBy = class, name
+	}
+	return declared, nil
 }
 
 // RetiredAt returns a pointer for DisabledAt. Paired with GCEligible: true it
