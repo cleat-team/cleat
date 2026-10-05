@@ -2,6 +2,7 @@ package webhookingest
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -27,6 +28,16 @@ import (
 // RunMigrations has already applied it once, the same state a crashed-then-
 // restarted worker would find the column in.
 func TestWebhookSourcesDeletedAtMigrationIsIdempotentOnMySQL(t *testing.T) {
+	// cleat#2249/cleat#2887: testutil.NewPluginTestBackends only includes a
+	// MySQL backend when CLEAT_TEST_MYSQL is set -- PostgreSQL is the only
+	// one it attempts unconditionally. So when CLEAT_TEST_MYSQL is unset,
+	// the returned slice has no MySQL entry, this loop's `continue` fires on
+	// every iteration, and the function returns having asserted nothing -- a
+	// genuine PASS with no t.Skip anywhere to make that visible to the
+	// skip-budget/skip-ledger guards, which only see t.Skip.
+	if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+		t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
+	}
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		if be.Dialect != testutil.DialectMySQL {
 			continue
