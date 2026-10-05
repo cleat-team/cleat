@@ -66,6 +66,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -109,8 +110,8 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("cleat-mcp: proxying %s, serving MCP on %s (protocol %s)", p.api, *addr, protocolVersion)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		ln := listenAndLogBoundAddr(*addr, p.api)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("cleat-mcp: %v", err)
 		}
 	}()
@@ -119,6 +120,24 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
+}
+
+// listenAndLogBoundAddr binds addr and logs the address it actually bound --
+// not addr itself (cleat#3155). Before this, ListenAndServe bound and logged
+// the configured address in one call, the same shape cleat-worker had until
+// cleat#3136/#3137: a caller that starts this on an ephemeral `:0` port had
+// no log line, or any other instrumentation, telling it which port it got.
+//
+// Extracted from main so the logged line is assertable without exec'ing a
+// built binary or touching the package-level flag.CommandLine main.Parse()
+// already consumed.
+func listenAndLogBoundAddr(addr, api string) net.Listener {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("cleat-mcp: listen on %s: %v", addr, err)
+	}
+	log.Printf("cleat-mcp: proxying %s, serving MCP on %s (protocol %s)", api, ln.Addr().String(), protocolVersion)
+	return ln
 }
 
 func envOr(k, def string) string {
