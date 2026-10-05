@@ -97,17 +97,21 @@ import (
 // WHAT IT DOES NOT DO: close the cross-allocator race. Releasing before the bind
 // leaves a gap on every platform, and no local hold can close it for a wildcard
 // consumer on Linux. What closes it is having the consumer allocate the port and
-// report it back (compose's own random host port, say) -- which the fullstack
-// template test now does for itself (cleat#3131). The two quick-start tests and the
-// proxy still need this helper -- but NOT because their consumer is missing, which
-// is what this comment said until cleat-review read the source. `cleat-worker` IS
-// the consumer: it binds the address a caller gives it and logs the CONFIGURED one
-// (`cmd/cleat-worker/main.go` logs `*apiAddr`, and no non-test worker code reads the
-// listener's `Addr()`), so `--api-addr ":0"` would log `:0` and the caller could not
-// read back what was bound. That is a REPORTING gap, not an absent consumer, and it
-// is filed as cleat#3136: bind explicitly, log `ln.Addr()`, and those sites can
-// discover their ports the way the fullstack test now does. The proxy's `-listen`
-// is the same shape. So the gap stands there for one named reason, not an inherent one.
+// report it back, and three sites now do that -- none of them needing this helper:
+//
+//   - the fullstack template test, via compose's own random host port (cleat#3131);
+//   - both quick-start tests, via startWorkerWithDiscoveredPort: the worker binds
+//     `127.0.0.1:0` and the test reads `ln.Addr()` back from its log.
+//
+// The worker half is what made the second possible. Before cleat#3136 (#3137) it
+// logged the CONFIGURED `--api-addr`, so `":0"` reported `":0"` and no caller could
+// read back the bound port -- a REPORTING gap, not an absent consumer, which is what
+// this comment said until cleat-review read the source.
+//
+// Two sites still need it: TestHoldTCPPortKeepsThePortReservedUntilReleased, which
+// exercises the helper itself, and driveTheProxy, which binds
+// `-listen 127.0.0.1:$(CLEAT_WEB_PORT)` -- handed a number and reporting it nowhere,
+// the same shape the worker had until cleat#3137.
 func holdTCPPort(t *testing.T) (port int, release func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -749,4 +753,47 @@ func waitForHealthz(t *testing.T, url string) {
 		time.Sleep(300 * time.Millisecond)
 	}
 	t.Fatalf("worker at %s did not become healthy within 30s", url)
+}
+
+// startWorkerWithDiscoveredPort starts cleat-worker with `--api-addr 127.0.0.1:0` -- so the
+// kernel allocates the port and the worker binds it as ONE act -- and reads the bound port
+// back from the worker's own "HTTP API listening" log line. That closes the cross-allocator
+// race holdTCPPort cannot: nothing can take the number between the allocation and the bind,
+// because the allocator and the consumer are the same process (cleat#3131).
+//
+// It returns the base URL built from the ADDRESS the worker logged, NOT from "localhost":
+// the worker logs `127.0.0.1:<port>`, and substituting "localhost" here would resolve ::1
+// first and trade a port race for a family mismatch -- the ::1-vs-IPv4 hazard ci.yml's
+// Test Go steps call out. The log carries the bound address only because of cleat#3136
+// (fixed in #3137); before that it carried the configured `:0`.
+//
+// The caller owns the returned cmd and must kill it -- the sites below install a t.Cleanup.
+// The worker's output is captured so a startup failure can be PRINTED rather than read as a
+// slow start: "never logged an address" and "still coming up" would otherwise be identical.
+func startWorkerWithDiscoveredPort(t *testing.T, workerBin, dsn string) (base string, cmd *exec.Cmd) {
+	t.Helper()
+	var log lockedBuffer
+	cmd = exec.Command(workerBin, "--db", dsn, "--api-addr", "127.0.0.1:0")
+	cmd.Stdout, cmd.Stderr = &log, &log
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start cleat-worker: %v", err)
+	}
+	addrRe := regexp.MustCompile(`"addr":"(127\.0\.0\.1:[0-9]+)"`)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(log.String(), "\n") {
+			// Only the API-listening record: the same worker also logs "pprof
+			// listening" and "internal holds listening" with their own addr fields.
+			if !strings.Contains(line, "HTTP API listening") {
+				continue
+			}
+			if m := addrRe.FindStringSubmatch(line); m != nil {
+				return "http://" + m[1], cmd
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("cleat-worker never logged its bound API address within 30s -- that is a startup "+
+		"failure, not a slow start; its log:\n%s", log.String())
+	return "", cmd
 }
