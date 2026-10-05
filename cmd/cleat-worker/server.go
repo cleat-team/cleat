@@ -2939,10 +2939,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	// a one-line call-site update forced by ResolveDeployableExposure's
 	// signature change, scoped to exactly that -- cmd/cleat-worker/ is WS-3's
 	// zone, and leaving this call uncompilable (or, worse, silently hardcoding
-	// false forever) would be strictly worse than the one-line touch. Cleared
-	// with WS-3 before this landed. tid is already in scope from the request's
-	// auth context; a store that does not implement the reader is treated as
-	// "not opted in" (see TenantExposurePolicyReader's doc comment).
+	// false forever) would be strictly worse than the one-line touch. Proposed
+	// as this diff, then cleared by WS-3 reviewing it on PR #3154 before the PR
+	// landed. tid is already in scope from the request's auth context; a store
+	// that does not implement the reader is treated as "not opted in" (see
+	// TenantExposurePolicyReader's doc comment).
 	tidUUID, tidOK := auth.TenantIDFromContext(r.Context())
 	tid := ""
 	if tidOK {
