@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -150,6 +151,30 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// boundAPIAddr returns the addr field of the first "HTTP API listening" JSON log
+// line in s, or "" if no such line has been written yet. The worker logs JSON on
+// stderr (slog.NewJSONHandler), so a line that does not parse, or whose msg is
+// something else, is skipped rather than guessed at.
+//
+// This is the shared half of "boot on :0 and learn the port": the API listener
+// logs the address it actually bound (cleat#3136), so a caller that needs to talk
+// to the worker boots it with `--api-addr=127.0.0.1:0` and reads the port back
+// through here, instead of pre-choosing one with freePort and racing another
+// process for it between the probe and the bind (cleat#3138). Poll until it
+// returns non-empty: the line is written just before Serve, so it appears early.
+func boundAPIAddr(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		var rec struct {
+			Msg  string `json:"msg"`
+			Addr string `json:"addr"`
+		}
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "HTTP API listening" {
+			return rec.Addr
+		}
+	}
+	return ""
+}
+
 // runWorker runs the binary to completion (for the modes that exit) and returns its
 // exit code and combined output.
 func runWorker(t *testing.T, bin string, env []string, args ...string) (int, string) {
@@ -179,8 +204,11 @@ func runWorker(t *testing.T, bin string, env []string, args ...string) (int, str
 // either way, for the assertions that read a warning out of it.
 func startsHealthy(t *testing.T, bin string, args ...string) (bool, string) {
 	t.Helper()
-	port := freePort(t)
-	cmd := exec.Command(bin, append(args, fmt.Sprintf("--api-addr=127.0.0.1:%d", port), "--require-auth=false")...)
+	// Boot on an ephemeral port and read the address the socket actually bound
+	// from the worker's own "HTTP API listening" line, rather than pre-choosing a
+	// port with freePort and racing another process for it between the probe and
+	// the bind (cleat#3138 -- the race cleat#3136 removed for the API listener).
+	cmd := exec.Command(bin, append(args, "--api-addr=127.0.0.1:0", "--require-auth=false")...)
 	// Read while the worker is still running (the healthy case returns before it
 	// is killed), so the buffer has to be safe against exec's copier goroutine.
 	var out syncBuffer
@@ -203,7 +231,12 @@ func startsHealthy(t *testing.T, bin string, args ...string) (bool, string) {
 			return false, out.String()
 		default:
 		}
-		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+		apiAddr := boundAPIAddr(out.String())
+		if apiAddr == "" {
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		resp, err := client.Get("http://" + apiAddr + "/healthz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
