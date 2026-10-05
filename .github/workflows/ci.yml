@@ -386,6 +386,19 @@ jobs:
           python3 scripts/check-bare-entry-decorator.py
           LINT_GUARD_EOF
 
+      # cleat#3132. This one is a HELPER, not a guard, and the shape of the step
+      # says so: there is no real run to follow the self-test, because the
+      # helper's own invocation needs a live job id. That is also why the
+      # self-test is the whole step rather than a courtesy -- a committed helper
+      # nothing exercises is a mechanism wired to nothing, and the flag it exists
+      # to stop forgetting is exactly what its known-positive asserts.
+      - name: Job-log helper self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Job-log helper self-test" >> "$LINT_FAILURES_FILE"
+          python3 scripts/gh-job-log.py --self-test
+          LINT_GUARD_EOF
+
       # A test double that never reads the parameter its test is named after
       # cannot fail for the reason the test exists. That is not hypothetical:
       # reprocess never read Idempotency-Key (cleat#1167), and the two tests
