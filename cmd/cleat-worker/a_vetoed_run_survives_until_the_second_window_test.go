@@ -64,7 +64,7 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := newInternalHoldsServer("", secret, holder)
+	srv := newInternalHoldsServer(secret, holder)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	holderAddress := ln.Addr().String()

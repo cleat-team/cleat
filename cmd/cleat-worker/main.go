@@ -2680,7 +2680,6 @@ func main() {
 	if *pprofAddr != "" {
 		go func() {
 			defer recoverBackgroundGoroutine(logger, workerID, "pprof-listener")
-			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
 			// An explicit Server rather than http.ListenAndServe, for the
 			// ReadHeaderTimeout (gosec G114/G112): the convenience function
 			// cannot set one, so a client that opens a connection and sends
@@ -2693,11 +2692,22 @@ func main() {
 			// the API server above is built with its own mux, so profiling
 			// endpoints are not reachable there. Worth keeping that way --
 			// a heap profile from this process contains workflow payloads.
+			//
+			// No Addr field, and net.Listen before Serve: with ListenAndServe
+			// the bind happened internally, so `--pprof-addr ":0"` logged
+			// `addr=:0` -- an address no caller can connect to -- while the
+			// kernel had already chosen the real port. Same defect cleat#3136
+			// fixed for the API listener (cleat#3139).
 			pprofSrv := &http.Server{
-				Addr:              *pprofAddr,
 				ReadHeaderTimeout: 10 * time.Second,
 			}
-			if err := pprofSrv.ListenAndServe(); err != nil {
+			ln, err := net.Listen("tcp", *pprofAddr)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "pprof server listen error", "worker_id", workerID, "addr", *pprofAddr, "error", err)
+				return
+			}
+			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", ln.Addr().String())
+			if err := pprofSrv.Serve(ln); err != nil {
 				logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
 			}
 		}()
@@ -2724,11 +2734,20 @@ func main() {
 				"worker_id", workerID)
 			os.Exit(1)
 		}
-		internalSrv := newInternalHoldsServer(*internalAddr, internalSecret, w)
+		internalSrv := newInternalHoldsServer(internalSecret, w)
 		go func() {
 			defer recoverBackgroundGoroutine(logger, workerID, "internal-holds-listener")
-			logger.InfoContext(context.Background(), "internal holds listening", "worker_id", workerID, "addr", *internalAddr)
-			if err := internalSrv.ListenAndServe(); err != http.ErrServerClosed {
+			// net.Listen before Serve so the log names the BOUND address rather
+			// than the configured one: `--internal-addr ":0"` would otherwise
+			// log `addr=:0`, which no caller can connect to (cleat#3139, same
+			// defect cleat#3136 fixed for the API listener).
+			ln, err := net.Listen("tcp", *internalAddr)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "internal holds listen error", "worker_id", workerID, "addr", *internalAddr, "error", err)
+				return
+			}
+			logger.InfoContext(context.Background(), "internal holds listening", "worker_id", workerID, "addr", ln.Addr().String())
+			if err := internalSrv.Serve(ln); err != http.ErrServerClosed {
 				logger.ErrorContext(context.Background(), "internal holds server error", "worker_id", workerID, "error", err)
 			}
 		}()

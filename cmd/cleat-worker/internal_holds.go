@@ -95,15 +95,20 @@ func validInternalAuth(r *http.Request, secret string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(secret)) == 1
 }
 
-// newInternalHoldsServer builds the listener for --internal-addr. Separate
+// newInternalHoldsServer builds the HTTP server for --internal-addr. Separate
 // from main.go's startup sequence so it can be unit-tested without a full
 // worker boot: callers needing a real round trip construct a *Worker with
-// nothing but w.inflight populated (the only field this handler reads).
-func newInternalHoldsServer(addr, secret string, w *Worker) *http.Server {
+// nothing but w.inflight populated (the only field this handler reads), and
+// bind their own listener -- as main.go does, with net.Listen plus Serve
+// rather than ListenAndServe, so the log can name the address actually bound.
+func newInternalHoldsServer(secret string, w *Worker) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /internal/holds/{run_id}", w.handleInternalHolds(secret))
+	// No Addr field on purpose: Serve uses the LISTENER's address, so an Addr
+	// here would be read by nothing and would put --internal-addr in two
+	// places with only one of them honoured -- the same hygiene cleat#3136
+	// applied to the API server (cleat#3139).
 	return &http.Server{
-		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
