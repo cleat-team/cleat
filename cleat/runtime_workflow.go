@@ -695,6 +695,17 @@ func (s *Saga) RunWithResult(h HostCalls) (*SagaResult, error) {
 	h.SetQueryState("status", "done")
 	h.SetQueryState("compensated", "")
 	h.SetQueryState("compensated_count", "0")
+	// cleat#2967. current_step self-heals on a second saga (the next run
+	// overwrites it on its first step), but failed_step/unwind_failed have
+	// nothing that overwrites them -- without this clear, a saga that runs
+	// after an earlier failed one on the same workflow publishes status=done
+	// beside the FIRST saga's failed_step and unwind_failed, a confident wrong
+	// answer for anyone polling. Empty rather than deleted, for the same
+	// reason the compensated clear above is: a poller that read the key
+	// during the run still finds it afterwards.
+	h.SetQueryState(sagaFailedStep, "")
+	h.SetQueryState("unwind_failed", "")
+	h.SetQueryState("unwind_failed_count", "0")
 	return res, nil
 }
 
