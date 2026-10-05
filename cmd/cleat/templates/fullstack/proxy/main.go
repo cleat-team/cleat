@@ -327,8 +327,19 @@ func run(args []string, getenv func(string) string, readFile func(string) ([]byt
 		return fmt.Errorf("refusing to listen on %s: it is not a loopback address, and anything that can reach it would act as "+
 			"your tenant. Pass -allow-remote if you mean it", *listen)
 	}
+	// Bind before building the handler and logging, rather than letting ListenAndServe do both:
+	// a -listen ending in :0 (the scratch proxy cleat#3131 names, started by a test that cannot
+	// pre-choose the port without racing it) means the address actually bound can differ from
+	// *listen, and cfg.listen -- which the Host-header allowlist below is built from -- must be
+	// the real one, not the configured ":0". Logging ln.Addr() here is what lets a caller
+	// discover the real port afterwards, the same reporting fix cleat#3137 made for cleat-worker.
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", *listen, err)
+	}
+	bound := ln.Addr().String()
 	cfg := config{
-		upstream: u, workflow: *workflow, apiKey: key, page: *page, script: filepath.Join(filepath.Dir(*page), "app.js"), listen: *listen,
+		upstream: u, workflow: *workflow, apiKey: key, page: *page, script: filepath.Join(filepath.Dir(*page), "app.js"), listen: bound,
 		client: &http.Client{
 			Timeout:       15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -336,10 +347,9 @@ func run(args []string, getenv func(string) string, readFile func(string) ([]byt
 	}
 	if allowedHosts(*listen) == nil {
 		log.Printf("WARNING: -allow-remote: listening on %s, which is not a loopback address: anyone who can reach it acts as "+
-			"your tenant and the Host check is off", *listen)
+			"your tenant and the Host check is off", bound)
 	}
 	srv := &http.Server{
-		Addr:              *listen,
 		Handler:           newHandler(cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -347,8 +357,8 @@ func run(args []string, getenv func(string) string, readFile func(string) ([]byt
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
-	log.Printf("open http://%s/  (forwarding to %s)", *listen, u.Host)
-	return srv.ListenAndServe()
+	log.Printf("proxy listening on %s  (forwarding to %s)", bound, u.Host)
+	return srv.Serve(ln)
 }
 
 func main() {
