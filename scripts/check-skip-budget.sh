@@ -569,10 +569,22 @@ check_ledger_line() {
       echo >&2
       echo "  This line's pattern has no \"Test\" in it, so this checker treats it as" >&2
       echo "  BROAD -- it is checked against every skip no specific line already" >&2
-      echo "  claimed, rather than against one test by name. If a new test's own" >&2
-      echo "  named line didn't fix this, that line's pattern is missing \"Test\"" >&2
-      echo "  too (a typo, or a name that isn't a Go test identifier) and is being" >&2
-      echo "  treated as broad when it was meant to be specific." >&2
+      echo "  claimed, rather than against one test by name." >&2
+      if [ "$got" -gt "$count" ]; then
+        echo "  DO NOT bump this count for a newly-skipping test. Add a new line for" >&2
+        echo "  just that test instead, in its own skip-ledger.d fragment, under this" >&2
+        echo "  same job key: a specific line's matches are removed from the pool" >&2
+        echo "  before any broad line is checked (cleat#2729), so the new line" >&2
+        echo "  satisfies this error without editing this one -- and without" >&2
+        echo "  conflicting with any other concurrent PR doing the same thing." >&2
+        echo "  (Three PRs bumped this exact line instead and didn't need to:" >&2
+        echo "  cleat#2908.)" >&2
+      else
+        echo "  If a new test's own named line didn't fix this, that line's pattern" >&2
+        echo "  is missing \"Test\" too (a typo, or a name that isn't a Go test" >&2
+        echo "  identifier) and is being treated as broad when it was meant to be" >&2
+        echo "  specific." >&2
+      fi
     fi
     echo "  reason on file: $why" >&2
     fail=1
