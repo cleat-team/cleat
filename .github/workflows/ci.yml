@@ -392,6 +392,13 @@ jobs:
       # self-test is the whole step rather than a courtesy -- a committed helper
       # nothing exercises is a mechanism wired to nothing, and the flag it exists
       # to stop forgetting is exactly what its known-positive asserts.
+      #
+      # ZONE EXCEPTION, stated because .github/workflows/ is WS-3's and this step
+      # is the case the exception names rather than a trespass. WORKSTREAM.md
+      # lets another stream add here "when leaving the mechanism unwired would be
+      # worse -- say so in the comment", and that is exactly this: without the
+      # step nothing invokes scripts/gh-job-log.py at all. Asked of WS-3 directly
+      # (cleat#3134); the step comes out if they would rather.
       - name: Job-log helper self-test
         if: always()
         run: |
