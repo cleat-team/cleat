@@ -1212,6 +1212,35 @@ func runDeploy(args []string) {
 		}
 	}
 
+	// cleat#3150: `cleat build` writes a `<wasm>.schema.json` sidecar next to
+	// the binary when it computed one (entrypoint_schemas.go's
+	// buildEntryPointSchemas); `cleatctl deploy workflow` already reads it
+	// (cmd/cleatctl/deploy.go), and this mirrors that read so the documented
+	// `cleat deploy` path stops silently omitting it. Absence is not an
+	// error -- an older build, or a build from a language
+	// internal/jsonschema has no emitter for yet, simply has none.
+	var entryPointSchemas map[string]engine.EntryPointSchema
+	if schemaBytes, serr := os.ReadFile(wasmPath + ".schema.json"); serr == nil {
+		if uerr := json.Unmarshal(schemaBytes, &entryPointSchemas); uerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %s.schema.json is not valid JSON, deploying without entry point schemas: %v\n", wasmPath, uerr)
+			entryPointSchemas = nil
+		}
+	}
+	// entry_point_schemas is nullable with no default (migrations/postgres/
+	// 006), unlike pluginDepsJSON above: "no schema was computed" is a real
+	// state, and a nil []byte parameter binds to SQL NULL rather than the
+	// literal `null` json.Marshal(nil map) would produce -- mirroring
+	// engine/store_deployment.go's DeployWorkflowDef.
+	var entryPointSchemasJSON []byte
+	if len(entryPointSchemas) > 0 {
+		var merr error
+		entryPointSchemasJSON, merr = json.Marshal(entryPointSchemas)
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding entry point schemas: %v\n", merr)
+			os.Exit(1)
+		}
+	}
+
 	// The tenant this deploy belongs to, resolved the way `cleat lock` already
 	// resolves it: flag, then environment, then the single-tenant default.
 	//
@@ -1261,8 +1290,8 @@ func runDeploy(args []string) {
 	}
 
 	_, err = tx.Exec(
-		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length, tenant_id)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length, tenant_id, entry_point_schemas)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 		   wasm_bytes = EXCLUDED.wasm_bytes,
 		   abi_version = EXCLUDED.abi_version,
@@ -1270,9 +1299,10 @@ func runDeploy(args []string) {
 		   min_version = EXCLUDED.min_version,
 		   entry_points = EXCLUDED.entry_points,
 		   task_queue = EXCLUDED.task_queue,
-		   max_history_length = EXCLUDED.max_history_length`,
+		   max_history_length = EXCLUDED.max_history_length,
+		   entry_point_schemas = EXCLUDED.entry_point_schemas`,
 		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag, *maxHistoryLengthFlag,
-		deployTenantID,
+		deployTenantID, entryPointSchemasJSON,
 	)
 	if err != nil {
 		_ = tx.Rollback()
