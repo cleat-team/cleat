@@ -19,8 +19,10 @@
 //     release, so a PR cannot pull the one that reflects its own change. The test builds the repository's own
 //     Dockerfile and points CLEAT_WORKER_IMAGE at it. The DEFAULT is asserted separately (below), so renaming
 //     it in the compose file is still seen.
-//   - the two host ports (CLEAT_PG_PORT, CLEAT_API_PORT), so a runner that already has something on 5432 or
-//     8080 does not fail a test about the template.
+//   - the two host ports (CLEAT_PG_PORT, CLEAT_API_PORT), set to 0 so DOCKER allocates them and the test
+//     reads back what it bound. A runner with something already on 5432 or 8080 does not fail a test about the
+//     template, and -- since cleat#3131 -- neither does the gap between the test picking a port and compose
+//     binding it, which is what cleat#3122's race was and what a hold cannot close on Linux.
 //
 // It asserts the state the README says the run reaches, `done` with `status` = `complete`, not merely that curl
 // returned a run id: a route or entry-point bug can produce a 2xx with an id and fail a moment later
@@ -38,6 +40,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -94,7 +97,17 @@ import (
 // WHAT IT DOES NOT DO: close the cross-allocator race. Releasing before the bind
 // leaves a gap on every platform, and no local hold can close it for a wildcard
 // consumer on Linux. What closes it is having the consumer allocate the port and
-// report it back (compose's own random host port, say) -- a change this is not.
+// report it back (compose's own random host port, say) -- which the fullstack
+// template test now does for itself (cleat#3131). The two quick-start tests and the
+// proxy still need this helper -- but NOT because their consumer is missing, which
+// is what this comment said until cleat-review read the source. `cleat-worker` IS
+// the consumer: it binds the address a caller gives it and logs the CONFIGURED one
+// (`cmd/cleat-worker/main.go` logs `*apiAddr`, and no non-test worker code reads the
+// listener's `Addr()`), so `--api-addr ":0"` would log `:0` and the caller could not
+// read back what was bound. That is a REPORTING gap, not an absent consumer, and it
+// is filed as cleat#3136: bind explicitly, log `ln.Addr()`, and those sites can
+// discover their ports the way the fullstack test now does. The proxy's `-listen`
+// is the same shape. So the gap stands there for one named reason, not an inherent one.
 func holdTCPPort(t *testing.T) (port int, release func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -105,6 +118,37 @@ func holdTCPPort(t *testing.T) (port int, release func()) {
 	// before its own release(). Closing twice is harmless.
 	t.Cleanup(func() { ln.Close() })
 	return ln.Addr().(*net.TCPAddr).Port, func() { ln.Close() }
+}
+
+// composePublishedPort asks the running compose project which host port it actually bound.
+// That is the difference between choosing a port and being told one: docker does the
+// allocation and the bind as one act, so there is no interval for anything to take the
+// number in (cleat#3131).
+//
+// It reads the project's own record rather than guessing from output text. `docker compose
+// port` prints "0.0.0.0:<port>" -- and "[::]:<port>" on hosts with IPv6 enabled -- so the
+// port is what follows the LAST colon, and a project that is not running prints nothing.
+// Both of those must fail here rather than becoming port 0, which would silently send the
+// test at whatever is listening on the wildcard.
+func composePublishedPort(t *testing.T, dir string, env []string, service string, containerPort int) int {
+	t.Helper()
+	cmd := exec.Command("docker", "compose", "port", service, fmt.Sprintf("%d", containerPort))
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("docker compose port %s %d: %v", service, containerPort, err)
+	}
+	text := strings.TrimSpace(string(out))
+	if i := strings.LastIndex(text, ":"); i >= 0 {
+		text = text[i+1:]
+	}
+	port, convErr := strconv.Atoi(text)
+	if convErr != nil || port <= 0 {
+		t.Fatalf("docker compose port %s %d printed %q, which is not a host port",
+			service, containerPort, strings.TrimSpace(string(out)))
+	}
+	return port
 }
 
 // TestHoldTCPPortKeepsThePortReservedUntilReleased asserts the property the helper
@@ -204,23 +248,23 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	}
 	t.Cleanup(func() { exec.Command("docker", "rmi", "-f", image).Run() })
 
-	// Both picked while the earlier one is still held, so the two CANNOT be one number -- the
-	// same-number branch of cleat#3122, where postgres bound the port and the worker then failed
-	// to publish it. Released immediately afterwards and BEFORE `make up`, which is the part the
-	// first version of this change got wrong: on Linux a live hold refuses compose's wildcard
-	// publish outright, so holding until the containers bind would produce the very
-	// `port is already allocated` failure this exists to remove. See holdTCPPort.
-	pgPort, releasePG := holdTCPPort(t)
-	apiPort, releaseAPI := holdTCPPort(t)
-	releasePG()
-	releaseAPI()
-
+	// DOCKER PICKS BOTH PORTS AND THE TEST READS THEM BACK, which removes the window rather
+	// than narrowing it (cleat#3131). `CLEAT_PG_PORT=0` is not "no port" -- it is an explicit
+	// request for the allocation, measured: compose publishes `0.0.0.0:33290` and
+	// `docker compose port postgres 5432` reports it back. Nothing is chosen before the bind,
+	// so nothing can be taken in between, which is the branch a hold cannot close: on Linux a
+	// live hold refuses the consumer's bind outright, so it must be released before `make up`
+	// and the gap is inherent (see holdTCPPort's own note).
+	//
+	// The scaffold is untouched: its template still publishes 5432 and 8080 by default for a
+	// newcomer reading the README. This test is setting the same two variables it already
+	// substituted, to a value that means "you choose".
 	env := append(os.Environ(),
 		"PATH="+filepath.Dir(cleatBinary)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"COMPOSE_PROJECT_NAME=cleat-template-test-"+suffix,
 		"CLEAT_WORKER_IMAGE="+image,
-		fmt.Sprintf("CLEAT_PG_PORT=%d", pgPort),
-		fmt.Sprintf("CLEAT_API_PORT=%d", apiPort),
+		"CLEAT_PG_PORT=0",
+		"CLEAT_API_PORT=0",
 	)
 	runMake := func(target string) (string, error) {
 		cmd := exec.Command("make", target)
@@ -234,6 +278,16 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	if out, err := runMake("up"); err != nil {
 		t.Fatalf("make up: %v\n%s", err, out)
 	}
+	// READ BACK what docker bound, rather than choosing and hoping. The discovered values go
+	// into env, which `runMake` reads at call time, so `make deploy` and `make run` -- which
+	// reach postgres and the API by these numbers -- get the real ones.
+	pgPort := composePublishedPort(t, proj, env, "postgres", 5432)
+	apiPort := composePublishedPort(t, proj, env, "cleat-worker", 8080)
+	env = append(env,
+		fmt.Sprintf("CLEAT_PG_PORT=%d", pgPort),
+		fmt.Sprintf("CLEAT_API_PORT=%d", apiPort),
+	)
+	t.Logf("docker allocated CLEAT_PG_PORT=%d and CLEAT_API_PORT=%d", pgPort, apiPort)
 	base := fmt.Sprintf("http://localhost:%d", apiPort)
 	dumpLogs := func() {
 		if t.Failed() {
