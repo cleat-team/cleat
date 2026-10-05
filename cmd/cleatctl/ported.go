@@ -131,11 +131,26 @@ var portedOn = map[string][]string{
 	// it. Narrowing it to {"postgres"} would have been the cautious-looking
 	// move and would have removed a working path on the strength of not having
 	// looked.
-	"suspend-tenant":     {"postgres", "mssql"},
-	"resume-tenant":      {"postgres", "mssql"},
-	"set-tenant-setting": {"postgres"},
-	"deploy":             {"postgres"},
-	"versions":           {"postgres"},
+	"suspend-tenant": {"postgres", "mssql"},
+	"resume-tenant":  {"postgres", "mssql"},
+
+	// allow-public-exposure / revoke-public-exposure (cleat#1986). Same shape
+	// as suspend-tenant/resume-tenant immediately above, including the same
+	// bug class this map exists to prevent: the pre-read SELECT in
+	// publicexposure.go hardcodes `admin.tenants`, which does not exist on
+	// MySQL ("Unknown database 'admin'"). The write path underneath
+	// (auth.TenantStore.SetTenantAllowsPublicExposure) is portable to all
+	// three -- TestSetTenantAllowsPublicExposure proves it -- but this
+	// COMMAND's own read is not, so the command is restricted to match what
+	// was actually exercised. Both postgres and mssql are evidenced:
+	// TestATenantWithNoGrantMayNotDeployPublic (engine) and
+	// TestSetTenantAllowsPublicExposure (auth) both run against real
+	// PostgreSQL and SQL Server databases.
+	"allow-public-exposure":  {"postgres", "mssql"},
+	"revoke-public-exposure": {"postgres", "mssql"},
+	"set-tenant-setting":     {"postgres"},
+	"deploy":                 {"postgres"},
+	"versions":               {"postgres"},
 
 	// slack, cleat#2230: all three, from the start. slack_workspace carries
 	// no admin.-qualified SQL of its own (unlike drop-tenant) and no

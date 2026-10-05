@@ -26,6 +26,8 @@
 //	suspend-tenant <tenant-id>       — stop new work for a tenant, reversibly
 //	resume-tenant <tenant-id>        — undo suspend-tenant
 //	set-tenant-trial <tenant-id> --days N — schedule a tenant for trial-expiry suspension
+//	allow-public-exposure <tenant-id> — opt a tenant into deploying 'public' workflows (cleat#1986)
+//	revoke-public-exposure <tenant-id> — undo allow-public-exposure
 //	revoke-api-key [flags]           — revoke a cleat API key (credential rotation)
 //	operator-key create|list|revoke  — mint or revoke an operator credential for /api/admin/*
 //	oauth-allow <list|add|remove>    — manage a tenant's OAuth identity allowlist
@@ -154,6 +156,10 @@ func main() {
 		runSuspendTenant(ctx, db, d, args[1:], false)
 	case "set-tenant-trial":
 		runSetTenantTrial(ctx, db, d, args[1:])
+	case "allow-public-exposure":
+		runPublicExposureGrant(ctx, db, d, args[1:], true)
+	case "revoke-public-exposure":
+		runPublicExposureGrant(ctx, db, d, args[1:], false)
 	case "revoke-api-key":
 		runRevokeAPIKey(ctx, db, args[1:])
 	case "operator-key":
@@ -216,6 +222,8 @@ Commands:
   suspend-tenant <tenant-id> [--yes]           stop new work for a tenant, reversibly
   resume-tenant <tenant-id>                    undo suspend-tenant
   set-tenant-trial <tenant-id> --days N        schedule a tenant for trial-expiry suspension
+  allow-public-exposure <tenant-id> [--yes]    opt a tenant into deploying 'public' workflows (cleat#1986)
+  revoke-public-exposure <tenant-id>           undo allow-public-exposure
   revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
   operator-key create --description <text> [--expires-in <dur>]  mint an operator key
   operator-key list                                list operator credentials, live and revoked

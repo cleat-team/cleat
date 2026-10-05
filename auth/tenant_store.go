@@ -462,6 +462,46 @@ func setTenantSuspendedStmt(dialect string) string {
 	}
 }
 
+// SetTenantAllowsPublicExposure sets or clears a tenant's operator opt-in for
+// the `public` exposure class (cleat#1986). The write half of
+// engine.TenantExposurePolicyReader -- this works on all three dialects,
+// unlike the read interface, for the same reason SetTenantSuspended does: an
+// `UPDATE ... WHERE tenant_id = ?` needs no RETURNING-shaped workaround, so
+// there is no dialect this refuses. MySQL's row simply has no multi-tenant
+// read path consulting it (D1), not a write path that cannot reach it.
+//
+// Returns ErrTenantNotFound when the update affects zero rows, same
+// reasoning as SetTenantSuspended: an operator acting on a tenant id it did
+// not just read from this same table needs to be able to tell "granted" from
+// "there is no such tenant".
+func (s *TenantStore) SetTenantAllowsPublicExposure(ctx context.Context, tenantID uuid.UUID, allow bool) error {
+	res, err := s.db.ExecContext(ctx, setTenantAllowsPublicExposureStmt(s.dialect), allow, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrTenantNotFound, tenantID)
+	}
+	return nil
+}
+
+// setTenantAllowsPublicExposureStmt mirrors setTenantSuspendedStmt's per-dialect
+// table naming exactly.
+func setTenantAllowsPublicExposureStmt(dialect string) string {
+	switch dialect {
+	case DialectMySQL:
+		return `UPDATE tenants SET allow_public_exposure = ? WHERE tenant_id = ?`
+	case DialectMSSQL:
+		return `UPDATE admin.tenants SET allow_public_exposure = @p1 WHERE tenant_id = @p2`
+	default:
+		return `UPDATE admin.tenants SET allow_public_exposure = $1 WHERE tenant_id = $2`
+	}
+}
+
 // GenerateAPIKey generates a random API key string.
 func GenerateAPIKey() string {
 	// cleat_sk_ prefix for easy identification in logs
