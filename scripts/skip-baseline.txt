@@ -63,6 +63,7 @@ cmd/cleat	runVetCmd	1
 cmd/cleat	skipIfNoCleatSDKPython	2
 cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
+cmd/cleat-mcp	TestAModernMCPClientListsCallsAndCancelsARealWorkflow	2
 cmd/cleat-worker	TestABlockedStartIsAcceptedAndWaits	1
 cmd/cleat-worker	TestABootedWorkerBindsLoginToTheHost	2
 cmd/cleat-worker	TestABootedWorkerDisablesAnExpiredOAuthMintedKey	2
