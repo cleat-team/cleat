@@ -1757,7 +1757,7 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
 	var req struct {
@@ -1818,7 +1818,7 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
 	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
@@ -1894,7 +1894,7 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
 	var req struct {
@@ -1972,7 +1972,7 @@ func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if s.refuseIfAbsentOrInternalDef(w, r, st, name, "workflow definition not found") {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
 	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
@@ -2061,17 +2061,28 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 //	POST   /api/workflows/{name}/routing            409 via ValidateVersion
 //	GET    /api/workflows/{name}/tags               404 via defExists
 //	PUT    /api/workflows/{name}/tags               409 via ValidateVersion
-//	DELETE /api/workflows/{name}/tags/{tag}         unchecked -- see below
+//	DELETE /api/workflows/{name}/tags/{tag}         404 via refuseIfAbsentOrInternalDef (cleat#3165)
 //	DELETE /api/workflows/{name}/routing/{ruleID}   name UNUSED -- see below
 //
-// The two DELETEs are deliberately left alone here, for different reasons.
-// The tag delete is a no-op on the store for an unknown name, and adding a 404
-// changes DELETE idempotency semantics, which is a separate argument from the
-// reader/writer disagreement this change is about. The routing delete is a
-// different defect rather than the same one: it never reads the name at all
-// (handleRemoveRoutingRule takes parts[2], the rule id), so any name in the
-// path deletes any rule id within the tenant. Filed separately; fixing it here
-// would bundle a second concern.
+// The tag delete's row above used to read "unchecked -- see below", with the
+// same idempotency argument this file's own comment on
+// refuseIfAbsentOrInternalDef still carries: DELETE is conventionally
+// idempotent, and removing a tag that is not there is a no-op success. That
+// was never shipped as a non-decision -- cleat-ports pinned the then-current
+// 200 in TestDeletingATagOnAnUnknownDefinitionCurrentlyAnswers200 "so the port
+// notices whichever way it goes" (ports/samples-go/ISSUES.md), and cleat had
+// in fact already moved to 404 (handleRemoveWorkflowTag calls
+// refuseIfAbsentOrInternalDef) before this comment was next read. Owner
+// decision on cleat#3165, verbatim via the coordinator: "recommendation
+// accepted" -- keep 404 for an unknown DEFINITION; keep 200 for an absent TAG
+// on a definition that exists, which is the idempotency case the argument
+// above was actually protecting and which refuseIfAbsentOrInternalDef never
+// touched.
+//
+// The routing delete remains a different, unfixed defect: it never reads the
+// name at all (handleRemoveRoutingRule takes parts[2], the rule id), so any
+// name in the path deletes any rule id within the tenant. Filed separately;
+// fixing it here would bundle a second concern.
 //
 // The empty value is worse here than an empty list was there, because it is
 // ALSO a legitimate answer: a key that has not been published yet reads

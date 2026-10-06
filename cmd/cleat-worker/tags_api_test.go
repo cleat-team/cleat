@@ -227,4 +227,12 @@ func TestDeletingATagOnAnUnknownDefinitionIs404(t *testing.T) {
 		t.Error("the store was asked to remove a tag from a definition that does not " +
 			"exist, so the refusal did not come before the write")
 	}
+	// cleat#3165's usability half: the message names the workflow the caller
+	// asked for, so a typo in the name is visible in the response rather than
+	// a generic "workflow definition not found" that could be any of the four
+	// routes refuseIfAbsentOrInternalDef guards.
+	if !strings.Contains(rec.Body.String(), "never-deployed") {
+		t.Errorf("the 404 body does not name the workflow the caller asked for: %s",
+			rec.Body.String())
+	}
 }
