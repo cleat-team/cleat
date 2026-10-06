@@ -462,24 +462,32 @@ func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
 	// together, finalize_workflow_status included -- so replaying 003 alone
 	// has the side effect of reverting ANY later migration that redefines a
 	// routine 003 also defines, not only the RLS predicate this function
-	// exists to restore. Any such later file has to be replayed here too, in
-	// order, after 003. cleat#3171 (migrations/mssql/013) is the first one
-	// since the 2434 rebaseline -- found by this exact revert, mid-suite:
-	// a fix landed in 013, the FIRST MSSQL test in the process to touch this
-	// path released the admin pool in its teardown, this function replayed
-	// 003 alone, and finalize_workflow_status went back to its pre-013 body
-	// for every subtest after that one. TestProcedureMigrationListsAreComplete
+	// exists to restore. cleat#3171 (migrations/mssql/013) was the first one
+	// since the 2434 rebaseline to hit this -- found by this exact revert,
+	// mid-suite: a fix landed in 013, the FIRST MSSQL test in the process to
+	// touch this path released the admin pool in its teardown, this
+	// function replayed 003 alone, and finalize_workflow_status went back
+	// to its pre-013 body for every subtest after that one.
+	//
+	// cleat#3173: that was fixed by hand, by adding 013 to a hardcoded list
+	// here -- which is exactly the gap, because the NEXT migration that
+	// redefines a bundled routine needs a human to notice this function
+	// exists and remember to do the same thing again.
+	// mssqlPlainPredicateReplayFiles (mssql_admin_replay_list.go) derives
+	// the tail instead: it reads which routines 003_procedures.sql defines,
+	// then scans every later-numbered file for a redefinition of any of
+	// them. TestProcedureMigrationListsAreComplete
 	// (engine/store_backends_procedures_test.go) catches a routine missing
-	// from ITS list; nothing catches one missing from THIS list, because this
-	// file has no equivalent test -- read every migration after 003 that
-	// redefines a routine 003 defines before trusting this list is complete.
+	// from ITS list, which is scoped to finalize_workflow_status alone; this
+	// derivation covers every routine 003 bundles, not just that one.
 	root := repoRootForMSSQLTestutil(t)
-	for _, name := range []string{
-		"002_defaults.sql",
-		"003_procedures.sql",
-		"013_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
-	} {
-		execMSSQLBatchFile(t, restoreDB, filepath.Join(root, "migrations", "mssql", name))
+	dir := filepath.Join(root, "migrations", "mssql")
+	names, err := mssqlPlainPredicateReplayFiles(dir)
+	if err != nil {
+		t.Fatalf("derive the plain-predicate replay list from %s: %v", dir, err)
+	}
+	for _, name := range names {
+		execMSSQLBatchFile(t, restoreDB, filepath.Join(dir, name))
 	}
 }
 
