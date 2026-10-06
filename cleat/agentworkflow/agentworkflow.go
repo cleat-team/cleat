@@ -185,6 +185,45 @@ type Tool struct {
 	// the run.
 	PollIntervalSeconds int `json:"poll_interval_seconds,omitempty"`
 	MaxPolls            int `json:"max_polls,omitempty"`
+
+	// ArgTransforms and StaticArgs are cleat#3169: KindPlugin and
+	// KindApproval otherwise hand the model's own tool-call JSON to the
+	// plugin VERBATIM, and once the loop is inside this workflow there is
+	// nowhere else for a caller to interpose a translation -- the same
+	// structural reason the budget ceiling could not be interposed
+	// (cleat#3022's central finding). Both are optional, and a Tool with
+	// neither declared dispatches exactly as it always has: the model's
+	// JSON, unchanged. See applyArgMapping for the exact merge order.
+	ArgTransforms []ArgTransform  `json:"arg_transforms,omitempty"`
+	StaticArgs    json.RawMessage `json:"static_args,omitempty"`
+}
+
+// ArgTransform copies one field from the model's tool-call arguments to the
+// name the plugin or service actually expects, with an optional encoding.
+// It is declarative on purpose -- see cleat#3169's issue body for why this
+// cannot be a Go callback: Tool crosses the WASM/child-workflow boundary as
+// plain JSON, so anything here has to be expressible as data.
+type ArgTransform struct {
+	// FromField is read from the model's arguments, and then REMOVED unless
+	// ToField names the same key -- a transform exists to produce ToField
+	// FROM FromField, and leaving an untransformed copy of (say) a
+	// plain-text body sitting next to its base64 encoding would defeat the
+	// point. If the model did not supply FromField, this transform is
+	// silently skipped -- a missing optional argument is not this
+	// mechanism's business to enforce; a plugin that requires the field
+	// will refuse the call as it always would.
+	FromField string `json:"from_field"`
+
+	// ToField is written into what the plugin or service receives.
+	ToField string `json:"to_field"`
+
+	// Encoding transforms the value before it is written. "" copies it
+	// verbatim. "base64" standard-encodes it, which is cleat#3169's whole
+	// motivating case: a plugin whose field is `[]byte` (base64 in JSON,
+	// e.g. blobstore's Data) no longer needs the MODEL to produce base64 --
+	// the model supplies plain text under FromField, and this does the
+	// encode a hand-written tool function used to do in Go.
+	Encoding string `json:"encoding,omitempty"`
 }
 
 // Defaults. MaxSteps matches the library this replaces, which the issue fixed
@@ -675,7 +714,115 @@ func (t Tool) validate() error {
 		return fmt.Errorf("agent: tool %q has unknown kind %q (want %q, %q, %q or %q)",
 			t.Name, t.Kind, KindService, KindPlugin, KindWorkflow, KindApproval)
 	}
+
+	// ArgTransforms/StaticArgs are applied only for KindPlugin and
+	// KindApproval -- see callTool. Declaring either on a KindService or
+	// KindWorkflow tool would otherwise pass validation cleanly and then be
+	// silently ignored at every dispatch, forever: a mechanism that exists,
+	// validates, and is wired to nothing reads as working to anyone who
+	// greps for it. Refused here instead (found in review, cleat#3174).
+	if len(t.ArgTransforms) > 0 || len(t.StaticArgs) > 0 {
+		switch t.Kind {
+		case KindPlugin, KindApproval:
+		default:
+			return fmt.Errorf("agent: tool %q declares arg_transforms or static_args, but kind %q never applies them (only %q and %q do)",
+				t.Name, t.Kind, KindPlugin, KindApproval)
+		}
+	}
+
+	// Validated at declaration time, not at first dispatch, same reasoning
+	// as every branch above: a malformed tool should not look like a model
+	// failure three turns later.
+	for _, xf := range t.ArgTransforms {
+		if xf.FromField == "" || xf.ToField == "" {
+			return fmt.Errorf("agent: tool %q has an arg_transform missing from_field or to_field", t.Name)
+		}
+		switch xf.Encoding {
+		case "", "base64":
+		default:
+			return fmt.Errorf("agent: tool %q has an arg_transform with unknown encoding %q (want \"\" or %q)",
+				t.Name, xf.Encoding, "base64")
+		}
+	}
+	if len(t.StaticArgs) > 0 {
+		var static map[string]any
+		if err := json.Unmarshal(t.StaticArgs, &static); err != nil {
+			return fmt.Errorf("agent: tool %q has static_args that is not a JSON object: %w", t.Name, err)
+		}
+	}
 	return nil
+}
+
+// applyArgMapping returns the plugin/service-facing arguments for a KindPlugin
+// or KindApproval tool call: the model's own JSON, with each of
+// t.ArgTransforms copied in (CONSUMING its source field -- see below), then
+// t.StaticArgs merged over everything last (so a static field always wins a
+// collision, with either the model's own argument or a transform's output).
+// A Tool with neither set returns args completely unchanged -- not even
+// round-tripped through JSON -- so an existing caller's behaviour, and the
+// exact bytes any existing test asserts on, are untouched. See cleat#3169.
+func applyArgMapping(t Tool, args string) (string, error) {
+	if len(t.ArgTransforms) == 0 && len(t.StaticArgs) == 0 {
+		return args, nil
+	}
+
+	out := map[string]any{}
+	if args != "" {
+		if err := json.Unmarshal([]byte(args), &out); err != nil {
+			return "", fmt.Errorf("agent: tool %q: model arguments are not a JSON object: %w", t.Name, err)
+		}
+	}
+
+	for _, xf := range t.ArgTransforms {
+		raw, ok := out[xf.FromField]
+		if !ok {
+			// Missing is not this mechanism's business to enforce -- see
+			// ArgTransform's doc comment. A plugin that requires the field
+			// refuses the call as it always would.
+			continue
+		}
+		switch xf.Encoding {
+		case "":
+			out[xf.ToField] = raw
+		case "base64":
+			s, ok := raw.(string)
+			if !ok {
+				return "", fmt.Errorf("agent: tool %q: arg_transform to %q wants base64 encoding, but the model's %q was not a string",
+					t.Name, xf.ToField, xf.FromField)
+			}
+			out[xf.ToField] = base64.StdEncoding.EncodeToString([]byte(s))
+		}
+		// CONSUME the source field: a transform exists to produce ToField
+		// FROM FromField, and leaving the untransformed original sitting
+		// alongside it defeats the point for exactly the case this issue is
+		// about -- save_report's whole reason for existing is that the
+		// plugin should never see an unencoded copy of the body next to the
+		// encoded one. Skipped when they are the same key, so a transform
+		// that merely relabels a field in place does not delete what it just
+		// wrote.
+		if xf.FromField != xf.ToField {
+			delete(out, xf.FromField)
+		}
+	}
+
+	if len(t.StaticArgs) > 0 {
+		var static map[string]any
+		if err := json.Unmarshal(t.StaticArgs, &static); err != nil {
+			// validate() already checked this at declaration time; a tool
+			// reaching dispatch with invalid static_args would mean validate
+			// was bypassed, not that the model did anything wrong.
+			return "", fmt.Errorf("agent: tool %q: static_args is not a JSON object: %w", t.Name, err)
+		}
+		for k, v := range static {
+			out[k] = v
+		}
+	}
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("agent: tool %q: marshal mapped arguments: %w", t.Name, err)
+	}
+	return string(b), nil
 }
 
 // writeArtifact puts the run's answer in the bundled blobstore plugin, in the
@@ -708,7 +855,11 @@ func callTool(h cleat.HostCalls, t Tool, args string) (string, error) {
 	case KindService:
 		return h.DurableCall(t.Service, t.Operation, args)
 	case KindPlugin:
-		return h.PluginCall(t.Plugin, t.Function, args)
+		mapped, err := applyArgMapping(t, args)
+		if err != nil {
+			return "", err
+		}
+		return h.PluginCall(t.Plugin, t.Function, mapped)
 	case KindWorkflow:
 		runID, err := h.ChildWorkflow(t.Workflow, args)
 		if err != nil {
@@ -716,7 +867,11 @@ func callTool(h cleat.HostCalls, t Tool, args string) (string, error) {
 		}
 		return h.AwaitChild(runID)
 	case KindApproval:
-		return awaitApproval(h, t, args)
+		mapped, err := applyArgMapping(t, args)
+		if err != nil {
+			return "", err
+		}
+		return awaitApproval(h, t, mapped)
 	}
 	return "", fmt.Errorf("agent: tool %q has unknown kind %q", t.Name, t.Kind)
 }
