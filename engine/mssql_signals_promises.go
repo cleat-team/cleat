@@ -603,11 +603,15 @@ func (s *MSSQLStore) ResolvePromise(ctx context.Context, promiseID, result strin
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// promise_seq bump, the same shape DeliverSignal uses for signal_seq
+	// (cleat#953) -- see engine/store_promises.go's ResolvePromise for the
+	// full rationale (cleat#3171).
 	_, _ = tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN SYSUTCDATETIME() ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = @p1 AND tenant_id = @p2)
-		  AND status IN ('ready', 'suspended')
 	`, promiseID, s.tenantID)
 	return tx.Commit()
 }
@@ -630,11 +634,13 @@ func (s *MSSQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// promise_seq bump: see ResolvePromise's comment above (cleat#3171).
 	_, _ = tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN SYSUTCDATETIME() ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = @p1 AND tenant_id = @p2)
-		  AND status IN ('ready', 'suspended')
 	`, promiseID, s.tenantID)
 	return tx.Commit()
 }
@@ -715,7 +721,8 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 		return err
 	}
 
-	// Wake the workflow, exactly as DeliverSignal does.
+	// Wake the workflow, exactly as DeliverSignal does, with the same
+	// promise_seq bump ResolvePromise/RejectPromise use (cleat#3171).
 	//
 	// Not optional: an update is delivered at a DISPATCH POINT in the guest,
 	// and a suspended workflow reaches no dispatch point. Without this the
@@ -723,8 +730,9 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 	// which for a workflow waiting on a signal or a long sleep may be never.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND tenant_id = @p2 AND status IN ('ready', 'suspended')
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN SYSUTCDATETIME() ELSE next_wake_at END
+		WHERE id = @p1 AND tenant_id = @p2
 	`, workflowID, s.tenantID); err != nil {
 		return err
 	}

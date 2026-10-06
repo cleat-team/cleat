@@ -3975,7 +3975,7 @@ func TestPostgresStore_CreatePromise_BeginError(t *testing.T) {
 func TestPostgresStore_ResolvePromise_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 
@@ -4002,7 +4002,7 @@ func TestPostgresStore_ResolvePromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_ResolvePromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 
@@ -4034,7 +4034,7 @@ func TestPostgresStore_ResolvePromise_BeginError(t *testing.T) {
 func TestPostgresStore_RejectPromise_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 
@@ -4061,7 +4061,7 @@ func TestPostgresStore_RejectPromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_RejectPromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 

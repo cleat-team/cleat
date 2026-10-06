@@ -1602,7 +1602,7 @@ func TestMSSQLStore_ResolvePromise_Success(t *testing.T) {
 	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET status = 'resolved'", affected: 1},
-		{match: "SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 
@@ -1621,7 +1621,7 @@ func TestMSSQLStore_RejectPromise_Success(t *testing.T) {
 	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET status = 'rejected'", affected: 1},
-		{match: "SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 

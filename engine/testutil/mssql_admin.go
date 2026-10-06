@@ -457,8 +457,28 @@ func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
 	// (the definitions), so the restore follows the content rather than the
 	// filename. 003 opens by dropping every policy, which is what lets it run
 	// against a database already in the opt-in form.
+	//
+	// 003_procedures.sql is the GENERATED baseline and bundles every routine
+	// together, finalize_workflow_status included -- so replaying 003 alone
+	// has the side effect of reverting ANY later migration that redefines a
+	// routine 003 also defines, not only the RLS predicate this function
+	// exists to restore. Any such later file has to be replayed here too, in
+	// order, after 003. cleat#3171 (migrations/mssql/013) is the first one
+	// since the 2434 rebaseline -- found by this exact revert, mid-suite:
+	// a fix landed in 013, the FIRST MSSQL test in the process to touch this
+	// path released the admin pool in its teardown, this function replayed
+	// 003 alone, and finalize_workflow_status went back to its pre-013 body
+	// for every subtest after that one. TestProcedureMigrationListsAreComplete
+	// (engine/store_backends_procedures_test.go) catches a routine missing
+	// from ITS list; nothing catches one missing from THIS list, because this
+	// file has no equivalent test -- read every migration after 003 that
+	// redefines a routine 003 defines before trusting this list is complete.
 	root := repoRootForMSSQLTestutil(t)
-	for _, name := range []string{"002_defaults.sql", "003_procedures.sql"} {
+	for _, name := range []string{
+		"002_defaults.sql",
+		"003_procedures.sql",
+		"013_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
+	} {
 		execMSSQLBatchFile(t, restoreDB, filepath.Join(root, "migrations", "mssql", name))
 	}
 }
