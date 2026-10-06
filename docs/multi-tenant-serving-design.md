@@ -63,9 +63,10 @@ This is the expensive part of an edge-function or front-end delivery system, and
 built, already tenant-scoped, and already load-bearing for workflows.
 
 **Traffic splitting.** Routing rules exist per definition name — `handleSetRoutingRule`
-(`cmd/cleat-worker/server.go:1358`), `handleListRoutingRules` (`:1331`), `handleRemoveRoutingRule`
-(`:1416`). That is canary and blue-green infrastructure, built for workflow versions, structurally
-reusable for any other versioned artifact.
+(`cmd/cleat-worker/server.go:1755`), `handleListRoutingRules` (`:1728`), `handleRemoveRoutingRule`
+(`:1816`). That is canary and blue-green infrastructure, built for workflow versions, structurally
+reusable for any other versioned artifact. The delete is now name-scoped at the store layer too,
+not just at the existence check (cleat#3168).
 
 **A sandbox designed for untrusted guests.** `engine/wasi_policy.go` is an explicit allow/refuse
 table over WASI preview1 with a stated reason per function: no preopened directories, no `sock_*`

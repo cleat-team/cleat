@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,10 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockShardStore struct {
-	// heldRoutingRules, when non-nil, is the set of routing-rule IDs this
-	// shard actually holds. See RemoveRoutingRule below.
-	heldRoutingRules map[string]bool
-	name             string
+	name string
 
 	// Default error for all methods (if fn override is nil)
 	err error
@@ -926,24 +921,12 @@ func (m *mockShardStore) SetRoutingRule(ctx context.Context, workflowName string
 	return nil
 }
 
-func (m *mockShardStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+func (m *mockShardStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	m.recordCall("RemoveRoutingRule")
 	if m.err != nil {
 		return m.err
 	}
-	// A shard with no rule set claims everything, which is what every test
-	// written before cleat#946's second half assumed. Once heldRoutingRules is
-	// set the mock answers honestly -- claiming what it holds and reporting the
-	// rest as not found, which is what a real store does now that all three
-	// check rows-affected.
-	if m.heldRoutingRules == nil {
-		return nil
-	}
-	if m.heldRoutingRules[ruleID] {
-		delete(m.heldRoutingRules, ruleID)
-		return nil
-	}
-	return ErrRoutingRuleNotFound
+	return nil
 }
 
 func (m *mockShardStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
@@ -3855,7 +3838,7 @@ func TestSetRoutingRule_NoShard(t *testing.T) {
 
 func TestRemoveRoutingRule_Delegation(t *testing.T) {
 	ss, _ := makeShardedStore(t, 1)
-	err := ss.RemoveRoutingRule(context.Background(), "rule-1")
+	err := ss.RemoveRoutingRule(context.Background(), "my-wf", "rule-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3863,7 +3846,7 @@ func TestRemoveRoutingRule_Delegation(t *testing.T) {
 
 func TestRemoveRoutingRule_NoShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.RemoveRoutingRule(context.Background(), "rule-1")
+	err := ss.RemoveRoutingRule(context.Background(), "my-wf", "rule-1")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -4054,94 +4037,38 @@ func (m *mockShardStore) GetChildCompletedAtMs(ctx context.Context, runID string
 	return 0, false, nil
 }
 
-// ---- cleat#946: routing rules were written by name and deleted by rule id ----
-
-// shardIndexFor mirrors getShard's arithmetic so a test can state which shard a
-// key belongs to instead of assuming. It is deliberately a second, independent
-// expression of that rule: if getShard's hashing ever changes, these tests
-// should fail rather than quietly agree with whatever it does now.
-func shardIndexFor(key string, n int) int {
-	h := sha256.Sum256([]byte(key))
-	return int(binary.BigEndian.Uint64(h[:8]) % uint64(n))
-}
-
-// TestRemovingARoutingRuleReachesTheShardThatHoldsIt is the regression test for
-// cleat#946, and it is written around the premise rather than the symptom.
+// TestRemovingARoutingRuleReachesTheShardHoldingItsName is cleat#3168's
+// regression test for ShardedStore, replacing the three above it that pinned
+// #946/#948's fan-out (deleted with the fan-out itself: there is no longer a
+// walk to ask every shard about, and no id-vs-name premise to check, because
+// RemoveRoutingRule now takes workflowName and routes by it exactly the way
+// SetRoutingRule and GetRoutingRules already do).
 //
-// The premise is that the write key and the delete key disagree. The test
-// asserts that first -- if they ever landed on the same shard for these inputs
-// the rest would prove nothing, and the old code would pass.
-func TestRemovingARoutingRuleReachesTheShardThatHoldsIt(t *testing.T) {
+// What is still worth asserting here, that TestRemoveRoutingRule_Delegation
+// (single shard, every key maps to shard 0) cannot: with more than one shard,
+// the call reaches the shard the NAME hashes to, not some other one.
+func TestRemovingARoutingRuleReachesTheShardHoldingItsName(t *testing.T) {
 	const (
 		workflowName = "checkout"
-		ruleID       = "6b0d549b-6f03-475a-9600-a35a099950d8"
 		shards       = 4
 	)
-
-	nameShard := shardIndexFor(workflowName, shards)
-	idShard := shardIndexFor(ruleID, shards)
-	if nameShard == idShard {
-		t.Fatalf("premise broken: %q and rule id both hash to shard %d, so this "+
-			"test cannot distinguish the two keys -- pick a different rule id",
-			workflowName, nameShard)
-	}
-
 	ss, mocks := makeShardedStore(t, shards)
 
-	// The rule is created the way production creates it: keyed by name.
-	if err := ss.SetRoutingRule(context.Background(), workflowName, 2, 0.25); err != nil {
-		t.Fatalf("SetRoutingRule: %v", err)
-	}
-	if got := mocks[nameShard].CallCount("SetRoutingRule"); got != 1 {
-		t.Fatalf("the rule was not created on shard %d (the name's shard): count %d",
-			nameShard, got)
-	}
-
-	if err := ss.RemoveRoutingRule(context.Background(), ruleID); err != nil {
+	if err := ss.RemoveRoutingRule(context.Background(), workflowName, "rule-1"); err != nil {
 		t.Fatalf("RemoveRoutingRule: %v", err)
 	}
 
-	// The one that matters: the shard actually holding the row was asked.
-	if got := mocks[nameShard].CallCount("RemoveRoutingRule"); got != 1 {
-		t.Errorf("removal never reached shard %d, which holds the rule (count %d). "+
-			"The rule is still live and still routing traffic, and the API "+
-			"reported success.", nameShard, got)
-	}
-}
-
-// TestRemovingARoutingRuleAsksEveryShard pins the mechanism the fix uses, which
-// the test above deliberately does not: that one would also pass if removal
-// were routed by name, and routing by name is not available here because
-// RemoveRoutingRule is given only an id.
-func TestRemovingARoutingRuleAsksEveryShard(t *testing.T) {
-	const shards = 4
-	ss, mocks := makeShardedStore(t, shards)
-
-	if err := ss.RemoveRoutingRule(context.Background(), "rule-1"); err != nil {
-		t.Fatalf("RemoveRoutingRule: %v", err)
-	}
+	asked := 0
 	for i, m := range mocks {
-		if got := m.CallCount("RemoveRoutingRule"); got != 1 {
-			t.Errorf("shard %d was asked %d times, want 1", i, got)
+		if got := m.CallCount("RemoveRoutingRule"); got != 0 {
+			asked++
+			if got != 1 {
+				t.Errorf("shard %d was asked %d times, want 0 or 1", i, got)
+			}
 		}
 	}
-}
-
-// TestRemovingARoutingRuleOnOneShardStillWorks is the control.
-//
-// TestRemoveRoutingRule_Delegation, which existed before this fix, builds the
-// store with makeShardedStore(t, 1). At one shard every key maps to shard 0, so
-// the wrong-key defect was invisible to it by construction and it passed
-// throughout. Keeping the single-shard case asserted means the fan-out cannot
-// regress the common deployment, but it is NOT evidence about sharding -- that
-// is what the two tests above are for.
-func TestRemovingARoutingRuleOnOneShardStillWorks(t *testing.T) {
-	ss, mocks := makeShardedStore(t, 1)
-	if err := ss.RemoveRoutingRule(context.Background(), "rule-1"); err != nil {
-		t.Fatalf("RemoveRoutingRule: %v", err)
-	}
-	if got := mocks[0].CallCount("RemoveRoutingRule"); got != 1 {
-		t.Errorf("the only shard was asked %d times, want 1", got)
+	if asked != 1 {
+		t.Errorf("exactly one shard should have been asked, got %d", asked)
 	}
 }
 

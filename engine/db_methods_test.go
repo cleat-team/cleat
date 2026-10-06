@@ -2881,7 +2881,7 @@ func TestPostgresStore_RemoveRoutingRule_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RemoveRoutingRule(testCtx, "rule-uuid")
+	err := store.RemoveRoutingRule(testCtx, "test-wf", "rule-uuid")
 	if err != nil {
 		t.Fatalf("RemoveRoutingRule: %v", err)
 	}
@@ -2892,7 +2892,7 @@ func TestPostgresStore_RemoveRoutingRule_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RemoveRoutingRule(testCtx, "rule-uuid")
+	err := store.RemoveRoutingRule(testCtx, "test-wf", "rule-uuid")
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -2905,7 +2905,7 @@ func TestPostgresStore_RemoveRoutingRule_ExecError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RemoveRoutingRule(testCtx, "rule-uuid")
+	err := store.RemoveRoutingRule(testCtx, "test-wf", "rule-uuid")
 	if err == nil {
 		t.Fatal("expected error from delete failure")
 	}

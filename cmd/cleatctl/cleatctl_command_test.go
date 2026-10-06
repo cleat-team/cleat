@@ -1987,7 +1987,9 @@ func (m *mockStore) GetWorkflowTags(ctx context.Context, workflowName string) (m
 func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
 	return nil
 }
-func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error { return nil }
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
+	return nil
+}
 func (m *mockStore) GetRoutingRules(ctx context.Context, workflowName string) ([]engine.RoutingRule, error) {
 	return nil, nil
 }
