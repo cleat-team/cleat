@@ -103,15 +103,18 @@ of one reusable agent workflow that any SDK starts as a child; see "Agent Workfl
 [`docs/reference/sdk-api.md`](../reference/sdk-api.md). **Do not write your own loop** — the engine
 owns it now.
 
-One hand-written loop remains: `examples/ai-agent-platform/agent.go` carries its own `RunAgent`. It
-is this playbook's reference implementation and its own scenario asserts the same durability claim
-by counting the model's requests across a SIGKILL, so it is not dead weight — but it is a copy of a
-loop that now ships once, and cleat#1983 did not migrate it. Tracked as **cleat#2980**; until it
-lands, take the agent from the workflow and this example for the deployment shape.
+**Migrated 2026-10-06 (cleat#2980).** `examples/ai-agent-platform/agent.go`'s `RunAgent` was the
+fourth hand-written copy this page used to describe (written 2026-09-28, cleat#2535, in the form
+#1983 was always going to replace); it is now a thin client of the shipped workflow, the same shape
+the templates are. Its own scenario still asserts the same durability claim by counting the model's
+requests across a SIGKILL — that property moved to the workflow with the loop and is unchanged.
 
-`examples/ai-agent-platform/` (2026-09-28, cleat#2535) is **the fourth copy**, written in the form
-#1983 will replace rather than as the permanent answer: it says so in its README, and a reader who
-finds it later should read it as a shape to copy and delete, not as the loop the engine owns.
+The migration needed two extensions first, both found by building it rather than by reading the
+issue: a budget/tenant/artifact surface and an approval gate with observability (cleat#3022,
+cleat#3170), and a declarative way for a tool to map its own arguments onto a plugin's actual wire
+format rather than the model's own JSON verbatim (cleat#3169). `search_docs` — pure in-process
+computation, reaching no plugin at all — had nowhere to go and was dropped; the example's own
+comments say so.
 
 **Model keys are per-tenant now, which this page would have told you was impossible.** It listed
 per-tenant model keys under what you still have to build, because the `llm` request had no `api_key`

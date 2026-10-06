@@ -171,34 +171,6 @@ tenant allowed to lower the operator's value and never raise it. A long agent
 run under a tenant-set wall clock fails per-tenant, which is hard to reproduce
 centrally: report the effective ceiling in the run's error.
 
-## The agent loop is a copy, and you should not write one
-
-**Do not copy `RunAgent`'s loop out of this file.** It is the last hand-written
-copy of it left in this repository, and it is here because this example was
-written before there was an alternative — not because the loop belongs in a
-product.
-
-As of 2026-09-28 there was **no reusable loop**: `cleat/ai/agent` existed and
-had no importer at all, and the working versions were two hand-copies inside
-`cleat init` templates (`cmd/cleat/templates/agent/workflow.go`,
-`templates/agent-python/agent.py`) — separate from each other, and untested as
-loops.
-
-**cleat#1983 replaced all three with one reusable agent workflow that any SDK
-starts as a child**, and both templates are clients of it now. What that buys,
-and what a hand-written loop cannot: every LLM turn and every tool call is a
-durable step, so an agent survives a crash mid-conversation and resumes without
-asking the model again for turns it already completed. See "Agent Workflows" in
-[`docs/reference/sdk-api.md`](../../docs/reference/sdk-api.md).
-
-For a new product, start the shipped workflow — `agentworkflow.RunAsChild` in
-Go, `cleat_sdk.agent.run_agent` in Python.
-
-**This example has not been migrated onto it, and that is tracked rather than
-intended as an example to follow**: cleat#2980. Until it lands, read this file
-for the deployment shape (`cleat.yaml`, the backend, the web front end) and take
-the agent itself from the workflow.
-
 ## Build
 
 ```bash
