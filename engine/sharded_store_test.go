@@ -4044,9 +4044,17 @@ func (m *mockShardStore) GetChildCompletedAtMs(ctx context.Context, runID string
 // RemoveRoutingRule now takes workflowName and routes by it exactly the way
 // SetRoutingRule and GetRoutingRules already do).
 //
-// What is still worth asserting here, that TestRemoveRoutingRule_Delegation
-// (single shard, every key maps to shard 0) cannot: with more than one shard,
-// the call reaches the shard the NAME hashes to, not some other one.
+// The first version of this test only counted how many shards were asked,
+// not which one -- true for ANY key, since getShard always picks exactly
+// one. Reverting RemoveRoutingRule to getShard(ruleID), cleat#946's exact
+// original bug, still passed it. Caught by cleat-review on #3177, verified
+// here by the same falsification before this version was written.
+//
+// The fix is the shape TestRemovingARoutingRuleReachesTheShardThatHoldsIt
+// used before it was deleted: establish which shard the NAME actually lands
+// on by calling SetRoutingRule first -- the one call in this store that was
+// never in question -- and assert removal reaches that same shard, not just
+// that it reached exactly one.
 func TestRemovingARoutingRuleReachesTheShardHoldingItsName(t *testing.T) {
 	const (
 		workflowName = "checkout"
@@ -4054,21 +4062,36 @@ func TestRemovingARoutingRuleReachesTheShardHoldingItsName(t *testing.T) {
 	)
 	ss, mocks := makeShardedStore(t, shards)
 
+	if err := ss.SetRoutingRule(context.Background(), workflowName, 2, 0.25); err != nil {
+		t.Fatalf("SetRoutingRule: %v", err)
+	}
+	nameShard := -1
+	for i, m := range mocks {
+		if m.CallCount("SetRoutingRule") == 1 {
+			nameShard = i
+			break
+		}
+	}
+	if nameShard == -1 {
+		t.Fatalf("SetRoutingRule did not land on any shard")
+	}
+
 	if err := ss.RemoveRoutingRule(context.Background(), workflowName, "rule-1"); err != nil {
 		t.Fatalf("RemoveRoutingRule: %v", err)
 	}
 
-	asked := 0
-	for i, m := range mocks {
-		if got := m.CallCount("RemoveRoutingRule"); got != 0 {
-			asked++
-			if got != 1 {
-				t.Errorf("shard %d was asked %d times, want 0 or 1", i, got)
-			}
-		}
+	if got := mocks[nameShard].CallCount("RemoveRoutingRule"); got != 1 {
+		t.Errorf("removal never reached shard %d, which the name hashes to (count %d)",
+			nameShard, got)
 	}
-	if asked != 1 {
-		t.Errorf("exactly one shard should have been asked, got %d", asked)
+	for i, m := range mocks {
+		if i == nameShard {
+			continue
+		}
+		if got := m.CallCount("RemoveRoutingRule"); got != 0 {
+			t.Errorf("shard %d, which the name does NOT hash to, was asked %d times, want 0",
+				i, got)
+		}
 	}
 }
 
