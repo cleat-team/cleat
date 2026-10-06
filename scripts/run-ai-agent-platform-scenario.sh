@@ -397,7 +397,7 @@ except Exception: print("")' 2>/dev/null || echo ""
 # use -- two readers of one fact, not two facts.
 run_state() {
   printf 'status=%s steps=%s spent=%s' \
-    "$(query_state "$1" status)" "$(query_state "$1" steps)" "$(query_state "$1" spent_usd)"
+    "$(query_state "$1" status)" "$(query_state "$1" agent_step)" "$(query_state "$1" agent_cost)"
 }
 
 echo
@@ -484,7 +484,7 @@ if [[ "$FINAL_STATUS" != "done" ]]; then
 fi
 
 HITS_AFTER="$(model_hits)"
-STEPS="$(query_state "$RUN_ID" steps)"
+STEPS="$(query_state "$RUN_ID" agent_step)"
 echo "    model requests before the kill: $HITS_BEFORE"
 echo "    model requests after  the kill: $HITS_AFTER"
 echo "    steps the run reports:          $STEPS"
@@ -555,7 +555,7 @@ echo "==> the per-run spend ceiling"
 # Half of one call's cost means the FIRST call already reaches the ceiling, so
 # the bounded run must make exactly one model call. That is the assertion, and
 # it self-calibrates against whatever the provider reports.
-SPENT_2CALLS="$(query_state "$RUN_ID" spent_usd)"
+SPENT_2CALLS="$(query_state "$RUN_ID" agent_cost)"
 HALF_A_CALL="$(python3 -c '
 import sys
 try:

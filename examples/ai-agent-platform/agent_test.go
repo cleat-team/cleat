@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/cleat/agentworkflow"
 	"github.com/cleat-team/cleat/cleat/cleattest"
 )
 
@@ -23,7 +24,7 @@ func setupEnv() *cleattest.TestEnv {
 // modelReply builds one `llm.chat` response in the wire shape the plugin
 // forwards. Every stub in this file goes through it, so a change to the shape
 // is one edit rather than eight.
-func modelReply(content string, cost float64, calls ...ToolCall) string {
+func modelReply(content string, cost float64, calls ...agentworkflow.ToolCall) string {
 	msg := map[string]any{"role": "assistant", "content": content}
 	if len(calls) > 0 {
 		msg["tool_calls"] = calls
@@ -40,15 +41,15 @@ func modelReply(content string, cost float64, calls ...ToolCall) string {
 	return string(b)
 }
 
-func toolCall(id, name, args string) ToolCall {
-	return ToolCall{ID: id, Type: "function", Function: FunctionCall{Name: name, Arguments: args}}
+func toolCall(id, name, args string) agentworkflow.ToolCall {
+	return agentworkflow.ToolCall{ID: id, Type: "function", Function: agentworkflow.FunctionCall{Name: name, Arguments: args}}
 }
 
 // run drives RunAgent to completion while advancing the simulated clock.
 //
-// It has to: the settle step is a DurableSleep, and a durable sleep waits on
-// SIMULATED time -- real timers do not move it, so a test that simply called
-// RunAgent would block until the deadline.
+// It has to: the approval wait's inter-poll sleeps are DurableSleep, which
+// waits on SIMULATED time -- real timers do not move it, so a test that hit
+// that path and simply called RunAgent would block until the deadline.
 func run(t *testing.T, env *cleattest.TestEnv, in AgentInput) (AgentOutput, error) {
 	t.Helper()
 
@@ -83,9 +84,6 @@ func run(t *testing.T, env *cleattest.TestEnv, in AgentInput) (AgentOutput, erro
 			t.Fatal("RunAgent did not return within 10s of real time")
 			return AgentOutput{}, nil
 		default:
-			// Generous per tick, for the reason integration-hub's helper gives:
-			// the settle window is tens of seconds of simulated time and a
-			// fine-grained tick spends its budget on iterations.
 			env.AdvanceTime(time.Hour)
 			time.Sleep(time.Millisecond)
 		}
@@ -191,11 +189,15 @@ func TestAgentFeedsAToolResultBackToTheModel(t *testing.T) {
 	env := setupEnv()
 	env.OnPluginCall("blobstore", "put").Return(`{"key":"report","sha256":"ab","size":5}`, nil)
 
-	// First turn asks for the tool, so the second turn's request must carry the
-	// tool result; the stub for the second turn is the same one, but the LOOP's
-	// behaviour is what the assertions below read.
-	env.OnPluginCall("llm", "chat").Return(modelReply("Saved.", 0.002,
-		toolCall("c1", "save_report", `{"body":"draft"}`)), nil)
+	// First turn asks for the tool; second turn answers with no further tool
+	// call, so the loop finishes NATURALLY rather than by exhausting
+	// MaxSteps. Unlike the pre-migration loop, agentworkflow.Run treats
+	// exhausting MaxSteps as an ERROR, not as an implicit "done" -- so a
+	// single repeating stub that never finishes (the old shape here) would
+	// make this test fail on exhaustion instead of testing what it means to.
+	env.OnPluginCall("llm", "chat").
+		Return(modelReply("", 0.002, toolCall("c1", "save_report", `{"body":"draft"}`)), nil).
+		Return(modelReply("Saved.", 0.001), nil)
 
 	out, err := run(t, env, baseInput())
 	if err != nil {
@@ -231,18 +233,70 @@ func TestAgentFeedsAToolResultBackToTheModel(t *testing.T) {
 	}
 }
 
+// THE PLUGIN RECEIVES base64, NOT THE MODEL'S PLAIN TEXT -- cleat#3169's
+// whole motivating case for this migration. A version that forgot
+// save_report's ArgTransform would send "draft report" verbatim under
+// "data", which blobstore's own []byte field expects base64-encoded.
+func TestSaveReportBase64EncodesTheBodyForBlobstore(t *testing.T) {
+	env := setupEnv()
+	env.OnPluginCall("blobstore", "put").Return(`{"key":"report","sha256":"ab","size":5}`, nil)
+	env.OnPluginCall("llm", "chat").
+		Return(modelReply("", 0.002, toolCall("c1", "save_report", `{"body":"draft report"}`)), nil).
+		Return(modelReply("Saved.", 0.001), nil)
+
+	// No ArtifactKey: baseInput() sets one, and a finished run with an
+	// answer ALSO writes an artifact through blobstore.put, under a
+	// different key -- a second, unrelated call to the same stub this test
+	// is not about. Isolating this to the tool's own call is the point.
+	in := baseInput()
+	in.ArtifactKey = ""
+	if _, err := run(t, env, in); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+
+	var reqSeen string
+	for _, c := range env.CallHistory() {
+		if c.Service == "blobstore" && c.Operation == "put" {
+			reqSeen = c.Request
+		}
+	}
+	if reqSeen == "" {
+		t.Fatal("blobstore.put was never called")
+	}
+	var req struct {
+		Key  string `json:"key"`
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(reqSeen), &req); err != nil {
+		t.Fatalf("blobstore.put request is not valid JSON: %v", err)
+	}
+	if req.Key != "report" {
+		t.Errorf("key = %q, want %q", req.Key, "report")
+	}
+	if strings.Contains(reqSeen, "draft report") {
+		t.Errorf("blobstore.put request carries the PLAIN TEXT body unencoded:\n%s", reqSeen)
+	}
+}
+
 // ---- The human wait ----
 
 func TestAgentProceedsWhenAHumanApproves(t *testing.T) {
 	env := setupEnv()
-	env.OnPluginCall("llm", "chat").Return(modelReply("Rolled back.", 0.003,
-		toolCall("c1", "request_approval", `{"reason":"roll back the deploy"}`)), nil)
+	// First turn asks for approval; second turn (after the approval is fed
+	// back) answers. MaxSteps=2, not 1: a single step can request the
+	// approval and receive the decision, but reporting on it needs a SECOND
+	// model turn, which MaxSteps=1 would never reach -- see
+	// TestAgentFeedsAToolResultBackToTheModel's comment for why that used to
+	// work anyway (exhaustion was "done", not an error) and no longer does.
+	env.OnPluginCall("llm", "chat").
+		Return(modelReply("", 0.003, toolCall("c1", "request_approval", `{}`)), nil).
+		Return(modelReply("Rolled back.", 0.001), nil)
 	env.OnPluginCall("event-triggers", "await_event").
 		Return(`{"found":true,"event_id":"e1","event_data":{"approved":true,"note":"go ahead"}}`, nil)
 	env.OnPluginCall("blobstore", "put").Return(`{"key":"k","sha256":"ab","size":1}`, nil)
 
 	in := baseInput()
-	in.MaxSteps = 1
+	in.MaxSteps = 2
 
 	out, err := run(t, env, in)
 	if err != nil {
@@ -255,6 +309,27 @@ func TestAgentProceedsWhenAHumanApproves(t *testing.T) {
 		t.Errorf("tools_used = %v, want request_approval", out.ToolsUsed)
 	}
 	env.AssertCalled(t, "event-triggers", "await_event")
+
+	// The model was NEVER asked for event_type/timeout_ms -- request_approval
+	// declares no parameters, and cleat#3169's static_args supplies both.
+	// This asserts the actual bytes the plugin received, not just that the
+	// run finished.
+	var reqSeen string
+	for _, c := range env.CallHistory() {
+		if c.Service == "event-triggers" && c.Operation == "await_event" {
+			reqSeen = c.Request
+		}
+	}
+	var pollReq struct {
+		EventType string `json:"event_type"`
+		TimeoutMs int    `json:"timeout_ms"`
+	}
+	if err := json.Unmarshal([]byte(reqSeen), &pollReq); err != nil {
+		t.Fatalf("await_event request is not valid JSON: %v", err)
+	}
+	if pollReq.EventType != "agent.approval" || pollReq.TimeoutMs != 0 {
+		t.Errorf("await_event request = %+v, want event_type=agent.approval timeout_ms=0", pollReq)
+	}
 }
 
 // A DENIAL IS A RESULT, NOT AN ERROR, and the assertion is on what the MODEL
@@ -269,8 +344,12 @@ func TestAgentProceedsWhenAHumanApproves(t *testing.T) {
 // this file does not yet, drive that turn-taking shape directly).
 func TestAgentReportsADenialRatherThanFailing(t *testing.T) {
 	env := setupEnv()
-	env.OnPluginCall("llm", "chat").Return(modelReply("", 0.003,
-		toolCall("c1", "request_approval", `{"reason":"delete the database"}`)), nil)
+	// Second turn finishes rather than asking again, so the run completes
+	// naturally at MaxSteps=2 instead of exhausting it as an error -- see
+	// TestAgentFeedsAToolResultBackToTheModel's comment.
+	env.OnPluginCall("llm", "chat").
+		Return(modelReply("", 0.003, toolCall("c1", "request_approval", `{}`)), nil).
+		Return(modelReply("Understood, I will not proceed.", 0.001), nil)
 	env.OnPluginCall("event-triggers", "await_event").
 		Return(`{"found":true,"event_id":"e1","event_data":{"approved":false,"note":"no"}}`, nil)
 	env.OnPluginCall("blobstore", "put").Return(`{"key":"k","sha256":"ab","size":1}`, nil)
@@ -303,14 +382,19 @@ func TestAgentReportsADenialRatherThanFailing(t *testing.T) {
 		t.Fatal("the model was called only once; the denial was never fed back")
 	}
 
-	// DECODE IT. The first version of this assertion was a substring search for
-	// `"approved":false`, and it failed on a request that carried
-	// `{\"approved\":false,\"note\":\"no\"}` -- the denial IS there, escaped
-	// inside a JSON string, where a raw-text search for the unescaped form
-	// cannot see it. A tool result is a string field, so what the model reads
-	// is the DECODED value, and that is what to assert on.
+	// DECODE IT, THROUGH THE AWAIT_EVENT ENVELOPE. agentworkflow's awaitApproval
+	// (unlike the original hand-written requestApproval) returns the plugin's
+	// claim VERBATIM on a hit -- {"found":true,"event_id":...,"event_data":{...}}
+	// -- rather than unwrapping it to {"approved":...,"note":...} itself. So the
+	// tool message the model receives is the whole envelope, and the decision
+	// is nested under event_data. A test that decoded straight to {Approved
+	// bool} here, the way this test did before the migration, would see no
+	// top-level "approved" field at all and silently read Approved as its zero
+	// value (false) -- passing for the wrong reason on BOTH a genuine denial
+	// and a decode that never found the field. Decoding event_data explicitly
+	// is what makes those two cases different.
 	var req struct {
-		Messages []Message `json:"messages"`
+		Messages []agentworkflow.Message `json:"messages"`
 	}
 	if err := json.Unmarshal([]byte(second), &req); err != nil {
 		t.Fatalf("the recorded request is not valid JSON: %v", err)
@@ -324,11 +408,21 @@ func TestAgentReportsADenialRatherThanFailing(t *testing.T) {
 	if fedBack == "" {
 		t.Fatalf("no tool message came back to the model:\n%s", second)
 	}
+	var claim struct {
+		Found     bool            `json:"found"`
+		EventData json.RawMessage `json:"event_data"`
+	}
+	if err := json.Unmarshal([]byte(fedBack), &claim); err != nil {
+		t.Fatalf("the tool message is not an await_event claim: %q", fedBack)
+	}
+	if !claim.Found {
+		t.Fatalf("the tool message claims found=false, want the hit the plugin stub returned: %q", fedBack)
+	}
 	var decision struct {
 		Approved bool `json:"approved"`
 	}
-	if err := json.Unmarshal([]byte(fedBack), &decision); err != nil {
-		t.Fatalf("the tool message is not the approval decision: %q", fedBack)
+	if err := json.Unmarshal(claim.EventData, &decision); err != nil {
+		t.Fatalf("event_data is not the approval decision: %q", claim.EventData)
 	}
 	if decision.Approved {
 		t.Errorf("the model was told the action was approved; it was denied: %q", fedBack)
@@ -338,33 +432,30 @@ func TestAgentReportsADenialRatherThanFailing(t *testing.T) {
 // ONE PATH THIS FILE STILL DOES NOT REACH, though the tool it needed now
 // exists. cleat#2522.
 //
-// **In `requestApproval`.** It polls: it asks for the event, and on
-// `found:false` it sleeps and asks again. The branch where the FIRST poll
-// misses and a LATER one hits is the branch a real deployment takes most often
-// -- a human takes minutes, not microseconds -- and nothing here reaches it.
+// **In `awaitApproval`** (now in cleat/agentworkflow, not this file). It
+// polls: it asks for the event, and on `found:false` it sleeps and asks
+// again. The branch where the FIRST poll misses and a LATER one hits is the
+// branch a real deployment takes most often -- a human takes minutes, not
+// microseconds -- and nothing here reaches it.
 //
-// **`OnPluginCall(...).Return(...)` can now express that miss-then-hit
-// sequence** -- a second `.Return` for the same plugin+function used to be
-// unreachable (`pluginCallImpl` matched only the first-registered stub,
-// forever) and now answers the second call, with the last registered
-// response repeating after that. What is below is still the two tests
-// written against the OLD limitation, bounding the loop with `MaxSteps`
-// instead of sequencing `event-triggers/await_event`'s answer -- they remain
-// correct tests of the turn-taking behaviour they assert on, so they were
-// left as they are rather than rewritten for its own sake. What they do NOT
-// do, and what a new test using the sequencing above could, is drive
-// `requestApproval`'s actual miss-then-hit branch end to end; that is
-// unclaimed follow-up work, not done here.
+// **`OnPluginCall(...).Return(...)` can express that miss-then-hit
+// sequence** -- a second `.Return` for the same plugin+function answers the
+// second call, with the last registered response repeating after that. What
+// is below is still the test written against the OLD limitation, bounding
+// the loop with `MaxSteps` instead of sequencing `event-triggers/await_event`'s
+// answer -- it remains a correct test of the turn-taking behaviour it asserts
+// on, so it was carried over rather than rewritten for its own sake.
 func TestAgentApprovesOnTheFirstPoll(t *testing.T) {
 	env := setupEnv()
-	env.OnPluginCall("llm", "chat").Return(modelReply("", 0.001,
-		toolCall("c1", "request_approval", `{"reason":"ship it"}`)), nil)
+	env.OnPluginCall("llm", "chat").
+		Return(modelReply("", 0.001, toolCall("c1", "request_approval", `{}`)), nil).
+		Return(modelReply("Done.", 0.001), nil)
 	env.OnPluginCall("event-triggers", "await_event").
 		Return(`{"found":true,"event_id":"e1","event_data":{"approved":true,"note":""}}`, nil)
 	env.OnPluginCall("blobstore", "put").Return(`{"key":"k","sha256":"ab","size":1}`, nil)
 
 	in := baseInput()
-	in.MaxSteps = 1
+	in.MaxSteps = 2
 
 	if _, err := run(t, env, in); err != nil {
 		t.Fatalf("RunAgent: %v", err)
@@ -384,6 +475,12 @@ func TestAgentApprovesOnTheFirstPoll(t *testing.T) {
 
 // ---- Refusals ----
 
+// THE ERROR NO LONGER LISTS AVAILABLE TOOLS. agentworkflow's unknown-tool
+// error ("agent: no such tool %q") names the tool the model invented, same
+// as before, but -- unlike the original hand-written runTool -- does not
+// enumerate what IS available; that was this file's own addition, not a
+// property the generic loop replicates. Asserting on it after migration
+// would be asserting on a sentence this file no longer writes.
 func TestAgentRefusesAToolItDoesNotHave(t *testing.T) {
 	env := setupEnv()
 	env.OnPluginCall("llm", "chat").Return(modelReply("", 0.001,
@@ -396,9 +493,6 @@ func TestAgentRefusesAToolItDoesNotHave(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "wire_transfer") {
 		t.Errorf("error = %v, want it to name the tool the model invented", err)
-	}
-	if !strings.Contains(err.Error(), "search_docs") {
-		t.Errorf("error = %v, want it to name what IS available, so the prompt can be fixed", err)
 	}
 }
 
