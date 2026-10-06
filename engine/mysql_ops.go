@@ -59,11 +59,20 @@ func (s *MySQLStore) ResolvePromise(ctx context.Context, promiseID, result strin
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// promise_seq bump, the same shape DeliverSignal uses for signal_seq
+	// (cleat#953) -- see engine/store_promises.go's ResolvePromise for the
+	// full rationale (cleat#3171). The status filter stays `= 'ready'`
+	// rather than `IN ('ready', 'suspended')`: that is this dialect's
+	// existing predicate (matches MySQLStore.DeliverSignal, not the wider
+	// one PostgreSQL/SQL Server use), and no behavioural difference today --
+	// nothing writes 'suspended' here either.
 	_, _ = s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = NOW(6)
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status = 'ready' THEN NOW(6) ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = ? AND tenant_id = ?)
-		  AND status = 'ready' AND tenant_id = ?
+		  AND tenant_id = ?
 	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
@@ -82,11 +91,14 @@ func (s *MySQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// promise_seq bump: see ResolvePromise's comment above (cleat#3171).
 	_, _ = s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = NOW(6)
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status = 'ready' THEN NOW(6) ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = ? AND tenant_id = ?)
-		  AND status = 'ready' AND tenant_id = ?
+		  AND tenant_id = ?
 	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
@@ -166,7 +178,8 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 		return err
 	}
 
-	// Wake the workflow, exactly as DeliverSignal does.
+	// Wake the workflow, exactly as DeliverSignal does, with the same
+	// promise_seq bump ResolvePromise/RejectPromise use (cleat#3171).
 	//
 	// Not optional: an update is delivered at a DISPATCH POINT in the guest,
 	// and a suspended workflow reaches no dispatch point. Without this the
@@ -174,8 +187,9 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 	// which for a workflow waiting on a signal or a long sleep may be never.
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET next_wake_at = NOW(6)
-		WHERE id = ? AND tenant_id = ? AND status IN ('ready', 'suspended')
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN NOW(6) ELSE next_wake_at END
+		WHERE id = ? AND tenant_id = ?
 	`, workflowID, s.tenantID)
 	return err
 }

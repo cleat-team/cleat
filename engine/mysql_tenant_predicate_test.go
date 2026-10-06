@@ -93,7 +93,19 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 	// can touch; both narrow it further (a row must also match status/
 	// assigned_to to be affected or fetched). So the reason is unchanged and
 	// still describes why the statement is safe.
-	"mysql_lifecycle.go:ClaimWorkflows#49bd2f4a5509": {
+	//
+	// The UPDATE entries moved a third time, to 9c78961f0b33/a052e3956229,
+	// when cleat#3171 added `promise_seq_at_claim = promise_seq,` to each
+	// claim's SET list (mirroring the signal_seq_at_claim stamp already
+	// there). The SELECT entries are untouched -- cleat#3171 only changed
+	// the claiming UPDATE, not the candidate query -- so their digests stay.
+	//
+	// RE-MAKING THE CLAIM: the addition is one more assignment in a SET
+	// list. It introduces no WHERE clause, references no other table, and
+	// does not change which rows the statement touches -- the candidate
+	// query above it still decides that. So the reason is unchanged and
+	// still describes why the statement is safe.
+	"mysql_lifecycle.go:ClaimWorkflows#9c78961f0b33": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: mysqlScopedByCandidateQuery,
 	},
@@ -101,7 +113,7 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
 		Reason: mysqlScopedByCandidateQuery,
 	},
-	"mysql_lifecycle.go:ClaimStickyWorkflows#e468197bcf08": {
+	"mysql_lifecycle.go:ClaimStickyWorkflows#a052e3956229": {
 		SQL:    "update workflow_instances set status = 'running', signal_seq_at_claim = signal",
 		Reason: mysqlScopedByCandidateQuery,
 	},

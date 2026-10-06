@@ -170,6 +170,8 @@ CREATE TABLE workflow_instances (
     signal_seq_at_claim BIGINT NOT NULL DEFAULT 0,
     signal_consumed_seq BIGINT NOT NULL DEFAULT 0,
     signal_consumed_at_claim BIGINT NOT NULL DEFAULT 0,
+    promise_seq BIGINT NOT NULL DEFAULT 0,
+    promise_seq_at_claim BIGINT NOT NULL DEFAULT 0,
     reclaim_count BIGINT NOT NULL DEFAULT 0,
     started_at TIMESTAMPTZ,
     concurrency_key TEXT,
