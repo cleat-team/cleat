@@ -161,6 +161,143 @@ func mssql2139Percentiles(latencies []time.Duration) (p50, p99 time.Duration) {
 	return p50, p99
 }
 
+// mssql2139AttemptResult is what one measurement attempt reports to the retry loop below: the
+// in-window treatment P99 it measured, the bound that same attempt's own baseline implies, and
+// the pre-formatted line this attempt contributes to the final failure message if every attempt
+// exceeds. Everything about HOW treP99/bound were measured is the caller's business; this type
+// only carries what the retry decision needs.
+type mssql2139AttemptResult struct {
+	treP99 time.Duration
+	bound  time.Duration
+	log    string
+}
+
+// mssql2139RunWithRetry is cleat#3129's attempt/retry decision (cleat#3117), extracted out of
+// TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded's loop so the question cleat#3117
+// leaves open -- "does the retry loop recover from a transient?" -- can be asked directly of
+// THIS function, deterministically, rather than of real SQL Server contention. Two prior
+// attempts to trigger a real transient on a shared CI-like machine (a 24-process CPU burst, a
+// 7-second HOLDLOCK) both failed to reproduce one on demand -- see cleat#3117's comment history
+// -- so TestMSSQL2139RetryLoopRecoversFromATransientAttempt below calls this same function with
+// a fake measure that manufactures the transient instead.
+//
+// Calls measure(attempt) for attempt = 1..maxAttempts, stopping as soon as one attempt's treP99
+// is within its own bound. measure is expected to call t.Fatalf itself for anything that is not
+// a retryable timing miss (a sweep error, too little overlap to mean anything, a row-count
+// precondition) -- that unwinds through this function exactly as it did when this code was
+// inline in the caller's own for loop, since calling measure here is an ordinary nested function
+// call on the same goroutine, not a new one; t.Fatalf's runtime.Goexit still unwinds correctly
+// through it.
+func mssql2139RunWithRetry(t *testing.T, label string, maxAttempts int, measure func(attempt int) mssql2139AttemptResult) (withinBound bool, attemptsRun int, perAttempt []string) {
+	t.Helper()
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		attemptsRun++
+		r := measure(attempt)
+		perAttempt = append(perAttempt, r.log)
+		if r.treP99 <= r.bound {
+			withinBound = true
+			break
+		}
+		if attempt < maxAttempts {
+			// Logged rather than silent, so a green CI run that spent an attempt is visible:
+			// "the host was busy for a few seconds" and "this test is measuring noise" look
+			// identical from the verdict alone.
+			t.Logf("%s: attempt %d exceeded the bound (%v > %v, %+.0f%% over) -- retrying, because a "+
+				"load spike inside this window is not the regression this measures, while a "+
+				"regression exceeds the bound on every attempt",
+				label, attempt, r.treP99, r.bound, float64(r.treP99)/float64(r.bound)*100-100)
+		}
+	}
+	return withinBound, attemptsRun, perAttempt
+}
+
+// TestMSSQL2139RetryLoopRecoversFromATransientAttempt answers cleat#3117's one item its own
+// author could not responsibly close: "recovery from a transient, demonstrated against the
+// in-process retry loop." Two real attempts to manufacture a transient on a shared CI-like
+// machine (cleat#3117's comment history: a 24-process CPU burst, a 7-second HOLDLOCK) both
+// failed to reproduce one on demand, and the author declined a third rather than load a
+// machine other sessions are actively using for a low-probability payoff.
+//
+// This does not repeat that experiment. It calls mssql2139RunWithRetry -- the actual, real
+// function TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded uses, not a
+// reimplementation of it -- with a fake measure that manufactures the transient directly:
+// attempt 1 reports a treP99 comfortably over its bound (the transient), attempt 2 reports one
+// comfortably under (the recovery). No database, no goroutines racing real contention, no load
+// on this or any other machine: the question this asks is purely "does the retry loop's own
+// control flow accept a later clean attempt after an earlier noisy one", which is answerable
+// deterministically because it is a property of the code, not of SQL Server's scheduler.
+//
+// What this does NOT claim: it is not evidence that real MSSQL contention manifests as a
+// transient this loop would catch -- that remains the two real CI instances cleat#3117's
+// comment history already found (both recovered via an external workflow re-run, predating
+// this loop, not via mssql2139RunWithRetry itself). This closes the narrower, cleaner question:
+// given a transient, does the loop's own accept/retry logic work correctly.
+func TestMSSQL2139RetryLoopRecoversFromATransientAttempt(t *testing.T) {
+	var calls []int
+	withinBound, attemptsRun, perAttempt := mssql2139RunWithRetry(t, "fake-arm", 3, func(attempt int) mssql2139AttemptResult {
+		calls = append(calls, attempt)
+		if attempt == 1 {
+			// The transient: comfortably over bound, the shape a loaded runner produces.
+			return mssql2139AttemptResult{
+				treP99: 500 * time.Millisecond,
+				bound:  250 * time.Millisecond,
+				log:    fmt.Sprintf("attempt %d: over bound (fake)", attempt),
+			}
+		}
+		// The recovery: comfortably under, as the same scenario measures on a quiet runner.
+		return mssql2139AttemptResult{
+			treP99: 80 * time.Millisecond,
+			bound:  250 * time.Millisecond,
+			log:    fmt.Sprintf("attempt %d: within bound (fake)", attempt),
+		}
+	})
+
+	if !withinBound {
+		t.Fatalf("withinBound = false, want true -- the loop did not recover from the manufactured transient")
+	}
+	if attemptsRun != 2 {
+		t.Fatalf("attemptsRun = %d, want 2 -- the loop should stop as soon as an attempt lands within bound", attemptsRun)
+	}
+	if got := len(calls); got != 2 {
+		t.Fatalf("measure was called %d time(s), want exactly 2 -- a third, unnecessary attempt ran after recovery", got)
+	}
+	if len(perAttempt) != 2 {
+		t.Fatalf("perAttempt has %d entries, want 2 -- the log for a spent attempt went missing", len(perAttempt))
+	}
+}
+
+// TestMSSQL2139RetryLoopStillFailsWhenEveryAttemptExceeds is the companion falsification this
+// file's own rule asks for ("a rule with two clauses needs one mutation per clause"): the retry
+// loop existing must not mean it can no longer fail. Every attempt here exceeds its bound, so
+// the loop must exhaust maxAttempts and report withinBound=false -- this is what catches a
+// persistent regression (mssqlEventRowChunk 2000->10000, the real test's own documented
+// known-positive, fails on all three attempts; this is that behavior, isolated from the
+// database).
+func TestMSSQL2139RetryLoopStillFailsWhenEveryAttemptExceeds(t *testing.T) {
+	var calls []int
+	withinBound, attemptsRun, perAttempt := mssql2139RunWithRetry(t, "fake-arm", 3, func(attempt int) mssql2139AttemptResult {
+		calls = append(calls, attempt)
+		return mssql2139AttemptResult{
+			treP99: 900 * time.Millisecond,
+			bound:  250 * time.Millisecond,
+			log:    fmt.Sprintf("attempt %d: over bound (fake persistent regression)", attempt),
+		}
+	})
+
+	if withinBound {
+		t.Fatalf("withinBound = true, want false -- a regression that exceeds the bound on every attempt must still fail")
+	}
+	if attemptsRun != 3 {
+		t.Fatalf("attemptsRun = %d, want 3 -- a persistent regression must spend every attempt, not stop early", attemptsRun)
+	}
+	if got := len(calls); got != 3 {
+		t.Fatalf("measure was called %d time(s), want exactly 3", got)
+	}
+	if len(perAttempt) != 3 {
+		t.Fatalf("perAttempt has %d entries, want 3 -- the final failure message would be missing an attempt's numbers", len(perAttempt))
+	}
+}
+
 func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
 		t.Skip("CLEAT_TEST_MSSQL not set")
@@ -311,13 +448,13 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 			// this repo keeps paying for. Their calibration note sits beside the `bound :=` line.
 			const boundFactor = 4.0
 			const boundFloor = 100 * time.Millisecond
-			var (
-				attemptsRun int
-				withinBound bool
-				perAttempt  []string
-			)
-			for attempt := 1; attempt <= maxAttempts; attempt++ {
-				attemptsRun++
+
+			// The attempt/retry decision itself lives in mssql2139RunWithRetry (cleat#3117), extracted
+			// out of this closure so that function's recovery-from-a-transient behavior can be asked
+			// directly of THIS code, deterministically -- see
+			// TestMSSQL2139RetryLoopRecoversFromATransientAttempt below. Everything inside measure is
+			// unchanged from before the extraction; only the retry/early-break control flow moved.
+			withinBound, attemptsRun, perAttempt := mssql2139RunWithRetry(t, arm.name, maxAttempts, func(attempt int) mssql2139AttemptResult {
 				if attempt > 1 {
 					// The previous attempt's sweep consumed the seeded targets, so the scenario has to
 					// be rebuilt before a retry -- otherwise the retry measures a sweep over an
@@ -412,7 +549,7 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 					writerDef+"%").Scan(&writerRowsRemaining); err != nil {
 					t.Fatalf("count surviving writer rows: %v", err)
 				}
-				wantWriterRows := attemptsRun * 2 * mssql2139WriterSamples // baseline + treatment, per attempt
+				wantWriterRows := attempt * 2 * mssql2139WriterSamples // baseline + treatment, per attempt
 				if writerRowsRemaining != wantWriterRows {
 					t.Fatalf("%s: %d writer workflow rows remain, want %d -- the sweep deleted rows "+
 						"it should never have matched", arm.name, writerRowsRemaining, wantWriterRows)
@@ -444,23 +581,14 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 				// to still catch #2138 regressing -- see the falsification
 				// below, which confirms it does.
 				bound := time.Duration(float64(basP99)*boundFactor) + boundFloor
-				perAttempt = append(perAttempt, fmt.Sprintf(
-					"attempt %d: baseline P99=%v, treatment(in-window) P99=%v, bound=%v (%+.0f%% of bound)",
-					attempt, basP99, treP99, bound, float64(treP99)/float64(bound)*100-100))
-				if treP99 > bound && attempt < maxAttempts {
-					// Logged rather than silent, so a green CI run that spent an attempt is visible:
-					// "the host was busy for a few seconds" and "this test is measuring noise" look
-					// identical from the verdict alone.
-					t.Logf("%s: attempt %d exceeded the bound (%v > %v, %+.0f%% over) -- retrying, because a "+
-						"load spike inside this window is not the regression this measures, while a "+
-						"regression exceeds the bound on every attempt",
-						arm.name, attempt, treP99, bound, float64(treP99)/float64(bound)*100-100)
+				return mssql2139AttemptResult{
+					treP99: treP99,
+					bound:  bound,
+					log: fmt.Sprintf(
+						"attempt %d: baseline P99=%v, treatment(in-window) P99=%v, bound=%v (%+.0f%% of bound)",
+						attempt, basP99, treP99, bound, float64(treP99)/float64(bound)*100-100),
 				}
-				if treP99 <= bound {
-					withinBound = true
-					break
-				}
-			}
+			})
 			if !withinBound {
 				t.Errorf("%s: concurrent-writer P99 under the sweep exceeded the stated bound (%.1fx the "+
 					"same attempt's baseline P99 + %v floor) on ALL %d attempt(s) -- the sweep is materially "+
