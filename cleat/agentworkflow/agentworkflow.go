@@ -241,6 +241,59 @@ const (
 	StatusBudgetExceeded = "budget_exceeded"
 )
 
+// Query-state keys and values a caller reads WHILE a run is in progress,
+// through the ordinary query-state mechanism -- not through Result, which is
+// only readable once Run has returned. This is cleat#3170, completing the
+// approval gate cleat#3022 added: a workflow whose whole point is surviving
+// a wait of hours has to be able to say it is waiting, since the alternative
+// is a caller inferring it from silence.
+//
+// STATUS VALUES ARE A PUBLIC VOCABULARY. Once a caller matches on
+// QueryStatusAwaitingApproval, changing what gets written there is the same
+// kind of break as changing a JSON field name -- treat the strings below as
+// fixed once this ships, the same discipline Result.Status already gets.
+const (
+	// QueryKeyStatus is the key. Its value progresses through every constant
+	// below in the run's actual order, ending at StatusDone or
+	// StatusBudgetExceeded -- the SAME two values Result.Status reports, so a
+	// caller who only ever reads the live key still sees a value Result.Status
+	// would agree with once the run finishes.
+	QueryKeyStatus = "status"
+
+	QueryStatusRunning          = "running"
+	QueryStatusToolCall         = "tool_call"
+	QueryStatusThinking         = "thinking"
+	QueryStatusAwaitingApproval = "awaiting_approval"
+	QueryStatusApprovalReceived = "approval_received"
+	QueryStatusApprovalTimeout  = "approval_timeout"
+	QueryStatusFailed           = "failed"
+)
+
+// Query-state keys written only inside an approval wait (KindApproval),
+// and only while that wait is live.
+const (
+	// QueryKeyApprovalWait is "entered", written ONCE, before the first poll.
+	// Not on a later poll: a run approved on its very first poll must still
+	// be distinguishable from a run that never reached the wait at all, which
+	// is exactly the thing a "the run finished" check alone cannot tell apart
+	// -- see run-ai-agent-platform-scenario.sh's own comment on why it checks
+	// this separately from the run's completion.
+	QueryKeyApprovalWait = "approval_wait"
+
+	// QueryKeyApprovalWaitSince is an RFC3339 timestamp, written at the same
+	// point as QueryKeyApprovalWait. Taken from h.Now(), the workflow's
+	// durable clock, never time.Now() -- this executes inside the loop and
+	// must replay identically, and the package comment's determinism
+	// constraint applies here exactly as it does to everything else in it.
+	QueryKeyApprovalWaitSince = "approval_wait_since"
+
+	// QueryKeyApprovalPolls is the 1-based count of misses so far, updated on
+	// every miss. Unset (never written) for a run approved on its first poll
+	// -- that is not a bug to fix, it is the signal that distinguishes "hit
+	// immediately" from "missed N times then hit".
+	QueryKeyApprovalPolls = "approval_polls"
+)
+
 // ---- LLM wire types (the llm plugin's `chat` contract) ----
 
 // Message is one turn of the conversation.
@@ -380,6 +433,18 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 	}
 
 	res := Result{Model: in.Model, TenantID: in.TenantID}
+	h.SetQueryState(QueryKeyStatus, QueryStatusRunning)
+
+	// fail writes the one QueryStatusFailed value shared by every error return
+	// below, so every one of them stays in sync rather than each repeating the
+	// write and risking one that forgets it. Not used for the three input
+	// errors above this point: this run has not yet announced itself as
+	// QueryStatusRunning, so there is nothing for a poller to have been
+	// reading that "failed" would correct.
+	fail := func(err error) (string, error) {
+		h.SetQueryState(QueryKeyStatus, QueryStatusFailed)
+		return "", err
+	}
 
 	for step := 0; step < in.MaxSteps; step++ {
 		// THE SEAM. The ceiling is enforced before a turn is STARTED, so a run
@@ -401,7 +466,12 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 		if in.Budget > 0 && res.Cost >= in.Budget {
 			res.Status = StatusBudgetExceeded
 			res.Steps = step
-			return marshal(res)
+			h.SetQueryState(QueryKeyStatus, res.Status)
+			out, merr := marshal(res)
+			if merr != nil {
+				return fail(merr)
+			}
+			return out, nil
 		}
 		req := chatRequest{
 			Provider:    in.Provider,
@@ -413,25 +483,25 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 		}
 		reqJSON, err := json.Marshal(req)
 		if err != nil {
-			return "", fmt.Errorf("agent: marshal llm request: %w", err)
+			return fail(fmt.Errorf("agent: marshal llm request: %w", err))
 		}
 
 		// THE DURABLE STEP. Recorded in the event history and replayed on
 		// resume, so a completed turn is not asked again.
 		respJSON, err := h.PluginCall("llm", "chat", string(reqJSON))
 		if err != nil {
-			return "", fmt.Errorf("agent: llm call failed at step %d: %w", step, err)
+			return fail(fmt.Errorf("agent: llm call failed at step %d: %w", step, err))
 		}
 
 		var resp chatResponse
 		if err := json.Unmarshal([]byte(respJSON), &resp); err != nil {
-			return "", fmt.Errorf("agent: invalid llm response: %w", err)
+			return fail(fmt.Errorf("agent: invalid llm response: %w", err))
 		}
 		if resp.Error != "" {
-			return "", fmt.Errorf("agent: llm error: %s", resp.Error)
+			return fail(fmt.Errorf("agent: llm error: %s", resp.Error))
 		}
 		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("agent: llm returned no choices")
+			return fail(fmt.Errorf("agent: llm returned no choices"))
 		}
 		if resp.Model != "" {
 			res.Model = resp.Model
@@ -455,11 +525,16 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 			res.Status = StatusDone
 			if in.ArtifactKey != "" {
 				if err := writeArtifact(h, in.ArtifactKey, res.Answer); err != nil {
-					return "", err
+					return fail(err)
 				}
 				res.ArtifactKey = in.ArtifactKey
 			}
-			return marshal(res)
+			h.SetQueryState(QueryKeyStatus, res.Status)
+			out, merr := marshal(res)
+			if merr != nil {
+				return fail(merr)
+			}
+			return out, nil
 		}
 
 		messages = append(messages, Message{
@@ -469,6 +544,7 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 		})
 
 		for _, tc := range choice.Message.ToolCalls {
+			h.SetQueryState(QueryKeyStatus, QueryStatusToolCall)
 			rec := ToolCallRecord{
 				Step: step + 1,
 				Name: tc.Function.Name,
@@ -492,7 +568,7 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 				// branch below always did set it, so the two disagreed.
 				msg := fmt.Sprintf("no such tool %q", tc.Function.Name)
 				if failOnToolError {
-					return "", fmt.Errorf("agent: %s", msg)
+					return fail(fmt.Errorf("agent: %s", msg))
 				}
 				rec.Error = msg
 				rec.Result = "error: " + msg
@@ -504,7 +580,7 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 					// handles a tool error far better than a dead run does.
 					// ToolErrorFail is the caller saying it disagrees.
 					if failOnToolError {
-						return "", fmt.Errorf("agent: tool %q failed: %w", tc.Function.Name, cerr)
+						return fail(fmt.Errorf("agent: tool %q failed: %w", tc.Function.Name, cerr))
 					}
 					rec.Error = cerr.Error()
 					rec.Result = "error: " + cerr.Error()
@@ -518,11 +594,18 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 				Content:    rec.Result,
 			})
 		}
+
+		// Every tool call this step is resolved (an approval tool included --
+		// awaitApproval has already returned, found or timed out, by the time
+		// control reaches here). The model's next turn is what happens after
+		// this status, so QueryStatusThinking is the honest description of
+		// what the run is doing until the next llm.chat call lands.
+		h.SetQueryState(QueryKeyStatus, QueryStatusThinking)
 	}
 
 	// Exhausted the step budget without a final answer. A stable prefix, so a
 	// caller can match on it.
-	return "", fmt.Errorf("agent: exceeded max steps (%d)", in.MaxSteps)
+	return fail(fmt.Errorf("agent: exceeded max steps (%d)", in.MaxSteps))
 }
 
 // ChildName is the workflow name the agent must be DEPLOYED under for
@@ -662,6 +745,18 @@ func awaitApproval(h cleat.HostCalls, t Tool, args string) (string, error) {
 		maxPolls = DefaultApprovalMaxPolls
 	}
 
+	// Written ONCE, before the first poll -- cleat#3170. A run that hits this
+	// line has genuinely entered the wait, which is the one thing "the run
+	// finished" cannot tell a caller: a run that never called an approval
+	// tool at all also finishes, and would otherwise look identical from the
+	// outside to one that was approved instantly.
+	h.SetQueryState(QueryKeyStatus, QueryStatusAwaitingApproval)
+	h.SetQueryState(QueryKeyApprovalWait, "entered")
+	// h.Now(), not time.Now(): this runs inside the durable loop and must
+	// replay to the same value every time, which only the workflow's own
+	// clock guarantees -- see the package comment's determinism constraint.
+	h.SetQueryState(QueryKeyApprovalWaitSince, h.Now().UTC().Format(time.RFC3339))
+
 	for poll := 0; poll < maxPolls; poll++ {
 		out, err := h.PluginCall(t.Plugin, t.Function, args)
 		if err != nil {
@@ -677,14 +772,21 @@ func awaitApproval(h cleat.HostCalls, t Tool, args string) (string, error) {
 			return "", fmt.Errorf("agent: approval tool %q returned unparsable JSON %q: %w", t.Name, out, err)
 		}
 		if claim.Found {
+			h.SetQueryState(QueryKeyStatus, QueryStatusApprovalReceived)
 			return out, nil
 		}
+		// approval_polls is the 1-based MISS count, so a run approved on its
+		// first poll never writes it -- that absence is the signal that
+		// distinguishes "hit immediately" from "missed once then hit", the
+		// same reasoning approval_wait's unconditional write above exists for.
+		h.SetQueryState(QueryKeyApprovalPolls, fmt.Sprintf("%d", poll+1))
 		// Sleep only BETWEEN polls: a last sleep after the final miss would
 		// add the interval to every timeout for nothing.
 		if poll < maxPolls-1 {
 			h.DurableSleep(time.Duration(interval) * time.Second)
 		}
 	}
+	h.SetQueryState(QueryKeyStatus, QueryStatusApprovalTimeout)
 	return `{"found":false,"timed_out":true}`, nil
 }
 
