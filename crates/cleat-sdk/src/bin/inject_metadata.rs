@@ -163,7 +163,7 @@ Options:
         "child_binding_policy": resolved_child_binding_policy,
         "sdk_language": "rust",
         "language": "rust",
-        "sdk_version": "0.3.2",
+        "sdk_version": "0.4.0",
         "created_at": chrono_now(),
     });
 

@@ -108,7 +108,7 @@ def test_inject_and_read_metadata_round_trips_on_a_real_component_binary():
         "plugin_deps": {},
         "child_binding_policy": "",
         "sdk_language": "python",
-        "sdk_version": "0.3.2",
+        "sdk_version": "0.4.0",
         "created_at": "2026-10-01T00:00:00Z",
         "language": "python",
         "entry_points": ["call_all_plugins"],
