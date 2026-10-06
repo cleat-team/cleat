@@ -467,7 +467,11 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 			res.Status = StatusBudgetExceeded
 			res.Steps = step
 			h.SetQueryState(QueryKeyStatus, res.Status)
-			return marshal(res)
+			out, merr := marshal(res)
+			if merr != nil {
+				return fail(merr)
+			}
+			return out, nil
 		}
 		req := chatRequest{
 			Provider:    in.Provider,
@@ -526,7 +530,11 @@ func Run(h cleat.HostCalls, inputJSON string) (string, error) {
 				res.ArtifactKey = in.ArtifactKey
 			}
 			h.SetQueryState(QueryKeyStatus, res.Status)
-			return marshal(res)
+			out, merr := marshal(res)
+			if merr != nil {
+				return fail(merr)
+			}
+			return out, nil
 		}
 
 		messages = append(messages, Message{
