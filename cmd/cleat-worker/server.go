@@ -1821,13 +1821,18 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
-	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
+	if err := st.RemoveRoutingRule(r.Context(), name, ruleID); err != nil {
 		// 404, not the 200 this answered for every miss before cleat#946's
 		// second half. No store checked rows-affected, so a DELETE matching
 		// nothing returned nil and an operator tearing down a canary was told it
 		// was gone while it went on shifting live traffic. A rule ID that names
 		// nothing is a bad request path, not a server fault, so it is not a 500
 		// either.
+		//
+		// A rule ID that names a DIFFERENT workflow's rule hits this same path
+		// -- cleat#3168. RemoveRoutingRule scopes its DELETE by name, so a rule
+		// belonging to some other workflow matches nothing here and is
+		// indistinguishable from a rule that was never created.
 		if errors.Is(err, engine.ErrRoutingRuleNotFound) {
 			s.writeError(w, 404, "routing rule not found: "+ruleID)
 			return
@@ -2062,7 +2067,7 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 //	GET    /api/workflows/{name}/tags               404 via defExists
 //	PUT    /api/workflows/{name}/tags               409 via ValidateVersion
 //	DELETE /api/workflows/{name}/tags/{tag}         404 via refuseIfAbsentOrInternalDef (cleat#3165)
-//	DELETE /api/workflows/{name}/routing/{ruleID}   name UNUSED -- see below
+//	DELETE /api/workflows/{name}/routing/{ruleID}   404 via refuseIfAbsentOrInternalDef, scoped by RemoveRoutingRule (cleat#3168)
 //
 // The tag delete's row above used to read "unchecked -- see below", with the
 // same idempotency argument this file's own comment on
@@ -2079,10 +2084,16 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 // above was actually protecting and which refuseIfAbsentOrInternalDef never
 // touched.
 //
-// The routing delete remains a different, unfixed defect: it never reads the
-// name at all (handleRemoveRoutingRule takes parts[2], the rule id), so any
-// name in the path deletes any rule id within the tenant. Filed separately;
-// fixing it here would bundle a second concern.
+// The routing delete used to be a different, unfixed defect: it never read
+// the name at all (handleRemoveRoutingRule took parts[2], the rule id, with
+// no name parameter), so any name in the path deleted any rule id within the
+// tenant. That stopped being quite true when the name parameter was added
+// for the refusal above -- "never reads the name at all" became false, while
+// the consequence (any existing name deletes any rule id) survived, because
+// RemoveRoutingRule still took only the id. cleat#3168 closed the gap:
+// RemoveRoutingRule now takes workflowName too and scopes its DELETE by it,
+// so a rule id belonging to a different workflow is ErrRoutingRuleNotFound,
+// the same as a rule id that was never created.
 //
 // The empty value is worse here than an empty list was there, because it is
 // ALSO a legitimate answer: a key that has not been published yet reads

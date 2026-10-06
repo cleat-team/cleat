@@ -68,7 +68,7 @@ type mockStore struct {
 	deliverSignalIdempotentFn          func(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error)
 	validateVersionFn                  func(ctx context.Context, defName string, defVersion int) (bool, error)
 	setRoutingRuleFn                   func(ctx context.Context, workflowName string, targetVersion int, weight float64) error
-	removeRoutingRuleFn                func(ctx context.Context, ruleID string) error
+	removeRoutingRuleFn                func(ctx context.Context, workflowName, ruleID string) error
 	getRoutingRulesFn                  func(ctx context.Context, workflowName string) ([]engine.RoutingRule, error)
 	setWorkflowTagFn                   func(ctx context.Context, workflowName string, version int, tag string) error
 	removeWorkflowTagFn                func(ctx context.Context, workflowName string, tag string) error
@@ -3486,9 +3486,9 @@ func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, tar
 	}
 	return nil
 }
-func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	if m.removeRoutingRuleFn != nil {
-		return m.removeRoutingRuleFn(ctx, ruleID)
+		return m.removeRoutingRuleFn(ctx, workflowName, ruleID)
 	}
 	return nil
 }

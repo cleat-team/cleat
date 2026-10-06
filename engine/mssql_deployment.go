@@ -696,15 +696,17 @@ func (s *MSSQLStore) SetRoutingRule(ctx context.Context, workflowName string, ta
 	return nil
 }
 
-// RemoveRoutingRule deletes a routing rule by ID.
-func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+// RemoveRoutingRule deletes a routing rule by ID, scoped to workflowName --
+// cleat#3168. A ruleID that belongs to a different workflow matches nothing
+// and is reported the same as a ruleID that does not exist.
+func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	id, err := uuid.Parse(ruleID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: invalid rule id %q: %w", ruleID, err)
 	}
 	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_routing WHERE id = @p1 AND tenant_id = @p2
-	`, id, s.tenantID)
+		DELETE FROM workflow_routing WHERE id = @p1 AND workflow_name = @p2 AND tenant_id = @p3
+	`, id, workflowName, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: %w", err)
 	}

@@ -2572,7 +2572,7 @@ func (s *stubWorkflowStore) GetWorkflowTags(ctx context.Context, workflowName st
 func (s *stubWorkflowStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
 	return nil
 }
-func (s *stubWorkflowStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+func (s *stubWorkflowStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	return nil
 }
 func (s *stubWorkflowStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {

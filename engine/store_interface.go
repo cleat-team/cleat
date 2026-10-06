@@ -774,8 +774,11 @@ type WorkflowStore interface {
 	// SetRoutingRule creates a traffic-splitting rule for a workflow version.
 	SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error
 
-	// RemoveRoutingRule deletes a routing rule by its ID.
-	RemoveRoutingRule(ctx context.Context, ruleID string) error
+	// RemoveRoutingRule deletes a routing rule by its ID, scoped to the
+	// workflow it is claimed to belong to. A ruleID that exists but under a
+	// different workflow name is ErrRoutingRuleNotFound, the same as a ruleID
+	// that does not exist at all -- cleat#3168.
+	RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error
 
 	// GetRoutingRules returns all routing rules for a workflow.
 	GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error)

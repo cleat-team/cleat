@@ -136,9 +136,11 @@ func (s *PostgresStore) SetRoutingRule(ctx context.Context, workflowName string,
 	return tx.Commit()
 }
 
-// RemoveRoutingRule deletes a routing rule by ID.
+// RemoveRoutingRule deletes a routing rule by ID, scoped to workflowName --
+// cleat#3168. A ruleID that belongs to a different workflow matches nothing
+// and is reported the same as a ruleID that does not exist.
 
-func (s *PostgresStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+func (s *PostgresStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: begin: %w", err)
@@ -146,8 +148,8 @@ func (s *PostgresStore) RemoveRoutingRule(ctx context.Context, ruleID string) er
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx, `
-		DELETE FROM workflow_routing WHERE id = $1
-	`, ruleID)
+		DELETE FROM workflow_routing WHERE id = $1 AND workflow_name = $2
+	`, ruleID, workflowName)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: %w", err)
 	}
