@@ -1,4 +1,4 @@
--- cleat#3171: see migrations/postgres/012 for the rationale -- this is
+-- cleat#3171: see migrations/postgres/013 for the rationale -- this is
 -- signal_seq/signal_seq_at_claim's sibling (cleat#953) for the promise/update
 -- wake paths. Two columns, each guarded separately through
 -- information_schema.columns and PREPARE/EXECUTE, the same shape

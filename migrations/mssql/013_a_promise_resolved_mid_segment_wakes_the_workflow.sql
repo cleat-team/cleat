@@ -1,4 +1,4 @@
--- cleat#3171. See migrations/postgres/013 for the full rationale -- this is
+-- cleat#3171. See migrations/postgres/014 for the full rationale -- this is
 -- signal_seq's sibling (cleat#953) on the promise/update paths, on the SQL
 -- Server dialect. Only the 'ready' arm's CASE WHEN changes, adding one OR
 -- clause. Whole redefinition rather than a patch: CREATE OR ALTER is

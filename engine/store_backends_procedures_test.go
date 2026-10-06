@@ -58,7 +58,7 @@ import (
 // list must name it.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
-	"013_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
+	"014_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 }
 
 // Same shape as the Postgres list above, for the same reason: MySQL was
@@ -79,7 +79,7 @@ var mysqlProcedureMigrations = []string{
 // replayed one after another to arrive at a body 003 already contains.
 var mssqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"012_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
+	"013_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup

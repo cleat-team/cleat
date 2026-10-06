@@ -1,6 +1,6 @@
 -- cleat#3171: a promise resolved/rejected, or an update dispatched, while the
 -- workflow was AWAKE scheduled no wake. This is signal_seq's sibling
--- (cleat#953, migrations/postgres/047) on the promise/update paths.
+-- (cleat#953) on the promise/update paths.
 --
 -- ResolvePromise, RejectPromise and CreateUpdateRequest each pull
 -- next_wake_at forward only for a workflow that is already suspended --
@@ -35,7 +35,7 @@
 -- new issue, not an omission from this one.
 --
 -- Only the 'ready' arm's CASE WHEN changes, adding one OR clause. Everything
--- else here is 012_tenant_allow_public_exposure.sql's effect on the schema
+-- else here is 011_tenant_allow_public_exposure.sql's effect on the schema
 -- plus the LAST finalize_workflow_status body on develop (migrations/postgres/003_procedures.sql),
 -- reproduced whole because the function is replaced in full.
 CREATE OR REPLACE FUNCTION finalize_workflow_status(p_workflow_id text, p_worker_id text, p_generation bigint, p_final_status text, p_result text, p_error_code text, p_error_op text, p_query_state jsonb, p_next_wake_at TIMESTAMPTZ, p_notify_channel text) RETURNS boolean
