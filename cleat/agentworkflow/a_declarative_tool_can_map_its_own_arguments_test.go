@@ -271,3 +271,27 @@ func TestStaticArgsMustBeAJSONObject(t *testing.T) {
 		t.Errorf("error = %v, want it to name the field", err)
 	}
 }
+
+// A MAPPING DECLARED ON A KIND THAT NEVER APPLIES IT MUST BE REFUSED, not
+// silently ignored -- callTool only calls applyArgMapping for KindPlugin and
+// KindApproval, so a KindService or KindWorkflow tool with arg_transforms
+// would otherwise validate cleanly and then do nothing at every dispatch,
+// forever. Found in review (cleat#3174).
+func TestArgTransformsAreRefusedOnAKindThatNeverAppliesThem(t *testing.T) {
+	for _, kind := range []string{agentworkflow.KindService, agentworkflow.KindWorkflow} {
+		t.Run(kind, func(t *testing.T) {
+			env := cleattest.NewTestEnv()
+			tool := agentworkflow.Tool{
+				Name: "t", Kind: kind, Service: "s", Operation: "o", Workflow: "w",
+				StaticArgs: json.RawMessage(`{"a":1}`),
+			}
+			_, err := run(t, env, agentworkflow.Input{Message: "x", Tools: []agentworkflow.Tool{tool}})
+			if err == nil {
+				t.Fatalf("a %q tool with static_args must be refused at declaration, not silently ignored", kind)
+			}
+			if !strings.Contains(err.Error(), "never applies them") {
+				t.Errorf("error = %v, want it to say the mapping is inert for this kind", err)
+			}
+		})
+	}
+}

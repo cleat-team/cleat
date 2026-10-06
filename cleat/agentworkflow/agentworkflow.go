@@ -715,6 +715,21 @@ func (t Tool) validate() error {
 			t.Name, t.Kind, KindService, KindPlugin, KindWorkflow, KindApproval)
 	}
 
+	// ArgTransforms/StaticArgs are applied only for KindPlugin and
+	// KindApproval -- see callTool. Declaring either on a KindService or
+	// KindWorkflow tool would otherwise pass validation cleanly and then be
+	// silently ignored at every dispatch, forever: a mechanism that exists,
+	// validates, and is wired to nothing reads as working to anyone who
+	// greps for it. Refused here instead (found in review, cleat#3174).
+	if len(t.ArgTransforms) > 0 || len(t.StaticArgs) > 0 {
+		switch t.Kind {
+		case KindPlugin, KindApproval:
+		default:
+			return fmt.Errorf("agent: tool %q declares arg_transforms or static_args, but kind %q never applies them (only %q and %q do)",
+				t.Name, t.Kind, KindPlugin, KindApproval)
+		}
+	}
+
 	// Validated at declaration time, not at first dispatch, same reasoning
 	// as every branch above: a malformed tool should not look like a model
 	// failure three turns later.
