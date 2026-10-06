@@ -10,15 +10,11 @@ import (
 	"github.com/cleat-team/cleat/cleat/cleattest"
 )
 
-// setupEnv creates a test environment and wires its HostCalls into the
-// package-level h, which the workflow reaches through rather than taking a
-// HostCalls parameter. Without this line `h` is nil and the first PluginCall
-// panics -- see cleat/runtime.go, and note that the panic names the runtime
-// rather than the test.
+// setupEnv creates a test environment. RunAgent takes its HostCalls as an
+// ordinary parameter (env.H(), passed at each call site below) rather than
+// through a package-level variable, so there is nothing to wire up here.
 func setupEnv() *cleattest.TestEnv {
-	env := cleattest.NewTestEnv()
-	h = env.H()
-	return env
+	return cleattest.NewTestEnv()
 }
 
 // modelReply builds one `llm.chat` response in the wire shape the plugin

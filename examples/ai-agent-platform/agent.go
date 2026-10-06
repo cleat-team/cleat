@@ -78,11 +78,6 @@ import (
 	"github.com/cleat-team/cleat/cleat/agentworkflow"
 )
 
-// h is the package-level context object. The transformer auto-threads it into
-// every function in the durable closure that references it — which is why the
-// helpers below take domain values and not a HostCalls.
-var h cleat.HostCalls
-
 // ---- Domain types ----
 //
 // AgentInput/AgentOutput keep their pre-migration names and fields, per

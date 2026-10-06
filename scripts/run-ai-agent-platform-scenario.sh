@@ -736,8 +736,8 @@ if not cases:
     print("EXTRACTED-NOTHING-FROM-THE-PAGE")
     raise SystemExit
 sources = " ".join(p.read_text() for p in [
-    pathlib.Path("engine/status_vocabulary.go"),        # the RUN vocabulary
-    pathlib.Path("examples/ai-agent-platform/agent.go"),  # the query-state values
+    pathlib.Path("engine/status_vocabulary.go"),               # the RUN vocabulary
+    pathlib.Path("cleat/agentworkflow/agentworkflow.go"),       # the query-state values (cleat#2980 moved these here)
 ])
 print(",".join(c for c in cases if f'"{c}"' not in sources and f"'{c}'" not in sources))
 PY
