@@ -165,7 +165,7 @@ func TestDeployWorkflow_RestampsTheBinaryToTheVersionItRecords(t *testing.T) {
 func TestRestampWorkflowVersionPreservesKeysItDoesNotModel(t *testing.T) {
 	payload := `{"workflow_name":"provision","workflow_version":1,"abi_version":1,` +
 		`"min_compatible_version":1,"plugin_deps":{},"entry_points":["place_order"],` +
-		`"sdk_language":"python","sdk_version":"0.3.2","created_at":"2026-10-02T00:00:00Z"}`
+		`"sdk_language":"python","sdk_version":"0.4.0","created_at":"2026-10-02T00:00:00Z"}`
 	built := artifactWithRawMetadata(t, payload)
 
 	got, err := restampWorkflowVersion(built, 2)
@@ -189,7 +189,7 @@ func TestRestampWorkflowVersionPreservesKeysItDoesNotModel(t *testing.T) {
 	// whole-payload comparison would be a false failure).
 	for _, want := range []string{
 		`"sdk_language":"python"`,
-		`"sdk_version":"0.3.2"`,
+		`"sdk_version":"0.4.0"`,
 		`"created_at":"2026-10-02T00:00:00Z"`,
 		`"entry_points":["place_order"]`,
 		`"workflow_name":"provision"`,

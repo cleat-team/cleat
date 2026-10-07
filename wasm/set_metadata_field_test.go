@@ -93,7 +93,7 @@ func TestSetMetadataFieldRejectsInvalidJSON(t *testing.T) {
 func TestSetMetadataFieldChangesOneKeyAndKeepsTheRest(t *testing.T) {
 	header := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	payload := `{"workflow_name":"provision","workflow_version":1,"abi_version":1,` +
-		`"sdk_version":"0.3.2","created_at":"2026-10-02T00:00:00Z"}`
+		`"sdk_version":"0.4.0","created_at":"2026-10-02T00:00:00Z"}`
 	b, err := writeCustomSection(header, sectionName, []byte(payload))
 	if err != nil {
 		t.Fatalf("writeCustomSection: %v", err)
@@ -119,7 +119,7 @@ func TestSetMetadataFieldChangesOneKeyAndKeepsTheRest(t *testing.T) {
 	for key, want := range map[string]string{
 		"workflow_name": `"provision"`,
 		"abi_version":   `1`,
-		"sdk_version":   `"0.3.2"`,
+		"sdk_version":   `"0.4.0"`,
 		"created_at":    `"2026-10-02T00:00:00Z"`,
 	} {
 		gotVal, ok := fields[key]

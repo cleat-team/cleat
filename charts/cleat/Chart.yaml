@@ -2,8 +2,8 @@ apiVersion: v2
 name: cleat
 description: Cleat durable execution worker
 type: application
-version: 0.3.2
-appVersion: "0.3.2"
+version: 0.4.0
+appVersion: "0.4.0"
 keywords:
   - cleat-execution
   - workflow
