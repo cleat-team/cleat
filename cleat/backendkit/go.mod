@@ -4,7 +4,7 @@ go 1.27.0
 
 toolchain go1.27.1
 
-require github.com/cleat-team/cleat v0.3.2
+require github.com/cleat-team/cleat v0.4.0
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

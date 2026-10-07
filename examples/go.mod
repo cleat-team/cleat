@@ -20,7 +20,7 @@ require (
 	// import the root module (plugins/dag for dagrun, engine for cleattest),
 	// so examples needs both replaces, not just cleat/'s -- a replace directive
 	// is not transitive across module boundaries.
-	github.com/cleat-team/cleat v0.3.2 // indirect
+	github.com/cleat-team/cleat v0.4.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-sql-driver/mysql v1.10.1 // indirect

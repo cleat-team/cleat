@@ -6,8 +6,8 @@ github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1x
 github.com/cenkalti/backoff/v5 v5.0.3/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
-github.com/cleat-team/cleat v0.3.2 h1:oIjrHxAeebEUOgjGbhe5U5zI//9DW6Ug7nHHogTEtHE=
-github.com/cleat-team/cleat v0.3.2/go.mod h1:6SP30RDHaUio9WerIa9iD2e7DquFZeEhgjilJFzV0kI=
+github.com/cleat-team/cleat v0.4.0 h1:b9BswEKpwVY1mf7Po+HgWuc2qlV4fqYsL1YETGatwVo=
+github.com/cleat-team/cleat v0.4.0/go.mod h1:eW6vLaI+neSu7s1r4qag6GAti0jFBGB/+MtewOkRG7o=
 github.com/go-logr/logr v1.4.4 h1:tG4xh9yMsRCAiodLVTxyrkzSZ9+o0L1Kg/+cPVcbP/8=
 github.com/go-logr/logr v1.4.4/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
 github.com/go-logr/stdr v1.2.2 h1:hSWxHoqTgW2S2qGc0LTAI563KZ5YKYRhT3MFKZMbjag=
