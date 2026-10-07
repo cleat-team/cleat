@@ -8,6 +8,8 @@ engine/app.go	func NewApp
 engine/callerrors.go	func GuestCallErrorCodes
 engine/child_version.go	func ResolveChildVersion
 engine/cron.go	func NextCronTime
+engine/deployment_secrets.go	func NewDeploymentSecretStoreWithReloadableRing
+engine/encryption.go	func NewPayloadEncryptionWithReloadableRing
 engine/engine.go	func Engine.ExecuteCompiled
 engine/engine.go	func RunsOnWasmtime
 engine/engine.go	func WithAllowVersionMismatch
@@ -44,12 +46,14 @@ engine/plugin_resolver.go	func ResolvePlugins
 engine/plugins.go	func PluginRegistry.RegisterIdempotent
 engine/redact.go	func RedactMap
 engine/redact.go	func ResetPatterns
+engine/reloadable_key_ring.go	func ReloadableKeyRing.Reload
 engine/replayer.go	func Engine.ReplayCompiled
 engine/runtime.go	func Runtime.InstantiateAndInit
 engine/runtime.go	func fuelMeter.Abort
 engine/runtime.go	func fuelMeter.NewFunctionListener
 engine/sharded_store.go	func ShardedStore.LoadEventHistoryBatch
 engine/store_types.go	func RetiredAt
+engine/tenant_secrets.go	func NewSecretStoreWithReloadableRing
 engine/testutil/mssql_admin.go	func AdminDB
 engine/testutil/mssql_row_disappearance.go	func ClearMSSQLRowDisappearanceAudit
 engine/testutil/mssql_row_disappearance.go	func InstallMSSQLRowDisappearanceAudit

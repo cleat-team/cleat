@@ -527,3 +527,50 @@ func TestCheckKeyRingCountsSuspendedTenantsAndNamesTheUnopenableVersion(t *testi
 		}
 	})
 }
+
+// TestCheckKeyRingCandidateChecksTheCandidateNotTheStoresOwnRing is
+// cleat#2298's M4: a reload must verify every stored secret opens under
+// the ring it is ABOUT to install, before installing it -- not under
+// whatever ring the store already has live. CheckKeyRing (above) asks the
+// second question; this is the first, and the two must give DIFFERENT
+// answers when the store's live ring and the candidate differ, or nothing
+// distinguishes "safe to swap" from "already swapped".
+func TestCheckKeyRingCandidateChecksTheCandidateNotTheStoresOwnRing(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, e *rotationEnv) {
+		// A store whose LIVE ring only opens v1.
+		s := e.store(ringOf(t, rotV1))
+		tenant := e.tenants[0]
+		e.claim(t, tenant, "cleat-2298-m4-candidate")
+		e.put(t, ringOf(t, rotV1), tenant, "cleat-2298-m4-candidate", "v")
+
+		beforeV1Only, err := s.CheckKeyRingCandidate(context.Background(), ringOf(t, rotV1))
+		if err != nil {
+			t.Fatalf("CheckKeyRingCandidate(v1): %v", err)
+		}
+		beforeV2Only, err := s.CheckKeyRingCandidate(context.Background(), ringOf(t, rotV2))
+		if err != nil {
+			t.Fatalf("CheckKeyRingCandidate(v2): %v", err)
+		}
+
+		// The CANDIDATE answers differ even though the STORE's live ring (v1
+		// only) never changed between the two calls -- proving the method
+		// checked the argument, not s's own field.
+		if beforeV1Only.Unopenable[1] != 0 {
+			t.Errorf("candidate v1: Unopenable[1] = %d, want 0 -- the row IS sealed under v1", beforeV1Only.Unopenable[1])
+		}
+		if beforeV2Only.Unopenable[1] == 0 {
+			t.Error("candidate v2-only: Unopenable[1] = 0, want > 0 -- a v2-only candidate cannot open a v1 row, " +
+				"regardless of what the store's own live ring (v1) can do")
+		}
+
+		// A nil candidate -- the "no master key" case -- reports the row
+		// unopenable too, matching CheckKeyRing's own nil-ring convention.
+		nilCandidate, err := s.CheckKeyRingCandidate(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("CheckKeyRingCandidate(nil): %v", err)
+		}
+		if nilCandidate.Unopenable[1] == 0 {
+			t.Error("nil candidate: Unopenable[1] = 0, want > 0")
+		}
+	})
+}

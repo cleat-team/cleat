@@ -122,29 +122,31 @@ func TestASecretOpensUnderTheKeyItsVersionNames(t *testing.T) {
 	const tenant = "11111111-1111-1111-1111-111111111111"
 	v1, v2 := VersionedKey{1, rawKey(1)}, VersionedKey{2, rawKey(2)}
 
-	before := NewSecretStoreWithRing(nil, "postgres", ringOf(t, v1))
-	after := NewSecretStoreWithRing(nil, "postgres", ringOf(t, v2, v1))
+	beforeRing := ringOf(t, v1)
+	afterRing := ringOf(t, v2, v1)
+	before := NewSecretStoreWithRing(nil, "postgres", beforeRing)
+	after := NewSecretStoreWithRing(nil, "postgres", afterRing)
 
-	old, err := before.seal(tenant, "sk-sealed-before")
+	old, err := before.seal(beforeRing, tenant, "sk-sealed-before")
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if got, err := after.open(tenant, old, 1); err != nil || got != "sk-sealed-before" {
+	if got, err := after.open(afterRing, tenant, old, 1); err != nil || got != "sk-sealed-before" {
 		t.Fatalf("a row sealed before the rotation must open under the previous key: got %q, %v", got, err)
 	}
 
-	fresh, err := after.seal(tenant, "sk-sealed-after")
+	fresh, err := after.seal(afterRing, tenant, "sk-sealed-after")
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if got, err := after.open(tenant, fresh, 2); err != nil || got != "sk-sealed-after" {
+	if got, err := after.open(afterRing, tenant, fresh, 2); err != nil || got != "sk-sealed-after" {
 		t.Fatalf("a row sealed after the rotation must open under the current key: got %q, %v", got, err)
 	}
 
 	// The version is what selects the key. Labelling a v2 ciphertext as v1 must
 	// fail to decrypt, not silently succeed: if it opened, the version would be
 	// decoration and a mislabelled row would go unnoticed.
-	if _, err := after.open(tenant, fresh, 1); err == nil {
+	if _, err := after.open(afterRing, tenant, fresh, 1); err == nil {
 		t.Fatal("a ciphertext sealed under version 2 opened when labelled version 1: the version does not select the key")
 	}
 }
@@ -155,9 +157,11 @@ func TestASecretOpensUnderTheKeyItsVersionNames(t *testing.T) {
 func TestARowOnAnUnconfiguredVersionNamesTheMissingVersion(t *testing.T) {
 	const tenant = "11111111-1111-1111-1111-111111111111"
 	v1, v2 := VersionedKey{1, rawKey(1)}, VersionedKey{2, rawKey(2)}
-	old, _ := NewSecretStoreWithRing(nil, "postgres", ringOf(t, v1)).seal(tenant, "x")
+	ring1 := ringOf(t, v1)
+	old, _ := NewSecretStoreWithRing(nil, "postgres", ring1).seal(ring1, tenant, "x")
 
-	_, err := NewSecretStoreWithRing(nil, "postgres", ringOf(t, v2)).open(tenant, old, 1)
+	ring2 := ringOf(t, v2)
+	_, err := NewSecretStoreWithRing(nil, "postgres", ring2).open(ring2, tenant, old, 1)
 	var verr *SecretKeyVersionError
 	if !errors.As(err, &verr) {
 		t.Fatalf("err = %v (%T), want a *SecretKeyVersionError", err, err)
