@@ -56,7 +56,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) processBatch(parentCtx context.Context) {
 	start := time.Now()
 
-	rows, err := p.db.Query(parentCtx, plugin.Rebind(queryUnprocessedEvents.For(p.dialect), p.dialect))
+	rows, err := p.db.Query(parentCtx, queryUnprocessedEvents.For(p.dialect))
 	if err != nil {
 		p.logger.Error("event-triggers: query unprocessed events", "error", err)
 		return

@@ -42,7 +42,7 @@ var resetStuckJobsQuery = plugin.Query{
 // runReaper resets stuck running jobs back to pending. Returns the number of
 // jobs reset, or -1 on error (the error is logged internally).
 func (p *Plugin) runReaper(ctx context.Context) int {
-	n, err := p.db.Exec(ctx, plugin.Rebind(resetStuckJobsQuery.For(p.dialect), p.dialect))
+	n, err := p.db.Exec(ctx, resetStuckJobsQuery.For(p.dialect))
 	if err != nil {
 		p.logger.Error("jobqueue: reaper failed",
 			"plugin", p.Info().Name,
@@ -121,7 +121,7 @@ func (p *Plugin) sweepAbandonedJobs(ctx context.Context) int {
 	}
 	across := plugin.AcrossAllTenants(ctx,
 		"jobqueue abandonment sweep: run_id visibility spans every tenant")
-	n, err := p.db.Exec(across, plugin.Rebind(abandonedJobsQuery.For(p.dialect), p.dialect))
+	n, err := p.db.Exec(across, abandonedJobsQuery.For(p.dialect))
 	if err != nil {
 		p.logger.Error("jobqueue: abandonment sweep failed",
 			"plugin", p.Info().Name,
@@ -168,7 +168,7 @@ func (p *Plugin) sweepAbandonedJobsPerTenant(ctx context.Context) int {
 			return -1
 		}
 		tctx := plugin.ForTenant(ctx, id)
-		n, err := p.db.Exec(tctx, plugin.Rebind(abandonedJobsQuery.For(p.dialect), p.dialect))
+		n, err := p.db.Exec(tctx, abandonedJobsQuery.For(p.dialect))
 		if err != nil {
 			p.logger.Error("jobqueue: abandonment sweep failed for tenant",
 				"plugin", p.Info().Name, "tenant_id", tid, "error", err)
@@ -325,11 +325,11 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 
 		// Atomically claim the job. Only succeeds if still pending (avoids
 		// double-dispatch when multiple workers poll concurrently).
-		rowsAffected, err := p.db.Exec(ctx, plugin.Rebind(`
+		rowsAffected, err := p.db.Exec(ctx, `
 				UPDATE task_queue
 				SET status = 'running', started_at = now()
 				WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3 AND status = 'pending'
-			`, p.dialect), jobID, tenantID, queueName)
+			`, jobID, tenantID, queueName)
 		if err != nil {
 			p.logger.Error("jobqueue: claim job", "job_id", jobID, "error", err)
 			continue
@@ -366,11 +366,11 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 					"error", err,
 				)
 				failed++
-				if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
+				if _, updateErr := p.db.Exec(ctx, `
 						UPDATE task_queue
 						SET status = 'failed', completed_at = now()
 						WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
-					`, p.dialect), jobID, tenantID, queueName); updateErr != nil {
+					`, jobID, tenantID, queueName); updateErr != nil {
 					p.logger.Error("jobqueue: mark failed", "job_id", jobID, "error", updateErr)
 				}
 				continue
@@ -403,11 +403,11 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 			// and an UPDATE matching zero rows is not an error, so the job
 			// stayed "running" forever on MySQL. Found by cleat#2257's
 			// real-dialect pollPending test.
-			if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
+			if _, updateErr := p.db.Exec(ctx, `
 					UPDATE task_queue
 					SET status = 'dispatched', run_id = $1
 					WHERE job_id = $2 AND tenant_id = $3 AND queue_name = $4
-				`, p.dialect), runID, jobID, tenantID, queueName); updateErr != nil {
+				`, runID, jobID, tenantID, queueName); updateErr != nil {
 				p.logger.Error("jobqueue: mark dispatched", "job_id", jobID, "error", updateErr)
 			}
 		} else {
@@ -416,11 +416,11 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 				"queue", queueName,
 				"tenant", tenantID,
 			)
-			if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
+			if _, updateErr := p.db.Exec(ctx, `
 					UPDATE task_queue
 					SET status = 'completed', completed_at = now()
 					WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
-				`, p.dialect), jobID, tenantID, queueName); updateErr != nil {
+				`, jobID, tenantID, queueName); updateErr != nil {
 				p.logger.Error("jobqueue: mark completed", "job_id", jobID, "error", updateErr)
 			}
 		}

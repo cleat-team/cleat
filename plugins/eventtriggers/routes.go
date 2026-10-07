@@ -193,7 +193,7 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 	if p.dialect == plugin.DialectMySQL {
 		// MySQL: generate UUID on Go side, insert without RETURNING
 		subID = uuid.New()
-		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(insertSubscriptionReturning.For(p.dialect), p.dialect),
+		_, execErr := p.db.Exec(r.Context(), insertSubscriptionReturning.For(p.dialect),
 			subID, tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now)
 		if execErr != nil {
 			p.logger.Error("event-triggers: create subscription", "error", execErr)
@@ -201,7 +201,7 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 			return
 		}
 	} else {
-		err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(insertSubscriptionReturning.For(p.dialect), p.dialect),
+		err = plugin.ScanRow(p.db.QueryRow(r.Context(), insertSubscriptionReturning.For(p.dialect),
 			tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now), &subID)
 	}
 	if err != nil {

@@ -207,12 +207,12 @@ func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider str
 	// accepts ?tenant_id= precisely because a login is unauthenticated -- so
 	// the value in hand is the only reliable one.
 	ctx = plugin.ForTenant(ctx, tenantID)
-	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 			SELECT tenant_id, provider, client_id, redirect_url,
 			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
-		`, p.dialect), tenantID, provider),
+		`, tenantID, provider),
 		&cfg.TenantID, &cfg.Provider, &cfg.ClientID,
 		&cfg.RedirectURL, &cfg.Domain, &cfg.Issuer, &cfg.Enabled,
 	)
@@ -281,11 +281,11 @@ func (p *Plugin) extractSession(r *http.Request) *SessionInfo {
 	// tenant's row requires already holding that tenant's session token.
 	err := plugin.ScanRow(p.db.QueryRow(
 		plugin.AcrossAllTenants(r.Context(), "oauth session lookup: the token hash identifies the tenant, so there is none to scope by"),
-		plugin.Rebind(`
+		`
 			SELECT id, tenant_id, user_email, expires_at
 			FROM oauth_sessions
 			WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
-		`, p.dialect), tokenHash), &sessionID, &tenantID, &userEmail, &expiresAt)
+		`, tokenHash), &sessionID, &tenantID, &userEmail, &expiresAt)
 	if err != nil {
 		return nil
 	}
@@ -458,10 +458,10 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// ForTenant: tid is known here but the request is unauthenticated by
 	// definition -- it may have come from ?tenant_id= -- so nothing has put it
 	// in the context carrier the policy reads. cleat#1512.
-	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), plugin.Rebind(`
+	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), `
 			INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, nonce, expires_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-		`, p.dialect), sessionID, tid, provider, state, codeVerifier, nonce, sessionExpiresAt)
+		`, sessionID, tid, provider, state, codeVerifier, nonce, sessionExpiresAt)
 	if err != nil {
 		p.logger.Error("oauth: store state", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to initialize login")
@@ -529,11 +529,11 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// known, is scoped with ForTenant rather than inheriting this.
 	err := plugin.ScanRow(p.db.QueryRow(
 		plugin.AcrossAllTenants(r.Context(), "oauth callback: the state parameter identifies the tenant, so there is none to scope by"),
-		plugin.Rebind(`
+		`
 			SELECT id, tenant_id, provider, code_verifier, nonce
 			FROM oauth_sessions
 			WHERE state = $1 AND expires_at > now()
-		`, p.dialect), state), &sessionID, &tid, &storedProvider, &codeVerifier, &storedNonce)
+		`, state), &sessionID, &tid, &storedProvider, &codeVerifier, &storedNonce)
 	if err != nil {
 		p.logger.Error("oauth: state lookup", "error", err)
 		p.writeError(w, http.StatusBadRequest, "invalid or expired state")
@@ -923,13 +923,13 @@ func (p *Plugin) finishLogin(
 	// the PKCE fields. The nonce is cleared with them: it is single-use by
 	// definition, and a spent nonce left in the row is a replay waiting for a
 	// state collision.
-	_, err = p.db.Exec(ctx, plugin.Rebind(`
+	_, err = p.db.Exec(ctx, `
 			UPDATE oauth_sessions
 			SET session_token = NULL, token_hash = $1, user_email = $2,
 			    access_token = NULL, refresh_token = NULL, expires_at = $3,
 			    state = NULL, code_verifier = NULL, nonce = NULL
 			WHERE id = $4
-		`, p.dialect), tokenHash, id.Email, expiresAt, sessionID)
+		`, tokenHash, id.Email, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")
@@ -1100,12 +1100,12 @@ func (p *Plugin) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(plugin.ForTenant(r.Context(), session.TenantID), plugin.Rebind(`
+	rows, err := p.db.Query(plugin.ForTenant(r.Context(), session.TenantID), `
 			SELECT id, provider, user_email, created_at, expires_at
 			FROM oauth_sessions
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
-		`, p.dialect), session.TenantID)
+		`, session.TenantID)
 	if err != nil {
 		p.logger.Error("oauth: list sessions", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to list sessions")
@@ -1159,10 +1159,10 @@ func (p *Plugin) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(plugin.ForTenant(r.Context(), session.TenantID), plugin.Rebind(`
+	rows, err := p.db.Exec(plugin.ForTenant(r.Context(), session.TenantID), `
 			DELETE FROM oauth_sessions
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, session.TenantID)
+		`, id, session.TenantID)
 	if err != nil {
 		p.logger.Error("oauth: delete session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to delete session")

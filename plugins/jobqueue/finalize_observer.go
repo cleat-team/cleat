@@ -57,10 +57,10 @@ func (p *Plugin) ObserveFinalize(ctx context.Context, runID, finalStatus string)
 	// TestObserveFinalize_MultiBackend left the row unchanged -- the UPDATE
 	// ran, matched zero rows, and returned no error, because run_id was
 	// being compared against jqStatus and status was being set to runID.
-	_, err := p.db.Exec(ctx, plugin.Rebind(`
+	_, err := p.db.Exec(ctx, `
 		UPDATE task_queue
 		SET status = $1, completed_at = now()
 		WHERE run_id = $2 AND status IN ('dispatched', 'abandoned')
-	`, p.dialect), jqStatus, runID)
+	`, jqStatus, runID)
 	return err
 }

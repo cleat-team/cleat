@@ -166,10 +166,10 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	// payload/input columns on write -- a 200 with an empty body on the next
 	// read, because encoding/json fails part-way through writing the
 	// response. See plugin.JSONColumn. cleat#2206.
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), `
 			INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
 			VALUES ($1, $2, $3, $4, $5, $6)
-		`, p.dialect), tid, queueName, jobID, plugin.JSONColumn{Raw: payload}, defName, plugin.JSONColumn{Raw: req.Input})
+		`, tid, queueName, jobID, plugin.JSONColumn{Raw: payload}, defName, plugin.JSONColumn{Raw: req.Input})
 	if err != nil {
 		p.logger.Error("jobqueue: enqueue", "error", err)
 		p.writeError(w, 500, "failed to enqueue job")
@@ -236,7 +236,7 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("jobqueue: list jobs", "error", err)
 		p.writeError(w, 500, "failed to list jobs")
@@ -306,11 +306,11 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	var startedAt, completedAt sql.NullTime
 	var runID sql.NullString
 
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at, run_id
 			FROM task_queue
 			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
-		`, p.dialect), tid, queueName, jobID),
+		`, tid, queueName, jobID),
 		&j.JobID, &j.QueueName, &j.Status,
 		&payloadCol, &j.CreatedAt,
 		&startedAt, &completedAt, &runID,
@@ -359,11 +359,11 @@ func (p *Plugin) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(r.Context(), `
 			UPDATE task_queue
 			SET status = 'failed', completed_at = now()
 			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3 AND status = 'pending'
-		`, p.dialect), tid, queueName, jobID)
+		`, tid, queueName, jobID)
 	if err != nil {
 		p.logger.Error("jobqueue: cancel job", "job_id", jobIDStr, "error", err)
 		p.writeError(w, 500, "failed to cancel job")

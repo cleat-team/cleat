@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cleat-team/cleat/auth"
-	"github.com/cleat-team/cleat/plugin"
 )
 
 var errNoDatabase = errors.New(
@@ -180,10 +179,10 @@ func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter 
 // quotaFor reads one tenant's quota. found=false means none is configured,
 // which is not an error.
 func (p *Plugin) quotaFor(ctx context.Context, tid uuid.UUID, resource string) (quota, bool, error) {
-	q := plugin.Rebind(`
+	q := `
 		SELECT limit_count, window_seconds, enforce
 		FROM tenant_quota WHERE tenant_id = $1 AND resource = $2
-	`, p.dialect)
+	`
 	var out quota
 	row := p.db.QueryRow(ctx, q, tid, resource)
 	if err := row.Scan(&out.limitCount, &out.windowSeconds, &out.enforce); err != nil {
@@ -198,10 +197,10 @@ func (p *Plugin) quotaFor(ctx context.Context, tid uuid.UUID, resource string) (
 // usage sums the buckets inside the rolling window.
 func (p *Plugin) usage(ctx context.Context, tid uuid.UUID, resource string, windowSeconds int) (int64, error) {
 	cutoff := time.Now().UTC().Add(-time.Duration(windowSeconds) * time.Second)
-	q := plugin.Rebind(`
+	q := `
 		SELECT COALESCE(SUM(count), 0) FROM tenant_quota_counter
 		WHERE tenant_id = $1 AND resource = $2 AND bucket_start > $3
-	`, p.dialect)
+	`
 	var used int64
 	if err := p.db.QueryRow(ctx, q, tid, resource, cutoff).Scan(&used); err != nil {
 		return 0, err
@@ -220,18 +219,18 @@ func (p *Plugin) usage(ctx context.Context, tid uuid.UUID, resource string, wind
 func (p *Plugin) increment(ctx context.Context, tid uuid.UUID, resource string) error {
 	bucket := time.Now().UTC().Truncate(time.Hour)
 
-	ins := plugin.Rebind(`
+	ins := `
 		INSERT INTO tenant_quota_counter (tenant_id, resource, bucket_start, count)
 		VALUES ($1, $2, $3, 0)
-	`, p.dialect)
+	`
 	if _, err := p.db.Exec(ctx, ins, tid, resource, bucket); err != nil && !isDuplicateKey(err) {
 		return err
 	}
 
-	upd := plugin.Rebind(`
+	upd := `
 		UPDATE tenant_quota_counter SET count = count + 1
 		WHERE tenant_id = $1 AND resource = $2 AND bucket_start = $3
-	`, p.dialect)
+	`
 	_, err := p.db.Exec(ctx, upd, tid, resource, bucket)
 	return err
 }

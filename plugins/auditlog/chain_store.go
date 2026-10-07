@@ -237,7 +237,7 @@ func (p *Plugin) ensureHead(ctx context.Context, tenant uuid.UUID) error {
 	if _, ok := p.headsSeen.Load(tenant); ok {
 		return nil
 	}
-	if _, err := p.db.Exec(ctx, plugin.Rebind(ensureHeadSQL(p.dialect), p.dialect), tenant, zeroHashHex); err != nil {
+	if _, err := p.db.Exec(ctx, ensureHeadSQL(p.dialect), tenant, zeroHashHex); err != nil {
 		return fmt.Errorf("audit chain: create head for tenant %s: %w", tenant, err)
 	}
 	p.headsSeen.Store(tenant, struct{}{})
@@ -258,7 +258,7 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 		seq  int64
 		hash string
 	}
-	if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(lockHeadSQL(p.dialect), p.dialect), e.tenantID),
+	if err := plugin.ScanRow(tx.QueryRow(ctx, lockHeadSQL(p.dialect), e.tenantID),
 		&head.seq, &head.hash); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errHeadMissing
@@ -276,8 +276,8 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 	// and the insert: if the event is not here now it is not going to appear.
 	if e.retry && e.id != uuid.Nil {
 		var one int
-		switch err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(
-			`SELECT 1 FROM audit_events WHERE tenant_id = $1 AND id = $2`, p.dialect), e.tenantID, e.id.String()), &one); {
+		switch err := plugin.ScanRow(tx.QueryRow(ctx,
+			`SELECT 1 FROM audit_events WHERE tenant_id = $1 AND id = $2`, e.tenantID, e.id.String()), &one); {
 		case err == nil:
 			return errAlreadyRecorded
 		case !errors.Is(err, sql.ErrNoRows):
@@ -316,7 +316,7 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 	// Every value is passed as the type the column holds, and the id is supplied rather
 	// than defaulted: see the note on recordAudit. No row_hash yet -- see
 	// insertChainedSQL's comment and cleat#2589.
-	_, err = tx.Exec(ctx, plugin.Rebind(insertChainedSQL, p.dialect),
+	_, err = tx.Exec(ctx, insertChainedSQL,
 		rec.ID.String(), rec.TenantID, timestampArg(p.dialect, ts), rec.Method, rec.Path,
 		rec.StatusCode.Int64, rec.UserID.String, rec.IPAddress.String, rec.UserAgent.String, rec.DurationMs.Int64,
 		rec.Metadata.String, rec.Seq, strings.ToLower(hex.EncodeToString(prev[:])))
@@ -330,7 +330,7 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 	// reconcile a hash taken over the pre-insert spelling with a verify that reads the
 	// stored spelling once a dialect has rewritten it (cleat#2589).
 	var stored sql.NullString
-	if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(selectStoredMetadataSQL, p.dialect), rec.ID.String()),
+	if err := plugin.ScanRow(tx.QueryRow(ctx, selectStoredMetadataSQL, rec.ID.String()),
 		&stored); err != nil {
 		return fmt.Errorf("audit chain: read back stored metadata: %w", err)
 	}
@@ -342,11 +342,11 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 	}
 	rowHash := hex.EncodeToString(sum[:])
 
-	if _, err = tx.Exec(ctx, plugin.Rebind(setRowHashSQL, p.dialect), rowHash, rec.ID.String()); err != nil {
+	if _, err = tx.Exec(ctx, setRowHashSQL, rowHash, rec.ID.String()); err != nil {
 		return fmt.Errorf("audit chain: set row hash: %w", err)
 	}
 
-	n, err := tx.Exec(ctx, plugin.Rebind(moveHeadSQL, p.dialect), rec.Seq, rowHash, e.tenantID, head.seq)
+	n, err := tx.Exec(ctx, moveHeadSQL, rec.Seq, rowHash, e.tenantID, head.seq)
 	if err != nil {
 		return fmt.Errorf("audit chain: move head: %w", err)
 	}

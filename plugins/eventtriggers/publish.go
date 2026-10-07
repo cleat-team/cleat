@@ -130,7 +130,7 @@ func PublishEvent(
 
 	// Insert with idempotency — ON CONFLICT DO NOTHING prevents duplicate
 	// processing of the same event ID.
-	rows, err := db.Exec(ctx, plugin.Rebind(insertEventIdempotent.For(currentDialect), currentDialect),
+	rows, err := db.Exec(ctx, insertEventIdempotent.For(currentDialect),
 		eventID, tenantID, eventType, string(eventData), key1, key2, key3)
 	if err != nil {
 		return 0, fmt.Errorf("store event: %w", err)
@@ -155,7 +155,7 @@ func PublishEvent(
 
 	matched, err := triggerMatchingWorkflows(ctx, db, logger, env, eventID, tenantID, eventType, eventData)
 	if err != nil {
-		db.Exec(ctx, plugin.Rebind(`UPDATE ingested_events SET error_msg = $1 WHERE id = $2`, currentDialect),
+		db.Exec(ctx, `UPDATE ingested_events SET error_msg = $1 WHERE id = $2`,
 			"failed to query subscriptions: "+err.Error(), eventID)
 	}
 
@@ -203,11 +203,11 @@ func triggerMatchingWorkflows(
 		return decoded, decodeErr
 	}
 
-	rows, err := db.Query(ctx, plugin.Rebind(`
+	rows, err := db.Query(ctx, `
 		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at, max_retries
 		FROM event_subscriptions
 		WHERE tenant_id = $1 AND event_type = $2 AND enabled = true
-		`, currentDialect), tenantID, eventType)
+		`, tenantID, eventType)
 	if err != nil {
 		return 0, fmt.Errorf("query subscriptions: %w", err)
 	}
@@ -343,11 +343,11 @@ func signalAwaiters(
 		return
 	}
 
-	rows, err := db.Query(ctx, plugin.Rebind(`
+	rows, err := db.Query(ctx, `
 		SELECT workflow_id
 		FROM event_awaiters
 		WHERE tenant_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5
-		`, currentDialect), tenantID, eventType, key1, key2, key3)
+		`, tenantID, eventType, key1, key2, key3)
 	if err != nil {
 		logger.Error("event-triggers: query awaiters", "error", err)
 		return
@@ -428,10 +428,10 @@ func unregisterAwaiter(ctx context.Context, db plugin.PluginDB, logger *slog.Log
 	if workflowID == "" {
 		return
 	}
-	_, err := db.Exec(ctx, plugin.Rebind(`
+	_, err := db.Exec(ctx, `
 		DELETE FROM event_awaiters
 		WHERE workflow_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5
-		`, currentDialect), workflowID, eventType, key1, key2, key3)
+		`, workflowID, eventType, key1, key2, key3)
 	if err != nil {
 		logger.Warn("event-triggers: unregister awaiter", "error", err)
 	}

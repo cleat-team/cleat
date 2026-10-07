@@ -149,11 +149,11 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// clause a deleted source's endpoint would keep answering 403 forever
 	// instead of behaving like the caller asked it to stop existing.
 	var source webhookSourceJSON
-	err = plugin.ScanRow(p.db.QueryRow(discoverCtx, plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(discoverCtx, `
 		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND deleted_at IS NULL
-	`, p.dialect), sourceID), &source.ID, &source.TenantID, &source.Name, &source.SourceType,
+	`, sourceID), &source.ID, &source.TenantID, &source.Name, &source.SourceType,
 		&source.SecretConfigured, &source.Enabled,
 		&source.CorrelationKeyField, &source.CreatedAt, &source.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -335,11 +335,11 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	if p.dialect != plugin.DialectMSSQL {
 		existsGuard += " FOR SHARE"
 	}
-	rowsInserted, err := p.db.Exec(tenantCtx, plugin.Rebind(fmt.Sprintf(`
+	rowsInserted, err := p.db.Exec(tenantCtx, fmt.Sprintf(`
 		INSERT INTO webhook_events (id, source_id, tenant_id, event_type, headers, payload, received_at, processed)
 		SELECT $1, $2, $3, $4, $5, $6, $7, false
 		WHERE EXISTS (%s)
-	`, existsGuard), p.dialect), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now, sourceID)
+	`, existsGuard), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now, sourceID)
 	if err != nil {
 		p.logger.Error("webhook-ingest: store event", "error", err)
 		p.writeError(w, 500, "failed to store event")
@@ -446,12 +446,12 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	// caller, even though the row survives underneath for admin.drop_tenant
 	// and for GET /ingest/events, which is deliberately NOT filtered the
 	// same way -- see handleDeleteSource.
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(r.Context(), `
 		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE tenant_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
-	`, p.dialect), tid)
+	`, tid)
 	if err != nil {
 		p.logger.Error("webhook-ingest: list sources", "error", err)
 		p.writeError(w, 500, "failed to list sources")
@@ -561,10 +561,10 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	// INSERT against real MySQL for the first time (cleat#1992's dialect
 	// coverage) -- the in-memory fake driver binds by Ordinal and cannot see
 	// this class of defect.
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), `
 		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret_configured, enabled, created_at, updated_at, correlation_key_field)
 		VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8)
-	`, p.dialect), tid, id, req.Name, req.SourceType, secretConfigured, now, now, req.CorrelationKeyField)
+	`, tid, id, req.Name, req.SourceType, secretConfigured, now, now, req.CorrelationKeyField)
 	if err != nil {
 		p.logger.Error("webhook-ingest: create source",
 			"error", err, "orphaned_secret_configured", secretConfigured)
@@ -609,11 +609,11 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 
 	// deleted_at IS NULL -- see handleListSources.
 	var s webhookSourceJSON
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, p.dialect), id, tid), &s.ID, &s.TenantID, &s.Name, &s.SourceType,
+	`, id, tid), &s.ID, &s.TenantID, &s.Name, &s.SourceType,
 		&s.SecretConfigured, &s.Enabled,
 		&s.CorrelationKeyField, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -684,11 +684,11 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := tx.Exec(r.Context(), plugin.Rebind(`
+	rows, err := tx.Exec(r.Context(), `
 		UPDATE webhook_sources
 		SET enabled = false, deleted_at = $1
 		WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
-	`, p.dialect), time.Now(), id, tid)
+	`, time.Now(), id, tid)
 	if err != nil {
 		tx.Rollback()
 		p.logger.Error("webhook-ingest: delete source", "error", err)
@@ -709,12 +709,12 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	// GET /ingest/events reports a deleted source's events as settled rather
 	// than forever 'pending'. The THIRD statement below is what actually
 	// closes off delivery through the claim path.
-	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
+	if _, err := tx.Exec(r.Context(), `
 		UPDATE webhook_events
 		SET status = 'cancelled', processed = true, error_msg = 'source deleted'
 		WHERE source_id = $1 AND tenant_id = $2 AND processed = false
 		  AND (status = 'pending' OR status IS NULL)
-	`, p.dialect), id, tid); err != nil {
+	`, id, tid); err != nil {
 		tx.Rollback()
 		p.logger.Error("webhook-ingest: cancel pending events on delete", "error", err)
 		p.writeError(w, 500, "failed to delete source")
@@ -743,11 +743,11 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	// being dispatched for a deleted source's event. Decided in #2822
 	// (closing #2820, which asked the question): a deleted source's events
 	// are inert on both paths, matching webhook_events' own cancellation.
-	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
+	if _, err := tx.Exec(r.Context(), `
 		UPDATE ingested_events
 		SET status = 'cancelled', processed = true, dispatch_processed = true, error_msg = 'source deleted'
 		WHERE tenant_id = $1 AND key1 = $2 AND processed = false
-	`, p.dialect), tid, id.String()); err != nil {
+	`, tid, id.String()); err != nil {
 		tx.Rollback()
 		p.logger.Error("webhook-ingest: cancel pending correlated events on delete", "error", err)
 		p.writeError(w, 500, "failed to delete source")
@@ -828,7 +828,7 @@ func (p *Plugin) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, 100)
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("webhook-ingest: list events", "error", err)
 		p.writeError(w, 500, "failed to list events")

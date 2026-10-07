@@ -487,9 +487,9 @@ func (p *Plugin) resolveSlackTenant(ctx context.Context, payload slackInteractiv
 	if teamID == "" {
 		return "", false
 	}
-	if err := p.db.QueryRow(ctx, plugin.Rebind(
-		`SELECT CAST(tenant_id AS CHAR(36)) FROM slack_workspace WHERE team_id = $1`, p.dialect,
-	), teamID).Scan(&tenantID); err != nil {
+	if err := p.db.QueryRow(ctx,
+		`SELECT CAST(tenant_id AS CHAR(36)) FROM slack_workspace WHERE team_id = $1`,
+		teamID).Scan(&tenantID); err != nil {
 		return "", false
 	}
 	// Canonicalize before this value is used for anything -- MSSQL's
@@ -507,9 +507,9 @@ func (p *Plugin) resolveSlackTenant(ctx context.Context, payload slackInteractiv
 	}
 	if userTeamID := slackUserTeamID(payload.User); userTeamID != "" && userTeamID != teamID {
 		var userTenantID string
-		if err := p.db.QueryRow(ctx, plugin.Rebind(
-			`SELECT CAST(tenant_id AS CHAR(36)) FROM slack_workspace WHERE team_id = $1`, p.dialect,
-		), userTeamID).Scan(&userTenantID); err != nil {
+		if err := p.db.QueryRow(ctx,
+			`SELECT CAST(tenant_id AS CHAR(36)) FROM slack_workspace WHERE team_id = $1`,
+			userTeamID).Scan(&userTenantID); err != nil {
 			return "", false
 		}
 		if parsed, parseErr := uuid.Parse(userTenantID); parseErr == nil {
