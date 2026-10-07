@@ -902,9 +902,18 @@ for attention at the seams, and it went unspent there.
   `workflow_instances.status`. `specs/CleatQueueAdmission.tla` — **fixed in cleat#2000** the
   same way, and directly replaces (and, since its replacement landed, deletes)
   `specs/CleatConcurrencyKeys.tla`, which this bullet used to count among "the other three"
-  unmaintained specs. The remaining two (`CleatSignals.tla`, `CleatStateMachine.tla`) are
-  marked not-maintained in `specs/README.md` rather than fixed, superseded by the model
-  issues in cleat#1998-#1999.
+  unmaintained specs. `specs/CleatDurableCallIntent.tla` — **new in cleat#1999**, modelling
+  durable-call intents, ambiguity, re-replay and retention (a fourth model-checked spec with
+  no legacy predecessor at all). `specs/CleatParentAwait.tla` — **new in cleat#1998**,
+  modelling parents awaiting children and the parent-close cascade to every descendant, not
+  just direct children; every one of the four bug issues it was written to check (#1974,
+  #1976, #1978, #1108) was already fixed on develop by the time this model was built, so its
+  own properties pass directly rather than finding anything new — the pre-#1974 regression it
+  would have caught is reproduced on demand via a separate, known-positive `.cfg` kept
+  outside `specs/` (see `specs/CleatParentAwait.md`). The remaining two (`CleatSignals.tla`,
+  `CleatStateMachine.tla`) stay marked not-maintained in `specs/README.md` rather than fixed
+  — cleat#1996's own scope call, now that both #1998 and #1999 have landed with no
+  commitment to reuse either legacy file's name or structure.
 - Head-to-head numbers still do not exist. `benchmarks/comparative/` was removed from this
   repo in favour of [cleat-bench](https://github.com/cleat-team/cleat-bench), which already
   has the runners, seven workload specs and the AWS infrastructure — **run them there.**
