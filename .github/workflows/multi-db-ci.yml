@@ -71,7 +71,10 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    # cleat#2483: `branches` filters on the PR's BASE branch, and a
+    # release branch was absent -- so every PR targeting one ran none of
+    # this workflow, and the release PR into main was the only gate left.
+    branches: [main, develop, "release/**"]
     # `edited` is required, not decorative: it is the activity type a BASE
     # CHANGE fires. Without it a PR opened against a feature branch and later
     # retargeted here never triggers this workflow at all -- not at open (the
@@ -296,8 +299,20 @@ jobs:
       # fails if a second package starts wiping these databases, which is the
       # condition that would make -p 1 load-bearing. Change this comment when
       # it does.
+      # -json, tee'd to a report rather than piped through -v: cleat#2444. This
+      # is the only job that runs with exactly one non-PostgreSQL DSN set, so a
+      # dialect-gated test that starts SKIPPING here (rather than running)
+      # previously had nothing to notice -- `ok …/engine` prints identically
+      # either way. set -o pipefail is required: without it, tee supplies the
+      # exit status and a failing go test is reported as a green step.
       - name: Run tests
-        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/mysql test-report.json
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
@@ -414,8 +429,17 @@ jobs:
       # space"), and azure-sql-edge, which does, cannot apply the shipped
       # migrations (011_json_scalar_payloads.sql needs isjson). The claim here
       # rests on the call sites plus this job, not on a local measurement.
+      # Same treatment as test-mysql above, cleat#2444: this job runs with
+      # exactly one non-PostgreSQL DSN set, so a dialect-gated test flipping
+      # from running to skipping here was invisible until this budget step.
       - name: Run tests
-        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/mssql test-report.json
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
@@ -429,7 +453,8 @@ jobs:
   # Unlike the per-backend jobs above (test-mysql, test-mssql), this job
   # does NOT run the full WorkflowStore suite — only plugin migration tests.
   #
-  # Not a required status check, and the two above are, as of 2026-08-07. The
+  # NOT A REQUIRED CHECK: Plugin Migrations
+# The two above are required, as of 2026-08-07. The
   # asymmetry is deliberate. Both of this job's steps are already gated
   # elsewhere on all three dialects: TestPluginMigrations lives in ./engine/,
   # a tier-1 package that the required `Tier 2 Gate`'s sibling `Tier 1 Gate`
@@ -566,7 +591,16 @@ jobs:
           docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Run plugin migration tests
-        run: go test -count=1 -p 1 -timeout=600s -run TestPluginMigrations ./engine/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=600s -json -run TestPluginMigrations ./engine/... 2>&1 | tee migration-test-report.json
+
+      # cleat#2444: this job sets all three DSNs, so a passing budget here
+      # means the filtered step above genuinely exercised every dialect
+      # rather than a dialect's arm quietly skipping under an unfiltered "ok".
+      - name: Skip budget (plugin migration tests)
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/plugin-migrations migration-test-report.json
 
       # Unfiltered, and -p 1. cleat#1203.
       #
@@ -589,7 +623,62 @@ jobs:
       # concurrently against one server delete each other's fixtures mid-test.
       # That serialisation is part of the 31s above, not an addition to it.
       - name: Run plugin behavioral tests (all backends)
-        run: go test -count=1 -p 1 -timeout=900s ./plugins/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=900s -json ./plugins/... 2>&1 | tee plugins-test-report.json
+
+      # cleat#2444: this is the step the issue is about -- "ok …/plugins/
+      # eventtriggers" prints identically whether a dialect-gated test ran or
+      # skipped, and this unfiltered sweep is the ONLY place any plugin
+      # package's MySQL and SQL Server arms execute at all (ci.yml's
+      # test-go/plugins job sets CLEAT_TEST_DB for PostgreSQL only, no MySQL
+      # or SQL Server DSN). The per-package -v step below is a convenience
+      # once this exists, not the only evidence.
+      - name: Skip budget (plugin behavioral tests)
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/plugins plugins-test-report.json
+
+      # A NARROW, ADDITIONAL step -- not a replacement for the unfiltered run
+      # above, which stays unfiltered for exactly the reason cleat#1203 gives
+      # it. This one exists only so the log can show what the step above
+      # cannot: "ok …/plugins/eventtriggers" prints identically whether a
+      # test RAN or SKIPPED, so a green step there is not evidence the
+      # dialect-gated tests cleat#2645 added actually exercised MySQL and SQL
+      # Server rather than testutil.TestDB skipping them cleanly
+      # (cleat-review's finding on that PR). -v makes each subtest's
+      # RUN/PASS/SKIP its own line. Scoped to one package and one -run
+      # pattern, so it re-runs in seconds and cannot hide a badly-named test
+      # the way the removed job-wide filter did -- it adds visibility for
+      # these specific tests, it does not stand in for the step above.
+      #
+      # cleat#2669 (cleat-review, reviewing #2675): the pattern was
+      # '^TestAwaitEvent', which does not match TestVersion7ReplacesThe...,
+      # TestClaimQueryPlanExcludesProcessedRowsOnPostgres or
+      # TestClaimQueryIsSargableOnProcessedOnMySQL -- three tests added to
+      # prove the same "ran vs skipped, both print ok" gap this step exists
+      # to close, invisible to the one step that exists to close it. Widened
+      # rather than renamed, because a second badly-matched pattern is the
+      # same failure mode this step's own history already has one instance
+      # of.
+      #
+      # cleat#2649: widened again, for TestClaimOrRegisterAwaiterSkippingBeforeCommitLosesCleat2654IsRealFinding
+      # -- MSSQL-only, no subtests, the same shape as
+      # TestAwaitEventMarshalFailureLeavesEventUnconsumed (which the
+      # original pattern already covered by prefix coincidence, not by
+      # deliberate inclusion), and exactly the "ran vs skipped, both print
+      # ok" ambiguity this step exists to close.
+      #
+      # cleat#2697 (cleat-review): widened again, and the PACKAGE SET too --
+      # for TestACorrelationKeyFieldMismatchIsRefused, in plugins/webhookingest,
+      # not plugins/eventtriggers. Adding a package changes what an unqualified
+      # pattern can match, so the pattern was re-checked against BOTH packages
+      # together, not just re-checked in isolation and assumed to still be
+      # scoped the same way. Re-derive what a pattern selects before trusting
+      # it, and re-derive it against the exact package list this step uses:
+      #   go test ./plugins/eventtriggers/... ./plugins/webhookingest/... -list \
+      #     '^Test(AwaitEvent|ClaimQuery|Version7|ClaimOrRegisterAwaiter|ACorrelationKeyFieldMismatch)'
+      - name: Verify the oldest-first and lock claim tests ran (not skipped) per dialect
+        run: go test -count=1 -v -run '^Test(AwaitEvent|ClaimQuery|Version7|ClaimOrRegisterAwaiter|ACorrelationKeyFieldMismatch)' ./plugins/eventtriggers/... ./plugins/webhookingest/...
 
   # -------------------------------------------------------------------------
   # Crash shutdown scenarios on MySQL and SQL Server (cleat#2288)
@@ -607,7 +696,8 @@ jobs:
   # another worker. The suite's other scenarios stay PostgreSQL-only -- they are
   # not what cleat#2288 asked for, and each would be its own dialect port.
   #
-  # NOT A REQUIRED STATUS CHECK, by owner decision on 2026-09-25. It runs and it
+  # NOT A REQUIRED CHECK: Crash Shutdown Scenarios (MySQL, SQL Server)
+# By owner decision on 2026-09-25. It runs and it
   # reports; it does not gate a merge. Promoting it is three changes that have
   # to land together: this job's `name:` into .github/required-checks.txt,
   # tiers.yaml's required_contexts block, and branch protection.
@@ -672,4 +762,15 @@ jobs:
       # CLEAT_CRASH_DB and Fatals without it, deliberately. It selects the
       # parent and its four dialect subtests; re-derive with -list.
       - name: Run the shutdown scenarios on MySQL and SQL Server
-        run: go test -count=1 -timeout=900s ./tests/crash/ -run TestShutdownScenariosOnMySQLAndMSSQL
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout=900s -json ./tests/crash/ -run TestShutdownScenariosOnMySQLAndMSSQL 2>&1 | tee test-report.json
+
+      # cleat#2444: both dialect DSNs are set here (CLEAT_CRASH_MYSQL,
+      # CLEAT_CRASH_MSSQL), so the four selected subtests should never skip in
+      # this job -- unlike test-go/crash's ledger entry for the SAME test
+      # names in ci.yml's PostgreSQL-only crash matrix, where all four skip by
+      # design. Budgeted at 0 here for exactly that reason.
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/crash-shutdown test-report.json

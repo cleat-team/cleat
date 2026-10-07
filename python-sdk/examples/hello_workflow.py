@@ -11,7 +11,7 @@ class GreetingRequest:
     language: str = "en"
 
 
-@cleat_entry
+@cleat_entry("hello_workflow")
 def hello_workflow(h: HostCalls, request: GreetingRequest) -> str:
     """A simple workflow that calls a greeting service."""
     h.log(f"Hello workflow started for {request.name}")

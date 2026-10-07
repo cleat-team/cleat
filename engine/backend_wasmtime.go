@@ -950,18 +950,28 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				// Non-Go guests never had this hole: the direct-export path
 				// below returns its callErr unconditionally.
 				//
-				// Deliberately NOT widened to "any startErr is a failure". A
-				// non-resource trap that is not a proc_exit still falls through
-				// to `"ok"`, which is the same shape of hole. It is left alone
-				// because nothing has demonstrated a Go guest reaching it: Go
-				// recovers panics into cleat_complete, and its unrecoverable
-				// failures leave through proc_exit, which the check above now
-				// catches. Widening on the strength of an argument rather than
-				// a measurement is how the exit-0 path -- which every healthy
-				// guest depends on -- would get broken.
+				// A *wasmtime.Error WITHOUT an exit status is a genuine TRAP
+				// that is not a WASI exit at all -- a host-raised refusal such
+				// as engine/wasi_policy.go's WASI policy, or a runtime fault
+				// like stack overflow or unreachable code. This used to fall
+				// through to `"ok"` exactly like the exit-code case above,
+				// and it is not hypothetical either: demonstrated 2026-09-28
+				// building the integration-hub tenant-sandbox wedge scenario,
+				// a tenant-uploaded step whose filesystem read the host
+				// correctly refused (a real trap, "cleat refuses the WASI
+				// call \"path_open\"") was reported to its caller as
+				// status=done, result="ok". The sandbox held; the WORKFLOW
+				// lied about it -- the same shape of hole as §3.71, a
+				// different and previously-undemonstrated cause reaching it.
+				// This closes both causes with the same test: ExitStatus's
+				// `ok` return distinguishes a WASI exit (of either code) from
+				// every other trap, so the healthy exit-0 path below is
+				// untouched.
 				var wasmErr *wasmtime.Error
 				if errors.As(startErr, &wasmErr) {
-					if code, ok := wasmErr.ExitStatus(); ok && code != 0 {
+					code, isExit := wasmErr.ExitStatus()
+					switch {
+					case isExit && code != 0:
 						b.runGuestDefersAfterKill(store, instance, entryPoint, startErr)
 						return nil, fmt.Errorf(
 							"host: export %q: the guest exited with status %d without "+
@@ -969,7 +979,16 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 								"(a Go guest exits this way on an unrecoverable runtime "+
 								"failure such as out-of-memory or stack exhaustion): %w",
 							entryPoint, code, startErr)
+					case !isExit:
+						b.runGuestDefersAfterKill(store, instance, entryPoint, startErr)
+						return nil, fmt.Errorf(
+							"host: export %q: the guest trapped and never reported a "+
+								"result; it was aborted mid-execution rather than "+
+								"finishing: %w",
+							entryPoint, startErr)
 					}
+					// isExit && code == 0: the healthy path every Go guest
+					// takes. Fall through to "ok".
 				}
 			}
 			return &ExecResult{Result: `"ok"`, Suspended: false}, nil
@@ -1257,6 +1276,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 		return err
 	}
 	if err := b.registerCleatAwaitSignals(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatWaitForEvent(linker); err != nil {
 		return err
 	}
 	if err := b.registerCleatSetQueryState(linker); err != nil {

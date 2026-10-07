@@ -243,10 +243,44 @@ cmd/cleat-worker/cleat-worker
 # rather than moved.
 tests/plugin-harness/testdata/asworkflow/dist/
 
+# hostcallsas/dist/ for the same reason, and one more that is stronger: the
+# required step "Tests did not rewrite their own fixtures" git-diffs THIS tree,
+# so committing the bytes a build wrote here would defeat the very check that
+# exists to notice a fixture being rewritten. Note that `cleat build --target
+# assemblyscript` writes into the fixture's own dist/ regardless of -o, so this
+# directory is produced by ordinary local work rather than only by an explicit
+# build step. Added 2026-10-04, after exactly that: four files from a local
+# `asc` run landed in a commit and review caught them.
+tests/plugin-harness/testdata/hostcallsas/dist/
+
 # goreleaser output. Produced by `goreleaser build --snapshot`, which the
 # Release Dry Run CI job runs and which is the documented way to reproduce a
 # release build locally (docs/project/release-process.md).
-dist/
+#
+# THE LEADING SLASH IS LOAD-BEARING. An ignore pattern with no slash inside it
+# is not anchored -- git applies it at every depth -- so the unanchored `dist/`
+# this replaced also matched cmd/cleat-worker/web/dist, the bundle
+# cmd/cleat-worker/server.go embeds with `//go:embed web/dist` and that
+# `cd web && npm run build` regenerates under content-hashed names
+# (assets/index-<hash>.js). Every regeneration then wrote files git refused to
+# add, while `git add -A` staged the DELETION of the previous chunk without its
+# replacement -- and `//go:embed` compiles either way, so the build stayed green
+# on a bundle missing the JS it referenced. Only NEW files are affected: git
+# exempts tracked ones, which is why a stable-named file under an ignored
+# directory is fine and a content-hashed one is not. Measured 2026-09-27,
+# cleat#2485.
+#
+# Anchoring is the repair, not deleting the rule: goreleaser writes to the repo
+# root, which is the only path this is for. cmd/cleat-worker/web/dist/ is
+# covered by nothing else and must stay committable; the sibling rules above
+# (`tests/plugin-harness/testdata/asworkflow/dist/`, and the `examples/*/dist/`
+# one further up) each still match their own trees. Verified: anchoring changes
+# the ignored set on nothing else.
+#
+# TestNoEmbeddedFileIsHiddenFromGit fails if any path the compiler embeds is
+# reported ignored, so a future unanchored pattern reaching that bundle is
+# caught in CI rather than at the next release.
+/dist/
 
 # TLC's disk-based fingerprint/state checkpoints (MSBDiskFPSet, DiskStateQueue).
 # Written wherever `java -cp tla2tools.jar tlc2.TLC` is invoked FROM -- ./states/

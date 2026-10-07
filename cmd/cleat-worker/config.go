@@ -44,7 +44,7 @@ var (
 
 	// migrateDBURL exists so that --db can be an unprivileged role.
 	//
-	// The role cleat should run as (migrations/postgres/005_app_role.sql) owns
+	// The role cleat should run as (cleat_app) owns
 	// nothing and has no DDL rights -- that is what makes it subject to
 	// row-level security, and RLS is the only tenant isolation
 	// GetWorkflowByID and ListWorkflows have. But migrations obviously do need
@@ -78,14 +78,46 @@ var (
 	// of a stall rather than of workers dying. cleat#1320.
 	maxReclaimPerTick = flag.Int("max-reclaim-per-tick", 200,
 		"Max stale instances the reaper reclaims per tick (0 = unbounded; see --help for why bounding matters)")
-	maxQueued           = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
-	shutdownGrace       = flag.Duration("shutdown-grace", 20*time.Second, "How long SIGTERM/SIGINT waits for in-flight runs to finish before the worker cancels them. During the wait the worker stops claiming, keeps heartbeating, and reports /readyz 503 (draining); a run that ends in time is finalized normally, and any run cut off at the end is RELEASED for another worker to replay (at-least-once), never recorded as failed (cleat#2285). Keep it below the orchestrator's kill deadline (the chart sets terminationGracePeriodSeconds above it); a second signal cancels immediately.")
-	heartbeatInterval   = flag.Duration("heartbeat", 5*time.Second, "How often a worker proves it is alive. This ALSO sets two expiry windows unless --reclaim-timeout overrides the first: a run is reclaimable after heartbeat + 3x the database-call deadline + the retry interval + 1s of slack (about 14.5s at the default), and a worker's membership lease expires on a related shape. Raising it to survive a longer database outage therefore also delays how quickly a genuinely dead worker's runs are picked up -- use --reclaim-timeout to separate those. It must stay below 150s: past that a stalled worker can be invisible to a secret writer and not know it (cleat#2167), so the worker refuses to start.")
-	reclaimTimeout      = flag.Duration("reclaim-timeout", 0, "How long a run may go without a heartbeat before another worker may claim it. 0 (the default) derives it as max(2x --heartbeat, 10s), which is the historical behaviour and changes nothing. Set it to decouple the two: the heartbeat is how often a live worker checks in, this is how long a DEAD one's work stays stranded, and a database outage stops the heartbeat without the worker being dead. Sizing it to a failover window (tens of seconds for streaming replication, longer for managed Multi-AZ) buys outage tolerance at the cost of that much extra delay before a crashed worker's runs are recovered. Refused if below 2x --heartbeat, which would reap runs whose workers are heartbeating normally. Does NOT move the worker-membership lease, which is a different question -- which workers exist, for shard distribution -- and still follows --heartbeat.")
-	pollInterval        = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
-	notifyChannel       = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
-	apiAddr             = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
-	pprofAddr           = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
+	maxQueued         = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
+	shutdownGrace     = flag.Duration("shutdown-grace", 20*time.Second, "How long SIGTERM/SIGINT waits for in-flight runs to finish before the worker cancels them. During the wait the worker stops claiming, keeps heartbeating, and reports /readyz 503 (draining); a run that ends in time is finalized normally, and any run cut off at the end is RELEASED for another worker to replay (at-least-once), never recorded as failed (cleat#2285). Keep it below the orchestrator's kill deadline (the chart sets terminationGracePeriodSeconds above it); a second signal cancels immediately.")
+	heartbeatInterval = flag.Duration("heartbeat", 5*time.Second, "How often a worker proves it is alive. This ALSO sets two expiry windows unless --reclaim-timeout overrides the first: a run is reclaimable after heartbeat + 3x the database-call deadline + the retry interval + 1s of slack (about 14.5s at the default), and a worker's membership lease expires on a related shape. Raising it to survive a longer database outage therefore also delays how quickly a genuinely dead worker's runs are picked up -- use --reclaim-timeout to separate those. It must stay below 150s: past that a stalled worker can be invisible to a secret writer and not know it (cleat#2167), so the worker refuses to start.")
+	reclaimTimeout    = flag.Duration("reclaim-timeout", 0, "How long a run may go without a heartbeat before another worker may claim it. 0 (the default) derives it as max(2x --heartbeat, 10s), which is the historical behaviour and changes nothing. Set it to decouple the two: the heartbeat is how often a live worker checks in, this is how long a DEAD one's work stays stranded, and a database outage stops the heartbeat without the worker being dead. Sizing it to a failover window (tens of seconds for streaming replication, longer for managed Multi-AZ) buys outage tolerance at the cost of that much extra delay before a crashed worker's runs are recovered. Refused if below 2x --heartbeat, which would reap runs whose workers are heartbeating normally. Does NOT move the worker-membership lease, which is a different question -- which workers exist, for shard distribution -- and still follows --heartbeat.")
+	pollInterval      = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
+	notifyChannel     = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
+	apiAddr           = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
+	pprofAddr         = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
+	// workerServiceName names a headless Kubernetes Service (clusterIP: None)
+	// that selects this worker's pods, matching the pod spec's own
+	// spec.subdomain (see charts/cleat/templates/{service,deployment}.yaml).
+	// When set, the worker publishes <hostname>.<this> in its membership
+	// registration (engine.WorkerRegistration.Address) as a DNS name another
+	// worker can reach it at -- cleat#2196's reaper-to-worker veto channel,
+	// per the owner's decision (headless Service + DNS, not a captured pod
+	// IP). Empty (the default, and the right value outside Kubernetes, or
+	// inside it without this chart's headless Service) means "this worker's
+	// address is not known to be resolvable", and nothing currently reads
+	// the address this populates -- that is cleat#2196's step 4, not yet
+	// built. See podAddress in connection_share.go.
+	workerServiceName = flag.String("worker-service-name", "", "Headless Kubernetes Service name selecting this worker's pods, for DNS-based worker-to-worker addressing (empty disables; see cleat#2196)")
+	// Shaped exactly like --pprof-addr: its own opt-in address, empty by
+	// default, never reachable from the ordinary API port or from ingress.
+	// Serves /internal/holds (cleat#2196's reaper-to-worker veto channel) --
+	// a reaper asks the worker named in a stale row's assigned_to whether it
+	// still holds that run before reclaiming it. Needs --worker-service-name
+	// set (step 2, cleat#2196) to be dialable by name at all; set without it,
+	// the listener still starts, it is just unreachable by anything that
+	// doesn't already know this pod's IP.
+	//
+	// Authenticated by CLEAT_INTERNAL_AUTH_KEY (env, never a flag -- a flag
+	// value is visible in `ps`), a single shared secret every worker in the
+	// deployment is given the same value of. Deliberately NOT cleat#2169's
+	// future operator credential: that is a per-caller identity for
+	// cross-tenant HTTP admin routes, a different and larger problem this
+	// does not try to solve. This is narrower and interim -- symmetric
+	// (every worker is both a caller and a callee), tenant-blind (a hold
+	// query names a run and a generation, nothing about a tenant), and
+	// meant to be retired once cleat#2169 lands, not extended.
+	internalAddr        = flag.String("internal-addr", "", "Worker-to-worker internal HTTP listen address (e.g., :7070). Serves /internal/holds for cleat#2196's reaper veto channel. Empty disables it (default). Requires CLEAT_INTERNAL_AUTH_KEY to be set, and is refused otherwise.")
 	taskQueuesStr       = flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
 	compactionThreshold = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
 	compactionInterval  = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
@@ -310,6 +342,9 @@ var (
 	hostRetryBudget               = flag.Duration("host-retry-budget", engine.DefaultHostRetryBudget, "CEILING on how much worst-case backoff a retry policy may carry and still be run on the host, inside one segment, holding the worker slot. A policy above this is refused (callErrorCode 6, RetryPolicyTooLong); the guest then runs it itself, suspending between attempts, which releases the slot. A tenant may set a LOWER value in tenant_settings and it is clamped to this; it can never raise it. This is ALSO the boundary at which a backoff survives a worker loss: on the host path the wait is worker-local and a crash discards its remainder (decided, cleat#1111), while the guest's own loop backs off with a durable sleep and resumes. Moving this flag moves policies between those two behaviours as well as between holding a slot and suspending. Keep it well below --wasm-wall-clock-ceiling: that ceiling covers the whole invocation, so a budget near it lets one retry policy consume everything the workflow had. 0 uses the built-in default.")
 	noPerStepFlush                = flag.Bool("no-per-step-flush", false, "Skip per-step event flush; rely on batch finalization for persistence (higher throughput, weaker crash safety)")
 	writeAheadIntentOps           = flag.String("write-ahead-intent-ops", "", "Comma-separated service.operation pairs that must use write-ahead call intent: the engine commits a pending event before dispatching, so a crash mid-call is reported as ambiguous on replay instead of silently repeating the side effect. Costs one extra synchronous round trip per call, so declare only operations that are not safe to repeat (a card charge, not a GET). Independent of --no-per-step-flush, which does not defer these writes.")
+	ambiguityLookupFlag           = flag.String("ambiguity-lookup", "", "Comma-separated service.operation=service.lookup_operation pairs. When a crash leaves a --write-ahead-intent-ops call's outcome unrecorded, the worker asks the named lookup operation on the SAME service, under the same idempotency key, instead of surfacing [AMBIGUOUS] to every replay forever: a 200 settles the step with the lookup's response, a 404 settles it as a retryable failure (the call never arrived), and anything else (including a timeout) falls back to today's [AMBIGUOUS]. The named operation must also be declared in --write-ahead-intent-ops -- a lookup for an operation that never records a pending intent would be a mechanism wired to nothing, and the worker refuses to start rather than ship one.")
+	idempotencyKeyOpsFlag         = flag.String("idempotency-key-ops", "", "Comma-separated service.operation pairs whose service accepts an idempotency key and guarantees a repeated key returns the original outcome (cleat#2897, decision (c) on cleat#1984). This is the DEFAULT path for such a service: when a crash leaves a --write-ahead-intent-ops call's outcome unrecorded, the worker re-dispatches the SAME call under its ORIGINAL idempotency key instead of surfacing [AMBIGUOUS] -- the service's own key table resolves it. A 409 is read as \"a request under this key is still being processed\" and retried a few times before falling back to [AMBIGUOUS]; see --ambiguity-lookup for the alternative for a service that can answer \"what happened to this key\" but does not itself deduplicate a repeated one. An operation here must also be declared in --write-ahead-intent-ops, and must NOT also appear in --ambiguity-lookup -- the two are different capabilities a service either has or does not, and the worker refuses to start on either violation rather than leave the precedence between them unstated.")
+	idempotencyKeyRetention       = flag.Duration("idempotency-key-retention", engine.DefaultIdempotencyKeyRetention, "How long after a call's original dispatch --idempotency-key-ops will still re-send it under the original key. Beyond the service's own key-retention window a resend is a NEW call, not a dedupe candidate -- set this to (or below) whatever window the services named in --idempotency-key-ops actually guarantee (Stripe: 24h; Adyen: >=7 days; check your provider). Default matches Stripe's, the shorter of the two this flag's design issue surveyed, because a bound that is too long is unsafe and one that is too short only costs an occasional avoidable [AMBIGUOUS].")
 	batchFlushDisabled            = flag.Bool("batch-flush-disabled", false, "Disable adaptive batch flushing (always use direct per-step flush). Batch flushing exists on PostgreSQL only; other drivers always flush directly")
 	batchFlushMaxWaitMs           = flag.Int("batch-flush-max-wait-ms", 8, "Max milliseconds to wait accumulating events in batch mode")
 	batchFlushMaxSize             = flag.Int("batch-flush-max-size", 200, "Max events per batch flush transaction")
@@ -501,20 +536,16 @@ var (
 	maxQuotaConcurrencyKeys = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
 	maxQuotaSchedules       = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
 	claimAcrossTenants      = flag.Bool("claim-across-tenants", true, "Execute work for every tenant, not only this worker's own. "+
-		"DEFAULTS ON since the default mechanism stopped needing a database grant: --claim-strategy=rotate "+
-		"reads the tenant list from admin.tenants -- which carries no row-level security -- and then claims "+
-		"and reads due schedules under each tenant's OWN RLS context. Nothing is exempt from a policy and "+
-		"nothing has to be granted.\n"+
-		"It was off by default because the only mechanism was admin.claim_workflows, whose owner needs "+
-		"BYPASSRLS: a privilege only a superuser can grant, and one managed PostgreSQL cannot grant at all. "+
-		"Turning that on had to be a deliberate act. `rotate` asks nothing of the deployment, so leaving a "+
-		"non-default tenant's work unexecuted by default stopped being caution and became a surprise.\n"+
+		"DEFAULTS ON: the dispatch loop rotates through admin.tenants -- which carries no row-level "+
+		"security -- and then claims and reads due schedules under each tenant's OWN RLS context. "+
+		"Nothing is exempt from a policy and nothing has to be granted, on any dialect.\n"+
+		"It was off by default because the only mechanism used to be a widened admin.claim_workflows "+
+		"query, whose owner needed BYPASSRLS: a privilege only a superuser can grant, and one managed "+
+		"PostgreSQL cannot grant at all. Turning that on had to be a deliberate act. That mechanism, "+
+		"and the --claim-strategy flag that selected it, were retired in #1926 once the per-tenant "+
+		"rotation proved itself: rotation asks nothing of the deployment, so leaving a non-default "+
+		"tenant's work unexecuted by default stopped being caution and became a surprise.\n"+
 		"WITH ONE TENANT THIS COSTS ONE QUERY PER TICK -- the tenant list -- and nothing else changes.\n"+
-		"--claim-strategy=global still needs the grants: migrations/postgres/023_cross_tenant_claim.sql and "+
-		"024_cross_tenant_schedules.sql on PostgreSQL; on SQL Server, migrations/mssql/optional/"+
-		"cross_tenant_claim.sql (NOT auto-applied: its predicate costs the index seek on any query without "+
-		"its own tenant predicate, 5760 logical reads against 33, cleat#1491) and THEN dbo.cleat_admin "+
-		"membership per migrations/mssql/012_admin_role.sql. 012 alone is not enough since cleat#1541.\n"+
 		"Set false to run this worker against its own tenant only. A worker reports on both loops at startup "+
 		"which mechanism it actually has, so a half-completed setup says so rather than running silently "+
 		"single-tenant.")
@@ -525,7 +556,7 @@ var (
 	maxWorkflowDuration     = flag.Duration("max-workflow-duration", 0, "CEILING on wall-clock duration for ONE workflow execution segment (0 = no limit); a workflow that suspends and resumes gets a fresh deadline each time. Workflows exceeding it are cancelled and fail with a timeout error. A tenant may set a LOWER value in tenant_settings, and a single run a lower one still at start; neither can raise it. With 0 here the operator sets no bound, so a tenant's value stands alone -- which is how a deployment that never set this flag can still give one tenant a deadline. cleat#1117.")
 	healthCheckInterval     = flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
 	maxPluginConnections    = flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
-	heartbeatMaxConnections = flag.Int("heartbeat-max-connections", 3, "Maximum database connections reserved for heartbeat writes, isolated from the execution pool so a burst of long-held connections cannot queue a heartbeat behind them (0 = no separate pool, share the execution pool as before). cleat#2009 investigation. Not yet supported on a sharded deployment (--shards-file): a sharded worker's heartbeat stays on the execution pool regardless of this flag.")
+	heartbeatMaxConnections = flag.Int("heartbeat-max-connections", 3, "Maximum database connections reserved for heartbeat writes, isolated from the execution pool so a burst of long-held connections cannot queue a heartbeat behind them (0 = no separate pool, share the execution pool as before). cleat#2009 investigation. On a sharded deployment (--shards-file), this is a PER-SHARD ceiling: each shard gets its own reserved heartbeat pool of this size (cleat#2195).")
 	otelEndpoint            = flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
 	otelDisabled            = flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
 	serviceEndpointsFlag    = flag.String("service-endpoints", "",
@@ -552,7 +583,7 @@ var (
 		"A pool with no traffic drains to nothing: every one is built with a 5-minute "+
 		"ConnMaxLifetime, so this is a ceiling for a tenant EXECUTING work, not a resting cost.")
 	logLevel       = flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	enableAdminAPI = flag.Bool("enable-admin-api", false, "Enable the /api/admin/* routes: drain, retention sweep, force-complete, force-fail, re-replay and step resolve. Off by default, and while off every one answers 404. force-complete, force-fail, re-replay and resolve act on the CALLER's tenant only. drain and the retention sweep act on the WORKER, and while this flag is on ANY authenticated API key of ANY tenant can call them, because cleat has no operator credential yet (cleat#2169). See docs/operations/admin-api.md.")
+	enableAdminAPI = flag.Bool("enable-admin-api", false, "Enable the /api/admin/* routes: drain, retention sweep, force-complete, force-fail, re-replay and step resolve. Off by default, and while off every one answers 404. force-complete, force-fail, re-replay and resolve act on the CALLER's tenant only, or on the tenant named in the /api/admin/tenants/<id>/instances/... form, which requires an operator credential. drain and the retention sweep act on the WORKER, and while this flag is on ANY authenticated API key of ANY tenant can call them: they are not tenant-scoped, so an operator credential confers nothing on them and none is required (cleat#2169). See docs/operations/admin-api.md.")
 	verifyBackend  = flag.Bool("verify-backend", false, "Report whether this binary has the wasmtime backend and exit (0 = yes, 1 = no). Intended as a build-time gate: see the Dockerfile.")
 	listPlugins    = flag.Bool("list-plugins", false, "Print the plugins linked into this binary and exit. A plugin registers via init(), so this reports the import block in main.go -- see IMPROVEMENT-PLAN.md 3.315.")
 )

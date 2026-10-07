@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -127,8 +128,62 @@ func main() {
 	// cmd/cleat's deploy has always read the metadata first and falls back the
 	// same way; this makes the two agree.
 	version := 0
-	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil && meta.WorkflowVersion > 0 {
-		version = meta.WorkflowVersion
+	// cleat#1986 slice 2c-ii: this binary has no --exposure flag, so the
+	// artifact's own source declaration is the only class it can honour. Before
+	// this it stored `auth` for every workflow, including one whose source
+	// declares `internal` -- a fail-open on a path that reads the metadata
+	// already, for the version.
+	declared := engine.ExposureClass("")
+	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
+		if meta.WorkflowVersion > 0 {
+			version = meta.WorkflowVersion
+		}
+		declared = engine.ExposureClass(meta.Exposure)
+	}
+	// cleat#1986, Python half: a language with no wasm.Metadata write path of
+	// its own declares exposure through its <wasm>.schema.json sidecar instead
+	// (cmd/cleatctl/deploy.go's own read is the reference; see
+	// engine.DeclaredExposureFromSchemas's doc comment for the refusal shape).
+	// This binary is a test harness for Go workflows on MySQL/SQL Server, not
+	// a documented Python deploy path, but the fallback costs nothing to keep
+	// in step with cleatctl's -- and leaving it out would silently stop
+	// honouring a Python artifact's declaration if one were ever pointed here.
+	if declared == "" {
+		if schemaBytes, serr := os.ReadFile(wasmPath + ".schema.json"); serr == nil {
+			var entryPointSchemas map[string]engine.EntryPointSchema
+			if jerr := json.Unmarshal(schemaBytes, &entryPointSchemas); jerr != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s.schema.json is not valid JSON, deploying without it: %v\n", wasmPath, jerr)
+			} else if schemaDeclared, derr := engine.DeclaredExposureFromSchemas(entryPointSchemas); derr != nil {
+				fmt.Fprintf(os.Stderr, "error: %s.schema.json: %v\n", wasmPath, derr)
+				os.Exit(1)
+			} else {
+				declared = schemaDeclared
+			}
+		}
+	}
+	// The per-tenant operator opt-in (cleat#1986's enforcement slice). This
+	// binary always deploys for engine.DefaultTenantUUID -- every OpenStore
+	// call above passes that literal -- so that is the tenant whose grant is
+	// checked. A store that does not implement the reader (MySQL; see
+	// TenantExposurePolicyReader's own doc comment) is treated as "not opted
+	// in", never as "nothing to check".
+	tenantAllowsPublic := false
+	if reader, ok := store.(engine.TenantExposurePolicyReader); ok {
+		allowed, aerr := reader.AllowsPublicExposure(ctx, engine.DefaultTenantUUID)
+		if aerr != nil {
+			fmt.Fprintf(os.Stderr, "error: checking public exposure opt-in for tenant %s: %v\n", engine.DefaultTenantUUID, aerr)
+			os.Exit(1)
+		}
+		tenantAllowsPublic = allowed
+	}
+
+	// requested is "" -- no manifest opinion -- so the declaration stands, and
+	// `auth` when the artifact declares nothing. A malformed stamp in the file is
+	// refused rather than read as an absence; see engine.ResolveExposure.
+	exposure, err := engine.ResolveDeployableExposure(declared, "", tenantAllowsPublic, engine.DefaultTenantUUID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Determine next version number.
@@ -158,6 +213,7 @@ func main() {
 		WASMBytes:  wasmBytes,
 		ABIVersion: 1,
 		MinVersion: minVersion,
+		Exposure:   exposure,
 		CreatedAt:  time.Now(),
 	}
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {

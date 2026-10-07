@@ -25,6 +25,19 @@ FAILS on the row-only references and that the real reading does not: a self-test
 that only checks the happy path is satisfied by every broken version of this
 script.
 
+THE FIVE REFERENCES THAT RESOLVE TO NOTHING LIVE IN A SHRINK-ONLY BASELINE.
+
+scripts/plan-references-baseline.txt lists references that resolve to nothing and
+are tolerated. They predate the split, and they are not repaired here for the
+reason the file gives: repairing a reference means knowing where its author meant
+it to point, and a plausible guess invents a link rather than restoring one.
+
+The full mode fails on any dangling reference NOT in that file, and fails when a
+listed one stops dangling -- so the list cannot rot in either direction, and it is
+what makes the full mode safe to gate in CI. Until cleat#2441, only --self-test
+ran there, and a NEW dangling reference went unreported by the job whose whole
+subject is references that resolve to nothing.
+
 Usage:
     scripts/check-plan-references.py
     scripts/check-plan-references.py --self-test
@@ -38,6 +51,23 @@ import sys
 PLAN = pathlib.Path("IMPROVEMENT-PLAN.md")
 PLAN_D = pathlib.Path("IMPROVEMENT-PLAN.d")
 ARCHIVE = pathlib.Path("IMPROVEMENT-PLAN-CLOSED.md")
+BASELINE = pathlib.Path("scripts/plan-references-baseline.txt")
+
+
+def baseline():
+    """The references recorded as dangling, as the bare numbers the checker keys.
+
+    A missing or unreadable file returns an empty set rather than raising: every
+    dangling reference then reports as NEW, which is loud and correct. The
+    opposite default -- tolerating everything when the file cannot be read --
+    would make this check pass by failing to load, which is the failure mode the
+    whole file is about.
+    """
+    try:
+        lines = BASELINE.read_text().splitlines()
+    except OSError:
+        return set()
+    return {ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")}
 
 HEADING_RE = re.compile(r"^### (\d+\.\d+) ", re.M)
 ROW_RE = re.compile(r"^\|\s*(\d+\.\d+)\s*\|", re.M)
@@ -115,6 +145,46 @@ def self_defined(path):
         return set()
 
 
+# Documents, other than the plan, that number their own sections and are
+# legitimately cited from code elsewhere. An EXPLICIT registry, not "every
+# tracked .md file": a blanket scan over every .md file was tried first and
+# reverted, because ABI.md numbers its OWN host-call ABI entries the same
+# shape (`#### 2.59 \`cleat_complete\``) and docs/reference/database-backends.md
+# has its own `### 7.4` -- both pure numeric coincidences with two of the
+# plan's own genuinely-dangling numbers (see ci.yml's comment on the same
+# check for the current list). Unioning every .md file's headings into
+# the resolved set made BOTH of those read as fixed, when neither citation had
+# anything to do with either file -- the measurement-error direction this
+# repo's own CLAUDE.md names explicitly: an error that flatters the number
+# survives because nobody has a reason to re-check a result that already
+# looks like success. A reference must name a SPECIFIC other document to be
+# exempted from the plan's namespace, not merely find one by accident.
+FOREIGN_DOCS = [
+    "docs/contributor/design/event-routing-design.md",
+]
+
+
+def foreign_defined():
+    """Section numbers owned by a document in FOREIGN_DOCS, cited from
+    somewhere other than that document itself.
+
+    self_defined() exempts a reference from event-routing-design.md's own
+    prose to event-routing-design.md's own §4.3 -- the citing file defines the
+    heading itself. It does nothing for plugins/eventtriggers/keys.go citing
+    that SAME §4.3 from outside the file that owns it, because self_defined()
+    only ever looks at the citing file. cleat#2867, found live: five
+    references from plugins/eventtriggers/*.go into event-routing-design.md's
+    own §3.1/§4.1/§4.3/§4.4/§6.5 read as dangling plan references for exactly
+    that reason -- the citing files obviously define no such headings
+    themselves, and plan_text() has never read event-routing-design.md, so
+    nothing anywhere resolves them.
+    """
+    owned = set()
+    for path in FOREIGN_DOCS:
+        owned |= self_defined(path)
+    return owned
+
+
 def references():
     """Every §N.M in the repo that plausibly names a PLAN section.
 
@@ -163,7 +233,7 @@ def references():
 
 def run(headings_only=False):
     text = plan_text()
-    have = defined(text, headings_only)
+    have = defined(text, headings_only) | foreign_defined()
     refs = references()
     dangling = {n: locs for n, locs in refs.items() if n not in have}
     return have, refs, dangling
@@ -251,16 +321,45 @@ def main():
               "from here, and every reference would look dangling.",
               file=sys.stderr)
         return 2
-    if dangling:
+
+    by_num = lambda n: [int(p) for p in n.split(".")]
+
+    # The stale direction is checked FIRST and unconditionally, because it has to
+    # fire when nothing is dangling at all -- which is exactly the state it would
+    # otherwise be invisible in. If every baselined reference got repaired, the
+    # code below would fall straight through to "OK" and the ledger would go on
+    # describing a tree that no longer exists.
+    recorded = baseline()
+    retired = sorted(recorded - set(dangling), key=by_num)
+    if retired:
+        print("ERROR: reference(s) recorded as dangling now resolve: "
+              + ", ".join(f"§{n}" for n in retired), file=sys.stderr)
+        print("\nThey are still listed in " + str(BASELINE) + ". Delete those "
+              "lines: the list is shrink-only, and an entry that no longer "
+              "describes reality hides the next real one.", file=sys.stderr)
+        return 1
+
+    new = {n: locs for n, locs in dangling.items() if n not in recorded}
+    if new:
         print("ERROR: §N.M references that resolve to nothing:", file=sys.stderr)
-        for n in sorted(dangling, key=lambda x: [int(p) for p in x.split(".")]):
-            locs = sorted(dangling[n])
+        for n in sorted(new, key=by_num):
+            locs = sorted(new[n])
             print(f"  §{n}  cited from {len(locs)} place(s): "
                   f"{', '.join(locs[:3])}{' ...' if len(locs) > 3 else ''}",
                   file=sys.stderr)
         print("\nA reference that resolves to nothing is a pointer into prose "
               "that reads as correct.", file=sys.stderr)
+        if recorded:
+            print(f"\n({len(recorded)} pre-split reference(s) are recorded in "
+                  f"{BASELINE} and are not what this is about.)", file=sys.stderr)
         return 1
+
+    if dangling:
+        print(f"OK: all {len(refs)} distinct §N.M reference(s) resolve except the "
+              f"{len(dangling)} recorded as dangling by the pre-split baseline "
+              f"({BASELINE}), against {len(have)} defined section number(s) "
+              f"across both namespaces.")
+        return 0
 
     print(f"OK: all {len(refs)} distinct §N.M reference(s) resolve, against "
           f"{len(have)} defined section number(s) across both namespaces.")

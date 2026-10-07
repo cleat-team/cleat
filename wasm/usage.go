@@ -13,6 +13,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -38,9 +39,20 @@ const PythonTarget = "python"
 var sdkHelperImports = map[string][]string{
 	"Saga.AddStepCall": {"cleat_call"},
 
-	// Saga.Run's own LogKV. The steps' calls are closures the workflow wrote,
-	// so they need nothing here.
-	"Saga.Run": {"cleat_log"},
+	// Saga.Run and Saga.RunWithResult share one body -- Run delegates to
+	// RunWithResult (cleat#2627) -- so both need the same imports: the saga's
+	// own LogKV, and the SetQueryState it publishes its progress with. The
+	// steps' calls are closures the workflow wrote, so they need nothing here.
+	//
+	// TWO KEYS, not one, because the analyzer sees the method the WORKFLOW
+	// calls: saga.Run(h) hits the first, saga.RunWithResult(h) the second.
+	// Before #2627 the saga made no SetQueryState call and order-lifecycle
+	// wrote its own in workflow code, which the ordinary scan caught. The saga
+	// makes it now, so it has to be declared here or the module builds, imports
+	// nothing, and publishes nothing at run time -- the failure this table
+	// exists to prevent, and one a host-side test cannot see.
+	"Saga.Run":           {"cleat_log", "set_query_state"},
+	"Saga.RunWithResult": {"cleat_log", "set_query_state"},
 
 	// Selector.Select calls five HostCalls methods -- DurableSleep, Now,
 	// AwaitSignals, PollSignal and AwaitChild -- and this list is the union of
@@ -141,6 +153,7 @@ var hostFunctions = []HostFunction{
 	{"cleat_reject_promise", "RejectPromise"},
 	{"cleat_schedule_invoke", "ScheduleInvoke"},
 	{"cleat_await_signals", "AwaitSignals"},
+	{"cleat_wait_for_event", "WaitForEvent"},
 	// Defer
 	{"cleat_defer", "DurableDefer"},
 	{"cleat_defer", "DurableDeferFunc"},
@@ -242,6 +255,29 @@ type UsageInfo struct {
 	// Keys are the first argument string literals of h.ChildWorkflow(name, ...),
 	// h.ChildWorkflowWithOptions(name, ...), and h.ChildWorkflowTyped(name, ...).
 	Children map[string]bool
+
+	// Exposure is the value of the package-level `//cleat:exposure` directive,
+	// verbatim and UNVALIDATED (cleat#1986 slice 2c). Empty means the source
+	// declared nothing, which is NOT the same as declaring `auth`.
+	//
+	// Validating here would need this package to know the closed set, which
+	// lives in engine -- above this one. So the raw string is carried and the
+	// build path, which can see both, refuses an unknown value with a message
+	// naming the accepted ones. A build must not stamp a class the database's
+	// CHECK will reject at deploy, and it must not silently drop one either.
+	Exposure string
+
+	// ExposureConflict is non-empty when the target package declares two
+	// DIFFERENT exposure classes; it names them, sorted, comma-separated. The
+	// build path refuses on a non-empty value and nothing else reads it.
+	//
+	// Last-one-wins was the alternative and it is the wrong shape here. The
+	// sibling directive merges as a UNION (//cleat:require adds imports), and a
+	// union is safe because the worst case is an unnecessary import. A class is
+	// single-valued, so any merge rule PICKS, and the pick can be the looser of
+	// the two -- a fail-open in the exact field this feature protects, decided
+	// by which file sorts last. See collectExposure.
+	ExposureConflict string
 }
 
 // AnalyzeUsage scans every function in the cleat closure and returns
@@ -271,6 +307,9 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 
 	// Incorporate //cleat:require directives from source comments.
 	collectRequirements(result, info)
+
+	// And the //cleat:exposure declaration, same mechanism (cleat#1986 2c).
+	collectExposure(result, info)
 
 	// Build the stable ordered list of used functions.
 	for _, hf := range hostFunctions {
@@ -315,13 +354,22 @@ var compositeRequires = map[string][]string{
 	// cleat_now is enough: info.Funcs is hostFunctions filtered by Used, so
 	// marking the import used pulls in {"cleat_now", "Now"} and the emitted Now
 	// field is what populates h.now. IMPROVEMENT-PLAN 3.234.
-	"NowMs":                  {"cleat_now"},
-	"NewUUID":                {"cleat_random"},
-	"NewUUIDv7":              {"cleat_random", "cleat_now"},
-	"UUID":                   {"cleat_workflow_id"},
-	"Log":                    {"cleat_log"},
-	"Call":                   {"cleat_call"},
-	"AwaitCondition":         {"cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"NowMs":          {"cleat_now"},
+	"NewUUID":        {"cleat_random"},
+	"NewUUIDv7":      {"cleat_random", "cleat_now"},
+	"UUID":           {"cleat_workflow_id"},
+	"Log":            {"cleat_log"},
+	"Call":           {"cleat_call"},
+	"AwaitCondition": {"cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	// WaitForEvent's claim/register/re-claim loop is composed in
+	// cleat/runtime_signals.go from PluginCall, AwaitSignals and NowMs, so a
+	// workflow that calls it reaches all three -- plugin_call for the claim,
+	// and AwaitCondition's own set for the wait it loops on. Without this row
+	// AnalyzeUsage (which does not follow into the SDK) generates none of them,
+	// the adapter fields stay nil, and WaitForEvent returns a ZERO VALUE at run
+	// time in a compiled workflow: the failure #775 records, present in the
+	// shipped artefact rather than at build time.
+	"WaitForEvent":           {"plugin_call", "cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
 	"AwaitSignalsWithQuorum": {"cleat_await_signals", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
 	// Delegates to AwaitPromise, which is the dispatch point, so it reaches the
 	// update imports too. Merged into the existing row rather than added as a
@@ -462,6 +510,80 @@ func fieldImports() map[string][]string {
 		m[hf.FieldName] = append(m[hf.FieldName], hf.ImportName)
 	}
 	return m
+}
+
+// collectExposure reads the package-level `//cleat:exposure <class>` directive
+// (cleat#1986 slice 2c) -- the source-level declaration of a workflow's exposure
+// class.
+//
+// It is a //cleat: directive rather than an attribute on the entry point, for
+// the reason collectRequirements above gives. `@cleatEntry` is a real decorator
+// on the AssemblyScript path, where that toolchain's own transform reads it; on
+// the Go path it is documentation. The Go loader classifies an entry point in
+// analyzer.IsEntryPoint from exportedness, a receiver and generics -- it never
+// consults a comment -- so an exposure written as an annotation there would
+// compile, stamp nothing, and be silently ignored, which is the failure mode
+// cleat#1617 records for the sibling directive.
+//
+// TARGET PACKAGE ONLY, and this is where it deliberately parts company with
+// collectRequirements. //cleat:require is TRANSITIVE because the need is
+// physical: a library makes a host call on the caller's behalf, so the compiled
+// artifact really does need that import whoever named it. Exposure is not
+// transitive in that way -- it is a policy statement about the DEFINITION being
+// deployed, and cleat#1986 declares it "in the workflow source". Reading
+// ImportedPkgs here would hand a dependency the choice of its importers'
+// exposure, and the direction that goes wrong is FAIL-OPEN: a library declaring
+// `public` would loosen every workflow that imports it, silently, in the field
+// this feature exists to protect. A package that wants a different class is a
+// package that is a deployment unit, and that is what `cleat build` is pointed
+// at. TestAnImportedPackagesExposureIsNotInherited is the negative control.
+//
+// ONE CLASS PER PACKAGE. Two different classes are reported through
+// ExposureConflict instead of resolved; see that field for why picking is the
+// wrong merge for a single-valued declaration. A repeated IDENTICAL declaration
+// is not a conflict -- two files may both state the class the package has.
+func collectExposure(result *analyzer.AnalysisResult, info *UsageInfo) {
+	// Guarded like the sibling's closure: a caller can reach AnalyzeUsage with a
+	// result that loaded no target package, and the guard is what keeps that a
+	// no-op rather than a panic.
+	if result.TargetPkg == nil {
+		return
+	}
+
+	const prefix = "//cleat:exposure "
+	declared := make(map[string]bool)
+
+	// TrimSpace before the prefix test, unlike collectRequirements: a trailing
+	// \r on a CRLF file would otherwise leave the value as "internal\r", which
+	// validates as neither class and fails the build with a confusing message.
+	// It also rules out a value-less `//cleat:exposure`, which trims to the bare
+	// directive and does not match the space-terminated prefix.
+	for _, file := range result.TargetPkg.Files {
+		for _, cg := range file.Comments {
+			for _, c := range cg.List {
+				text := strings.TrimSpace(c.Text)
+				if !strings.HasPrefix(text, prefix) {
+					continue
+				}
+				value := strings.TrimSpace(text[len(prefix):])
+				if value == "" {
+					continue
+				}
+				declared[value] = true
+				info.Exposure = value
+			}
+		}
+	}
+
+	if len(declared) > 1 {
+		values := make([]string, 0, len(declared))
+		for v := range declared {
+			values = append(values, v)
+		}
+		sort.Strings(values)
+		info.Exposure = ""
+		info.ExposureConflict = strings.Join(values, ", ")
+	}
 }
 
 // collectHostCallsCalls walks a function body and records which HostCalls

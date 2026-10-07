@@ -1,0 +1,9 @@
+# file	key	reason
+# cleat#2904: every candidate below is an MSSQL MERGE statement with no
+# HOLDLOCK, found by scripts/check-mssql-merge-holdlock.py. Reachability --
+# whether two concurrent writers can ever race the same not-yet-existing
+# key for a given statement -- is UNASSESSED for every entry here; that is
+# why each is DEFERRED rather than EXEMPT (see the script's own docstring
+# for the distinction). Remove a line once its statement gains
+# WITH (HOLDLOCK) -- a stale entry (one that no longer matches a
+# candidate) is a guard failure, not a silent pass.

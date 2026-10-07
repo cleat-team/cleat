@@ -64,10 +64,23 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, promiseID, result st
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// Two writes, two different windows, and neither replaces the other --
+	// the same shape DeliverSignal uses for signal_seq (cleat#953).
+	//
+	// next_wake_at wakes a workflow that is ALREADY suspended; 'running' is
+	// deliberately excluded, because a claimed workflow's row is about to be
+	// overwritten by finalize anyway.
+	//
+	// promise_seq covers the window that leaves -- a resolution arriving
+	// while the workflow is awake. The worker captured this value when it
+	// claimed; finalize compares and schedules an immediate wake if it
+	// moved. Bumped unconditionally, in this transaction, so the counter and
+	// the resolution become visible together (cleat#3171).
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = now()
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
-		  AND status IN ('ready', 'suspended')
 	`, promiseID)
 	if err != nil {
 		return err
@@ -97,10 +110,12 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, promiseID, errMsg str
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// promise_seq bump: see ResolvePromise's comment above (cleat#3171).
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = now()
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
-		  AND status IN ('ready', 'suspended')
 	`, promiseID)
 	if err != nil {
 		return err
@@ -232,7 +247,11 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 		return err
 	}
 
-	// Wake the workflow, exactly as DeliverSignal does.
+	// Wake the workflow, exactly as DeliverSignal does, with the same
+	// promise_seq bump ResolvePromise/RejectPromise use (cleat#3171): a
+	// dispatch arriving while the workflow is running scheduled nothing
+	// before, because 'running' is excluded from the status filter below and
+	// finalize overwrites next_wake_at with its own deadline regardless.
 	//
 	// Not optional: an update is delivered at a DISPATCH POINT in the guest,
 	// and a suspended workflow reaches no dispatch point. Without this the
@@ -240,8 +259,9 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 	// which for a workflow waiting on a signal or a long sleep may be never.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET next_wake_at = now()
-		WHERE id = $1 AND status IN ('ready', 'suspended')
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = $1
 	`, workflowID); err != nil {
 		return err
 	}

@@ -49,6 +49,15 @@ type WorkerRegistration struct {
 	StartedAt        time.Time
 	LastHeartbeatAt  time.Time
 
+	// Address is a DNS name another worker can reach this one at, or empty
+	// if none is known -- cleat#2196's reaper-to-worker veto channel. Unlike
+	// Hostname (os.Hostname(), diagnostic only, not necessarily routable),
+	// this is published only when --worker-service-name names a headless
+	// Kubernetes Service that actually selects this pod (see
+	// cmd/cleat-worker's podAddress). Nothing reads this column yet --
+	// cleat#2196's step 4 (the reaper wiring) is what will.
+	Address string
+
 	// SecretKeyVersions are the tenant-secret key versions this worker can
 	// open, published so a writer can refuse a version some live worker cannot
 	// read (cleat#1991, secret_key_gate.go). Written on every registration --
@@ -123,13 +132,14 @@ func (r *WorkerRegistry) Register(ctx context.Context, reg WorkerRegistration) e
 func (r *WorkerRegistry) registerOn(ctx context.Context, q querier, reg WorkerRegistration) error {
 	_, err := q.ExecContext(ctx, r.stmt(
 		"INSERT INTO ", r.table(),
-		" (worker_id, hostname, pid, concurrency, connection_budget,",
+		" (worker_id, hostname, address, pid, concurrency, connection_budget,",
 		" started_at, last_heartbeat_at, secret_key_versions) VALUES (",
 		r.Dialect.placeholder(1), ", ", r.Dialect.placeholder(2), ", ",
 		r.Dialect.placeholder(3), ", ", r.Dialect.placeholder(4), ", ",
-		r.Dialect.placeholder(5), ", ", r.Dialect.nowExpr(), ", ", r.Dialect.nowExpr(), ", ",
-		r.Dialect.placeholder(6), ")"),
-		reg.WorkerID, reg.Hostname, reg.PID, reg.Concurrency, reg.ConnectionBudget,
+		r.Dialect.placeholder(5), ", ", r.Dialect.placeholder(6), ", ",
+		r.Dialect.nowExpr(), ", ", r.Dialect.nowExpr(), ", ",
+		r.Dialect.placeholder(7), ")"),
+		reg.WorkerID, reg.Hostname, reg.Address, reg.PID, reg.Concurrency, reg.ConnectionBudget,
 		encodeKeyVersions(reg.SecretKeyVersions))
 	if err != nil {
 		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
@@ -219,7 +229,7 @@ func (r *WorkerRegistry) CountLive(ctx context.Context, maxAge time.Duration) (i
 // the budget only needs the count.
 func (r *WorkerRegistry) ListLive(ctx context.Context, maxAge time.Duration) ([]WorkerRegistration, error) {
 	q := r.stmt(
-		"SELECT worker_id, hostname, pid, concurrency, connection_budget,",
+		"SELECT worker_id, hostname, address, pid, concurrency, connection_budget,",
 		" started_at, last_heartbeat_at FROM ", r.table(),
 		" WHERE last_heartbeat_at > ", r.Dialect.intervalExpr(1),
 		" ORDER BY last_heartbeat_at")
@@ -232,7 +242,7 @@ func (r *WorkerRegistry) ListLive(ctx context.Context, maxAge time.Duration) ([]
 	var out []WorkerRegistration
 	for rows.Next() {
 		var w WorkerRegistration
-		if err := rows.Scan(&w.WorkerID, &w.Hostname, &w.PID, &w.Concurrency,
+		if err := rows.Scan(&w.WorkerID, &w.Hostname, &w.Address, &w.PID, &w.Concurrency,
 			&w.ConnectionBudget, &w.StartedAt, &w.LastHeartbeatAt); err != nil {
 			return nil, fmt.Errorf("worker registry: list live: scan: %w", err)
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -72,9 +73,16 @@ func TestEntryPointBindingMatchesTheSharedTable(t *testing.T) {
 			goCases = append(goCases, c)
 		}
 	}
-	if len(goCases) < 4 {
-		t.Fatalf("only %d cases carry a \"go\" expectation in %s; the table has lost rows",
-			len(goCases), path)
+	// EQUALITY, not a floor -- and the difference is the whole of cleat#2542's
+	// second half. A floor catches a row being REMOVED. It cannot catch a row
+	// being ADDED without a "go" key: that row is filtered out here and never
+	// runs, so a case added later would pass by not being checked. Every case in
+	// this table applies to Go -- it is one of the three SDKs that binds by name,
+	// which is what the table is about -- so the two counts must be equal.
+	if len(goCases) != len(doc.Cases) {
+		t.Fatalf("%d of %d cases carry a \"go\" expectation in %s. Every case in this "+
+			"table applies to Go, so a case without one is a case nothing checks.",
+			len(goCases), len(doc.Cases), path)
 	}
 
 	ctx := context.Background()
@@ -126,7 +134,7 @@ func TestEntryPointBindingMatchesTheSharedTable(t *testing.T) {
 			}
 			res, _, _, _, _, execErr := eng.Execute(ctx, wasmBytes, entry, payload)
 
-			got := classifyGoBinding(res, execErr, d.Name, d.OptionalDefault, string(payload), c.Payload)
+			got := classifyGoBinding(res, execErr, d.Name, d.Kind, d.OptionalDefault, string(payload), c.Payload)
 			want := c.Expect["go"]
 			if got != want {
 				t.Errorf("%s: Go bound %q, the table says %q.\n\n"+
@@ -145,7 +153,7 @@ func TestEntryPointBindingMatchesTheSharedTable(t *testing.T) {
 // A tag, never a message. The SDKs word their errors differently and always
 // will, which is why the table carries kinds -- the same reasoning
 // quorum_cases.json gives for error_kind.
-func classifyGoBinding(result string, execErr error, pname, optDefault, wholePayload string, payload map[string]any) string {
+func classifyGoBinding(result string, execErr error, pname, kind, optDefault, wholePayload string, payload map[string]any) string {
 	if execErr != nil {
 		return "refused"
 	}
@@ -155,8 +163,19 @@ func classifyGoBinding(result string, execErr error, pname, optDefault, wholePay
 	if err := json.Unmarshal([]byte(result), &out); err != nil {
 		return fmt.Sprintf("unparseable(%s)", strings.TrimSpace(result))
 	}
-	if _, present := payload[pname]; present {
-		return "bound_value"
+	// THE KEY'S PRESENCE IS NOT THE ASSERTION -- the VALUE is. Until cleat#2542
+	// this was `if _, present := payload[pname]; present { return "bound_value" }`,
+	// which left the row whose `why` calls itself "the control" unable to fail:
+	// a fixture mutated to bind nothing (`{"bound":""}` with the parameter
+	// discarded) still reported bound_value and the table stayed green. Measured
+	// 2026-09-28. What that row exists to catch is an SDK that ignores the
+	// payload, and only the value tells the two apart.
+	if want, present := payload[pname]; present {
+		echo := fixtureEcho(want, kind)
+		if reflect.DeepEqual(out.Bound, echo) {
+			return "bound_value"
+		}
+		return fmt.Sprintf("bound_wrong_value(bound %#v, want %#v)", out.Bound, echo)
 	}
 	// The single-string fast path: the parameter got the whole payload rather
 	// than a value extracted by name. Checked BEFORE the zero tests, because
@@ -186,4 +205,20 @@ func classifyGoBinding(result string, execErr error, pname, optDefault, wholePay
 		}
 	}
 	return fmt.Sprintf("bound_other(%v)", out.Bound)
+}
+
+// fixtureEcho is what the Go fixture reports for a parameter that bound this
+// payload value. The scalars are echoed as they are; the composite is echoed as
+// its sku, which is what testdata/bindingconformance/workflow.go returns.
+//
+// This is what makes the parameter's NAME the subject of the assertion: a
+// binder that read the struct from the top level instead of from payload["item"]
+// would bind the zero Item and echo "", and "" is not payload["item"]["sku"].
+// Key presence alone could not tell those apart.
+func fixtureEcho(payloadValue any, kind string) any {
+	if kind != "composite" {
+		return payloadValue
+	}
+	m, _ := payloadValue.(map[string]any)
+	return m["sku"]
 }

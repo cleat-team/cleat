@@ -140,14 +140,158 @@ if rec.isPendingIntent() {
 ```
 
 **Before that report happens, an optional resolver gets a chance to make it a non-event.**
-`WithAmbiguityResolver` (an `EngineOption`) lets an embedder supply a lookup — keyed on the same
-per-step idempotency key the pattern in §5.1 uses — that checks the external service directly. If
-it answers, the outcome is recorded and replay carries on as though the call had returned
-normally: the crash lost the answer, not the effect, and the workflow never sees `[AMBIGUOUS]` at
-all. **`cleat-worker` does not configure one** — `grep -rn WithAmbiguityResolver
-cmd/cleat-worker/` finds nothing — so on the shipped worker binary every ambiguity reaches the
-report above; this is an extension point for an embedder, and as of this writing nothing in the
-tree, embedded or otherwise, calls it (cleat#1871).
+`WithAmbiguityResolver` (an `EngineOption`) lets a caller supply a lookup — keyed on the same
+per-step idempotency key the pattern in §5.1 uses — that checks the external service directly.
+Any embedder can call it directly (cleat#1871); `cleat-worker` registers one through a flag, so an
+operator configures it without writing code (cleat#1984).
+
+#### `--idempotency-key-ops`: same-key replay, the default path (cleat#2897)
+
+```
+--idempotency-key-ops payment.charge,shipping.dispatch   # comma-separated service.operation
+--idempotency-key-retention 24h                          # default; see below
+```
+
+**This is the recommended mechanism for a service that accepts an idempotency key and guarantees a
+repeated key returns the original outcome (§5.1) — the DEFAULT path, not the exception.** Where a
+crash leaves a `--write-ahead-intent-ops` call's outcome unrecorded, the worker re-dispatches the
+*same* call to the *same* operation under its *original* idempotency key, rather than asking a
+separate lookup operation (`--ambiguity-lookup`, below) or reporting `[AMBIGUOUS]`. The service's
+own key table is what resolves the ambiguity: it has already seen this exact key, from the
+original attempt, so there is nothing new to reconcile the way `--ambiguity-lookup`'s `404` case
+has to.
+
+**The response decides the outcome, read directly off the re-dispatch rather than through the
+ordinary retryable/permanent classification an ordinary call failure gets:**
+
+| Response to the replayed dispatch | Meaning | Engine action |
+|---|---|---|
+| `200` with a body | The service's key table answered — either the original attempt's recorded outcome, or (far less often) this retried request is itself what got executed | The pending step completes with that response, and replay carries on as though the original call had returned it |
+| `409` | A request under this exact key is still being processed — Stripe's documented meaning for a concurrent same-key request, and exactly the state a crashed-but-not-lost original leaves | **Retried**, under the same key, a bounded number of times with a fixed backoff. Not a failure: this is the mechanism catching the window where the original attempt has not finished yet. If every retry still reads `409`, the engine gives up and falls back to `[AMBIGUOUS]` |
+| Anything else — a `4xx` other than `409` (e.g. a cached `402`), `5xx`, a malformed response, a transport error, a timeout | Cannot say | Falls back to `[AMBIGUOUS]`, unchanged |
+
+**Why `409` does not mean the same thing here that it would on an ordinary call.** An operation
+*not* going through this replay path that returns `409` is, by default, classified the same as any
+other 4xx — non-retryable. That classification is unchanged and correct for an ordinary call: an
+operator who wants `409` read differently for a specific operation does so through the service's
+own `RetryableFromService` declaration (see `serviceStatusError`). It is *only* inside this
+replay — re-dispatching a call already known to be ambiguous, under its own original key — that a
+`409` has one specific, known cause (a concurrent request under this key) rather than being one of
+many possible reasons a service might refuse a request.
+
+**The retention bound: a resend past a service's own key-retention window is a NEW call, not a
+dedupe candidate.** Idempotency keys are not retained forever — Stripe prunes at 24 hours and then
+treats a reused key as a fresh request; other providers differ (Adyen holds at least 7 days; check
+yours). `--idempotency-key-retention` (default: 24 hours, Stripe's bound, the shorter of the two
+surveyed when this was decided) bounds how long after the ORIGINAL dispatch the engine will still
+attempt a same-key resend. Past that window the pending call is not retried at all — not even once
+— and falls straight back to `[AMBIGUOUS]`, because resending under a key the service may have
+already forgotten risks the exact double-execution a `--ambiguity-lookup`-configured `404` has to
+guard against with a durability promise of its own (below). This needs no new column: the bound
+is read from the pending row's own `created_at`, set once at `WriteCallIntent` and never touched
+by `CompleteCallIntent`, so it is the original dispatch time.
+
+**Compared against the store's own clock, not this process's.** MySQL converts a `TIMESTAMP`
+column to and from the *session's* `time_zone` on the wire, and the Go driver parses whatever
+comes back assuming UTC — so on a session whose `time_zone` is not UTC, `created_at` read back
+into this process is silently offset by that session's difference from UTC. Comparing it against
+this process's own `time.Now()` would be wrong by that offset (measured: ~2 hours at
+`time_zone='+02:00'`). The engine instead asks the store itself what time it is
+(`callIntentClock.ServerNow`) and compares the two readings against each other: both pass through
+the same session default, so a *fixed* offset cancels in the subtraction without the engine ever
+needing to know or correct it. This does **not** cancel a DST transition that falls inside the
+window being measured — a session in a DST-observing zone can read a 24-hour-old row as roughly an
+hour younger right after the clocks fall back, so the bound can overshoot by up to an hour, once a
+year, for a session in such a zone. A deployment that cares about the bound to that precision
+should pin its MySQL session to UTC — which observes no DST, so there is no transition left to
+overshoot across — by adding `time_zone` to `--db`'s DSN:
+
+```
+--db "user:pass@tcp(host:3306)/cleat?parseTime=true&time_zone=%27%2B00%3A00%27"
+```
+
+No `mysql://` scheme prefix: `go-sql-driver/mysql`'s own DSN parser does not strip one, so it
+reads as the start of the username, and the connection is refused as that literal user
+("Access denied for user 'mysql'@…") — reproduced directly, both on the main pool and on
+`MySQLStoreFactory.OpenIsolatedStore`'s per-tenant pool (cleat-review, #2935). The bare
+`user:pass@tcp(host:port)/db?params` form is what `cmd/cleat-worker` and every store factory
+actually connect with.
+
+The driver passes an unrecognised DSN parameter straight through as a session variable
+(`go-sql-driver/mysql`'s `handleParams`, `SET time_zone = <value>`), so the value must be the
+*SQL string literal* `'+00:00'`, quotes included — `%27` is `'` and `%2B` is `+`, both of which a
+bare DSN query string cannot carry unescaped. `plugins/auditlog/chain_db_test.go`'s
+`TestTheChainDoesNotDependOnTheMySQLSessionTimeZone` pins a session the same way for its own test
+setup (`url.QueryEscape("'" + zone + "'")`), which is the non-UTC zone side of the same hazard.
+
+**Validated at worker startup, same shape as `--ambiguity-lookup` below, plus one more check:**
+every operation named in `--idempotency-key-ops` must also be declared
+`--write-ahead-intent-ops` (same reasoning — `AtLeastOnce` never leaves a pending row), and must
+**not** also appear in `--ambiguity-lookup`. The two are different capabilities a service either
+has or does not; declaring one operation under both would make `--ambiguity-lookup`'s
+configuration for it silently unreachable, since this mechanism is tried first, and the worker
+refuses to start on either violation rather than leave the precedence unstated.
+
+**Metrics:** `RecordAmbiguousCall`'s `outcome` attribute carries `key_replay_resolved` for a call
+this mechanism settled, alongside `resolved`, `not_sent` and `cannot_say` from the lookup path
+below and the plain `[AMBIGUOUS]` fallback.
+
+#### `--ambiguity-lookup`: the exception, for a service that cannot dedupe a repeated key itself
+
+```
+--ambiguity-lookup payment.charge=payment.get_by_key   # comma-separated for more than one
+```
+
+For each `service.operation=service.lookup_operation` pair, the worker's resolver calls the
+**lookup operation on the same service**, under the **same idempotency key** the original attempt
+sent — the same route convention `DurableCall` itself uses
+(`POST {base-url}/call/{service}/{lookup_operation}`, `Idempotency-Key` header), because a lookup
+*is* another operation on the service, not a separate kind of request. Only an operation named
+here gets this treatment; every other ambiguity reaches the `[AMBIGUOUS]` report as before.
+
+**Read this as the exception, not the recommended route: an opt-in alternative for a service that
+can answer "what happened to this key" but does not itself resolve a repeated key.**
+`--idempotency-key-ops`, above, is the default path for a service that accepts an idempotency key
+and does — same-key replay catches the ambiguity before the lookup's own `404`-durability
+obligation (below) would even become relevant. The two mechanisms are mutually exclusive per
+operation (worker boot validation refuses an operation declared under both).
+
+**The lookup convention — the contract a service implements:**
+
+| Lookup response | Meaning | Engine action |
+|---|---|---|
+| `200` with a body | The call happened; the body is its response | The pending step completes with that response, and replay carries on as though the original call had returned it |
+| `404` | The service has no record — the call never arrived | The step completes as a **retryable failure** (the same classification an ordinary transient call failure gets), not `[AMBIGUOUS]`. Nothing was sent, so nothing needs reconciling; the workflow's own retry handling (or an explicit retry in its code) is what makes "the step re-executes" — the engine does not re-dispatch on its own |
+| Anything else — `5xx`, a malformed response, a transport error, a timeout | Cannot say | Falls back to today's `[AMBIGUOUS]` report, unchanged |
+
+**A `404` answer is a PROMISE, not just information, and a service that implements this lookup
+takes on an obligation because of it.** The retry the table above describes is a NEW step — the
+engine's per-step idempotency key (`DurableCallIdempotencyKey`, keyed on `(workflow, run,
+step)`) is different from the original attempt's, by construction, the same way any two distinct
+steps get different keys. So a service that only checks "have I seen this exact key before" does
+not catch the case this exists to prevent: the lookup answers `404` because the original request
+is merely *slow*, not because it never arrived; the retry's request (new key) is accepted and
+executed; the original request (old key) then arrives late and is *also* accepted, because its
+key has never been used — two charges.
+
+**The lookup operation must therefore make its `404` durable**, not just report current
+knowledge: the moment it answers "never arrived" for a given key, it must also commit to
+rejecting (or no-op'ing) any execution request that later arrives under that exact key, as
+reliably as it already guarantees idempotent execution for a REPEATED key (§5.1). A service that
+cannot make that guarantee must not answer `404` — it must answer as "cannot say" (anything other
+than `200` or `404`) instead, which is always safe and leaves the ambiguity exactly where it was.
+This is a correctness requirement on the lookup contract, not a suggestion: `--ambiguity-lookup`
+should only be pointed at an operation whose service can uphold it.
+
+**Validated at worker startup, not at the first ambiguity:** every operation named in
+`--ambiguity-lookup` must also be declared in `--write-ahead-intent-ops`. `AtLeastOnce` (the
+default call semantics) never leaves a pending intent row — only `WriteAheadIntent` does — so a
+lookup configured for an operation that is never write-ahead would be a mechanism with nothing to
+resolve, wired to nothing. The worker refuses to start rather than ship that silently.
+
+**Metrics:** `RecordAmbiguousCall` carries an `outcome` attribute of `resolved`, `not_sent` or
+`cannot_say`, per operation — the auto-settled-versus-still-ambiguous counts an operator needs to
+know whether the lookup is earning its keep.
 
 ---
 
@@ -166,6 +310,14 @@ When a workflow receives an `ErrAmbiguous` error, it means the call *may* have s
 1. Check the external service's state to determine whether the operation completed.
 2. If completed: proceed with the known outcome (e.g., look up the result from the external service).
 3. If not completed: retry the call.
+
+**This is the fallback, not the only path.** If the operation is named in the worker's
+`--idempotency-key-ops` flag (§3) — the recommended configuration for a service that accepts an
+idempotency key — or its `--ambiguity-lookup` flag (the exception, for a service that can answer
+"what happened to this key" but cannot dedupe a repeated one itself), the three steps above
+already happened before the workflow ever saw an error. `ErrAmbiguous` reaches workflow code only
+for an operation configured for neither, or when the configured mechanism itself could not say —
+the "anything else" row of each table in §3.
 
 ### 4.3 Not assume exactly-once
 

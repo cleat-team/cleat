@@ -34,7 +34,11 @@ import (
 // plugin.applyTenantScoping emits nothing on MySQL, and installs a policy on
 // SQL Server too as of cleat#1552. Running
 // this against MySQL or SQL Server would assert that an absent policy does not
-// apply.
+// apply. The SQL Server policy has its own dedicated regression test as of
+// cleat#2714 --
+// audit_rows_are_scoped_to_their_tenant_mssql_test.go's
+// TestAuditRowsAreScopedToTheirTenantOnMSSQL -- so "installs a policy on SQL
+// Server too" no longer reads as an untested claim.
 func TestAuditRowsAreScopedToTheirTenant(t *testing.T) {
 	// A SUITE DATABASE, NOT THE SHARED ONE. This test's migrations put a
 	// row-level policy on audit_events, and under testutil.TestDB that table

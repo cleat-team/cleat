@@ -689,18 +689,56 @@ the tables exist from the first boot of a worker built after that change, and a
 deployment that has booted one has them. P1 should re-check that before assuming it can
 reshape `event_awaiters` freely.
 
-**P0b — fix today's semantics.** `ORDER BY received_at DESC` → ordered ascending by a
-monotonic column; consume-and-record in one transaction (today's code marks consumed
-and logs on failure with "Continue even if marking fails", admitting a double-consume).
-Cheap *now*, and cheaper than it looks: `plugins` is a **tier 2** component, nothing may
-describe it as production-ready, and — per P0 — nothing is running it, so there are no
-existing semantics for anyone to depend on.
+**P0b — fix today's semantics. DONE except the monotonic column (2026-09-29,
+cleat#2641).** `ORDER BY received_at DESC` → ordered ascending by `received_at`, with
+the claiming SELECT and the consuming UPDATE folded into one transaction, holding
+`FOR UPDATE SKIP LOCKED` / `WITH (UPDLOCK, READPAST, ROWLOCK)` on the claimed row for
+that transaction's lifetime (`queryOldestUnprocessedEventForClaim` in
+`plugins/eventtriggers/queries.go`, mirroring the idiom
+`plugins/scheduler/background.go` already uses for the same problem). The old "continue
+even if marking fails" branch is gone — a failed consuming UPDATE now returns an error
+rather than reporting `{"found": true}` for a row that was never actually marked
+consumed.
+
+**The "except" is real, and it attaches to `ingested_events` — the queue `await_event`
+claims from — not to `event_awaiters`.** `received_at` is not monotonic: on PostgreSQL
+`NOW()` is transaction-start time, and two events committed by concurrent transactions
+can carry the same value or an out-of-arrival-order one, with ties unordered by `ORDER
+BY received_at` alone. That is not a corner case here — it is exactly the concurrent
+arrival that the lock this PR adds exists to handle, so "oldest-first" is only
+approximate until `ingested_events` gains a column that orders ties the way concurrent
+inserts actually happened (a sequence, not a wall-clock column). P1's surrogate key
+(cleat#2646) is on `event_awaiters`, a registration table looked up by equality with no
+ordering role, and is not a candidate for this. Tracked as cleat#2652, which also
+records cleat-review's nuance: a sequence gives insert order, not commit order, so even
+that is an approximation under concurrency rather than a strict guarantee.
+
+**What this does not cover, filed separately as cleat#2644:** the lock excludes a second
+concurrent `await_event` call, which is what P0b's bug was about. It does not exclude
+`processBatch`'s background scan (`background.go`), which reads the same table with a
+plain, unlocked SELECT — so the two mechanisms can still race each other under READ
+COMMITTED. That is a design decision about the background dispatcher's own query, not an
+extension of this fix, so P1 should not assume it is closed.
 
 **P1 — key slots and correlation, inside the plugin.** The §8 schema, the surrogate
 primary key, three slots on both tables, the composite indexes, and the `Keys`
 parameter on `await_event`. **No ABI change** — it goes through `plugin_call` — and,
 since §8 is greenfield, no data migration either. Proves the model before spending a
 host call.
+
+**P1 landed for `event-triggers` itself (cleat#2641/#2645/#2646/#2647/#2668), and
+extended to a second plugin, cleat#2649.** The claim/register mechanism
+(`ClaimOrRegisterAwaiter`) is now exported from `plugins/eventtriggers/claim.go` rather
+than living only inside `awaitEvent`, and `webhookingest.await_webhook` calls it
+directly — the mechanism this design settles on is shared across plugins, not
+reimplemented per caller, which is what §13's own phasing exists to avoid (a second,
+divergent correlation mechanism was exactly the failure this cleat#2649 was scoped
+not to become). `webhookingest`'s own key1 is always its publishing source's id
+(`plugins/webhookingest/routes.go`), automatic and not part of the key budget a caller
+declares — key2 (and key3) are free for a tenant-declared correlation field
+(`correlation_key_field` on `webhook_sources`). A plugin adopting this mechanism after
+`webhookingest` should read `plugins/eventtriggers/claim.go`'s doc comment before
+building a second copy.
 
 **P2 — promote to an engine suspend.** The §12 checklist, plus §6's write-then-read
 ordering and the sweeper. **This carries the risk**, and the earlier draft's claim that

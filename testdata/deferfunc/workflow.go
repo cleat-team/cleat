@@ -268,6 +268,41 @@ func TwoSequentialCalls(h cleat.HostCalls, input string) (string, error) {
 	return `{"status":"ok"}`, nil
 }
 
+// RetryOnceOnFailure is cleat#1984's acceptance fixture for the
+// AmbiguityNotSent retry hazard engine/callintent.go's resolveAmbiguity
+// documents (coordinator + cleat-review, cleat#1984 round 1): a guest's own
+// retry after a resolved "not sent" failure is a NEW DurableCall at a NEW
+// step, and therefore a NEW idempotency key -- unlike the engine's internal
+// MaxAttempts loop, which deliberately keeps the same step/key across
+// attempts (durablecalls.go's retryStep). No layer test below the guest can
+// show that retry happening, because it is the guest's own code that issues
+// it.
+//
+// This is the simplest guest code that does it: try once, and on a
+// RETRYABLE failure try exactly once more. Retryable, not any error --
+// cleat-review measured that retrying unconditionally makes the "404"
+// acceptance-table row pass even when the lookup is broken (degraded to
+// CannotSay, or a lookup answering 500): an [AMBIGUOUS] (non-retryable)
+// failure got retried too, producing the same "2 charges, 2 keys, done"
+// shape as a correct not-sent resolution, which is also what an unsafe
+// guest would do -- retrying an outcome that is genuinely unknown, not
+// confirmed-safe-to-retry. A real workflow would not retry [AMBIGUOUS]
+// either, for the same reason.
+func RetryOnceOnFailure(h cleat.HostCalls, input string) (string, error) {
+	resp, err := h.DurableCall("billing", "charge", `{"amount":100}`)
+	if err == nil {
+		return resp, nil
+	}
+	if ce, ok := err.(*cleat.CallError); !ok || !ce.Retryable() {
+		return "", err
+	}
+	resp, err = h.DurableCall("billing", "charge", `{"amount":100}`)
+	if err != nil {
+		return "", err
+	}
+	return resp, nil
+}
+
 // RetryBacksOffOnHost is cleat#2020's fixture, not 3.88's -- it shares
 // DeferOnLongRetryPolicy's host-vs-SDK retry split (see that comment), but
 // on the HOST side of it deliberately: one attempt, then a 10s backoff short

@@ -20,6 +20,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/eventtriggers"
 )
 
 // TestAnIngestedEventIsListedAndAwaited is cleat#1992/#2172's end-to-end pin,
@@ -50,8 +51,21 @@ func TestAnIngestedEventIsListedAndAwaited(t *testing.T) {
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 
 			p := &Plugin{dialect: dialect, logger: quiet}
+
+			// eventtriggers is migrated and initialised too, cleat#2649:
+			// handleIngestWebhook publishes through it and awaitWebhook now
+			// claims from its ingested_events table directly, not just
+			// webhook_events -- see
+			// an_auth_exempt_route_cannot_assume_a_tenant_test.go's identical
+			// pairing and its comment on why Init (not just Migrations) is
+			// required: it sets eventtriggers' package-level dialect, and
+			// without it Rebind produces the wrong placeholders.
+			et := &eventtriggers.Plugin{}
+			if err := et.Init(ctx, &plugin.Environment{Dialect: dialect, Logger: quiet}); err != nil {
+				t.Fatalf("eventtriggers Init: %v", err)
+			}
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
-				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}, {Plugin: et, Healthy: true}}); err != nil {
 				t.Fatalf("migrations: %v", err)
 			}
 
@@ -153,17 +167,13 @@ func TestAnIngestedEventIsListedAndAwaited(t *testing.T) {
 			// SQL Server has no superuser exemption, so the row is genuinely
 			// invisible without the session context set.
 			awaitCtx := plugin.WithCallContext(auth.WithTenantID(context.Background(), tenantID), cc)
-			awaitInput := `{"source_id":"` + sourceID + `","event_type":"listed.event"}`
-			outJSON, err := p.awaitWebhook(awaitCtx, awaitInput)
+			awaitInput := AwaitWebhookInput{SourceID: sourceID, EventType: "listed.event"}
+			out, err := p.awaitWebhook(awaitCtx, awaitInput)
 			if err != nil {
 				t.Fatalf("await_webhook: %v", err)
 			}
-			var out awaitWebhookOutput
-			if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
-				t.Fatalf("decode await_webhook output: %v (%q)", err, outJSON)
-			}
 			if !out.Found {
-				t.Fatalf("await_webhook: found=false, want true (output: %s)", outJSON)
+				t.Fatalf("await_webhook: found=false, want true (output: %+v)", out)
 			}
 			if out.EventType != "listed.event" {
 				t.Errorf("await_webhook event_type: got %q, want %q", out.EventType, "listed.event")
@@ -184,17 +194,13 @@ func TestAnIngestedEventIsListedAndAwaited(t *testing.T) {
 			// own LIMIT/ORDER BY actually selects the right (and only) row
 			// rather than something that happens to satisfy `found: true` once
 			// by accident.
-			outJSON2, err := p.awaitWebhook(awaitCtx, awaitInput)
+			out2, err := p.awaitWebhook(awaitCtx, awaitInput)
 			if err != nil {
 				t.Fatalf("await_webhook (second call): %v", err)
 			}
-			var out2 awaitWebhookOutput
-			if err := json.Unmarshal([]byte(outJSON2), &out2); err != nil {
-				t.Fatalf("decode await_webhook output (second call): %v (%q)", err, outJSON2)
-			}
 			if out2.Found {
 				t.Errorf("await_webhook (second call): found=true, want false -- the event was "+
-					"already consumed and marked processed by the first call (output: %s)", outJSON2)
+					"already consumed and marked processed by the first call (output: %+v)", out2)
 			}
 		})
 	}

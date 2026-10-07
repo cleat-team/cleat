@@ -7,6 +7,7 @@
 package wasm
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,22 @@ type Metadata struct {
 	// constrained ([]string, names only) so it cannot become the parameter
 	// list cleat#1065/#1705 documented the host as unable to validate against.
 	EntryPoints []string `json:"entry_points,omitempty"`
+
+	// Exposure is the workflow's declared exposure class, carried from the
+	// source declaration to deploy (cleat#1986 slice 2c).
+	//
+	// A plain string rather than engine.ExposureClass, deliberately: this
+	// package sits BELOW engine, so naming engine's type here would invert the
+	// dependency. The closed set is enforced where both are available -- the
+	// build path validates through engine.ParseExposure and fails the build on
+	// an unknown value, and the column's own CHECK is the last line.
+	//
+	// Empty means NO DECLARATION, which is not the same as `auth`: the deploy
+	// path treats absent as "no source opinion" and lets the requested class
+	// stand, where a declared class can only be tightened. Recording the empty
+	// string is therefore meaningful, and omitempty keeps it off the wire for
+	// every build that predates this field.
+	Exposure string `json:"exposure,omitempty"`
 }
 
 // EffectivePolicy returns the effective child binding policy after applying
@@ -188,17 +205,96 @@ func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
 	return writeCustomSection(wasmBytes, entryPointsSectionName, []byte(payload.String()))
 }
 
+// ErrNotAJSONObject is returned by SetMetadataField when the cleat.metadata
+// payload is valid JSON but not an object: the literal `null`, an array, a bare
+// scalar. There are no keys to patch, and json.Unmarshal leaves its map target
+// nil for `null`, so assigning into that nil map would panic rather than fail.
+//
+// It is a sentinel rather than a message because callers differ on what it
+// means. A caller that can leave the section as it found it should treat it as
+// "nothing to patch" rather than a failure -- a binary carrying such a payload
+// is one the calling command did not produce.
+var ErrNotAJSONObject = errors.New("cleat.metadata: not a JSON object")
+
+// SetMetadataField returns wasmBytes with the cleat.metadata key set to
+// rawValue, leaving every OTHER key exactly as the build wrote it.
+//
+// It exists because ReadMetadata/WriteMetadata round-trip through the Metadata
+// struct, and that struct models the keys the engine reads -- while a build may
+// write keys it does not. stamp_metadata.py writes sdk_language, sdk_version and
+// created_at, and the Rust, Java and AssemblyScript builds inject sdk_version
+// too. Rebuilding the payload from the struct DROPS every one of them, so a
+// caller that only meant to change one field silently rewrites the whole
+// section and loses provenance (cleat#2944).
+//
+// Key ORDER is not preserved, and values are preserved SEMANTICALLY rather than
+// byte-for-byte: the payload is decoded into a map and re-encoded, so
+// encoding/json sorts the keys and compacts the whitespace inside a value
+// ([1, 2] becomes [1,2]). HTML escaping is switched off, so <, > and & inside a
+// value are left as the build wrote them rather than becoming backslash-u
+// escape sequences. Every key and every value survives; only their order and interior
+// whitespace change. Nothing reads the section positionally, and the field this
+// was written for is not order sensitive.
+//
+// A payload that is valid JSON but not an object (the literal null, an array, a
+// bare string) is an error, not a panic: it has no keys to patch.
+func SetMetadataField(wasmBytes []byte, key string, rawValue json.RawMessage) ([]byte, error) {
+	payload, err := readCustomSection(wasmBytes, sectionName)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		if json.Valid(payload) {
+			// Valid JSON that is not an object: an array, a string, a number, a
+			// boolean. Unmarshal fails on the target TYPE rather than on the
+			// syntax, and "not a JSON object" is exactly the condition the
+			// sentinel names, so reporting it here is what keeps the documented
+			// contract true rather than narrowing the doc to `null`.
+			return nil, ErrNotAJSONObject
+		}
+		// The same message ReadMetadata gives for the same input, so a caller
+		// cannot tell the two readers apart by their error.
+		return nil, fmt.Errorf("cleat.metadata: invalid JSON: %w", err)
+	}
+	if fields == nil {
+		// Unmarshal leaves the map nil for a JSON `null` -- valid JSON, and the
+		// only non-object shape that decodes cleanly enough to reach here rather
+		// than the branch above.
+		return nil, ErrNotAJSONObject
+	}
+	fields[key] = rawValue
+
+	// An Encoder rather than json.Marshal, with HTML escaping off, so a value the
+	// build wrote is not rewritten. Marshal escapes <, > and & inside a
+	// RawMessage; the compaction below happens either way.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fields); err != nil {
+		return nil, fmt.Errorf("cleat.metadata: %w", err)
+	}
+	return writeCustomSection(wasmBytes, sectionName, bytes.TrimRight(buf.Bytes(), "\n"))
+}
+
 // --- low-level WASM custom section helpers ---
 
 func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 	if len(wasmBytes) < 8 {
 		return nil, fmt.Errorf("not a valid WASM binary (too short)")
 	}
-	// Check magic + version header.
-	if !hasWasmHeader(wasmBytes) {
+	// Check magic + version header. A Component Model binary's top-level
+	// sections use the identical id/size/content framing a core module's do
+	// for a custom section (id 0) -- verified against a real componentize-py
+	// artifact, cleat#2936 -- so this walk is safe on either header. It is
+	// NOT safe to widen readImportSection/readImportModuleNames the same way:
+	// their section ID 2 means "import" only in a core module; at a
+	// component's top level it means "core instance", a different section
+	// entirely.
+	if !hasWasmHeader(wasmBytes) && !hasComponentHeader(wasmBytes) {
 		return nil, fmt.Errorf("not a valid WASM binary (bad magic/version)")
 	}
-	offset := 8 // skip magic (4) + version (4)
+	offset := 8 // skip magic (4) + version/layer (4)
 	for offset < len(wasmBytes) {
 		sectionID := wasmBytes[offset]
 		offset++
@@ -269,7 +365,9 @@ func stripCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 	if len(wasmBytes) < 8 {
 		return nil, fmt.Errorf("not a valid WASM binary (too short)")
 	}
-	if !hasWasmHeader(wasmBytes) {
+	// See readCustomSection's comment: this walk only ever inspects custom
+	// sections (id 0), which both headers frame identically.
+	if !hasWasmHeader(wasmBytes) && !hasComponentHeader(wasmBytes) {
 		return nil, fmt.Errorf("not a valid WASM binary (bad magic/version)")
 	}
 
@@ -331,6 +429,29 @@ func hasWasmHeader(b []byte) bool {
 		b[4] == 0x01 && b[5] == 0x00 && b[6] == 0x00 && b[7] == 0x00
 }
 
+// hasComponentHeader reports whether b opens with a WASM Component Model
+// binary header -- cleat#2936. It shares hasWasmHeader's 4-byte magic, but
+// what follows is not the same field read two ways: the Component Model
+// spec splits the core module's single u32 LE version into a u16 LE version
+// (bytes 4-5) and a u16 LE "layer" (bytes 6-7), fixed at 1 for a component
+// and -- because a core module's version 1 fits entirely in the low u16 --
+// always 0 for a core module. That is why hasWasmHeader's bytes 6-7 check
+// reads 0x00 0x00: it is reading a core module's zero layer, not asserting
+// anything about a byte the spec calls unused. See
+// https://github.com/WebAssembly/component-model/blob/main/design/mvp/Binary.md.
+//
+// The version field itself is deliberately NOT constrained to one value here:
+// it read 13 (0x0d 0x00) in a real componentize-py artifact
+// (tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm), and
+// the spec does not promise it will not move again.
+func hasComponentHeader(b []byte) bool {
+	if len(b) < 8 {
+		return false
+	}
+	return b[0] == 0x00 && b[1] == 0x61 && b[2] == 0x73 && b[3] == 0x6d &&
+		b[6] == 0x01 && b[7] == 0x00
+}
+
 // decodeULEB128 decodes an unsigned LEB128 value from b and returns the
 // decoded value and the number of bytes consumed.
 func decodeULEB128(b []byte) (uint32, int) {
@@ -368,10 +489,13 @@ func DetectLanguage(wasmBytes []byte) string {
 		return meta.Language
 	}
 
-	// 2. Check Component Model header (bytes 4-7 = 0x0d 0x00 0x01 0x00).
-	if len(wasmBytes) > 7 &&
-		wasmBytes[4] == 0x0d && wasmBytes[5] == 0x00 &&
-		wasmBytes[6] == 0x01 && wasmBytes[7] == 0x00 {
+	// 2. Check Component Model header. This used to hardcode the exact
+	// version bytes one observed componentize-py artifact happened to carry
+	// (0x0d 0x00, i.e. version 13) alongside the layer field, which is the
+	// only part the spec actually fixes -- see hasComponentHeader's comment
+	// (cleat#2936). A future componentize-py bumping its version would have
+	// silently stopped matching here.
+	if hasComponentHeader(wasmBytes) {
 		return "python"
 	}
 
@@ -547,6 +671,14 @@ func skipImportDesc(b []byte, offset, sectionEnd int) (int, error) {
 	return offset, nil
 }
 
+// readImportSection reads core-module section ID 2 as "import" -- true only
+// for a core module. At a Component Model binary's top level, section ID 2
+// means "core instance" instead, so this deliberately stays on hasWasmHeader
+// alone rather than also accepting hasComponentHeader (cleat#2936): widening
+// it would silently parse a component's core-instance bytes as import
+// module/field name pairs. Callers already treat a rejection here as "cannot
+// tell" (see the comment on skipImportDesc below), so a component binary
+// falls through safely without this function understanding it.
 func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 	if len(wasmBytes) < 8 || !hasWasmHeader(wasmBytes) {
 		return nil, fmt.Errorf("not a valid WASM binary")
@@ -633,6 +765,9 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 // readImportModuleNames extracts the module names from the import section
 // (section ID 2) of a WASM binary. It returns only the module names, skipping
 // the full descriptor parsing of each import.
+//
+// Deliberately core-module-only -- see readImportSection's comment above;
+// the same section-ID-2 ambiguity applies here (cleat#2936).
 func readImportModuleNames(wasmBytes []byte) ([]string, error) {
 	if len(wasmBytes) < 8 {
 		return nil, fmt.Errorf("not a valid WASM binary (too short)")

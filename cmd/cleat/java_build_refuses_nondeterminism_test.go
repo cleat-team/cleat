@@ -8,6 +8,13 @@ import (
 	"testing"
 )
 
+// The two absence-arms below call requireReachedStage(t, out, javaVetMarker); both
+// it and requireBuildStarted live in build_reached_the_stage_test.go, shared with
+// the Rust and AssemblyScript siblings. This file used to carry its own
+// requireTheCheckerRan -- written first, in cleat#3056, and generalised once the
+// siblings landed (cleat#3075). The rationale that used to sit here is on the shared
+// helper, which is now the one place a reader has to look.
+
 // TestJavaBuildRefusesNondeterminism is the Java half of what
 // rust_build_refuses_nondeterminism_test.go asserts for Rust, and its doc
 // comment carries the reasoning for the two-arm shape. The short version:
@@ -89,7 +96,14 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 			t.Fatalf("copied 0 files from %s -- the fixture is missing or empty, "+
 				"so neither arm below would be measuring the checker", src)
 		}
-		out, _ := exec.Command(cleatBinary, "build", "--target", "java", "-o", t.TempDir(), dst).CombinedOutput()
+		// The exit status is NOT discarded. A build that never started produces
+		// EMPTY output, and every absence-assertion below then holds for a reason
+		// with nothing behind it -- a failed measurement rather than a result. A
+		// NON-ZERO exit is fine: most of these fixtures have no TeaVM plugin, so
+		// the build fails on its own and the arms assert on the REASON in the
+		// output. See requireBuildStarted in build_reached_the_stage_test.go.
+		out, err := exec.Command(cleatBinary, "build", "--target", "java", "-o", t.TempDir(), dst).CombinedOutput()
+		requireBuildStarted(t, err)
 		return string(out)
 	}
 
@@ -120,6 +134,7 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 	// thing and appears nowhere in the pattern table.
 	t.Run("known limit escapes the checker, and says so out loud", func(t *testing.T) {
 		out := build(t, "known_limit_nio")
+		requireReachedStage(t, out, javaVetMarker)
 
 		if strings.Contains(out, "determinism check failed") || strings.Contains(out, "Error [J0") {
 			t.Errorf("the Java checker now CATCHES the java.nio fixture.\n\n"+
@@ -166,6 +181,7 @@ func TestJavaBuildRefusesNondeterminism(t *testing.T) {
 	// arm is the one that catches a resolver refusing something fine.
 	t.Run("pure_byte_array_stream is NOT refused", func(t *testing.T) {
 		out := build(t, "pure_byte_array_stream")
+		requireReachedStage(t, out, javaVetMarker)
 
 		if strings.Contains(out, "determinism check failed") || strings.Contains(out, "Error [J0") {
 			t.Errorf("the build refused a pure, in-memory byte stream.\n\noutput:\n%s", out)

@@ -35,6 +35,12 @@ type publishEventRequest struct {
 	// Decoding into a map[string]any here rewrote any number outside float64's
 	// exact range before PublishEvent was even called. cleat#1641.
 	Data json.RawMessage `json:"data"`
+	// Keys are the correlation-key slots from the event routing design's
+	// §3.1 envelope -- 0 to 3 ordinary strings, left to right into
+	// key1/key2/key3 (migrations.go's Version 6). cleat#2625, P1. Optional:
+	// omitted or empty is the "no keys" case every awaiter matched before
+	// this existed.
+	Keys []string `json:"keys,omitempty"`
 }
 
 type publishEventResponse struct {
@@ -111,7 +117,7 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 
 	// Dispatch through the core publish pipeline — stores the event,
 	// matches subscriptions, starts workflows, and signals awaiters.
-	matched, err := PublishEvent(r.Context(), p.db, p.logger, p.env, eventID, tid, req.EventType, req.Data)
+	matched, err := PublishEvent(r.Context(), p.db, p.logger, p.env, eventID, tid, req.EventType, req.Data, req.Keys)
 	if err != nil {
 		p.logger.Error("event-triggers: publish event", "error", err)
 	}
@@ -334,15 +340,16 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 
 	// Look up the event to verify it exists and is eligible for retry.
 	var (
-		currentStatus string
-		eventType     string
-		eventDataRaw  []byte
+		currentStatus    string
+		eventType        string
+		eventDataRaw     []byte
+		key1, key2, key3 string
 	)
 	err = p.db.QueryRow(r.Context(), `
-		SELECT COALESCE(status, 'pending'), event_type, event_data
+		SELECT COALESCE(status, 'pending'), event_type, event_data, key1, key2, key3
 		FROM ingested_events
 		WHERE id = $1 AND tenant_id = $2
-	`, eventID, tid).Scan(&currentStatus, &eventType, &eventDataRaw)
+	`, eventID, tid).Scan(&currentStatus, &eventType, &eventDataRaw, &key1, &key2, &key3)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "event not found")
 		return
@@ -362,7 +369,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 	// Reset processing state.
 	_, err = p.db.Exec(r.Context(), `
 		UPDATE ingested_events
-		SET processed = false, status = 'pending', retry_count = 0, error_msg = NULL, last_retry_at = NULL
+		SET dispatch_processed = false, status = 'pending', retry_count = 0, error_msg = NULL, last_retry_at = NULL
 		WHERE id = $1 AND tenant_id = $2
 	`, eventID, tid)
 	if err != nil {
@@ -393,14 +400,14 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 
 	// Also signal any awaiting workflows so they wake up promptly.
 	if len(eventDataRaw) > 0 {
-		signalAwaiters(r.Context(), p.db, p.logger, p.env, tid, eventType, string(eventDataRaw))
+		signalAwaiters(r.Context(), p.db, p.logger, p.env, tid, eventType, string(eventDataRaw), key1, key2, key3)
 	}
 
 	if matched > 0 {
 		// Mark as completed since at least one workflow was started.
 		p.db.Exec(r.Context(), `
 			UPDATE ingested_events
-			SET processed = true, status = 'completed', error_msg = NULL
+			SET dispatch_processed = true, status = 'completed', error_msg = NULL
 			WHERE id = $1
 		`, eventID)
 	}

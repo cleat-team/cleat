@@ -476,13 +476,39 @@ func (g *GUID) Scan(src any) error {
 	return g.UUID.Scan(swapped)
 }
 
+// NullGUID is GUID's nullable counterpart, for a UUID-valued column that may
+// be NULL (cleat#2292 item 6). Without it, a *uuid.NullUUID destination
+// passed to ScanRow would fall through untouched -- correct on PostgreSQL and
+// MySQL, wrong on SQL Server, which is exactly the silent-corruption shape
+// cleat#1137 is about, one type over.
+type NullGUID struct {
+	uuid.NullUUID
+}
+
+func (g *NullGUID) Scan(src any) error {
+	b, ok := src.([]byte)
+	if !ok || len(b) != 16 {
+		// nil (SQL NULL), text forms, and PostgreSQL/MySQL's own
+		// representations are already correct -- uuid.NullUUID.Scan handles
+		// nil itself (Valid=false), same as GUID defers to uuid.UUID.Scan.
+		return g.NullUUID.Scan(src)
+	}
+	swapped := make([]byte, 16)
+	copy(swapped, b)
+	swapped[0], swapped[1], swapped[2], swapped[3] = b[3], b[2], b[1], b[0]
+	swapped[4], swapped[5] = b[5], b[4]
+	swapped[6], swapped[7] = b[7], b[6]
+	return g.NullUUID.Scan(swapped)
+}
+
 // ScanRow scans a database row, correcting SQL Server's UNIQUEIDENTIFIER byte
-// order for any destination that is a *uuid.UUID.
+// order for any destination that is a *uuid.UUID or *uuid.NullUUID.
 //
 // cleat#1137: SQL Server returns UNIQUEIDENTIFIER in mixed-endian byte order.
 // uuid.UUID's own Scan accepts those 16 bytes WITHOUT ERROR and yields a
 // different uuid — so every plugin reading an id from SQL Server got the wrong
-// one, silently, and nothing failed. GUID (above) exists to swap them.
+// one, silently, and nothing failed. GUID (above) exists to swap them; NullGUID
+// is the same fix for a column that may be NULL.
 //
 // WHY A WRAPPER RATHER THAN 85 EDITS. The type checker found 85 Scan arguments
 // across 15 plugins resolving to *uuid.UUID. Fixing each by hand means 85
@@ -497,36 +523,54 @@ func (g *GUID) Scan(src any) error {
 // and the byte-order knowledge lives in one tested place instead of being
 // restated per site.
 //
-// Destinations that are not *uuid.UUID are passed through untouched, so this is
+// Destinations that are neither are passed through untouched, so this is
 // safe to apply to a whole Scan call rather than to selected arguments — which
 // matters, because deciding per-argument is what a reader gets wrong.
 func ScanRow(s interface{ Scan(...any) error }, dest ...any) error {
 	// Substitute in place, remembering which slots to copy back. The common
 	// case has no uuid at all and allocates nothing.
-	var swapped map[int]*GUID
+	var swappedUUID map[int]*GUID
+	var swappedNullUUID map[int]*NullGUID
 	args := dest
+	copied := false
 	for i, d := range dest {
-		u, ok := d.(*uuid.UUID)
-		if !ok {
-			continue
+		switch d.(type) {
+		case *uuid.UUID:
+			if !copied {
+				args = make([]any, len(dest))
+				copy(args, dest)
+				copied = true
+			}
+			if swappedUUID == nil {
+				swappedUUID = make(map[int]*GUID, len(dest))
+			}
+			g := &GUID{}
+			swappedUUID[i] = g
+			args[i] = g
+		case *uuid.NullUUID:
+			if !copied {
+				args = make([]any, len(dest))
+				copy(args, dest)
+				copied = true
+			}
+			if swappedNullUUID == nil {
+				swappedNullUUID = make(map[int]*NullGUID, len(dest))
+			}
+			g := &NullGUID{}
+			swappedNullUUID[i] = g
+			args[i] = g
 		}
-		if swapped == nil {
-			swapped = make(map[int]*GUID, len(dest))
-			args = make([]any, len(dest))
-			copy(args, dest)
-		}
-		g := &GUID{}
-		swapped[i] = g
-		args[i] = g
-		_ = u
 	}
 	if err := s.Scan(args...); err != nil {
 		return err
 	}
 	// Copy back only on success: a failed Scan leaves destinations untouched
 	// under database/sql, and this must not differ from that.
-	for i, g := range swapped {
+	for i, g := range swappedUUID {
 		*(dest[i].(*uuid.UUID)) = g.UUID
+	}
+	for i, g := range swappedNullUUID {
+		*(dest[i].(*uuid.NullUUID)) = g.NullUUID
 	}
 	return nil
 }

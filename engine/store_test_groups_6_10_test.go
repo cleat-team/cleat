@@ -603,32 +603,321 @@ func TestReapStaleInstances(t *testing.T) {
 				t.Fatal("StartNewRun returned empty runID")
 			}
 
-			// Claim the workflow to transition it to "running".
-			claimed, err := store.ClaimWorkflow(ctx, "reap-worker")
-			if err != nil {
-				t.Fatalf("ClaimWorkflow: %v", err)
+			// Claim THIS run to transition it to "running" -- draining claims by
+			// distinct worker id until it appears, for the reason the sibling
+			// below records: setupTestData leaves its own "ready" row
+			// (setup-ready-1) unclaimed and ClaimWorkflow takes no task-queue
+			// filter, so a single claim is not guaranteed to return this run.
+			// A single claim used to stand here; it could claim setupTestData's
+			// row instead, and the outcome assertions below would then be about
+			// a row this test never started.
+			var claimed *WorkflowInstance
+			workerNames := []string{"reap-worker-a", "reap-worker-b", "reap-worker-c"}
+			claims := map[string]*WorkflowInstance{}
+			for _, w := range workerNames {
+				c, err := store.ClaimWorkflow(ctx, w)
+				if err != nil {
+					t.Fatalf("ClaimWorkflow(%s): %v", w, err)
+				}
+				if c == nil {
+					t.Fatalf("ClaimWorkflow(%s) returned nil -- expected a ready row for each of %v", w, workerNames)
+				}
+				claims[c.ID] = c
+				if c.ID == runID {
+					claimed = c
+					break
+				}
 			}
 			if claimed == nil {
-				t.Fatal("ClaimWorkflow returned nil")
+				t.Fatalf("this test's run %s was not claimed by any of %v; claimed IDs: %v",
+					runID, workerNames, claimedIDsFromMap(claims))
 			}
 
-			// Reap with a 1-nanosecond timeout. The just-claimed workflow's
-			// heartbeat_at should already be stale at this granularity.
-			count, err := store.ReapStaleInstances(ctx, time.Nanosecond, 0)
+			// PRECONDITION: the run is in the state the reaper acts on, asserted
+			// rather than assumed. Without it the outcome assertions below could
+			// hold for a store that never moved the row.
+			before, err := store.GetWorkflowByID(ctx, runID)
 			if err != nil {
-				t.Fatalf("ReapStaleInstances(1ns): %v", err)
+				t.Fatalf("GetWorkflowByID(before): %v", err)
 			}
-			if count < 0 {
-				t.Fatalf("ReapStaleInstances(1ns) returned negative count: %d", count)
+			if before.Status != "running" {
+				t.Fatalf("run %s is %q before the reap, want \"running\" -- claiming it is what puts it there",
+					runID, before.Status)
+			}
+			if before.AssignedTo != claimed.AssignedTo {
+				t.Fatalf("run %s is assigned to %q before the reap, want %q (from ClaimWorkflow)",
+					runID, before.AssignedTo, claimed.AssignedTo)
 			}
 
-			// Reap with a zero timeout (reclaim any running workflow).
-			count, err = store.ReapStaleInstances(ctx, 0, 0)
+			// Reap with a NEGATIVE window, so the row is stale by construction
+			// rather than by luck.
+			//
+			// This passed time.Nanosecond until cleat#3032, and on MSSQL that is
+			// a ZERO: Duration.Milliseconds() truncates, so -1ns became 0 and
+			// the threshold became exactly SYSUTCDATETIME(). ClaimWorkflow
+			// stamps heartbeat_at = SYSUTCDATETIME() from the same server clock,
+			// so the row counted as stale only if that clock had ticked between
+			// the two statements -- and it advances in ~4ms steps. That is the
+			// ~2-in-13 failure observed on CI, and it is the identical value
+			// cleat#1448 had already taken out of the sibling in this package;
+			// reapEverythingNow's comment has the measurements.
+			count, err := store.ReapStaleInstances(ctx, reapEverythingNow, 0)
 			if err != nil {
-				t.Fatalf("ReapStaleInstances(0): %v", err)
+				t.Fatalf("ReapStaleInstances(%v): %v", reapEverythingNow, err)
 			}
-			if count < 0 {
-				t.Fatalf("ReapStaleInstances(0) returned negative count: %d", count)
+			// count < 1 is what a reaper that reclaims NOTHING fails: this test's
+			// row is stale by construction, so a working reap takes at least it.
+			// The assertion that stood here was `count < 0`, which no implementation
+			// can fail -- rows-affected is never negative -- so the test named for
+			// reaping asserted nothing about it (cleat#3036).
+			if count < 1 {
+				t.Fatalf("ReapStaleInstances(%v) reclaimed %d rows; this test's run %s is stale by construction, so a working reap reclaims at least it",
+					reapEverythingNow, count, runID)
+			}
+
+			// THE OUTCOME, asserted on the ROW rather than the count: count >= 1 is
+			// also satisfied by a reaper that reclaimed some other row.
+			after, err := store.GetWorkflowByID(ctx, runID)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID(after the reap): %v", err)
+			}
+			if after.Status != "ready" {
+				t.Fatalf("run %s is %q after the reap, want \"ready\" -- a reclaimed row goes back to the ready queue (its terminal status is not decided, so not \"terminating\")",
+					runID, after.Status)
+			}
+			if after.AssignedTo != "" {
+				t.Fatalf("run %s still reports assigned_to=%q after the reap; reclaiming it releases the lease",
+					runID, after.AssignedTo)
+			}
+			if after.Generation != before.Generation+1 {
+				t.Fatalf("run %s generation = %d after the reap, want %d; the reap fences the previous claim by incrementing it",
+					runID, after.Generation, before.Generation+1)
+			}
+			if after.ReclaimCount != before.ReclaimCount+1 {
+				t.Fatalf("run %s reclaim_count = %d after the reap, want %d",
+					runID, after.ReclaimCount, before.ReclaimCount+1)
+			}
+
+			// THE ZERO WINDOW, asserted as its own subject rather than as a
+			// second helping of the first call's.
+			//
+			// This call used to follow the reap directly and assert the row was
+			// UNTOUCHED, on the reading that the window alone must not re-take a
+			// row the first call had released. That assertion cannot fail first:
+			// the reclaim leaves the row excluded by two independent predicates
+			// -- status is "ready", and heartbeat_at is NULL (and NULL fails
+			// `heartbeat_at < now() - interval` on every dialect) -- so removing
+			// either one alone still passes, and a mutation that removes both
+			// fails the status assertion above first. Measured: dropping
+			// `heartbeat_at = NULL` from the UPDATE left this test green.
+			//
+			// What the second call tests is that a row claimed SINCE the last
+			// reap is reclaimable too -- the reap is not one-shot. It must use
+			// the same negative window as the first call, and NOT a zero one:
+			// on MSSQL a zero window is the coin flip cleat#3032 fixed, because
+			// Duration.Milliseconds() truncates and `now() - 0` is
+			// SYSUTCDATETIME(), the same clock the claim stamped -- so a row
+			// claimed milliseconds ago is reclaimed only if that clock ticked.
+			// A first version of this call asserted exactly that and failed on
+			// the SQL Server CI job at ~2-in-13, which is the identical value
+			// the sibling above records for the same mistake.
+			reclaimedAgain := false
+			for _, w := range workerNames {
+				c, err := store.ClaimWorkflow(ctx, w)
+				if err != nil {
+					t.Fatalf("ClaimWorkflow(%s) after the reap: %v", w, err)
+				}
+				if c == nil {
+					break
+				}
+				if c.ID == runID {
+					reclaimedAgain = true
+					break
+				}
+			}
+			if !reclaimedAgain {
+				t.Fatalf("run %s could not be claimed again after being reclaimed; a reclaimed row must be runnable work", runID)
+			}
+
+			count, err = store.ReapStaleInstances(ctx, reapEverythingNow, 0)
+			if err != nil {
+				t.Fatalf("ReapStaleInstances(%v) after re-claiming: %v", reapEverythingNow, err)
+			}
+			if count < 1 {
+				t.Fatalf("ReapStaleInstances(%v) reclaimed %d rows; this test's run was claimed again since the first reap and is stale by construction, so a second reap takes it",
+					reapEverythingNow, count)
+			}
+			again, err := store.GetWorkflowByID(ctx, runID)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID(after the second reap): %v", err)
+			}
+			if again.ReclaimCount != after.ReclaimCount+1 {
+				t.Fatalf("run %s reclaim_count = %d after the second reap, want %d; the row was claimed again since the first reap, so the reap must take it a second time",
+					runID, again.ReclaimCount, after.ReclaimCount+1)
+			}
+			if again.Status != "ready" {
+				t.Fatalf("run %s is %q after the second reap, want \"ready\"", runID, again.Status)
+			}
+		})
+	}
+}
+
+// claimedIDsFromMap is claimedIDs' sibling: a diagnostic helper for
+// TestListStaleHoldersAndReapExcept's failure messages, over a map rather
+// than the slice claimedIDs (cross_tenant_fixtures_test.go) already covers.
+func claimedIDsFromMap(claims map[string]*WorkflowInstance) []string {
+	ids := make([]string, 0, len(claims))
+	for id := range claims {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// TestListStaleHoldersAndReapExcept is cleat#2196's veto-channel foundation:
+// a holder has to be nameable before it can be asked, and excluding it has
+// to actually protect its row. All three dialects must implement
+// StaleHolderReaper -- t.Fatal, not t.Skip, if one doesn't, because a
+// silently-missing dialect here is exactly the "a skip that hides a gap"
+// shape this repo's CLAUDE.md warns about, not a genuine environmental
+// precondition.
+func TestListStaleHoldersAndReapExcept(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+
+			reaper, ok := store.(StaleHolderReaper)
+			if !ok {
+				t.Fatalf("%s does not implement StaleHolderReaper", backend.Name())
+			}
+			ctx := context.Background()
+
+			runA, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "stale-holders-a", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun(A): %v", err)
+			}
+			runB, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "stale-holders-b", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun(B): %v", err)
+			}
+
+			// setupTestData leaves its own "ready" row (setup-ready-1)
+			// unclaimed, competing with A and B for whichever worker claims
+			// next -- ClaimWorkflow takes no task-queue filter, so it is not
+			// safe to assume the Nth claim returns the Nth StartNewRun. Drain
+			// claims, by distinct worker id, until both A and B are found
+			// rather than assuming an order; leave setupTestData's own row
+			// claimed by whichever worker got it (ignored, not asserted on).
+			claims := map[string]*WorkflowInstance{}
+			workerNames := []string{"veto-worker-a", "veto-worker-b", "veto-worker-c"}
+			for _, w := range workerNames {
+				claimed, err := store.ClaimWorkflow(ctx, w)
+				if err != nil {
+					t.Fatalf("ClaimWorkflow(%s): %v", w, err)
+				}
+				if claimed == nil {
+					t.Fatalf("ClaimWorkflow(%s) returned nil -- expected a ready row available for each of %v", w, workerNames)
+				}
+				claims[claimed.ID] = claimed
+			}
+			claimedA, ok := claims[runA]
+			if !ok {
+				t.Fatalf("run A (%s) was not claimed by any of %v; claimed IDs: %v", runA, workerNames, claimedIDsFromMap(claims))
+			}
+			claimedB, ok := claims[runB]
+			if !ok {
+				t.Fatalf("run B (%s) was not claimed by any of %v; claimed IDs: %v", runB, workerNames, claimedIDsFromMap(claims))
+			}
+
+			// Both are stale by construction: reapEverythingNow, the same
+			// negative window TestReapStaleInstances uses above, which is what
+			// makes this independent of whether the server's clock ticked
+			// (cleat#3032). ListStaleHolders must name BOTH, with the holder and
+			// generation ClaimWorkflow actually recorded -- not just a count.
+			holders, err := reaper.ListStaleHolders(ctx, reapEverythingNow, 0)
+			if err != nil {
+				t.Fatalf("ListStaleHolders: %v", err)
+			}
+			byID := map[string]StaleHold{}
+			for _, h := range holders {
+				byID[h.Key.WorkflowID] = h
+			}
+			hA, ok := byID[runA]
+			if !ok {
+				t.Fatalf("ListStaleHolders did not report run A (%s); got %+v", runA, holders)
+			}
+			if hA.AssignedTo != claimedA.AssignedTo {
+				t.Fatalf("run A's AssignedTo = %q, want %q (from ClaimWorkflow)", hA.AssignedTo, claimedA.AssignedTo)
+			}
+			if hA.Key.Generation != claimedA.Generation {
+				t.Fatalf("run A's Generation = %d, want %d (from ClaimWorkflow)", hA.Key.Generation, claimedA.Generation)
+			}
+			hB, ok := byID[runB]
+			if !ok {
+				t.Fatalf("ListStaleHolders did not report run B (%s); got %+v", runB, holders)
+			}
+			if hB.AssignedTo != claimedB.AssignedTo {
+				t.Fatalf("run B's AssignedTo = %q, want %q (from ClaimWorkflow)", hB.AssignedTo, claimedB.AssignedTo)
+			}
+			if hB.Key.Generation != claimedB.Generation {
+				t.Fatalf("run B's Generation = %d, want %d (from ClaimWorkflow)", hB.Key.Generation, claimedB.Generation)
+			}
+
+			// Exclude A's real generation. setupTestData leaves its OWN
+			// already-running row (setup-running-1, claimed by "test-worker"
+			// before this test ever starts) stale too, and one of
+			// workerNames above may have also drained setup-ready-1 into
+			// running -- so the total reclaimed here is not pinned to a
+			// specific number; what matters is which ONE row did not move,
+			// checked below by status, not by count.
+			excluded, err := reaper.ReapStaleInstancesExcept(ctx, reapEverythingNow, 0, []GenerationKey{
+				{WorkflowID: runA, Generation: hA.Key.Generation},
+			})
+			if err != nil {
+				t.Fatalf("ReapStaleInstancesExcept(exclude A): %v", err)
+			}
+			if excluded < 1 {
+				t.Fatalf("ReapStaleInstancesExcept(exclude A) reclaimed %d, want at least 1 (B, and possibly other stale fixture rows)", excluded)
+			}
+
+			afterA, err := store.GetWorkflowByID(ctx, runA)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID(A) after excluded reap: %v", err)
+			}
+			if afterA.Status != "running" {
+				t.Fatalf("run A's status = %q after being excluded from reclaim, want %q", afterA.Status, "running")
+			}
+			afterB, err := store.GetWorkflowByID(ctx, runB)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID(B) after excluded reap: %v", err)
+			}
+			if afterB.Status == "running" {
+				t.Fatalf("run B's status is still %q; it was not in the exclude list and should have been reclaimed", afterB.Status)
+			}
+
+			// A stale-but-WRONG-generation exclude entry for A must not protect
+			// it: the generation this run actually holds has not changed, so an
+			// exclude naming a generation it never had is a no-op, and A is
+			// reclaimed on this call exactly as an empty exclude would reclaim
+			// it -- confirming empty-exclude parity with plain ReapStaleInstances
+			// at the same time.
+			stillExcluded, err := reaper.ReapStaleInstancesExcept(ctx, reapEverythingNow, 0, []GenerationKey{
+				{WorkflowID: runA, Generation: hA.Key.Generation + 999},
+			})
+			if err != nil {
+				t.Fatalf("ReapStaleInstancesExcept(wrong generation): %v", err)
+			}
+			if stillExcluded < 1 {
+				t.Fatalf("ReapStaleInstancesExcept(wrong generation for A) reclaimed %d, want at least 1 (A, since the exclude entry's generation never matched)", stillExcluded)
+			}
+			afterA2, err := store.GetWorkflowByID(ctx, runA)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID(A) after second reap: %v", err)
+			}
+			if afterA2.Status == "running" {
+				t.Fatal("run A is still running after a reap whose exclude entry named a generation it never held")
 			}
 		})
 	}

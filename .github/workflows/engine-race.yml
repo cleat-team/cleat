@@ -119,7 +119,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: engine-race-report-${{ github.run_id }}
+          name: engine-race-report-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-report.json
           retention-days: 30
 

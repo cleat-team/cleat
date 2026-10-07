@@ -1,17 +1,15 @@
 package engine
 
 // Regression coverage for Finding S3: admin.drop_tenant
-// (migrations/postgres/001_schema.sql, fixed by
-// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql) dropped a
-// tenant's plugin schema and role and two admin.* bookkeeping rows, but
-// never deleted a single row of the tenant's actual workflow data.
+// (migrations/postgres/001_schema.sql, originally fixed by
+// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql, now folded
+// into the cleat#2059 baseline) dropped a tenant's plugin schema and role
+// and two admin.* bookkeeping rows, but never deleted a single row of the
+// tenant's actual workflow data.
 //
-// This file applies 032 directly via os.ReadFile + Exec, the same approach
-// engine/rls_gap_concurrency_and_update_requests_test.go uses for 031:
-// engine/testutil's postgresSchemaFiles() is an explicit list (not a
-// directory glob) owned by another stream this round per
-// WORKSTREAM.md's shared-files table, so a migration added here is applied locally
-// rather than by editing that list.
+// apply032DropTenantMigration below no longer reads any file: it asserts the
+// current admin.drop_tenant is installed, which is what the call sites
+// actually need. See its own comment for why it is still called that.
 //
 // CLAUDE.md's standing requirement: prove the regression test can fail, and
 // read why. TestDropTenant_OldVersionLeavesDataBehind below calls the
@@ -120,10 +118,40 @@ func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 //	grep -n 'CREATE OR REPLACE FUNCTION' migrations/postgres/001_schema.sql
 //
 // and check each name for later definitions before widening this again.
-func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
+// The return value is a cleanup the caller must `defer` itself, immediately
+// after calling this -- NOT t.Cleanup. Every call site already does
+// `defer adminDB.Close()` before this is called, and that is a plain defer
+// inside the test's own body: it runs as part of the test function
+// RETURNING, before the testing package ever gets to a t.Cleanup callback,
+// whatever order the two were registered in. A t.Cleanup here tried to
+// DROP FUNCTION on a connection the test's own defer had already closed --
+// "sql: database is closed" -- which only a real database run caught,
+// since the mock-free unit tests in this package never exercise it. `defer
+// resetToOriginal001DropTenant(t, adminDB)()`, placed AFTER
+// `defer adminDB.Close()`, runs before it by ordinary LIFO defer order.
+func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) func() {
 	t.Helper()
 	if _, err := db.Exec(pre032DropTenant); err != nil {
 		t.Fatalf("reinstall the pre-032 admin.drop_tenant: %v", err)
+	}
+	// cleat#2449. This runs against a database SetupFullSchema has ALREADY
+	// migrated to the current, two-argument admin.drop_tenant -- so the
+	// CREATE above does not replace anything, it adds a second overload.
+	// Nothing else in this package ever dropped it: cleat-review found this
+	// is the actual, live, in-repo origin of the superseded overload
+	// filed as #2449 (this session's own earlier guess -- a manual
+	// statement run outside the migration runner -- was wrong; every run
+	// of TestDropTenant_OldVersionLeavesDataBehind and its two siblings
+	// against a persistent Postgres database reproduces it unconditionally,
+	// with no manual step at all). Without this cleanup, `cleatctl check-db`
+	// (or TestTheSuiteLeavesTheMigratedSchemaIntact's overload check, added
+	// alongside this) reports EVERY local engine test database as carrying
+	// an unpinned, superseded SECURITY DEFINER function the moment any of
+	// these three tests has ever run against it.
+	cleanup := func() {
+		if _, err := db.Exec(`DROP FUNCTION IF EXISTS admin.drop_tenant(uuid)`); err != nil {
+			t.Errorf("cleanup: drop the pre-032 admin.drop_tenant this helper installed: %v", err)
+		}
 	}
 	// The REVOKE is not optional, and leaving it out is a real hazard rather
 	// than an untidy fixture. PostgreSQL's default for a NEW function is
@@ -141,6 +169,7 @@ func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
 	if _, err := db.Exec(`REVOKE EXECUTE ON FUNCTION admin.drop_tenant(uuid) FROM PUBLIC`); err != nil {
 		t.Fatalf("revoke PUBLIC execute on the reinstalled pre-032 admin.drop_tenant: %v", err)
 	}
+	return cleanup
 }
 
 // Moved BELOW the function it belongs to, deliberately: inserting a declaration
@@ -454,7 +483,7 @@ func TestDropTenant_OldVersionLeavesDataBehind(t *testing.T) {
 	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
 	defer adminDB.Close()
 	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
-	resetToOriginal001DropTenant(t, adminDB) // guarantee the pre-032 function, see helper doc
+	defer resetToOriginal001DropTenant(t, adminDB)() // guarantee the pre-032 function, see helper doc
 	testutil.CleanupPostgresTestData(t, adminDB)
 	defer testutil.CleanupPostgresTestData(t, adminDB)
 
@@ -512,7 +541,7 @@ func TestDropTenant_APIKeyFailureRollsBackEverything(t *testing.T) {
 	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
 	defer adminDB.Close()
 	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
-	resetToOriginal001DropTenant(t, adminDB)
+	defer resetToOriginal001DropTenant(t, adminDB)()
 	testutil.CleanupPostgresTestData(t, adminDB)
 	defer testutil.CleanupPostgresTestData(t, adminDB)
 
@@ -556,7 +585,7 @@ func TestDropTenant_RoleDropFailureRollsBackEverything(t *testing.T) {
 	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
 	defer adminDB.Close()
 	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
-	resetToOriginal001DropTenant(t, adminDB)
+	defer resetToOriginal001DropTenant(t, adminDB)()
 	testutil.CleanupPostgresTestData(t, adminDB)
 	defer testutil.CleanupPostgresTestData(t, adminDB)
 

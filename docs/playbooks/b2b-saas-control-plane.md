@@ -2,8 +2,12 @@
 
 **Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
 2026-09-25 against `develop` at `656aced4` (cleat#2052) — see
-[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
-to end.
+[What was verified](#what-was-verified) at the end for what changed. **As of cleat#2716
+(2026-09-30), this scenario has been built end to end**, at `examples/b2b-saas-control-plane/` —
+signup, provisioning workflow, audit trail and trial-expiry sweep, run for real against a live
+worker by `scripts/run-b2b-saas-control-plane-scenario.sh` and CI's "B2B SaaS control plane
+scenario" job. See that directory's README for what it covers and what it still asserts rather
+than measures.
 
 **Who this is for:** you sell software to businesses. Each customer gets their own login, their own
 data, their own settings, often their own branded URL, and an auditor will eventually ask you to
@@ -31,9 +35,15 @@ A B2B SaaS control plane is a remarkably consistent shopping list:
 Each is a vendor relationship, an SDK, a failure mode, a bill, and a place where tenancy has to be
 re-modelled from scratch — because none of them knows what a tenant is in your system.
 
-**The cleat version is one binary and one Postgres**, and the reason is not that cleat reimplements
-those products well. It is that **cleat already had to model a tenant to do its own job**, so
-everything hung off that model inherits tenancy for free.
+**The cleat version is one platform and one Postgres**, and the reason is not that cleat
+reimplements those products well. It is that **cleat already had to model a tenant to do its own
+job**, so everything hung off that model inherits tenancy for free.
+
+**That is a shared worker pool and one database — a pool of stateless processes, scaled for
+throughput and never per tenant.** Tenant count and process count are independent: isolation comes
+from row-level security in the database, never from giving a tenant its own process. (An earlier
+version of this paragraph said "one binary", which read as a literal single-process requirement and
+sent at least one reader chasing one that does not exist — cleat#2670.)
 
 ---
 
@@ -70,9 +80,9 @@ everything hung off that model inherits tenancy for free.
 | Business processes | your workflows — or your **tenants' own**, via `POST /api/definitions`. See *Tenant-supplied steps* below | — |
 | Schedules | `scheduler` | routes + background loop |
 | Settings and metadata | `kvstore` (versioned JSONB, optimistic concurrency) | routes |
-| Per-tenant secrets | the tenant secret store (migration 081) — read by the host and **never handed to the guest**; `cleatctl set-secret`, rotation via `reseal-secrets` | host + admin |
+| Per-tenant secrets | the tenant secret store (`tenant_secrets`, `migrations/postgres/001_schema.sql`) — read by the host and **never handed to the guest**; `cleatctl set-secret`, rotation via `reseal-secrets` | host + admin |
 | Hostname to tenant | `auth/host_binding.go` (cleat#1568) | edge middleware |
-| Grouping a customer's tenants | orgs (cleat#1898, `091_an_org_groups_a_customers_tenants.sql`) | schema |
+| Grouping a customer's tenants | orgs (cleat#1898, `admin.orgs`, `migrations/postgres/001_schema.sql`) | schema |
 | Files and attachments | `blobstore` (S3-backed) | host functions |
 | Notifications | `email`, `slacknotify`, `notifications` | host functions |
 
@@ -167,7 +177,8 @@ due-schedule read go through — so a single line stops work and cron together. 
 side effect of the per-tenant claim: before it, the claim was one widened query inside a
 `SECURITY DEFINER` function and there was nowhere central to put this.
 
-`admin.tenants.suspended` had been in the schema since migration 001 with **no Go code reading it**.
+`admin.tenants.suspended` had been in the schema since the earliest migration (now generated into
+`migrations/postgres/001_schema.sql`) with **no Go code reading it**.
 A column named `suspended` that does nothing is worse than an absent one — the first operator to
 reach for it in an incident sets it, sees nothing happen, and has spent the minutes that mattered
 finding that out.
@@ -316,16 +327,17 @@ thing you have to route through a workflow for the history to answer it.
 
 **Two items this list used to carry have shipped, and the issue that asked for them to be added here
 was overtaken by the same thing** — the quota admin surface (cleat#2046, now `cleatctl quota`) and
-the audit export (cleat#2047, now `cleatctl audit export`) are in the assembly table above, not here.
+the audit export (cleat#2047, now `cleatctl audit export`) have **shipped** and are in the assembly
+table above, not here.
 Re-check a "still to build" list against the tree before acting on it; this one drifted in the
 direction that costs you work you did not have to do.
 
-1. **A terminator, if a customer needs SAML** — but **not** the issuer support. Generic OIDC shipped
-   in cleat#1582 (`providerOIDC`), so a customer's SAML proxy terminates SAML itself and presents
-   OIDC to cleat, with no per-vendor code. cleat does not implement SAML by decision, not by omission
+1. **A terminator, if a customer needs SAML** — but **not** the issuer support. Generic OIDC **shipped**
+   in cleat#1582 (`providerOIDC`), so a customer's SAML proxy terminates SAML itself and presents OIDC
+   to cleat, with no per-vendor code. cleat does not implement SAML by decision, not by omission
    — [`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md). **SCIM remains
    genuinely absent**, deferred rather than declined, and is still yours to build or buy.
-2. **Per-tenant TLS**, if tenants get their own domains. The host-to-tenant *binding* is shipped
+2. **Per-tenant TLS**, if tenants get their own domains. The host-to-tenant *binding* is **shipped**
    (`auth/host_binding.go`, cleat#1568); this is the certificate and its renewal, not the mapping.
 3. **A user-level authorization model.** `SessionInfo` carries `TenantID`, `SessionID` and
    `UserEmail` (`SessionInfo`, `plugins/oauthprovider/middleware.go`), so a principal below the tenant
@@ -392,3 +404,12 @@ tree rather than taken from the issue:
 
 Line citations were replaced with symbol names throughout, per the precedent
 `docs/reference/workflow-lifecycle.md` set — several had drifted.
+
+**Built end to end, 2026-09-30 (cleat#2534/#2681/#2716).** The top-of-page status line said
+"nothing here has been built end to end" from this page's first draft through cleat#2716's own
+review; it landed the scenario the line was denying. `examples/b2b-saas-control-plane/` runs
+signup through a real HTTP backend, a durable provisioning workflow started **as the tenant it
+provisions** (not the operator — see that directory's `provision.go` for why that distinction
+matters for the audit trail the workflow writes), and the background trial-expiry sweep, all
+against a live worker; `scripts/run-b2b-saas-control-plane-scenario.sh` and the "B2B SaaS control
+plane scenario" CI job are the falsifiable version of that claim, not this sentence.

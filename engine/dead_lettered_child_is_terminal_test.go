@@ -88,7 +88,7 @@ func TestADeadLetteredChildIsReportedToItsParent(t *testing.T) {
 			}
 
 			const reason = "retries exhausted"
-			if err := store.MoveToDeadLetterQueue(ctx, childID, "w-dlq", gen, reason, "", ""); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, childID, "w-dlq", gen, reason, "", "", nil); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 

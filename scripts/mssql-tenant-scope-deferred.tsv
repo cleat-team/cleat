@@ -1,0 +1,38 @@
+engine/concurrency_key_holder.go	GetConcurrencyKeyHolder	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	CountActiveInstances	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	GetRoutingRules	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	GetWASMLength	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	GetWorkflowDef	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	GetWorkflowTag	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	GetWorkflowTags	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	ListWorkflowDefs	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	ListWorkflows	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	LoadDAGSpec	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	LoadWASM	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	LoadWorkflowConfig	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	MarkVersionDeprecated	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	PurgeWorkflowDef	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	RemoveRoutingRule	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	RemoveWorkflowTag	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	ResolveLatestVersion	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	ResolveVersionByTag	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	SetRoutingRule	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	SetWorkflowTag	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_deployment.go	ValidateVersion	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_events.go	CountEventHistory	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_events.go	IsHistorySwept	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_events.go	LoadEventHistory	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_events.go	LoadEventHistoryPaginated	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_events.go	StreamEventHistory	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_lifecycle.go	CountRunnableWorkflows	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_lifecycle.go	RetryWorkflow	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_lifecycle.go	childrenClosedByTerminate	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_operations.go	GetQueryState	deferred: sequenced behind WS-3's cleat#2751 (open PR touching this file); convert after it merges. cleat#2210.
+engine/mssql_operations.go	ListQueryState	deferred: sequenced behind WS-3's cleat#2751 (open PR touching this file); convert after it merges. cleat#2210.
+engine/mssql_operations.go	QueueDepth	deferred: sequenced behind WS-3's cleat#2751 (open PR touching this file); convert after it merges. cleat#2210.
+engine/mssql_tenant_settings.go	GetTenantSettings	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/run_limits.go	GetRunLimits	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/stream_chunk_tail.go	LoadStreamChunksAfter	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/terminal_run.go	successorOfRun	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/workflow_list_query.go	CountWorkflows	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
+engine/mssql_schedules.go	deleteWorkflowsBatchOnce	deferred: its own comment documents a deliberate no-transaction design (RCSI non-blocking read) tied to cleat#2060/#2139's carefully-tuned lock-escalation-avoidance work; converting to beginTxWithContext needs dedicated empirical verification against TestMSSQLRetentionSweepsCauseNoLockEscalation before landing, not a mechanical conversion alongside 23 unrelated CRUD methods. cleat#2210.

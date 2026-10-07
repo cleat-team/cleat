@@ -19,7 +19,7 @@ original defect survived.
 from cleat_sdk import HostCalls, cleat_entry
 
 
-@cleat_entry
+@cleat_entry("cron_workflow")
 def cron_workflow(h: HostCalls, workflow_name: str) -> str:
     """Register a recurring trigger, read it back, then remove it.
 

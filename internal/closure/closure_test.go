@@ -2,6 +2,7 @@ package closure
 
 import (
 	"go/token"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -234,11 +235,14 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedLeaves := map[string]bool{
-		"github.com/cleat-team/cleat/testdata/errors.leafFunc":                 true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine":         true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch": true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":         true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":    true,
+		"github.com/cleat-team/cleat/testdata/errors.leafFunc":                  true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine":          true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch":  true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":          true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":     true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithErrError":           true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFieldErrError":      true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithCallResultErrError": true,
 	}
 
 	for name := range expectedLeaves {
@@ -337,6 +341,111 @@ func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 		t.Errorf("expected E008 (interface dispatch) error for %s, got codes: ", badName)
 		for _, e := range errs {
 			t.Logf("  %s: %s", e.Code, e.Message)
+		}
+	}
+}
+
+// TestComputeErrorsNamesTheCallForErrError falsifies cleat#2516: on
+// `h.DurableLog("operation failed: " + err.Error())`, the diagnostic used to
+// name only the line -- which also holds a valid h.DurableLog call -- and
+// suggest "use concrete types", which fits nobody's mental model of ordinary
+// error handling. The message must name the actual call and its interface
+// type, and a column must be present so an editor can point at err.Error()
+// specifically rather than the whole line.
+func TestComputeErrorsNamesTheCallForErrError(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph failed: %v", err)
+	}
+
+	cr := Compute(result, cg)
+
+	badName := "github.com/cleat-team/cleat/testdata/errors.BadWithErrError"
+	errs := cr.Errors[badName]
+
+	var e008 *ValidationError
+	for i := range errs {
+		if errs[i].Code == "E008" {
+			e008 = &errs[i]
+			break
+		}
+	}
+	if e008 == nil {
+		t.Fatalf("expected an E008 error for %s, got codes: %v", badName, errs)
+	}
+
+	if !strings.Contains(e008.Message, "err.Error()") {
+		t.Errorf("message does not name the call err.Error(): %q", e008.Message)
+	}
+	if !strings.Contains(e008.Message, "error") {
+		t.Errorf("message does not name the interface type: %q", e008.Message)
+	}
+	if e008.Column <= 0 {
+		t.Errorf("expected a positive column so the call can be pinpointed, got %d", e008.Column)
+	}
+	if strings.Contains(e008.Suggestion, "Use concrete types") {
+		t.Errorf("suggestion still gives the generic interface-variable advice, which fits nobody's "+
+			"error-handling code: %q", e008.Suggestion)
+	}
+}
+
+// TestComputeErrorsDetectsInterfaceDispatchThroughFieldOrCallResult falsifies
+// cleat#2799: checkInterfaceDispatch used to require the dispatch receiver to
+// be a bare *ast.Ident, so err.Error() reached through a struct field
+// (x.err.Error()) or directly off a call result (failingOp().Error()) got NO
+// E008 at all -- not a wrong diagnostic, none whatsoever. BadWithErrError is
+// included as the POSITIVE CONTROL from the issue's own table: it must still
+// get E008 in the same run, which is what tells "genuinely missed" apart from
+// "the analyzer isn't running".
+func TestComputeErrorsDetectsInterfaceDispatchThroughFieldOrCallResult(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph failed: %v", err)
+	}
+
+	cr := Compute(result, cg)
+
+	hasE008 := func(funcName string) *ValidationError {
+		for i, e := range cr.Errors[funcName] {
+			if e.Code == "E008" {
+				return &cr.Errors[funcName][i]
+			}
+		}
+		return nil
+	}
+
+	cases := []struct {
+		name         string
+		wantReceiver string
+	}{
+		{"github.com/cleat-team/cleat/testdata/errors.BadWithFieldErrError", "x.err"},
+		{"github.com/cleat-team/cleat/testdata/errors.BadWithCallResultErrError", "failingOp()"},
+		{"github.com/cleat-team/cleat/testdata/errors.BadWithErrError", "err"}, // positive control
+	}
+
+	for _, c := range cases {
+		e := hasE008(c.name)
+		if e == nil {
+			t.Errorf("%s: expected an E008 error, got codes: %v", c.name, cr.Errors[c.name])
+			continue
+		}
+		if !strings.Contains(e.Message, c.wantReceiver) {
+			t.Errorf("%s: message does not name the receiver %q: %q", c.name, c.wantReceiver, e.Message)
+		}
+		if !strings.Contains(e.Message, "Error()") {
+			t.Errorf("%s: message does not name the call: %q", c.name, e.Message)
 		}
 	}
 }

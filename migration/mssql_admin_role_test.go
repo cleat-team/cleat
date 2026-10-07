@@ -8,7 +8,7 @@ package migration_test
 // SQL Server applies a security policy to every principal -- sysadmin, db_owner
 // and dbo included -- so before migration 012 there was no connection that
 // could read or delete across tenants. PostgreSQL gets that for free, because a
-// superuser bypasses RLS unconditionally; migrations/postgres/005_app_role.sql
+// superuser bypasses RLS unconditionally; the cleat_app role
 // is entirely about keeping the *application* out of that exemption. SQL Server
 // has to write the privileged half into the predicate, because the predicate is
 // the only place an exemption can live.

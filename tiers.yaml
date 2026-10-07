@@ -723,7 +723,7 @@ tier2:
            kill-path cleanup reaches AssemblyScript guests"
 
     - id: plugins
-      why: 21 built-in, all with unit tests; 10 covered by the integration harness.
+      why: 22 built-in, all with unit tests; 10 covered by the integration harness.
       open_items:
         - "RESOLVED 2026-08-09 for the read paths: webhookingest and notifications (HMAC keys),
            pagerdutyalert (routing key), slacknotify (webhook URL) and datadogexport (API key)
@@ -914,10 +914,13 @@ tier2:
             fail-closed through assert_tenant_set() rather than COALESCE-ing to a
             default. An earlier version of this entry claimed the opposite; the startup
             check reports the attribute by name, since P0001 does not.
-          mssql — works. dbo.fn_tenant_filter already admits on
-            `IS_ROLEMEMBER(N'cleat_admin') = 1` (migrations/mssql/012_admin_role.sql), so
-            the exemption is in the predicate rather than in a role attribute. The role
-            ships with NO MEMBERS; granting it is a deployment decision.
+          mssql — works. dbo.fn_tenant_filter admits on
+            `IS_ROLEMEMBER(N'cleat_admin') = 1` once
+            migrations/mssql/optional/cross_tenant_claim.sql has switched the predicate to
+            that form (the shipped predicate, migrations/mssql/003_procedures.sql, has no
+            such admission since cleat#1541), so the exemption is in the predicate rather
+            than in a role attribute. The role (migrations/mssql/001_schema.sql) ships with
+            NO MEMBERS; granting it is a deployment decision.
           mysql — does NOT work, and cannot without a different mechanism. MySQLStoreFactory
             gives each tenant its own physical database (cleat_<tenant_id>), so there is no
             predicate to drop: the other tenants' rows are not filtered out, they are in
@@ -1262,6 +1265,21 @@ tier2:
         Re-derive the split is real: `go list ./... | grep -c cleat-team/cleat/cleat`
         from the repo root is 0; `cd examples && go test ./...` is green.
 
+    - dir: examples/fooddash/clients
+      why: >-
+        Got its own go.mod (cleat#2658): these generated fixture clients
+        (dispatch, menu, orders, payments, restaurant) import their own
+        module's own subpackages the same way examples/order-lifecycle's did
+        before cleat#2657, and cleat build's staging fix for cleat#2658 now
+        refuses that -- silently resolving them from the module proxy against
+        whatever is on develop's HEAD, rather than the tree being built, was
+        the exact failure cleat#2658 closes. A nested module with an explicit
+        replace from examples/go.mod is the fix, mirroring this same
+        examples/ entry's own history. No test files (still "Code generated
+        by cleat-gen. DO NOT EDIT."); `go test ./...` here prints ok / no
+        test files for all five packages, which is the expected shape for
+        a generated-fixture module, not a suite disappearing.
+
     - dir: benchmarks/workflows
       why: >-
         Same cycle-break as examples/ (2026-08-09/10): benchmarks/workflows imports the
@@ -1372,8 +1390,8 @@ required_contexts:
   # `measured` is the date the declared list below was last compared against branch
   # protection itself, not the date this file was last edited. Only --check-live and the
   # default run's live attempt can move it; an entry added from a PR description cannot.
-  measured: 2026-09-23
-  total: 33
+  measured: 2026-09-29
+  total: 35
 
   # `covers` is one of:
   #   tier1        the context runs only tier-1 packages/modules
@@ -1427,7 +1445,7 @@ required_contexts:
       covers: tier2
       packages: ["./plugins/..."]
       why_required: |
-        The 21 built-in plugins are tier 2 as a support claim -- what is frontier about
+        The 22 built-in plugins are tier 2 as a support claim -- what is frontier about
         them is the breadth of the surface, not whether they run. They ship in the
         binary, so a plugin that stops building or stops passing is a defect in a
         shipped artifact, and holding them to must-pass costs nothing while the suite
@@ -1555,6 +1573,20 @@ required_contexts:
       job: lint-go
       covers: infra          # no `name:` on the job, so the context IS the job id
 
+    # The Python suite became gate-worthy on 2026-09-29, once cleat#2547, #2567 and
+    # #2569 had closed the ways it could pass while asserting nothing. 3.12 and 3.13
+    # are required; 3.10 and 3.11 stay non-required and are declared in
+    # .github/required-checks.txt's "NOT required" block. The matrix runs all four
+    # either way -- this block is about which of them gate.
+    - context: Test Python 3.12
+      workflow: ci.yml
+      job: test-python
+      covers: infra
+    - context: Test Python 3.13
+      workflow: ci.yml
+      job: test-python
+      covers: infra
+
     # --- tier2.gated_by suites, which have their own stricter jobs -------------------
     - context: Cross-Language WASM E2E
       workflow: e2e-cross-language.yml
@@ -1661,17 +1693,33 @@ tier3:
 
     - id: formal-specs
       why: |
-        Checked 2026-08-09 (`grep -n '^====\|^\\\* =' specs/CleatClaim.tla`, and
-        `find specs -iname '*.cfg'`, `grep -rn 'tlc2\.TLC' .github/workflows/`). An
-        earlier version of this entry claimed line 53 was TLA+'s `====` module
-        terminator, cutting off 89% of the 495-line spec. That was wrong: line 53 is
-        `\* =============...`, a `\*`-prefixed line *comment* used as a decorative
-        divider (the same pattern repeats at 21 other lines). The real module
-        terminator is the bare `====` on line 495, the file's last line, so the
-        module is not truncated. The narrower claim stands and is why this stays
-        tier 3: no `.cfg` file exists anywhere under `specs/`, and nothing under
-        `.github/workflows/` invokes `tlc2.TLC` — TLC never runs, in CI or otherwise.
-        Either fix that and run them, or move them to docs/ as design notes.
+        STALE 2026-09-29 (cleat#2420): this entry said no `.cfg` file existed under
+        `specs/` and that nothing invoked `tlc2.TLC` — "TLC never runs, in CI or
+        otherwise". Both halves are now false. `find specs -iname '*.cfg'` returns
+        5 files, and `.github/workflows/tla.yml`'s "SANY + TLC (make tla)" step runs
+        `make tla`, whose `Makefile` target invokes `tlc2.TLC -config "$$cfg"
+        "$$spec"` per `.cfg`/`.tla` pair on every PR touching `specs/**` (plus a
+        listed set of implementing files) and on every push to `main`/`develop`.
+        `specs/README.md`'s own generated index already gets this right --
+        `CleatClaim.tla`, `CleatDurableCallIntent.tla`, `CleatKeyRotation.tla`,
+        `CleatQueueAdmission.tla` and `CleatRunLifecycle.tla` are listed "checked by
+        TLC: Yes" -- so the drift was in this file alone, exactly the pattern
+        CLAUDE.md's "a count of a growing population is guaranteed to be wrong"
+        section describes: re-derive rather than trusting either table.
+
+        What is NOT re-derived here, on purpose, is the tier itself. Five specs
+        being model-checked in CI is in tension with this component's own
+        tier3 contract (`not built, not shipped, not claimed ... may not appear in
+        docs as supported`) when `specs/README.md` already documents and links
+        per-spec status files -- but reclassifying a component is a product-status
+        decision, not a wording fix, and it belongs to whoever owns this file's
+        tier assignments rather than to the session that noticed the comment was
+        wrong. Filed as cleat#2708 rather than decided here.
+
+        The two remaining specs, `CleatSignals.tla` and `CleatStateMachine.tla`,
+        have no `.cfg` and are explicitly documented as unmaintained/superseded in
+        `specs/README.md` -- that part of the original claim (something here is
+        genuinely unchecked) still holds, just not for the whole directory.
 
     - id: comparative-benchmarks
       why: |

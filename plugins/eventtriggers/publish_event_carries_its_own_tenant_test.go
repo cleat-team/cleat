@@ -116,7 +116,7 @@ func TestPublishEventCarriesItsOwnTenant(t *testing.T) {
 	eventID := uuid.New()
 	matched, err := PublishEvent(context.Background(), db, quiet,
 		&plugin.Environment{Dialect: dialect, Logger: quiet},
-		eventID, mine, "kafka.message", json.RawMessage(`{"topic":"orders"}`))
+		eventID, mine, "kafka.message", json.RawMessage(`{"topic":"orders"}`), nil)
 	if err != nil {
 		t.Fatalf("PublishEvent from a context with no tenant: %v\n\n"+
 			"The tenant is in hand as an argument and ingested_events carries a policy "+

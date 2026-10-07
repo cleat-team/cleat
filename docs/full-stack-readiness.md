@@ -27,7 +27,7 @@ and then deleted, and its output is reproduced verbatim.
 
 ## Why "good enough" is the deciding concept
 
-The playbooks all make one argument: replace five vendors with one binary and a database. That
+The playbooks all make one argument: replace five vendors with one platform and a database. That
 argument has a specific failure mode, and it is worth stating precisely because it governs
 everything else.
 
@@ -96,17 +96,20 @@ The bar is the buyer's most demanding common requirement, not parity with the ca
 | Multi-tenant isolation | Enforced below application code | **Clears on PostgreSQL and SQL Server** | MySQL has no row-level security; see below |
 | Rate limiting | Cluster-wide, per tenant, observable | **Clears** | Silent fail-open fixed (#1581); default is still `memory` |
 | Feature flags | Targeting, percentage rollout, kill switch | **Probably clears** | No experimentation platform — rarely the deciding requirement |
-| Audit | Who did what, retained, exportable | **Partial** | Subject attribution shipped (#1882); tamper-evidence and export still absent |
+| Audit | Who did what, retained, exportable | **Clears** | Subject attribution (#1882), per-tenant hash chain, export and verify all shipped (#2047); `cleatctl audit verify` |
 | Identity | SSO, and SAML/SCIM for enterprise | **Clears** | Generic `oidc` provider + `issuer` column (#1582); SAML via a customer terminator; SCIM deferred |
-| Secrets | Encrypted at rest, rotatable | **Partial** | AES-256-GCM, per-tenant HKDF, tenant-ID AAD, never reaches the guest; rotation absent |
+| Secrets | Encrypted at rest, rotatable | **Partial** | AES-256-GCM, per-tenant HKDF, tenant-ID AAD, never reaches the guest; master-key rotation shipped (`cleatctl reseal-secrets`); rotating one tenant's secret VALUE in place still absent |
 | Outbound network | Cannot be used to attack the host | **Clears** | Three-layer guard at `DialContext`; both `http.fetch` paths covered (#1565) |
 | Reading your own data | Query a tenant's entities | **Does not clear** | Listable per run (#1902), still no projection or cross-run query |
 | Deploy and rollback | Atomic, fast, reversible | **Clears** | Routing-pin rollback (#1894); version-pinned in-flight runs |
 
-**One of ten misses outright — a queryable read model — and two are partial (secrets rotation, and
-audit tamper-evidence/export).** Egress, identity and rate limiting, which missed at drafting, have
-since cleared. The read model remains the gap that costs every adopter the most hand-written code.
-*(Re-scored 2026-09-20 against the same method as the 2026-09-18 full-stack review.)*
+**One of ten misses outright — a queryable read model — and one is partial (secrets: master-key
+rotation shipped, per-tenant secret-value rotation absent).** Egress, identity and rate limiting,
+which missed at drafting, have since cleared; audit, partial as of the 2026-09-20 re-score, has
+since cleared too (#2047). The read model remains the gap that costs every adopter the most
+hand-written code.
+*(Re-scored 2026-09-28 against `develop` at `04a9ea0f`, replacing the 2026-09-20 pass this table's
+own audit and secrets rows had fallen behind on — see cleat#2596.)*
 
 ### Tenant isolation is not the same mechanism on every dialect
 
@@ -142,7 +145,7 @@ evidence and the open design questions, and this section is the summary and the 
 | 3 | `cleat init --template fullstack` — **shipped** | [#1567](https://github.com/cleat-team/cleat/issues/1567) | adoption | — (time to evaluate) |
 | 4 | `Host` → tenant binding — **shipped** | [#1568](https://github.com/cleat-team/cleat/issues/1568) | security | Per-tenant URLs |
 | 5 | Counter-based tenant quotas — **shipped**, defaults off | [#1569](https://github.com/cleat-team/cleat/issues/1569) | feature | Commercial packaging |
-| 6 | Per-tenant secrets — **shipped**; rotation absent | [#1570](https://github.com/cleat-team/cleat/issues/1570) | security | Secrets |
+| 6 | Per-tenant secrets — **shipped**; master-key rotation shipped, per-secret-value rotation absent | [#1570](https://github.com/cleat-team/cleat/issues/1570) | security | Secrets |
 | 7 | A queryable read model — **declined** | [#1571](https://github.com/cleat-team/cleat/issues/1571) | feature | Reading your own data |
 | 8 | `chat_stream` → SSE bridge — **shipped** | [#1572](https://github.com/cleat-team/cleat/issues/1572) | feature | Interactive AI |
 
@@ -226,7 +229,7 @@ absence is why the serving design doc could not make the vhost story concrete.
 
 `tenant_settings` has exactly three knobs, all durations: `wasm_instance_timeout_ms`,
 `wasm_wall_clock_ceiling_ms`, `host_retry_budget_ms`
-(`migrations/postgres/039_tenant_settings.sql`), clamped by `ClampToCeiling(tenant, ceiling
+(`migrations/postgres/001_schema.sql`), clamped by `ClampToCeiling(tenant, ceiling
 time.Duration)` (`engine/tenant_settings.go:97`).
 
 The clamp semantics are right — a tenant may lower and can never raise — but the dimension is

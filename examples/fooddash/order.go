@@ -198,7 +198,10 @@ func PlaceOrder(h cleat.HostCalls, userID string, restaurantID string,
 // {"orderID": "ord-1"} bound orderID to the literal text {"orderID":"ord-1"},
 // so every step below addressed an order that does not exist -- and reported
 // success, because releasing a driver for an unknown order is not an error.
-// A struct parameter is unmarshalled from the input and binds by field.
+// A struct parameter binds by its PARAMETER name, not by these fields: this one is
+// `ref`, so the input carries {"ref": {"orderID": "ord-1"}}. Sending the fields
+// directly as {"orderID": "ord-1"} fails at the export, before the workflow runs,
+// with `unmarshal ref: unexpected end of JSON input`.
 // `cleat vet` now warns about the old shape (W003); cleat#824.
 type OrderRef struct {
 	OrderID string `json:"orderID"`

@@ -311,6 +311,66 @@ func TestScanWasmImports_MultipleImports(t *testing.T) {
 	}
 }
 
+// TestScanWasmImports_SectionsAreContiguousAcrossCustomSections is cleat#3069.
+//
+// WASM sections are contiguous: the byte after a section's content is the NEXT
+// section's id, with nothing between them. 0x00 is not padding -- it is the
+// custom section's id, and Go emits custom sections on every non-trivial module
+// (the "name" and "producers" sections, DWARF). A scanner that treats a 0x00 id
+// byte as something to step over eats that section's id and reads its CONTENT
+// as section headers from there on. On a real module the desynchronised walk
+// eventually meets a truncated LEB, and the caller reports it as
+//
+//	Warning: error scanning WASM imports: invalid section size at offset N
+//
+// on a module that builds, deploys and runs correctly.
+//
+// Both layouts are pinned, because they fail differently:
+//
+//   - a custom section BETWEEN two real sections is the consequential one. The
+//     desynchronised walk overshoots the file and the import section is never
+//     reached, so ScanWasmImports returns ZERO imports with NO error -- and
+//     FindCleatOrphanedImports then finds no orphans in an empty list, silently
+//     disabling the check on exactly the modules large enough to carry a
+//     trailing custom section.
+//   - a TRAILING custom section whose content ends in a continuation byte is
+//     the shape that reached the issue: the walk reads it as a section size and
+//     runs off the end, turning the scan into the warning above.
+func TestScanWasmImports_SectionsAreContiguousAcrossCustomSections(t *testing.T) {
+	// A minimal but real type section, so the custom section is preceded by a
+	// section -- which is what makes the id byte at its start look like
+	// padding to a walk that expects to "align".
+	typ := makeTestWasmSection(1, []byte{0x00})
+	imp := makeImportSection(importEntry{[]byte("env"), []byte("cleat_call"), 0, encodeULEB128(0)})
+
+	t.Run("a custom section between two real ones does not lose the imports", func(t *testing.T) {
+		// Content spelling "name" as the real section does. Its exact bytes
+		// matter only in that the desynchronised read of them must not happen
+		// to land on the next section's start -- which would let a broken walk
+		// re-synchronise and hide this.
+		custom := makeTestWasmSection(0, []byte("name"))
+
+		imports, err := ScanWasmImports(makeTestWasmBinary(typ, custom, imp))
+		if err != nil {
+			t.Fatalf("scan errored on a module with a custom section: %v", err)
+		}
+		if len(imports) != 1 || imports[0].Name != "cleat_call" {
+			t.Fatalf("imports = %+v, want the single cleat_call import", imports)
+		}
+	})
+
+	t.Run("a trailing custom section does not error the scan", func(t *testing.T) {
+		// 0x80 alone is a truncated LEB, which is what the reported offset came
+		// from: the desynchronised walk reads the custom section's content as a
+		// section size and finds no terminating byte before the buffer ends.
+		custom := makeTestWasmSection(0, []byte{0x80})
+
+		if _, err := ScanWasmImports(makeTestWasmBinary(typ, custom)); err != nil {
+			t.Fatalf("scan of a healthy module with a trailing custom section errored: %v", err)
+		}
+	})
+}
+
 func TestScanWasmImports_InvalidMagic(t *testing.T) {
 	bad := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x00, 0x00, 0x00}
 	_, err := ScanWasmImports(bad)

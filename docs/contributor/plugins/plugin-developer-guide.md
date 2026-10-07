@@ -85,19 +85,39 @@ The constructor should allocate nothing heavy. `Init()` does the real setup.
 
 ## Environment
 
-`Environment` gives you raw infrastructure access:
+`Environment` gives you access to cleat infrastructure. This is a curated
+subset of the fields you'll reach for first — see
+[`plugin.Environment`](../../../plugin/plugin.go) for the full, current
+struct (19 fields as of this writing, several of them advanced grants like
+`Audit`, `Secrets` and the OAuth-key management closures, each documented at
+its own field):
 
 ```go
 type Environment struct {
-    DB     *sql.DB          // PostgreSQL connection pool
-    Mux    *http.ServeMux   // register HTTP routes
-    Config []byte           // your plugin's config section (JSON/YAML/whatever)
-    Logger *slog.Logger     // structured logger
-    Done   <-chan struct{}  // closes on shutdown
+    DB            PluginDB               // scoped query interface -- not *sql.DB
+    Mux           ServeMux               // *http.ServeMux on the host; register HTTP routes
+    Config        []byte                 // your plugin's config section (JSON/YAML/whatever)
+    Logger        *slog.Logger           // structured logger
+    TenantID      string                 // the tenant this call is scoped to
+    Done          <-chan struct{}        // closes on shutdown
+    Dialect       Dialect                // which database this deployment runs, for dialect-specific SQL
+    EventsLost    func(pluginName, reason string, n int64) // report events your plugin gave up on; nil means nobody is counting
+    HTTPTransport EgressTransport        // the egress-guarded RoundTripper -- every outbound HTTP request must go through this
 }
 ```
 
-No wrappers, no abstractions. Use `env.DB` for `database/sql` queries.
+> Corrected 2026-09-30: this previously showed `DB *sql.DB` and
+> `Mux *http.ServeMux`, and said "Use `env.DB` for `database/sql` queries" --
+> `PluginDB` is not `*sql.DB`, so that sentence told a plugin author to treat
+> one as the other. It also omitted `TenantID`, `Dialect`, `EventsLost` and
+> `HTTPTransport` entirely; the first two are how a multi-tenant plugin knows
+> who it is serving and what SQL it may write, and `HTTPTransport` is not
+> optional -- a plugin that reaches the network by any other means bypasses
+> the egress guard. See cleat#2711.
+
+No wrappers, no abstractions for `DB`: it is a narrower interface
+(`Begin`/`Exec`/`Query`/`QueryRow`/`Ping`) scoped to your plugin's declared
+`DatabaseAccess` level, not a `database/sql` handle.
 Use `env.Mux` to register `http.HandlerFunc`s.
 
 ## Optional Interfaces
@@ -127,7 +147,7 @@ Rules:
 ### HasRoutes — HTTP endpoints
 
 ```go
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
     mux.HandleFunc("GET /my-plugin/things", p.handleList)
     mux.HandleFunc("PUT /my-plugin/things/{id}", p.handlePut)
     return nil

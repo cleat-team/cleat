@@ -1,0 +1,2 @@
+test-go/engine	1	^TestFinalizeRetryBudgetSurvivesNWayContention/mysql$	MySQL-only, same reason as TestFinalizeRetriesADeadlockOnEventCount's own line (test-finalize-retries-a-deadlock-on-event-count.tsv): the race is InnoDB gap-locking under REPEATABLE READ, and this PostgreSQL-only job has no CLEAT_TEST_MYSQL. cleat#2033.
+cluster	1	^TestFinalizeRetryBudgetSurvivesNWayContention/mysql$	same test, same one arm, and the cluster job runs ./engine/... too. See the test-go/engine line above.

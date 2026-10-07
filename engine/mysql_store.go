@@ -114,11 +114,12 @@ type MySQLStore struct {
 
 	// perTenantDatabase records that this store was built by
 	// MySQLStoreFactory, whose topology gives each tenant its own physical
-	// database (cleat_<tenant_id>). Only ClaimWorkflowsAcrossTenants reads it,
-	// and only to refuse: dropping a tenant_id predicate cannot widen a
-	// connection that is pointed at a single tenant's database, so the claim
-	// would return one tenant's work and report success. See the doc comment
-	// on ClaimWorkflowsAcrossTenants.
+	// database (cleat_<tenant_id>). It existed for ClaimWorkflowsAcrossTenants
+	// to refuse on: dropping a tenant_id predicate could not widen a
+	// connection already pointed at a single tenant's database, so that claim
+	// would have returned one tenant's work and reported success. #1926
+	// retired ClaimWorkflowsAcrossTenants; this field is set below but has no
+	// remaining reader.
 	perTenantDatabase bool
 
 	logger *slog.Logger
@@ -823,11 +824,16 @@ func (s *MySQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflo
 }
 
 // ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
+//
+// Mirrors auth.TenantStore.ResolveTenantFromAPIKey's expiry clause
+// (auth/tenant_store.go) -- cleat#2352 enforced expiry there but never
+// touched this store, so an expired key authenticated against any host that
+// wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *MySQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tenant_id FROM tenant_api_keys
-		 WHERE key_hash = ? AND disabled_at IS NULL`, keyHash).Scan(&tenantID)
+		 WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -1114,7 +1120,7 @@ func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, task
 	store.tenantID = tenantID
 	store = store.WithLogger(f.logger)
 	// Set last: WithLogger returns a copy, so anything set before it survives
-	// only by accident of struct copying. See ClaimWorkflowsAcrossTenants.
+	// only by accident of struct copying.
 	store.perTenantDatabase = true
 	return store, lease, nil
 }

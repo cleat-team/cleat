@@ -25,7 +25,8 @@ import (
 // would pass just as happily against a connection that could see everything.
 //
 // It runs as `cleat_app` -- the role that actually ships -- rather than as the
-// synthetic RLS test role, because the grant under test is one 005_app_role.sql
+// synthetic RLS test role, because the grant under test is one the schema
+// baseline
 // makes. A test role granted SELECT on admin.tenants by its own fixture would
 // prove the query works and say nothing about whether a deployed worker may run
 // it.

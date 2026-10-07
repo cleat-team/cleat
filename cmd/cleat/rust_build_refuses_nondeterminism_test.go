@@ -52,7 +52,14 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	build := func(t *testing.T, fixture string) string {
 		t.Helper()
 		dir := filepath.Join("..", "..", "testdata", "vet-checks", "rust", fixture)
-		out, _ := exec.Command(cleatBinary, "build", "--target", "rust", "-o", t.TempDir(), dir).CombinedOutput()
+		// The exit status is NOT discarded. A build that never started produces
+		// EMPTY output, and every absence-assertion below then holds for a reason
+		// with nothing behind it -- a failed measurement rather than a result. A
+		// NON-ZERO exit is fine: these fixtures keep their sources at the crate
+		// root, so cargo rejects the manifest and the build fails on its own. See
+		// requireBuildStarted in build_reached_the_stage_test.go.
+		out, err := exec.Command(cleatBinary, "build", "--target", "rust", "-o", t.TempDir(), dir).CombinedOutput()
+		requireBuildStarted(t, err)
 		return string(out)
 	}
 
@@ -173,6 +180,7 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	// goes red. That is good news, not a regression -- see the failure text.
 	t.Run("known limit escapes the checker, and says so out loud", func(t *testing.T) {
 		out := build(t, "known_limit_trait_method")
+		requireReachedStage(t, out, rustVetMarker)
 
 		if strings.Contains(out, "determinism check failed") || strings.Contains(out, "Error [R0") {
 			t.Errorf("the Rust checker now CATCHES the trait-method fixture.\n\n"+
@@ -194,6 +202,7 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	// right limit to accept rather than close.
 	t.Run("a HashMap behind a struct field escapes the checker, and says so out loud", func(t *testing.T) {
 		out := build(t, "known_limit_map_via_struct_field")
+		requireReachedStage(t, out, rustVetMarker)
 
 		if strings.Contains(out, "R008") {
 			t.Errorf("the Rust checker now CATCHES a HashMap reached through a struct field.\n\n"+
@@ -210,6 +219,7 @@ func TestRustBuildRefusesNondeterminism(t *testing.T) {
 	// tracks bindings; a value with no name has nothing to track.
 	t.Run("collecting straight into a HashMap and iterating inline escapes the checker", func(t *testing.T) {
 		out := build(t, "known_limit_collect_into_map")
+		requireReachedStage(t, out, rustVetMarker)
 
 		if strings.Contains(out, "R008") {
 			t.Errorf("the Rust checker now CATCHES an inline .collect::<HashMap<_, _>>() chain.\n\n"+

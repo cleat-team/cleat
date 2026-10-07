@@ -13,6 +13,7 @@ package fencereentry
 
 import (
 	"strconv"
+	"syscall"
 
 	"github.com/cleat-team/cleat/cleat"
 )
@@ -93,6 +94,34 @@ func AllocateForever(h cleat.HostCalls) (string, error) {
 // sink retains what AllocateForever allocates. Package-level and never read, so
 // nothing can conclude the allocations are unnecessary.
 var sink [][]byte
+
+// ReadHostFile is the abnormal-exit measurement's THIRD arm, beside
+// AllocateForever's OOM and SpinForever's fence: a genuine WASM TRAP that is
+// neither a resource-limit trap nor a proc_exit at all. It exists for
+// TestAGuestRefusedByTheWasiPolicyIsNotReportedAsSuccess.
+//
+// It uses syscall, not os, deliberately: `cleat build`'s static analyzer
+// (internal/closure, error E010) refuses any Go guest that imports "os" --
+// confirmed by trying. That check is keyed on the "os" import path alone, so
+// it is a convenience that catches the common case, not the security
+// boundary a tenant's own toolchain has no reason to go through at all. This
+// reaches the same WASI import (path_open) through an unchecked package, and
+// the guarantee that matters is enforced at the host, in
+// engine/wasi_policy_wasmtime.go, regardless of which Go package a guest
+// used to reach it.
+func ReadHostFile(h cleat.HostCalls) (string, error) {
+	fd, err := syscall.Open("/etc/hostname", syscall.O_RDONLY, 0)
+	if err != nil {
+		return "", err
+	}
+	defer syscall.Close(fd)
+	buf := make([]byte, 256)
+	n, err := syscall.Read(fd, buf)
+	if err != nil {
+		return "", err
+	}
+	return string(buf[:n]), nil
+}
 
 // SpinWithARunawayDefer registers a defer that never returns, then spins until
 // the fence stops the entry point.

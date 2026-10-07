@@ -168,7 +168,7 @@ elif [ -x "$CLEAT_CLI" ]; then
   "child_binding_policy": "$CHILD_BINDING_POLICY",
   "sdk_language": "java",
   "language": "java",
-  "sdk_version": "0.3.2",
+  "sdk_version": "0.4.0",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 ENDJSON
@@ -206,7 +206,7 @@ else
   "child_binding_policy": "$CHILD_BINDING_POLICY",
   "sdk_language": "java",
   "language": "java",
-  "sdk_version": "0.3.2",
+  "sdk_version": "0.4.0",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 ENDJSON

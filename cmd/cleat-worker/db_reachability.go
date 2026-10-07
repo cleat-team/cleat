@@ -43,6 +43,12 @@ type dbReachability struct {
 	// outage began, for the recovery grace: it excuses only loops that went quiet DURING that outage.
 	recoveredAt time.Time
 	outageStart time.Time
+	// outageFailingSince is failingSince as it stood at the moment outageStart was computed, captured
+	// separately because failingSince itself is reset to zero later in the same successful call
+	// (cleat#2284 follow-up, cleat-review). databaseExplainsStaleLoop uses it to bound how far outageStart
+	// can reach back: lastSuccessStart alone has no upper bound on its age, so with a raised --heartbeat a
+	// loop can go quiet long before the real outage and still land inside [outageStart, now).
+	outageFailingSince time.Time
 
 	// clock is time.Now in production; tests replace it.
 	clock func() time.Time
@@ -71,6 +77,9 @@ type dbSnapshot struct {
 	Superseded   int64
 	// LastSuccessStart is when the latest successful bounded call BEGAN.
 	LastSuccessStart time.Time
+	// OutageFailingSince is failingSince as it stood when OutageStart was computed. See the field
+	// comment on dbReachability.outageFailingSince.
+	OutageFailingSince time.Time
 }
 
 // dbTransition says what an observation changed.
@@ -124,15 +133,27 @@ func (r *dbReachability) observe(started, now time.Time, elapsed time.Duration, 
 		r.reachable = true
 		r.failures = 0
 		r.lastSuccess = now
+		if wasKnown && !wasReachable {
+			// r.lastSuccessStart, read before this call's own success updates it below, is the
+			// last known-good instant BEFORE the outage -- a lower bound on how early the outage could
+			// have begun, but with no upper bound on its own age: with a raised --heartbeat it can sit
+			// arbitrarily long before the real onset (cleat-review, cleat#2284 follow-up). r.failingSince
+			// is when the first failed call RETURNED, which lags the real onset by up to a heartbeat
+			// interval plus that call's deadline (cleat#2284): a call in flight when the database died
+			// does not report failure until its deadline expires, and the failing call that set
+			// failingSince might not have started until a heartbeat interval after the database was
+			// already down. databaseExplainsStaleLoop (health.go) combines both bounds -- lastSuccessStart
+			// and failingSince minus that lag -- and uses whichever is more recent, which is why
+			// r.outageFailingSince below captures failingSince before it is reset a few lines down.
+			t, outage = dbBecameReachable, now.Sub(r.failingSince)
+			r.recoveredAt = now
+			r.outageStart = r.lastSuccessStart
+			r.outageFailingSince = r.failingSince
+		}
 		if started.After(r.lastSuccessStart) {
 			r.lastSuccessStart = started
 		}
 		r.lastErr = ""
-		if wasKnown && !wasReachable {
-			t, outage = dbBecameReachable, now.Sub(r.failingSince)
-			r.recoveredAt = now
-			r.outageStart = r.failingSince
-		}
 		r.failingSince = time.Time{}
 	} else {
 		r.reachable = false
@@ -158,7 +179,8 @@ func (r *dbReachability) snapshotLocked() dbSnapshot {
 		LastSuccess: r.lastSuccess, FailingSince: r.failingSince,
 		LastError: r.lastErr, LastElapsed: r.lastElapsed,
 		LastObserved: r.lastObserved, RecoveredAt: r.recoveredAt, OutageStart: r.outageStart, InFlight: r.inFlight, Superseded: r.superseded,
-		LastSuccessStart: r.lastSuccessStart,
+		LastSuccessStart:   r.lastSuccessStart,
+		OutageFailingSince: r.outageFailingSince,
 	}
 }
 

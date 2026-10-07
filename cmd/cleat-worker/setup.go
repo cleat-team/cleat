@@ -198,6 +198,26 @@ type dbServiceCaller struct {
 	// sits on the call path.
 	serviceEndpoints map[string]string
 
+	// ambiguityLookup maps "service.operation" to the lookup mapping
+	// configured for it, from --ambiguity-lookup. Nil or empty means this
+	// caller does not implement ResolveCall usefully -- see ResolveCall's own
+	// doc comment -- and WithAmbiguityResolver is not wired at all in that
+	// case (executeWorkflow), so an unconfigured deployment pays nothing.
+	ambiguityLookup map[string]ambiguityLookupEntry
+
+	// idempotencyKeyOps is the set of "service.operation" keys declared
+	// --idempotency-key-ops, consulted by ReplayUnderOriginalKey. Disjoint
+	// from ambiguityLookup's keys by boot-time validation (see
+	// validateIdempotencyKeyOps). Nil or empty means this caller does not
+	// implement IdempotencyKeyReplayer usefully, and
+	// WithIdempotencyKeyReplayer is not wired at all in that case, same
+	// reasoning as ambiguityLookup above.
+	//
+	// The retention bound (--idempotency-key-retention) is NOT duplicated
+	// here: engine.execSession.replayUnderOriginalKey checks it BEFORE ever
+	// calling ReplayUnderOriginalKey, so this caller never needs to know it.
+	idempotencyKeyOps map[string]bool
+
 	// secrets resolves ${secret:name} in a request on the way OUT to the
 	// service, and the direction is the whole point.
 	//
@@ -372,6 +392,176 @@ func (c *dbServiceCaller) forwardToService(ctx context.Context, baseURL, service
 	}
 	slog.Debug("BENCH-SVC-CALL", "duration_ms", time.Since(t0).Milliseconds(), "body_bytes", len(body))
 	return string(body), nil
+}
+
+// ResolveCall implements engine.AmbiguityResolver. cleat#1984.
+//
+// It answers only for an operation named in --ambiguity-lookup; everything
+// else returns AmbiguityCannotSay, exactly as no resolver being configured at
+// all does, which is deliberate -- a resolver that answers about operations
+// nobody declared a lookup for would be guessing.
+//
+// The lookup operation is called the same way forwardToService calls an
+// ordinary operation -- same URL convention, same Idempotency-Key, same
+// egress-guarded per-call client -- because it IS one: a service that can
+// answer "what happened to idempotency key X" implements that as another
+// route on itself, under the SAME service a workflow's own call reached. This
+// is a sibling of forwardToService rather than a reuse of it because
+// forwardToService collapses every non-200 into one classified error, and the
+// contract here is the status code itself (see the table below), not a
+// retry/non-retry classification of it.
+//
+// | status | outcome |
+// |---|---|
+// | 200 | AmbiguityResolved, response = body |
+// | 404 | AmbiguityNotSent -- the service has no record; never arrived |
+// | anything else, including a transport error or timeout | AmbiguityCannotSay |
+func (c *dbServiceCaller) ResolveCall(ctx context.Context, service, operation, idempotencyKey string) (string, engine.AmbiguityOutcome, error) {
+	e, ok := c.ambiguityLookup[service+"."+operation]
+	if !ok {
+		return "", engine.AmbiguityCannotSay, nil
+	}
+	baseURL, ok := c.serviceEndpoints[service]
+	if !ok {
+		// Configured for a service this worker has no endpoint for at all --
+		// not reachable if --ambiguity-lookup and --service-endpoints are
+		// validated together at boot, but ResolveCall itself does not trust
+		// that validation ran (a future caller might construct this struct
+		// directly), so it degrades to "cannot say" rather than panicking on
+		// a nil baseURL.
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: no endpoint registered for service %q",
+			service, operation, service)
+	}
+
+	url := fmt.Sprintf("%s/call/%s/%s", baseURL, service, e.LookupOperation)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: create request: %w", service, operation, err)
+	}
+	plugin.SetTraceparent(req, c.traceID)
+	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	// Same per-call, egress-guarded client as forwardToService -- see that
+	// method's comment for why this is not pooled.
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// A transport failure answers nothing about the call's outcome --
+		// cannot say, not an error the caller must propagate. See
+		// AmbiguityResolver.ResolveCall's own doc comment on why an error
+		// here is not fatal: it leaves the ambiguity exactly as it was.
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: %w", service, operation, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: read response: %w", service, operation, err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return string(body), engine.AmbiguityResolved, nil
+	case http.StatusNotFound:
+		return "", engine.AmbiguityNotSent, nil
+	default:
+		return "", engine.AmbiguityCannotSay, nil
+	}
+}
+
+// ReplayUnderOriginalKey implements engine.IdempotencyKeyReplayer. cleat#2897,
+// decision (c) on cleat#1984.
+//
+// It answers only for an operation named in --idempotency-key-ops; everything
+// else returns IdempotencyReplayCannotSay, the same "not configured for this"
+// default ResolveCall uses above.
+//
+// SAME URL, SAME REQUEST, DIFFERENT KEY-BEARING HEADER VALUE -- unlike
+// ResolveCall, which asks a SEPARATE lookup operation. This re-issues
+// service.operation itself, exactly the route forwardToService uses for an
+// ordinary call, with the SAME idempotency key the original (now-ambiguous)
+// attempt sent. A service that honours the key returns the original outcome
+// from its own key table; that IS the mechanism, so there is no second
+// operation to name in configuration the way --ambiguity-lookup needs one.
+//
+// Reading the status directly, like ResolveCall, rather than through
+// forwardToService's classified error: the contract here is the status code
+// itself (see the table below), and forwardToService's serviceStatusError
+// would collapse 409 into "permanent" (see its own statusSaysPermanent,
+// which does not exempt 409) -- an ordinary call response and this one mean
+// different things by the same status.
+//
+// | status | outcome |
+// |---|---|
+// | 200 | IdempotencyReplayResolved, response = body |
+// | 409 | IdempotencyReplayRetryLater -- a request under this key is still being processed (Stripe's documented meaning for a concurrent same-key request) |
+// | anything else -- a 4xx other than 409 (e.g. a cached 402), 5xx, a transport error, or a timeout | IdempotencyReplayCannotSay |
+func (c *dbServiceCaller) ReplayUnderOriginalKey(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, engine.IdempotencyReplayOutcome, error) {
+	if !c.idempotencyKeyOps[service+"."+operation] {
+		return "", engine.IdempotencyReplayCannotSay, nil
+	}
+	baseURL, ok := c.serviceEndpoints[service]
+	if !ok {
+		// Not reachable if --idempotency-key-ops and --service-endpoints are
+		// validated together at boot, but this method does not trust that
+		// validation ran, same reasoning as ResolveCall's identical guard.
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: no endpoint registered for service %q",
+			service, operation, service)
+	}
+
+	// requestJSON is the ORIGINAL request the workflow wrote, which may
+	// carry a ${secret:name} reference exactly like a first dispatch does
+	// (call()/resolveSecrets above). Unlike ResolveCall's lookup operation,
+	// which sends a fixed "{}" body and never touches this, a replay sends
+	// requestJSON itself, so it needs the same substitution or the service
+	// receives the literal, unresolved reference text (cleat#2911 G1). A
+	// resolution failure is CannotSay with nothing dispatched -- the same
+	// contract resolveSecrets's own doc comment states for call().
+	requestJSON, err := c.resolveSecrets(ctx, service, operation, requestJSON)
+	if err != nil {
+		return "", engine.IdempotencyReplayCannotSay, err
+	}
+
+	url := fmt.Sprintf("%s/call/%s/%s", baseURL, service, operation)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
+	if err != nil {
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: create request: %w", service, operation, err)
+	}
+	plugin.SetTraceparent(req, c.traceID)
+	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	// Same per-call, egress-guarded client as forwardToService and
+	// ResolveCall -- see forwardToService's comment for why this is not
+	// pooled.
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// A transport failure answers nothing about the call's outcome --
+		// cannot say, not an error the caller must propagate. Same reasoning
+		// as ResolveCall's identical branch.
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: %w", service, operation, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: read response: %w", service, operation, err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return string(body), engine.IdempotencyReplayResolved, nil
+	case http.StatusConflict:
+		return "", engine.IdempotencyReplayRetryLater, nil
+	default:
+		return "", engine.IdempotencyReplayCannotSay, nil
+	}
 }
 
 // serviceStatusError turns a non-200 from a called service into a classified
@@ -1384,6 +1574,62 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 	return pe, nil
 }
 
+// checkPayloadEncryptionState is cleat#2324's startup guard.
+//
+// engine/encryption.go documents that a sealed column carries no envelope or
+// version prefix, by design -- so a worker with no key ring configured has no
+// way to recognise ciphertext by inspecting a row. Measured (cleat#2324) on a
+// real worker: a keyless worker reading a sealed run's history gets a
+// checksum mismatch by default, which fails the run -- misleadingly, since
+// the real cause is a missing key, but at least closed -- and
+// --disable-checksum-verification removes that net entirely, so the run ends
+// DONE on ciphertext.
+//
+// So this asks a different question, one that needs no inspection at all:
+// has any worker on THIS DATABASE ever had a key ring configured. store must
+// implement engine.PayloadEncryptionState for the question to be answerable
+// at all -- *engine.MySQLStore and *engine.MSSQLStore do not, because
+// --encrypt-sensitive-payloads already refuses every driver but postgres
+// (see the two driver checks in main.go), so neither can ever hold a sealed
+// row and this is a silent no-op for them, not a skipped check.
+//
+// Returns an error describing what went wrong or what was found, matching
+// checkPluginRouteSignatures' shape (plugin_stale_routes_check.go): a pure
+// decision the caller logs and turns into os.Exit(1), so the decision itself
+// can be unit tested without a process exiting out from under the test.
+//
+// Called once, in main.go, AFTER the migrate-or-verify block (the table this
+// checks is itself migration 008) and before a non-migrate-only worker does
+// anything else -- a --migrate-only job exits before reaching this point and
+// never needs to answer the question, and checking any earlier would refuse
+// a worker on a database that is merely not yet migrated, for the wrong
+// reason.
+func checkPayloadEncryptionState(ctx context.Context, store engine.WorkflowStore, payloadEncryption *engine.PayloadEncryption) error {
+	pes, ok := store.(engine.PayloadEncryptionState)
+	if !ok {
+		return nil
+	}
+	if payloadEncryption != nil {
+		// Marked at startup, not on first successful seal: a key present and
+		// never yet used is still an operator's declared intent to encrypt,
+		// and the failure direction this check should err toward is
+		// "refuses a deploy that turns out to be safe" rather than "misses
+		// the window before the first write".
+		if err := pes.MarkPayloadEncryptionEnabled(ctx); err != nil {
+			return fmt.Errorf("failed to record that payload encryption is enabled for this database: %w", err)
+		}
+		return nil
+	}
+	everEnabled, err := pes.PayloadEncryptionEverEnabled(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check whether payload encryption was ever enabled on this database: %w", err)
+	}
+	if everEnabled {
+		return fmt.Errorf("this database has sensitive event payloads sealed under a key ring, but this worker was started without --encrypt-sensitive-payloads -- refusing to start: it cannot tell a sealed column from plaintext and would otherwise read ciphertext as data (cleat#2324)")
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Peer schemas parsing
 // ---------------------------------------------------------------------------
@@ -1700,6 +1946,31 @@ type Worker struct {
 	// --service-endpoints. Passed to every dbServiceCaller this worker builds.
 	serviceEndpoints map[string]string
 
+	// ambiguityLookup maps "service.operation" to its configured lookup
+	// mapping, from --ambiguity-lookup. Passed to every dbServiceCaller this
+	// worker builds, which implements engine.AmbiguityResolver against it.
+	// Nil or empty means no resolver is registered at all -- see
+	// executeWorkflow's WithAmbiguityResolver wiring, which is conditional on
+	// this being non-empty, so a deployment that configures nothing pays
+	// nothing (no resolver call on an ambiguity, same as before cleat#1984).
+	ambiguityLookup map[string]ambiguityLookupEntry
+
+	// idempotencyKeyOps is the set of "service.operation" keys declared
+	// --idempotency-key-ops, from cleat#2897. Passed to every dbServiceCaller
+	// this worker builds, which implements engine.IdempotencyKeyReplayer
+	// against it. Nil or empty means no replayer is registered at all -- see
+	// executeWorkflow's WithIdempotencyKeyReplayer wiring, conditional on
+	// this being non-empty, same shape as ambiguityLookup above.
+	idempotencyKeyOps map[string]bool
+
+	// idempotencyKeyRetention is --idempotency-key-retention, passed to
+	// engine.WithIdempotencyKeyRetention. Zero means
+	// engine.DefaultIdempotencyKeyRetention -- this field is never zero in
+	// practice because the flag default already sets it, but the engine
+	// option's own zero-means-default behaviour is what a test building a
+	// Worker directly, without going through flag parsing, falls back to.
+	idempotencyKeyRetention time.Duration
+
 	// egressAllow answers "which hosts may this tenant's workflows reach".
 	// Nil denies every guest-initiated fetch. cleat#1565.
 	egressAllow *engine.TenantEgressStore
@@ -1725,6 +1996,18 @@ type Worker struct {
 	// budget nobody configured -- the same opt-in rule the per-worker budget
 	// follows.
 	workerRegistry *engine.WorkerRegistry
+
+	// internalAuthSecret is CLEAT_INTERNAL_AUTH_KEY, read once at startup --
+	// cleat#2196's reaper-to-worker veto channel. Read unconditionally,
+	// independent of whether THIS worker also serves --internal-addr: this is
+	// the CLIENT half (reapOnce asking another worker before reclaiming its
+	// run), and asking does not require answering. Empty disables the channel
+	// for THIS worker's reaper, which falls back to its pre-#2196 unconditional
+	// ReapStaleInstances -- the same behaviour every worker had before the
+	// channel existed, and the correct one for any deployment that has not
+	// opted in at all.
+	internalAuthSecret string
+
 	// membershipLastBeat is when the last membership tick succeeded, or, until the
 	// first one does, when this worker registered (main sets it; a zero value would
 	// mean a slow boot is never a lapse -- cleat#2167). Read and written only by the
@@ -1766,7 +2049,14 @@ type Worker struct {
 	// other engine-side reads that take Replay's own ctx argument directly --
 	// but it is NOT what stops the next durable call; see fencedRuns below
 	// for why and what does.
-	execCancel sync.Map // map[workflowID]context.CancelFunc
+	//
+	// The value is a *execRegistration, which carries the GENERATION it
+	// belongs to and is a pointer -- comparable, which sync.Map's
+	// CompareAndDelete requires and a bare context.CancelFunc is not. Both the
+	// fence and deregistration have to tell one generation's entry from a
+	// successor's for the same id; see execRegistration's doc comment
+	// (cleat#2942).
+	execCancel sync.Map // map[workflowID]*execRegistration
 
 	// fencedRuns is set for a workflow ID the moment its fenced heartbeat
 	// reports the run lost, and is what freshCall actually refuses on via
@@ -1795,7 +2085,12 @@ type Worker struct {
 	// affected by this. fencedRuns reuses that same proven call site for
 	// decision 1, scoped to the one run rather than every run this worker
 	// holds.
-	fencedRuns sync.Map // map[workflowID]struct{}
+	//
+	// cleat#2942: the value is the generation this marker belongs to, not an
+	// empty struct, so a run's own teardown can CompareAndDelete exactly its
+	// own marker. A predecessor deregistering must not clear a marker a
+	// successor for the same id set.
+	fencedRuns sync.Map // map[workflowID]int64
 
 	// lastHeartbeatOK is the UnixNano of the last heartbeatAndFenceInFlight
 	// call that could actually ask the store -- a successful
@@ -1861,14 +2156,18 @@ type Worker struct {
 	// reason lastDBTrouble is seeded to now rather than to the zero value.
 	lastDBContactOK atomic.Int64
 
-	// consecutiveReapSkips counts reaper ticks in a row that skipped because
-	// reapingIsSafe() was false, reset to 0 by any tick that actually calls
-	// ReapStaleInstances (whether or not it reclaims anything). Purely for
-	// observability: reapOnce warns once this crosses
-	// reapSkipWarningThreshold, so a link that is chronically slow or
-	// unreliable -- which keeps the grace period from ever clearing, see
-	// reapingIsSafe's doc -- is visible as "the reaper is not running," not
-	// silent. cleat#2005 follow-up review, GAP3.
+	// consecutiveReapSkips counts reaper ticks in a row that failed to
+	// reclaim for a database reason -- either reapingIsSafe() was false, or
+	// the stall probe or the reclaim call itself errored out -- reset to 0
+	// only by a tick that completes with no error. See recordReapSkip,
+	// which is the sole place this is mutated. Purely for observability:
+	// reapOnce warns once this crosses reapSkipWarnThreshold, so a link
+	// that is chronically slow or unreliable -- which keeps the grace
+	// period from ever clearing, see reapingIsSafe's doc -- is visible as
+	// "the reaper is not running," not silent. cleat#2005 follow-up review,
+	// GAP3; widened to cover the error path in cleat#2193, which found the
+	// two call sites disagreeing about what counted (see recordReapSkip's
+	// doc for the mechanism).
 	consecutiveReapSkips atomic.Int64
 
 	// stallEpisodes tracks cleat#2006's suspected-database-stall suppression
@@ -1886,6 +2185,12 @@ type Worker struct {
 	consecutiveDBErrors int
 	backoffUntil        time.Time
 	circuitOpen         atomic.Bool
+
+	// internalDefsRefreshed records, per tenant, when this worker last resolved
+	// that tenant's internal definition names for the /metrics filter
+	// (cleat#3001). Keyed on cacheTenantFor, so it tracks storeForTenant's own
+	// first condition. See noteInternalDefs.
+	internalDefsRefreshed sync.Map
 
 	// Compaction settings.
 	Metrics                 *prometheus.Metrics
@@ -2008,6 +2313,43 @@ func (w *Worker) completeDrain() {
 // this is true has not FAILED the run: see writeTerminalFailure.
 func (w *Worker) shuttingDown() bool {
 	return w.ctx.Err() != nil
+}
+
+// runWasStopped reports whether this execution was STOPPED rather than broken:
+// the worker is shutting down, or the run was fenced out to a later generation.
+//
+// Both mean the segment's own outcome describes nothing about the workflow -- a
+// fenced run's next durable call is refused (fencedRuns, via
+// WithCanStartNewWork), and a shutting-down worker's guest was told to stop --
+// so neither may be persisted as this run's result. The post-execute path has
+// handled the shutdown half since cleat#2285: release, do not fail.
+//
+// cleat#2942 is the fence half of the same rule plus the PRE-EXECUTE reads,
+// which had no guard at all. A fence cancels this execution's context
+// (cleat#2008 fix 1), that cancellation lands on ordinary context-taking reads,
+// and each of them turned it into a terminal failure -- which converts a
+// hand-over into an application failure the caller cannot tell from a real one.
+func (w *Worker) runWasStopped(wf *engine.WorkflowInstance) bool {
+	return w.shuttingDown() || w.runIsFenced(wf.ID, wf.Generation)
+}
+
+// releaseIfStopped releases wf and reports whether it did, when this execution
+// was stopped rather than broken. Callers invoke it from an error path, before
+// recording any failure: a stopped execution's error describes the stopping,
+// not the run.
+//
+// "what" names the point of failure for the log, so a hand-over is visible
+// where it happened rather than only as an absence of failures.
+func (w *Worker) releaseIfStopped(wf *engine.WorkflowInstance, what string, err error) bool {
+	if !w.runWasStopped(wf) {
+		return false
+	}
+	w.logger.InfoContext(context.Background(),
+		"run was stopped rather than failing: releasing it for another worker instead of recording a failure",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "at", what,
+		"shutting_down", w.shuttingDown(), "fenced", w.runIsFenced(wf.ID, wf.Generation), "error", err)
+	w.releaseWorkflow(wf)
+	return true
 }
 
 // shutdownTailDuration is how long gracefulShutdown waits after the hard-stop
@@ -2214,6 +2556,7 @@ func (w *Worker) Run() {
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
 	initLoopCtx("memory_reload")
+	initLoopCtx("internal_defs_sweep")
 	initLoopCtx("plugin_health")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
@@ -2319,6 +2662,13 @@ func (w *Worker) Run() {
 	// Memory estimate reload loop.
 	w.registerLoopFunc("memory_reload", w.memoryReloadLoop)
 	w.launchLoop("memory_reload", w.memoryReloadLoop)
+
+	// Internal-definition sweep loop (cleat#3001). Re-resolves each tenant's
+	// internal definition names for the /metrics filter, so a definition
+	// TIGHTENED to internal after its last execution is still hidden rather than
+	// named until the process restarts. See sweepInternalDefs.
+	w.registerLoopFunc("internal_defs_sweep", w.internalDefsSweepLoop)
+	w.launchLoop("internal_defs_sweep", w.internalDefsSweepLoop)
 
 	// Memory sample cleanup loop.
 	w.registerLoopFunc("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
@@ -2717,11 +3067,49 @@ func (w *Worker) dispatchLoop() {
 	}
 }
 
+// execRegistration is what execCancel maps a workflow id to: the cancel func
+// for the execution registered under that id, tagged with the generation it
+// belongs to.
+//
+// The tag exists because the maps the heartbeat fence reads are keyed by
+// wf.ID alone while the fence asks a (id, generation) question. A suspend
+// makes a worker re-claim its OWN run milliseconds after releasing it, and
+// claiming Stores by wf.ID, so a successor's registration silently replaces
+// the judged one in place; the fence then cancels the execution that just
+// claimed, which dies in its pre-replay reads and is reported as a failed run
+// rather than handed over (cleat#2942). The generation lets the fence see that
+// the entry it loaded is not the one it judged, and lets a run's teardown
+// CompareAndDelete its own entry rather than a successor's.
+//
+// A pointer rather than the struct by value because sync.Map.CompareAndDelete
+// requires a comparable value, and the struct holds a context.CancelFunc (a
+// func type, which is not comparable).
+type execRegistration struct {
+	generation int64
+	cancel     context.CancelFunc
+}
+
+// deregisterExecution drops this execution's own entries from the maps the
+// fence reads.
+//
+// Every one is a CompareAndDelete by ENTRY, never a Delete by id: a same-worker
+// re-claim Stores a successor's registration under the same wf.ID, so an
+// id-only Delete here would tear down a run that is still executing. This is
+// the deferred half of the same root cause as the fence cancelling the wrong
+// generation (cleat#2942).
+func (w *Worker) deregisterExecution(wf *engine.WorkflowInstance, reg *execRegistration) {
+	w.inflight.CompareAndDelete(wf.ID, wf)
+	w.fencedRuns.CompareAndDelete(wf.ID, wf.Generation)
+	w.execCancel.CompareAndDelete(wf.ID, reg)
+}
+
 func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	defer w.wg.Done()
+	// execEngines stays id-keyed on purpose: unlike the three maps below it
+	// carries no fence decision, and this execution uses its own local `eng`
+	// for the rest of the function -- a successor losing this lookup entry
+	// costs a debug handle, not a wrong cancellation (cleat#2942).
 	defer w.execEngines.Delete(wf.ID)
-	defer w.inflight.Delete(wf.ID)
-	defer w.fencedRuns.Delete(wf.ID)
 
 	// cleat#2008: this execution's OWN context, cancelled independently of
 	// every other execution and of w.ctx, the moment its fenced heartbeat
@@ -2735,8 +3123,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// w.inflight (and so eligible to be heartbeat) but has no cancel func for
 	// the heartbeat loop to call.
 	execCtx, execCancel := context.WithCancel(w.ctx)
-	w.execCancel.Store(wf.ID, execCancel)
-	defer w.execCancel.Delete(wf.ID)
+	// The entry carries its generation and is a pointer so that both the fence
+	// and deregistration identify THIS registration rather than whatever a
+	// successor has since Stored under the same id (cleat#2942).
+	reg := &execRegistration{generation: wf.Generation, cancel: execCancel}
+	w.execCancel.Store(wf.ID, reg)
+	defer w.deregisterExecution(wf, reg)
 	defer execCancel()
 
 	defer func() {
@@ -2745,6 +3137,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))
 		}
 	}()
+	// cleat#3001: teach the /metrics filter this tenant's internal definition
+	// names before any name-carrying series for this run is recorded.
+	w.noteInternalDefs(context.Background(), wf)
 	w.Metrics.RecordWorkflowStarted(context.Background(), wf.DefName)
 	w.Metrics.AddWorkflowActive(context.Background(), 1, wf.DefName)
 	defer w.Metrics.AddWorkflowActive(context.Background(), -1, wf.DefName)
@@ -2946,6 +3341,13 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 			w.releaseForAnotherWorker(wf, fmt.Sprintf("history load: %v", err), "history_decrypt")
 			return
 		}
+		// A stopped worker or a fenced-out run must not have this read's
+		// failure written down as the run's own (cleat#2942). This read takes
+		// w.ctx, so the shutdown half is the reachable one here; the predicate
+		// covers both so a later context change cannot silently reintroduce it.
+		if w.releaseIfStopped(wf, "history load", err) {
+			return
+		}
 		w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "")
 		return
 	}
@@ -3033,16 +3435,18 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// egressAllow is what makes http.fetch usable at all: without it the guard
 	// has no allowlist and refuses every destination. cleat#1565.
 	caller := &dbServiceCaller{
-		store:            execStore,
-		workerID:         w.id,
-		benchSvcURL:      *benchSvcURL,
-		serviceEndpoints: w.serviceEndpoints,
-		egressAllow:      w.egressAllow,
-		operatorEgress:   w.operatorEgress,
-		privateHosts:     w.privateHosts,
-		egress:           w.egress,
-		traceID:          traceID,
-		secrets:          w.secrets,
+		store:             execStore,
+		workerID:          w.id,
+		benchSvcURL:       *benchSvcURL,
+		serviceEndpoints:  w.serviceEndpoints,
+		ambiguityLookup:   w.ambiguityLookup,
+		idempotencyKeyOps: w.idempotencyKeyOps,
+		egressAllow:       w.egressAllow,
+		operatorEgress:    w.operatorEgress,
+		privateHosts:      w.privateHosts,
+		egress:            w.egress,
+		traceID:           traceID,
+		secrets:           w.secrets,
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
@@ -3099,7 +3503,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// for why decision 1 has to be checked here rather than left to
 		// execCtx cancellation.
 		engine.WithCanStartNewWork(func() bool {
-			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID)
+			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID, wf.Generation)
 		}),
 		// cleat#2020: w.ctx is cancelled on SIGINT/SIGTERM (main.go's signal
 		// handler) and on the watchdog's poison-pill exit (w.cancel() in
@@ -3198,6 +3602,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if w.tenantPools != nil && wf.TenantID != "" {
 		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
 		if err != nil {
+			// Same rule as the history load above: a stopped execution did not
+			// fail, so its read failures are not this run's outcome
+			// (cleat#2942).
+			if w.releaseIfStopped(wf, "tenant pool", err) {
+				return
+			}
 			w.logger.ErrorContext(context.Background(), "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("tenant pool: %v", err), engine.ErrUnknown.String(), "")
 			return
@@ -3254,6 +3664,30 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// is about: durability code that is tested, believed and unreachable.
 	if ops := parseWriteAheadIntentOps(writeAheadIntentOps); len(ops) > 0 {
 		engineOpts = append(engineOpts, engine.WithWriteAheadIntentOps(ops...))
+	}
+	// cleat#1984: the shipped worker can settle most ambiguities itself,
+	// through a declared lookup, instead of leaving every one for an
+	// operator. Wired here, beside WithWriteAheadIntentOps, because the two
+	// are the same shape of "engine mechanism the worker turns on by flag"
+	// and the lookup is meaningless without write-ahead intent already
+	// recording the pending row it resolves. Conditional on len > 0 so a
+	// deployment that configures nothing registers no resolver at all and
+	// pays no extra lookup call on an ambiguity -- same cost as before this
+	// existed.
+	if len(w.ambiguityLookup) > 0 {
+		engineOpts = append(engineOpts, engine.WithAmbiguityResolver(caller))
+	}
+	// Same conditional-registration shape, for cleat#2897's same-key replay.
+	// The two are mutually exclusive per operation (validateIdempotencyKeyOps
+	// at boot), so this and the resolver above never compete over one
+	// operation -- but both options can be set on one Engine at once, for two
+	// DIFFERENT operations each handled by its own mechanism.
+	if len(w.idempotencyKeyOps) > 0 {
+		engineOpts = append(engineOpts,
+			engine.WithIdempotencyKeyReplayer(caller),
+			engine.WithIdempotencyKeyOps(w.idempotencyKeyOps),
+			engine.WithIdempotencyKeyRetention(w.idempotencyKeyRetention),
+		)
 	}
 	// Set unconditionally, and note it is NOT enough on its own: this governs
 	// the direct flush path only. The batch path takes the same value from the
@@ -3331,6 +3765,19 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		w.releaseWorkflow(wf)
 		return
 	}
+	// FENCED OUT: the same reasoning one generation later (cleat#2942). The
+	// fence cancelled this execution's context (cleat#2008 fix 1), so what came
+	// back describes a segment that was cut off rather than a workflow that
+	// failed -- an error may be the cancellation landing on a read the engine
+	// makes before the guest runs, and a "done" cannot be trusted either,
+	// because the guest's next durable call was refused. The release below is
+	// itself fenced on (id, worker, generation), so for a run another worker
+	// legitimately reclaimed this is a no-op that logs at debug -- which is
+	// exactly the "a lost fence is not an error" rule recordTerminalFailure's
+	// own doc states.
+	if w.releaseIfStopped(wf, "post-replay", err) {
+		return
+	}
 	if err != nil {
 		if deferPhase {
 			// A defer segment that could not run is still a terminate that
@@ -3363,7 +3810,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// was recorded by the segment that just ran, so it is only in the
 		// post-execution history. Passing the pre-execution `history` here
 		// would look correct and dead-letter nothing on a first failure.
-		w.recordTerminalFailureWithHistory(wf, workflowStartTime, errMsg, errorCode, errorOp, resultHistory)
+		w.recordTerminalFailureWithHistory(wf, workflowStartTime, errMsg, errorCode, errorOp, resultHistory, queryState)
 		return
 	}
 
@@ -3566,9 +4013,11 @@ func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
 
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
 // are currently executing, fenced individually per (run, generation) rather
-// than in the single unfenced statement BatchHeartbeat issues. cleat#2008:
-// this replaces that call at this one site (BatchHeartbeat itself is
-// unchanged and still correct for whatever else may call it) because it does
+// than in the single unfenced statement BatchHeartbeat used to issue.
+// cleat#2008 replaced BatchHeartbeat with this at the worker's one
+// heartbeat-loop call site -- BatchHeartbeat itself is gone, not left
+// standing for other callers, because it had none (see
+// engine/store_interface.go's HeartbeatBatchFenced doc) -- because this does
 // everything BatchHeartbeat did here PLUS the fence check, in the same
 // number of round trips.
 //
@@ -3656,14 +4105,26 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
 	w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
 
+	// cleat#2942: the generations as SENT, kept so the fence's WARN below can
+	// print the generation the store judged against beside the one it reads
+	// live from w.inflight. The two differ exactly when a same-worker
+	// re-claim landed while this call was in flight, and today's message
+	// prints only the live one -- so it reads as a run superseded by itself.
+	sentGeneration := make(map[string]int64, len(runs))
+	for _, r := range runs {
+		sentGeneration[r.WorkflowID] = r.Generation
+	}
+
 	for _, id := range lost {
+		sentGen := sentGeneration[id]
+
 		wfAny, ok := w.inflight.Load(id)
+		if !ok {
+			continue
+		}
 		wf, _ := wfAny.(*engine.WorkflowInstance)
-		var defName string
-		var generation int64
-		if ok && wf != nil {
-			defName = wf.DefName
-			generation = wf.Generation
+		if wf == nil {
+			continue
 		}
 		cancelAny, ok := w.execCancel.Load(id)
 		if !ok {
@@ -3672,20 +4133,39 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 			// returning. Nothing to cancel.
 			continue
 		}
-		cancel, ok := cancelAny.(context.CancelFunc)
-		if !ok {
+		reg, ok := cancelAny.(*execRegistration)
+		if !ok || reg == nil {
+			continue
+		}
+		// cleat#2942: judge the fence against the generation SENT, not the one
+		// live in these maps now. A suspend makes this worker re-claim its OWN
+		// run milliseconds later, and claiming Stores by wf.ID, so a successor
+		// overwrites both entries in place. If either has moved to a later
+		// generation, the hand-over this fence exists to perform has ALREADY
+		// happened locally: nothing of the judged generation is left to stop,
+		// and cancelling here would kill the execution that just claimed --
+		// which then dies in its pre-replay reads and (engine/executor.go:249)
+		// is surfaced as a fatal "checksum verification failed", failing a run
+		// that should simply have been handed over.
+		if wf.Generation != sentGen || reg.generation != sentGen {
+			w.logger.WarnContext(w.ctx, "heartbeat: run was re-claimed while the fence was deciding; not fencing",
+				"worker_id", w.id, "workflow_id", id, "def_name", wf.DefName,
+				"sent_generation", sentGen, "generation", wf.Generation)
 			continue
 		}
 		w.logger.WarnContext(w.ctx, "execution fenced out: run superseded by a later generation",
-			"worker_id", w.id, "workflow_id", id, "def_name", defName, "generation", generation)
-		w.Metrics.RecordExecutionFencedOut(w.ctx, defName)
+			"worker_id", w.id, "workflow_id", id, "def_name", wf.DefName,
+			"sent_generation", sentGen, "generation", wf.Generation)
+		w.Metrics.RecordExecutionFencedOut(w.ctx, wf.DefName)
 		// This, not cancel() below, is what stops the NEXT durable call --
 		// see fencedRuns' doc comment. Set only here, alongside the execCancel
 		// that proves the execution is still registered, so a run that has
 		// already finished (and deregistered) by the time this loop reaches
-		// it never gets an entry nothing would go on to delete.
-		w.fencedRuns.Store(id, struct{}{})
-		cancel()
+		// it never gets an entry nothing would go on to delete. The value is
+		// the generation judged, so the executing run's own CompareAndDelete
+		// removes only its own marker (cleat#2942).
+		w.fencedRuns.Store(id, sentGen)
+		reg.cancel()
 	}
 	return true
 }
@@ -3738,13 +4218,27 @@ func (w *Worker) heartbeatPresumedLost() bool {
 	return time.Since(last) > w.reclaimAfter()
 }
 
-// runIsFenced reports whether THIS run's own fenced heartbeat has already
-// reported it lost -- decision 1, scoped to one workflow ID rather than
-// every run this worker holds. See fencedRuns' doc comment for why this,
-// and not execCtx cancellation, is what freshCall actually refuses on.
-func (w *Worker) runIsFenced(workflowID string) bool {
-	_, ok := w.fencedRuns.Load(workflowID)
-	return ok
+// runIsFenced reports whether THIS generation of this run has had its own fenced
+// heartbeat report it lost -- decision 1, scoped to one run rather than every run
+// this worker holds. See fencedRuns' doc comment for why this, and not execCtx
+// cancellation, is what freshCall actually refuses on.
+//
+// The generation is part of the question rather than a detail of it. fencedRuns is
+// keyed by workflow id, and a marker outlives the claim that set it -- it is removed
+// by the marking run's OWN teardown, which for a run that was fenced out may never
+// come. An id-only read therefore answers "has ANY generation of this run been
+// fenced", which is not what either caller asks, and both symptoms have one cause:
+// a successor's GENUINE failure looks like a fence loss (runWasStopped releases it
+// rather than recording it, so the run can cycle claim -> fail -> release -> claim),
+// and a successor's guest has its durable calls refused by a fence that judged its
+// predecessor (cleat#2956).
+//
+// Both callers can state the generation, and did not have to be changed to: the two
+// release-path callers hold the instance, and the WithCanStartNewWork closure captures
+// the same wf that WithGeneration is handed a few lines above it.
+func (w *Worker) runIsFenced(workflowID string, generation int64) bool {
+	v, ok := w.fencedRuns.Load(workflowID)
+	return ok && v == generation
 }
 
 // recordDBTrouble marks this worker's own database contact as having just
@@ -4336,12 +4830,69 @@ func reclaimWindow(reclaimTimeout, heartbeat time.Duration) time.Duration {
 	return max(minimumReclaimAfter(heartbeat), 10*time.Second)
 }
 
-// reapSkipWarnThreshold is how many reaper ticks in a row reapOnce will skip
-// via its grace-period gate before escalating to a distinct, harder-to-miss
-// warning (see reapOnce). Three, not one: a single skip right after a real
-// stall is the gate doing exactly its job and is already logged at the
-// normal level: this is for the case where it never seems to clear.
+// reapSkipWarnThreshold is how many reaper ticks in a row reapOnce will fail
+// to reclaim -- via its grace-period gate, OR via the probe/reclaim call
+// itself erroring out -- before escalating to a distinct, harder-to-miss
+// warning (see reapOnce and recordReapSkip). Three, not one: a single skip
+// right after a real stall is the gate doing exactly its job and is already
+// logged at the normal level: this is for the case where it never seems to
+// clear.
 const reapSkipWarnThreshold = 3
+
+// recordReapSkip increments consecutiveReapSkips and, on the tick that
+// reaches reapSkipWarnThreshold, fires the "chronically skipped" alarm once
+// per streak. It is the ONLY place that increments the counter, and it is
+// called from both places reapOnce can end a tick without reclaiming
+// anything for database reasons: the grace-period gate (reapingIsSafe ==
+// false) and a probe or reclaim call that itself errors out.
+//
+// cleat#2193: those two call sites used to disagree about what counted.
+// Only the gate branch incremented; the error branch (lastErr != nil) did
+// not, and reapOnce reset the counter to 0 the moment reapingIsSafe()
+// returned true -- BEFORE the error branch could even run, since the gate
+// is checked first. A persistently failing stall probe calls recordDBTrouble
+// on every failure, which re-arms the gate for roughly one more tick (the
+// grace period is one to two tick intervals wide in practice) -- so the
+// sequence became error(reset to 0, untouched) -> gate-skip(1) ->
+// error(reset to 0 again, untouched) -> gate-skip(1) -> ... forever, never
+// reaching 3. The counter now advances on every tick that fails to
+// reclaim for a database reason, and resets to 0 only on a tick that
+// actually completes (reapOnce's own success path, after the reclaim loop
+// finishes with no error) -- so a probe that never recovers now trips the
+// alarm, whichever of the two branches keeps failing.
+func (w *Worker) recordReapSkip() int64 {
+	skips := w.consecutiveReapSkips.Add(1)
+	if skips == reapSkipWarnThreshold {
+		// A single skip, or a handful right after a real outage, is the
+		// gate (or a transient DB error) working as designed. A STREAK
+		// this long is a different thing worth an operator's attention:
+		// either the grace period keeps re-arming because the link is
+		// chronically slow or unreliable (cleat-review's GAP3), the
+		// stall-detection probe or the reclaim call itself is chronically
+		// failing (cleat#2193), or something is wrong with this worker's
+		// clock or database contact that never clears on its own -- either
+		// way, this worker's reaper is not reclaiming anyone's dead work
+		// right now, silently, and could stay that way indefinitely
+		// without this. Fires once per streak, at the threshold, rather
+		// than on every tick past it, so a genuinely long outage does not
+		// spam the log once a minute for its duration.
+		//
+		// WARN, not ERROR, and no escalation beyond the metric below: a
+		// genuine probe/reclaim failure already logs at ERROR (or WARN for
+		// a recognized connection error) on every tick it happens, via
+		// reapOnce's own lastErr branch -- this is a rollup on top of an
+		// already-loud per-tick signal, not the primary alert. It exists so
+		// a human or a dashboard notices the PATTERN (persistent, not
+		// occasional) rather than needing to count log lines; paging
+		// policy on cleat_background_loops_total{status="chronically_skipped"}
+		// is an operational decision for whoever owns alerting on this
+		// metric, not something to hardcode into the worker itself.
+		w.logger.WarnContext(w.ctx, "Reaper: skipped its last several ticks in a row -- this worker has not reclaimed a stale run in a while; check its database connectivity",
+			"worker_id", w.id, "consecutive_skips", skips)
+		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "chronically_skipped")
+	}
+	return skips
+}
 
 func (w *Worker) reaperLoop() {
 	defer w.wg.Done()
@@ -4364,6 +4915,293 @@ func (w *Worker) reaperLoop() {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// cleat#2196: the reaper's veto channel
+// ---------------------------------------------------------------------------
+//
+// Before reclaiming a stale run, the reaper ASKS the worker named in the row
+// whether it still holds it, and takes a "yes, and I am making progress" as a
+// veto for one more window. The database stays the only authority on who holds
+// a run -- the channel never grants ownership and generation fencing is
+// unchanged -- so it buys liveness for a worker whose own path to the database
+// is degraded (the one case neither #2166's grace period nor #2006's stall
+// shape covers: the database is healthy and exactly one worker is stale), at
+// the cost of one extra window before that worker's runs are reclaimed.
+//
+// Everything here fails toward RECLAIMING. A store without the interface, a
+// worker with no shared secret, a holder with no published address, a dial
+// error, a timeout, a non-200 -- each is "no veto", and the row is reclaimed
+// exactly as it was before any of this existed. Only an explicit, authenticated
+// "held: true" from the named holder removes a row from a tick's sweep.
+
+// askerFunc asks one worker whether it still holds one run at one generation.
+// A function rather than a direct askInternalHolds call so the split and the
+// ask phase are both testable without a live peer -- the tests pass a stub.
+type askerFunc func(ctx context.Context, address, runID string, generation int64) bool
+
+// holderQuestion is one row this tick will ask a holder about.
+type holderQuestion struct {
+	holder  string
+	address string
+	key     engine.GenerationKey
+}
+
+// staleRowsToAsk returns the rows this tick should ASK about, which is
+// deliberately a NARROWER set than the sweep covers.
+//
+// THE TWO-WINDOW SPLIT, and why carrying it needs no state at all. WS-2's
+// design on cleat#2009 bounds the veto to one extra reclaim window; this is
+// that bound, expressed with nothing persisted:
+//
+//	normal  = rows stale by >= 1 window   (what the sweep may reclaim)
+//	doubled = rows stale by >= 2 windows  (what it reclaims WITHOUT asking)
+//	ask     = normal - doubled            (asked; a "held" answer excludes it)
+//
+// A row vetoed now is in ask on this tick and in doubled on the next, so the
+// exclusion lifts by itself one window later -- no per-row bookkeeping to
+// expire, leak, or get stuck holding a run forever. A row already past the
+// second window is never asked, so no holder, honest or lying, can delay its
+// own reclaim past one extra window.
+//
+// Both reads use the same limit, which is what makes doubled a subset of
+// normal rather than merely overlapping it: each takes the OLDEST rows by
+// heartbeat_at on its own side of the threshold, and everything older than two
+// windows is older than everything in [one, two).
+func (w *Worker) staleRowsToAsk(ctx context.Context, reaper engine.StaleHolderReaper, staleTimeout time.Duration) ([]engine.StaleHold, error) {
+	normal, err := reaper.ListStaleHolders(ctx, staleTimeout, w.maxReclaimPerTick)
+	if err != nil {
+		return nil, err
+	}
+	if len(normal) == 0 {
+		return nil, nil
+	}
+	doubled, err := reaper.ListStaleHolders(ctx, 2*staleTimeout, w.maxReclaimPerTick)
+	if err != nil {
+		return nil, err
+	}
+	past := make(map[engine.GenerationKey]struct{}, len(doubled))
+	for _, h := range doubled {
+		past[h.Key] = struct{}{}
+	}
+	ask := make([]engine.StaleHold, 0, len(normal))
+	for _, h := range normal {
+		if _, ok := past[h.Key]; !ok {
+			ask = append(ask, h)
+		}
+	}
+	return ask, nil
+}
+
+// registryAddresses returns worker_id -> the address that worker published, in
+// ONE registry read rather than one per holder.
+//
+// THE WINDOW IS workerRegistryRetention, NOT THE MEMBERSHIP LEASE, and that is
+// load-bearing rather than tidy: the holders this exists to resolve are exactly
+// the ones whose heartbeats have stopped, so under the lease (10s at the
+// default heartbeat) they are ALREADY SWEPT while their runs remain askable
+// until two reclaim windows (29s). Reading with the lease would return an empty
+// map for every holder worth asking -- see workerRegistryRetention for the
+// arithmetic, and for why the sweep had to be widened to match.
+func (w *Worker) registryAddresses(ctx context.Context) (map[string]string, error) {
+	if w.workerRegistry == nil {
+		return nil, nil
+	}
+	live, err := w.workerRegistry.ListLive(ctx, workerRegistryRetention(w.heartbeatInterval, w.reclaimAfter()))
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]string, len(live))
+	for _, r := range live {
+		if r.Address != "" {
+			byID[r.WorkerID] = r.Address
+		}
+	}
+	return byID, nil
+}
+
+// holderQuestions pairs each row to ask about with the address of the worker
+// holding it. Takes the address map rather than reading the registry itself, so
+// the pairing is testable without a database.
+//
+// A row whose holder published no address is dropped rather than asked
+// anywhere: this worker predates --worker-service-name, runs outside
+// Kubernetes, is in a deployment whose headless Service does not select it, or
+// has aged out of the registry. Told apart from an unreachable holder in no way
+// that matters -- both are "no veto, reclaim proceeds", the pre-#2196
+// behaviour.
+func (w *Worker) holderQuestions(rows []engine.StaleHold, addresses map[string]string) []holderQuestion {
+	out := make([]holderQuestion, 0, len(rows))
+	for _, h := range rows {
+		address := addresses[h.AssignedTo]
+		if address == "" {
+			continue
+		}
+		out = append(out, holderQuestion{holder: h.AssignedTo, address: address, key: h.Key})
+	}
+	return out
+}
+
+// askHolders asks each holder whether it still holds the runs it was named for,
+// and returns the (run, generation) pairs a live holder vetoed.
+//
+// ONE BOUNDED PHASE, one goroutine per HOLDER rather than per row: a worker
+// holding several stale runs is asked about them in sequence, so a single
+// unhealthy holder cannot fan out into a burst of connections, while distinct
+// holders are asked concurrently so a tick's total wait stays near one timeout
+// instead of growing with the number of stale workers.
+//
+// An ask that does not answer inside the budget is NO VETO, and its row is
+// reclaimed -- which is the pre-#2196 behaviour, and precisely what the
+// acceptance criterion asks of a killed worker ("a worker that is killed loses
+// them within the normal window"). Nothing here can block a reclaim.
+//
+// WHAT IT COSTS A TICK. One dbCallDeadline for the whole phase, whatever the
+// number of holders, so at the defaults the reaper's worst case is three such
+// phases (list, ask, reclaim, ~2.5s each) inside a 10s tick interval -- asking
+// cannot push the reaper past its own cadence.
+func (w *Worker) askHolders(ctx context.Context, questions []holderQuestion, ask askerFunc) []engine.GenerationKey {
+	if len(questions) == 0 {
+		return nil
+	}
+	byHolder := make(map[string][]engine.GenerationKey, len(questions))
+	addresses := make(map[string]string, len(questions))
+	for _, q := range questions {
+		byHolder[q.holder] = append(byHolder[q.holder], q.key)
+		addresses[q.holder] = q.address
+	}
+
+	askCtx, cancel := context.WithTimeout(ctx, w.dbCallDeadline())
+	defer cancel()
+
+	var mu sync.Mutex
+	var vetoed []engine.GenerationKey
+	var wg sync.WaitGroup
+	for holder, keys := range byHolder {
+		wg.Add(1)
+		go func(holder string, keys []engine.GenerationKey) {
+			defer wg.Done()
+			defer recoverBackgroundGoroutine(w.logger, w.id, "reaper-ask-holder")
+			address := addresses[holder]
+			var held []engine.GenerationKey
+			for _, k := range keys {
+				if askCtx.Err() != nil {
+					// Budget spent: the remaining rows are "no veto", which is
+					// the safe direction -- they get reclaimed.
+					break
+				}
+				if ask(askCtx, address, k.WorkflowID, k.Generation) {
+					held = append(held, k)
+				}
+			}
+			if len(held) == 0 {
+				return
+			}
+			mu.Lock()
+			vetoed = append(vetoed, held...)
+			mu.Unlock()
+			w.logger.InfoContext(w.ctx, "Reaper: a holder vetoed reclaim of its run for one more window",
+				"worker_id", w.id, "holder", holder, "held", len(held))
+		}(holder, keys)
+	}
+	wg.Wait()
+	return vetoed
+}
+
+// askHolder is the production askerFunc: one authenticated GET to the holder's
+// --internal-addr listener. askInternalHolds already collapses every failure to
+// held=false, and the error it returns is nil by construction; it is dropped
+// here as well so no future caller can mistake "could not ask" for "must not
+// reclaim".
+//
+// ONE CLIENT PER ASK, AND EGRESS-GUARDED -- not the stock client this started
+// as. A worker address is a cluster-internal name, so it is RFC1918 by
+// construction; the absolute floor would refuse it, and the tree-wide guard
+// (plugins/every_plugin_routes_its_egress_through_the_guard_test.go) requires
+// every http.Client here to carry an explicit Transport rather than the
+// default, so an unguarded one is a build failure as well as a denied dial.
+//
+// The grant is the host being dialled and nothing else, which is the
+// OPERATOR-named side of that guard's line: the address comes from
+// --worker-service-name, never from a guest. A pooled client could not carry a
+// per-host exempt set, so this is built per ask -- the same shape, and the same
+// reason, as forwardToService's client. See service_egress.go.
+func (w *Worker) askHolder(ctx context.Context, address, runID string, generation int64) bool {
+	client := &http.Client{
+		// A backstop only. The ask phase's own context (askHolders) is the real
+		// bound, at one dbCallDeadline for every holder together.
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: w.serviceEgressGuard(ctx, "http://"+address).DialContext},
+	}
+	held, _ := askInternalHolds(ctx, client, address, w.internalAuthSecret, runID, generation)
+	return held
+}
+
+// reapUnitOnce performs one reap unit's sweep for this tick, consulting the
+// veto channel when both the store and this worker's configuration support it.
+//
+// A store that does not implement StaleHolderReaper, or a worker with no
+// CLEAT_INTERNAL_AUTH_KEY, gets exactly the unconditional ReapStaleInstances
+// every worker ran before the channel existed -- the channel is additive and a
+// deployment that never opted in is bit-for-bit unchanged.
+//
+// The two database phases are wrapped in probeBoundedCall; the asks BETWEEN
+// them are not, and that separation is the point. An ask is HTTP to another
+// worker, and folding it into the database-reachability probe would report a
+// slow peer as this worker's DATABASE being unreachable -- the one reading that
+// must not happen here, since the premise of the whole channel is that the
+// database is healthy and one worker is not.
+//
+// WHAT A TICK COSTS WITH THE CHANNEL ON. One extra indexed SELECT against each
+// unit (ListStaleHolders) before the reclaim that would otherwise be the tick's
+// only statement. Nothing else: when there is nothing stale -- the ordinary
+// tick -- the second listing, the registry read and the asks are all skipped.
+func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, error) {
+	reaper, ok := unit.store.(engine.StaleHolderReaper)
+	if !ok || w.internalAuthSecret == "" {
+		var n int
+		err := w.probeBoundedCall(func(reapCtx context.Context) error {
+			var err error
+			n, err = unit.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
+			return err
+		})
+		return n, err
+	}
+
+	var rows []engine.StaleHold
+	var addresses map[string]string
+	err := w.probeBoundedCall(func(reapCtx context.Context) error {
+		var e error
+		rows, e = w.staleRowsToAsk(reapCtx, reaper, staleTimeout)
+		if e != nil || len(rows) == 0 {
+			// Nothing to ask about -- the ordinary tick, and the one the
+			// registry read below would otherwise charge for.
+			return e
+		}
+		addresses, e = w.registryAddresses(reapCtx)
+		return e
+	})
+	if err != nil {
+		// The listing and the address read are this worker's OWN database
+		// reads, so a failure is a failure of the reclaim attempt and is treated
+		// as one -- skip this unit this tick rather than reclaim unasked. Same
+		// choice, and same reasoning, as the suspected-stall probe's FAIL
+		// CLOSED: the tick a read like this is most likely to fail on is the one
+		// where reclaiming blind would take a live worker's run, and
+		// recordDBTrouble (from probeBoundedCall) still covers the failure.
+		return 0, err
+	}
+
+	exclude := w.askHolders(w.ctx, w.holderQuestions(rows, addresses), w.askHolder)
+
+	var n int
+	err = w.probeBoundedCall(func(reapCtx context.Context) error {
+		var err error
+		n, err = reaper.ReapStaleInstancesExcept(reapCtx, staleTimeout, w.maxReclaimPerTick, exclude)
+		return err
+	})
+	return n, err
+}
+
 // reapOnce is one reaper tick, extracted from reaperLoop so a test can drive
 // it directly without a ticker. cleat#2005.
 func (w *Worker) reapOnce() {
@@ -4378,31 +5216,13 @@ func (w *Worker) reapOnce() {
 	// from "my own observation of every worker just went dark, briefly,
 	// including of myself".
 	if !w.reapingIsSafe() {
-		skips := w.consecutiveReapSkips.Add(1)
+		skips := w.recordReapSkip()
 		w.logger.WarnContext(w.ctx, "Reaper: skipping this tick -- recent database trouble on this worker, waiting out the recovery grace period before trusting a stale heartbeat",
 			"worker_id", w.id, "reclaim_after", w.reclaimAfter(), "consecutive_skips", skips)
-		if skips == reapSkipWarnThreshold {
-			// A single skip, or a handful right after a real outage, is the
-			// gate working as designed. A STREAK this long is a different
-			// thing worth an operator's attention: either the grace period
-			// keeps re-arming because the link is chronically slow or
-			// unreliable (cleat-review's GAP3), or something is wrong with
-			// this worker's clock or database contact that never clears on
-			// its own -- either way, this worker's reaper is not reclaiming
-			// anyone's dead work right now, silently, and could stay that
-			// way indefinitely without this. Fires once per streak, at the
-			// threshold, rather than on every tick past it, so a genuinely
-			// long outage does not spam the log once a minute for its
-			// duration.
-			w.logger.WarnContext(w.ctx, "Reaper: skipped its last several ticks in a row -- this worker has not reclaimed a stale run in a while; check its database connectivity",
-				"worker_id", w.id, "consecutive_skips", skips)
-			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "chronically_skipped")
-		}
 		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 		return
 	}
-	w.consecutiveReapSkips.Store(0)
 
 	// Bounded for the same reason heartbeatAndFenceInFlight's call is: a
 	// call already in flight from before a stall began would otherwise
@@ -4466,12 +5286,7 @@ func (w *Worker) reapOnce() {
 		if suppressed {
 			continue
 		}
-		var n int
-		err := w.probeBoundedCall(func(reapCtx context.Context) error {
-			var err error
-			n, err = unit.store.ReapStaleInstances(reapCtx, staleTimeout, w.maxReclaimPerTick)
-			return err
-		})
+		n, err := w.reapUnitOnce(unit, staleTimeout)
 		reaped += n
 		if err != nil {
 			lastErr = err
@@ -4479,15 +5294,17 @@ func (w *Worker) reapOnce() {
 	}
 	if lastErr != nil {
 		w.recordDBTrouble()
+		skips := w.recordReapSkip()
 		if isConnectionError(lastErr) {
-			w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id)
+			w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id, "consecutive_skips", skips)
 		} else {
-			w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", lastErr)
+			w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", lastErr, "consecutive_skips", skips)
 		}
 		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "error")
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 		return
 	}
+	w.consecutiveReapSkips.Store(0)
 	w.recordDBContactOK()
 	if reaped > 0 {
 		w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
@@ -5856,7 +6673,19 @@ func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
 // because the two callers differ on it absolutely rather than by degree. The
 // panic path cannot be one: a recovered panic is a crash, not a call that ran
 // out of attempts.
-func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool, history []engine.EventRecord) (applied, deadLettered bool) {
+//
+// queryState is what the failing replay itself published via SetQueryState,
+// if any -- nil for the paths that never ran a replay (a panic recovery, or a
+// failure before the segment started). It is passed to both FailWorkflow and
+// MoveToDeadLetterQueue, the same way and for the same reason: each store's
+// UPDATE writes query_state = COALESCE(<param>, query_state), so a nil here
+// leaves the column exactly as the last successfully-finalized segment left
+// it, and a non-nil map is what THIS segment published before it failed.
+// Before cleat#2650, MoveToDeadLetterQueue's UPDATE never touched query_state
+// at all, so the final failing replay's own publishes -- the ones no earlier
+// successful segment had a chance to persist -- were silently discarded on
+// the dead-letter path. See cleat#2520.
+func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool, history []engine.EventRecord, queryState map[string]string) (applied, deadLettered bool) {
 	st, release := w.storeFor(wf)
 	defer release()
 	ctx := context.Background()
@@ -5948,9 +6777,9 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 
 	var err error
 	if deadLettered {
-		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
+		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, queryState)
 	} else {
-		err = st.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
+		err = st.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, queryState)
 	}
 
 	if errors.Is(err, engine.ErrFenceLost) {
@@ -6173,14 +7002,18 @@ func (w *Worker) shouldWarnUnservable(workflowID, check string, now time.Time) b
 // serve it rather than destroying it. See releaseForAnotherWorker above for
 // which side of that line a new pre-flight check belongs on.
 func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string) {
-	w.recordTerminalFailureWithHistory(wf, startedAt, errMsg, errorCode, errorOp, nil)
+	w.recordTerminalFailureWithHistory(wf, startedAt, errMsg, errorCode, errorOp, nil, nil)
 }
 
 // recordTerminalFailureWithHistory is the form used where a segment actually
 // executed, so its history can answer whether a retry exhaustion is what ended
 // the workflow.
-func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string, history []engine.EventRecord) {
-	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true, history)
+//
+// queryState is that same segment's replay result -- see writeTerminalFailure's
+// doc comment for how it reaches whichever of FailWorkflow or
+// MoveToDeadLetterQueue actually applies.
+func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string, history []engine.EventRecord, queryState map[string]string) {
+	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true, history, queryState)
 	if !applied {
 		return
 	}
@@ -6318,7 +7151,7 @@ func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 	// panicked left its parent waiting out its full timer, and its job (if
 	// jobqueue-dispatched) recoverable only by the abandonment sweep, marked
 	// 'abandoned' rather than 'failed'.
-	applied, _ := w.writeTerminalFailure(wf, errMsg, engine.ErrUnknown.String(), "panic", false, nil)
+	applied, _ := w.writeTerminalFailure(wf, errMsg, engine.ErrUnknown.String(), "panic", false, nil, nil)
 	if !applied {
 		return
 	}
@@ -6588,10 +7421,10 @@ func (w *Worker) storeFor(wf *engine.WorkflowInstance) (engine.WorkflowStore, fu
 // It is a report and not a gate. Refusing to start would contradict the
 // degradation the rest of this feature is built on, and would turn a revoked
 // GRANT into an outage for the worker's own tenant, which was never affected.
-// The one thing it does that no runtime path can is catch a lost BYPASSRLS on
-// PostgreSQL: that failure does not raise, it just returns fewer rows, so
-// without this check a silently single-tenant worker looks exactly like a
-// healthy one. See engine.PostgresStore.CheckCrossTenantCapability.
+//
+// It does not check BYPASSRLS. That belonged to the widened admin.claim_workflows
+// query #1926 retired, along with engine.PostgresStore.CheckCrossTenantCapability,
+// which this comment named until the function it pointed at stopped existing.
 func (w *Worker) reportCrossTenantCapability() {
 	if !w.claimAcrossTenants {
 		return
@@ -6689,13 +7522,14 @@ func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 // -- see storeForTenant -- so the widened view lasts exactly as long as the
 // claim.
 //
-// A store that does not implement CrossTenantClaimer falls back rather than
-// failing. The flag says what the operator wants; the store says what the
-// dialect and the deployment's grants can actually do, and those can disagree
-// on a mixed fleet.
+// A worker that cannot rotate -- no store factory, or a store that cannot
+// enumerate tenants -- falls back rather than failing (errRotatingClaimUnavailable,
+// cmd/cleat-worker/rotating_claim.go). The flag says what the operator wants;
+// the store says what the dialect and the deployment's grants can actually
+// do, and those can disagree on a mixed fleet.
 func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
-	// Every claim path returns through here -- cross-tenant, the fallback after
-	// ErrCrossTenantClaimUnsupported, and the scoped claim -- so one deferred
+	// Every claim path returns through here -- rotating, the fallback after
+	// errRotatingClaimUnavailable, and the scoped claim -- so one deferred
 	// record covers all three. It covers the ERROR returns too, deliberately: a
 	// claim that is slow because the database is struggling is exactly the
 	// latency an operator wants to see, and excluding it would make the metric

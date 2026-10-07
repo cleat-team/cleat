@@ -342,6 +342,34 @@ StaleInstances ==
     {i \in RunningInstances :
         ~alive[assignedTo[i]] \/ clock - heartbeatAt[i] >= HeartbeatTimeout}
 
+(*
+  cleat#2196's reaper-to-worker veto channel, as a single conjunct on Reap's
+  existing guard rather than new modeling work -- WS-2's #2009 design
+  comment: "The veto never grants ownership or changes who can hold a
+  claim -- it only gates WHEN the reclaim action's guard is enabled. That's
+  an additional conjunct on the existing reclaim-action guard in the spec,
+  followed by re-checking S4 ... still holds."
+
+  NO NEW VARIABLE. A worker already known dead (~alive[assignedTo[i]]) can
+  answer no veto -- there is no process left to ask -- so that half of
+  StaleInstances is reclaimable exactly as before. The other half (merely
+  heartbeat-stale, assignedTo[i] still alive) is where the channel acts in
+  the real system: the reaper asks that worker before reclaiming, and a
+  "yes, still running" answer defers the reclaim by one extra
+  reclaimAfter() window (WS-2: "a vetoing worker can delay reclaim of its
+  own run by at most one additional reclaimAfter() window ... then reclaim
+  proceeds regardless"). Modeled by requiring DOUBLE the staleness age for
+  that case, using the SAME HeartbeatTimeout the real code derives
+  reclaimAfter() from -- one ordinary window to go stale, one more to
+  exhaust the veto's grace. No persisted "was this vetoed" bit is needed:
+  the model does not have to answer whether a given tick's veto said yes or
+  no, only that the GUARD cannot be satisfied any earlier than this for an
+  alive holder, which is the one property #2196 depends on.
+*)
+ReapGuardSatisfied(i) ==
+    \/ ~alive[assignedTo[i]]
+    \/ clock - heartbeatAt[i] >= 2 * HeartbeatTimeout
+
 ExpiredDeferPhases ==
     {i \in Instances : pendingTerminalStatus[i] /= NoOutcome /\ deferDeadline[i] < clock}
 
@@ -461,6 +489,7 @@ Release(w) ==
 *)
 Reap ==
     \/ (\E i \in StaleInstances :
+        /\ ReapGuardSatisfied(i)   \* cleat#2196: the one added conjunct, see above
         /\ status' = [status EXCEPT ![i] =
               IF pendingTerminalStatus[i] /= NoOutcome THEN "terminating" ELSE "ready"]
         /\ assignedTo' = [assignedTo EXCEPT ![i] = NULL]

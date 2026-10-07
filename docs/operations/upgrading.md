@@ -276,12 +276,15 @@ operators that the Postgres migration set `SET LOCAL lock_timeout = '30s'`
 inside a `DO` block, that this *overrode* any session value they set, and that
 shortening it meant editing the migration SQL.
 
-Every part of that was false. There is no migration 007 on either dialect
-(`ls migrations/postgres/007*`), the five `ON DELETE CASCADE` foreign keys it
-claimed to add are declared in `001_schema.sql` from the beginning, and no
-migration has ever set `lock_timeout`. The cost was not the missing guard on its
-own: an operator who did the right thing was told their setting was inert, which
-is a gap plus a reason not to look for it.
+Every part of that was false. There was never a CASCADE migration numbered 007
+on either dialect -- the five `ON DELETE CASCADE` foreign keys it claimed to add
+are declared in `001_schema.sql` from the beginning, and no migration has ever
+set `lock_timeout`. (`migrations/postgres/007_input_validation_disabled.sql`,
+added later by cleat#1981, is a later, unrelated migration that happens to
+share the number -- it does nothing with CASCADE or `lock_timeout`, and this
+section's history predates it.) The cost was not the missing guard on its own:
+an operator who did the right thing was told their setting was inert, which is
+a gap plus a reason not to look for it.
 
 **Its second bullet was inert too, which is why this section is rewritten rather
 than patched.** That one read "Set `lock_timeout` before running for the
@@ -293,10 +296,12 @@ the DSN, so a value set anywhere else never reaches it. Both bullets pointed an
 operator away from the only thing that works.
 
 Three further paragraphs went with it -- a pre-migration orphan check for
-`concurrency_keys`, a "do not re-apply migration 007 manually" warning citing
-the idempotency of its Postgres `DO` block and its MSSQL `IF EXISTS` guards, and
-a rollback procedure for undoing the CASCADE. All three described the same
-migration, so all three were instructions about a file that is not there.
+`concurrency_keys`, a "do not re-apply the CASCADE migration manually" warning
+citing the idempotency of its Postgres `DO` block and its MSSQL `IF EXISTS`
+guards, and a rollback procedure for undoing the CASCADE. All three described
+the same phantom migration, so all three were instructions about a file that
+was never there -- and, since cleat#1981, a different file sits at that same
+number; none of this history ever applied to it.
 
 ## Running old and new workers side by side
 
@@ -668,9 +673,13 @@ As of this release, queries without tenant context **fail with an error**:
 
 ### Migration
 
-Run migration `008_rls_fail_closed.sql`. The migration is idempotent:
-- Creates or replaces the `cleat.assert_tenant_set()` function.
-- Recreates RLS policies to use the new assert function (Postgres).
+Run the standard migration command (`cleat-worker --migrate-db` or
+`cleatctl migrate`) against the current migration tree. The fail-closed
+`cleat.assert_tenant_set()` function and the RLS policies that call it have
+been part of the baseline schema (`migrations/postgres/001_schema.sql`) since
+the cleat#2059 rebaseline, so on a deployment already on that baseline this
+step is a no-op; it only does work on a deployment still on the pre-rebaseline
+numbered chain, where it originally shipped as migration `008_rls_fail_closed.sql`.
 
 No application code changes are required for normal operation. The existing
 `WithTenant()` pattern in the dispatch loop already sets tenant context before
@@ -688,10 +697,13 @@ SELECT set_config('cleat.tenant_id', '<tenant-uuid>', false);
 
 ### Migration ordering
 
-Migrations must be applied in order. Do not re-run migration `002_constraints.sql`
-after migration `008_rls_fail_closed.sql` without first manually dropping the RLS
-policies, because `002_constraints.sql` uses bare `CREATE POLICY` without
-`DROP POLICY IF EXISTS` guards.
+Migrations must be applied in order; the migration runner enforces this. On
+the pre-rebaseline numbered chain, this ordering hazard was real: replaying
+migration `002_constraints.sql` (bare `CREATE POLICY`, no
+`DROP POLICY IF EXISTS` guard) after `008_rls_fail_closed.sql` without first
+manually dropping the RLS policies would fail. `migrations/postgres/001_schema.sql`,
+the current baseline, carries the RLS policies' LAST definition directly and
+is applied once, so there is no such sequence to replay.
 
 ### MSSQL limitation
 

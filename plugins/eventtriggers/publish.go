@@ -57,6 +57,15 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 // 123456789012345678901234567890 into 1.2345678901234568e+29. The column type
 // could not fix that, because the value was wrong before any database saw it.
 // Taking bytes is what removes the round trip; it is not a style preference.
+//
+// keys is the correlation-key list from the event routing design's §3.1
+// envelope (cleat#2625, P1) -- 0 to 3 ordinary string values, left to right
+// into key1/key2/key3. A nil or empty keys matches only an awaiter that also
+// asked for no keys, which is every awaiter today: kafkaconnect and
+// webhookingest both currently call this with keys as nil, so nothing that
+// exists yet changes behaviour. It is exported so the two of them can adopt
+// correlation without a second publish pipeline -- see PublishEvent's own
+// doc comment above for why there is only one.
 func PublishEvent(
 	ctx context.Context,
 	db plugin.PluginDB,
@@ -66,6 +75,7 @@ func PublishEvent(
 	tenantID uuid.UUID,
 	eventType string,
 	eventData json.RawMessage,
+	keys []string,
 ) (int, error) {
 	// Scope every statement below to the tenant this event belongs to.
 	//
@@ -97,10 +107,31 @@ func PublishEvent(
 		eventData = json.RawMessage("{}")
 	}
 
+	// Reject invalid JSON HERE, uniformly, rather than leaving it to the
+	// column type. PostgreSQL's JSONB and MySQL's JSON both refuse an invalid
+	// value at INSERT; SQL Server's event_data is plain NVARCHAR(MAX) with no
+	// equivalent (migrations.go has never added an ISJSON check there,
+	// unlike event_subscriptions.input_template's JSON_VALID CHECK). Without
+	// this, a row that reaches storage on SQL Server only is unmarshalable by
+	// every reader downstream -- and because the claim query orders by
+	// received_at with no way to skip a row it cannot process, that row
+	// becomes the permanent head of its (tenant, event_type), and no later
+	// event of that type is ever delivered (cleat#2666). Checking in Go once,
+	// before the dialect-specific INSERT, makes the guarantee the same on all
+	// three dialects instead of resting on a per-column accident.
+	if !json.Valid(eventData) {
+		return 0, fmt.Errorf("event-triggers: publish: event data is not valid JSON")
+	}
+
+	key1, key2, key3, err := keySlots(keys)
+	if err != nil {
+		return 0, fmt.Errorf("event-triggers: publish: %w", err)
+	}
+
 	// Insert with idempotency — ON CONFLICT DO NOTHING prevents duplicate
 	// processing of the same event ID.
 	rows, err := db.Exec(ctx, plugin.Rebind(insertEventIdempotent.For(currentDialect), currentDialect),
-		eventID, tenantID, eventType, string(eventData))
+		eventID, tenantID, eventType, string(eventData), key1, key2, key3)
 	if err != nil {
 		return 0, fmt.Errorf("store event: %w", err)
 	}
@@ -130,7 +161,7 @@ func PublishEvent(
 
 	// ---- Signal awaiters ----
 
-	signalAwaiters(ctx, db, logger, env, tenantID, eventType, string(eventData))
+	signalAwaiters(ctx, db, logger, env, tenantID, eventType, string(eventData), key1, key2, key3)
 
 	return matched, nil
 }
@@ -286,9 +317,18 @@ func triggerMatchingWorkflows(
 	return matched, nil
 }
 
-// signalAwaiters delivers a signal to all workflows that are registered as
-// waiting for the given event type. Called from the publish handler after
-// an event has been successfully stored.
+// signalAwaiters delivers a signal to every workflow registered as waiting
+// for the given event type WITH MATCHING CORRELATION KEYS. Called from the
+// publish handler after an event has been successfully stored.
+//
+// key1/key2/key3 are the just-published event's own slots (from
+// PublishEvent's keySlots call), and the WHERE clause below requires all
+// three to match the awaiter's. An awaiter that asked for no keys has the
+// empty-string sentinel in all three (§4.4, never NULL), which is exactly
+// what an unkeyed event also carries -- so an unkeyed publish still reaches only
+// unkeyed awaiters of that type, precisely today's behaviour, and a keyed
+// publish no longer wakes every awaiter of the type regardless of which
+// value they are holding for. cleat#2625.
 func signalAwaiters(
 	ctx context.Context,
 	db plugin.PluginDB,
@@ -297,6 +337,7 @@ func signalAwaiters(
 	tenantID uuid.UUID,
 	eventType string,
 	eventData string,
+	key1, key2, key3 string,
 ) {
 	if env == nil || env.SignalWorkflow == nil {
 		return
@@ -305,8 +346,8 @@ func signalAwaiters(
 	rows, err := db.Query(ctx, plugin.Rebind(`
 		SELECT workflow_id
 		FROM event_awaiters
-		WHERE tenant_id = $1 AND event_type = $2
-		`, currentDialect), tenantID, eventType)
+		WHERE tenant_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5
+		`, currentDialect), tenantID, eventType, key1, key2, key3)
 	if err != nil {
 		logger.Error("event-triggers: query awaiters", "error", err)
 		return
@@ -358,7 +399,7 @@ func signalAwaiters(
 					"workflow_id", wfID,
 					"signal", signalName,
 				)
-				unregisterAwaiter(ctx, db, logger, wfID, eventType)
+				unregisterAwaiter(ctx, db, logger, wfID, eventType, key1, key2, key3)
 				continue
 			}
 			logger.Warn("event-triggers: signal awaiter failed",
@@ -372,19 +413,25 @@ func signalAwaiters(
 			"workflow_id", wfID,
 			"signal", signalName,
 		)
-		unregisterAwaiter(ctx, db, logger, wfID, eventType)
+		unregisterAwaiter(ctx, db, logger, wfID, eventType, key1, key2, key3)
 	}
 }
 
-// unregisterAwaiter removes the awaiter record.
-func unregisterAwaiter(ctx context.Context, db plugin.PluginDB, logger *slog.Logger, workflowID, eventType string) {
+// unregisterAwaiter removes the awaiter record matching the given workflow,
+// event type AND correlation keys. The key predicate matters once two
+// awaits for the same (workflow, type) can coexist with different keys
+// (migrations.go's Version 6 uniqueness is on the five-column tuple, not
+// just the first two) -- removing by workflow+type alone would delete
+// whichever awaiter happened to match first, including one still legitimately
+// waiting on a different value. cleat#2625.
+func unregisterAwaiter(ctx context.Context, db plugin.PluginDB, logger *slog.Logger, workflowID, eventType, key1, key2, key3 string) {
 	if workflowID == "" {
 		return
 	}
 	_, err := db.Exec(ctx, plugin.Rebind(`
 		DELETE FROM event_awaiters
-		WHERE workflow_id = $1 AND event_type = $2
-		`, currentDialect), workflowID, eventType)
+		WHERE workflow_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5
+		`, currentDialect), workflowID, eventType, key1, key2, key3)
 	if err != nil {
 		logger.Warn("event-triggers: unregister awaiter", "error", err)
 	}

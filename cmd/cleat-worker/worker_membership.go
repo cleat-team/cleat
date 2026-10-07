@@ -73,6 +73,59 @@ func membershipStaleAfter(heartbeat time.Duration) time.Duration {
 	return max(heartbeat*2, 10*time.Second)
 }
 
+// workerRegistryRetention is how long a worker's registry row is kept after its
+// last heartbeat. It is deliberately LONGER than the membership lease
+// (membershipStaleAfter), and cleat#2196's veto channel is why.
+//
+// THE TWO WINDOWS ANSWER DIFFERENT QUESTIONS. The lease answers "is this worker
+// live right now" -- it is what CountLive divides the connection share by,
+// what the lapse check compares against, and what validateHeartbeat keeps below
+// SecretKeyLiveWindow. Retention answers "can another worker still find out
+// WHERE this one is", and that has to outlive the window in which this worker's
+// runs can still be asked about at all.
+//
+// That window is [reclaimAfter, 2*reclaimAfter). The reaper asks the holder of
+// every row stale by one window; a row stale by TWO windows is reclaimed
+// without asking, which is what bounds the veto to one extra window
+// (staleRowsToAsk). A holder whose own heartbeats are failing -- the only case
+// the channel exists for -- ages its registry row at the same rate as its runs,
+// so at the far edge of that window BOTH are 2*reclaimAfter old.
+//
+// SWEEPING AT THE LEASE WOULD DELETE EXACTLY THE ADDRESS ABOUT TO BE NEEDED,
+// and this is not a margin problem, it is a certainty. At the default 5s
+// heartbeat the lease is 10s and reclaimAfter is 14.5s, so a holder's row is
+// gone 4.5s before its run is even eligible, and stays gone. More generally, at
+// every heartbeat above 2s the derived reclaim window under reclaimWindow's
+// arithmetic is strictly longer than the lease; at 2s and below the two are
+// equal, because reclaimWindow's own 10s floor binds there -- and equal is not
+// better, it is worse: the row is swept at the very instant its run becomes
+// eligible, leaving no window to ask in at all. (The guard test
+// TestTheRegistryOutlivesTheWindowAReaperCanAskIn pins both halves, which is
+// how the 2s boundary was found rather than assumed.)
+//
+// So the reaper would resolve an empty address map for precisely the holders
+// the channel was built to ask, and the veto would never fire in its own target
+// case -- the "wired to nothing" shape, with every unit test still green because
+// a test seeds the registry row and nothing sweeps it.
+//
+// The extra lease on top is margin, so a row is never swept at the instant a
+// reaper reads for it. This changes no liveness decision: the share is still
+// divided by CountLive(staleAfter), and the lapse check still compares against
+// the lease.
+//
+// ONE INTERACTION, stated rather than discovered. At a long --heartbeat (149s,
+// near the largest validateHeartbeat allows) retention exceeds
+// engine.SecretKeyLiveWindow (5m). That is safe and deliberately not capped: the
+// secret-key gate applies its OWN window to whatever rows exist, so it never
+// counts a row that old, and capping here would push retention back below
+// 2*reclaimAfter at large heartbeats and silently switch the veto channel off.
+// The only visible consequence is that ListLive can report long-dead workers, so
+// a reaper may dial one and get no answer -- which is "no veto", the same as
+// today.
+func workerRegistryRetention(heartbeat, reclaimAfter time.Duration) time.Duration {
+	return 2*reclaimAfter + membershipStaleAfter(heartbeat)
+}
+
 // validateHeartbeat refuses a --heartbeat at which a stalled worker can be invisible
 // to a secret writer AND not know it (cleat#2167).
 //
@@ -195,12 +248,18 @@ func (w *Worker) membershipTick(staleAfter time.Duration) {
 	// the behaviour unchanged, because a swept worker's heartbeat returns
 	// ErrWorkerNotRegistered and the branch above re-registers it. The order is
 	// the more obvious one to read, not a correctness requirement.
-	if n, err := w.workerRegistry.SweepExpired(ctx, staleAfter); err != nil {
+	//
+	// The window is workerRegistryRetention, NOT staleAfter: the row has to
+	// outlive the lease so cleat#2196's reaper can still resolve the address of
+	// a holder whose heartbeats have stopped. See that function for why, and for
+	// why nothing that decides liveness moves with it.
+	retention := workerRegistryRetention(w.heartbeatInterval, w.reclaimAfter())
+	if n, err := w.workerRegistry.SweepExpired(ctx, retention); err != nil {
 		w.logger.WarnContext(ctx, "worker registry: sweep failed",
 			"worker_id", w.id, "error", err)
 	} else if n > 0 {
 		w.logger.InfoContext(ctx, "worker registry: removed expired workers",
-			"worker_id", w.id, "count", n, "stale_after", staleAfter)
+			"worker_id", w.id, "count", n, "retention", retention, "stale_after", staleAfter)
 	}
 
 	if w.connectionShare == nil {
@@ -278,6 +337,7 @@ func (w *Worker) registerInWorkerRegistry(ctx context.Context) error {
 	return registerWithKeyCheck(ctx, w.workerRegistry, w.secrets, engine.WorkerRegistration{
 		WorkerID:         w.id,
 		Hostname:         hostnameOrEmpty(),
+		Address:          podAddress(hostnameOrEmpty(), *workerServiceName),
 		PID:              os.Getpid(),
 		Concurrency:      w.concurrency,
 		ConnectionBudget: w.clusterConnectionBudget,

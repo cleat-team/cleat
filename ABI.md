@@ -163,13 +163,13 @@ workflow is over"; it means "this call must not happen".
 **The same bit, on every host call that can start fresh work.** It is not specific to
 `cleat_call`:
 
-**Nineteen host calls can return it, in six result layouts.** The last column is the one an SDK
+**Twenty host calls can return it, in six result layouts.** The last column is the one an SDK
 acts on: it names the field bit 31 lands inside, which is the field a decoder misreads if it
 fills its fields before testing the sentinel.
 
 | host call | result layout | bit 31 lands in |
 |---|---|---|
-| `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`, `plugin_call_streaming` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 | `callErrorCode` |
+| `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`, `plugin_call_streaming`, `cleat_wait_for_event` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 | `callErrorCode` |
 | `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
 | `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
 | `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update` | `errCode` 0-31 | `errCode` (top bit) |
@@ -177,7 +177,7 @@ fills its fields before testing the sentinel.
 | `cleat_acquire_lock` | `acquired` bit 8, `errCode` 0-7 | no field |
 
 Four of the six layouts put bit 31 inside a live field, so "check the sentinel first" is load
-bearing for seventeen of the nineteen calls, not just for `cleat_await_signals`.
+bearing for eighteen of the twenty calls, not just for `cleat_await_signals`.
 
 The two `no field` rows are not exceptions to the rule. Bit 31 being unoccupied there is a
 property of today's layouts, not a guarantee to decode against — and both calls still return the
@@ -1990,3 +1990,47 @@ When a workflow is compiled from two different languages (e.g., Go and Rust) usi
 The cleat engine matches replay events by step index, checking `EventType`, `Service`, and `Op` for equality. Request JSON is not compared during replay matching.
 
 **Guarantee scope**: This guarantee applies to workflows that (a) use only the host functions listed in this ABI, (b) avoid language-specific non-deterministic features (raw map iteration, GC-based cleanup, language-native RNG), and (c) produce results serializable through the host's JSON normalization.
+
+#### 2.60 `cleat_wait_for_event`
+
+Block until the workflow's claim on an external event succeeds, or until the total timeout
+expires. This owns the claim/register/re-claim loop applications previously hand-wrote --
+attempt the claim, suspend on the signal the registration wakes, then attempt it again -- because
+a wake is not proof of a claimable event: a publish's INSERT and its `signalAwaiters` call are two
+separate steps, so a wake can be spurious. That invariant is a property of this mechanism, and
+expressing it in application code exports the internals into every app.
+
+```
+(func (import "env" "cleat_wait_for_event")
+  (param i32 i32 i32 i32 i32 i32 i32 i32 i64 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `plugin_ptr` | `i32` | Plugin name |
+| `plugin_len` | `i32` | Plugin name length |
+| `func_ptr` | `i32` | Function name |
+| `func_len` | `i32` | Function name length |
+| `input_ptr` | `i32` | Input JSON (may be empty) |
+| `input_len` | `i32` | Input JSON length |
+| `names_ptr` | `i32` | JSON array of signal names to suspend on |
+| `names_len` | `i32` | Signal-name array length |
+| `timeout_ms` | `i64` | Total budget for the whole wait, in milliseconds |
+| `out_ptr` | `i32` | Output buffer -- receives the claimed event |
+| `out_max_len` | `i32` | Output buffer capacity (1048576) |
+
+**Return packing:** the `cleat_call` layout -- `responseLen` 40-63, `callErrorCode` 8-39,
+`errCode` 0-7. A successful claim writes the event and reports its length; **exhausting the
+timeout is reported as a failed call**, whose message names the function and the budget, matching
+the application loop it replaces rather than adding a distinct packed field.
+
+**The awaited function must be claim-shaped:** its JSON output carries a boolean `found`. `true`
+returns the output to the caller; `false` means register and wait. An output with no `found` field
+is an **error**, not a not-found -- treating a malformed output as "nothing yet" would spend the
+whole budget and then report a timeout for what is a plugin defect.
+
+**Replay** writes the same record sequence the application loop wrote -- `plugin_call`,
+`await_signals`, `signal_received`, `plugin_call` -- because every attempt routes through the
+fresh/replay dispatcher and every wait through `cleat_await_signals`' own replay arm. No new event
+type is introduced.

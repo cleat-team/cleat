@@ -27,7 +27,8 @@ func TestARoutingRuleCanBeCreated(t *testing.T) {
 	var gotVersion int
 	var gotWeight float64
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		setRoutingRuleFn: func(_ context.Context, name string, version int, weight float64) error {
 			gotName, gotVersion, gotWeight = name, version, weight
 			return nil
@@ -55,7 +56,8 @@ func TestARoutingRuleCanBeCreated(t *testing.T) {
 func TestAnOmittedWeightMeansAllTrafficNotNone(t *testing.T) {
 	var gotWeight float64 = -1
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		setRoutingRuleFn: func(_ context.Context, _ string, _ int, weight float64) error {
 			gotWeight = weight
 			return nil
@@ -77,7 +79,8 @@ func TestAnOmittedWeightMeansAllTrafficNotNone(t *testing.T) {
 func TestAnExplicitZeroWeightIsPreserved(t *testing.T) {
 	gotWeight := -1.0
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		setRoutingRuleFn: func(_ context.Context, _ string, _ int, weight float64) error {
 			gotWeight = weight
 			return nil
@@ -102,7 +105,8 @@ func TestAnExplicitZeroWeightIsPreserved(t *testing.T) {
 func TestRoutingToADeprecatedVersionIsRefused(t *testing.T) {
 	called := false
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return false, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return false, nil },
 		setRoutingRuleFn: func(_ context.Context, _ string, _ int, _ float64) error {
 			called = true
 			return nil
@@ -173,10 +177,11 @@ func TestAnEmptyRoutingTableIsAnArrayNotNull(t *testing.T) {
 }
 
 func TestARoutingRuleCanBeRemovedByID(t *testing.T) {
-	var removed string
+	var removedName, removedID string
 	ms := &mockStore{
-		removeRoutingRuleFn: func(_ context.Context, ruleID string) error {
-			removed = ruleID
+		listWorkflowDefsFn: deployedDef("checkout"),
+		removeRoutingRuleFn: func(_ context.Context, workflowName, ruleID string) error {
+			removedName, removedID = workflowName, ruleID
 			return nil
 		},
 	}
@@ -188,8 +193,58 @@ func TestARoutingRuleCanBeRemovedByID(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("removing answered %d: %s", rec.Code, rec.Body.String())
 	}
-	if removed != "rule-1" {
-		t.Errorf("store was asked to remove %q, want rule-1", removed)
+	if removedName != "checkout" || removedID != "rule-1" {
+		t.Errorf("store was asked to remove (%q, %q), want (checkout, rule-1)",
+			removedName, removedID)
+	}
+}
+
+// TestARoutingRuleCannotBeDeletedByNamingADifferentWorkflow is cleat#3168's
+// regression test at the handler layer: it pins that the name in the URL
+// reaches RemoveRoutingRule, not just the existence check above it.
+//
+// The mock plays the part of a correctly name-scoped store: it holds one
+// rule, created against "checkout", and refuses to remove it under any other
+// name -- which is exactly what the real per-dialect DELETE now does by
+// filtering on workflow_name as well as id. Before cleat#3168 the store never
+// saw the name at all, so this call would have succeeded and deleted a rule
+// belonging to a workflow the URL never named.
+func TestARoutingRuleCannotBeDeletedByNamingADifferentWorkflow(t *testing.T) {
+	const holder, ruleID = "checkout", "rule-1"
+	rules := map[string]string{ruleID: holder} // ruleID -> owning workflow
+
+	ms := &mockStore{
+		listWorkflowDefsFn: deployedDefs("checkout", "refunds"),
+		removeRoutingRuleFn: func(_ context.Context, workflowName, ruleID string) error {
+			if owner, ok := rules[ruleID]; !ok || owner != workflowName {
+				return engine.ErrRoutingRuleNotFound
+			}
+			delete(rules, ruleID)
+			return nil
+		},
+	}
+	api := newTestAPIServer(ms)
+
+	// "refunds" is a real, deployed, non-internal workflow -- it passes the
+	// existence check -- but the rule belongs to "checkout".
+	rec := httptest.NewRecorder()
+	api.handleWorkflows(rec, httptest.NewRequest(http.MethodDelete,
+		"/api/workflows/refunds/routing/"+ruleID, nil))
+	if rec.Code != 404 {
+		t.Fatalf("deleting checkout's rule by naming refunds answered %d, want 404: %s",
+			rec.Code, rec.Body.String())
+	}
+	if _, stillThere := rules[ruleID]; !stillThere {
+		t.Fatal("the rule was deleted despite the URL naming a different workflow")
+	}
+
+	// The control: naming the real owner still works.
+	rec = httptest.NewRecorder()
+	api.handleWorkflows(rec, httptest.NewRequest(http.MethodDelete,
+		"/api/workflows/checkout/routing/"+ruleID, nil))
+	if rec.Code != 200 {
+		t.Fatalf("deleting checkout's own rule answered %d, want 200: %s",
+			rec.Code, rec.Body.String())
 	}
 }
 
@@ -202,11 +257,21 @@ func TestARoutingRuleCanBeRemovedByID(t *testing.T) {
 // that answers "exists" for every input would make defExists untestable and
 // every test below vacuous.
 func deployedDef(name string) func(context.Context, string) ([]engine.WorkflowDef, error) {
+	return deployedDefs(name)
+}
+
+// deployedDefs is deployedDef for more than one name, needed by cleat#3168's
+// regression test: the defect is only observable with a SECOND real,
+// deployed, non-internal workflow for the URL to name instead of the rule's
+// actual owner.
+func deployedDefs(names ...string) func(context.Context, string) ([]engine.WorkflowDef, error) {
 	return func(_ context.Context, got string) ([]engine.WorkflowDef, error) {
-		if got != name {
-			return nil, nil
+		for _, name := range names {
+			if got == name {
+				return []engine.WorkflowDef{{Name: name, Version: 1}}, nil
+			}
 		}
-		return []engine.WorkflowDef{{Name: name, Version: 1}}, nil
+		return nil, nil
 	}
 }
 
@@ -261,13 +326,19 @@ func TestARunIDInTheNamePositionIsNotFound(t *testing.T) {
 // TestTheNameScopedReadsAndWritesAgreeOnAnUnknownName is the point of the
 // change: before it, the write refused the input the read accepted.
 //
-// The codes differ on purpose and that is not an inconsistency left behind.
-// The writers answer 409 because they are refusing a (name, version) pair --
+// The reads and the writes now agree on the CODE too, and cleat#3003 is why:
+// both answer 404 for a name that was never deployed, because both now ask the
+// same question -- does this NAME exist -- through the same call.
+//
+// Before #3003 the writers answered 409 here, on the reasoning that
 // ValidateVersion cannot distinguish "no such name" from "that version is
-// deprecated", and both are conflicts with deployment state. The readers name
-// no version, so the only thing they can be refusing is the name itself, and
-// 404 is what the rest of this API says for an identifier that resolves to
-// nothing. What matters is that neither answers success.
+// deprecated" and both are conflicts with deployment state. That conflated two
+// cases. A deprecated version of a DEPLOYED name is a conflict and still
+// answers 409 (TestPointingATagAtADeprecatedVersionIsRefused,
+// TestRoutingToADeprecatedVersionIsRefused). A name that is not deployed at all
+// is an identifier that resolves to nothing -- 404, as it is everywhere else in
+// this API. The 409 for it was also the observable difference from an internal
+// name's 404, which is the disclosure cleat#3003 exists to close.
 func TestTheNameScopedReadsAndWritesAgreeOnAnUnknownName(t *testing.T) {
 	ms := &mockStore{
 		listWorkflowDefsFn: deployedDef("checkout"),

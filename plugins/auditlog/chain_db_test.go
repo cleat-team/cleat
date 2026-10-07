@@ -664,3 +664,55 @@ func TestChainedTenantsListsEveryTenantThatHasAChain(t *testing.T) {
 		}
 	})
 }
+
+// TestAppendHashesTheStoredMetadataSpellingNotTheSuppliedOne is the regression test for
+// cleat#2589: chainHash must cover the metadata as the database STORES it, not the token
+// appendOnce was given. canonicalJSON re-emits whatever token it receives verbatim, so it
+// cannot reconcile a hash taken over the pre-insert spelling with a verify that reads the
+// post-insert one, once a dialect rewrites a number on the way in.
+//
+// One respelling per dialect, from the issue's own measurement: PostgreSQL's JSONB
+// rewrites an exponent form (1e2 -> 100); MySQL's JSON collapses a redundant trailing
+// zero (2.50 -> 2.5). SQL Server's column is NVARCHAR(MAX) and never rewrites anything,
+// so it gets the same input as a negative control -- proving the mechanism does not
+// depend on respelling actually happening, only on hashing whatever the row holds.
+func TestAppendHashesTheStoredMetadataSpellingNotTheSuppliedOne(t *testing.T) {
+	metadataByDialect := map[plugin.Dialect]string{
+		plugin.DialectPostgres: `{"exp":1e2}`,
+		plugin.DialectMySQL:    `{"amount":2.50}`,
+		plugin.DialectMSSQL:    `{"amount":2.50}`,
+	}
+
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		meta := metadataByDialect[e.d.dialect]
+
+		if err := p.appendChained(plugin.ForTenant(context.Background(), tenant), chainEvent{
+			tenantID: tenant, method: "POST", path: "/metadata-respelling-test",
+			statusCode: 200, metadata: meta,
+		}); err != nil {
+			t.Fatalf("appendChained: %v", err)
+		}
+
+		var stored string
+		e.scan(tenant, `SELECT metadata FROM audit_events WHERE tenant_id = $1`, []any{tenant.String()}, &stored)
+
+		// Assert the precondition, not just the outcome: on PostgreSQL and MySQL the
+		// stored spelling must actually differ from what was supplied, or this test
+		// would pass for having nothing to catch rather than for catching it.
+		if e.d.dialect != plugin.DialectMSSQL && strings.TrimSpace(stored) == meta {
+			t.Fatalf("the database stored %q unchanged; this dialect no longer respells this "+
+				"value, so the test needs a different one to exercise the fix", stored)
+		}
+
+		rep := e.verify(tenant)
+		if !rep.OK() {
+			t.Fatalf("verify reported a break on a chain nobody tampered with: %+v\n"+
+				"  supplied metadata: %s\n  stored metadata:   %s", rep.Break, meta, strings.TrimSpace(stored))
+		}
+		if rep.Checked != 1 || rep.HeadSeq != 1 {
+			t.Fatalf("verify: %+v, want 1 row checked", rep)
+		}
+	})
+}

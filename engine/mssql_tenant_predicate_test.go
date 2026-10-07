@@ -10,11 +10,14 @@ package engine
 // file would not be one either. This fails at authoring time instead, in every
 // job, with no SQL Server required.
 //
-// Both allowlisted reasons that name a Go-level gate were checked against the
-// code rather than assumed: claimWorkflowsAcrossTenantsOnce and
-// GetDueSchedulesAcrossTenants both call requireCleatAdminMembership. An
-// allowlist whose reasons are not true is worse than no allowlist, because it
-// reads like it was checked.
+// Both allowlisted reasons that USED TO name a Go-level gate were checked
+// against the code rather than assumed: claimWorkflowsAcrossTenantsOnce and
+// GetDueSchedulesAcrossTenants both called requireCleatAdminMembership. #1926
+// retired that mechanism in favor of unconditional per-tenant rotation, so no
+// entry in this allowlist names a Go-level gate today -- see
+// adminToolAcrossTenants and scopedByCompactionSweep below for what replaced
+// it. An allowlist whose reasons are not true is worse than no allowlist,
+// because it reads like it was checked.
 //
 // WHY IT IS NOT A SUBSTRING CHECK, which is the lesson that produced it.
 // scripts/mssql-tenant-predicate-audit.py -- this guard's ancestor, deleted in
@@ -40,8 +43,11 @@ package engine
 //     arrives from an HTTP request -- those are fixed, not allowlisted.
 //   - mustNotScope: adding the predicate would BREAK the statement. One entry,
 //     and it needs to keep being one.
-//   - deliberatelyCrossTenant: the statement's whole purpose is to see every
-//     tenant, and it is gated on cleat_admin membership at the Go level.
+//   - deliberately cross-tenant (adminToolAcrossTenants, testDiagnosticAcrossTenants):
+//     the statement's whole purpose is to see every tenant. #1926 retired the
+//     Go-level cleat_admin gate this used to rest on; today it is justified by
+//     the CONNECTION instead -- a BYPASSRLS DSN for cleatctl, or the sa
+//     connection for test-only diagnostics.
 //
 // WHAT THIS DOES NOT CHECK, said out loud so nobody reads a pass as more than
 // it is. An INSERT is exempted once it writes tenant_id, but an INSERT can
@@ -72,8 +78,7 @@ import (
 const (
 	scopedByCaller = "scoped by construction: the id comes from a row already read under a " +
 		"predicate, and the store is re-scoped per instance by cmd/cleat-worker/setup.go:storeFor"
-	mustNotScope            = "MUST NOT be scoped: see the comment at the site"
-	deliberatelyCrossTenant = "deliberately cross-tenant, gated on cleat_admin membership in Go"
+	mustNotScope = "MUST NOT be scoped: see the comment at the site"
 	// Not a grant. An entry carrying this is a statement known to leak, kept
 	// here only so the ratchet holds while it is fixed, and it must name where
 	// it is tracked.
@@ -92,11 +97,12 @@ const (
 	// make the mechanism right, and the mechanism is what the next reader
 	// checks. Under a function-granularity key this could not be said at all:
 	// one string covered three statements and described none of them.
-	// cleatctl, and NOT deliberatelyCrossTenant -- whose clause names cleat_admin
-	// membership checked in Go, which is the WORKER's gate and nothing cleatctl
-	// runs. Getting that distinction wrong would attach a true-sounding reason
-	// to a mechanism that does not exist on this path, which is the failure
-	// mode scopedByCompactionSweep below was written to avoid.
+	// cleatctl, and not by a cleat_admin membership check in Go -- that
+	// mechanism was the WORKER's gate, never something cleatctl ran, and #1926
+	// retired it entirely. Getting that distinction wrong would attach a
+	// true-sounding reason to a mechanism that does not exist on this path,
+	// which is the failure mode scopedByCompactionSweep below was written to
+	// avoid.
 	//
 	// cleatctl's gate is the CONNECTION. cmd/cleatctl/main.go requires a DSN
 	// naming a role that row-level security does not apply to -- a superuser or
@@ -137,7 +143,15 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	// lives here because the mechanism does -- the digest is over the SQL, so
 	// this exemption stops covering the statement the moment the statement
 	// changes.
-	"replay.go:loadWorkflowInstanceSQL#cd97aca08a1e": {
+	//
+	// RE-KEYED 2026-10-02 by cleat#2993, which wrapped this statement's tenant_id
+	// projection in LOWER. The reason is remade rather than copied across: it is
+	// still true of the NEW text, because the edit touched a projected column and
+	// neither added nor removed a predicate. The digest moving is this mechanism
+	// working as documented above -- an exemption is a claim about one
+	// statement's text, and the text moved. The previous key was
+	// "replay.go:loadWorkflowInstanceSQL#cd97aca08a1e".
+	"replay.go:loadWorkflowInstanceSQL#2a0ad1292ad8": {
 		SQL:    "select id, def_name, def_version, status, input, coalesce(result, ''), coalesc",
 		Reason: adminToolAcrossTenants,
 	},
@@ -233,12 +247,19 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set status = 'done', result = @p3, completed_at = sy",
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:failWorkflowOnce#9f6051527077": {
-		SQL:    "update workflow_instances set status = 'failed', error_msg = @p3, error_code =",
+	"mssql_lifecycle.go:failWorkflowOnce#adc152244274": {
+		SQL: "update workflow_instances set status = 'failed', error_msg = @p3, error_code =",
+		// Digest moved from #9f6051527077 when cleat#2520 changed query_state = @p6
+		// to query_state = COALESCE(@p6, query_state) -- the WHERE clause (id,
+		// assigned_to, generation) is unchanged, so the reason is unchanged too.
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#6e62fa0d74d4": {
-		SQL:    "update workflow_instances set status = 'dead_lettered', error_msg = @p3, error",
+	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#c618d5298130": {
+		SQL: "update workflow_instances set status = 'dead_lettered', error_msg = @p3, error",
+		// Digest moved from #6e62fa0d74d4 when cleat#2650 changed this UPDATE
+		// to also write query_state = COALESCE(@p6, query_state) -- the WHERE
+		// clause (id, assigned_to, generation) is unchanged, so the reason is
+		// unchanged too. Same shape as failWorkflowOnce's re-key in cleat#2520.
 		Reason: scopedByCaller,
 	},
 	"mssql_lifecycle.go:releaseWorkflowOnce#2128999583d9": {
@@ -407,8 +428,11 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 				"join condition like `d.tenant_id = w.tenant_id` does, and correlates two "+
 				"tables while restricting neither to a caller. Only a comparison against "+
 				"@pN, ? or $N carries \"the tenant asking\". See tenantComparedToAParameter.\n\n"+
-				"dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection "+
-				"(012_admin_role.sql), which is what a multi-tenant deployment must use, so "+
+				"dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection, once "+
+				"migrations/mssql/optional/cross_tenant_claim.sql has switched it to that form "+
+				"(cleat_admin membership is granted today for cleatctl and cross-tenant test "+
+				"teardown, not for the worker's own dispatch loop -- see "+
+				"engine/testutil/mssql_admin.go), so on such a connection "+
 				"this predicate is the whole of the isolation. If it genuinely does not need "+
 				"one, add\n\n    %q: {\n        SQL:    %q,\n        Reason: <one of the constants at the top>,\n    },\n\n"+
 				"to tenantPredicateAllowlist WITH THE REASON THAT IS ACTUALLY TRUE. The key "+

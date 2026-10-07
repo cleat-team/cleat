@@ -20,7 +20,9 @@ import (
 //
 // A `require` was deliberately NOT added for them. It would work, and it would
 // be worse: with a require, building outside the workspace resolves the SDK to
-// whatever pseudo-version the proxy last published, and every drift test here
+// whatever the proxy last published -- a pseudo-version of the default branch
+// when this was written, a release since the submodule was tagged on 2026-09-27
+// (cleat/v0.3.1, cleat/v0.3.2; cleat#3078) -- and every drift test here
 // then compares the tree against a published snapshot of itself -- the
 // engine<->SDK call-error contract test, the whole analyzer stack, the generated
 // adapters. All of them would go green having measured a release rather than the

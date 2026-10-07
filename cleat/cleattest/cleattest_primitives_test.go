@@ -573,8 +573,14 @@ func TestSendSignalAndWaitTimeout(t *testing.T) {
 		errCh <- err
 	}()
 
-	// Give the goroutine time to reach the select and create the sleep record
-	// before advancing time.
+	// Deliberately NOT a WaitForParked site. SendSignalAndWait parks on
+	// neither a sleep record nor a signal waiter -- measured on cleat#3091,
+	// where WaitForParked here failed with "no goroutine parked on a durable
+	// sleep or AwaitSignals within 5s". Its wait is awaitPromiseImpl's channel
+	// backed by a real time.Timer, so this sleep is not a park race and the
+	// comment that stood here ("create the sleep record") was wrong about the
+	// mechanism. Left as it is: what this sleep actually holds up has not been
+	// measured, and changing it is not this change's subject.
 	time.Sleep(50 * time.Millisecond)
 	env.AdvanceTime(20 * time.Millisecond)
 
@@ -671,8 +677,9 @@ func TestAwaitConditionTimeout(t *testing.T) {
 		resultCh <- met
 	}()
 
-	// Give the goroutine time to enter durableSleepImpl.
-	time.Sleep(20 * time.Millisecond)
+	// AwaitCondition parks in durableSleepImpl's poll interval, so the sleep
+	// record is what the advance below is supposed to wake.
+	env.WaitForParked(t)
 
 	// Advance time past the deadline.
 	env.AdvanceTime(200 * time.Millisecond)
@@ -782,6 +789,54 @@ func TestPluginCallWithoutStub(t *testing.T) {
 	_, err := env.H().PluginCall("unknown", "unknown", "input")
 	if err == nil {
 		t.Fatal("expected error for unregistered plugin call")
+	}
+}
+
+// cleat#2522: before this, a second Return() for the same plugin+function
+// registered a stub pluginCallImpl's first-match scan could never reach --
+// silently unreachable, not sequenced. The first call below is the known
+// positive for the bug: without the fix it also returns "false", because
+// the second Return was dead.
+func TestOnPluginCallReturnSequencesAcrossCalls(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":false}`, nil)
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":true}`, nil)
+
+	first, err := env.H().PluginCall("event-triggers", "poll", "{}")
+	if err != nil {
+		t.Fatalf("first PluginCall: %v", err)
+	}
+	if first != `{"found":false}` {
+		t.Fatalf("first call = %q, want the first registered response", first)
+	}
+
+	second, err := env.H().PluginCall("event-triggers", "poll", "{}")
+	if err != nil {
+		t.Fatalf("second PluginCall: %v", err)
+	}
+	if second != `{"found":true}` {
+		t.Fatalf("second call = %q, want the second registered response -- "+
+			"a second Return() must sequence, not be unreachable", second)
+	}
+}
+
+// Once a sequence is exhausted, the LAST registered response repeats rather
+// than erroring -- which is also what makes a single Return() (nearly every
+// existing stub in this repo) answer every call identically, unchanged from
+// before cleat#2522.
+func TestOnPluginCallReturnRepeatsTheLastResponseOnceExhausted(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":false}`, nil)
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":true}`, nil)
+
+	for i, want := range []string{`{"found":false}`, `{"found":true}`, `{"found":true}`, `{"found":true}`} {
+		got, err := env.H().PluginCall("event-triggers", "poll", "{}")
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if got != want {
+			t.Fatalf("call %d = %q, want %q", i, got, want)
+		}
 	}
 }
 
@@ -1224,6 +1279,14 @@ func TestEveryHostCallIsWired(t *testing.T) {
 		"HandleUpdate":                "falls back to the registered handlers",
 		"PluginCallStreaming":         "guarded with != nil, so nil is a no-op path",
 		"AwaitSignalsWithQuorum":      "falls back to the plain await",
+		// The claim/register/re-claim loop, composed in
+		// cleat/runtime_signals.go's WaitForEvent from PluginCall and
+		// DurableAwaitSignals -- both wired in this harness, so the fallback
+		// has everything it needs. Same shape as AwaitSignalsWithQuorum
+		// directly above, and the reason it is a fallback rather than a wired
+		// hook: a host that knows better overrides it, and the engine's WASM
+		// export does.
+		"WaitForEvent": "falls back to the composed loop over PluginCall and DurableAwaitSignals",
 	}
 
 	opts := NewTestEnv().hostCallsOptions()

@@ -1,0 +1,81 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# Refuse a commit whose Claude-Stream trailer git's own parser cannot read,
+# AFTER the message has had its chance to be edited.
+#
+# This is the second half of the cleat#2588 fix, found on that issue's own
+# second review round. prepare-commit-msg (this same directory) detects the
+# identical malformed shape -- a Claude-Stream line separated from the real
+# trailer block by a blank line, invisible to
+# stream-trailer-check.yml's %(trailers:key=Claude-Stream,valueonly) -- but
+# does not refuse it, because prepare-commit-msg runs BEFORE the commit
+# message editor opens. Refusing there blocks the only paths that could
+# actually repair it: `commit --amend` and `rebase -i`'s `reword` both hand
+# the ALREADY-malformed message to prepare-commit-msg first, and a hook that
+# exits non-zero there aborts before the editor is invoked -- there is no
+# chance to edit the blank line away. Measured with git 2.50.1:
+# `commit --amend --no-edit` on such a commit was refused with HEAD
+# unchanged; a `reword` was refused with the rebase left stuck, rescheduled.
+# `--no-verify` skips this hook, but not prepare-commit-msg, so it does not
+# help reach a refusal placed there either. The only escape from a refusal
+# in prepare-commit-msg was `--amend -F <already-fixed-file>` -- which is
+# not "fix the message by hand", the remedy prepare-commit-msg's own
+# refusal text used to describe while blocking the way to do it.
+#
+# commit-msg runs on the FINAL message, after any editor, so refusing here
+# does not have that problem: an amend or reword whose editor removes the
+# blank line completes normally (see
+# tests/hooks/stream_trailer_hook_test.go's repair-path test, which drives
+# this through a real `git commit --amend` rather than invoking either hook
+# directly); only a message that is STILL malformed after editing is
+# refused, and a plain, non-interactive `git commit -F <malformed file>` is
+# refused immediately, with HEAD never created.
+#
+# commit-msg never runs for a pick that opens no editor. prepare-commit-msg
+# runs whenever git actually CREATES the commit -- a cherry-pick, or a
+# rebase onto a base that moved -- and only warns; measured, git 2.50.1. A
+# pick git fast-forwards, because the parent is unchanged, reuses the
+# existing commit object and runs neither hook. In every case an
+# already-malformed commit passes through unrefused, exactly as it did
+# before this hook existed; CI's Stream Trailer Check is the backstop
+# there, same as always.
+#
+# Deliberately narrower than prepare-commit-msg's job: this hook does not
+# enforce that a Claude-Stream trailer is PRESENT. prepare-commit-msg
+# already refuses to proceed -- before the editor opens -- when
+# `git config cleat.stream` is unset, and that refusal has no repair-path
+# problem, because its fix is a `git config` command, not an edit to this
+# message. This hook only refuses a trailer-shaped line the parser cannot
+# read as one; a message with no Claude-Stream line anywhere at all is not
+# this hook's concern (CI's stream-trailer-check.yml is the backstop for
+# presence, same as it always was).
+# ---------------------------------------------------------------------------
+set -eu
+
+MSG_FILE=$1
+
+if git interpret-trailers --parse "$MSG_FILE" | grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]'; then
+	exit 0
+fi
+
+if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
+	echo "commit-msg: this message has a line matching 'Claude-Stream: ...'," >&2
+	echo "but git's own trailer parser does not read it as a trailer -- it is" >&2
+	echo "not in the message's FINAL paragraph." >&2
+	echo "stream-trailer-check.yml's %(trailers:key=Claude-Stream,valueonly)" >&2
+	echo "would see nothing here, exactly as it does on this repo's own" >&2
+	echo "history for the identical shape (see that workflow's header)." >&2
+	echo "" >&2
+	echo "Usually caused by a blank line between the Claude-Stream line and" >&2
+	echo "the rest of the trailer block:" >&2
+	echo "" >&2
+	echo "    Claude-Stream: WS-2" >&2
+	echo "                          <- this blank line is the defect" >&2
+	echo "    Signed-off-by: ..." >&2
+	echo "" >&2
+	echo "Remove the blank line so the trailer block is one contiguous," >&2
+	echo "final paragraph -- or delete the stray line entirely." >&2
+	exit 1
+fi
+
+exit 0

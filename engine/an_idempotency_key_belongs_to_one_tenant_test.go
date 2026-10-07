@@ -1,9 +1,11 @@
 package engine
 
-// Layer-separation proof for cleat#1534:
-// migrations/postgres/083_an_idempotency_key_belongs_to_one_tenant.sql gives
-// idempotency_keys a fail-closed policy, which migrations 031 and 061 both
-// declined because startNewRun read the table before any RLS context existed.
+// Layer-separation proof for cleat#1534: idempotency_keys_tenant_isolation
+// (migrations/postgres/001_schema.sql since the cleat#2059 rebaseline;
+// originally added by migrations/postgres/083_an_idempotency_key_belongs_to_one_tenant.sql)
+// gives idempotency_keys a fail-closed policy, which migrations 031 and 061
+// both declined because startNewRun read the table before any RLS context
+// existed.
 //
 // The commit carrying this file moves those reads onto transactions that have
 // the tenant set. Three properties have to hold together, and each of them can
@@ -63,7 +65,9 @@ func TestAnIdempotencyKeyBelongsToOneTenant(t *testing.T) {
 	defA := fmt.Sprintf("idem-rls-a-%d", stamp)
 	defB := fmt.Sprintf("idem-rls-b-%d", stamp)
 	// ONE key string for both tenants. That collision is the whole subject of
-	// migration 010 -- "order-123" chosen by two customers -- and it is also
+	// the idempotency key's (key_hash, tenant_id) primary key --
+	// "order-123" chosen by two customers
+	// (migrations/postgres/001_schema.sql) -- and it is also
 	// what makes tenant B's row the row the policy has to EXCLUDE rather than
 	// one it would have admitted anyway.
 	sharedKey := fmt.Sprintf("order-%d", stamp)

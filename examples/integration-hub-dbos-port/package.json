@@ -1,0 +1,21 @@
+{
+  "name": "integration-hub-dbos-port",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DBOS counterpart to examples/integration-hub's wedge, for cleat#2597's cleat-vs-DBOS pair harness. See README.md for the finding this pair measures before reading any code here.",
+  "scripts": {
+    "build": "tsc",
+    "test": "node run-tests.js"
+  },
+  "dependencies": {
+    "@dbos-inc/dbos-sdk": "5.2.11",
+    "isolated-vm": "6.1.2"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4",
+    "@types/node": "24.0.0"
+  },
+  "allowScripts": {
+    "isolated-vm@6.1.2": true
+  }
+}

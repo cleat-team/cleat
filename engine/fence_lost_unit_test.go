@@ -264,7 +264,7 @@ func TestFenceLost_MoveToDeadLetterQueue(t *testing.T) {
 			db, st := newFenceFakeDB(t, tc.rowsAffected)
 			store := NewPostgresStore(db)
 
-			err := store.MoveToDeadLetterQueue(context.Background(), "wf-1", "worker-1", 5, "boom", "unknown", "op")
+			err := store.MoveToDeadLetterQueue(context.Background(), "wf-1", "worker-1", 5, "boom", "unknown", "op", nil)
 
 			assertFenceOutcome(t, tc.rowsAffected, err, st)
 		})

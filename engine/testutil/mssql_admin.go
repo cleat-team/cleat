@@ -6,8 +6,10 @@ package testutil
 // principal -- sysadmin, db_owner and dbo included -- so on a database built
 // from the shipped migrations a plain pool cannot see across tenants. Teardown
 // that issues DELETE on such a pool matches nothing, reports no error, and
-// leaves every row behind. Migration 012 introduces the cleat_admin role as the
-// exemption; this file provisions a member of it for the test harness.
+// leaves every row behind. migrations/mssql/001_schema.sql (née 012_admin_role.sql,
+// before the SQL Server compaction folded it into the baseline) introduces the
+// cleat_admin role as the exemption; this file provisions a member of it for
+// the test harness.
 //
 // The gate is "does this database have security policies", not "does the role
 // exist". On the hand-written schema there are no policies, so a plain
@@ -18,6 +20,7 @@ package testutil
 // nothing.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -36,7 +39,10 @@ const (
 	// meaningful sense -- CLEAT_TEST_MSSQL already carries sa's password in
 	// the clear, and this only ever exists on a throwaway test instance. The
 	// shipped migration deliberately creates no login at all, leaving that to
-	// the deployment (migrations/mssql/012_admin_role.sql).
+	// the deployment (migrations/mssql/001_schema.sql creates the empty
+	// cleat_admin role; it was 012_admin_role.sql until the SQL Server
+	// compaction folded it into the baseline, and that filename no longer
+	// exists).
 	mssqlTestAdminLogin    = "cleat_test_admin"
 	mssqlTestAdminPassword = "CleatTestAdmin123!"
 )
@@ -57,8 +63,86 @@ var (
 	// restores 'plain' and evicts the cached pool, so the next caller
 	// re-establishes 'admin' from scratch rather than reusing a pool that
 	// authenticates fine but now grants nothing (cleat#1541's failure mode).
+	//
+	// PER-PROCESS ONLY -- see mssqlAdminLockConns below, cleat#2857, for the
+	// cross-process half this map cannot provide. Kept as a fast in-process
+	// short-circuit (no network round trip) ahead of the authoritative
+	// cross-process check; every holder counted here also holds the lock
+	// below, so this can only ever agree with it or be less informed, never
+	// contradict it.
 	mssqlAdminRefs = map[string]int{}
+	// mssqlAdminLockConns holds the dedicated, pinned *sql.Conn each baseDSN's
+	// FIRST MSSQLAdminDB caller used to acquire mssqlAdminLockResource in
+	// SHARED mode, for as long as the cached pool above lives. cleat#2857: the
+	// refcount above is per-process, so it cannot tell "no process anywhere
+	// still needs 'admin'" from "no process *in this one* does" -- a second
+	// `go test` process sharing the same server reads this process's empty
+	// refcount and heals the predicate out from under a still-live first
+	// process. The lock makes liveness a property of the SERVER, which every
+	// process sees the same way, rather than of any one process's memory.
+	//
+	// Pinned deliberately: database/sql may otherwise hand this physical
+	// connection to an unrelated query and give the lock-holder a different
+	// one for its next statement, silently dropping the SESSION-scoped lock.
+	// Holding the *sql.Conn without ever calling Close() keeps one specific
+	// session -- and therefore the lock on it -- alive for exactly the cached
+	// pool's lifetime; mssqlReleaseAdminDB's Close() is what lets it go.
+	// Verified empirically (not assumed from the docs) before relying on it:
+	// a held, unclosed *sql.Conn keeps a SHARED sp_getapplock blocking a
+	// separate connection's EXCLUSIVE attempt across an 8s idle gap and
+	// across a wholly separate *sql.DB pool (the cross-process stand-in);
+	// closing the Conn releases it immediately, confirmed by the next
+	// EXCLUSIVE attempt succeeding right after.
+	mssqlAdminLockConns = map[string]*sql.Conn{}
+	// mssqlAdminLockDBs holds the *sql.DB each baseDSN's mssqlAdminLockConns
+	// entry was drawn from. cleat#2899 (G3a): the lock connection is now
+	// opened BEFORE the admin pool exists (see MSSQLAdminDB), on a *sql.DB
+	// dedicated to the lock alone -- never the caller's own db, which the
+	// caller's own `defer teardown()` may close first (the same hazard
+	// restoreMSSQLPlainPredicate's doc comment already describes), and never
+	// the admin pool itself, since at acquisition time it has not been
+	// opened yet. Closed alongside lockConn in mssqlReleaseAdminDB.
+	mssqlAdminLockDBs = map[string]*sql.DB{}
 )
+
+// mssqlAdminLockResource is the sp_getapplock resource name MSSQLAdminDB and
+// selfHealMSSQLAdminPredicate share. App locks are scoped to the connection's
+// current database by default, and every connection here is opened against
+// baseDSN's own `?database=` -- so a single fixed name is already scoped per
+// database; it does not need baseDSN folded into it.
+const mssqlAdminLockResource = "cleat_testutil_mssql_admin"
+
+// mssqlTryApplock runs sp_getapplock on conn and returns its return code:
+// 0 or 1 mean the lock was granted (immediately, or after waiting); any
+// negative value (-1 timeout, -2 cancelled, -3 deadlock victim, -999 a
+// parameter or other error) means it was not. Documented return codes, not
+// re-derived here: https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-getapplock-transact-sql
+func mssqlTryApplock(t *testing.T, ctx context.Context, conn *sql.Conn, mode string, timeoutMs int) int {
+	t.Helper()
+	var code int
+	if err := conn.QueryRowContext(ctx,
+		`DECLARE @r INT; EXEC @r = sp_getapplock @Resource=@p1, @LockMode=@p2, @LockOwner='Session', @LockTimeout=@p3; SELECT @r`,
+		mssqlAdminLockResource, mode, timeoutMs,
+	).Scan(&code); err != nil {
+		t.Fatalf("sp_getapplock(%s, timeout=%dms): %v", mode, timeoutMs, err)
+	}
+	return code
+}
+
+// mssqlReleaseApplock releases a lock acquired by mssqlTryApplock, on the
+// same connection. Best-effort: logged rather than fatal, because every
+// caller of this reaches it only when the connection may be on its way out
+// anyway (eviction) or the lock was only ever a probe (the heal's exclusive
+// check), and failing a test over a release that didn't matter would be the
+// wrong trade.
+func mssqlReleaseApplock(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	if _, err := conn.ExecContext(ctx,
+		`EXEC sp_releaseapplock @Resource=@p1, @LockOwner='Session'`, mssqlAdminLockResource,
+	); err != nil {
+		t.Logf("sp_releaseapplock: %v", err)
+	}
+}
 
 // mssqlHasCoreSecurityPolicies reports whether this database enforces RLS on
 // the CORE tables specifically -- a predicate bound to dbo.fn_tenant_filter,
@@ -118,6 +202,57 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	}
 
 	requireMSSQLAdminRole(t, db)
+
+	// cleat#2899 (G3a): acquire the cross-process SHARED lock BEFORE the
+	// opt-in write below, not after everything else as this used to. With
+	// the opt-in going first, there was a window -- provision/Open/Ping and
+	// the two verification queries wide -- between this process setting
+	// admin.rls_predicate_form='admin' and this process taking SHARED on
+	// mssqlAdminLockResource. A concurrent process's selfHealMSSQLAdminPredicate
+	// probes EXCLUSIVE(0) and sees nothing holding SHARED in that window, so
+	// it heals the predicate back to 'plain' out from under a setup that is
+	// still in progress -- measured with the window widened by a 3s sleep
+	// after the opt-in, 2/2: this function's own form=='admin' check below
+	// then fails with "installed predicate is \"plain\"" (cleat#1541's
+	// symptom, reached by a different route). Acquiring SHARED first closes
+	// it: a concurrent heal's EXCLUSIVE(0) attempt now blocks on US and skips
+	// healing (cleat-review, cleat#2899).
+	//
+	// On a connection dedicated to this lock's lifetime, not `db` -- the
+	// caller's own `defer teardown()` can close db before this function's
+	// later t.Cleanup runs (restoreMSSQLPlainPredicate's doc comment
+	// describes the identical hazard) -- and not the admin pool, which does
+	// not exist yet at this point in the function.
+	ctx := context.Background()
+	lockDB, err := sql.Open("sqlserver", baseDSN)
+	if err != nil {
+		t.Fatalf("open the dedicated applock connection: %v", err)
+	}
+	lockConn, err := lockDB.Conn(ctx)
+	if err != nil {
+		lockDB.Close()
+		t.Fatalf("open the dedicated applock connection: %v", err)
+	}
+	// Released on any early return below (a Fatalf from this point on calls
+	// runtime.Goexit, which still runs deferred functions) -- an orphaned
+	// SHARED hold would block every future selfHealMSSQLAdminPredicate probe
+	// on this server until the process exits, which is worse than the bug
+	// this lock exists to prevent.
+	lockEstablished := false
+	defer func() {
+		if lockEstablished {
+			return
+		}
+		mssqlReleaseApplock(t, ctx, lockConn)
+		lockConn.Close()
+		lockDB.Close()
+	}()
+	if code := mssqlTryApplock(t, ctx, lockConn, "Shared", 5000); code < 0 {
+		t.Fatalf("sp_getapplock(%q, Shared) returned %d -- a shared lock should never "+
+			"conflict with another shared holder, so this is a real failure (timeout, "+
+			"cancellation, or a parameter error), not contention", mssqlAdminLockResource, code)
+	}
+
 	// Since cleat#1541 the SHIPPED predicate does not mention IS_ROLEMEMBER, so
 	// membership on its own grants nothing and this whole path would hand back a
 	// pool that deletes silently -- the exact failure the comment below is
@@ -174,19 +309,43 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 			mssqlTestAdminLogin, form)
 	}
 
+	// lockConn/lockDB were already acquired above, before the opt-in --
+	// nothing left to do here but cache them alongside the pool they now
+	// cover, and mark the early-return release defer as no longer needed.
 	mssqlAdminPools[baseDSN] = pool
+	mssqlAdminLockConns[baseDSN] = lockConn
+	mssqlAdminLockDBs[baseDSN] = lockDB
 	mssqlAdminRefs[baseDSN]++
+	lockEstablished = true
 	t.Cleanup(func() { mssqlReleaseAdminDB(t, baseDSN) })
 	return pool
 }
 
 // mssqlReleaseAdminDB is the Cleanup counterpart of every MSSQLAdminDB call
 // that flipped or reused the admin predicate form. When the count for baseDSN
-// reaches zero, no live caller still needs 'admin', so it restores 'plain'
-// (migration 075 is idempotent -- see restoreMSSQLPlainPredicate) and evicts
-// the cached pool, so the next MSSQLAdminDB call re-provisions and
+// reaches zero, no live caller IN THIS PROCESS still needs 'admin' -- but
+// that is not the same as no live caller anywhere (cleat#2857), so this no
+// longer restores 'plain' unconditionally. It releases this process's own
+// SHARED hold, then probes EXCLUSIVE with no wait: granted means nothing
+// else anywhere still holds SHARED, so it is safe to restore (migration 075
+// is idempotent -- see restoreMSSQLPlainPredicate) and the cached pool is
+// evicted either way, so the next MSSQLAdminDB call re-provisions and
 // re-verifies rather than handing back a pool that now authenticates into a
 // predicate it never checked.
+//
+// cleat#2899 (G2): this used to restore unconditionally right after
+// releasing its own SHARED hold, which is the release-side mirror of G3's
+// ordering bug -- a different, still-live process's SHARED hold does not
+// prevent THIS process from clobbering the predicate out from under it.
+// Measured 3/3 plus a control: process B holds MSSQLAdminDB 8-10s, process A
+// (a 1s hold, started once B is confirmed live) releases and restores
+// 'plain' unconditionally; B, still live, then reads 'plain' instead of
+// 'admin'. The EXCLUSIVE(0) probe below is the same check
+// selfHealMSSQLAdminPredicate already does on the heal side, applied here on
+// the release side, and held THROUGH the restore for the same reason that
+// function now holds it through its own heal (G3b): releasing before
+// restoring would reopen the identical window for a MSSQLAdminDB caller
+// that acquires SHARED in the gap.
 //
 // Takes baseDSN only, not the caller's plain db -- see
 // restoreMSSQLPlainPredicate's own comment for why db cannot be used here:
@@ -213,7 +372,41 @@ func mssqlReleaseAdminDB(t *testing.T, baseDSN string) {
 	}
 	delete(mssqlAdminPools, baseDSN)
 
-	restoreMSSQLPlainPredicate(t, baseDSN)
+	lockConn, hasLock := mssqlAdminLockConns[baseDSN]
+	lockDB := mssqlAdminLockDBs[baseDSN]
+	delete(mssqlAdminLockConns, baseDSN)
+	delete(mssqlAdminLockDBs, baseDSN)
+
+	if hasLock {
+		ctx := context.Background()
+		mssqlReleaseApplock(t, ctx, lockConn)
+
+		if code := mssqlTryApplock(t, ctx, lockConn, "Exclusive", 0); code < 0 {
+			t.Logf("releasing this process's own hold on %s, but another live caller "+
+				"(in this process or another sharing this database server) still needs "+
+				"'admin' (sp_getapplock EXCLUSIVE returned %d) -- leaving the predicate "+
+				"as-is rather than restoring 'plain' out from under it", mssqlAdminLockResource, code)
+		} else {
+			restoreMSSQLPlainPredicate(t, baseDSN)
+			mssqlReleaseApplock(t, ctx, lockConn)
+		}
+
+		if err := lockConn.Close(); err != nil {
+			t.Logf("closing the dedicated applock connection: %v", err)
+		}
+		if lockDB != nil {
+			if err := lockDB.Close(); err != nil {
+				t.Logf("closing the dedicated applock connection's pool: %v", err)
+			}
+		}
+	} else {
+		// Should not happen -- MSSQLAdminDB always acquires the lock before
+		// caching a pool as of cleat#2899 -- but fail safe rather than
+		// silently dropping the restore this branch existed for before
+		// cleat#2857 added the lock at all.
+		restoreMSSQLPlainPredicate(t, baseDSN)
+	}
+
 	if err := pool.Close(); err != nil {
 		t.Logf("closing the administrative SQL Server pool: %v", err)
 	}
@@ -264,9 +457,37 @@ func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
 	// (the definitions), so the restore follows the content rather than the
 	// filename. 003 opens by dropping every policy, which is what lets it run
 	// against a database already in the opt-in form.
+	//
+	// 003_procedures.sql is the GENERATED baseline and bundles every routine
+	// together, finalize_workflow_status included -- so replaying 003 alone
+	// has the side effect of reverting ANY later migration that redefines a
+	// routine 003 also defines, not only the RLS predicate this function
+	// exists to restore. cleat#3171 (migrations/mssql/013) was the first one
+	// since the 2434 rebaseline to hit this -- found by this exact revert,
+	// mid-suite: a fix landed in 013, the FIRST MSSQL test in the process to
+	// touch this path released the admin pool in its teardown, this
+	// function replayed 003 alone, and finalize_workflow_status went back
+	// to its pre-013 body for every subtest after that one.
+	//
+	// cleat#3173: that was fixed by hand, by adding 013 to a hardcoded list
+	// here -- which is exactly the gap, because the NEXT migration that
+	// redefines a bundled routine needs a human to notice this function
+	// exists and remember to do the same thing again.
+	// mssqlPlainPredicateReplayFiles (mssql_admin_replay_list.go) derives
+	// the tail instead: it reads which routines 003_procedures.sql defines,
+	// then scans every later-numbered file for a redefinition of any of
+	// them. TestProcedureMigrationListsAreComplete
+	// (engine/store_backends_procedures_test.go) catches a routine missing
+	// from ITS list, which is scoped to finalize_workflow_status alone; this
+	// derivation covers every routine 003 bundles, not just that one.
 	root := repoRootForMSSQLTestutil(t)
-	for _, name := range []string{"002_defaults.sql", "003_procedures.sql"} {
-		execMSSQLBatchFile(t, restoreDB, filepath.Join(root, "migrations", "mssql", name))
+	dir := filepath.Join(root, "migrations", "mssql")
+	names, err := mssqlPlainPredicateReplayFiles(dir)
+	if err != nil {
+		t.Fatalf("derive the plain-predicate replay list from %s: %v", dir, err)
+	}
+	for _, name := range names {
+		execMSSQLBatchFile(t, restoreDB, filepath.Join(dir, name))
 	}
 }
 
@@ -320,8 +541,10 @@ func requireMSSQLAdminRole(t *testing.T, db *sql.DB) {
 	if n == 0 {
 		t.Fatalf("this database enforces row-level security but has no cleat_admin role, " +
 			"so nothing can read or delete across tenants.\n" +
-			"Apply migrations/mssql/012_admin_role.sql (IMPROVEMENT-PLAN 3.37), or drop and " +
-			"recreate the test database so the shipped migrations run from scratch.")
+			"The role is created empty by migrations/mssql/001_schema.sql (IMPROVEMENT-PLAN 3.37; " +
+			"this file was named 012_admin_role.sql before the SQL Server migration compaction " +
+			"folded it into the baseline). Drop and recreate the test database so the shipped " +
+			"migrations run from scratch.")
 	}
 }
 

@@ -14,10 +14,19 @@
 // Host functions communicate with the cleat worker via WASM linear memory.
 // Input and output are JSON strings passed through memory buffers.
 //
-// The ABI export/import layer (//go:wasmimport, //export) is provided by
-// the cleat WASM SDK. This file contains the pure business logic that the
-// ABI layer dispatches to. See docs/third-party-plugin-guide.md for the
-// full host function ABI reference.
+// The ABI export/import layer (//go:wasmimport, //export) is not provided
+// by any cleat package. No cleat package provides the PLUGIN ABI layer --
+// the workflow SDK under cleat/ ("the durable SDK") exists, but it is for
+// workflows, not plugins, and its own ABI stubs come from the code
+// transformer rather than being hand-written or library-provided either.
+// This file's ABI layer is hand-written, illustrated only as a comment
+// near the bottom of this file, because WASM plugin execution is unwired
+// end to end (IMPROVEMENT-PLAN 3.315):
+// engine.PluginLoader.LoadPlugin has no non-test caller, and cmd/cleat-worker
+// constructs no loader. This file contains the pure business logic a real
+// ABI layer would dispatch to. See
+// docs/contributor/plugins/third-party-plugin-guide.md for the intended
+// import surface -- but read its status note first.
 package main
 
 import (

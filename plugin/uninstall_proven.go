@@ -20,14 +20,20 @@ import "sort"
 // Most of the rest DO recover with a follow-up --migrate-only, on either
 // dialect, but not all: cleat#2306 phase 2's schema-equality check
 // (cmd/cleat-worker/a_uninstall_down_chain_is_classified_on_every_dialect_test.go,
-// migration/catalogdiff) found three pairs where the follow-up run returns
-// no error yet the recovered schema is missing an object the failed Down
+// migration/catalogdiff) found pairs where the follow-up run returns no
+// error yet the recovered schema is missing an object the failed Down
 // destroyed -- plugin_migrations still records that migration as applied, so
 // the recovery run has nothing pending to re-apply. Measured 2026-09-25:
 // blobstore/MySQL (loses the workflow_blob_refs table), oauth-provider/MSSQL
 // (loses oauth_sessions.nonce), webhook-ingest/MSSQL (loses
-// webhook_events.error_msg). Those three are classified
-// outcomeUnrecoverable in knownBrokenPluginDown, same as a pair whose
+// webhook_events.error_msg) -- three pairs at the time. cleat#2850 wrapped
+// each RunDownMigrations version in its own transaction, and on SQL Server,
+// which supports transactional DDL, that stops a failed Down from leaving a
+// destroyed object behind: oauth-provider/MSSQL and webhook-ingest/MSSQL
+// reclassified to outcomeRecoverable as a result, and blobstore/MySQL (MySQL
+// commits each DDL statement as it runs, so the transaction only orders
+// statements there, it does not roll them back) is the only one still
+// classified outcomeUnrecoverable in knownBrokenPluginDown, same as a pair whose
 // follow-up run fails outright -- "the command exited 0" is not the bar,
 // "the schema matches a clean install" is. Do not tell an operator
 // --migrate-only repairs an uninstall for any (plugin, dialect) pair without
@@ -76,6 +82,13 @@ var provenPluginDialects = map[string]map[Dialect]bool{
 	"rate-limiter":     {DialectMySQL: true, DialectMSSQL: true},
 	"slack-notify":     {DialectMySQL: true, DialectMSSQL: true},
 	"tenant-quota":     {DialectMySQL: true, DialectMSSQL: true},
+	// cleat#2534: tenant_trials is a single TenantScoped table with a plain
+	// `DROP TABLE IF EXISTS` Down and no DROP COLUMN/INDEX of the kind that
+	// broke other plugins on MySQL -- the same shape as tenant-quota above,
+	// which is already proven on both. Listed here in the same PR as
+	// TestUninstallDownChainIsClassifiedOnEveryDialect's own subtests proving
+	// it, per this file's own rule.
+	"tenant-lifecycle": {DialectMySQL: true, DialectMSSQL: true},
 }
 
 // UninstallProvenOnDialect reports whether pluginName's Down chain is

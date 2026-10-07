@@ -124,11 +124,27 @@ func ScanWasmImports(wasmBytes []byte) ([]ScannedImport, error) {
 			}
 		}
 
+		// Sections are contiguous: the byte at sectionEnd IS the next
+		// section's id, with nothing between them.
+		//
+		// cleat#3069: this used to be followed by an "align to next section
+		// boundary" step that advanced one byte further whenever that id byte
+		// was 0x00. But 0x00 is not padding -- it is the custom section's id,
+		// and Go emits custom sections on every non-trivial module (the "name"
+		// and "producers" sections, DWARF). The step ate the id of the first
+		// custom section that followed another section, and the walk then read
+		// that section's CONTENT as section headers.
+		//
+		// What the caller sees then depends on the trailing bytes, and both
+		// directions were measured on real artifacts: the misread can land on
+		// a truncated LEB, which fails the whole scan with "invalid section
+		// size at offset N" on a module that builds and runs; or it can land
+		// on content that parses, in which case the walk FABRICATES imports
+		// out of symbol and DWARF text and returns them as real entries -- 23
+		// for a binary that declares 21, on the tutorial's own module. The
+		// first silences the orphan check this scanner feeds; the second can
+		// make it name a call path the closure analysis never missed.
 		offset = sectionEnd
-		// Align to next section boundary.
-		if offset < len(wasmBytes) && wasmBytes[offset] == 0 {
-			offset++
-		}
 	}
 
 	return imports, nil

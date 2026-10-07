@@ -8,13 +8,14 @@ helpers for the Cleat ABI.
 Quick start:
     from cleat_sdk import HostCalls, cleat_entry
 
-    @cleat_entry
+    @cleat_entry("my_workflow")
     def my_workflow(h: HostCalls, name: str) -> str:
         h.log(f"Hello, {name}!")
         resp = h.call("my-service", "DoThing", {"name": name})
         return resp
 """
 
+from .agent import AGENT_WORKFLOW_NAME, AgentConfig, Tool, run_agent
 from .client import CleatClient
 from .entry import cleat_entry, virtual_object
 from .host_calls import (
@@ -58,7 +59,9 @@ from .test_harness import CallRecord, CleatTestHarness
 from .types import ChildWorkflow, CleatDefer, Saga, SagaStep, SagaStepResult, TerminalError
 
 __all__ = [
+    "AGENT_WORKFLOW_NAME",
     "INFINITE_TIMEOUT_MS",
+    "AgentConfig",
     "AwaitEventResult",
     "AwaitWebhookResult",
     "BlobGetResult",
@@ -99,7 +102,9 @@ __all__ = [
     "StreamEvent",
     "SuspendSentinel",
     "TerminalError",
+    "Tool",
     "TriggerIncidentResult",
     "cleat_entry",
+    "run_agent",
     "virtual_object",
 ]

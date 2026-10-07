@@ -9,12 +9,34 @@
 // statement (second-truncated) disagreed about which rows were
 // reclaimable.
 //
-// Each dialect seeds two rows against one fractional R (14.5s): one aged
-// 14.2s -- inside R, must stay 'running' -- and one aged 14.8s -- past R,
-// must be reclaimed to 'ready'. Pre-fix, int(14.5s) truncates to a 14s
-// cutoff, so the 14.2s row (14.2 > 14) was wrongly reclaimed too -- this
-// is the exact case that distinguishes the fix from the bug, not just a
-// pass/fail on the already-obviously-stale row.
+// Each dialect seeds two rows against one fractional R (14.9s): one aged
+// 14.1s -- inside R, must stay 'running' -- and one aged 15.9s -- past R,
+// must be reclaimed to 'ready'. Pre-fix, int(14.9s) truncates to a 14s
+// cutoff, so the 14.1s row (14.1 > 14) was wrongly reclaimed too -- this is
+// the case that distinguishes the fix from the bug: the inside row must sit
+// strictly inside (floor(R), R), not merely inside (0, R).
+//
+// cleat#2197: this margin was originally 300ms either side of R (14.2s /
+// 14.8s) -- narrow enough that a slow CI runner, or an MSSQL deadlock retry
+// (withRollbackGuaranteedRetry can re-run the whole reap statement) eating
+// more than 300ms between the seed INSERT and the reap query flips the
+// result, independent of whether the fix itself is correct.
+//
+// cleat-review on cleat#2751: a first widening moved BOTH rows a full
+// second, to 13.5s/15.5s -- which moved the inside row from 14.2s (above
+// the truncated 14s cutoff, where a truncating bug misclassifies it) to
+// 13.5s (below 14s, where a truncating bug classifies it correctly too).
+// Measured with `timeout = timeout.Truncate(time.Second)` reintroduced into
+// PostgresStore.ReapStaleInstances: the 13.5s/15.5s version PASSED against
+// that mutant -- #2189's own bug went uncaught. The flake risk is one-sided
+// (only the inside row's ACTUAL age at reap time, seed-time age plus
+// whatever elapses before the query runs, can cross above R -- the past
+// row can only get more obviously stale), so the fix raises R's fraction
+// instead of lowering the inside row: R=14.9s keeps the inside row at
+// 14.1s, which stays above the 14s truncated cutoff (where the mutant must
+// misclassify it) with 800ms of headroom below R itself (where slow
+// CI or a retry would otherwise flip a correct implementation's answer,
+// same hazard the original 300ms margin had, now 800ms wide instead).
 package engine
 
 import (
@@ -29,9 +51,9 @@ import (
 )
 
 const (
-	reapFractionalR         = 14500 * time.Millisecond // 14.5s
-	reapFractionalInsideR   = 14200 * time.Millisecond // 14.2s stale: must NOT reclaim
-	reapFractionalPastR     = 14800 * time.Millisecond // 14.8s stale: must reclaim
+	reapFractionalR         = 14900 * time.Millisecond // 14.9s
+	reapFractionalInsideR   = 14100 * time.Millisecond // 14.1s stale: must NOT reclaim (above the 14s truncated cutoff)
+	reapFractionalPastR     = 15900 * time.Millisecond // 15.9s stale: must reclaim
 	reapFractionalTestLimit = 10
 )
 
@@ -55,11 +77,11 @@ func assertReapFractionalStatuses(t *testing.T, dialect string, db *sql.DB, ctx 
 		return status
 	}
 	if got := statusOf(insideID); got != "running" {
-		t.Errorf("%s: the 14.2s-stale row (inside R=14.5s) status = %q, want running -- "+
+		t.Errorf("%s: the 14.1s-stale row (inside R=14.9s) status = %q, want running -- "+
 			"a whole-second-truncated reap would cut off at 14s and wrongly reclaim this row", dialect, got)
 	}
 	if got := statusOf(pastID); got != "ready" {
-		t.Errorf("%s: the 14.8s-stale row (past R=14.5s) status = %q, want ready -- it should have been reclaimed", dialect, got)
+		t.Errorf("%s: the 15.9s-stale row (past R=14.9s) status = %q, want ready -- it should have been reclaimed", dialect, got)
 	}
 }
 
@@ -98,7 +120,7 @@ func TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnPostgres(t *testing.T)
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("ReapStaleInstances reclaimed %d rows, want 1 (only the 14.8s-stale row)", n)
+		t.Fatalf("ReapStaleInstances reclaimed %d rows, want 1 (only the 15.9s-stale row)", n)
 	}
 	assertReapFractionalStatuses(t, "postgres", db, ctx, func(i int) string { return fmt.Sprintf("$%d", i) }, insideID, pastID)
 }
@@ -144,7 +166,7 @@ func TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMySQL(t *testing.T) {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("ReapStaleInstances reclaimed %d rows, want 1 (only the 14.8s-stale row)", n)
+		t.Fatalf("ReapStaleInstances reclaimed %d rows, want 1 (only the 15.9s-stale row)", n)
 	}
 	assertReapFractionalStatuses(t, "mysql", db, ctx, func(int) string { return "?" }, insideID, pastID)
 }
@@ -197,7 +219,7 @@ func TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMSSQL(t *testing.T) {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("ReapStaleInstances reclaimed %d rows, want 1 (only the 14.8s-stale row)", n)
+		t.Fatalf("ReapStaleInstances reclaimed %d rows, want 1 (only the 15.9s-stale row)", n)
 	}
 	assertReapFractionalStatuses(t, "mssql", admin, ctx, func(i int) string { return fmt.Sprintf("@p%d", i) }, insideID, pastID)
 }

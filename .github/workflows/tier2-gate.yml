@@ -52,7 +52,10 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    # cleat#2483: `branches` filters on the PR's BASE branch, and a
+    # release branch was absent -- so every PR targeting one ran none of
+    # this workflow, and the release PR into main was the only gate left.
+    branches: [main, develop, "release/**"]
     # `edited` is required, not decorative: it is the activity type a BASE
     # CHANGE fires. Without it a PR opened against a feature branch and later
     # retargeted here never triggers this workflow at all -- not at open (the
@@ -125,8 +128,24 @@ permissions:
   contents: read
 
 jobs:
-  tier2:
-    name: Tier 2 Gate
+  # SPLIT INTO A WORKER JOB (this one) AND A SEPARATE AGGREGATOR (`tier2`,
+  # below) named `Tier 2 Gate` -- cleat#2847. Until this split, this single
+  # job WAS the required context `Tier 2 Gate`, so its "Upload the tier-2
+  # log" step could not be given `continue-on-error` the way tier1-gate.yml's
+  # equivalent step was in #2846: scripts/check-workflow-guards.py's
+  # `guard_no_continue_on_error` correctly refuses a non-fatal step inside a
+  # job whose own name IS a required context, and a mutation test confirmed
+  # it does (see #2847). Moving the actual gate into a job that is NOT itself
+  # the required context, with a thin aggregator carrying that name instead,
+  # gives the log upload the same non-fatal treatment tier1 has without
+  # asking the guard to make an exception for it.
+  #
+  # Unlike tier1-engine/tier1-rest, this job is not conditionally skipped for
+  # merge_group -- tier 2 is not report-only in the queue the way tier 1 is
+  # (cleat#2080), so the aggregator below only has one outcome to check:
+  # success.
+  tier2-run:
+    name: Tier 2 Gate -- run
     runs-on: ubuntu-latest
     # The gate ran 1567 tests in six patterns plus one module when this was written,
     # with -p 1, in well under two minutes of test time locally. 30 is generous; a gate
@@ -232,12 +251,106 @@ jobs:
       - name: Tier 2 gate
         run: scripts/tier2-gate.sh
 
+      # cleat#2691: this job already sets all three DSNs (above), and
+      # tier2-gate.sh's sweep above already runs this test's postgres,
+      # mysql and mssql subtests for real -- cleat-review confirmed that
+      # while reviewing #2684, the PR that moved this test from tier 1
+      # (skips_allowed: false) to plugins/eventtriggers, a plain tier-2
+      # package (tiers.yaml:577, skips_allowed: true). The move was
+      # necessary -- registerAwaiter/unregisterAwaiter/registrationKey are
+      # unexported, so exercising the REAL functions instead of a
+      # hand-copy requires being in-package -- but it means a toolchain
+      # hiccup or an unset DSN no longer fails anything here:
+      # scripts/tier2-gate.sh enforces no skip budget of its own, only
+      # tiers.yaml's generic (and permissive) one.
+      #
+      # A NARROW, ADDITIONAL, -run-filtered rerun of just this one test,
+      # same DSNs, with a skip budget of ZERO -- the pattern
+      # tiers.yaml:1060-1066 already documents for tests/cross-language and
+      # tests/plugin-harness, not new infrastructure. Filtering to one test
+      # means this step's report contains only its own skip events, so a
+      # single zero-budget __UNATTRIBUTED__ line suffices; no per-dialect
+      # regex is needed the way it is for an unfiltered sweep's ledger
+      # lines elsewhere in this repo.
+      #
+      # This catches a genuine t.Skip (today, only reachable on PostgreSQL
+      # -- see the next step's comment for why MySQL/MSSQL need a different
+      # check).
+      - name: Run eventtriggers legacy-replay dialect test
+        run: |
+          set -o pipefail
+          go test -count=1 -json -run '^TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth$' ./plugins/eventtriggers/... 2>&1 | tee eventtriggers-legacy-replay-report.json
+
+      - name: Skip budget (eventtriggers legacy-replay dialect test)
+        if: always()
+        run: scripts/check-skip-budget.sh tier2/eventtriggers-legacy-replay eventtriggers-legacy-replay-report.json
+
+      # The skip-budget step above cannot see the failure mode this issue
+      # actually names for MySQL/MSSQL. engine/testutil/plugin_backend.go's
+      # NewPluginTestBackends only includes a MySQL or MSSQL backend when
+      # its DSN env var is non-empty (checked BEFORE MySQLTestDB/MSSQLTestDB
+      # ever run) -- an unset DSN means that dialect's t.Run subtest is
+      # never CREATED, which emits no skip event at all. Verified by
+      # falsification: unsetting CLEAT_TEST_MSSQL and rerunning this exact
+      # test produces `go test` exit 0, zero skip events, and a passing
+      # skip-budget check -- the mssql subtest is simply absent, not
+      # skipped. (The dialect that CAN still emit a real skip event here is
+      # PostgreSQL, which NewPluginTestBackends always attempts and which
+      # TestDB skips, rather than fails, when unconfigured and unreachable
+      # -- that path is what the step above actually guards.) Assert
+      # presence directly, independent of the skip-budget mechanism.
+      - name: Assert eventtriggers legacy-replay ran on all three dialects
+        if: always()
+        run: |
+          missing=""
+          for d in postgres mysql mssql; do
+            grep -q "\"Test\":\"TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth/$d\"" eventtriggers-legacy-replay-report.json || missing="$missing $d"
+          done
+          if [ -n "$missing" ]; then
+            echo "eventtriggers legacy-replay dialect subtest(s) never ran (DSN unset?):$missing"
+            exit 1
+          fi
+          echo "all three dialect subtests ran"
+
+      # continue-on-error, for the same reason as tier1-gate.yml's identical
+      # steps (cleat#2834, #2846): this is debugging evidence, not the gate --
+      # the "Tier 2 gate" step's own exit status is what this job's result
+      # already is, and that result (not this upload) is what the `tier2`
+      # aggregator job below checks. Safe here specifically because this job
+      # is no longer itself the required context (see the comment above
+      # `tier2-run:`); the guard in scripts/check-workflow-guards.py would
+      # refuse this exact line if it appeared in a job named `Tier 2 Gate`.
       - name: Upload the tier-2 log
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: tier2-gate-${{ github.sha }}
+          name: tier2-gate-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             tier2-gate.log
             tier2-gate.json
+            eventtriggers-legacy-replay-report.json
           retention-days: 30
+
+  # `always()` and an explicit result check, not a bare `needs:` -- CLAUDE.md
+  # records, under "a condition that never decides anything cannot be
+  # observed to be wrong", how costly it was to find out only after relying
+  # on it that a SKIPPED needs-job does not read as failure to branch
+  # protection. tier1-gate.yml's own aggregator (job `tier1`) states the same
+  # check for its three shards; this is the one-shard version of it.
+  tier2:
+    name: Tier 2 Gate
+    needs: [tier2-run]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate the gate result
+        env:
+          RUN: ${{ needs.tier2-run.result }}
+        run: |
+          echo "tier2-run: $RUN"
+          if [ "$RUN" != "success" ]; then
+            echo "::error::Tier 2 Gate: tier2-run did not succeed ($RUN)"
+            exit 1
+          fi

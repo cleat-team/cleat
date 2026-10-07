@@ -75,6 +75,8 @@ Test Go (support) on 1.26
 Test Go (upgrade) on 1.26
 Test Go (wasm) on 1.26
 Test MySQL
+Test Python 3.12
+Test Python 3.13
 Test Rust
 Test SQL Server
 Tier 1 Gate
@@ -115,5 +117,18 @@ Web Dashboard
 #   260 and 7 -- were worked off. Both are zero and both linters are now steps
 #   in `Lint`, so the job was deleted rather than left as a permanent green.
 #   ci.yml keeps the full rationale where the job used to be.)
-#   Test Python 3.10/3.11/3.12
+#   Test Python 3.10/3.11      -- 3.12 and 3.13 ARE required, added 2026-09-29.
+#                                3.13's check-run arrived with cleat#2462 (the
+#                                matrix stopped at 3.12 while pyproject.toml
+#                                classified 3.13, so the newest advertised
+#                                version was exercised by nothing); 3.12 was
+#                                already there. Both were made required once
+#                                cleat#2547/#2567/#2569 had given the suite
+#                                enough teeth to be worth gating on.
+#                                3.10 and 3.11 stay out: the matrix still RUNS
+#                                all four, and requiring four full Python
+#                                suites on every PR buys little signal over the
+#                                oldest and newest. This line is about which of
+#                                them GATE -- recorded here so the absence is a
+#                                decision rather than an oversight.
 #   Benchmarks, Docs, Examples, and the release/soak/stale/ecosystem jobs.

@@ -69,8 +69,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE INDEX IF NOT EXISTS idx_kafka_config_enabled ON kafka_config(enabled);
 			`,
 			UpMySQL: `
-				ALTER TABLE kafka_config ADD COLUMN event_type VARCHAR(255) NOT NULL DEFAULT '';
-				CREATE INDEX idx_kafka_config_enabled ON kafka_config(enabled);
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'kafka_config' AND column_name = 'event_type');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE kafka_config ADD COLUMN event_type VARCHAR(255) NOT NULL DEFAULT ''''', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'kafka_config' AND index_name = 'idx_kafka_config_enabled');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_kafka_config_enabled ON kafka_config(enabled)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('kafka_config') AND name = 'event_type')

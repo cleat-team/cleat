@@ -90,7 +90,7 @@ func TestARetentionPreviewAgreesWithTheSweepAndDeletesNothing(t *testing.T) {
 				t.Fatalf("ClaimWorkflow (decoy): %v %v", dclaimed, err)
 			}
 			if err := store.MoveToDeadLetterQueue(ctx, dclaimed.ID, "preview-worker",
-				dclaimed.Generation, "decoy", "", ""); err != nil {
+				dclaimed.Generation, "decoy", "", "", nil); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue (decoy): %v", err)
 			}
 

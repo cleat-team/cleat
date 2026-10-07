@@ -100,6 +100,47 @@ type hookError struct {
 
 func (e *hookError) Error() string { return e.err.Error() + ": " + e.stderr }
 
+// runCommitMsgHook invokes .githooks/commit-msg directly against a message
+// file, mirroring runHook's shape but with commit-msg's own signature: one
+// positional argument (the message file), no SOURCE, no repository state to
+// seed -- commit-msg's job in this repo reads nothing but the file itself.
+func runCommitMsgHook(t *testing.T, message string) (string, error) {
+	t.Helper()
+	root := repoRoot(t)
+	hook := filepath.Join(root, ".githooks", "commit-msg")
+
+	dir := t.TempDir()
+	msgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
+		t.Fatalf("writing the message: %v", err)
+	}
+
+	// commit-msg calls `git interpret-trailers`, which needs to be run inside
+	// SOME repository; it does not read repository config the way
+	// prepare-commit-msg's stream lookup does, so an empty one is enough.
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+
+	cmd := exec.Command("sh", hook, msgFile)
+	cmd.Dir = dir
+	out, runErr := cmd.CombinedOutput()
+	got, readErr := os.ReadFile(msgFile)
+	if readErr != nil {
+		t.Fatalf("reading the message back: %v", readErr)
+	}
+	if runErr != nil {
+		return string(got), &hookError{stderr: string(out), err: runErr}
+	}
+	return string(got), nil
+}
+
 // The hook stamps both trailers, once each.
 func TestTheHookStampsTheStreamAndTheSignoff(t *testing.T) {
 	got, err := runHook(t, "cleat-review", "fix: something\n")
@@ -189,6 +230,200 @@ func TestAnUnsetStreamIsRefusedRatherThanGuessed(t *testing.T) {
 func TestAStreamTheCheckWouldRejectIsRefusedLocally(t *testing.T) {
 	if _, err := runHook(t, "WS-9", "fix: something\n"); err == nil {
 		t.Fatal("the hook stamped 'WS-9', which the stream check does not accept")
+	}
+}
+
+// TestPrepareCommitMsgSkipsStampingOnAMalformedTrailer is half of the
+// regression test for cleat#2588: a message whose Claude-Stream line sits in
+// an earlier paragraph, separated from the actual trailer block by a blank
+// line, is invisible to
+// stream-trailer-check.yml's %(trailers:key=Claude-Stream,valueonly) --
+// git's parser reads only the message's FINAL paragraph.
+//
+// prepare-commit-msg must not read this as "already present" (a raw grep
+// over the whole file is satisfied by it) and stamp nothing while saying
+// nothing either -- that was the original bug. But it must ALSO not refuse
+// outright: cleat#2588's second review round found that prepare-commit-msg
+// runs before the commit-message editor opens, so a refusal here blocks the
+// only paths that could fix it (`commit --amend`, `rebase -i reword`) before
+// the author ever gets a chance to edit. So the assertion here is narrower
+// than a first read of the issue suggests: exit 0, leave the message
+// UNCHANGED (no second trailer stamped alongside the broken one), and warn.
+// The actual refusal is commit-msg's job --
+// TestCommitMsgRefusesAMalformedTrailer below.
+func TestPrepareCommitMsgSkipsStampingOnAMalformedTrailer(t *testing.T) {
+	message := "fix: something\n\nClaude-Stream: WS-2\n\nSigned-off-by: Someone <someone@example.com>\n"
+	got, err := runHook(t, "cleat-review", message)
+	if err != nil {
+		t.Fatalf("prepare-commit-msg refused a malformed trailer outright, which "+
+			"blocks the only way to repair it (see the hook's own doc comment): %v", err)
+	}
+	if got != message {
+		t.Errorf("prepare-commit-msg changed a message it should have left alone "+
+			"for commit-msg to judge:\ngot:  %q\nwant: %q", got, message)
+	}
+}
+
+// TestCommitMsgRefusesAMalformedTrailer is the other half: commit-msg runs on
+// the FINAL message, after any editor has had its chance, so it is where the
+// actual refusal belongs. Same shape as the test above, driven at
+// .githooks/commit-msg directly.
+func TestCommitMsgRefusesAMalformedTrailer(t *testing.T) {
+	message := "fix: something\n\nClaude-Stream: WS-2\n\nSigned-off-by: Someone <someone@example.com>\n"
+	got, err := runCommitMsgHook(t, message)
+	if err == nil {
+		t.Fatalf("commit-msg accepted a message where Claude-Stream is split from "+
+			"the trailer block by a blank line:\n%s", got)
+	}
+	he, ok := err.(*hookError)
+	if !ok {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	for _, want := range []string{"final paragraph", "blank line"} {
+		if !strings.Contains(he.stderr, want) {
+			t.Errorf("the refusal does not mention %q:\n%s", want, he.stderr)
+		}
+	}
+}
+
+// TestCommitMsgAcceptsAWellFormedTrailer is commit-msg's negative control: a
+// message whose Claude-Stream trailer git's parser DOES read must pass, so
+// the malformed-shape check is not accidentally refusing every commit.
+func TestCommitMsgAcceptsAWellFormedTrailer(t *testing.T) {
+	message := "fix: something\n\nClaude-Stream: WS-2\nSigned-off-by: Someone <someone@example.com>\n"
+	if _, err := runCommitMsgHook(t, message); err != nil {
+		t.Fatalf("commit-msg refused a well-formed trailer: %v", err)
+	}
+}
+
+// TestCommitMsgDoesNotDemandPresence is commit-msg's second negative control:
+// it is deliberately narrower than "every commit must carry a Claude-Stream
+// trailer" -- that presence check belongs to prepare-commit-msg (whose fix,
+// an unset git config, has no repair-path problem) and to CI. A message with
+// no Claude-Stream line anywhere must not be refused here.
+func TestCommitMsgDoesNotDemandPresence(t *testing.T) {
+	message := "fix: something\n\nCo-Authored-By: Someone <someone@example.com>\n"
+	if _, err := runCommitMsgHook(t, message); err != nil {
+		t.Fatalf("commit-msg refused a message with no Claude-Stream trailer at all, "+
+			"which is not this hook's job to enforce: %v", err)
+	}
+}
+
+// TestARepairingAmendSucceeds drives the pair of hooks through a REAL
+// `git commit --amend`, not a direct hook invocation -- the class of failure
+// cleat#2588's second review round found (prepare-commit-msg refusing before
+// the editor runs, blocking the repair) is invisible to a test that invokes
+// either hook directly, because the whole point is the ORDER git calls them
+// in around an editor. GIT_EDITOR here stands in for the author fixing the
+// blank line by hand.
+func TestARepairingAmendSucceeds(t *testing.T) {
+	root := repoRoot(t)
+	dir := t.TempDir()
+
+	run := func(env []string, args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), env...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return out
+	}
+
+	run(nil, "init", "-q")
+	run(nil, "config", "user.name", "Test Person")
+	run(nil, "config", "user.email", "test@example.com")
+	run(nil, "config", "cleat.stream", "WS-2")
+	run(nil, "config", "core.hooksPath", filepath.Join(root, ".githooks"))
+
+	checkDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(checkDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	checkBody, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "stream-trailer-check.yml"))
+	if err != nil {
+		t.Fatalf("reading the stream check: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(checkDir, "stream-trailer-check.yml"), checkBody, 0o644); err != nil {
+		t.Fatalf("writing the stream check: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("writing f.txt: %v", err)
+	}
+	run(nil, "add", "f.txt")
+
+	// Seed a malformed HEAD directly -- bypassing hooks is the only way to get
+	// one into history at all, since prepare-commit-msg (correctly) will not
+	// stamp a second trailer next to this shape and commit-msg would refuse a
+	// normal `git commit` outright. That refusal is proven by the tests above;
+	// this test is about what happens to a commit that already has the shape,
+	// which is the scenario the second review round is actually about.
+	malformed := "fix: something\n\nClaude-Stream: WS-2\n\nSigned-off-by: Test Person <test@example.com>\n"
+	msgPath := filepath.Join(dir, "malformed-msg.txt")
+	if err := os.WriteFile(msgPath, []byte(malformed), 0o644); err != nil {
+		t.Fatalf("writing seed message: %v", err)
+	}
+	run([]string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=/dev/null"},
+		"commit", "-q", "-F", msgPath)
+
+	// A no-op editor (P4's shape): the blank line survives, so the amend must
+	// still be refused, and HEAD must not move.
+	beforeAmend := strings.TrimSpace(string(run(nil, "rev-parse", "HEAD")))
+	cmd := exec.Command("git", "commit", "--amend")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_EDITOR=true")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("a no-op amend (leaving the blank line in place) was accepted:\n%s", out)
+	}
+	if got := strings.TrimSpace(string(run(nil, "rev-parse", "HEAD"))); got != beforeAmend {
+		t.Fatalf("HEAD moved despite the refused amend: %s -> %s", beforeAmend, got)
+	}
+
+	// A repairing editor: removes the blank line between Claude-Stream and the
+	// rest of the trailer block. This must succeed -- it is the exact path
+	// cleat#2588's second review round found broken when the refusal lived in
+	// prepare-commit-msg.
+	editorScript := filepath.Join(dir, "fix-editor.sh")
+	editorSrc := "#!/bin/sh\n" +
+		"f=\"$1\"\n" +
+		"awk 'BEGIN{p=0} /^Claude-Stream:/{print; getline; if ($0==\"\") next; print; next} {print}' " +
+		"\"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"\n"
+	if err := os.WriteFile(editorScript, []byte(editorSrc), 0o755); err != nil {
+		t.Fatalf("writing editor script: %v", err)
+	}
+
+	cmd = exec.Command("git", "commit", "--amend")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_EDITOR="+editorScript)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("a repairing amend was refused: %v\n%s", err, out)
+	}
+
+	final := string(run(nil, "log", "-1", "--format=%B"))
+	trailer := string(run(nil, "log", "-1", "--format=%(trailers:key=Claude-Stream,valueonly)"))
+	if strings.TrimSpace(trailer) != "WS-2" {
+		t.Fatalf("git's own trailer parser does not read the repaired commit's "+
+			"stream after amend:\nmessage:\n%s\ntrailer read: %q", final, trailer)
+	}
+}
+
+// TestAGenuinelyMissingTrailerIsStillStamped is the negative control for the
+// test above: proves the new git-parser-based check does not become MORE
+// restrictive than the raw grep it replaced. A message with no Claude-Stream
+// line anywhere must still be stamped normally, exactly as
+// TestTheHookStampsTheStreamAndTheSignoff already covers for the simplest
+// case -- this one adds an unrelated trailer-shaped final paragraph, so the
+// parser has something to parse before Claude-Stream is added to it.
+func TestAGenuinelyMissingTrailerIsStillStamped(t *testing.T) {
+	got, err := runHook(t, "WS-3", "fix: something\n\nCo-Authored-By: Someone <someone@example.com>\n")
+	if err != nil {
+		t.Fatalf("hook failed: %v", err)
+	}
+	if !strings.Contains(got, "Claude-Stream: WS-3") {
+		t.Errorf("a genuinely missing trailer was not stamped:\n%s", got)
 	}
 }
 

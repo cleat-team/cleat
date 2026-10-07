@@ -170,3 +170,58 @@ func (s *MSSQLStore) IsTenantSuspended(ctx context.Context, tenantID string) (bo
 	}
 	return suspended, nil
 }
+
+// TenantExposurePolicyReader reports whether an operator has opted a tenant
+// into the `public` exposure class (cleat#1986). It is the read half of the
+// per-tenant operator opt-in ResolveDeployableExposure's doc comment names as
+// the thing that does not exist yet -- it now does, here.
+//
+// Same shape as TenantSuspensionReader, and for the same reason: a deploy
+// path type-asserts the store it already has rather than opening a second
+// connection or a second store type for a single-column, primary-key lookup.
+//
+// NOT IMPLEMENTED FOR MySQLStore, matching IsTenantSuspended's own asymmetry
+// above -- MySQL is single-tenant by construction (D1, mysql/038), so there is
+// no cross-tenant operator policy to consult there. A deploy path that type-
+// asserts against a store that does not implement this must treat the miss as
+// "not opted in" (see ResolveDeployableExposure's caller contract), never as
+// "nothing to check" -- the fail-closed default this whole feature exists to
+// get right.
+type TenantExposurePolicyReader interface {
+	AllowsPublicExposure(ctx context.Context, tenantID string) (bool, error)
+}
+
+// AllowsPublicExposure reports whether admin.tenants has opted this tenant
+// into `public`.
+//
+// A tenant with no row is NOT opted in. Same reasoning as IsTenantSuspended:
+// admin.tenants is a registry a deployment can run without fully populating,
+// and treating "absent" as "opted in" would be the exact permissive default
+// cleat#1986's owner decision refuses -- "refused at deploy otherwise" means
+// absence of a grant, not merely a false value in one.
+func (s *PostgresStore) AllowsPublicExposure(ctx context.Context, tenantID string) (bool, error) {
+	var allowed bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT allow_public_exposure FROM admin.tenants WHERE tenant_id = $1::uuid`, tenantID).Scan(&allowed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("allows public exposure: %w", err)
+	}
+	return allowed, nil
+}
+
+// AllowsPublicExposure is the SQL Server form. See the PostgreSQL implementation.
+func (s *MSSQLStore) AllowsPublicExposure(ctx context.Context, tenantID string) (bool, error) {
+	var allowed bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT allow_public_exposure FROM admin.tenants WHERE tenant_id = @p1`, tenantID).Scan(&allowed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("allows public exposure: %w", err)
+	}
+	return allowed, nil
+}

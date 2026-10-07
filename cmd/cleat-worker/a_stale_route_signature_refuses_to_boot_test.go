@@ -247,7 +247,7 @@ func runBootRefusalSubprocess(t *testing.T, dsn, ownerDSN, inject string) (code 
 		"--driver=postgres",
 		"--db=" + dsn,
 		"--migrate-db=" + ownerDSN,
-		fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t)),
+		"--api-addr=127.0.0.1:0",
 	}
 	return runBootSubprocess(t, args, inject)
 }

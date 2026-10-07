@@ -152,6 +152,31 @@ type Engine struct {
 	// is reported to the workflow, which is the behaviour without it.
 	ambiguityResolver AmbiguityResolver
 
+	// idempotencyKeyReplayer re-dispatches a pending call under its ORIGINAL
+	// idempotency key when replay finds its outcome unrecorded, for an
+	// operation declared to support it (cleat#2897, decision (c)). Nil means
+	// this path is never tried -- resolveAmbiguity falls straight to
+	// ambiguityResolver (if any) and then to [AMBIGUOUS], exactly as before
+	// this existed.
+	idempotencyKeyReplayer IdempotencyKeyReplayer
+
+	// idempotencyKeyOps holds the "service.operation" keys declared to
+	// support idempotency-key replay (cleat#2897). Disjoint from the keys in
+	// ambiguityLookup's caller-side map by construction -- validated at
+	// worker boot, because the two are different capabilities a service
+	// either has or does not, not a precedence to choose between at runtime.
+	idempotencyKeyOps map[string]bool
+
+	// idempotencyKeyRetention bounds how long after the original dispatch a
+	// pending call may still be replayed under its original key. Beyond a
+	// service's own key-retention window, a resend is no longer a dedupe
+	// candidate -- it is a NEW call under a key the service has already
+	// forgotten, which is the one case this mechanism exists to avoid
+	// (cleat#2897 item 3; see docs/durable-calls.md's "A 404 answer is a
+	// PROMISE" paragraph for the sibling hazard this mirrors). Zero means
+	// DefaultIdempotencyKeyRetention.
+	idempotencyKeyRetention time.Duration
+
 	// intentOps holds the "service.operation" keys declared as
 	// WriteAheadIntent (IMPROVEMENT-PLAN 1.4 phase D). Empty means every call
 	// is AtLeastOnce, which is what shipped before and costs nothing.
@@ -1118,7 +1143,17 @@ func (e *Engine) getAdaptiveFlusher() *AdaptiveFlusher {
 // in this package can build fake stores that stand in for PostgreSQL on the
 // batch path. No non-test type may implement it:
 // TestNoProductionStoreOptsBackIntoBatchMode reads the sources to keep it so.
+//
+// NIL IS REFUSED, NOT WAVED THROUGH. A nil WorkflowStore implements no
+// concrete type, so the interface check below would otherwise read it the
+// same as "definitely not PostgreSQL" and answer true -- the unsafe direction
+// for a fail-safe gate. getAdaptiveFlusher never calls this with a nil store
+// in production, so this is defence in depth rather than a reachable path;
+// it costs one comparison to make the gate's failure mode match its name.
 func batchFlushSupported(store WorkflowStore) bool {
+	if store == nil {
+		return false
+	}
 	if _, notPostgres := store.(perStepEventFlusher); !notPostgres {
 		return true
 	}

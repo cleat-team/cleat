@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -54,6 +55,19 @@ func (c deployDialect) admin() string {
 // deployScratch creates an EMPTY database for one dialect and returns the DSN the
 // worker should use and a handle for inspecting it.
 func deployScratch(t *testing.T, c deployDialect) (dsn string, db *sql.DB) {
+	return deployScratchNamed(t, c, "cleat_2117_deploy_")
+}
+
+// deployScratchNamed is deployScratch with the database name's prefix as a parameter.
+//
+// The prefix matters because two guards key on the database NAME. deploy/mysql/900-app-role.sh
+// refuses any database matching `cleat_*` (see its own guard, and
+// TestTheMySQLDeployScriptRefusesACollidingDatabaseName), and deployScratch's own
+// `cleat_2117_deploy_<n>` matches that pattern -- deliberately, since
+// mysqlAppRoleDSN's grantTenantPattern case depends on the collision. So a caller that
+// needs to run the shipped script against its own scratch database must not reuse the
+// default prefix, or the script refuses the database before reaching any SQL.
+func deployScratchNamed(t *testing.T, c deployDialect, prefix string) (dsn string, db *sql.DB) {
 	t.Helper()
 	admin := c.admin()
 	adb, err := sql.Open(c.driver, admin)
@@ -64,7 +78,7 @@ func deployScratch(t *testing.T, c deployDialect) (dsn string, db *sql.DB) {
 	if err := adb.Ping(); err != nil {
 		t.Fatalf("%s is set but unreachable: %v", c.env, err)
 	}
-	name := fmt.Sprintf("cleat_2117_deploy_%d", time.Now().UnixNano()%1_000_000_000)
+	name := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano()%1_000_000_000)
 	switch c.name {
 	case "postgres":
 		if _, err := adb.Exec(`CREATE DATABASE ` + name); err != nil {
@@ -137,6 +151,30 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// boundAPIAddr returns the addr field of the first "HTTP API listening" JSON log
+// line in s, or "" if no such line has been written yet. The worker logs JSON on
+// stderr (slog.NewJSONHandler), so a line that does not parse, or whose msg is
+// something else, is skipped rather than guessed at.
+//
+// This is the shared half of "boot on :0 and learn the port": the API listener
+// logs the address it actually bound (cleat#3136), so a caller that needs to talk
+// to the worker boots it with `--api-addr=127.0.0.1:0` and reads the port back
+// through here, instead of pre-choosing one with freePort and racing another
+// process for it between the probe and the bind (cleat#3138). Poll until it
+// returns non-empty: the line is written just before Serve, so it appears early.
+func boundAPIAddr(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		var rec struct {
+			Msg  string `json:"msg"`
+			Addr string `json:"addr"`
+		}
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "HTTP API listening" {
+			return rec.Addr
+		}
+	}
+	return ""
+}
+
 // runWorker runs the binary to completion (for the modes that exit) and returns its
 // exit code and combined output.
 func runWorker(t *testing.T, bin string, env []string, args ...string) (int, string) {
@@ -166,8 +204,11 @@ func runWorker(t *testing.T, bin string, env []string, args ...string) (int, str
 // either way, for the assertions that read a warning out of it.
 func startsHealthy(t *testing.T, bin string, args ...string) (bool, string) {
 	t.Helper()
-	port := freePort(t)
-	cmd := exec.Command(bin, append(args, fmt.Sprintf("--api-addr=127.0.0.1:%d", port), "--require-auth=false")...)
+	// Boot on an ephemeral port and read the address the socket actually bound
+	// from the worker's own "HTTP API listening" line, rather than pre-choosing a
+	// port with freePort and racing another process for it between the probe and
+	// the bind (cleat#3138 -- the race cleat#3136 removed for the API listener).
+	cmd := exec.Command(bin, append(args, "--api-addr=127.0.0.1:0", "--require-auth=false")...)
 	// Read while the worker is still running (the healthy case returns before it
 	// is killed), so the buffer has to be safe against exec's copier goroutine.
 	var out syncBuffer
@@ -190,7 +231,12 @@ func startsHealthy(t *testing.T, bin string, args ...string) (bool, string) {
 			return false, out.String()
 		default:
 		}
-		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", port))
+		apiAddr := boundAPIAddr(out.String())
+		if apiAddr == "" {
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		resp, err := client.Get("http://" + apiAddr + "/healthz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -324,27 +370,56 @@ func TestMigrationIsADeployStepOnEveryDialect(t *testing.T) {
 				t.Errorf("after repair schema_migrations has %d rows, want %d", got, first)
 			}
 
-			// 6b. A PLUGIN migration behind: same rule, its own message. Last of the
-			//     destructive steps because re-running a plugin migration whose row was
-			//     deleted would try to CREATE a table that exists.
-			//     (The row is restored by hand below, so step 7 can migrate again.)
-			var pluginName string
-			var pluginVersion int
-			if err := db.QueryRow(firstPluginMigrationSQL(c.name)).Scan(&pluginName, &pluginVersion); err != nil {
-				t.Fatalf("read a plugin migration row: %v", err)
+			// 6b. A PLUGIN migration behind: same rule, its own message. cleat#2223:
+			//     this used to target the GLOBALLY FIRST (plugin_name, version) row,
+			//     which -- alphabetically and version-ascending -- is overwhelmingly
+			//     likely to be a `CREATE TABLE IF NOT EXISTS`, idempotent by
+			//     construction, and restored the row by hand afterward rather than
+			//     letting --migrate-only re-apply it for real. That combination
+			//     meant this test could never structurally catch a non-idempotent
+			//     LATER migration -- exactly where cleat#2223's bare
+			//     `ALTER TABLE ... ADD/DROP COLUMN` class of bug lives (cleat-review
+			//     on #2663/#2822, fixed for webhook-ingest's v3/v4/v7 in this same
+			//     PR; v8 already fixed in #2221). Targets webhook-ingest's own
+			//     NEWEST migration instead, and restores it by actually re-running
+			//     --migrate-only rather than hand-inserting the tracking row -- the
+			//     real crash-then-reboot path, not a stand-in for it.
+			const probePlugin = "webhook-ingest"
+			var newestVersion int
+			if err := db.QueryRow(newestPluginMigrationVersionSQL(c.name), probePlugin).Scan(&newestVersion); err != nil {
+				t.Fatalf("read %s's newest plugin migration version: %v", probePlugin, err)
 			}
-			if _, err := db.Exec(deletePluginMigrationSQL(c.name), pluginName, pluginVersion); err != nil {
+			var beforeCount int
+			if err := db.QueryRow(countPluginMigrationsSQL(c.name), probePlugin).Scan(&beforeCount); err != nil {
+				t.Fatalf("count %s's plugin_migrations rows before delete: %v", probePlugin, err)
+			}
+			if _, err := db.Exec(deletePluginMigrationSQL(c.name), probePlugin, newestVersion); err != nil {
 				t.Fatal(err)
 			}
 			code, out = runWorker(t, bin, nil, base...)
 			if code == 0 {
 				t.Fatalf("a worker with a plugin migration behind exited 0:\n%s", out)
 			}
-			if !strings.Contains(out, "plugin schema is behind") || !strings.Contains(out, pluginName) {
-				t.Errorf("the refusal should be the PLUGIN check naming %s:\n%s", pluginName, out)
+			if !strings.Contains(out, "plugin schema is behind") || !strings.Contains(out, probePlugin) {
+				t.Errorf("the refusal should be the PLUGIN check naming %s:\n%s", probePlugin, out)
 			}
-			if _, err := db.Exec(insertPluginMigrationRowSQL(c.name), pluginName, pluginVersion); err != nil {
-				t.Fatalf("restore the plugin migration row: %v", err)
+			// The real re-apply: if webhook-ingest's newest migration's MySQL arm
+			// were still a bare, unguarded ALTER, this is where it would crash with
+			// `ERROR 1060 (42S21): Duplicate column name` or `ERROR 1091` -- the
+			// exact worker-cannot-boot symptom cleat#2223 is about -- instead of
+			// exiting 0.
+			if code, out = runWorker(t, bin, nil, append(base, "--migrate-only")...); code != 0 {
+				t.Fatalf("--migrate-only could not re-apply %s's own newest migration (v%d) after its "+
+					"tracking row was deleted -- this is cleat#2223's exact hazard, not a repair failure:\n%s",
+					probePlugin, newestVersion, out)
+			}
+			var afterCount int
+			if err := db.QueryRow(countPluginMigrationsSQL(c.name), probePlugin).Scan(&afterCount); err != nil {
+				t.Fatalf("count %s's plugin_migrations rows after reapply: %v", probePlugin, err)
+			}
+			if afterCount != beforeCount {
+				t.Errorf("%s's plugin_migrations row count after delete-and-reapply: got %d, want %d (the pre-delete count)",
+					probePlugin, afterCount, beforeCount)
 			}
 
 			// 7. --migrate-only needs NO key ring and never reaches the secrets check.
@@ -439,11 +514,36 @@ func insertSecretSQL(dialect string) string {
 	return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext, key_version) VALUES ('` + tenant + `', 'cleat-2117', 'x', 1)`
 }
 
-func firstPluginMigrationSQL(dialect string) string {
-	if dialect == "mssql" {
-		return `SELECT TOP 1 plugin_name, version FROM plugin_migrations ORDER BY plugin_name, version`
+// newestPluginMigrationVersionSQL returns pluginName's highest applied
+// version -- never the globally-first (plugin_name, version) row, which is
+// what this test used before this PR. The first plugin
+// migration, alphabetically, is overwhelmingly likely to be a `CREATE TABLE
+// IF NOT EXISTS` -- idempotent by construction -- while schema evolution
+// concentrates in LATER migrations, which is exactly where cleat#2223's bare
+// `ALTER TABLE ... ADD/DROP COLUMN` class of bug lives. version is a real
+// INTEGER column here (unlike the core schema_migrations.version, which is
+// TEXT), so a plain MAX() needs no CAST.
+func newestPluginMigrationVersionSQL(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `SELECT MAX(version) FROM plugin_migrations WHERE plugin_name = ?`
+	case "mssql":
+		return `SELECT MAX(version) FROM plugin_migrations WHERE plugin_name = @p1`
 	}
-	return `SELECT plugin_name, version FROM plugin_migrations ORDER BY plugin_name, version LIMIT 1`
+	return `SELECT MAX(version) FROM plugin_migrations WHERE plugin_name = $1`
+}
+
+// countPluginMigrationsSQL counts pluginName's applied-migration rows, used
+// to confirm a deleted-then-reapplied row comes back as exactly one row, not
+// zero (reapply silently failed) or two (a duplicate insert).
+func countPluginMigrationsSQL(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = ?`
+	case "mssql":
+		return `SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = @p1`
+	}
+	return `SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = $1`
 }
 
 func deletePluginMigrationSQL(dialect string) string {
@@ -454,14 +554,4 @@ func deletePluginMigrationSQL(dialect string) string {
 		return `DELETE FROM plugin_migrations WHERE plugin_name = @p1 AND version = @p2`
 	}
 	return `DELETE FROM plugin_migrations WHERE plugin_name = $1 AND version = $2`
-}
-
-func insertPluginMigrationRowSQL(dialect string) string {
-	switch dialect {
-	case "mysql":
-		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES (?, ?)`
-	case "mssql":
-		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES (@p1, @p2)`
-	}
-	return `INSERT INTO plugin_migrations (plugin_name, version) VALUES ($1, $2)`
 }

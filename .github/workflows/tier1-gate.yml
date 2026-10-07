@@ -10,7 +10,11 @@
 # what we intend to hold ourselves to, not a claim that anything is checking."
 #
 # Deliberately strict, and the strictness is the point:
-#   - no continue-on-error. A tier-1 failure blocks.
+#   - no continue-on-error on the gate step itself. A tier-1 failure blocks.
+#     (cleat#2834: the "Upload the tier-1 log" steps do carry continue-on-error
+#     -- they run after the gate step and hold no test result of their own, so
+#     losing one to a transient artifact-upload failure must not fail this
+#     job. See the comment on those steps for the full reasoning.)
 #   - no known-failure list. Tier 1 has none by definition.
 #   - the gate refuses to run at all when a precondition is missing, rather
 #     than running and reporting a green that measured nothing. An unset DSN
@@ -86,30 +90,62 @@
 # python IS tier 1; crates.io, npm and Maven Central are not, because their
 # languages are not.
 #
-# MERGE_GROUP IS REPORT-ONLY FOR tier1-engine AND tier1-rest (cleat#2080). The
-# merge queue re-tests every required check against a temporary
-# `gh-readonly-queue/...` ref, which means these two DB-backed, ~10-11 minute
-# jobs used to re-provision three databases and a Python/wasm-tools toolchain
-# to re-run test content the PR's own `pull_request` run had already proven
-# green, on the critical path of every merge. Each now runs a single
-# unconditional `echo` step on `merge_group` and skips every OTHER step in
-# the job -- the job-level `services:` blocks (postgres, mysql, mssql) are
-# not a step, so they still start on `merge_group` regardless; "report-only"
-# here means the test content doesn't re-run, not that the job costs
-# nothing. Same pattern as stream-trailer-check.yml. `tier1-coverage` is
-# deliberately NOT report-only: it is cheap (~40s), needs no DB, and
-# re-running it in the queue is free insurance that the shard partition
-# itself did not change
-# underneath the merge. The `tier1` aggregator below is unchanged; its
-# `needs.*.result` check reads "success" for a report-only run exactly as it
-# would for a real one.
+# MERGE_GROUP SKIPS tier1-coverage, tier1-engine AND tier1-rest ENTIRELY
+# (owner-ordered, this change). The merge queue re-tests every required
+# check against a temporary `gh-readonly-queue/...` ref, which meant these
+# jobs -- two of them DB-backed, ~10-11 minute -- used to be STARTED on
+# every merge_group event just to run a single report-only `echo` step and
+# report success, so the test content never re-ran but each still queued
+# for, and held, its own runner. Five runner assignments (tier1-coverage,
+# the 2-way tier1-engine matrix, tier1-rest, the tier1 aggregator) for
+# ~3.5 minutes of real work, on the critical path of every merge, in a
+# queue depth where a runner assignment is the scarce thing, not job time.
+#
+# All three now carry `if: github.event_name != 'merge_group'` at the JOB
+# level, so on merge_group they are not started at all -- zero runner
+# assignments instead of three (four counting tier1-engine's matrix). The
+# tier1 aggregator's `needs.*.result` check, below, now reads "skipped" as
+# a pass on merge_group specifically, and nothing else -- see its own
+# comment for why that distinction is load-bearing rather than cosmetic.
+#
+# THIS REMOVES tier1-coverage's OWN safety net, and that removal is
+# deliberate, not an oversight: tier1-coverage used to be the one shard
+# EXEMPTED from report-only, on the reasoning that it is cheap (~40s), needs
+# no DB, and re-running it in the queue was free insurance that the shard
+# partition itself had not changed underneath the merge.
+#
+# "Free" was measured false before this change shipped, which is why the
+# insurance is being given up rather than kept alongside the other two
+# reductions. #2694's merge_group run (36631254824):
+#
+#   Tier 1 Shard Coverage   started +13.1 min into the run   duration 0.7 min
+#
+# It waited 13.1 minutes for a runner to do 0.7 minutes of work, in an
+# 83-minute run where ~79 minutes was jobs waiting on a runner, not jobs
+# running. The old reasoning priced the job's OWN execution time; the actual
+# cost is the runner ASSIGNMENT, which is the scarce and dominant term in
+# that whole pipeline. So this was never a 40-second insurance policy -- it
+# was a full queue slot on the critical path of every merge, which is the
+# single most expensive thing in the run.
+#
+# Skipping it entirely on merge_group gives that insurance up. What still
+# catches a broken partition: the PR's own `pull_request` run (this same
+# job, same script, unconditional there), and develop's own `push` run
+# after merge. What it no longer catches: a partition break introduced by a
+# DIFFERENT PR landing between this one's `pull_request` run and its place
+# in the queue -- the same class of gap the tradeoff below already accepts
+# for tier1-engine and tier1-rest's actual test content, now extended to
+# the partition check that used to be the one exception to it. This is a
+# real, if small, loss -- not sold here as strictly better than what it
+# replaces, only as worth the runner-assignment cost it stops paying.
 #
 # The tradeoff this accepts: a semantic conflict between two independently-
 # green PRs (each fine alone, broken together) is no longer caught IN the
-# queue for the engine/rest content -- only after merge, via develop's own
-# push run and (for ./engine/... under -race) engine-race.yml's 4-hour
-# schedule. No live branch-protection or required-check change was needed:
-# job ids, names and the "Tier 1 Gate" required context are all unchanged.
+# queue for the engine/rest content, OR for the shard partition itself --
+# only after merge, via develop's own push run and (for ./engine/... under
+# -race) engine-race.yml's 4-hour schedule. No live branch-protection or
+# required-check change was needed: job ids, names and the "Tier 1 Gate"
+# required context are all unchanged.
 # ---------------------------------------------------------------------------
 name: Tier 1 Gate
 
@@ -117,7 +153,10 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    # cleat#2483: `branches` filters on the PR's BASE branch, and a
+    # release branch was absent -- so every PR targeting one ran none of
+    # this workflow, and the release PR into main was the only gate left.
+    branches: [main, develop, "release/**"]
     # `edited` is required, not decorative: it is the activity type a BASE
     # CHANGE fires. Without it a PR opened against a feature branch and later
     # retargeted here never triggers this workflow at all -- not at open (the
@@ -197,6 +236,12 @@ jobs:
   # a shard split that was wrong from the start.
   tier1-coverage:
     name: Tier 1 Shard Coverage
+    # On merge_group this shard's own steps already reduce to one report-only
+    # echo (below) -- this makes it skip ENTIRELY instead, so merge_group
+    # costs one runner assignment across all three shards rather than three.
+    # See tier1's own "Aggregate shard results" step for why a job SKIPPED
+    # here does not fail the gate on merge_group.
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -215,6 +260,12 @@ jobs:
   tier1-engine:
     name: Tier 1 Engine Shard ${{ matrix.shard }}/3
     needs: [tier1-coverage]
+    # On merge_group every step below already reduces to one report-only
+    # echo (see the per-step `if:` guards further down) -- this skips the
+    # job ENTIRELY instead, so the matrix's two runner assignments are not
+    # spent just to run that echo. See tier1's "Aggregate shard results"
+    # step for why a SKIPPED job here does not fail the gate on merge_group.
+    if: github.event_name != 'merge_group'
     strategy:
       fail-fast: false
       matrix:
@@ -374,22 +425,13 @@ jobs:
       CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
 
     steps:
-      # cleat#2080: the merge queue re-runs this job's `pull_request` content
-      # against a temporary `gh-readonly-queue/...` ref via the `merge_group`
-      # trigger below. That content was already validated when the PR's own
-      # `pull_request` run went green -- re-provisioning three databases and a
-      # Python/wasm-tools toolchain to re-run the identical test shard is
-      # ~10-11 wall-clock minutes spent re-proving something already proven.
-      # See stream-trailer-check.yml for the established pattern this copies.
-      #
-      # This trades away in-queue detection of a semantic conflict between two
-      # independently-green PRs (each fine alone, broken merged together) --
-      # accepted per the issue: that case is now caught by develop's own push
-      # run (and engine-race.yml's schedule) rather than in the queue.
-      - name: Already checked on the pull request
-        if: github.event_name == 'merge_group'
-        run: echo "tier 1 gate -- engine shard ${{ matrix.shard }}/3 -- validated by this pull request's own pull_request run -- cleat#2080"
-
+      # merge_group no longer reaches any step in this job at all -- the
+      # job-level `if:` above already excludes it. See the top-of-file
+      # header comment for the mechanism and why tier1-coverage's own
+      # partition check is affected too. The per-step `if: != merge_group`
+      # guards below are consequently unreachable-false (this job cannot run
+      # WITH event_name == merge_group), left as-is rather than stripped from
+      # every step for a diff this size.
       - uses: actions/checkout@v7
         if: github.event_name != 'merge_group'
 
@@ -497,27 +539,85 @@ jobs:
       # stdout already names what it excluded, what it ran, and what failed.
       - name: Tier 1 gate -- engine shard ${{ matrix.shard }}/3
         if: github.event_name != 'merge_group'
+        env:
+          # A distinct local filename per shard, not just a distinct artifact
+          # NAME -- tier1-push-failure-notifier.yml downloads every shard's
+          # artifact with merge-multiple: true, which merges by the file's
+          # name INSIDE the artifact, not the artifact's own name. All shards
+          # writing "tier-gate.log" collided there, so only one shard's
+          # failures ever reached the notifier (cleat#2877).
+          TIER_GATE_LOG: tier-gate-engine-${{ matrix.shard }}.log
         run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/3
 
       # The log on failure, because the gate deliberately keeps it rather than
       # deleting its evidence -- re-running the whole shard to find out what
       # broke is not a debugging strategy. Guarded on merge_group too: the real
-      # step above did not run, so tier-gate.log does not exist, and `always()`
-      # alone would upload a missing-file failure on every queue run.
+      # step above did not run, so tier-gate-engine-N.log does not exist, and
+      # `always()` alone would upload a missing-file failure on every queue run.
+      #
+      # continue-on-error, deliberately -- and this is a NARROWER exemption
+      # than the "no continue-on-error" line at the top of this file, not a
+      # contradiction of it. That principle is about the GATE (the step above,
+      # whose exit status this job's exit status already is): a test failure
+      # must never be swallowed. This step carries no test result at all --
+      # it is debugging evidence for a failure the gate step already reported
+      # on its own exit status. cleat#2834: a `Failed to CreateArtifact:
+      # Unable to make request: ETIMEDOUT` here failed this whole job (and so
+      # the required "Tier 1 Gate" push-run check on develop, the one net
+      # cleat#2150 says the merge queue does not provide) while the actual
+      # gate step above had already exited 0. Losing this one shard's log to
+      # a network hiccup is a real but strictly smaller cost than reporting a
+      # false failure on the authoritative develop gate.
       - name: Upload the tier-1 log
         if: always() && github.event_name != 'merge_group'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}
-          path: tier-gate.log
+          name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: tier-gate-engine-${{ matrix.shard }}.log
           retention-days: 30
 
   tier1-rest:
     name: Tier 1 Gate -- rest
     needs: [tier1-coverage]
+    # Same reasoning as tier1-engine's job-level `if:` above: on merge_group
+    # every step below already reduces to one report-only echo, so skip the
+    # job entirely rather than spend a runner assignment on it.
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
-    # Same buffer as tier1-engine, over the same GO_TEST_TIMEOUT default.
-    timeout-minutes: 45
+    # Raised from 45 to 60, cleat#2876. Measured directly (full job logs via
+    # the jobs/<id>/logs API, locating the checkout-start/tier-gate.sh-start/
+    # tier-gate.sh-end/log-end timestamps on three clean runs): the 30m
+    # tests + 15m setup buffer this 45 was meant to be is mostly setup cost
+    # that doesn't shrink with sharding, per the comment above -- but
+    # genuine test execution itself now runs 32-37 minutes, not 30, and
+    # setup is ~1-1.5 minutes, not 15. Teardown (test end to job end) is
+    # 1-3 seconds across all three samples -- not a growing share, so this
+    # raise buys headroom for real test time rather than delaying a
+    # teardown problem that would recur at the new ceiling. It has fired
+    # wrongly before, exactly this way: PR #2861's Tier 1 Gate run
+    # (36799087322), job "Tier 1 Gate -- rest" (110169436550), ran
+    # 2026-10-01T01:05:39Z to cancelled 02:00:40Z (55m01s) with the
+    # annotation "The job has exceeded the maximum execution time of
+    # 45m0s" -- this job's own cap, on a PR whose test step alone ran
+    # ~54 min against this same job's usual 29-38m. Cause not established;
+    # cited for the mechanism (this cap firing on a diff that could not
+    # plausibly reach a 54-minute test run through it), not as a
+    # diagnosis of why that run was slow.
+    #
+    # CAVEAT (cleat-review, #2876), restated in PER-PACKAGE terms --
+    # `-timeout` resets for each test binary, not once per `go test`
+    # invocation (`go help testflag`: counted from that binary's own
+    # start). tier-gate.sh runs `go test -p 1 -timeout
+    # ${GO_TEST_TIMEOUT:-30m}` once for $ACTIVE_PKGS, then AGAIN in a loop
+    # over each separate Go module (cleat/, etc.) -- and ANY package
+    # within either call, not just the first, gets its own fresh 30m from
+    # when it personally starts. On the three clean runs measured, a
+    # package starting after roughly minute 29 of elapsed test time and
+    # then hanging would be killed by this 60m job cap before its own 30m
+    # Go-level timeout could fire, with no goroutine dump. Flagged rather
+    # than resolved, same as coverage's.
+    timeout-minutes: 60
 
     services:
       postgres:
@@ -619,10 +719,8 @@ jobs:
       CLEAT_CRASH_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
 
     steps:
-      # See tier1-engine's identical step for the full rationale (cleat#2080).
-      - name: Already checked on the pull request
-        if: github.event_name == 'merge_group'
-        run: echo "tier 1 gate -- rest shard 3/3 -- validated by this pull request's own pull_request run -- cleat#2080"
+      # See tier1-engine's identical comment: merge_group no longer reaches
+      # any step in this job either.
 
       - uses: actions/checkout@v7
         if: github.event_name != 'merge_group'
@@ -678,14 +776,24 @@ jobs:
 
       - name: Tier 1 gate -- rest shard 3/3
         if: github.event_name != 'merge_group'
+        env:
+          # See the engine shard's identical comment (cleat#2877): a distinct
+          # local filename per job, not just a distinct artifact name, is what
+          # survives tier1-push-failure-notifier.yml's merge-multiple download.
+          TIER_GATE_LOG: tier-gate-rest.log
         run: scripts/tier-gate.sh --shard 3/3
 
+      # continue-on-error, for the same reason as tier1-engine's identical
+      # step above (cleat#2834): this is debugging evidence, not the gate --
+      # the "Tier 1 gate -- rest shard 3/3" step's own exit status is what
+      # this job's result already is.
       - name: Upload the tier-1 log
         if: always() && github.event_name != 'merge_group'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: tier-gate-log-rest-${{ github.sha }}
-          path: tier-gate.log
+          name: tier-gate-log-rest-${{ github.sha }}-${{ github.run_attempt }}
+          path: tier-gate-rest.log
           retention-days: 30
 
   # The required status context. Named exactly "Tier 1 Gate" so
@@ -707,14 +815,39 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # The three shards now carry `if: github.event_name != 'merge_group'`
+      # at the JOB level (not just on their steps), so on merge_group they
+      # are skipped entirely rather than started-and-report-only -- one
+      # runner assignment instead of five. That makes their `result`
+      # "skipped", not "success", on exactly the event where skipping them
+      # is correct. "skipped" must read as a pass here ONLY when the event
+      # is merge_group; on pull_request or push a skipped shard is still a
+      # real failure (a job that did not run cannot have passed its tests),
+      # so the acceptance is conditioned on the event, not granted
+      # unconditionally to the string "skipped".
       - name: Aggregate shard results
+        env:
+          EVENT: ${{ github.event_name }}
+          COVERAGE: ${{ needs.tier1-coverage.result }}
+          ENGINE: ${{ needs.tier1-engine.result }}
+          REST: ${{ needs.tier1-rest.result }}
         run: |
-          echo "tier1-coverage: ${{ needs.tier1-coverage.result }}"
-          echo "tier1-engine:   ${{ needs.tier1-engine.result }}"
-          echo "tier1-rest:     ${{ needs.tier1-rest.result }}"
-          if [ "${{ needs.tier1-coverage.result }}" != "success" ] || \
-             [ "${{ needs.tier1-engine.result }}" != "success" ] || \
-             [ "${{ needs.tier1-rest.result }}" != "success" ]; then
+          echo "event:          $EVENT"
+          echo "tier1-coverage: $COVERAGE"
+          echo "tier1-engine:   $ENGINE"
+          echo "tier1-rest:     $REST"
+
+          ok() {
+            [ "$1" = "success" ] && return 0
+            [ "$EVENT" = "merge_group" ] && [ "$1" = "skipped" ] && return 0
+            return 1
+          }
+
+          fail=0
+          ok "$COVERAGE" || { echo "::error::tier1-coverage: $COVERAGE"; fail=1; }
+          ok "$ENGINE"   || { echo "::error::tier1-engine: $ENGINE"; fail=1; }
+          ok "$REST"     || { echo "::error::tier1-rest: $REST"; fail=1; }
+          if [ "$fail" -ne 0 ]; then
             echo "::error::Tier 1 Gate: at least one shard did not succeed"
             exit 1
           fi

@@ -537,6 +537,13 @@ func TestTheRecoveryGraceExcusesOnlyLoopsThatWentQuietDuringTheOutage(t *testing
 	w.healthTracker.recordRun("held")
 	w.healthTracker.recordRun("wedged")
 	probeOK(w)
+	// "wedged" has been silent a full minute before the outage even begins. cleat#2284 anchors the outage
+	// boundary on the last known-good call (lastSuccessStart) and NOT on failingSince, so this is the case
+	// that boundary must get right without help: lastSuccessStart alone would reach back the whole minute
+	// and wrongly excuse "wedged" too (cleat-review, cleat#2284 follow-up) unless it is clamped to the lag
+	// bound -- one heartbeat interval plus one call deadline -- before failingSince. This test was loosened
+	// to 12x5s of continuous probing earlier in review; restoring the harsh gap is part of the fix, not an
+	// obstacle to it.
 	clk.advance(time.Minute)
 	// "held" keeps ticking until the outage begins (the database then holds its call).
 	w.healthTracker.recordRun("held")
@@ -561,5 +568,92 @@ func TestTheRecoveryGraceExcusesOnlyLoopsThatWentQuietDuringTheOutage(t *testing
 	probeOK(w)
 	if c, b := livez(); c != 503 {
 		t.Fatalf("[grace over, the loop never resumed] /livez = %d %v, want 503", c, b)
+	}
+}
+
+// TestTheOutageBoundaryReachesBackToTheLastKnownGoodCallNotTheFirstFailedOne is a falsification for
+// cleat#2284: the failing call that sets failingSince does not FAIL at the instant the outage began, it
+// FAILS when its own deadline expires -- which can be up to a heartbeat interval plus that deadline
+// after the database actually went down. A loop that went quiet during that lag, before failingSince but
+// after the real onset, is explained by the outage and the old code (outageStart = failingSince) wrongly
+// called it wedged.
+func TestTheOutageBoundaryReachesBackToTheLastKnownGoodCallNotTheFirstFailedOne(t *testing.T) {
+	api := newTestAPIServer(&mockStore{})
+	w := api.worker
+	clk := sharedClock(w)
+	// The 5s/8s narrative below has to be backed by real config, not just clock hops: the fix clamps the
+	// boundary to w.heartbeatInterval+w.dbCallDeadline() (cleat-review, cleat#2284 follow-up), so if that
+	// sum does not actually equal 13s, the clamp computes a different, stricter anchor than the comments
+	// describe and this test would be asserting on a scenario that never happened.
+	oldFloor := dbCallDeadlineFloor
+	dbCallDeadlineFloor = 8 * time.Second
+	defer func() { dbCallDeadlineFloor = oldFloor }()
+	w.heartbeatInterval = 5 * time.Second // dbCallDeadline() = the floor, 8s: heartbeatInterval+dbCallDeadline() = 13s
+	w.healthTracker.setInterval("held", time.Second)
+	probeOK(w) // t=0: last known-good instant
+
+	// The database dies at t=5s, but the call watching it does not report failure until its 8s deadline
+	// expires at t=13s: observeDBProbe's "started" and the clock's "now" diverge on purpose, the same way
+	// a real bounded call's start and its eventual deadline-expiry do.
+	started := clk.now()
+	clk.advance(5 * time.Second)
+	w.healthTracker.registerLoop("held")
+	w.healthTracker.recordRun("held") // "held" ticks at t=5s, DURING the real outage, before it is detected
+	clk.advance(8 * time.Second)      // t=13s: the watching call's deadline finally expires
+	w.observeDBProbe(started, 13*time.Second, context.DeadlineExceeded)
+
+	clk.advance(2 * time.Second) // t=15s
+	probeOK(w)                   // recovery, well inside dbRecoveryGrace of the t=13s failure
+
+	if c, b, _ := healthGet(t, api.handleLivez, "/livez"); c != 200 {
+		t.Fatalf("[loop quiet at t=5s, DURING the outage that started at t=5s but was not observed as "+
+			"failed until t=13s] /livez = %d %v, want 200: the outage boundary must reach back to the "+
+			"last known-good call (t=0), not stop at the first failed observation (t=13s)", c, b)
+	}
+}
+
+// TestARaisedHeartbeatDoesNotUnboundTheOutageBoundary is a falsification for the follow-up cleat-review
+// found on cleat#2284's first fix: anchoring the outage boundary on lastSuccessStart alone has no upper
+// bound on how far back lastSuccessStart can be. --heartbeat may be raised to just under 150s (config.go's
+// help text recommends this "to survive a longer database outage"), so a worker that only probes once a
+// heartbeat can have a lastSuccessStart minutes old with nothing wrong at all -- and the unclamped anchor
+// would excuse every loop quiet since then for the outage's duration plus dbRecoveryGrace, however long ago
+// that was. The fix bounds the anchor to at most one heartbeat interval plus one call deadline before
+// failingSince, and that bound must scale WITH heartbeatInterval rather than being a fixed constant that
+// happens to work at the small intervals every other test in this file uses.
+func TestARaisedHeartbeatDoesNotUnboundTheOutageBoundary(t *testing.T) {
+	api := newTestAPIServer(&mockStore{})
+	w := api.worker
+	clk := sharedClock(w)
+	w.heartbeatInterval = 120 * time.Second // just under the 150s cap; dbCallDeadline() = 60s, lag = 180s
+	w.healthTracker.setInterval("held", time.Second)
+	w.healthTracker.setInterval("wedged", time.Second)
+
+	w.healthTracker.registerLoop("held")
+	w.healthTracker.registerLoop("wedged")
+	w.healthTracker.recordRun("held")
+	w.healthTracker.recordRun("wedged")
+	probeOK(w) // t=0: lastSuccessStart=0
+
+	// "wedged" goes silent here and never ticks again. Ten minutes pass with no further probing at all --
+	// a worker at this heartbeat genuinely goes that long between calls -- so lastSuccessStart is still 0
+	// when the outage is finally detected, 600s later: 3.3x the 180s lag bound.
+	clk.advance(10 * time.Minute)
+	w.healthTracker.recordRun("held") // "held" ticks once more, right before the outage
+	clk.advance(200 * time.Millisecond)
+	probeFail(w) // failingSince = 600.2s
+	clk.advance(10 * time.Second)
+	probeOK(w) // recovery at 610.2s; grace opens
+
+	livez := func() (int, map[string]any) { c, b, _ := healthGet(t, api.handleLivez, "/livez"); return c, b }
+	if c, b := livez(); c != 503 || b["reason"] != "background_loop_stuck" {
+		t.Fatalf("[wedged quiet since t=0, outage detected at t=600.2s, 600s > the 180s lag bound] "+
+			"/livez = %d %v, want 503: an unbounded anchor would reach all the way back to lastSuccessStart "+
+			"(t=0) and wrongly excuse a loop that went quiet 10 minutes before the outage", c, b)
+	}
+	// "held", which ticked 0.2s before the outage began, is well inside the bound and stays excused.
+	w.healthTracker.recordRun("wedged") // remove it from the picture
+	if c, b := livez(); c != 200 {
+		t.Fatalf("[only the loop the outage held is stale, well inside the bound] /livez = %d %v, want 200", c, b)
 	}
 }

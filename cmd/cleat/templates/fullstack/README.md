@@ -1,4 +1,4 @@
-# my-fullstack-app
+# {{.ProjectName}}
 
 A full-stack cleat application: a durable command path, a browser front-end, and
 the plugins that sit between them — wired so the non-obvious settings are

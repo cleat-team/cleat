@@ -132,12 +132,18 @@ func scanSecretsForTenantSites(t *testing.T, root string, files []string) []secr
 		if err != nil {
 			t.Fatalf("parse %s: %v", rel, err)
 		}
+		assertDefaultPluginImportName(t, f, rel)
+		// No gateBareIdentOnPackage here: isSecretsForTenant has no
+		// Ident branch to gate (every shape it looks for is a selector
+		// on some value), so wrapping it would be a no-op.
+		assertNoPackageScopeReferenceEscapes(t, f, fset, rel, isSecretsForTenant)
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
 			name := funcName(fn)
+			assertNoTrackedReferenceEscapes(t, fn, fset, rel, name, isSecretsForTenant)
 			ast.Inspect(fn, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok || !isSecretsForTenant(call.Fun) {

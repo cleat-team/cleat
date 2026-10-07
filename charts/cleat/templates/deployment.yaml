@@ -23,6 +23,11 @@ spec:
       # SIGTERM drain (--shutdown-grace) and its plugin Stop budget (5s, cleat#2147) all come out of it. The
       # Kubernetes default, 30s, is too short for a 20s drain plus the preStop sleep (cleat#2285).
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      # Must match the headless Service's name in service.yaml (cleat#2196):
+      # this is what makes each pod resolvable as
+      # <pod-name>.{{ include "cleat.fullname" . }}-headless, rather than
+      # just reachable through the load-balanced Service above.
+      subdomain: {{ include "cleat.fullname" . }}-headless
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -41,6 +46,7 @@ spec:
             - "--flush-retry-window={{ .Values.worker.flushRetryWindow }}"
             - "--poll={{ .Values.worker.pollInterval }}"
             - "--shutdown-grace={{ .Values.worker.shutdownGrace }}"
+            - "--worker-service-name={{ include "cleat.fullname" . }}-headless"
             {{- if .Values.adminApi.enabled }}
             # Off unless asked for (cleat#2267): while it is on, any authenticated key of any tenant can drain a
             # worker and trigger an all-tenant retention sweep. See values.yaml and docs/operations/admin-api.md.

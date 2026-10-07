@@ -219,6 +219,15 @@ public class HostCalls {
         int sigNameOut, int sigNameMax,
         int payloadOut, int payloadMax);
 
+    @Import(module = "env", name = "cleat_wait_for_event")
+    private static native long cleatWaitForEventRaw(
+        int pluginNamePtr, int pluginNameLen,
+        int functionNamePtr, int functionNameLen,
+        int inputPtr, int inputLen,
+        int namesPtr, int namesLen,
+        long timeoutMs,
+        int responsePtr, int responseMaxLen);
+
     @Import(module = "env", name = "cleat_register_update_handler")
     private static native long cleatRegisterUpdateHandlerRaw(
         int namePtr, int nameLen);
@@ -1203,6 +1212,87 @@ public class HostCalls {
      */
     public CleatResult<AwaitSignalsResult> awaitSignals(String[] signalNames, long timeoutSeconds) {
         return awaitSignalsMs(signalNames, timeoutSeconds * 1000);
+    }
+
+    /**
+     * Block until this workflow claims an external event, or until the timeout
+     * expires. Mirrors Go's WaitForEvent.
+     * <p>
+     * The claim/register/re-claim loop lives in the host rather than in every
+     * application: a wake is not proof of a claimable event, and the host
+     * already knows that, so re-deciding it here would be a second copy of an
+     * invariant the host owns.
+     * <p>
+     * {@code functionName} must be claim-shaped -- its JSON output carries a
+     * boolean {@code found}. {@code found} true returns the event; false means
+     * the host registers this workflow as an awaiter and waits. An output with
+     * no boolean {@code found} is reported as a failure rather than waited on,
+     * so a function that never answers the question cannot burn the whole
+     * budget reporting a timeout.
+     *
+     * @param pluginName     the plugin owning the claim-shaped function
+     * @param functionName   the claim-shaped function, e.g. await_webhook
+     * @param inputJson      the function's JSON input
+     * @param signalNames    the signal names the host registers and waits on
+     * @param timeoutSeconds maximum wait time in seconds
+     * @return the claimed event's JSON
+     * @see #waitForEventMs(String, String, String, String[], long)
+     */
+    public CleatResult<String> waitForEvent(String pluginName, String functionName,
+                                           String inputJson, String[] signalNames,
+                                           long timeoutSeconds) {
+        return waitForEventMs(pluginName, functionName, inputJson, signalNames,
+            timeoutSeconds * 1000);
+    }
+
+    /**
+     * Block until this workflow claims an external event, in milliseconds.
+     * Mirrors Go's WaitForEvent.
+     *
+     * @see #waitForEvent(String, String, String, String[], long)
+     */
+    public CleatResult<String> waitForEventMs(String pluginName, String functionName,
+                                             String inputJson, String[] signalNames,
+                                             long timeoutMs) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
+        // Serialize signal names as a JSON string array (matching Go adapter),
+        // the same shape awaitSignalsMs passes.
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < signalNames.length; i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(signalNames[i])).append("\"");
+        }
+        sb.append("]");
+        String namesJSON = sb.toString();
+
+        int[] p = packStrings(pluginName, functionName, inputJson, namesJSON);
+        int pnOff = p[0], fnOff = p[1], inOff = p[2], namesOff = p[3];
+        int pnLen = p[4], fnLen = p[5], inLen = p[6], namesLen = p[7];
+
+        long result = cleatWaitForEventRaw(
+            pnOff, pnLen,
+            fnOff, fnLen,
+            inOff, inLen,
+            namesOff, namesLen,
+            timeoutMs,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Ask BEFORE decoding: the host marks a refusal with bit 31, and returns
+        // the same word when the await it performed merely SUSPENDED the run.
+        // Bit 31 sits outside the durable-call layout, so a decoded stop reads as
+        // errCode=0 with length 0 -- an empty successful event the caller would
+        // act on. Both mean the segment ends here.
+        Memory.throwIfStopped(result);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            return CleatResult.err(readOutput(responseLen));
+        }
+        return CleatResult.ok(readOutput(responseLen));
     }
 
     /**

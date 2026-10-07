@@ -187,6 +187,87 @@ func TestExecuteWithBackend_ErrorPropagation(t *testing.T) {
 	}
 }
 
+// TestExecuteWithBackend_QueryStatePublishedBeforeAFailureSurvivesIt is
+// cleat#2520's actual boundary: a guest that calls SetQueryState and THEN
+// fails must have that state come back out of executeWithBackend, not just
+// out of a helper the failure path never reaches. cleat-review caught the
+// first version of this fix injecting a map directly into
+// recordTerminalFailureWithHistory, several frames below Replay, which could
+// not see that every error return in executeWithBackend passed a hardcoded
+// nil for queryState regardless of what the guest had published.
+//
+// Three cases, because the function has three DIFFERENT non-suspend error
+// returns once a session exists, and fixing one textually is not evidence
+// the other two were touched:
+//
+//   - a plain error that is not a *GuestReturnedError* and that
+//     resolveWasmTrap can enrich (which is any non-empty message --
+//     enrichTrapMessage wraps whatever it is handed) -- the common case for
+//     a trap or an unclassified execution failure.
+//   - a *GuestReturnedError*, whose branch returns before the trap-enrichment
+//     check runs at all -- the guest completed and returned its own error.
+//   - the wall-clock timeout, a distinct return before callErr is even
+//     examined and the realistic shape of a runaway workflow (cleat#2638).
+func TestExecuteWithBackend_QueryStatePublishedBeforeAFailureSurvivesIt(t *testing.T) {
+	cases := []struct {
+		name      string
+		configure func(e *Engine)
+		executeFn func(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error)
+	}{
+		{
+			name: "plain error, trap-enriched",
+			executeFn: func(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
+				es := session.(*execSession)
+				es.SetQueryState(ctx, nil, "phase", "charging")
+				return nil, errors.New("boom")
+			},
+		},
+		{
+			name: "guest returned its own error",
+			executeFn: func(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
+				es := session.(*execSession)
+				es.SetQueryState(ctx, nil, "phase", "charging")
+				return nil, &GuestReturnedError{Err: errors.New("validation failed")}
+			},
+		},
+		{
+			name: "wall-clock timeout",
+			configure: func(e *Engine) {
+				e.defaultWorkflowTimeout = 50 * time.Millisecond
+			},
+			executeFn: func(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
+				es := session.(*execSession)
+				es.SetQueryState(ctx, nil, "phase", "charging")
+				<-ctx.Done()
+				return &ExecResult{}, nil
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &configurableMockBackend{executeFn: tc.executeFn}
+			e := NewEngine(nil, nil, WithBackend("go", backend))
+			e.workflowID = "wf-query-state-on-failure-test"
+			if tc.configure != nil {
+				tc.configure(e)
+			}
+
+			_, _, _, _, queryState, err := e.executeWithBackend(
+				context.Background(), backend, minimalWasm(), "test", []byte(`{}`), nil,
+			)
+
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if queryState["phase"] != "charging" {
+				t.Errorf("queryState = %v, want phase=charging -- a guest's published "+
+					"state must survive the error that ends its execution", queryState)
+			}
+		})
+	}
+}
+
 func TestExecuteWithBackend_Timeout(t *testing.T) {
 	backend := &configurableMockBackend{
 		executeFn: func(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {

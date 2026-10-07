@@ -493,15 +493,38 @@ func TestQueryState(t *testing.T) {
 	})
 }
 
+// TestGetWorkflowState pins the route against the WORKER'S dispatch, not
+// against the client's own idea of it.
+//
+// IT PINNED THE WRONG ONE UNTIL 2026-09-28. The path asserted here was
+// `/api/workflows/wf-1/state` and the fixture served a BARE map -- so the test
+// and the method agreed with each other and both disagreed with the worker,
+// which has no `/state` verb at all (`cmd/cleat-worker/server.go`,
+// `handleWorkflows`) and answers a listing as `{"state": {...}}`. The defect
+// survived because the fixture was written from the client rather than from the
+// route: a test that serves whatever the code expects cannot notice that the
+// code expects the wrong thing.
+//
+// The route below is the one `handleGetQueryState` serves when `key` is ABSENT:
+// `?key=` reads one key, no `key` at all lists every key the run published.
 func TestGetWorkflowState(t *testing.T) {
 	t.Run("happy path", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if want := "/api/workflows/wf-1/state"; r.URL.Path != want {
+			if want := "/api/workflows/wf-1/query"; r.URL.Path != want {
 				t.Errorf("path = %s, want %s", r.URL.Path, want)
+			}
+			// The parameter must be ABSENT, not empty: `?key=` reads a key, and
+			// a workflow can publish under "" (see handleGetQueryState). A
+			// client that sent `?key=` would silently stop listing.
+			if r.URL.RawQuery != "" {
+				t.Errorf("query = %q, want no query string -- the listing is the "+
+					"ABSENCE of key, and ?key= reads a key instead", r.URL.RawQuery)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]string{"k1": "v1", "k2": "v2"})
+			json.NewEncoder(w).Encode(map[string]any{
+				"state": map[string]string{"k1": "v1", "k2": "v2"},
+			})
 		}))
 		defer srv.Close()
 
@@ -519,7 +542,10 @@ func TestGetWorkflowState(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("{}"))
+			// The real empty answer, envelope and all. A bare `{}` would also
+			// pass this arm while not being what the route sends -- which is
+			// exactly how the wrong path survived.
+			w.Write([]byte(`{"state":{}}`))
 		}))
 		defer srv.Close()
 

@@ -59,9 +59,24 @@ database.
 
 ## Quick Start
 
-This walkthrough runs from the root of a **checkout of this repository** — steps 2
-and 3 read `migrations/` and `testdata/`, which are repo-relative. If you have not
-cloned yet: `git clone https://github.com/cleat-team/cleat && cd cleat`.
+> **Just want to run cleat, not work on it?** Skip to
+> [Installation](#installation) and the
+> [Quick Start Tutorial](docs/tutorials/quick-start.md) — `brew install
+> cleat-team/tap/cleat`, plain Docker for Postgres, no checkout. This
+> walkthrough is the other thing: it works **inside this tree**, using `make
+> setup`, a CLI built into `./bin`, and the in-tree fixture `./testdata/hello/`,
+> so what it exercises is the code you are reading.
+
+This walkthrough runs from the root of a **checkout of this repository** — step 3
+deploys `testdata/`, which is repo-relative. If you have not cloned yet:
+`git clone https://github.com/cleat-team/cleat && cd cleat`.
+
+> Corrected 2026-10-03: this used to say *"steps 2 and 3 read `migrations/` and
+> `testdata/`"*. Step 3 does read `testdata/`; **nothing here reads
+> `migrations/`** — step 2 applies the schema with `cleat-worker --migrate-only`,
+> which reads migrations **embedded in the binary** (cleat#2995/#2999). The only
+> other repo-relative reference was `docker-compose.partner.yml`, and the
+> tutorial's copy of this walkthrough no longer uses it.
 
 ```bash
 # 0. Verify your toolchain (one command)
@@ -69,12 +84,17 @@ make setup
 
 # 1. Build the CLI from THIS checkout, into ./bin.
 #    In this walkthrough, build rather than `go install .../cmd/cleat@latest`:
-#    the published CLI is v0.2.0, from a release branch this one has not
-#    merged, and its `deploy` has no --db flag -- step 4 then fails with a
-#    usage error instead of deploying. (That is a fact about THIS checkout
-#    tracking ahead of the last release, not about the published CLI being
-#    broken; for installing cleat outside a checkout, `@latest` is right --
-#    see Installation below.)
+#    the tree tracks ahead of the last release, and this walkthrough deploys an
+#    in-tree fixture, so the two are not the same code and the interfaces can
+#    differ. Measured 2026-10-03: develop is 288 commits ahead of v0.3.2.
+#    (Corrected 2026-10-03. This said the published CLI was v0.2.0, "from a
+#    release branch this one has not merged, and its `deploy` has no --db flag".
+#    All three parts are now false: v0.3.2 is the latest release, it IS on the
+#    develop line -- `git merge-base --is-ancestor v0.3.2 develop` succeeds --
+#    and its `deploy` declares --db, --name and --task-queue. The lineage
+#    problem was real and a later release fixed it; what remains is the 288
+#    commits, which is a version skew and not a fork. For installing cleat
+#    outside a checkout, `@latest` is right -- see Installation below.)
 #    Build into ./bin deliberately: `-o cleat` writes *inside* ./cleat/, which
 #    is a directory in this repo, so ./cleat stays a directory and is not
 #    runnable.
@@ -97,15 +117,15 @@ docker compose -f docker-compose.partner.yml up -d postgres
 #    directory as a package path and fails with "main module
 #    (github.com/cleat-team/cleat) does not contain package
 #    github.com/cleat-team/cleat/out" (cleat#2473).
-./bin/cleat build -o /tmp/cleat-build ./testdata/basic/
-# Wrote /tmp/cleat-build/cancel_order.wasm -- cleat build bundles every entry
-# point in the package (PlaceOrder, CancelOrder, LongRunning) into one module,
-# named after the first entry point it found. All three are still callable
-# from that one file; --entry-point at trigger time (step 7) picks one.
+./bin/cleat build -o /tmp/cleat-build ./testdata/hello/
+# Wrote /tmp/cleat-build/hello.wasm -- named after the source file (hello.go,
+# cleat#2407), not the entry point. testdata/hello declares exactly one entry
+# point (Greet), which step 7 does not have to name: the worker reads it from
+# the WASM's own cleat.metadata when there is only one candidate.
 
 # 4. Deploy to your database. The owner DSN is correct here.
 ./bin/cleat deploy --db "$CLEAT_OWNER_DSN" \
-    --name place_order /tmp/cleat-build/cancel_order.wasm
+    --name hello /tmp/cleat-build/hello.wasm
 
 # 5. Give the worker a connection it will accept. It REFUSES a superuser DSN,
 #    because PostgreSQL never applies row-level security to a superuser. The
@@ -123,12 +143,14 @@ export CLEAT_APP_DSN="postgres://cleat_app:cleat_app@localhost:5432/cleat?sslmod
 # 7. Mint an API key for the default tenant and trigger a workflow. The route
 #    requires the key -- and note it is POST .../<name>/start, not POST
 #    .../workflows (that route is GET-only and returns 405 on POST).
+#    Greet's only parameter is a single string, so "input" is that string
+#    directly, not an object -- an object would bind literally, as text.
 ./bin/cleat-worker --db "$CLEAT_APP_DSN" \
     --generate-api-key 00000000-0000-0000-0000-000000000000
 export CLEAT_API_KEY='cleat_sk_...'   # paste the key the command printed
-curl -X POST http://localhost:8080/api/workflows/place_order/start \
+curl -X POST http://localhost:8080/api/workflows/hello/start \
     -H "Authorization: Bearer $CLEAT_API_KEY" \
-    -d '{"input":{"userID":"u1","cart":[{"sku":"widget","quantity":2}]},"entry_point":"PlaceOrder"}'
+    -d '{"input":"Ada"}'
 ```
 
 <!-- Corrected 2026-09-27. This block was run verbatim, in both of its documented
@@ -140,6 +162,14 @@ curl -X POST http://localhost:8080/api/workflows/place_order/start \
      CLI has -db, -dry-run and -max-history-length, and deploys successfully. The
      published version is not an older snapshot of this tree: it is a different
      lineage, which is why the interfaces differ.
+
+     SUPERSEDED 2026-10-03, for the lineage claim only: the latest release is now
+     v0.3.2, it IS on the develop line (`git merge-base --is-ancestor v0.3.2
+     develop` succeeds), and its `deploy` declares --db, --name and --task-queue.
+     So `@latest` no longer resolves to the v0.2.0 CLI described here, and the
+     "different lineage" claim is false for it. Everything else in this block was
+     re-derived and still holds. What the checkout buys you now is 288 commits of
+     version skew, not a fork. See Installation, and cleat#2999.
 
      The `-o ./out` form could not be kept. It fails on BOTH CLIs with identical
      output, so it is not the version skew: with a `go.work` in scope that `use`s
@@ -155,6 +185,21 @@ curl -X POST http://localhost:8080/api/workflows/place_order/start \
 
      The previous text credited `--migrate-on-start` with applying the schema,
      which is true, and started deploy before it, which is the order that fails. -->
+
+<!-- Corrected 2026-09-30 (cleat#2788, split from cleat#2469): steps 3/4/7 previously built,
+     deployed and triggered testdata/basic's PlaceOrder, which makes a DurableCall to a
+     "catalog" service nothing in this repository provides -- the exact defect cleat#1967 found
+     and fixed in this file's very first snippet (the "try it" block, above "## What is Cleat"),
+     by switching it to testdata/hello's dependency-free Greet. That fix never reached this
+     section, so a worker actually run against these exact steps failed at step 7 with "service
+     catalog.LookupItem not configured: no endpoint registered" -- reachable because nothing ran
+     this section in CI until cmd/cleat/readme_quick_start_reaches_done_test.go, added in the
+     same change. Fixed the same way as the "try it" block above: testdata/hello/Greet in place
+     of testdata/basic/PlaceOrder, and no `entry_point` in step 7's body -- Greet is the WASM's
+     only declared entry point, so the worker resolves it from cleat.metadata without being
+     told, and naming it explicitly would require "input" to be an object (to merge
+     `__entry_point` into), which conflicts with Greet's single-string parameter binding the
+     whole input value as text. -->
 
 <!-- Corrected 2026-08-09: `cleat build ./testdata/basic/` was previously
 
@@ -254,6 +299,15 @@ go install github.com/cleat-team/cleat/cmd/cleat@latest
 go install github.com/cleat-team/cleat/cmd/cleat-worker@latest
 go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
 ```
+
+`@latest` resolves to the newest tagged release — **v0.3.2** at this writing —
+which is on the `develop` line, not a fork, and whose `deploy` accepts `--db`,
+`--name` and `--task-queue`. Re-derived 2026-10-03 for cleat#2999, which asked
+for the status to be stated here rather than only as a historical note: the
+earlier warning that `@latest` gave a v0.2.0 CLI with **no `--db`** belonged to
+that release and no longer applies. What does remain true is that the checkout
+tracks **ahead** of any release — 288 commits ahead of v0.3.2 — so build from a
+checkout rather than `@latest` when you are working in one.
 
 Or build from source: `git clone https://github.com/cleat-team/cleat.git && cd cleat && go install ./cmd/...`
 

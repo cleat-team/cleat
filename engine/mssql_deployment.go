@@ -137,11 +137,16 @@ func (s *MSSQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 // The dbo.tenants / dbo.tenant_api_keys pair is duplicate schema and should be
 // dropped in a migration -- not done here, because a DROP needs to know what
 // an existing deployment has put in them.
+//
+// Also mirrors auth.TenantStore.ResolveTenantFromAPIKey's expiry clause
+// (auth/tenant_store.go) -- cleat#2352 enforced expiry there but never
+// touched this store, so an expired key authenticated against any host that
+// wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantIDStr string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys
-		 WHERE key_hash = @p1 AND disabled_at IS NULL`, keyHash).Scan(&tenantIDStr)
+		`SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenant_api_keys
+		 WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`, keyHash).Scan(&tenantIDStr)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -302,6 +307,23 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	if err != nil || len(pluginDepsJSON) == 0 || string(pluginDepsJSON) == "null" {
 		pluginDepsJSON = []byte("{}")
 	}
+
+	// entry_point_schemas is nullable with no default (migrations/mssql/005).
+	// A Go nil interface value binds to SQL NULL; a non-nil one must be a
+	// Go string, not []byte -- go-mssqldb binds []byte as VARBINARY, and the
+	// implicit conversion into this NVARCHAR(MAX) column reinterprets the
+	// UTF-8 bytes as UTF-16, mangling them exactly as decodePluginDeps'
+	// doc comment records happening to plugin_deps before that write path was
+	// fixed. Passing a string here instead of fixing it after the fact.
+	var entryPointSchemasParam any
+	if len(def.EntryPointSchemas) > 0 {
+		raw, err := json.Marshal(def.EntryPointSchemas)
+		if err != nil {
+			return fmt.Errorf("deploy workflow def: marshal entry point schemas: %w", err)
+		}
+		entryPointSchemasParam = string(raw)
+	}
+
 	// Refuse to deploy over a definition owned by another tenant, and record
 	// this tenant as the owner.
 	//
@@ -311,11 +333,6 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	// tenant's deploy of the same name into an overwrite of the first's WASM
 	// bytes. SQL Server's security policies filter on the tenant column, so an
 	// unset column is also an unfenced row. IMPROVEMENT-PLAN 3.12.
-	//
-	// UPDLOCK, HOLDLOCK is the SQL Server spelling of "lock the row, and the
-	// range it would occupy if it does not exist yet", which is what stops a
-	// concurrent deploy of the same new name from landing between the read and
-	// the MERGE.
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: begin: %w", err)
@@ -324,8 +341,19 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
+	//
+	// WITH (HOLDLOCK) on the target (cleat#2904/#2915): there is no separate
+	// locked read before this MERGE -- a prior version of this comment
+	// described one, but the function has never had one in the diff that
+	// introduced it (IMPROVEMENT-PLAN 3.12) -- so the lock has to be on the
+	// MERGE itself. Without it, two concurrent deploys of the same brand-new
+	// (tenant_id, name, version) can both evaluate WHEN NOT MATCHED true under
+	// READ COMMITTED, and one raises a duplicate-key error rather than taking
+	// the UPDATE branch. Reachable in the ordinary case: any two processes
+	// deploying a workflow definition under the same new name/version at once
+	// (a CI/CD pipeline retried or doubled, two operators promoting at once).
 	_, err = tx.ExecContext(ctx, `
-		MERGE workflow_defs AS target
+		MERGE workflow_defs WITH (HOLDLOCK) AS target
 		USING (VALUES (@p1, @p2)) AS source(name, version)
 		ON target.tenant_id = @p8 AND target.name = source.name AND target.version = source.version
 		WHEN MATCHED THEN UPDATE SET
@@ -335,10 +363,13 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			plugin_deps = @p6,
 			disabled_at = @p7,
 			gc_eligible = @p10,
-			max_history_length = @p9
-		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, tenant_id, max_history_length, gc_eligible)
-		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.DisabledAt, s.tenantID, def.MaxHistoryLength, def.GCEligible)
+			max_history_length = @p9,
+			entry_point_schemas = @p11,
+			input_validation_disabled = @p12,
+			exposure = @p13
+		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, tenant_id, max_history_length, gc_eligible, entry_point_schemas, input_validation_disabled, exposure)
+		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13);
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.DisabledAt, s.tenantID, def.MaxHistoryLength, def.GCEligible, entryPointSchemasParam, def.InputValidationDisabled, def.Exposure.OrDefault())
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -354,12 +385,12 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	var err error
 	if name == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 			FROM workflow_defs WHERE tenant_id = @p1 ORDER BY name, version DESC
 		`, s.tenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 			FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
 		`, name, s.tenantID)
 	}
@@ -372,9 +403,10 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	for rows.Next() {
 		var def WorkflowDef
 		var pluginDepsRaw []byte
+		var entryPointSchemasRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		def.CreatedAt = createdAt
@@ -384,6 +416,7 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
 		}
+		def.EntryPointSchemas = decodeEntryPointSchemas(s.log(), entryPointSchemasRaw, def.Name, def.Version)
 		defs = append(defs, def)
 	}
 	return defs, rows.Err()
@@ -393,13 +426,14 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
 	var def WorkflowDef
 	var pluginDepsRaw []byte
+	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 		FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -414,6 +448,7 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
 	}
+	def.EntryPointSchemas = decodeEntryPointSchemas(s.log(), entryPointSchemasRaw, name, version)
 	return &def, nil
 }
 
@@ -516,7 +551,7 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
 		WHERE status IN ('ready', 'running')
-		  AND (tenant_id = @p1 OR tenant_id IS NULL)
+		  AND tenant_id = @p1
 		GROUP BY def_name, def_version
 	`, s.tenantID)
 	if err != nil {
@@ -561,6 +596,12 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 // multi-tenant deployment must use -- that the filter is off and the match
 // succeeds. See the note above ClaimDueSchedule in mssql_schedules.go.
 //
+// WITH (HOLDLOCK) on the target (cleat#2904/#2915): two concurrent tag
+// assignments for the same new (tenant_id, workflow_name, tag) -- a deploy
+// pipeline retried, or two operators promoting at once -- can otherwise both
+// evaluate WHEN NOT MATCHED true and one takes a duplicate-key error instead
+// of the UPDATE branch.
+//
 // Shaped like DeployWorkflowDef's MERGE on purpose: the tenant is compared to
 // a BOUND PARAMETER (`target.tenant_id = @p4`) rather than to a projected
 // source column. The first version of this wrote
@@ -573,7 +614,7 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 // guard that exists because two real bugs got past review.
 func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
 	_, err := s.db.ExecContext(ctx, `
-		MERGE workflow_tags AS target
+		MERGE workflow_tags WITH (HOLDLOCK) AS target
 		USING (VALUES (@p1, @p2)) AS source(workflow_name, tag)
 		ON target.tenant_id = @p4
 		   AND target.workflow_name = source.workflow_name
@@ -655,15 +696,17 @@ func (s *MSSQLStore) SetRoutingRule(ctx context.Context, workflowName string, ta
 	return nil
 }
 
-// RemoveRoutingRule deletes a routing rule by ID.
-func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+// RemoveRoutingRule deletes a routing rule by ID, scoped to workflowName --
+// cleat#3168. A ruleID that belongs to a different workflow matches nothing
+// and is reported the same as a ruleID that does not exist.
+func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	id, err := uuid.Parse(ruleID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: invalid rule id %q: %w", ruleID, err)
 	}
 	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_routing WHERE id = @p1 AND tenant_id = @p2
-	`, id, s.tenantID)
+		DELETE FROM workflow_routing WHERE id = @p1 AND workflow_name = @p2 AND tenant_id = @p3
+	`, id, workflowName, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: %w", err)
 	}
@@ -677,7 +720,7 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error
 // GetRoutingRules returns all routing rules for a workflow.
 func (s *MSSQLStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT CONVERT(NVARCHAR(36), id), workflow_name, target_version, weight
+		SELECT LOWER(CONVERT(NVARCHAR(36), id)), workflow_name, target_version, weight
 		FROM workflow_routing WHERE workflow_name = @p1 AND tenant_id = @p2
 	`, workflowName, s.tenantID)
 	if err != nil {

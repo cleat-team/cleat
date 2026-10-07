@@ -2,8 +2,235 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
+
+// ExposureClass is one of a closed set of three, carried per workflow-definition
+// version (cleat#1986).
+//
+// The set is closed by the DATABASE as well: each dialect's workflow_defs.exposure
+// carries a CHECK over exactly these three values, added with the column in #2888.
+// So a value outside the set is refused at the column as well as here, and the two
+// lists have to agree -- the migration is the other half of this declaration.
+type ExposureClass string
+
+const (
+	// ExposureAuth is the DEFAULT and today's behaviour: reachable from the HTTP
+	// API with authentication required. Every row deployed before the column
+	// existed reads back as this, matching NOT NULL DEFAULT 'auth'.
+	ExposureAuth ExposureClass = "auth"
+
+	// ExposurePublic is reachable WITHOUT authentication, and only for a tenant an
+	// operator has opted in (cleatctl allow-public-exposure). A deploy whose
+	// resolved class is public and whose tenant carries no such grant is
+	// refused rather than silently downgraded -- see ResolveDeployableExposure
+	// and engine.TenantExposurePolicyReader, which is the opt-in read side.
+	ExposurePublic ExposureClass = "public"
+
+	// ExposureInternal is not reachable from the external HTTP surface at all, for
+	// any route that addresses the workflow. It remains reachable as a child
+	// workflow or by an in-engine signal, which never traverse ingress.
+	ExposureInternal ExposureClass = "internal"
+)
+
+// ParseExposure maps a string to an ExposureClass, reporting whether it is one of
+// the closed set. It exists so a caller can REFUSE an unknown class with a message
+// naming the accepted values, rather than storing something the database's CHECK
+// would reject later with a message naming a constraint.
+func ParseExposure(s string) (ExposureClass, bool) {
+	switch c := ExposureClass(s); c {
+	case ExposureAuth, ExposurePublic, ExposureInternal:
+		return c, true
+	}
+	return "", false
+}
+
+// OrDefault returns the class a store should WRITE when a caller set none: the
+// empty string becomes ExposureAuth, which is the column's own NOT NULL
+// DEFAULT 'auth'.
+//
+// It exists because the stores now always NAME the exposure column in their
+// INSERT, and a named column no longer receives the database's default -- it
+// receives whatever the caller supplied, and "" is not in the closed set the
+// CHECK enforces. Every deploy path that predates this column (and every caller
+// with no opinion) therefore has to be handed the default rather than the zero
+// value. Measured rather than reasoned: without this,
+// TestWorkflowDefDefaultsToTheAuthExposureClass fails on postgres with
+// `pq: new row for relation "workflow_defs" violates check constraint
+// "ck_workflow_defs_exposure" (23514)`.
+func (c ExposureClass) OrDefault() ExposureClass {
+	if c == "" {
+		return ExposureAuth
+	}
+	return c
+}
+
+// exposureRank orders the closed set from loosest to strictest: public (0),
+// auth (1), internal (2). That order IS cleat#1986's rule -- a higher rank is a
+// stricter class, so "tighten" is a move upward and "loosen" is a move down.
+//
+// A value outside the set returns -1, and every caller has to treat that as a
+// refusal rather than as the loosest class. Returning 0 for an unrecognised
+// value would make a typo compare as `public` and pass a looseness test.
+func exposureRank(c ExposureClass) int {
+	switch c {
+	case ExposurePublic:
+		return 0
+	case ExposureAuth:
+		return 1
+	case ExposureInternal:
+		return 2
+	}
+	return -1
+}
+
+// ErrExposureLoosened reports a deploy that asked for a class less restrictive
+// than the one the artifact's source declares.
+type ErrExposureLoosened struct {
+	Declared  ExposureClass
+	Requested ExposureClass
+}
+
+func (e *ErrExposureLoosened) Error() string {
+	return fmt.Sprintf("the artifact declares exposure %q and this deploy requests %q, "+
+		"which is less restrictive: a deploy may tighten a source-declared class "+
+		"(%s -> %s -> %s) but never loosen it",
+		e.Declared, e.Requested, ExposurePublic, ExposureAuth, ExposureInternal)
+}
+
+// ResolveExposure returns the class a deploy should STORE, given the class the
+// artifact's SOURCE declared -- from its build metadata, "" for no declaration
+// -- and the class the deploy caller REQUESTED, "" for no opinion (cleat#1986
+// slice 2c-ii).
+//
+// # The rule
+//
+// A deploy may TIGHTEN a source-declared class (public -> auth -> internal) but
+// never LOOSEN it, so the result is the stricter of the two. Asking to loosen is
+// an error rather than a silent clamp: clamping would leave the caller believing
+// -- reasonably, from its own command line -- that the deployment is less
+// restrictive than it is, and the next thing they would do is debug why.
+// Refusing names both classes.
+//
+// # Why "" and no opinion are the same value
+//
+// Both arguments use "" for "not stated", which is NOT `auth`. The distinction
+// is the whole reason this function exists: a caller that cannot express "no
+// opinion" cannot be told apart from one that asked for `auth`, and those want
+// opposite results when the source declared `internal`. That is why the deploy
+// flag's default had to become empty in this slice -- it defaulted to `auth`,
+// so an omitted flag read as a request to loosen.
+//
+// # An unrecognised DECLARED class is an error, not an absence
+//
+// This is the fail-open case, and it is the reason the two checks below are
+// separate. The declared value comes out of the artifact's metadata, which is
+// UNTRUSTED input at deploy time -- anyone who can hand this path a file
+// chooses it. Treating `"internal "` (a stray space), `"Internal"` (a case
+// slip), or `"secrets"` as "no declaration" would deploy the workflow as `auth`,
+// which is exactly the loosening this function refuses when a caller asks for it
+// out loud. The build path validates the stamp, so a well-formed artifact
+// cannot carry one of these; a hand-edited one can.
+func ResolveExposure(declared, requested ExposureClass) (ExposureClass, error) {
+	if declared != "" && exposureRank(declared) < 0 {
+		return "", fmt.Errorf("the artifact's metadata declares exposure %q, which is not one of %q, %q or %q",
+			declared, ExposureAuth, ExposurePublic, ExposureInternal)
+	}
+	if requested != "" && exposureRank(requested) < 0 {
+		return "", fmt.Errorf("requested exposure %q is not one of %q, %q or %q",
+			requested, ExposureAuth, ExposurePublic, ExposureInternal)
+	}
+
+	// No declaration: the caller's class stands, and `auth` when they had no
+	// opinion either. This is the pre-existing behaviour, unchanged.
+	if declared == "" {
+		return requested.OrDefault(), nil
+	}
+	// Declared, with no manifest opinion: the declaration is the answer.
+	if requested == "" {
+		return declared, nil
+	}
+	if exposureRank(requested) < exposureRank(declared) {
+		return "", &ErrExposureLoosened{Declared: declared, Requested: requested}
+	}
+	// Equal or stricter. Stricter is a tighten, which is allowed.
+	return requested, nil
+}
+
+// ErrExposurePublicNotOptedIn reports a deploy whose resolved class is
+// `public`, for a tenant the operator has not opted in.
+//
+// Named and typed separately from ErrExposureLoosened for the same reason
+// TestResolveDeployableExposureKeepsTheTwoRefusalsApart gives: the two sends
+// a caller to different places. A loosening means the deploy request
+// contradicts the artifact's own declaration; this means the artifact and
+// the request agree, and the OPERATOR has not granted this tenant the class
+// either of them is asking for.
+//
+// Called ErrExposurePublicUnavailable until cleat#1986's enforcement slice.
+// That name was accurate while the per-tenant opt-in did not exist at all --
+// every deploy was refused regardless of any tenant's state -- and became
+// wrong the moment this file started consulting one: "unavailable" reads as
+// a property of the feature, and it is now a property of the TENANT.
+type ErrExposurePublicNotOptedIn struct {
+	// TenantID is empty when the caller could not resolve one -- see
+	// ResolveDeployableExposure's doc comment on why that still refuses
+	// rather than defaulting to permissive.
+	TenantID string
+}
+
+func (e *ErrExposurePublicNotOptedIn) Error() string {
+	who := "this tenant"
+	if e.TenantID != "" {
+		who = "tenant " + e.TenantID
+	}
+	return "exposure class public is refused: " + who + " has no operator opt-in for it " +
+		"(grant one with `cleatctl allow-public-exposure <tenant-id>`); a deploy may not store public until then (cleat#1986)"
+}
+
+// ResolveDeployableExposure is ResolveExposure plus the `public` gate, and it is
+// what every DEPLOY path should call.
+//
+// The gate is here rather than at each call site because it is policy, not
+// plumbing: three paths store a definition -- `cleatctl deploy workflow`, the
+// worker's upload route, and `cmd/deploy-workflow` -- and all three must agree
+// about which classes may be stored.
+//
+// tenantAllowsPublic is the per-tenant operator opt-in
+// (engine.TenantExposurePolicyReader.AllowsPublicExposure), resolved by the
+// CALLER for the tenant this deploy is for -- this function takes a bool
+// rather than a reader and a tenant id so it stays a pure function, testable
+// without a database. A caller that cannot determine the tenant, or whose
+// store does not implement the reader at all (MySQL, which is single-tenant
+// by construction and has no cross-tenant operator policy to consult), MUST
+// pass false: an unresolved policy is not a granted one, and the fail-closed
+// direction is the one cleat#1986's owner decision requires ("refused at
+// deploy otherwise"). See TenantExposurePolicyReader's own doc comment,
+// which states this same contract from the read side.
+//
+// `public` is refused rather than stored when tenantAllowsPublic is false.
+// Storing it anyway would create a definition that becomes world-readable
+// the moment enforcement ships elsewhere, which is a time bomb rather than a
+// permissive default, and it is refused as the RESOLVED class so that an
+// artifact whose SOURCE declares it is caught too. That is wider than slice
+// 2a, which checked only the `--exposure` flag: `//cleat:exposure public` is
+// legal to BUILD, because the build knows no tenant.
+//
+// tenantID is carried into the refusal message only -- every current caller
+// has one in hand (two hardcode the default tenant, the worker's upload
+// route reads it from the request) -- so a reader of the error sees which
+// tenant needs the grant without the caller formatting it in.
+func ResolveDeployableExposure(declared, requested ExposureClass, tenantAllowsPublic bool, tenantID string) (ExposureClass, error) {
+	resolved, err := ResolveExposure(declared, requested)
+	if err != nil {
+		return "", err
+	}
+	if resolved == ExposurePublic && !tenantAllowsPublic {
+		return "", &ErrExposurePublicNotOptedIn{TenantID: tenantID}
+	}
+	return resolved, nil
+}
 
 type WorkflowDef struct {
 	Name       string            `json:"name"`
@@ -13,6 +240,47 @@ type WorkflowDef struct {
 	MinVersion int               `json:"min_version"`
 	PluginDeps map[string]string `json:"plugin_deps,omitempty"`
 	CreatedAt  time.Time         `json:"created_at"`
+
+	// EntryPointSchemas carries the JSON Schema internal/jsonschema computed
+	// at build time for this version's entry points, keyed by entry point
+	// name (cleat#1980). Nil for a version built before this existed, or
+	// whose source language has no emitter yet -- only Go does today.
+	//
+	// Unlike PluginDeps, the column backing this is nullable with no
+	// default: "no schema was computed" is a real state distinct from
+	// "computed, and it happens to be empty" (which cannot occur in
+	// practice -- a real Go entry point always has at least one field in its
+	// pair of schemas, even if that field is the unconstrained {}). The
+	// decode helper still normalizes a NULL or unreadable column to an empty,
+	// non-nil map on READ, matching decodePluginDeps -- the nil-vs-empty
+	// distinction matters at the point this is computed and stored, not to
+	// every caller that reads it back.
+	EntryPointSchemas map[string]EntryPointSchema `json:"entry_point_schemas,omitempty"`
+
+	// InputValidationDisabled opts this version OUT of cleat#1981's
+	// validate-input-against-schema behaviour, which is otherwise on by
+	// default for any entry point EntryPointSchemas carries a (non-empty)
+	// Params schema for. Set only at deploy (`cleatctl deploy
+	// --no-validate-input`) -- there is deliberately no per-request way to
+	// disable validation, so a caller cannot switch it off for its own
+	// requests. False (validation enabled) for every version deployed
+	// before this column existed, matching the NOT NULL DEFAULT false on
+	// all three dialects (migrations/*/007 or 006_input_validation_disabled).
+	InputValidationDisabled bool `json:"input_validation_disabled,omitempty"`
+
+	// Exposure is this version's exposure class (cleat#1986) -- one of the closed
+	// set declared above.
+	//
+	// NOT NULL DEFAULT 'auth' on all three dialects, so a version deployed before
+	// the column existed reads back as ExposureAuth, which is today's behaviour.
+	// That default is what makes this field safe to add ahead of its enforcement:
+	// every row carries a real class, and every existing row carries the one whose
+	// meaning is "what the server already does".
+	//
+	// Nothing reads it yet -- the enforcement slice is next (cleat#1986). Set only
+	// at deploy (cleatctl deploy --exposure); a source-level declaration, and the
+	// tightening-only rule that goes with it, are later slices.
+	Exposure ExposureClass `json:"exposure"`
 
 	// DisabledAt carries ADMISSION CONTROL, and only that. A disabled version
 	// cannot be started, cannot be routed to, cannot be pointed at by a tag,
@@ -47,6 +315,73 @@ type WorkflowDef struct {
 	// endpoint-set cap would stay, silently mis-tuning the version it was not
 	// chosen for. See cleat#889.
 	MaxHistoryLength int `json:"max_history_length,omitempty"`
+}
+
+// EntryPointSchema is one entry point's build-time-computed JSON Schema
+// pair (cleat#1980). Engine stores and returns these as opaque JSON
+// documents -- it does not parse, validate, or reason about their shape;
+// internal/jsonschema is what computes them, and the eventual OpenAPI-serving
+// endpoint is what interprets them.
+type EntryPointSchema struct {
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
+
+	// Exposure is this entry point's SOURCE-declared exposure class (cleat#1986),
+	// for a language with no wasm.Metadata write path of its own -- Python's
+	// `@cleat_entry(expose=...)` has nowhere else to put it, since
+	// wasm.Metadata is deliberately barred from carrying per-entry-point data
+	// (see wasm/metadata_carries_no_entry_point_parameters_test.go). Go never
+	// sets this: its declaration already rides wasm.Metadata.Exposure, read
+	// directly, and does not need this field at all.
+	//
+	// Empty string means no declaration, same meaning as an absent
+	// wasm.Metadata.Exposure -- omitempty so the two stay indistinguishable
+	// on the wire, never written as a literal "auth". See
+	// DeclaredExposureFromSchemas, which is what reads this across every
+	// entry point a sidecar carries.
+	Exposure ExposureClass `json:"exposure,omitempty"`
+}
+
+// DeclaredExposureFromSchemas returns the single declared exposure class
+// across every entry point in schemas, for a deploy path whose artifact has
+// no wasm.Metadata.Exposure of its own to read (cleat#1986) -- today, any
+// non-Go language.
+//
+// Mirrors the rule 2c-i already enforces for Go's package-level
+// `//cleat:exposure` directive: a build declares one class for the
+// definition, not one per function, so more than one DISTINCT non-empty
+// class across the entries is a conflicting declaration and is refused
+// rather than merged -- the same posture as Go's "two different classes in
+// one package are refused, not merged". A class that fails ParseExposure is
+// refused the same way a malformed wasm.Metadata stamp is: it came from the
+// file, and reading it as an absence would deploy as `auth` exactly what the
+// source meant to protect.
+//
+// In practice this is a 0-or-1 question for Python today: `cleat build
+// --target python` computes exactly one entry point per sidecar
+// (jsonschema_emitter.main itself asserts len(schemas) == 1), so the
+// conflict branch has no live caller yet. It is included anyway because the
+// rule is a property of the declaration model, not of today's one caller.
+func DeclaredExposureFromSchemas(schemas map[string]EntryPointSchema) (ExposureClass, error) {
+	var declared ExposureClass
+	var declaredBy string
+	for name, schema := range schemas {
+		if schema.Exposure == "" {
+			continue
+		}
+		class, ok := ParseExposure(string(schema.Exposure))
+		if !ok {
+			return "", fmt.Errorf("entry point %q declares exposure class %q, which is none of %q, %q or %q",
+				name, schema.Exposure, ExposureAuth, ExposurePublic, ExposureInternal)
+		}
+		if declaredBy != "" && class != declared {
+			return "", fmt.Errorf("entry points disagree on exposure class: %q declares %q, %q declares %q -- "+
+				"a build declares one class for the whole definition, not one per entry point",
+				declaredBy, declared, name, class)
+		}
+		declared, declaredBy = class, name
+	}
+	return declared, nil
 }
 
 // RetiredAt returns a pointer for DisabledAt. Paired with GCEligible: true it
@@ -450,6 +785,20 @@ type WorkflowFilter struct {
 	// DefName matches def_name exactly. Search is substring and spans four
 	// columns; this is the targeted form.
 	DefName string
+	// ExcludeDefNames removes runs whose def_name is in this set, and it is the
+	// INVERSE of DefName: a list of what not to show rather than what to show.
+	//
+	// It exists so an exclusion can be applied by the QUERY rather than by the
+	// caller filtering a page after it has been fetched (cleat#3009). That
+	// distinction is not cosmetic: a post-page filter is applied AFTER offset and
+	// limit, so pages come back shorter than the limit and any total the caller
+	// computes is approximate. Here the count and the page see the same rows,
+	// because both go through applyWorkflowFilters.
+	//
+	// Ordered and exact, matching def_name as DefName does. Empty means no
+	// exclusion, which is the pre-cleat#3009 behaviour and the default for every
+	// caller that does not set it.
+	ExcludeDefNames []string
 	// ErrorCode matches error_code exactly. Cancellation is an error code
 	// rather than a status, so without this a cancelled run cannot be selected
 	// as a class at all.

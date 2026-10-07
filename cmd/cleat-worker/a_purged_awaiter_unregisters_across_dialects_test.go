@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -113,7 +112,8 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 			// seed, which that test's own design (see its file comment) fails
 			// on by NAME rather than passing on a false "0 rows" negative.
 			// Found by cleat-review, cleat#2239.
-			defer cleanupEventTriggersSchema(t, be.DB, be.Dialect)
+			defer plugintest.CleanupPluginSchema(t, be.DB, be.Dialect, "event-triggers",
+				[]string{"event_awaiters", "event_subscriptions", "ingested_events"})
 
 			// MySQL isolates tenants by physical database (tiers.yaml D1: a
 			// second tenant row cannot even be created -- see
@@ -220,9 +220,19 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 					t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 				}
 
+				// id is supplied explicitly rather than left to a column
+				// default: Postgres and SQL Server's event_awaiters.id have
+				// one (gen_random_uuid()/NEWID()), but MySQL's does not --
+				// migrations.go's Version 6 comment explains why an
+				// expression default was deliberately not given to it there
+				// -- so an insert omitting id fails on MySQL only
+				// ("Field 'id' doesn't have a default value") while passing
+				// on the other two. Every production writer (registerAwaiter
+				// / upsertAwaiter) already supplies id explicitly on all
+				// three dialects; this fixture now matches that.
 				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-					`INSERT INTO event_awaiters (workflow_id, tenant_id, event_type) VALUES ($1, $2, $3)`,
-					runID, tenant.String(), eventType); err != nil {
+					`INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type) VALUES ($1, $2, $3, $4)`,
+					uuid.New().String(), runID, tenant.String(), eventType); err != nil {
 					t.Fatalf("insert event_awaiters on %s: %v", be.Name, err)
 				}
 
@@ -261,7 +271,7 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 					t.Helper()
 					eventID := uuid.New()
 					if _, err := eventtriggers.PublishEvent(ctx, pdb, logger, env,
-						eventID, tenant, eventType, json.RawMessage(`{}`)); err != nil {
+						eventID, tenant, eventType, json.RawMessage(`{}`), nil); err != nil {
 						t.Fatalf("PublishEvent (%s) on %s: %v", label, be.Name, err)
 					}
 				}
@@ -304,78 +314,5 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 			t.Run("without_signal_auth", func(t *testing.T) { runTenantSignal(t, false) })
 			t.Run("with_signal_auth", func(t *testing.T) { runTenantSignal(t, true) })
 		})
-	}
-}
-
-// cleanupEventTriggersSchema undoes eventtriggers.Migrations() against
-// TestPurgedAwaiterUnregistersAcrossDialects' shared, persistent test
-// database, table by table rather than via plugin.RunDownMigrations: that
-// function reverses a plugin's Down SQL, but eventtriggers' v4 migration
-// (TenantScoped, cleat#1512) applies its security policy through
-// plugin.RunMigrations' own runtime side effect (applyTenantScoping), not
-// through any Up/Down SQL the plugin declares -- so a Down pass never drops
-// the policy, and on SQL Server the later DROP TABLE for event_awaiters would
-// fail while that policy still references it ("...used by a security
-// policy..."). Dropping the policies first, by the same
-// "<table>_tenant_isolation" name plugin/migration.go's
-// applyTenantScopingMSSQL constructs, avoids depending on that ordering at
-// all.
-//
-// admin.plugin_tables (registerTenantScopedTables, Postgres only) is cleared
-// too, so a registry row naming a table that no longer exists cannot outlive
-// this test either -- see CLAUDE.md's "a resolver must be able to return
-// UNKNOWN" family of notes on stale registry rows reading as confident wrong
-// answers.
-func cleanupEventTriggersSchema(t *testing.T, conn *sql.DB, dialect testutil.Dialect) {
-	t.Helper()
-	ctx := context.Background()
-	const pluginName = "event-triggers"
-	tables := []string{"event_awaiters", "event_subscriptions", "ingested_events"}
-
-	exec := func(query string) {
-		if _, err := conn.ExecContext(ctx, query); err != nil {
-			t.Errorf("cleanupEventTriggersSchema: %s: %v", query, err)
-		}
-	}
-	exists := func(query string, args ...any) bool {
-		var n int
-		if err := conn.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
-			t.Errorf("cleanupEventTriggersSchema: existence check %s: %v", query, err)
-			return false
-		}
-		return n > 0
-	}
-
-	if dialect == testutil.DialectMSSQL {
-		// Checked in Go and dropped unconditionally rather than
-		// "IF EXISTS(...) DROP ..." in one batch: measured directly against
-		// a real SQL Server (cleat#2239) that the single-batch form raises
-		// 3701 ("does not exist or you do not have permission") on an
-		// object sys.security_policies confirms IS there, on the very
-		// connection running the check -- the IF guard and the DROP do not
-		// agree with each other inside one batch here, for a reason not
-		// worth chasing further when checking first in Go sidesteps it
-		// entirely.
-		for _, tbl := range tables {
-			policy := tbl + "_tenant_isolation"
-			if exists(`SELECT COUNT(*) FROM sys.security_policies WHERE name = @p1`, policy) {
-				exec(`DROP SECURITY POLICY dbo.` + policy)
-			}
-		}
-		for _, tbl := range tables {
-			if exists(`SELECT COUNT(*) FROM sys.tables WHERE name = @p1`, tbl) {
-				exec(`DROP TABLE ` + tbl)
-			}
-		}
-		exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
-		return
-	}
-
-	for _, tbl := range tables {
-		exec(`DROP TABLE IF EXISTS ` + tbl)
-	}
-	exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
-	if dialect == testutil.DialectPostgres {
-		exec(`DELETE FROM admin.plugin_tables WHERE plugin_name = '` + pluginName + `'`)
 	}
 }

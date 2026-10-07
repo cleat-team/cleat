@@ -16,12 +16,10 @@ package main
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -63,22 +61,25 @@ func TestWorkerMigratesFromOutsideTheRepo(t *testing.T) {
 			"repo to mean anything", outsideDir, repoRoot)
 	}
 
-	const apiAddr = ":18299"
-	waitForWorkerTestPortFree(t, 18299)
-
 	// --migrate-on-start: this test is about WHERE the embedded migrations are read
 	// from, and it starts the worker on an EMPTY database. A worker no longer
 	// migrates unless asked (cleat#2117); without the flag it refuses to start, which
 	// is asserted in a_migration_is_a_deploy_step_test.go.
+	//
+	// Boot on an ephemeral port and read the address the socket actually bound from
+	// the worker's own "HTTP API listening" line, rather than a hardcoded port: a
+	// fixed port collides deterministically between two concurrent runs of this
+	// test, which is worse than the check-to-bind race cleat#3138 removed from the
+	// other cmd/cleat-worker boot tests (cleat#3143).
 	worker := exec.Command(workerBin,
 		"--db="+dsn,
-		"--api-addr="+apiAddr,
+		"--api-addr=127.0.0.1:0",
 		"--require-auth=false",
 		"--migrate-on-start",
 	)
 	worker.Dir = outsideDir
 	worker.Env = os.Environ()
-	var workerOut strings.Builder
+	var workerOut syncBuffer
 	worker.Stdout = &workerOut
 	worker.Stderr = &workerOut
 	if startErr := worker.Start(); startErr != nil {
@@ -95,7 +96,8 @@ func TestWorkerMigratesFromOutsideTheRepo(t *testing.T) {
 		}
 	})
 
-	waitForWorkerTestHealthz(t, "http://localhost:18299/healthz")
+	apiAddr := waitForBoundAPIAddr(t, &workerOut)
+	waitForWorkerTestHealthz(t, "http://"+apiAddr+"/healthz")
 
 	// NOT MERELY THAT IT BOOTED: query the database directly for the table
 	// migration 001 creates. A worker that skipped migrations entirely (a
@@ -172,19 +174,21 @@ func startWorkerTestPostgres(t *testing.T) (dsn, containerName string) {
 	return "", ""
 }
 
-func waitForWorkerTestPortFree(t *testing.T, port int) {
+// waitForBoundAPIAddr polls out for the worker's "HTTP API listening" line and
+// returns the address the socket actually bound, via the package-shared
+// boundAPIAddr (cleat#3136/cleat#3138). out must be safe for concurrent
+// Write/String -- the worker is still running when this is called.
+func waitForBoundAPIAddr(t *testing.T, out *syncBuffer) string {
 	t.Helper()
-	addr := net.JoinHostPort("localhost", strconv.Itoa(port))
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err != nil {
-			return
+		if addr := boundAPIAddr(out.String()); addr != "" {
+			return addr
 		}
-		conn.Close()
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 	}
-	t.Fatalf("port %d is still in use after 10s", port)
+	t.Fatalf(`no "HTTP API listening" line within 30s:`+"\n%s", out.String())
+	return ""
 }
 
 func waitForWorkerTestHealthz(t *testing.T, url string) {

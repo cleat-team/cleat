@@ -291,6 +291,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
 		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
 		    started_at = COALESCE(started_at, now()),
@@ -569,6 +570,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
 		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
 		    started_at = COALESCE(started_at, now()),
@@ -890,7 +892,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	}
 	defer tx.Rollback()
 
-	qsJSON := marshalQueryState(queryState)
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -899,9 +901,9 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		    error_op = $5,
 		    completed_at = now(),
 		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = $6
+		    query_state = COALESCE($6::jsonb, query_state)
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}
@@ -1185,19 +1187,21 @@ func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query stri
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
 
-func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
-		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL
-		WHERE id = $1 AND assigned_to = $2 AND generation = $6
-	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
+		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL,
+		    query_state = COALESCE($6::jsonb, query_state)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $7
+	`, workflowID, workerID, errMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}
@@ -1608,6 +1612,89 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	return int(n), tx.Commit()
 }
 
+// ListStaleHolders satisfies StaleHolderReaper. Same RLS scoping and same
+// status='running'/heartbeat_at predicate as ReapStaleInstances, because it
+// has to report the same population -- see that method's doc and
+// StaleHolderReaper's doc for why the two are allowed to race.
+func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, generation, assigned_to FROM workflow_instances
+		WHERE status = 'running'
+		  AND heartbeat_at < now() - $1::interval
+		ORDER BY heartbeat_at
+		LIMIT $2
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: %w", err)
+	}
+	defer rows.Close()
+
+	var holders []StaleHold
+	for rows.Next() {
+		var h StaleHold
+		var assignedTo sql.NullString
+		if err := rows.Scan(&h.Key.WorkflowID, &h.Key.Generation, &assignedTo); err != nil {
+			return nil, fmt.Errorf("list stale holders: scan: %w", err)
+		}
+		h.AssignedTo = assignedTo.String
+		holders = append(holders, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list stale holders: rows: %w", err)
+	}
+	return holders, tx.Commit()
+}
+
+// ReapStaleInstancesExcept satisfies StaleHolderReaper. Identical to
+// ReapStaleInstances except for the NOT EXISTS clause, which is a no-op
+// against an empty exclude -- unnest of two empty arrays produces zero
+// rows, so NOT EXISTS is unconditionally true and every row ReapStaleInstances
+// would have reclaimed is still reclaimed.
+func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	excludeIDs := make([]string, len(exclude))
+	excludeGenerations := make([]int64, len(exclude))
+	for i, k := range exclude {
+		excludeIDs[i] = k.WorkflowID
+		excludeGenerations[i] = k.Generation
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id IN (
+		    SELECT id FROM workflow_instances
+		    WHERE status = 'running'
+		      AND heartbeat_at < now() - $1::interval
+		      AND NOT EXISTS (
+		          SELECT 1 FROM unnest($3::text[], $4::bigint[]) AS ex(id, generation)
+		          WHERE ex.id = workflow_instances.id AND ex.generation = workflow_instances.generation
+		      )
+		    ORDER BY heartbeat_at
+		    LIMIT $2
+		)
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), excludeIDs, excludeGenerations)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), tx.Commit()
+}
+
 // PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
 // query, so a worker with nothing in flight still has a way to prove it can
 // reach the database. See DBPinger's doc comment for why this exists.
@@ -1743,12 +1830,9 @@ func truncateForLog(s string) string {
 
 // scanClaimedWorkflows reads the rows a claim returns.
 //
-// Shared by ClaimWorkflows and ClaimWorkflowsAcrossTenants deliberately: the
-// second reads its columns from admin.claim_workflows, a function defined in a
-// migration, and the only thing keeping that definition in step with this scan
-// is that there is exactly one scan. Two copies would drift, and the symptom
-// would be a scan error at claim time on whichever deployment ran the newer
-// migration.
+// ClaimWorkflowsAcrossTenants was retired in #1926 (the widened
+// admin.claim_workflows path replaced by unconditional per-tenant rotation);
+// this scan now has ClaimWorkflows as its only caller.
 func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
 	var wfs []*WorkflowInstance
 	for rows.Next() {
@@ -1832,8 +1916,54 @@ func looksLikeJSONObject(result string) bool {
 // wrapRejectedResult returns anything it does not recognise unchanged, so the
 // blanket wrap costs nothing and cannot mislabel an unrelated failure.
 func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	return wrapRejectedResult(
+	err := wrapRejectedResult(
 		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+	return wrapPostgresFinalizeDBError(err, runID)
+}
+
+// wrapPostgresFinalizeDBError classifies a database-originated finalize
+// failure into a *CleatError so cmd/cleat-worker's errors.As(err, &ce) can
+// derive error_code instead of leaving it ErrUnknown for every DB-originated
+// terminal failure on this dialect (cleat#2805).
+//
+// Narrow on purpose, and the narrowing is load-bearing, not laziness:
+//   - nil, ErrFenceLost, and an error wrapRejectedResult already classified
+//     (ErrResultRejected) pass through unchanged -- this classifies only
+//     what reaches it UNclassified.
+//   - a connection-level failure never reaches here at all:
+//     cmd/cleat-worker's isConnectionError (text-matched, dialect-agnostic)
+//     intercepts it first and releases the workflow for another worker,
+//     never calling recordTerminalFailure in the first place. So this
+//     function does not need its own connection check, and one here would
+//     be dead code by construction.
+//   - 40P01 (deadlock_detected) and 40001 (serialization_failure) are the
+//     two PostgreSQL SQLSTATEs where the server GUARANTEES the transaction
+//     was rolled back, so the failure describes contention, not a data
+//     problem -> ErrTransient. A context cancellation or deadline (worker
+//     shutdown mid-transaction, a caller's own timeout) is the same shape
+//     for the same reason: it says nothing about the data and a retry is
+//     sound -> ErrTransient too.
+//   - Everything else defaults to ErrPermanent, matching the deleted
+//     mapMSSQLError's own default arm (cleat#2792) and CleatError's own
+//     "non-retryable" semantics -- an unrecognized DB failure is safer
+//     reported as needing a human than silently retried.
+func wrapPostgresFinalizeDBError(err error, workflowID string) error {
+	if err == nil || errors.Is(err, ErrFenceLost) {
+		return err
+	}
+	var ce *CleatError
+	if errors.As(err, &ce) {
+		return err
+	}
+	code := ErrPermanent
+	var pqErr *pq.Error
+	switch {
+	case errors.As(err, &pqErr) && (pqErr.Code == "40P01" || pqErr.Code == "40001"):
+		code = ErrTransient
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		code = ErrTransient
+	}
+	return &CleatError{Code: code, Op: "finalize workflow", WorkflowID: workflowID, Err: err}
 }

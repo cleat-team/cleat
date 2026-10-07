@@ -6,9 +6,11 @@ gated route from one that does not exist.
 
 ## Read this before you turn it on
 
-cleat has no operator credential yet (tracked in cleat#2169). The admin routes are authenticated like every
-other route, with an ordinary tenant API key, and **the routes that act on the worker do not check whose key
-it is**. So while the flag is on:
+cleat has an operator credential — a `cleat_op_…` key, distinct from a tenant key, which resolves to no tenant and
+is confined to `/api/admin/*` (cleat#2169, delivered in two parts). It changes what the **tenant-scoped** instance
+routes can reach, and nothing at all about the worker-level ones. **The routes that act on the worker do not check
+whose key it is**: they are not tenant-scoped, so an operator credential confers nothing on them and any
+authenticated key reaches them just as it always did. So while the flag is on:
 
 - **any authenticated API key of any tenant can drain the worker** (`POST /api/admin/drain`), which takes it
   out of rotation (`/readyz` answers 503 `draining`); it stops claiming and keeps running until SIGTERM;
@@ -36,10 +38,42 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 | `POST /api/admin/instances/{id}/force-fail` | one workflow | tenant-scoped |
 | `POST /api/admin/instances/{id}/re-replay` | one workflow | tenant-scoped |
 | `POST /api/admin/instances/{id}/steps/{n}/resolve` | one workflow's step | tenant-scoped |
+| `POST /api/admin/tenants/{tenant}/instances/{id}/force-complete` | one workflow, in the named tenant | tenant-scoped, **and cross-tenant for an operator** |
+| `POST /api/admin/tenants/{tenant}/instances/{id}/force-fail` | one workflow, in the named tenant | as above |
+| `POST /api/admin/tenants/{tenant}/instances/{id}/re-replay` | one workflow, in the named tenant | as above |
+| `POST /api/admin/tenants/{tenant}/instances/{id}/steps/{n}/resolve` | one workflow's step, in the named tenant | as above |
 
-The tenant-scoped routes are checked by `callerOwnsTarget` before anything runs, and answer 404 (never 403)
-for another tenant's workflow, so they do not confirm it exists. They sit behind the flag because they are
-destructive operator actions, not because they cross tenants.
+The id-only tenant-scoped routes are checked by `callerOwnsTarget` before anything runs, and answer 404 (never
+403) for another tenant's workflow, so they do not confirm it exists. They sit behind the flag because they are
+destructive operator actions, not because they cross tenants — the tenant-named form below is the one that
+crosses, and only for an operator.
+
+## Acting on another tenant
+
+`/api/admin/tenants/{tenant}/instances/{id}/…` is the same four operations addressed at an explicit tenant.
+That form is what an operator credential is for:
+
+| Caller | May name | Result |
+|---|---|---|
+| `cleat_op_…` operator credential | **any** tenant | the operation runs against the named tenant. An operator has no tenant, so the id-only routes above refuse it with `401` — that is deliberate, and the cross-tenant capability exists only where the URL says which tenant. |
+| tenant API key | **its own tenant only** | naming another tenant is `404`, not `403` (a `403` would confirm the tenant and the workflow exist). Naming its own tenant is identical to the id-only route. |
+| **no identity at all**, with `--require-auth=false` | **nothing** | `401`. This is the one row where the named form differs from the id-only one, and the difference is the point: the id-only route falls back to the process-wide store, which is **one constant scope** no request can redirect, so serving an identity-less request there is safe. This route opens a store for whatever the URL names, so the same fall-back would let an unauthenticated caller reach **any** tenant. Naming a tenant requires something to name it. |
+
+**Measured before that refusal existed**, with `--require-auth=false` on an identity-less request: naming another tenant opened that tenant's store and force-completed its workflow, `200 {"status":"completed"}`, audited as `operator=unknown`. The id-only route's posture under the same flag is unchanged.
+
+**The tenant is in the path rather than looked up from the workflow id, and that is a security property rather
+than a style choice.** Resolving it would need a read spanning tenants, which the store has no way to make:
+PostgreSQL scopes by row-level security on `cleat.tenant_id`, MySQL by the tenant's own database, SQL Server by
+its tenant predicates. Naming the tenant makes the **scope** the authorization — the store is opened for the
+named tenant, so a workflow that tenant does not own is not visible at all and the caller gets a `404`. There
+is no second comparison to keep in step with the scope, and no new cross-tenant read to get wrong.
+
+A `{tenant}` that is not a UUID is `400`: it is bound to `cleat.tenant_id`, where a non-UUID is a cast error
+raised by the policy rather than a clean refusal.
+
+**Not included, on purpose:** tenant-level roles (`admin` vs `member`). The operator credential is one axis of
+authorization and tenant roles are another; #2047 decision 2A still lets any authenticated tenant caller export
+and verify its own audit log.
 
 Routes outside `/api/admin/` (`/api/workflows`, `/api/definitions`, `/api/versions/...`, and the rest) are the
 ordinary tenant API and are not affected by this flag.

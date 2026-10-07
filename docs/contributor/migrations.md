@@ -148,7 +148,7 @@ Each dialect hides something outside the database, or inside it but outside a sc
 | MySQL | **users and their privileges** | the `mysql` system schema, not the database |
 | SQL Server | **logins** (server-level), and database **roles** | `sys.server_principals`; `sys.database_principals` |
 
-Three of those need a caveat, because a table like this invites a check that measures something
+Four of those need a caveat, because a table like this invites a check that measures something
 else:
 
 - **PostgreSQL's role memberships are real and were really lost** (cleat#2416), so that check has
@@ -161,13 +161,37 @@ else:
   *deployment* does it (`cmd/cleat-worker/setup.go`, `cmd/cleatctl/setsecret.go`). A membership
   check on a freshly-migrated database would therefore test nothing. Assert the role exists; do
   not assert who is in it.
-- **SQL Server's object grants are not a fact about cleat at all — they are the server's.** A
-  `sys.database_permissions` read returns **229 rows even in a brand-new empty database** (dbo 1,
-  `public` 2 database-level, `public` 226 object-level), all on server-supplied objects like
-  `sys.dm_pdw_nodes_os_tasks`. Nothing in `migrations/mssql/` issues a `GRANT`: the word appears
-  only in prose. So a comparison of that catalog compares server defaults to server defaults, and
-  a generator that *dumps* it would write 229 server defaults into the baseline as if they were
-  schema. Filter to what the migrations created — or, here, emit no grants at all.
+- **SQL Server's object grants used to be entirely the server's, and that stopped being true at
+  `migrations/mssql/008_app_login.sql` (cleat#2203).** A `sys.database_permissions` read returns
+  **229 rows even in a brand-new empty database** (dbo 1, `public` 2 database-level, `public` 226
+  object-level), all on server-supplied objects like `sys.dm_pdw_nodes_os_tasks` — this part still
+  holds, and is why `migration/catalogdiff/mssql.go`'s own grant query filters to `dp.class = 1`
+  (object-level) joined against `sys.objects`, rather than dumping the view raw. **That filter is
+  also, incidentally, why cleat_app's own grants do not show up in it**: they are schema-level
+  (`GRANT ... ON SCHEMA::dbo`, `class = 3`) and the one object-level statement is a `DENY`
+  (`state = 'D'`), not a `GRANT` (`state = 'G'`) — so the comparator's existing "compare server
+  defaults to server defaults" property survives by not modeling either kind, not because neither
+  kind exists any more. A generator that *dumps* `sys.database_permissions` raw would still write
+  229 server defaults into the baseline as if they were schema, and would now also need to decide
+  what to do with real ones. Filter to what the migrations created, as today — or emit none at all,
+  the same choice this note gave before cleat_app existed.
+- **MySQL's grants are real and the per-database diff can see them, but the obvious query embeds
+  the one thing that is never the same twice.** `information_schema.table_privileges.table_schema`
+  *is* the database name on MySQL — there is no narrower schema underneath it — so a grant string
+  built as `"<priv> ON <schema>.<table> TO <grantee>"` differs between any two scratch databases by
+  construction, since each one `scratchMySQLDB` builds gets its own generated name.
+  `TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL` caught this while cleat#2203 was
+  developing MySQL's first-ever migration-issued `GRANT`: every one of its statements reported as a
+  difference between two databases built from the identical chain. `migration/catalogdiff/mysql.go`
+  drops the schema/database name from the comparable string for this reason — table and routine
+  entries never carried it either, for the same underlying reason (`WHERE table_schema = DATABASE()`
+  already scopes the query to one database, so the name adds nothing to compare). **cleat#2203 went
+  on to move that GRANT out of migrations entirely**, into a deploy-time script
+  (`deploy/mysql/900-app-role.sh`) — CREATE USER and GRANT OPTION are privileges no MySQL migration
+  has ever been able to assume of its migrate login — so no committed migration exercises this fix
+  today. It is kept anyway: the defect is in the comparator, triggered by the shape of ANY MySQL
+  migration that grants anything, and the test passing without the fix proves only that nothing yet
+  asks the question, not that the comparator answers it correctly.
 
 PostgreSQL lost two `cleat_sweep` memberships to exactly this in cleat#2416, with the per-database
 diff reporting clean. Check the dialect's column *behaviourally* — query the catalogue — rather than
@@ -236,3 +260,47 @@ the places the emitter goes wrong:
 - **Security policies reference the predicate function, so the order is forced.** `DROP FUNCTION
   dbo.fn_tenant_filter` fails with error 3729 while any `TenantFilter_*` policy exists. Create
   function **before** policy; drop policy **before** function.
+
+## Reading the result: the conclusion and the duration are two readings
+
+**A step whose whole job is to verify something has silence as its failure mode.** `success` is
+what *"verified the baseline"* reports and also what *"returned early on a bad path"* reports, so
+the conclusion alone cannot separate them. Add the duration and it can.
+
+Measured on the first merge-group run carrying the PostgreSQL verify mode (cleat#2442):
+
+```
+step "Verify the committed PostgreSQL baseline is a fresh emit"    conclusion success
+elapsed 10.0s        (the mode measures ~6s end to end locally)
+```
+
+Ten seconds against six is what distinguishes building a database from the prior chain and
+comparing it, from exiting before doing the work. **Nothing else in that job's output can** — and
+note that "is it first among the test steps" does not either, because ordering is a property of
+the workflow file rather than of the run.
+
+This is the same shape as the empty catalog diff and as an absent `=== RUN`: **a check that fails
+by being silent reports identically whether it ran or not.** The remedy is always a reading that
+can fail *differently* — a positive marker, a floor, or a duration — never a narrower filter.
+
+It applies to verify modes specifically, and not to every step: a test step that skipped reports
+`skipped`. A verification step does not.
+
+### The other half: a verify mode can ground a decision that was already made
+
+A check is usually justified by *"this could go wrong later"*. **The stronger case is a present
+fact: something already rests on this and nothing has verified it.** The baseline is the clearest
+example here. cleat#2438 adjusted two `engine/` guards to suit a generated baseline — a floor that
+asserted *"there were 30+ `.sql` files on 2026-09-06"*, which a 3-file baseline fails while being
+exactly right, and a matcher written against the **source** spelling `ISJSON(dag_spec)` where the
+catalogue normalises the generated form to `isjson([dag_spec])`.
+
+**Both adjustments are sound only if the baseline is a faithful emit of the chain it replaces** —
+and that was true by construction and checked by nothing until the verify mode landed. So the
+verify step did not prevent a future mistake; it made an assumption that was *already load-bearing*
+into something the tree is held to, on every merge group. Note the shape: a guard relaxed to
+accommodate a change is the case where an unverified premise does the most damage, and it is the
+case least likely to be noticed, because the guard going green reads as the guard working.
+
+When you are weighing whether a check is worth building, that is the question to ask first:
+**not "what might break", but "what is already resting on this".**

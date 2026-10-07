@@ -148,15 +148,56 @@ func TestNextRun_Midnight(t *testing.T) {
 	}
 }
 
-func TestNextRun_Feb29NonLeapYear(t *testing.T) {
-	// Feb 29 in a non-leap year shouldn't match, should roll to Mar 1.
-	// nextRun iterates minute by minute so it should skip Feb 29.
-	from := time.Date(2025, 2, 28, 23, 59, 0, 0, time.UTC)
+// TestNextRun_Feb29NonLeapYear is the regression test for cleat#2839.
+//
+// The original version could not fail in any world: t.Skip fired when
+// next.IsZero() and t.Logf fired otherwise, asserting nothing on either
+// branch -- a broken nextRun and a correct one produce an identical PASS.
+// Its own comment's premise was also wrong: this cron implementation has no
+// "roll to Mar 1" behaviour for a day-of-month/month pair that never
+// occurs -- "0 0 29 2 *" means exactly "day 29 of February", and nextRun
+// (cron.go) just searches minute-by-minute for that literal match within a
+// fixed one-year window (`deadline := from.AddDate(1, 0, 0)`); there is no
+// rollover semantics anywhere in matches().
+//
+// Split into the two claims the original conflated, per the coordinator's
+// framing (cleat#2839): the negative (a window that cannot contain a Feb 29
+// finds nothing) and the positive -- reaching the REAL boundary, an actual
+// leap day inside the window, which the original test never did and so
+// never exercised this cron pattern's matching logic at all.
+func TestNextRun_Feb29NeverMatchesWithinAOneYearWindowOfNonLeapDates(t *testing.T) {
+	// 2025-2027 are all non-leap years (2028 is next). This specific start
+	// (NOT "anywhere in that span" -- a start on or after 2027-03-01 reaches
+	// into 2028 and DOES contain Feb 29, which is exactly
+	// TestNextRun_Feb29MatchesTheRealLeapDay's premise below) puts the whole
+	// one-year window inside 2025-2026, so it cannot reach any Feb 29 --
+	// deterministic by construction, not by running the code first.
+	from := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
+	next := nextRun("0 0 29 2 *", from)
+	if !next.IsZero() {
+		t.Errorf(`nextRun("0 0 29 2 *", %v) = %v, want the zero time -- `+
+			`the one-year window [%v, %v) contains no Feb 29 at all `+
+			`(2025-2027 are all non-leap years)`,
+			from, next, from.Add(time.Minute), from.AddDate(1, 0, 0))
+	}
+}
+
+func TestNextRun_Feb29MatchesTheRealLeapDay(t *testing.T) {
+	// 2028 is the next leap year after 2025-2027. Starting from March 1
+	// 2027 puts Feb 29 2028 inside the one-year window (deadline is March 1
+	// 2028, one day after the leap day) -- the case that actually exercises
+	// nextRun finding a genuine Feb 29 match, which
+	// TestNextRun_Feb29NeverMatchesWithinAOneYearWindowOfNonLeapDates
+	// above deliberately cannot reach.
+	from := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	want := time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC)
 	next := nextRun("0 0 29 2 *", from)
 	if next.IsZero() {
-		t.Skip("Feb 29 in 2025: no match found in 1 year window")
+		t.Fatalf(`nextRun("0 0 29 2 *", %v) found nothing, want %v`, from, want)
 	}
-	t.Logf("Feb 29 cron from Feb 28 2025: %v", next)
+	if !next.Equal(want) {
+		t.Errorf(`nextRun("0 0 29 2 *", %v) = %v, want %v`, from, next, want)
+	}
 }
 
 func TestNextRun_WrapYear(t *testing.T) {

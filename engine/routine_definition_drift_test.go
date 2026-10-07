@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // The database a test runs against must hold the LATEST definition of every
@@ -178,8 +179,18 @@ type routineDefinition struct {
 // off the migrations rather than assumed:
 //
 //	postgres  $$ LANGUAGE plpgsql;   (migrations/postgres/004:146)
-//	mysql     END //                 (migrations/mysql/004:134)
-//	mssql     END;                   (migrations/mssql/004:153)
+//	mysql     END //                 (migrations/mysql/004_fix_finalize_workflow_status_fence.sql:134)
+//	mssql     END;                   (migrations/mssql/004_fix_finalize_workflow_status_fence.sql:153)
+//
+// Both of those were cleat#1986's own finding: 004_fix_finalize_workflow_status_fence.sql
+// is long retired (docs/contributor/migrations.md's "compaction" section), and the bare
+// "migrations/mysql/004" / "migrations/mssql/004" form this comment used to cite is a
+// NUMBER, not a file -- so cleat#1986's new, unrelated 004_workflow_defs_exposure_class.sql
+// at that same number silently satisfied scripts/check-postgres-migration-citations.py's
+// is_real() check by coincidence, with this comment still describing a file that does not
+// exist. Naming the retired filename explicitly is what keeps the citation correctly
+// dangling (and correctly baselined as historical) regardless of what a later migration
+// happens to be numbered.
 //
 // Scoping the body matters in both directions, and the first attempt got both
 // wrong.
@@ -350,15 +361,14 @@ func databaseRoutineText(t *testing.T, db *sql.DB, dialect testutil.Dialect, qua
 	return text, strings.TrimSpace(text) != ""
 }
 
-// theBaseline is the frozen, generated baseline every dialect was compacted to
-// -- postgres in cleat#2059, MySQL in cleat#2433, SQL Server in cleat#2434.
-//
-// Named once, because docs/contributor/migrations.md names them once. The guard
-// below keys on the NAME rather than on a position or a count, and that choice
-// is the safe direction but not a free one: a dialect that gained a fourth
-// baseline file without this list moving would have that file read as
-// post-baseline, and duplicates inside it would go uncounted.
-var theBaseline = []string{"001_schema.sql", "002_defaults.sql", "003_procedures.sql"}
+// theBaseline is migration.BaselineFiles, not a second copy of it (cleat#2472).
+// scripts/gen-mssql-baseline/verify.go used to carry its own three-name list,
+// and nothing asserted the two agreed -- a dialect's baseline growing a fourth
+// file could update one consumer and leave the other silently checking a
+// population that no longer existed. See migration.BaselineFiles's doc comment
+// for the shared history and why the guard below keys on the NAME rather than
+// on a position or a count.
+var theBaseline = migration.BaselineFiles
 
 func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *testing.T) {
 	for _, d := range []struct {

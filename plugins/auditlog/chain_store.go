@@ -44,6 +44,12 @@ type chainEvent struct {
 	userAgent  string
 	durationMs int
 
+	// metadata is the literal JSON document to store, hashed as the database stores it
+	// rather than as supplied -- see appendOnce. Empty means "{}"; nothing in production
+	// sets this field yet (cleat#2534 will be the first caller), so every row appended
+	// today still stores and hashes "{}", unchanged.
+	metadata string
+
 	// id and ts are fixed when the request finished, not when the append runs: with a queue
 	// and retries the two can be seconds apart, the row should say when the request happened,
 	// and a retry has to be able to ask "did attempt one commit after all?" by id. Zero means
@@ -173,10 +179,20 @@ func lockHeadSQL(d plugin.Dialect) string {
 	return `SELECT seq, hash FROM audit_chain_heads WHERE tenant_id = $1 FOR UPDATE`
 }
 
+// insertChainedSQL deliberately omits row_hash: the hash has to cover the metadata as
+// the database stores it, which is only knowable after this INSERT -- see appendOnce
+// and cleat#2589. row_hash is nullable (migration v3) for exactly this window.
 const insertChainedSQL = `INSERT INTO audit_events
 	(id, tenant_id, timestamp, method, path, status_code, user_id, ip_address, user_agent, duration_ms, metadata,
-	 seq, prev_hash, row_hash)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+	 seq, prev_hash)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`
+
+// selectStoredMetadataSQL reads a row's metadata back exactly as stored -- the same
+// value verify.go and export.go hash -- so appendOnce can hash what a later verify will
+// re-read rather than the token the caller supplied.
+const selectStoredMetadataSQL = `SELECT metadata FROM audit_events WHERE id = $1`
+
+const setRowHashSQL = `UPDATE audit_events SET row_hash = $1 WHERE id = $2`
 
 const moveHeadSQL = `UPDATE audit_chain_heads SET seq = $1, hash = $2 WHERE tenant_id = $3 AND seq = $4`
 
@@ -278,6 +294,10 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 	if id == uuid.Nil {
 		id = uuid.New()
 	}
+	metadata := e.metadata
+	if metadata == "" {
+		metadata = "{}"
+	}
 	rec := chainRecord{
 		TenantID:   e.tenantID,
 		Seq:        head.seq + 1,
@@ -290,23 +310,42 @@ func (p *Plugin) appendOnce(ctx context.Context, e chainEvent) (err error) {
 		IPAddress:  sql.NullString{String: e.ipAddress, Valid: true},
 		UserAgent:  sql.NullString{String: e.userAgent, Valid: true},
 		DurationMs: sql.NullInt64{Int64: int64(e.durationMs), Valid: true},
-		Metadata:   sql.NullString{String: "{}", Valid: true},
+		Metadata:   sql.NullString{String: metadata, Valid: true},
 	}
+
+	// Every value is passed as the type the column holds, and the id is supplied rather
+	// than defaulted: see the note on recordAudit. No row_hash yet -- see
+	// insertChainedSQL's comment and cleat#2589.
+	_, err = tx.Exec(ctx, plugin.Rebind(insertChainedSQL, p.dialect),
+		rec.ID.String(), rec.TenantID, timestampArg(p.dialect, ts), rec.Method, rec.Path,
+		rec.StatusCode.Int64, rec.UserID.String, rec.IPAddress.String, rec.UserAgent.String, rec.DurationMs.Int64,
+		rec.Metadata.String, rec.Seq, strings.ToLower(hex.EncodeToString(prev[:])))
+	if err != nil {
+		return fmt.Errorf("audit chain: insert row: %w", err)
+	}
+
+	// Read the metadata back exactly as the database stored it -- the same value
+	// verify.go and export.go hash -- and hash THAT, not the token e.metadata supplied.
+	// canonicalJSON re-emits a number as the same token it was given, so it cannot
+	// reconcile a hash taken over the pre-insert spelling with a verify that reads the
+	// stored spelling once a dialect has rewritten it (cleat#2589).
+	var stored sql.NullString
+	if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(selectStoredMetadataSQL, p.dialect), rec.ID.String()),
+		&stored); err != nil {
+		return fmt.Errorf("audit chain: read back stored metadata: %w", err)
+	}
+	rec.Metadata = stored
+
 	sum, err := chainHash(prev, rec)
 	if err != nil {
 		return err
 	}
 	rowHash := hex.EncodeToString(sum[:])
 
-	// Every value is passed as the type the column holds, and the id is supplied rather
-	// than defaulted: see the note on recordAudit.
-	_, err = tx.Exec(ctx, plugin.Rebind(insertChainedSQL, p.dialect),
-		rec.ID.String(), rec.TenantID, timestampArg(p.dialect, ts), rec.Method, rec.Path,
-		rec.StatusCode.Int64, rec.UserID.String, rec.IPAddress.String, rec.UserAgent.String, rec.DurationMs.Int64,
-		rec.Metadata.String, rec.Seq, strings.ToLower(hex.EncodeToString(prev[:])), rowHash)
-	if err != nil {
-		return fmt.Errorf("audit chain: insert row: %w", err)
+	if _, err = tx.Exec(ctx, plugin.Rebind(setRowHashSQL, p.dialect), rowHash, rec.ID.String()); err != nil {
+		return fmt.Errorf("audit chain: set row hash: %w", err)
 	}
+
 	n, err := tx.Exec(ctx, plugin.Rebind(moveHeadSQL, p.dialect), rec.Seq, rowHash, e.tenantID, head.seq)
 	if err != nil {
 		return fmt.Errorf("audit chain: move head: %w", err)

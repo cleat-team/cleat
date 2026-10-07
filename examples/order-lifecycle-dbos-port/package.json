@@ -1,0 +1,20 @@
+{
+  "name": "order-lifecycle-dbos-port",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DBOS counterpart to examples/order-lifecycle, for cleat#2597's cleat-vs-DBOS pair harness. See README.md for why the SDK version is pinned rather than left to float.",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "node dist/order.test.js"
+  },
+  "dependencies": {
+    "@dbos-inc/dbos-sdk": "5.2.11",
+    "express": "4.22.3"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4",
+    "@types/express": "4.17.21",
+    "@types/node": "20.14.10"
+  }
+}

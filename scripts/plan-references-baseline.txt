@@ -1,0 +1,29 @@
+# §N.M references that resolve to nothing, recorded at the cleat#1727 split.
+#
+# SHRINK-ONLY. The full mode fails on any dangling reference NOT listed here,
+# and fails when a listed one starts resolving -- so this file cannot rot in
+# either direction. It is also the reason the full mode can run in CI at all.
+#
+# All five predate the split and none was introduced by it. Measured by running
+# the identical checker against the pre-split tree in a worktree: 18 dangling
+# before, 17 after, ZERO introduced. Until this file existed, ci.yml gated only
+# --self-test and said so precisely because a full-mode run was red on develop,
+# which left a NEW dangling reference unreported. cleat#2441.
+#
+# THEY ARE NOT FIXED HERE, DELIBERATELY. Two (§3.170, §3.889) look like a
+# duplicated digit for sections that do exist (3.17, 3.89) -- but repairing a
+# reference means knowing where its author meant it to point, and a plausible
+# guess invents a link rather than restoring one.
+#
+# NO --update FLAG, deliberately: one would let a NEW dangling reference be
+# absorbed here in a single command, which is the failure this check exists to
+# catch. Fixing a reference means deleting its line by hand, and the stale-entry
+# check prints the line to delete when a baselined reference starts resolving.
+#
+# Bare numbers, matching the keys the checker compares; the report renders them
+# with the section sign.
+2.59
+3.93
+3.170
+3.889
+7.4

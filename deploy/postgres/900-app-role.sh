@@ -2,7 +2,7 @@
 #
 # Give the cleat_app role a password so the workers can connect as it.
 #
-# migrations/postgres/005_app_role.sql creates cleat_app NOLOGIN and grants it
+# The schema baseline creates cleat_app NOLOGIN and grants it
 # what the engine needs. It deliberately stops there: a password does not
 # belong in a file that is committed to the repository, mounted into
 # containers, and re-applied by every worker at boot. Supplying it is the
@@ -49,7 +49,7 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-'
 	    SELECT rolsuper, rolbypassrls, rolcanlogin INTO r
 	    FROM pg_roles WHERE rolname = 'cleat_app';
 	    IF NOT FOUND THEN
-	        RAISE EXCEPTION 'cleat_app does not exist: 005_app_role.sql did not run';
+	        RAISE EXCEPTION 'cleat_app does not exist: the schema baseline has not been applied. Run the migrate step (--migrate-only), then re-run this one.';
 	    END IF;
 	    IF r.rolsuper OR r.rolbypassrls THEN
 	        RAISE EXCEPTION 'cleat_app is exempt from row-level security (superuser=% bypassrls=%)',

@@ -243,6 +243,50 @@ func (s *execSession) recordEventPersisted(rec EventRecord, checksum string) {
 // Resolution (IMPROVEMENT-PLAN 1.4 phase E)
 // ---------------------------------------------------------------------------
 
+// AmbiguityOutcome is what a resolver learned about a call whose outcome a
+// crash left unrecorded.
+//
+// THREE STATES, NOT A BOOL. An earlier version of AmbiguityResolver answered
+// with (response string, resolved bool), which can say "here is the
+// response" or "cannot say" but has no way to say "the call never reached
+// the service, it is safe to retry" -- a resolver that confirmed that had to
+// either lie (claim resolved=true with an empty response, which a workflow
+// would read as a real answer) or waste the information (report
+// resolved=false, identical to a resolver that found nothing at all).
+// cleat#1984.
+type AmbiguityOutcome int
+
+const (
+	// AmbiguityCannotSay is the zero value: the resolver has no answer. The
+	// engine reports the ambiguity to the workflow exactly as it does without
+	// a resolver. Also what a resolver error degrades to -- see ResolveCall's
+	// doc comment on err.
+	AmbiguityCannotSay AmbiguityOutcome = iota
+	// AmbiguityResolved means the call happened and response is its real
+	// outcome, to be recorded and handed to the workflow as though the
+	// original call had returned it.
+	AmbiguityResolved
+	// AmbiguityNotSent means the service has no record of the call: it never
+	// reached the service, so nothing to deduplicate against exists and
+	// retrying is safe. The engine records a retryable failure (the same
+	// classification -- and the same guest-visible CallError.Retryable()==true
+	// -- as an ordinary fresh call failure) rather than a response, and the
+	// workflow's own retry handling takes it from there. response is ignored
+	// for this outcome.
+	AmbiguityNotSent
+)
+
+func (o AmbiguityOutcome) String() string {
+	switch o {
+	case AmbiguityResolved:
+		return "resolved"
+	case AmbiguityNotSent:
+		return "not_sent"
+	default:
+		return "cannot_say"
+	}
+}
+
 // AmbiguityResolver answers the question a crash leaves open: did the call
 // actually happen, and what did it return?
 //
@@ -255,16 +299,16 @@ type AmbiguityResolver interface {
 	// ResolveCall reports the outcome of the operation identified by
 	// idempotencyKey, which is the key the original attempt sent.
 	//
-	// resolved=false means "cannot say" and is not an error: the service may
-	// have no record, or no way to look one up. The engine reports the
-	// ambiguity to the workflow, exactly as it does without a resolver.
+	// outcome=AmbiguityCannotSay is not an error: the service may have no
+	// record, or no way to look one up. The engine reports the ambiguity to
+	// the workflow, exactly as it does without a resolver.
 	//
 	// An error means the lookup itself failed. It is treated the same as
-	// "cannot say" -- an unreachable resolver must not turn a recoverable
-	// ambiguity into a different failure -- but it is logged, because a
-	// resolver that always errors is indistinguishable from one that never
-	// resolves anything.
-	ResolveCall(ctx context.Context, service, operation, idempotencyKey string) (response string, resolved bool, err error)
+	// AmbiguityCannotSay -- an unreachable resolver must not turn a
+	// recoverable ambiguity into a different failure -- but it is logged,
+	// because a resolver that always errors is indistinguishable from one
+	// that never resolves anything.
+	ResolveCall(ctx context.Context, service, operation, idempotencyKey string) (response string, outcome AmbiguityOutcome, err error)
 }
 
 // WithAmbiguityResolver sets the resolver consulted when replay finds a call
@@ -297,21 +341,248 @@ func WithAmbiguityResolver(r AmbiguityResolver) EngineOption {
 	return func(e *Engine) { e.ambiguityResolver = r }
 }
 
-// resolveAmbiguity attempts to turn a pending intent row into a completed one.
+// ---------------------------------------------------------------------------
+// Idempotency-key replay (cleat#2897, decision (c) on cleat#1984)
+// ---------------------------------------------------------------------------
+
+// IdempotencyReplayOutcome is what re-dispatching a pending call under its
+// original idempotency key found.
+type IdempotencyReplayOutcome int
+
+const (
+	// IdempotencyReplayCannotSay is the zero value: the replay attempt did
+	// not produce a definite answer (a transport error, a timeout, or any
+	// status other than the ones below). The engine falls back to today's
+	// [AMBIGUOUS] report, exactly as if no replayer were configured.
+	IdempotencyReplayCannotSay IdempotencyReplayOutcome = iota
+	// IdempotencyReplayResolved means the service answered with a definite
+	// result -- its own key table caught the duplicate and returned the
+	// original outcome, or (far less often) the retried request is itself
+	// what the service executed. Either way response is the real outcome,
+	// recorded and handed to the workflow exactly as resolveAmbiguity's
+	// AmbiguityResolved does.
+	IdempotencyReplayResolved
+	// IdempotencyReplayRetryLater means the service answered 409: a request
+	// under this exact key is still being processed. This is not a failure
+	// -- it is the mechanism working as designed, catching the window where
+	// the original attempt has not finished yet. See
+	// replayUnderOriginalKey's retry loop for the bound on how long the
+	// engine waits before giving up and reporting [AMBIGUOUS].
+	IdempotencyReplayRetryLater
+)
+
+func (o IdempotencyReplayOutcome) String() string {
+	switch o {
+	case IdempotencyReplayResolved:
+		return "resolved"
+	case IdempotencyReplayRetryLater:
+		return "retry_later"
+	default:
+		return "cannot_say"
+	}
+}
+
+// IdempotencyKeyReplayer is implemented by a ServiceCaller that can re-issue
+// an operation under its ORIGINAL idempotency key and read the service's own
+// verdict directly off the response -- as opposed to AmbiguityResolver, which
+// asks a SEPARATE lookup operation "what happened to this key". This is the
+// mechanism decision (c) on cleat#1984 asks for: the service's own key table
+// is what resolves the ambiguity, not a second query against it.
 //
-// It returns the resolved response and true only when the resolver answered
-// AND the outcome was durably recorded. A resolution that could not be
-// persisted is deliberately not used: the workflow would proceed on it now and
-// the next replay would find the row still pending and ask again, which is the
-// determinism divergence this whole stream exists to prevent.
-func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (string, bool) {
-	r := s.engine.ambiguityResolver
+// Reading the status directly (rather than through ServiceCaller.Call's
+// classified error) is deliberate and matches dbServiceCaller.ResolveCall's
+// own reasoning: the contract here IS the status code -- 409 means something
+// specific (IdempotencyReplayRetryLater) that a generic retryable/permanent
+// classification would collapse into "retryable", indistinguishable from an
+// ordinary 503.
+type IdempotencyKeyReplayer interface {
+	// ReplayUnderOriginalKey re-issues service.operation with the SAME
+	// requestJSON and idempotencyKey the original (now-ambiguous) attempt
+	// used. err is a transport/plumbing failure, not a service-level
+	// disagreement -- the service's own verdict is outcome, exactly as
+	// AmbiguityResolver.ResolveCall's err doc comment distinguishes.
+	ReplayUnderOriginalKey(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (response string, outcome IdempotencyReplayOutcome, err error)
+}
+
+// WithIdempotencyKeyReplayer sets the replayer consulted, before
+// ambiguityResolver, when replay finds a call whose outcome was never
+// recorded and whose operation is declared to support it (see
+// WithIdempotencyKeyOps). `cleat-worker` wires one through
+// --idempotency-key-ops; an embedder may supply its own. Nil (the default)
+// means this path is never tried.
+func WithIdempotencyKeyReplayer(r IdempotencyKeyReplayer) EngineOption {
+	return func(e *Engine) { e.idempotencyKeyReplayer = r }
+}
+
+// WithIdempotencyKeyOps declares which "service.operation" pairs support
+// idempotency-key replay: re-dispatching the SAME call under the SAME key on
+// an unresolved ambiguity, rather than reporting [AMBIGUOUS] or consulting a
+// separate lookup operation. Disjoint from WithAmbiguityResolver's
+// configured operations by construction -- cleat-worker's boot validation
+// refuses an operation declared for both, because they are different
+// capabilities a service either has or does not, not a precedence to choose
+// between per call.
+func WithIdempotencyKeyOps(ops map[string]bool) EngineOption {
+	return func(e *Engine) { e.idempotencyKeyOps = ops }
+}
+
+// DefaultIdempotencyKeyRetention is the bound applied when
+// WithIdempotencyKeyRetention is not set: 24 hours, matching Stripe's own
+// idempotency-key retention window -- the shortest of the providers cleat#1984
+// surveyed (Adyen holds >=7 days), and so the safer default where an operator
+// has not stated their service's own bound.
+const DefaultIdempotencyKeyRetention = 24 * time.Hour
+
+// WithIdempotencyKeyRetention bounds how long after the original call's
+// dispatch replayUnderOriginalKey will still attempt a resend under its
+// original key. Beyond a service's own key-retention window, the key has
+// been forgotten and a resend is a NEW call, not a dedupe candidate -- the
+// exact hazard cleat#1984's work item 3 names. Zero (including never calling
+// this option) means DefaultIdempotencyKeyRetention.
+func WithIdempotencyKeyRetention(d time.Duration) EngineOption {
+	return func(e *Engine) { e.idempotencyKeyRetention = d }
+}
+
+// idempotencyReplayMaxAttempts bounds how many times replayUnderOriginalKey
+// retries a 409 before giving up and falling back to [AMBIGUOUS]. This runs
+// synchronously inside replay, on a worker goroutine a workflow instance is
+// waiting on, so the bound is small and the backoff is fixed rather than
+// exponential -- a 409 means "still in flight", not "back off harder", and a
+// caller who needs longer than this should rely on --ambiguity-lookup or the
+// manual ResolveStep path instead of blocking replay on it.
+const (
+	idempotencyReplayMaxAttempts = 3
+	idempotencyReplayBackoff     = 2 * time.Second
+)
+
+// replayUnderOriginalKey attempts cleat#2897's mechanism (c): re-dispatch a
+// pending call under its ORIGINAL idempotency key, for an operation declared
+// in WithIdempotencyKeyOps, and let the service's own key table resolve it.
+//
+// Returns IdempotencyReplayResolved with the response only when the service
+// gave a definite answer. Every other outcome -- not configured for this
+// operation, retention window exceeded, a transport error, 409 exhausted its
+// retry budget -- returns IdempotencyReplayCannotSay, which the caller
+// (resolveAmbiguity) treats exactly like no replayer being configured at
+// all: falls through to ambiguityResolver (if any) and then to [AMBIGUOUS].
+func (s *execSession) replayUnderOriginalKey(ctx context.Context, rec EventRecord) (string, IdempotencyReplayOutcome) {
+	r := s.engine.idempotencyKeyReplayer
 	if r == nil {
-		return "", false
+		return "", IdempotencyReplayCannotSay
+	}
+	if !s.engine.idempotencyKeyOps[rec.Service+"."+rec.Op] {
+		return "", IdempotencyReplayCannotSay
+	}
+
+	// Scope the tenant, the same way callService does for the original
+	// dispatch (engine/idempotency.go) -- a replayer resolves secrets
+	// against this context (cleat#2911 G1), and a caller can answer "whose
+	// workflow is this" the same way it can for any other call.
+	ctx = s.tenantScopedContext(ctx)
+
+	// Retention bound (cleat#1984 item 3). rec.CreatedAt is the row's
+	// INSERT time -- set once, at WriteCallIntent, and never touched by
+	// CompleteCallIntent -- so for a still-pending row it is exactly the
+	// original dispatch time, with no new column needed: applyCreatedAt
+	// (store_events.go) already loads it for every dialect.
+	//
+	// Compared against the STORE's own clock, not this process's
+	// (cleat#2911 G2) -- see callIntentClock's doc comment (store_intent.go)
+	// for why a MySQL session whose time_zone is not UTC makes
+	// time.Since(rec.CreatedAt) silently wrong, and why asking the same
+	// store for its own "now" cancels the bias instead of correcting it. A
+	// store that cannot answer degrades to cannot-say rather than skipping
+	// the bound: an unmeasurable age must not be treated as a fresh one.
+	retention := s.engine.idempotencyKeyRetention
+	if retention <= 0 {
+		retention = DefaultIdempotencyKeyRetention
+	}
+	// A zero CreatedAt cannot be aged at all, and treating "unknown age" as
+	// "fresh" is the same fail-open mistake a missing clock would be below
+	// (cleat#2911 A1). Not reachable today -- every dialect's applyCreatedAt
+	// sets it unconditionally from a NOT NULL column -- but free to close,
+	// and a store implementation added later should not have to rediscover
+	// why this matters.
+	if rec.CreatedAt.IsZero() {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: pending row has no CreatedAt, so the retention bound cannot be checked safely",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op)
+		return "", IdempotencyReplayCannotSay
+	}
+	clk, ok := s.engine.workflowStore.(callIntentClock)
+	if !ok {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: store cannot report its own clock, so the retention bound cannot be checked safely",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op)
+		return "", IdempotencyReplayCannotSay
+	}
+	now, err := clk.ServerNow(ctx, s.workflowID)
+	if err != nil {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: could not read the store's clock to check the retention bound",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op, "error", err)
+		return "", IdempotencyReplayCannotSay
+	}
+	if age := now.Sub(rec.CreatedAt); age > retention {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: retention window exceeded",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op,
+			"age", age, "retention", retention)
+		return "", IdempotencyReplayCannotSay
 	}
 
 	key := DurableCallIdempotencyKey(s.workflowID, s.execRunID, rec.Step)
-	resp, resolved, err := r.ResolveCall(ctx, rec.Service, rec.Op, key)
+
+	for attempt := 1; attempt <= idempotencyReplayMaxAttempts; attempt++ {
+		resp, outcome, err := r.ReplayUnderOriginalKey(ctx, rec.Service, rec.Op, rec.Request, key)
+		if err != nil {
+			// A transport failure answers nothing about the call's outcome --
+			// cannot say, not an error the caller must propagate. Same
+			// reasoning as AmbiguityResolver.ResolveCall's own err doc
+			// comment: logged, because a replayer that always errors looks
+			// identical to one with nothing to say.
+			s.engine.log().WarnContext(ctx, "idempotency-key replay failed",
+				"workflow_id", s.workflowID, "step", rec.Step,
+				"service", rec.Service, "operation", rec.Op, "error", err)
+			return "", IdempotencyReplayCannotSay
+		}
+		if outcome == IdempotencyReplayResolved {
+			return resp, IdempotencyReplayResolved
+		}
+		if outcome != IdempotencyReplayRetryLater {
+			return "", IdempotencyReplayCannotSay
+		}
+		if attempt == idempotencyReplayMaxAttempts {
+			return "", IdempotencyReplayCannotSay
+		}
+		select {
+		case <-ctx.Done():
+			return "", IdempotencyReplayCannotSay
+		case <-time.After(idempotencyReplayBackoff):
+		}
+	}
+	return "", IdempotencyReplayCannotSay
+}
+
+// ambiguityNotSentMessage is the Err text recorded (and surfaced to the
+// guest) when a resolver confirms a call never reached the service. Not an
+// AMBIGUOUS message: this is a definite, retryable failure, same shape as any
+// other transient call error.
+const ambiguityNotSentMessage = "call outcome resolved: the service has no record of this call -- it never arrived, and retrying is safe"
+
+// resolveAmbiguity attempts to turn a pending intent row into a completed one.
+//
+// It returns the response and AmbiguityResolved only when the resolver found
+// a real outcome AND it was durably recorded; AmbiguityNotSent only when the
+// resolver confirmed the call never arrived AND that was durably recorded;
+// AmbiguityCannotSay otherwise. A resolution that could not be persisted is
+// deliberately not used: the workflow would proceed on it now and the next
+// replay would find the row still pending and ask again, which is the
+// determinism divergence this whole stream exists to prevent.
+func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (string, AmbiguityOutcome) {
+	r := s.engine.ambiguityResolver
+	if r == nil {
+		return "", AmbiguityCannotSay
+	}
+
+	key := DurableCallIdempotencyKey(s.workflowID, s.execRunID, rec.Step)
+	resp, outcome, err := r.ResolveCall(ctx, rec.Service, rec.Op, key)
 	if err != nil {
 		// Not fatal: an unreachable resolver leaves the ambiguity exactly as
 		// it was, which is the state this is trying to improve on and not a
@@ -320,12 +591,62 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 		s.engine.log().WarnContext(ctx, "ambiguity resolver failed",
 			"workflow_id", s.workflowID, "step", rec.Step,
 			"service", rec.Service, "operation", rec.Op, "error", err)
-		return "", false
-	}
-	if !resolved {
-		return "", false
+		return "", AmbiguityCannotSay
 	}
 
+	switch outcome {
+	case AmbiguityResolved:
+		if response, ok := s.persistAmbiguityResolution(ctx, rec, resp, "", "", false, outcome.String()); ok {
+			return response, AmbiguityResolved
+		}
+	case AmbiguityNotSent:
+		// Response stays empty: there is no real outcome to hand the
+		// workflow, only the engine's own classification of why this attempt
+		// failed. nonRetryable=false is what makes durablecalls.go's
+		// replay path (recordedFailureCode) reproduce the same retryable
+		// classification as a fresh call failure on every future replay of
+		// this now-completed row.
+		//
+		// THE RETRY THIS ENABLES USES A DIFFERENT IDEMPOTENCY KEY THAN THE
+		// ORIGINAL ATTEMPT (coordinator + cleat-review, cleat#1984 round 1).
+		// `key` above is DurableCallIdempotencyKey(workflow, run, rec.Step)
+		// -- this STEP's key. The workflow's retry is a NEW DurableCall, a
+		// NEW step, and therefore a NEW key, by the exact construction
+		// durablecalls.go's own comment on retryStep relies on to make the
+		// engine's OWN internal attempt loop safe ("every attempt carries
+		// the same idempotency key... without this the key changes at
+		// exactly the moment a duplicate is most likely"). This path does
+		// not have that protection: it hands the retry decision to the
+		// GUEST, which cannot reuse rec.Step. So if the resolver's `404`
+		// answered "not sent" because the original request was merely SLOW
+		// rather than lost, a late arrival under the OLD key and the
+		// retry's request under the NEW key can both execute. See
+		// docs/durable-calls.md's "A 404 answer is a PROMISE" paragraph for
+		// the contract requirement this places on the lookup operation.
+		//
+		// cleat#2897: this hazard is exactly what mechanism (c) --
+		// replayUnderOriginalKey, tried before this resolver -- exists to
+		// avoid for a service declared to support it: the retry there reuses
+		// THIS step's key instead of handing a new one to the guest.
+		if response, ok := s.persistAmbiguityResolution(ctx, rec, "", ambiguityNotSentMessage, ErrTransient.String(), false, outcome.String()); ok {
+			return response, AmbiguityNotSent
+		}
+	}
+	return "", AmbiguityCannotSay
+}
+
+// persistAmbiguityResolution records a pending row as completed with the
+// given outcome, shared by resolveAmbiguity (the --ambiguity-lookup path)
+// and resolveAmbiguityViaKeyReplay (cleat#2897's same-key path) so the two
+// mechanisms, which answer the same question through different means, write
+// it down the same way.
+//
+// Returns (response, true) only when the resolution was durably recorded. A
+// resolution that could not be persisted is deliberately not used: the
+// workflow would proceed on it now and the next replay would find the row
+// still pending and ask again, which is the determinism divergence this
+// whole stream exists to prevent.
+func (s *execSession) persistAmbiguityResolution(ctx context.Context, rec EventRecord, response, errMsg, errCode string, nonRetryable bool, logOutcome string) (string, bool) {
 	store, ok := s.engine.workflowStore.(callIntentResolver)
 	if !ok {
 		s.engine.log().WarnContext(ctx, "ambiguity resolved but the store cannot record it; reporting ambiguity instead",
@@ -334,12 +655,15 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 	}
 
 	completed := rec
-	completed.Response = resp
-	completed.Err = ""
 	completed.Pending = false
 	if completed.TimestampMs == 0 {
 		completed.TimestampMs = time.Now().UnixMilli()
 	}
+	completed.Response = response
+	completed.Err = errMsg
+	completed.ErrCode = errCode
+	completed.ErrNonRetryable = nonRetryable
+
 	payload, _ := eventRecordToPayload(completed)
 
 	// The replay path usually resolves the last row, where chainRepairsAfter
@@ -355,6 +679,21 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 
 	s.engine.log().InfoContext(ctx, "ambiguous call resolved",
 		"workflow_id", s.workflowID, "step", rec.Step,
-		"service", rec.Service, "operation", rec.Op)
-	return resp, true
+		"service", rec.Service, "operation", rec.Op, "outcome", logOutcome)
+	return completed.Response, true
+}
+
+// resolveAmbiguityViaKeyReplay attempts cleat#2897's mechanism (c) and
+// persists a positive result the same way resolveAmbiguity does. Returns
+// (response, true) only when replayUnderOriginalKey got a definite answer
+// AND it was durably recorded; (", false) otherwise, in which case the
+// caller falls through to resolveAmbiguity (the --ambiguity-lookup path, if
+// configured) and then to [AMBIGUOUS] -- exactly as if this mechanism were
+// not configured at all.
+func (s *execSession) resolveAmbiguityViaKeyReplay(ctx context.Context, rec EventRecord) (string, bool) {
+	resp, outcome := s.replayUnderOriginalKey(ctx, rec)
+	if outcome != IdempotencyReplayResolved {
+		return "", false
+	}
+	return s.persistAmbiguityResolution(ctx, rec, resp, "", "", false, outcome.String())
 }

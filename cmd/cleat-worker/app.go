@@ -43,6 +43,27 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
 	mux.HandleFunc("/api/schedules", api.handleSchedulesList)
+	// cleat#1986 slice 2b: where an `internal` workflow definition stops being
+	// reachable, and where it deliberately does not.
+	//
+	// IN, enforced below this line: every /api/workflows/... route, the runs
+	// list, GET /api/definitions, /api/openapi.json, and /api/instances/... . An
+	// internal definition answers the SAME 404 a route gives for a workflow that
+	// does not exist, so its existence is not disclosed; the collection routes
+	// OMIT it instead, because a list is not addressing one member.
+	//
+	// OUT, on purpose, and these are decisions rather than omissions:
+	//   * /api/admin/* and /api/dead-letters* -- operator surfaces. An operator
+	//     must still read an internal run's history, reach its DLQ entry and
+	//     cancel it. Exposure governs ingress, not administration, and a guard
+	//     here would strand exactly the runs it exists to rescue.
+	//   * /api/schedules* -- a schedule references a definition BY NAME, so a
+	//     schedule for an internal definition discloses that name. Deliberately
+	//     not filtered: a cron-triggered internal workflow is legitimate and
+	//     arguably should have a schedule, so the fix may be to hide the name
+	//     rather than the schedule. Filed as cleat#3001, which is the general
+	//     form -- an internal definition's NAME is still disclosed on routes
+	//     that do not address a workflow, /metrics among them.
 	mux.HandleFunc("/api/workflows/", api.handleWorkflows)
 	mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
 	mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
@@ -51,6 +72,17 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// Workflow definitions.
 	mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
 	mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
+
+	// The per-tenant OpenAPI document (cleat#2913). A metadata read like
+	// GET /api/definitions above -- assembled from workflow_defs, not a read
+	// through a durable run, so it is not Tier C.
+	//
+	// Registered with an exact path and no method prefix, matching the
+	// /api/workflows family it reads from: the handler answers a non-GET
+	// itself, the same way handleWorkflowsList does. A method-prefixed
+	// pattern would make that check unreachable -- a branch that can never
+	// decide anything -- so the two styles are not interchangeable here.
+	mux.HandleFunc("/api/openapi.json", api.handleOpenAPIDocument)
 
 	// Version management.
 	//
@@ -66,6 +98,16 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 
 	// Admin API endpoints: tenant-scoped (callerOwnsTarget, in api_admin.go), and gated like the rest.
 	mux.HandleFunc("/api/admin/instances/", api.adminAPIOnly(api.handleAdminRoutes))
+
+	// cleat#2169: the same operations addressed at a NAMED tenant, which is the
+	// form an operator credential uses to act on a tenant that is not its own.
+	// The id-only route above keeps its meaning and still refuses an operator, so
+	// the cross-tenant capability exists only where the URL says which tenant.
+	//
+	// Registered through adminAPIOnly like every other /api/admin/ route:
+	// TestEveryAdminRouteIsAbsentUntilTheAdminAPIIsEnabled reads this file for the
+	// registrations and fails on one that is not gated.
+	mux.HandleFunc("/api/admin/tenants/", api.adminAPIOnly(api.handleAdminRoutesForTenant))
 
 	// Plugin discovery, when the binary loaded plugins.
 	if api.plugins != nil {
@@ -83,11 +125,19 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 // off by default. While it is off the route does not exist: the answer is the 404 an unregistered /api/
 // path gets, so a caller cannot tell a gated route from a missing one.
 //
-// It exists because worker-level routes (drain, the health detail) accept ANY tenant's API key. cleat has
-// no operator identity yet (cleat#2169), so "who may drain a worker" cannot be answered per caller, and
-// the decision is made per deployment instead: the operator turns the routes on, and while they are on any
-// authenticated key can call them. The gate is checked per request, not at registration, so a test can
-// flip the flag.
+// It exists because worker-level routes (drain, the health detail) accept ANY tenant's API key. Nothing
+// HERE answers "who may drain a worker" per caller, so the decision is made per deployment instead: the
+// operator turns the routes on, and while they are on any authenticated key can call them. The gate is
+// checked per request, not at registration, so a test can flip the flag.
+//
+// cleat#2169 has since added the per-caller answer, and it is at the AUTH layer rather than here:
+// auth.OperatorMiddleware lets an operator key reach /api/admin/* and refuses it everywhere else in the
+// API. That does NOT narrow this gate, and the two are independent on purpose -- a TENANT key still calls
+// these routes while the flag is on, which is the behaviour this comment described before operators
+// existed, and changing that would break every deployment whose automation drains a worker with an
+// ordinary key. What an operator credential adds is a key that is CORRECT for these routes, not a
+// restriction on the ones already reaching them. Whether drain in particular should become operator-only
+// is a separate decision, and this comment is the place it was left open.
 func (s *apiServer) adminAPIOnly(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !*enableAdminAPI {
@@ -347,6 +397,9 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	if r.Method != http.MethodPost {

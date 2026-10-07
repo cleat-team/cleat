@@ -1,16 +1,15 @@
-// TestConcurrentAppendsGetContiguousSequences pins cleat#2260's concurrency
-// requirement: handleAppend's next-sequence read and its INSERT are two
-// separate statements (queries.go's nextSequenceForStream / insertEvent, not
-// one combined statement -- see that file's comment for why), so two
-// concurrent appenders to the same stream can read the same MAX(sequence)
-// and both attempt to write the same next value. What makes that safe is
-// event_stream's own PRIMARY KEY (tenant_id, stream_id, sequence): the
-// loser's INSERT fails with a duplicate-key error, and appendOnce's caller
-// (handleAppend's existing isPKConflict-and-retry loop) re-reads the
-// now-current MAX and retries. This test drives N real concurrent HTTP
+// TestConcurrentAppendsGetContiguousSequences pins cleat#2260/#2268's
+// concurrency requirement for the append path: N concurrent appenders to one
+// stream must all succeed, with no duplicate or skipped sequence numbers.
+// cleat#2260 first made this safe with a read-MAX-then-insert shape plus a
+// retry loop on duplicate-key errors; cleat#2268 replaced that with
+// upsertStreamHead's per-stream row lock (queries.go), which serializes
+// concurrent appenders to the SAME stream instead of racing them -- see that
+// comment for the mechanism. This test drives N real concurrent HTTP
 // requests at one stream and asserts the result is exactly what that design
 // promises: every append succeeds, and the sequences it received are
-// {1..N} -- no duplicates, no gaps.
+// {1..N} -- no duplicates, no gaps, and (cleat#2268's actual point) no
+// retries needed to get there.
 package eventstore
 
 import (

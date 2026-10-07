@@ -60,10 +60,21 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					processed   TINYINT(1) NOT NULL DEFAULT 0
 				);
 
-				CREATE INDEX idx_webhook_sources_tenant ON webhook_sources(tenant_id);
-				CREATE INDEX idx_webhook_events_source ON webhook_events(source_id);
-				CREATE INDEX idx_webhook_events_tenant ON webhook_events(tenant_id);
-				CREATE INDEX idx_webhook_events_processed ON webhook_events(processed);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND index_name = 'idx_webhook_sources_tenant');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_sources_tenant ON webhook_sources(tenant_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND index_name = 'idx_webhook_events_source');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_events_source ON webhook_events(source_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND index_name = 'idx_webhook_events_tenant');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_events_tenant ON webhook_events(tenant_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND index_name = 'idx_webhook_events_processed');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_events_processed ON webhook_events(processed)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'webhook_sources')
@@ -108,8 +119,24 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version: 3,
 			Up: `ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_workflow_id TEXT;
 	ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_name TEXT NOT NULL DEFAULT 'webhook_received';`,
-			UpMySQL: `ALTER TABLE webhook_sources ADD COLUMN signal_workflow_id VARCHAR(255);
-	ALTER TABLE webhook_sources ADD COLUMN signal_name VARCHAR(255) NOT NULL DEFAULT 'webhook_received';`,
+			// Guarded through information_schema.columns and executed via
+			// PREPARE/EXECUTE, matching v8/v9/v10's identical reasoning:
+			// MySQL DDL is not transactional, so a crash between either ALTER
+			// and plugin_migrations recording version 3 leaves a worker that
+			// re-runs a bare ADD COLUMN on its next start and gets
+			// `ERROR 1060 (42S21): Duplicate column name` and never boots.
+			// cleat#2223.
+			UpMySQL: `
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'signal_workflow_id');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_sources ADD COLUMN signal_workflow_id VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'signal_name');
+				SET @ddl := IF(@col = 0,
+					CONCAT('ALTER TABLE webhook_sources ADD COLUMN signal_name VARCHAR(255) NOT NULL DEFAULT ', CHAR(39), 'webhook_received', CHAR(39)),
+					'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'signal_workflow_id')
 				ALTER TABLE webhook_sources ADD signal_workflow_id NVARCHAR(MAX);
@@ -127,11 +154,31 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
 				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS error_msg TEXT;
 			`,
+			// Guarded through information_schema.columns and executed via
+			// PREPARE/EXECUTE, matching v8/v9/v10's identical reasoning:
+			// MySQL DDL is not transactional, so a crash between any one of
+			// these ALTERs and plugin_migrations recording version 4 leaves
+			// a worker that re-runs a bare ADD COLUMN on its next start and
+			// gets `ERROR 1060 (42S21): Duplicate column name` and never
+			// boots. cleat#2223.
 			UpMySQL: `
-				ALTER TABLE webhook_events ADD COLUMN retry_count INT DEFAULT 0;
-				ALTER TABLE webhook_events ADD COLUMN last_retry_at TIMESTAMP(6);
-				ALTER TABLE webhook_events ADD COLUMN ` + "`status`" + ` VARCHAR(255) DEFAULT 'pending';
-				ALTER TABLE webhook_events ADD COLUMN error_msg TEXT;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'retry_count');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_events ADD COLUMN retry_count INT DEFAULT 0', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'last_retry_at');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_events ADD COLUMN last_retry_at TIMESTAMP(6)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'status');
+				SET @ddl := IF(@col = 0,
+					CONCAT('ALTER TABLE webhook_events ADD COLUMN ', CHAR(96), 'status', CHAR(96), ' VARCHAR(255) DEFAULT ', CHAR(39), 'pending', CHAR(39)),
+					'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'error_msg');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_events ADD COLUMN error_msg TEXT', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_events') AND name = 'retry_count')
@@ -251,9 +298,22 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS secret_configured BOOLEAN NOT NULL DEFAULT false;
 				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS secret;
 			`,
+			// Guarded through information_schema.columns and executed via
+			// PREPARE/EXECUTE, matching v8/v9/v10's identical reasoning:
+			// MySQL DDL is not transactional, so a crash between either
+			// statement and plugin_migrations recording version 7 leaves a
+			// worker that re-runs a bare ADD COLUMN or DROP COLUMN on its
+			// next start and gets `ERROR 1060` (duplicate column) or
+			// `ERROR 1091` (can't DROP; check that column exists) and never
+			// boots. cleat#2223.
 			UpMySQL: `
-				ALTER TABLE webhook_sources ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0;
-				ALTER TABLE webhook_sources DROP COLUMN secret;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'secret_configured');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_sources ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'secret');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_sources DROP COLUMN secret', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			// v1's secret column carries DEFAULT '', which SQL Server backs
 			// with an unnamed default constraint. DROP COLUMN refuses while
@@ -377,6 +437,243 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
 					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
 				`,
+		},
+		{
+			// correlation_key_field: a tenant-declared, optional top-level
+			// JSON field name, extracted from an inbound payload at ingest
+			// time and carried as the P1 correlation key's second slot.
+			// cleat#2649, owner decision (relayed by coordinator): key1 is
+			// ALWAYS this source's own id (added automatically at ingest,
+			// no schema needed for it -- see handleIngestWebhook), so two
+			// sources declaring the same field name can never wake each
+			// other's awaiters; key2 is this field's extracted value; key3
+			// stays free. Empty string means "no extraction configured",
+			// the same empty-string-sentinel convention keySlots already
+			// uses for an unused slot -- never NULL.
+			//
+			// DEFAULT '' on every dialect, matching secret_configured's v7
+			// shape: a source created before this migration reads as
+			// "not configured" the instant the column exists, with no
+			// backfill needed -- there is no value to infer it from.
+			Version: 9,
+			Up:      `ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS correlation_key_field TEXT NOT NULL DEFAULT '';`,
+			// MySQL DDL is not transactional (see v8's UpMySQL comment for
+			// the identical crash-and-reboot hazard on a bare ADD COLUMN),
+			// so this is guarded through information_schema.columns and
+			// executed via PREPARE/EXECUTE the same way.
+			UpMySQL: `
+					SET @col := (
+						SELECT COUNT(*) FROM information_schema.columns
+						WHERE table_schema = DATABASE()
+						  AND table_name = 'webhook_sources'
+						  AND column_name = 'correlation_key_field'
+					);
+					SET @ddl := IF(@col = 0,
+						CONCAT('ALTER TABLE webhook_sources ADD COLUMN correlation_key_field VARCHAR(255) NOT NULL DEFAULT ', CHAR(39), CHAR(39)),
+						'DO 0');
+					PREPARE stmt FROM @ddl;
+					EXECUTE stmt;
+					DEALLOCATE PREPARE stmt;
+				`,
+			UpMSSQL: `
+					IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'correlation_key_field')
+					ALTER TABLE webhook_sources ADD correlation_key_field NVARCHAR(MAX) NOT NULL DEFAULT '';
+				`,
+			Down: `ALTER TABLE webhook_sources DROP COLUMN IF EXISTS correlation_key_field;`,
+			DownMySQL: `
+					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
+				`,
+			// NOT NULL DEFAULT '' above backs the column with a
+			// system-named default constraint, and a bare DROP COLUMN
+			// refuses while it exists (Msg 5074 / 4922) -- the same
+			// obstacle v7's UpMSSQL hits dropping the old `secret` column,
+			// and the same fix: look the constraint up by (table, column)
+			// in sys.default_constraints and drop it by name first. cleat
+			// review found this the hard way (cleat#2649 GAP): the broken
+			// Down doesn't merely fail to drop the column, it fails at the
+			// FIRST step of the whole Down chain (migrations run in
+			// descending order), so RunDownMigrations never even reaches
+			// v4's Down -- which is what actually drops
+			// webhook_events.error_msg. Nothing gets reversed, and the
+			// recovery Up trivially matches a clean install, which reads as
+			// "recovered" when it is really "never touched." A missing
+			// column makes the DECLARE/SELECT below set @dfname to NULL
+			// rather than error, so the constraint-drop step needs no
+			// existence guard of its own; only the column DROP does -- see
+			// v7's identical comment for why NO BEGIN/END: plugin.splitStatements
+			// shreds this on every literal ';', so each statement has to be
+			// independently complete.
+			DownMSSQL: `
+					DECLARE @dfname sysname
+					SELECT @dfname = dc.name
+						FROM sys.default_constraints dc
+						JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+						WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'correlation_key_field'
+					IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
+					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'correlation_key_field')
+					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
+				`,
+		},
+		{
+			// Retires the legacy static push-delivery path. cleat#2649/cleat#2689:
+			// signal_workflow_id/signal_name (v3) bound a source to ONE fixed
+			// workflow instance, signalled by background.go's retry sweep
+			// (processBatch/retryEvent/markRetryFailed, deleted alongside this
+			// migration). That binding cannot serve more than one concurrent
+			// workflow waiting on a shared source -- exactly the limitation
+			// cleat#2625/cleat#2649 built correlated await_webhook to remove --
+			// so once every source gets a correlated, per-order wait for free
+			// (cleat#2697), the static binding has no remaining case it serves
+			// better. cleat#2649's own founding issue called for its removal
+			// explicitly ("should be removed or explicitly retired, not left
+			// beside the new one"); cleat#2689 is that removal.
+			//
+			// retry_count/last_retry_at go too: both were written exclusively
+			// by the deleted retry sweep and read by nothing else
+			// (grep -rn 'retry_count\|last_retry_at' plugins/webhookingest --
+			// zero hits outside this file once background.go is gone).
+			// status/error_msg/processed on webhook_events are KEPT:
+			// handleDeleteSource's cancellation (routes.go) still writes
+			// status='cancelled'/processed=true/error_msg='source deleted',
+			// and GET /ingest/events still filters on processed. That is also
+			// the retire branch's fix for this issue's "audit lie" finding --
+			// not a patch to what `processed` means, but the removal of the
+			// only writer that was making an untrue claim with it
+			// ('completed' after ~10s whether or not anything had actually
+			// claimed the event through the correlated path). With that
+			// writer gone, `processed` on webhook_events now means exactly
+			// one thing: "cancelled by a source deletion" (or its DEFAULT
+			// false otherwise) -- narrower, but no longer false.
+			//
+			// NO BACKFILL, and UNLIKE v7's precedent this is not because
+			// there is nothing to preserve. v7's "0.3.0 requires a fresh
+			// database" (cleat#2058, owner decision 3) is true of the
+			// v0.2.0->v0.3.0 transition specifically: no v0.2.0 deployment
+			// had a plaintext secret to move, because the secret column
+			// didn't exist yet. It does NOT generalise to this migration --
+			// v0.3.0, v0.3.1 and v0.3.2 all shipped signal_workflow_id and a
+			// working push-to-signal path (confirmed via `git show
+			// v0.3.0:plugins/webhookingest/routes.go` and `background.go`),
+			// so a real v0.3.x deployment can have rows actively relying on
+			// it. There is no automatic backfill for "convert a static
+			// signal_workflow_id binding into a correlated await_webhook
+			// wait" -- that is a per-integration config decision only the
+			// operator can make. Owner ruling on cleat#2689/cleat#2833:
+			// RETIRE, with a mandatory pre-upgrade operator step rather than
+			// a silent drop. Before upgrading past this migration, run
+			//   SELECT id, tenant_id, signal_workflow_id, signal_name
+			//   FROM webhook_sources
+			//   WHERE signal_workflow_id IS NOT NULL AND deleted_at IS NULL
+			// on every v0.3.x deployment, and for each row, migrate that
+			// workflow onto correlated `await_webhook` (cleat#2625/#2649)
+			// before upgrading -- see CHANGELOG.md's entry for this version.
+			// A deployment that skips this step keeps working after
+			// upgrade; it just stops receiving pushed signals for any
+			// source that still had one bound, with no error and no
+			// warning, because the column carrying that binding is gone.
+			Version: 10,
+			Up: `
+				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS signal_workflow_id;
+				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS signal_name;
+				ALTER TABLE webhook_events DROP COLUMN IF EXISTS retry_count;
+				ALTER TABLE webhook_events DROP COLUMN IF EXISTS last_retry_at;
+			`,
+			// Guarded through information_schema.columns and executed via
+			// PREPARE/EXECUTE, matching v8/v9's identical reasoning: MySQL
+			// DDL is not transactional, so a crash between one of these
+			// ALTERs and plugin_migrations recording version 10 must not
+			// leave a worker that re-runs a plain DROP COLUMN into
+			// `ERROR 1091 (42000): can't DROP '...'; check that column/key
+			// exists` and never boots. (MySQL 8.0.29+ accepts `DROP COLUMN
+			// IF EXISTS` directly; this repo's stated floor is MySQL 8.0+
+			// with no minor-version pin, and MariaDB 10.6, so the portable
+			// guard is used rather than syntax only some supported versions
+			// have.)
+			UpMySQL: `
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'signal_workflow_id');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_sources DROP COLUMN signal_workflow_id', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'signal_name');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_sources DROP COLUMN signal_name', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'retry_count');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_events DROP COLUMN retry_count', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'last_retry_at');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_events DROP COLUMN last_retry_at', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			// signal_name and retry_count carry a DEFAULT on this dialect
+			// (v3/v4's UpMSSQL), backed by an unnamed default constraint --
+			// the same obstacle v7/v9 hit dropping secret/correlation_key_field,
+			// and the same fix: find the constraint by (table, column) in
+			// sys.default_constraints and drop it by name before the column
+			// can go. signal_workflow_id and last_retry_at carry no default
+			// on this dialect, so they need no such step. NO BEGIN/END,
+			// matching v7/v9's identical reasoning: plugin.splitStatements
+			// shreds this on every literal ';' with no awareness of T-SQL
+			// block structure, so each statement must be independently
+			// complete.
+			UpMSSQL: `
+				DECLARE @dfname sysname
+				SELECT @dfname = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'signal_name'
+				IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'signal_workflow_id')
+				ALTER TABLE webhook_sources DROP COLUMN signal_workflow_id;
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'signal_name')
+				ALTER TABLE webhook_sources DROP COLUMN signal_name;
+
+				DECLARE @dfname2 sysname
+				SELECT @dfname2 = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_events') AND c.name = 'retry_count'
+				IF @dfname2 IS NOT NULL EXEC('ALTER TABLE webhook_events DROP CONSTRAINT [' + @dfname2 + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_events') AND name = 'retry_count')
+				ALTER TABLE webhook_events DROP COLUMN retry_count;
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_events') AND name = 'last_retry_at')
+				ALTER TABLE webhook_events DROP COLUMN last_retry_at;
+			`,
+			// Down restores the SCHEMA, not the data -- matching v7/v9's own
+			// precedent: whatever a source's signal_workflow_id/signal_name
+			// held, or an event's retry_count/last_retry_at, is gone the
+			// moment Up runs. signal_name's DEFAULT 'webhook_received' and
+			// retry_count's DEFAULT 0 are restored so a re-added column
+			// behaves like it would have before this migration existed for
+			// any row inserted afterward.
+			Down: `
+				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_workflow_id TEXT;
+				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_name TEXT NOT NULL DEFAULT 'webhook_received';
+				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
+				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS last_retry_at TIMESTAMPTZ;
+			`,
+			DownMySQL: `
+				ALTER TABLE webhook_sources ADD COLUMN signal_workflow_id VARCHAR(255);
+				ALTER TABLE webhook_sources ADD COLUMN signal_name VARCHAR(255) NOT NULL DEFAULT 'webhook_received';
+				ALTER TABLE webhook_events ADD COLUMN retry_count INT DEFAULT 0;
+				ALTER TABLE webhook_events ADD COLUMN last_retry_at TIMESTAMP(6);
+			`,
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'signal_workflow_id')
+				ALTER TABLE webhook_sources ADD signal_workflow_id NVARCHAR(MAX);
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'signal_name')
+				ALTER TABLE webhook_sources ADD signal_name NVARCHAR(MAX) NOT NULL DEFAULT 'webhook_received';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_events') AND name = 'retry_count')
+				ALTER TABLE webhook_events ADD retry_count INT DEFAULT 0;
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_events') AND name = 'last_retry_at')
+				ALTER TABLE webhook_events ADD last_retry_at DATETIMEOFFSET;
+			`,
 		},
 	}
 }

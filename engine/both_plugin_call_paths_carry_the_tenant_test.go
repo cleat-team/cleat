@@ -143,3 +143,83 @@ func TestAnUnparseableTenantDoesNotFailThePluginCall(t *testing.T) {
 		t.Fatal("a tenant reached the plugin from a value that does not parse as a UUID")
 	}
 }
+
+// TestBothPluginCallPathsCarryStepAndRunID is cleat#2614, the same shape as
+// TestBothPluginCallPathsCarryTheTenant above: pluginCallContext is one
+// function reached from two call sites, and a field added to it can still be
+// threaded through only one of them if the second call site isn't updated.
+// stepCount is set to a nonzero value here on purpose -- asserting only the
+// zero value would pass whether or not the field was ever wired up.
+func TestBothPluginCallPathsCarryStepAndRunID(t *testing.T) {
+	const runID = "wf-2614"
+	const step = 7
+
+	// --- the unary path -------------------------------------------------
+	var unaryCC *plugin.CallContext
+	pr := NewPluginRegistry()
+	pr.RegisterWithPolicy("test-plugin", "unary",
+		func(ctx context.Context, inputJSON string) (string, error) {
+			unaryCC = plugin.CallContextFromContext(ctx)
+			return `{}`, nil
+		}, ReplayPolicy{}, nil)
+
+	s := newTestExecSession()
+	s.engine.pluginRegistry = pr
+	s.execRunID = runID
+	s.stepCount = step
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	if res := s.PluginCall(ctx, nil, "test-plugin", "unary", `{}`, 0, 255); byte(res&0xFF) != 0 {
+		t.Fatalf("the unary call itself failed (errCode %d), so its context assertion "+
+			"would be about a call that did not happen", byte(res&0xFF))
+	}
+
+	// --- the streaming path ---------------------------------------------
+	var streamCC *plugin.CallContext
+	var streamRan bool
+	psr := NewPluginStreamRegistry()
+	if err := psr.Register("test-plugin", "streaming",
+		func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+			streamCC = plugin.CallContextFromContext(ctx)
+			streamRan = true
+			ch := make(chan plugin.StreamEvent, 1)
+			close(ch)
+			return ch, nil
+		}); err != nil {
+		t.Fatalf("registering the streaming function: %v", err)
+	}
+
+	s2 := newTestExecSession()
+	s2.engine.pluginStreamRegistry = psr
+	s2.execRunID = runID
+	s2.stepCount = step
+	buf2 := make([]byte, 256)
+	ctx2 := contextWithRawMemBuf(context.Background(), buf2)
+	s2.PluginCallStreaming(ctx2, nil, "test-plugin", "streaming", `{}`, 0, 255)
+
+	if !streamRan {
+		t.Fatal("the streaming plugin function was never invoked, so nothing below " +
+			"is a measurement of what its context carried")
+	}
+
+	// --- both, and say which ---------------------------------------------
+	for _, c := range []struct {
+		path string
+		cc   *plugin.CallContext
+	}{
+		{"PluginCall", unaryCC},
+		{"PluginCallStreaming", streamCC},
+	} {
+		if c.cc == nil {
+			t.Errorf("%s handed the plugin no CallContext at all", c.path)
+			continue
+		}
+		if c.cc.RunID != runID {
+			t.Errorf("%s: RunID = %q, want %q", c.path, c.cc.RunID, runID)
+		}
+		if c.cc.Step != step {
+			t.Errorf("%s: Step = %d, want %d", c.path, c.cc.Step, step)
+		}
+	}
+}

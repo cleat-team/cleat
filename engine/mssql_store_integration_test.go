@@ -392,7 +392,7 @@ func TestMSSQLIntegration_DeadLetterAndRetry(t *testing.T) {
 	}
 
 	// Move to dead letter queue.
-	err = store.MoveToDeadLetterQueue(ctx, wfID, "worker-dlq", wf.Generation, "DLQ reason", "DLQ_CODE", "op_dlq")
+	err = store.MoveToDeadLetterQueue(ctx, wfID, "worker-dlq", wf.Generation, "DLQ reason", "DLQ_CODE", "op_dlq", nil)
 	if err != nil {
 		t.Fatalf("MoveToDeadLetterQueue: %v", err)
 	}
@@ -1195,13 +1195,57 @@ func TestMSSQLIntegration_ReapExpiredConcurrencyKeys(t *testing.T) {
 		t.Fatalf("insert expired concurrency key: %v", err)
 	}
 
-	// Reap should delete the expired key.
+	// And a live, unexpired key for the same workflow, which the reap must NOT
+	// take. The pair is what makes the two assertions below express "the reap
+	// took its target and nothing else" -- which is what the count used to
+	// proxy for, and could not, because the count is a claim about the whole
+	// table (cleat#2922: this job's command matched at 10 and at 4 on a shared
+	// database, and at 1 on a fresh one).
+	liveHash := sha256Of("live-key")
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		VALUES (@p1, 'live-key', @p2, DATEADD(HOUR, 1, SYSUTCDATETIME()), '00000000-0000-0000-0000-000000000000')
+	`, liveHash, wfID)
+	if err != nil {
+		t.Fatalf("insert live concurrency key: %v", err)
+	}
+
 	n, err := store.ReapExpiredConcurrencyKeys(ctx)
 	if err != nil {
 		t.Fatalf("ReapExpiredConcurrencyKeys: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("reaped %d keys, want 1", n)
+	t.Logf("ReapExpiredConcurrencyKeys reaped %d key(s) across the database", n)
+
+	// Asserted BY KEY, not by count. A count is a verdict about every row in
+	// the table; this test owns two of them.
+	remaining := map[string]int{}
+	rows, err := db.QueryContext(ctx,
+		`SELECT key_hash, COUNT(*) FROM concurrency_keys WHERE key_hash IN (@p1, @p2) GROUP BY key_hash`,
+		hash, liveHash)
+	if err != nil {
+		t.Fatalf("count the two keys after the reap: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var h string
+		var c int
+		if err := rows.Scan(&h, &c); err != nil {
+			t.Fatalf("scan key counts: %v", err)
+		}
+		remaining[h] = c
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read key counts: %v", err)
+	}
+
+	if remaining[string(hash)] != 0 {
+		t.Errorf("the expired key this test inserted survived the reap (%d row(s) remain): "+
+			"the reap did not delete an expired key", remaining[string(hash)])
+	}
+	if remaining[string(liveHash)] != 1 {
+		t.Errorf("the live, unexpired key this test inserted did not survive the reap "+
+			"(%d row(s) remain, want 1): the reap took a key whose workflow is running and "+
+			"whose TTL has not passed", remaining[string(liveHash)])
 	}
 }
 

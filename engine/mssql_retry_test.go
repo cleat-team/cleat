@@ -9,25 +9,35 @@ import (
 	"time"
 )
 
-func TestMSSQLRetry_SuccessFirstAttempt(t *testing.T) {
+// These tests targeted mssqlRetry until cleat#2758 deleted it (ConsumeSignal
+// was its only production caller; see mssql_retry.go's doc comment on
+// withRollbackGuaranteedRetry). Retargeted to withRollbackGuaranteedRetry,
+// the surviving retry primitive with the identical loop shape, so the
+// backoff/exhaustion/cancellation coverage isn't lost along with the dead
+// function. Triggers that relied on mssqlRetry's wider gate (timeouts,
+// connection resets) were swapped for ones isMSSQLRollbackGuaranteed also
+// accepts (deadlock, snapshot conflict); TestWithRollbackGuaranteedRetry_UnknownOutcomeNotRetried
+// is new and asserts the one behavior that distinguishes the two gates.
+
+func TestWithRollbackGuaranteedRetry_SuccessFirstAttempt(t *testing.T) {
 	ctx := context.Background()
 	calls := 0
-	err := mssqlRetry(ctx, "test-op", 3, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, time.Millisecond, func() error {
 		calls++
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("mssqlRetry: unexpected error: %v", err)
+		t.Fatalf("withRollbackGuaranteedRetry: unexpected error: %v", err)
 	}
 	if calls != 1 {
 		t.Errorf("expected 1 call, got %d", calls)
 	}
 }
 
-func TestMSSQLRetry_SuccessAfterTransientErrors(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_SuccessAfterRollbackGuaranteedErrors(t *testing.T) {
 	ctx := context.Background()
 	calls := 0
-	err := mssqlRetry(ctx, "test-op", 3, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, time.Millisecond, func() error {
 		calls++
 		if calls < 3 {
 			return fmt.Errorf("deadlock victim")
@@ -35,18 +45,18 @@ func TestMSSQLRetry_SuccessAfterTransientErrors(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("mssqlRetry: unexpected error after %d calls: %v", calls, err)
+		t.Fatalf("withRollbackGuaranteedRetry: unexpected error after %d calls: %v", calls, err)
 	}
 	if calls != 3 {
 		t.Errorf("expected 3 calls, got %d", calls)
 	}
 }
 
-func TestMSSQLRetry_PermanentErrorNoRetry(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_PermanentErrorNoRetry(t *testing.T) {
 	ctx := context.Background()
 	permanentErr := fmt.Errorf("syntax error near SELECT")
 	calls := 0
-	err := mssqlRetry(ctx, "test-op", 3, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, time.Millisecond, func() error {
 		calls++
 		return permanentErr
 	})
@@ -61,11 +71,35 @@ func TestMSSQLRetry_PermanentErrorNoRetry(t *testing.T) {
 	}
 }
 
-func TestMSSQLRetry_ExhaustedRetries(t *testing.T) {
+// TestWithRollbackGuaranteedRetry_UnknownOutcomeNotRetried is the test that
+// did not exist for mssqlRetry, because mssqlRetry retried this case --
+// that was the bug. A timeout or dropped connection leaves the outcome
+// unknown, so withRollbackGuaranteedRetry must return it unretried rather
+// than replay a possibly-already-applied statement.
+func TestWithRollbackGuaranteedRetry_UnknownOutcomeNotRetried(t *testing.T) {
 	ctx := context.Background()
-	transientErr := fmt.Errorf("timeout expired error 258")
+	unknownOutcomeErr := fmt.Errorf("connection reset by peer")
 	calls := 0
-	err := mssqlRetry(ctx, "test-op", 2, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, time.Millisecond, func() error {
+		calls++
+		return unknownOutcomeErr
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, unknownOutcomeErr) {
+		t.Errorf("expected unknownOutcomeErr, got %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call (no retry on unknown-outcome error), got %d", calls)
+	}
+}
+
+func TestWithRollbackGuaranteedRetry_ExhaustedRetries(t *testing.T) {
+	ctx := context.Background()
+	transientErr := fmt.Errorf("deadlock victim")
+	calls := 0
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 2, time.Millisecond, func() error {
 		calls++
 		return transientErr
 	})
@@ -84,7 +118,7 @@ func TestMSSQLRetry_ExhaustedRetries(t *testing.T) {
 	}
 }
 
-func TestMSSQLRetry_ContextCancelledDuringBackoff(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_ContextCancelledDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
 
@@ -95,9 +129,9 @@ func TestMSSQLRetry_ContextCancelledDuringBackoff(t *testing.T) {
 		cancel()
 	}()
 
-	err := mssqlRetry(ctx, "test-op", 3, 50*time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, 50*time.Millisecond, func() error {
 		calls++
-		return fmt.Errorf("connection reset by peer") // transient, triggers retry
+		return fmt.Errorf("deadlock victim") // rollback-guaranteed, triggers retry
 	})
 	if err == nil {
 		t.Fatal("expected context cancellation error, got nil")
@@ -110,11 +144,11 @@ func TestMSSQLRetry_ContextCancelledDuringBackoff(t *testing.T) {
 	}
 }
 
-func TestMSSQLRetry_AlreadyCancelledContext(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_AlreadyCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	err := mssqlRetry(ctx, "test-op", 3, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, time.Millisecond, func() error {
 		return fmt.Errorf("deadlock victim")
 	})
 	if err == nil {
@@ -125,15 +159,15 @@ func TestMSSQLRetry_AlreadyCancelledContext(t *testing.T) {
 	}
 }
 
-func TestMSSQLRetry_MixedErrorsStopsOnPermanent(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_MixedErrorsStopsOnPermanent(t *testing.T) {
 	ctx := context.Background()
 	calls := 0
 	permanentErr := fmt.Errorf("violation of PRIMARY KEY constraint error 2627")
 
-	err := mssqlRetry(ctx, "test-op", 3, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, time.Millisecond, func() error {
 		calls++
 		if calls == 1 {
-			return fmt.Errorf("deadlock victim") // transient
+			return fmt.Errorf("deadlock victim") // rollback-guaranteed
 		}
 		return permanentErr // non-retryable
 	})
@@ -148,11 +182,11 @@ func TestMSSQLRetry_MixedErrorsStopsOnPermanent(t *testing.T) {
 	}
 }
 
-func TestMSSQLRetry_MaxRetriesZero(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_MaxRetriesZero(t *testing.T) {
 	ctx := context.Background()
 	transientErr := fmt.Errorf("deadlock victim")
 	calls := 0
-	err := mssqlRetry(ctx, "test-op", 0, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 0, time.Millisecond, func() error {
 		calls++
 		return transientErr
 	})
@@ -168,12 +202,12 @@ func TestMSSQLRetry_MaxRetriesZero(t *testing.T) {
 	}
 }
 
-func TestMSSQLRetry_DeadlineExceededDuringBackoff(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_DeadlineExceededDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(5*time.Millisecond))
 	defer cancel()
 
-	err := mssqlRetry(ctx, "test-op", 3, 50*time.Millisecond, func() error {
-		return fmt.Errorf("snapshot isolation update conflict error 3960") // transient
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, 50*time.Millisecond, func() error {
+		return fmt.Errorf("snapshot isolation update conflict error 3960") // rollback-guaranteed
 	})
 	if err == nil {
 		t.Fatal("expected deadline exceeded error, got nil")
@@ -183,14 +217,14 @@ func TestMSSQLRetry_DeadlineExceededDuringBackoff(t *testing.T) {
 	}
 }
 
-func TestMSSQLRetry_NilErrorFromFn(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_NilErrorFromFn(t *testing.T) {
 	// Verify that a nil error from the function (not just no error) is handled.
 	ctx := context.Background()
 	calls := 0
-	err := mssqlRetry(ctx, "test-op", 2, time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 2, time.Millisecond, func() error {
 		calls++
 		if calls == 1 {
-			return fmt.Errorf("connection reset by peer") // transient, retry
+			return fmt.Errorf("deadlock victim") // rollback-guaranteed, retry
 		}
 		return nil // explicit nil
 	})
@@ -202,16 +236,16 @@ func TestMSSQLRetry_NilErrorFromFn(t *testing.T) {
 	}
 }
 
-// TestMSSQLRetry_ExponentialBackoffShape verifies that backoff increases
+// TestWithRollbackGuaranteedRetry_ExponentialBackoffShape verifies that backoff increases
 // exponentially by checking that the total elapsed time with a known baseDelay
 // is within expected bounds. With maxRetries=3 and baseDelay=10ms:
 // attempt 0: immediate, attempt 1: 10ms, attempt 2: 20ms, attempt 3: 40ms
 // Total = ~70ms. We check it's >= 30ms (generous lower bound) and < 500ms.
-func TestMSSQLRetry_ExponentialBackoffShape(t *testing.T) {
+func TestWithRollbackGuaranteedRetry_ExponentialBackoffShape(t *testing.T) {
 	ctx := context.Background()
 	transientErr := fmt.Errorf("deadlock victim")
 	start := time.Now()
-	err := mssqlRetry(ctx, "test-op", 3, 10*time.Millisecond, func() error {
+	err := withRollbackGuaranteedRetry(ctx, "test-op", 3, 10*time.Millisecond, func() error {
 		return transientErr
 	})
 	elapsed := time.Since(start)

@@ -32,6 +32,7 @@ admin.orgs	exempt	cleat#1898; identity only (created_at, no updated_at) -- it gr
 admin.plugin_tables	exempt	registry of plugin-owned tables, not operator-created
 public.plugin_defs	exempt	derived from plugin binaries, not operator-created
 admin.tenant_api_keys	member
+admin.operator_api_keys	member	cleat#2169; an operator credential, same shape as admin.tenant_api_keys minus tenant_id
 admin.tenant_roles	member
 public.workflow_defs	member
 public.workflow_schedules	member
@@ -57,3 +58,4 @@ public.workflow_memory_samples	not-an-entity	stats
 public.workflow_memory_stats	not-an-entity	stats
 admin.workers	not-an-entity	infrastructure; a worker registers itself
 admin.rls_predicate_form	not-an-entity	SQL Server only; single-row config, CHECK (only_row = 1), read from engine/mssql_schedules.go
+public.payload_encryption_ever_enabled	not-an-entity	PostgreSQL only; single-row marker, CHECK (singleton), cleat#2324, read from engine/store_payload_encryption_state.go

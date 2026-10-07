@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -552,39 +553,160 @@ func (s *Saga) AddStepCall(c StepCall) *Saga {
 		compensate)
 }
 
+// SagaResult is what a saga did, returned by RunWithResult and published as
+// query state on the same call. The three lists are named for the three things
+// that can happen to a step, and their overlap is deliberate rather than a
+// defect:
+//
+//	Completed     every step whose Forward returned nil
+//	Unwound       ⊆ Completed -- compensations that ran AND SUCCEEDED
+//	UnwindFailed  ⊆ Completed -- compensations that ran and FAILED
+//
+// Unwound and UnwindFailed are disjoint from each other, because a compensation
+// that ran and failed has undone nothing. A step that completed and was later
+// undone appears in Completed AND Unwound, which is exactly what lets a caller
+// report "these ran, and these were rolled back".
+//
+// It exists so that a caller does not have to keep its own tally to report
+// what happened. Before cleat#2627 an author who wanted to show "these steps
+// ran, these were undone" built three slices in closures threaded through
+// every step, purely because Run kept that bookkeeping to itself.
+type SagaResult struct {
+	// Completed are the steps whose Forward returned nil, in execution order.
+	Completed []string
+
+	// Unwound are the steps whose compensation RAN AND SUCCEEDED, in the order
+	// they were undone -- which is the reverse of Completed, and is the order a
+	// reader wants ("what was rolled back, and in what order").
+	Unwound []string
+
+	// UnwindFailed are the steps whose compensation was attempted and returned
+	// an error. Deliberately disjoint from Unwound: a compensation that runs and
+	// fails has NOT undone its step, and reporting it as unwound would say the
+	// opposite of what happened.
+	UnwindFailed []string
+}
+
+// sagaQueryState keys. Unexported deliberately: they are a contract a poller
+// reads by name, not an API a caller compiles against, so a name change is a
+// breaking change to the published state and not to anyone's build.
+const (
+	// sagaCurrentStep is published before each step's Forward runs. It carries
+	// the step's Description, which is the string the author already passed to
+	// AddStep -- so publishing costs the author nothing to set up. The trade is
+	// vocabulary: a hand-written SetQueryState("status", "charging") reads
+	// better than the step's own name, and an author who wants that keeps
+	// writing it (it is app-specific state, not a saga concept).
+	sagaCurrentStep = "current_step"
+
+	// sagaFailedStep is published when a step's Forward returns an error.
+	sagaFailedStep = "failed_step"
+)
+
 // Run executes all forward steps in order. If any step fails, previously
 // completed steps are compensated in reverse order. Nil compensate functions
 // are skipped. The first forward error encountered is returned.
+//
+// IT PUBLISHES AS IT GOES (cleat#2627) -- current_step, failed_step, status and
+// the compensation lists -- and delegates to RunWithResult, which is where the
+// full published contract is documented. The signature is unchanged on
+// purpose: publishing is a side effect every caller wants, while the RESULT is
+// something only some callers want, so growing this return would have forced a
+// mechanical edit at every existing call site and a break for every external
+// user, to buy nothing this shape does not already give.
 func (s *Saga) Run(h HostCalls) error {
-	var completed int
+	_, err := s.RunWithResult(h)
+	return err
+}
+
+// RunWithResult is Run plus what it did: the steps completed, the steps
+// unwound, and the steps whose compensation failed. Prefer Run where the result
+// is not needed; it is the same execution either way, and both publish the same
+// query state.
+//
+// PUBLISHING IS THE POINT, not a side effect (cleat#2627). A caller that polls
+// this run -- the order-lifecycle backend, a UI, an operator -- can see which
+// step is running and, on failure, what was unwound, without the workflow
+// author writing a SetQueryState at every step boundary:
+//
+//	current_step   before each step's Forward: the step's Description
+//	failed_step    on a step's Forward error: the step's Description
+//	status         "done" on success, "failed" on a forward error
+//	compensated / compensated_count   the Unwound list, comma-joined and counted
+//	unwind_failed / unwind_failed_count   the UnwindFailed list, same shape
+//
+// THE PUBLISHED CONTRACT IS THE ONE order-lifecycle ALREADY HAD, with one
+// deliberate substitution. `failed_step`, `status`, `compensated`/
+// `compensated_count` and `unwind_failed`/`unwind_failed_count` carry the same
+// keys and the same values the scenario wrote by hand at its step boundaries,
+// so this moves that publication into the SDK rather than inventing a second
+// vocabulary beside it. The substitution is the step-in-progress key: the
+// scenario published `status` = a human word ("charging"), which is
+// app-specific vocabulary the saga cannot know, so the saga publishes
+// `current_step` = the step's own Description instead. An author who wants the
+// nicer word still writes it -- that one is theirs, not a saga concept. The
+// success path clears `compensated` rather than deleting the key, so a poller
+// that read it before still finds it.
+//
+// The returned SagaResult is the same data, for a caller that needs it
+// programmatically rather than as published text -- so neither the publication
+// nor the return has to be reconstructed by the caller.
+func (s *Saga) RunWithResult(h HostCalls) (*SagaResult, error) {
+	res := &SagaResult{}
 	for i, step := range s.steps {
 		h.LogKV("saga: executing step", "step", i, "description", step.Description)
+		h.SetQueryState(sagaCurrentStep, step.Description)
 		_, err := step.Forward(h)
 		if err != nil {
+			h.SetQueryState("status", "failed")
+			h.SetQueryState(sagaFailedStep, step.Description)
 			h.LogKV("saga: step failed, compensating",
 				"step", i,
 				"description", step.Description,
 				"error", err.Error(),
-				"completed_count", completed)
+				"completed_count", len(res.Completed))
 			var compErr error
-			for j := completed - 1; j >= 0; j-- {
+			for j := len(res.Completed) - 1; j >= 0; j-- {
 				cs := s.steps[j]
 				if cs.Compensate == nil {
 					continue
 				}
 				h.LogKV("saga: compensating", "step", j, "description", cs.Description)
 				if cerr := cs.Compensate(h); cerr != nil {
+					res.UnwindFailed = append(res.UnwindFailed, cs.Description)
 					compErr = errors.Join(compErr, cerr)
+					continue
 				}
+				res.Unwound = append(res.Unwound, cs.Description)
 			}
+			// Published after the compensations, not before, because these are
+			// the lists the compensations produced.
+			h.SetQueryState("compensated", strings.Join(res.Unwound, ","))
+			h.SetQueryState("compensated_count", strconv.Itoa(len(res.Unwound)))
+			h.SetQueryState("unwind_failed", strings.Join(res.UnwindFailed, ","))
+			h.SetQueryState("unwind_failed_count", strconv.Itoa(len(res.UnwindFailed)))
 			if compErr != nil {
-				return fmt.Errorf("saga: %w", errors.Join(err, compErr))
+				return res, fmt.Errorf("saga: %w", errors.Join(err, compErr))
 			}
-			return fmt.Errorf("saga: %w", err)
+			return res, fmt.Errorf("saga: %w", err)
 		}
-		completed++
+		res.Completed = append(res.Completed, step.Description)
 	}
-	return nil
+	h.SetQueryState("status", "done")
+	h.SetQueryState("compensated", "")
+	h.SetQueryState("compensated_count", "0")
+	// cleat#2967. current_step self-heals on a second saga (the next run
+	// overwrites it on its first step), but failed_step/unwind_failed have
+	// nothing that overwrites them -- without this clear, a saga that runs
+	// after an earlier failed one on the same workflow publishes status=done
+	// beside the FIRST saga's failed_step and unwind_failed, a confident wrong
+	// answer for anyone polling. Empty rather than deleted, for the same
+	// reason the compensated clear above is: a poller that read the key
+	// during the run still finds it afterwards.
+	h.SetQueryState(sagaFailedStep, "")
+	h.SetQueryState("unwind_failed", "")
+	h.SetQueryState("unwind_failed_count", "0")
+	return res, nil
 }
 
 // AddParallel adds multiple steps that execute concurrently. If any step

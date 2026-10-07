@@ -582,6 +582,9 @@ func TestPostgresStore_GetWorkflowDef_Success(t *testing.T) {
 				createdAt,             // created_at
 				nil,                   // disabled_at
 				false,                 // gc_eligible
+				nil,                   // entry_point_schemas
+				false,                 // input_validation_disabled
+				"auth",                // exposure
 			}},
 		},
 	}, nil)
@@ -621,6 +624,9 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 				createdAt,   // created_at
 				nil,         // disabled_at
 				false,       // gc_eligible
+				nil,         // entry_point_schemas
+				false,       // input_validation_disabled
+				"auth",      // exposure
 			}},
 		},
 	}, nil)
@@ -847,8 +853,8 @@ func TestPostgresStore_ListWorkflowDefs_All(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, createdAt, true},
+				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil, false, "auth"},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, createdAt, true, nil, false, "auth"},
 			},
 		},
 	}, nil)
@@ -876,7 +882,7 @@ func TestPostgresStore_ListWorkflowDefs_ByName(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil, false, "auth"},
 			},
 		},
 	}, nil)
@@ -901,7 +907,7 @@ func TestPostgresStore_ListWorkflowDefs_NilPluginDeps(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, nil, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, nil, false, nil, false, "auth"},
 			},
 		},
 	}, nil)
@@ -2875,7 +2881,7 @@ func TestPostgresStore_RemoveRoutingRule_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RemoveRoutingRule(testCtx, "rule-uuid")
+	err := store.RemoveRoutingRule(testCtx, "test-wf", "rule-uuid")
 	if err != nil {
 		t.Fatalf("RemoveRoutingRule: %v", err)
 	}
@@ -2886,7 +2892,7 @@ func TestPostgresStore_RemoveRoutingRule_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RemoveRoutingRule(testCtx, "rule-uuid")
+	err := store.RemoveRoutingRule(testCtx, "test-wf", "rule-uuid")
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -2899,7 +2905,7 @@ func TestPostgresStore_RemoveRoutingRule_ExecError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RemoveRoutingRule(testCtx, "rule-uuid")
+	err := store.RemoveRoutingRule(testCtx, "test-wf", "rule-uuid")
 	if err == nil {
 		t.Fatal("expected error from delete failure")
 	}
@@ -3626,7 +3632,7 @@ func TestPostgresStore_MoveToDeadLetterQueue_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 1, "err", "ERR", "op")
+	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 1, "err", "ERR", "op", nil)
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -3969,7 +3975,7 @@ func TestPostgresStore_CreatePromise_BeginError(t *testing.T) {
 func TestPostgresStore_ResolvePromise_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 
@@ -3996,7 +4002,7 @@ func TestPostgresStore_ResolvePromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_ResolvePromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 
@@ -4028,7 +4034,7 @@ func TestPostgresStore_ResolvePromise_BeginError(t *testing.T) {
 func TestPostgresStore_RejectPromise_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 
@@ -4055,7 +4061,7 @@ func TestPostgresStore_RejectPromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_RejectPromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances SET next_wake_at", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 

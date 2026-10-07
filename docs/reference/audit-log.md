@@ -17,8 +17,85 @@ same list that is exempt from authentication. `GET /api/admin/health` needs a cr
 
 `method`, `path`, `status_code`, `user_id` (the OAuth subject when the request carried one, else
 empty), `ip_address`, `user_agent`, `duration_ms` and `timestamp`, plus the chain columns
-`seq`, `prev_hash` and `row_hash`. `metadata` is always `{}` today; it is part of the hash so a
-later use of the column is already covered.
+`seq`, `prev_hash` and `row_hash`. `metadata` was always `{}` before cleat#2534; see
+*Recording from a workflow* below for the first thing that writes anything else there.
+
+## Recording from a workflow
+
+A workflow can append to its own tenant's chain directly, with the `record_event` host
+function `plugins/auditlog/host_functions.go` registers:
+
+    { "event_type": "tenant.suspended", "details": {"reason": "trial_expired"}, "event_id": "suspend-once" }
+    -> { "recorded": true }
+
+`details` is optional and, when given, must be a JSON **object** (not a string, number, array
+or bare `true`/`false`) -- the same shape `metadata` has held since the chain existed, and a
+consumer reading the column back is entitled to keep assuming that. `null` is treated as
+omitted. `event_type` is required and has no fixed vocabulary; pick short, stable, dotted
+names (`tenant.suspended`, not a sentence) -- see *Field reuse* below for why. `event_id` is
+optional -- `record_event` is deduplicated **by default** (see *The AtLeastOnce residual*
+below), and `event_id` overrides the default key with a caller-chosen one.
+
+This call is **synchronous**, not queued: unlike an HTTP request's audit row (see *Delivery*
+below), it does not return until the row has committed. It uses the exact same transaction and
+per-tenant head lock a queued HTTP append would (`chain_store.go`'s `appendChained`), so the
+two interleave safely with no second append path.
+
+**Field reuse.** A workflow-sourced row has no HTTP request to describe, so it reuses the
+request-shaped columns rather than adding new ones: `method` is always the fixed string
+`workflow:record_event`, `path` holds `event_type`, `user_id` holds the calling workflow's id,
+and `status_code`, `duration_ms`, `ip_address` and `user_agent` are all present but empty/zero
+(`Valid: true` with no meaningful value, not `NULL`) -- the same shape they would have for any
+row, just uninformative here. `details` becomes `metadata`.
+
+**The marker is not merely conventional -- it has to be syntactically impossible as an HTTP
+method.** This plugin's own middleware records every non-infrastructure request's `r.Method`
+verbatim, including a failed one, so an all-caps word like `PLUGIN_CALL` (the first version of
+this marker, before cleat-review's #2616 finding) IS a request a caller can send: RFC 9110's
+method grammar has no notion of "looks like a verb", and any caller whose request reaches this
+server could plant a row carrying it. `workflow:record_event` contains `:`, which is not a
+valid token character, so Go's HTTP server refuses the request line with `400` before any
+handler -- including this middleware -- ever runs. `method=` on `GET /audit/events` and in an
+export can therefore select workflow-sourced rows apart from request ones with the same
+confidence the chain gives everything else: nothing reachable over HTTP can forge one.
+
+**The AtLeastOnce residual, and why it is closed by default now (cleat#2618).** Every plugin
+host function in cleat (`send_message`, and `record_event`) is called, and only THEN recorded
+to the workflow's own durable event history (`engine/plugins.go`'s
+`freshPluginCallInternal`) -- there is no write-ahead-intent path for this call shape, only for
+the separate `ServiceCaller` route (`engine.DurableCallIdempotencyKey`,
+`engine/idempotency.go`). So a worker killed after `record_event`'s transaction commits but
+before the engine's own history record for that call lands would, on resume, call it again
+with the same input. For most host functions that is a quiet, rare, accepted gap. For a
+hash-chained audit log it is not quiet: the chain would faithfully record **two**
+correctly-linked rows for one event, the opposite of the failure mode this whole page is about
+detecting.
+
+Originally (cleat#2616) there was no per-call id a plugin function could build to catch this
+with `appendOnce`'s existing `errAlreadyRecorded` path (used today by the async queue's own
+retry) -- `plugin.CallContext` carried no step number. **cleat#2618 closed that**:
+`CallContext.RunID` and `CallContext.Step` are now populated at every `PluginCall` dispatch
+from the same `s.execRunID`/`s.stepCount` the recorded event itself uses
+(`engine/plugin_call_context.go`), stable across exactly the crash-and-retry this residual
+describes. So **by default, with no input required**, `record_event` derives the row's id from
+`(tenant, workflow, RunID, Step)` -- the same shape `DurableCallIdempotencyKey` uses for the
+`ServiceCaller` path -- and a retry lands on `errAlreadyRecorded` instead of a second row.
+
+The one case this does not cover: a `CallContext` built directly rather than by the engine's
+`PluginCall` dispatch (`cleattest`, a plugin's own unit test, an embedder that predates #2618)
+leaves `RunID` empty, and `record_event` falls back to no dedup at all -- the plain AtLeastOnce
+behaviour every other plugin host function still has today.
+
+**`event_id`: an explicit override, for a caller that wants its own key.** A caller does not
+need the engine's step number at all if it already knows, from its own logic, which of its OWN
+calls are "the same event" -- useful when the same logical event could be triggered from
+different steps (a retry loop inside the workflow itself, not a crash) or when a key stable
+across a workflow definition's own step renumbering is wanted. Scoped to the calling tenant and
+workflow the same way the default key is: two different workflow instances, or two different
+tenants, using the same `event_id` string produce different rows, never a collision, and a
+workflow that reuses an `event_id` on purpose only suppresses its OWN later event, which it
+could already do by not calling `record_event` at all. `event_id` takes priority over the
+default step-based key when both are available.
 
 Text that cannot be stored or reproduced is replaced, not dropped: a `User-Agent` is bytes an
 attacker chooses, and PostgreSQL refuses invalid UTF-8 and NUL bytes. Both are replaced with

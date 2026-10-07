@@ -26,9 +26,15 @@ import (
 //	fooddash     fooddash.wasm        cancel_order.wasm    PlaceOrder                 cancel_order
 //	onboarding   onboarding.wasm      register_user.wasm   RegisterUser               register_user
 //
-// `cleat build` names the artifact after the entry point in snake_case -- `//go:wasmexport
+// `cleat build` named the artifact after the entry point in snake_case -- `//go:wasmexport
 // book_travel` -- not after the example directory the README is named for, and the module exports
-// that snake_case form. So a reader who copies the commands gets `Error reading WASM file
+// that snake_case form. (The rule has moved twice since: cleat#2407 renamed it to the entry
+// point's own SOURCE FILE, and cleat#2692 -- an owner decision, once cleat#2407's rule collided
+// whenever several workflows shared a bare main.go -- renamed it again to cleat.yaml's own
+// `name:` field, falling back to the #2407 rule when there is no manifest. The mismatch this
+// guard exists to catch is the same shape regardless: the README's deploy target and what
+// `cleat build` actually writes can drift.) So a reader who copies the commands got `Error reading
+// WASM file
 // /tmp/out/travel.wasm: no such file or directory` on the deploy line and an export lookup failure
 // on the run line. Surfaced by cleat#2049's cost measurement, which drove three examples by hand
 // and got three failures; #2048's method was a regex over command SHAPE, and a name is not a shape.
@@ -145,9 +151,10 @@ func TestEveryGoExampleReadmeNamesTheArtifactTheBuildProduces(t *testing.T) {
 				t.Errorf("the README tells the reader to deploy %q, and `cleat build` does not produce it.\n"+
 					"  produced instead: %v\n"+
 					"  the README's deploy line: cleat deploy … %s\n"+
-					"`cleat build` names the artifact after the entry point in snake_case, not after the "+
-					"example directory, so a reader who copies the command gets \"Error reading WASM file … "+
-					"no such file or directory\". cleat#2049.",
+					"`cleat build` names the artifact after cleat.yaml's own `name:` field when there is one "+
+					"(cleat#2692), or the entry point's own SOURCE FILE when there is not (cleat#2407) -- "+
+					"never after the example directory or the entry point itself -- so a reader who copies "+
+					"the command gets \"Error reading WASM file … no such file or directory\". cleat#2049.",
 					wantBase, produced, deployWasm)
 			}
 

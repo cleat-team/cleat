@@ -99,7 +99,19 @@ test-as:
 test-cluster: build-go cluster-up
 	@echo "Waiting for cluster to be ready..."
 	@sleep 10
-	go test -p 1 -count=1 -timeout=180s ./engine/...
+	# -timeout=900s, not 180s (cleat#2252). cluster-up's Postgres container
+	# listens on the standard 5432, which is also engine/testutil's DSN
+	# fallback when no CLEAT_TEST_* is set -- so this step is a real,
+	# Postgres-configured ./engine/... run, not a no-DSN one, and measured
+	# 452s (engine) on a dedicated, unloaded container 2026-09-30 (see
+	# CONTRIBUTING.md's "Test commands by category" for the full per-dialect
+	# table and the command that re-derives it). 900s is roughly 2x that.
+	#
+	# A run that hits this timeout leaves shared test-database state dirty,
+	# not just late -- see CONTRIBUTING.md's note on the same target for why,
+	# and drop/recreate the cluster (cluster-down/cluster-up) rather than
+	# trusting the next run's failures if it ever does.
+	go test -p 1 -count=1 -timeout=900s ./engine/...
 	$(MAKE) cluster-down
 
 # ---- plugin harness -------------------------------------------------------
@@ -129,9 +141,33 @@ test-plugin-harness-check:
 # ---- coverage -------------------------------------------------------------
 
 .PHONY: coverage-go
+# -timeout 40m, NOT the 10m default. With a database configured the engine
+# suite runs its Postgres-backed tests instead of skipping them, and it needs
+# well over ten minutes -- the 10m default cuts it partway through and reports
+# a package-level timeout, which carries no `"Test"` field and so is invisible
+# to a check that counts test failures (CLAUDE.md, "Is this result real?").
+#
+# It matters here specifically because the Coverage job now supplies a database
+# (see ci.yml): before that, this run skipped every DB-backed test and finished
+# in minutes, so the default was never exercised.
+#
+# -p 1, for the reason CLAUDE.md gives: engine/testutil's CleanupPostgresTestData
+# issues an UNQUALIFIED `DELETE FROM` over a list that includes
+# workflow_instances, so packages running concurrently against one database
+# delete each other's fixtures mid-test.
+#
+# And measured here rather than assumed -- it is also the difference between a
+# run that measures something and a run that reports 30 failures. Running the
+# seven package trees at the default parallelism against one Postgres exhausted
+# it:
+#
+#     pq: sorry, too many clients already (53300)
+#
+# 30 of 62 packages failed on that alone, every failure the same, none of them
+# about coverage. One package at a time is what keeps the pool bounded.
 coverage-go:
-	-go test -coverprofile=coverage.out -covermode=atomic ./internal/... ./plugins/... ./cmd/... ./engine/... ./plugin/... ./wasm/... ./auth/...
-	cd cleat && go test -coverprofile=../coverage_cleat.out -covermode=atomic ./...
+	-go test -p 1 -coverprofile=coverage.out -covermode=atomic -timeout 40m ./internal/... ./plugins/... ./cmd/... ./engine/... ./plugin/... ./wasm/... ./auth/...
+	cd cleat && go test -p 1 -coverprofile=../coverage_cleat.out -covermode=atomic -timeout 40m ./...
 
 .PHONY: coverage-python
 coverage-python:
@@ -147,6 +183,7 @@ coverage-report:
 
 # Thresholds (enforced via prefix matching; measured 2026-06-10):
 #   engine/testutil    0%     (test helper)
+#   plugins/plugintest 0%     (test helper -- NOT a plugin; see below)
 #   engine/           70%     (actual 70.0% PG-only; 77.6% with all backends)
 #   internal/         65%     (lowest: telemetry 65.7%)
 #   plugin/           70%     (actual 71.7%)
@@ -159,6 +196,27 @@ coverage-report:
 #   cmd/              40%     (lowest non-zero: cleat-worker 42.8%)
 #   wasm/             75%     (actual 79.4%)
 #   auth/             90%     (actual 90.9%)
+#
+# The match below is FIRST-match-wins over `prefixes`, so a package needing its
+# own floor has to be listed BEFORE the broader prefix it would otherwise fall
+# under. That is why engine/testutil heads the list rather than sitting beside
+# engine, and it is the whole mechanism behind the plugins/plugintest entry in
+# this table.
+#
+# plugins/plugintest is a TEST HELPER, not a plugin, and until it was listed it
+# inherited `plugins/` -- an 80% floor calibrated for real plugins. It scored
+# 5.26% and the Coverage job reported a coverage collapse. It is not one: the
+# package's own doc comment says why it exists, and it is the same reason
+# engine/testutil is exempt --
+#
+#   WHY THIS IS A SEPARATE PACKAGE. The natural home is engine/testutil, and it
+#   cannot go there: engine's and plugin's own tests import testutil, so
+#   testutil importing either is an import cycle in the test binary.
+#
+# A helper that cannot live with the other helper is exempt for the same
+# reason that one is. Nothing about this is a bar being lowered: it is a bar
+# that was never meant for this package being correctly withdrawn, and the two
+# helper entries should move together if either does.
 .PHONY: coverage-check
 coverage-check: coverage-go
 	@cat coverage_cleat.out 2>/dev/null | grep -v "^mode:" >> coverage.out 2>/dev/null; \
@@ -166,8 +224,9 @@ coverage-check: coverage-go
 	    fail = 0; \
 	    printf "=== Coverage by Package ===\n"; \
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
-	    n = split("engine/testutil engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd/cleatctl cmd wasm auth", prefixes, " "); \
+	    n = split("engine/testutil plugins/plugintest engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd/cleatctl cmd wasm auth", prefixes, " "); \
 	    thresh["engine/testutil"] = 0; \
+	    thresh["plugins/plugintest"] = 0; \
 	    thresh["engine"] = 70; \
 	    thresh["internal"] = 65; \
 	    thresh["plugin"] = 70; \
@@ -186,7 +245,7 @@ coverage-check: coverage-go
 	{ \
 	    path = $$1; \
 	    sub(/:[0-9]+:$$/, "", path); \
-	    sub(/\/[^/]+\.go$$/, "", path); \
+	    sub(/\/[^\/]+\.go$$/, "", path); \
 	    sub(/^github\.com\/cleat-team\/cleat\//, "", path); \
 	    gsub(/%$$/, "", $$NF); \
 	    cov[path] += $$NF; \
@@ -374,7 +433,7 @@ tools: tools-go tools-rust tools-python tools-java tools-as
 .PHONY: tools-go
 tools-go:
 	@if command -v go >/dev/null 2>&1; then \
-		VER=$$(go version | grep -oP 'go\K[0-9]+\.[0-9]+'); \
+		VER=$$(go version | sed -E 's/^go version go([0-9]+\.[0-9]+).*/\1/'); \
 		MAJOR=$$(echo $$VER | cut -d. -f1); \
 		MINOR=$$(echo $$VER | cut -d. -f2); \
 		MIN_MAJOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f1); \
@@ -467,9 +526,9 @@ setup:
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Start PostgreSQL:  docker compose -f docker-compose.partner.yml up -d postgres"
-	@echo "  2. Build CLI:         go build -o cleat ./cmd/cleat && go build -o cleat-worker ./cmd/cleat-worker"
+	@echo "  2. Build CLI:         go build -o ./bin/cleat ./cmd/cleat && go build -o ./bin/cleat-worker ./cmd/cleat-worker"
 	@echo "  3. Verify:            make tools"
-	@echo "  4. Run dev mode:      ./cleat dev start"
+	@echo "  4. Run dev mode:      ./bin/cleat dev --entry-point Greet --input '{\"name\":\"Ada\"}' ./testdata/hello/"
 	@echo ""
 	@echo "See docs/tutorials/quick-start.md for a full walkthrough."
 

@@ -67,9 +67,17 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at       TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
 				);
 
-				CREATE INDEX idx_webhook_config_tenant ON webhook_config(tenant_id);
-				CREATE INDEX idx_webhook_delivery_webhook ON webhook_delivery(webhook_id);
-				CREATE INDEX idx_webhook_delivery_status ON webhook_delivery(` + "`status`" + `, next_attempt_at);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND index_name = 'idx_webhook_config_tenant');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_config_tenant ON webhook_config(tenant_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND index_name = 'idx_webhook_delivery_webhook');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_delivery_webhook ON webhook_delivery(webhook_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND index_name = 'idx_webhook_delivery_status');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_delivery_status ON webhook_delivery(` + "`status`" + `, next_attempt_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'webhook_config')
@@ -253,8 +261,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_config DROP COLUMN IF EXISTS secret;
 			`,
 			UpMySQL: `
-				ALTER TABLE webhook_config ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0;
-				ALTER TABLE webhook_config DROP COLUMN secret;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'secret_configured');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_config ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'secret');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_config DROP COLUMN secret', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			// v1's secret column carries DEFAULT '', which SQL Server backs with
 			// an unnamed default constraint -- unlike pd_config.routing_key and

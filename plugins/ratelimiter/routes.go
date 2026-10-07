@@ -3,13 +3,19 @@ package ratelimiter
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// upsertQuery provides dialect-specific upsert for rate limits.
+// upsertQuery provides dialect-specific upsert for rate limits. The MSSQL
+// variant's WITH (HOLDLOCK) (cleat#2904/#2915) closes the window where two
+// concurrent PUTs establishing a limit under the same new (tenant_id,
+// limit_key) -- plain HTTP request concurrency, handlePut has no
+// serialization of its own -- both evaluate WHEN NOT MATCHED true and one
+// takes a duplicate-key error instead of the UPDATE branch.
 var upsertQuery = plugin.Query{
 	Default: `
 		INSERT INTO rate_limits (tenant_id, limit_key, max_requests, window_seconds)
@@ -26,7 +32,7 @@ var upsertQuery = plugin.Query{
 		window_seconds = VALUES(window_seconds),
 		updated_at = now()`,
 	MSSQL: `
-		MERGE INTO rate_limits AS target
+		MERGE INTO rate_limits WITH (HOLDLOCK) AS target
 		USING (VALUES ($1, $2, $3, $4)) AS source (tenant_id, limit_key, max_requests, window_seconds)
 		ON target.tenant_id = source.tenant_id AND target.limit_key = source.limit_key
 		WHEN MATCHED THEN
@@ -53,8 +59,41 @@ type rateLimitEntry struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// managementBasePath is the path every route in this plugin's management
+// surface lives under, declared ONCE because TWO places have to agree about it:
+// RegisterRoutes mounts them, and Middleware EXEMPTS them from the limit they
+// manage.
+//
+// If the two drift, one of two defects appears and neither is visible from the
+// other side: a mounted route that is not exempt is refused by the bucket it
+// would change (cleat#2551), and an exempt prefix with nothing mounted under it
+// is a hole with no handler behind it. Spelling the base path here is what makes
+// that a one-line change rather than a search.
+const managementBasePath = "/rate-limits"
+
+// isManagementRequest reports whether r is a request for one of this plugin's
+// OWN management routes.
+//
+// THE BOUNDARY IS THE SLASH, and it is asserted by a test that sends
+// `/rate-limits-are-not-a-sibling` and requires it to be LIMITED. A bare
+// HasPrefix(path, managementBasePath) would exempt every path that merely
+// begins with the same characters, which is how a prefix check quietly becomes
+// broader than the surface it was written for.
+//
+// It is deliberately broader than the REGISTERED patterns (`/rate-limits/{key}`
+// matches any single segment) and narrower than the character prefix: a path
+// like `/rate-limits/a/b` is exempt and serves nothing, so the cost of the
+// slack is a 404 that skipped a counter, not a route that escaped it.
+func isManagementRequest(r *http.Request) bool {
+	path := r.URL.Path
+	return path == managementBasePath || strings.HasPrefix(path, managementBasePath+"/")
+}
+
 // RegisterRoutes registers the rate limit management HTTP routes on the
 // given mux. All routes require a tenant context set by the auth middleware.
+//
+// THESE ROUTES ARE EXEMPT FROM THIS PLUGIN'S OWN LIMIT — see Middleware. They
+// are how an operator raises or removes a limit, so they cannot be behind it.
 //
 //	GET    /rate-limits        — list rate limits for the tenant
 //	PUT    /rate-limits/{key}  — create or update a rate limit
@@ -63,9 +102,9 @@ func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return nil
 	}
-	mux.HandleFunc("GET /rate-limits", p.handleList)
-	mux.HandleFunc("PUT /rate-limits/{key}", p.handlePut)
-	mux.HandleFunc("DELETE /rate-limits/{key}", p.handleDelete)
+	mux.HandleFunc("GET "+managementBasePath, p.handleList)
+	mux.HandleFunc("PUT "+managementBasePath+"/{key}", p.handlePut)
+	mux.HandleFunc("DELETE "+managementBasePath+"/{key}", p.handleDelete)
 	return nil
 }
 

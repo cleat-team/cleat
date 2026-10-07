@@ -13,10 +13,46 @@
 # Here there is no concurrency group at all: each run is a few seconds, the
 # latest one is what the PR shows, and nothing is ever cancelled.
 #
-# NOT A REQUIRED CHECK (as of 2026-09-23). A red here blocks nothing on its own;
+# A REQUIRED CHECK: Closing References
+#
+# This said "NOT A REQUIRED CHECK (as of 2026-09-23)" until 2026-09-27, and the claim
+# was false for all but the first four hours of its life: the comment was written
+# 2026-09-23T16:21:15Z and the check was made required 2026-09-23T20:32:29Z
+# (cleat#2100). It had already talked a stream out of a repair before anyone noticed
+# (cleat#2510) -- a stale "not required" reads as permission not to act. The old text
+# continued: a red here blocks nothing on its own;
 # it is visible on the PR and to scripts/pr-watch.py. Making it required is a
 # ruleset change plus a line in .github/required-checks.txt, and the
 # merge_group arm below already exists so that change needs nothing else.
+# cleat#2436, a SECOND, separate defect this same check now also covers: a
+# closing keyword can be correctly formed (`#N`, not `cleat#N`) and still be
+# NEGATED in the surrounding text -- "Deliberately does not close #2402."
+# registers as closing #2402 regardless of the "not". #2072's script above
+# catches the FORM only; scripts/check-negated-closing-references.py is the
+# SEMANTICS half, added as a second step in the SAME job rather than a new
+# required check, since adding a required check is a ruleset change this
+# workflow file cannot make on its own. See that script's own docstring for
+# the full design and why closingIssuesReferences, not a text scan, is the
+# authority it reads first.
+#
+# cleat#1962, a THIRD and DIFFERENT question, deliberately a SEPARATE JOB
+# rather than a third step here. #2072's check and #2436's check both ask
+# "does a claimed closing reference actually work" -- they have nothing to
+# say about a PR that makes no claim at all, which is #1962's subject: 12 of
+# the last 20 merged PRs closed nothing, and #1116 sat open for two days
+# after its own fix merged because nobody noticed the silence. GitHub
+# creates one check-run PER JOB, not per step (see the code-span step's own
+# comment below), so a step added HERE would ride inside the required
+# `Closing References` context -- and #1962 is explicit that a check on a
+# prose convention needs its false-positive rate watched before it can be
+# required at all. `closing-reference-declared` below is its own job for
+# exactly that reason: a separate check-run, visible but NOT in
+# .github/required-checks.txt, so it can be promoted later the same way
+# `Closing References` itself was (non-required for its first four hours).
+#
+# In .github/workflows/, which WORKSTREAM.md's shared-files table gives to
+# WS-3 -- added under that row's exception, "another stream may add there
+# when leaving the mechanism unwired would be worse, say so in the comment".
 # ---------------------------------------------------------------------------
 name: Closing Reference Check
 
@@ -31,6 +67,10 @@ on:
 
 permissions:
   contents: read
+  # Read-only, for `gh pr view --json closingIssuesReferences,commits` in the
+  # negated-reference step below. contents:read alone does not reach the
+  # Pulls API.
+  pull-requests: read
 
 jobs:
   closing-references:
@@ -45,9 +85,101 @@ jobs:
       - if: github.event_name != 'merge_group'
         uses: actions/checkout@v7
 
+      # --self-test first, same reason as every guard in ci.yml: cleat#2800
+      # found this check flagging CORRECT prose ("Fix (#2003)"), and the
+      # self-test's fixture pins that exact case so the class can't regress
+      # to matching a bare `(` again without CI noticing before it reaches a
+      # real PR body.
+      - name: Closing reference check self-test
+        if: github.event_name != 'merge_group'
+        run: scripts/check-closing-references.sh --self-test
+
       - name: Check closing references
         if: github.event_name != 'merge_group'
         env:
           # Through env, never ${{ }} inside run: -- the body is untrusted text.
           PR_BODY: ${{ github.event.pull_request.body }}
         run: scripts/check-closing-references.sh
+
+      # --self-test, same reason as the step above it. cleat#2992 moved this
+      # wrapper's usage guard from exit 1 to exit 2, and NOTHING would have
+      # gone red had it moved back: the step below always sets PR_NUMBER and
+      # REPO, so CI never exercises the guard, and the guard's whole job is the
+      # case CI does not have. The fixture pins both the status and the
+      # `UNMEASURED:` text, since exit 2 with the finding's wording is the same
+      # collapse arriving by a different door. cleat#3024.
+      - name: Negated closing-reference wrapper self-test
+        if: github.event_name != 'merge_group'
+        run: scripts/check-negated-closing-references.sh --self-test
+
+      - name: Check for a negated closing reference
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: scripts/check-negated-closing-references.sh
+
+      - name: Code-span closer that will not fire
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: scripts/check-code-span-closing-keywords.sh
+
+      # In .github/workflows/, which WORKSTREAM.md's shared-files table gives to
+      # WS-3 -- added under that row's exception, "another stream may add there
+      # when leaving the mechanism unwired would be worse, say so in the
+      # comment", and WS-3 was notified BEFORE the diff rather than after.
+      #
+      # WHY THE MECHANISM WOULD BE UNWIRED WITHOUT IT (cleat#3028). A closing
+      # keyword inside a code span is INERT -- GitHub does not read it -- so
+      # `Closes #3018` in backticks closes nothing, the PR merges green, and the
+      # issue stays open with no detector but a person asking why. Two of the
+      # last forty merged PR bodies carry one, and they are the two possible
+      # cases: #3021 (nothing live, issue stayed open) and #3038 (a QUOTE, with a
+      # live closer elsewhere, closed correctly). `closingIssuesReferences`
+      # separates them, which is what makes the check safe to have.
+      #
+      # No new check context: this is another step in the existing job, and
+      # GitHub creates one check-run per job, not per step. The
+      # `!= 'merge_group'` guard means it never runs in the queue, so it cannot
+      # block an enqueue, though it IS part of the required `Closing References`
+      # context on the ordinary path -- by design, since a match stops a PR whose
+      # closer would silently do nothing.
+      - name: Code-span closing-keyword self-test
+        if: github.event_name != 'merge_group'
+        run: scripts/check-code-span-closing-keywords.sh --self-test
+
+  closing-reference-declared:
+    name: Closing Reference Declared
+    runs-on: ubuntu-latest
+
+    # cleat#1962. ADVISORY ONLY -- deliberately NOT in .github/required-checks.txt.
+    # A separate job (see the header comment above) so this check-run cannot ride
+    # inside the required `Closing References` context while its false-positive
+    # rate is unmeasured.
+    steps:
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "closing-reference-declared validated on the pull request"
+
+      - if: github.event_name != 'merge_group'
+        uses: actions/checkout@v7
+
+      - name: Closing-reference-declared wrapper self-test
+        if: github.event_name != 'merge_group'
+        run: scripts/check-closing-reference-declared.sh --self-test
+
+      - name: Closing-reference-declared self-test
+        if: github.event_name != 'merge_group'
+        run: python3 scripts/check-closing-reference-declared.py --self-test
+
+      - name: Check that a closing reference is declared one way or the other
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: scripts/check-closing-reference-declared.sh

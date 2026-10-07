@@ -2,8 +2,10 @@
 
 **Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
 2026-09-25 against `develop` at `656aced4` (cleat#2051) — see
-[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
-to end.
+[What was verified](#what-was-verified) at the end for what changed. **Built since drafting**:
+`examples/order-lifecycle/` runs the cleat-side half end to end on every pull request, driven by
+`scripts/run-order-lifecycle-scenario.sh`; its own section under
+[The assembly](#the-assembly) says what is real and what is stubbed.
 
 **Who this is for:** you take money and ship something. An order touches inventory, payment,
 fulfilment and notification; a subscription renews, dunns, upgrades and cancels. Each of those is a
@@ -76,6 +78,20 @@ code resumes where it stopped.
 Worked examples already in the tree: `examples/subscription/billing.go`,
 `examples/fooddash/order.go`, `examples/travel/booking.go`,
 `examples/saga-temporal-port/workflow.go`.
+
+**Those four are read, not run.** They are compiled on every pull request
+(`scripts/build-documented-examples.sh`), which catches a break in their Go, and
+nothing deploys them or starts a run — so a break that compiles is found by a
+person noticing, or not at all.
+
+**`examples/order-lifecycle/` is the runnable one.** It is the same shape as the
+four above — a saga over a payment provider, with a declared undo per step — and
+it is executed end to end on every pull request by
+`scripts/run-order-lifecycle-scenario.sh`: deployed to a real `cleat-worker` on a
+real PostgreSQL, with runs started against it and their published state asserted.
+It is what to read if you want to see the lifecycle actually run rather than
+described, and it is the one to copy when you want a skeleton that is already
+wired to a deployment.
 
 ---
 

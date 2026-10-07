@@ -69,9 +69,17 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			     ALTER TABLE task_queue ADD COLUMN IF NOT EXISTS input JSONB;
 			     ALTER TABLE task_queue ADD COLUMN IF NOT EXISTS run_id TEXT;`,
 			UpMySQL: `
-				ALTER TABLE task_queue ADD COLUMN def_name VARCHAR(255);
-				ALTER TABLE task_queue ADD COLUMN input JSON;
-				ALTER TABLE task_queue ADD COLUMN run_id VARCHAR(255);
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'task_queue' AND column_name = 'def_name');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE task_queue ADD COLUMN def_name VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'task_queue' AND column_name = 'input');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE task_queue ADD COLUMN input JSON', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'task_queue' AND column_name = 'run_id');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE task_queue ADD COLUMN run_id VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('task_queue') AND name = 'def_name')
@@ -164,6 +172,58 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE task_queue
 					MODIFY input JSON NULL,
 					MODIFY payload JSON NULL;
+			`,
+		},
+		{
+			// v4's `MODIFY payload LONGTEXT NULL` restated the column
+			// without NOT NULL or DEFAULT ('{}') -- MySQL's MODIFY
+			// redefines a column wholesale, so anything from v1 not
+			// repeated there is gone, not merely left alone. cleat#2282:
+			// checked empirically against a scratch database carrying v4,
+			// `DESCRIBE task_queue` reports payload as `NULL: YES,
+			// Default: NULL` -- both attributes lost, not just
+			// nullability. PostgreSQL (JSONB NOT NULL DEFAULT '{}', v1,
+			// untouched since) and SQL Server (NVARCHAR(MAX) NOT NULL
+			// DEFAULT ('{}'), v1, untouched -- v4's own DialectSpecific
+			// note: "SQL Server has always used NVARCHAR(MAX) ... here")
+			// never had a v4 arm, so only MySQL drifted.
+			//
+			// No tracked, non-test INSERT into task_queue omits payload
+			// (commands.go, routes.go both supply it), so this is not
+			// known to have produced a NULL row yet -- but the column
+			// having neither a NOT NULL guard nor a DEFAULT means any
+			// FUTURE insert that omits it, on MySQL only, would silently
+			// write NULL where PostgreSQL and SQL Server fall back to
+			// '{}'. That asymmetry, not a known bad row, is what this
+			// closes.
+			//
+			// THE BACKFILL IS NOT OPTIONAL. Measured directly: seeding one
+			// row with no payload (so it reads NULL under v4's shape),
+			// then running a bare `MODIFY payload LONGTEXT NOT NULL
+			// DEFAULT ('{}')` with no backfill, fails --
+			// `ERROR 1265 (01000): Data truncated for column 'payload' at
+			// row 1` -- on MySQL 8.4, strict mode (this repo's default).
+			// A one-line "add NOT NULL back" migration is unsafe on any
+			// database already carrying a NULL row; the UPDATE first is
+			// what makes it safe on every database, whether or not one
+			// exists there today.
+			//
+			// input is NOT part of this: it has never been NOT NULL on
+			// any dialect (v2 added it plain JSONB/JSON/NVARCHAR(MAX),
+			// nullable everywhere), so there is no drift to close there.
+			Version:         5,
+			Up:              "",
+			DialectSpecific: "MySQL only: restoring payload's NOT NULL DEFAULT ('{}'), which v4's MODIFY silently dropped. PostgreSQL and SQL Server never lost it, so an arm for them would be a statement that must not exist. cleat#2282.",
+			UpMySQL: `
+				UPDATE task_queue SET payload = '{}' WHERE payload IS NULL;
+				ALTER TABLE task_queue MODIFY payload LONGTEXT NOT NULL DEFAULT ('{}');
+			`,
+			// Reversal restores v4's shape (nullable, no default) -- a row
+			// backfilled to '{}' by Up's UPDATE stays '{}' rather than
+			// reverting to NULL, the same lossy-but-reversible tradeoff
+			// v4's own Down makes for input/payload's type change.
+			DownMySQL: `
+				ALTER TABLE task_queue MODIFY payload LONGTEXT NULL;
 			`,
 		},
 	}

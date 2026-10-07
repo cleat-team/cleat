@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// TestGenerateGo_Simple is the untyped case: no InputType/OutputType
+// declared, so the business method's own signature already matches
+// plugin.PluginFunc and is registered directly, with no generated wrapper.
 func TestGenerateGo_Simple(t *testing.T) {
 	ir := &IR{
 		PluginName:    "echo",
@@ -14,8 +17,6 @@ func TestGenerateGo_Simple(t *testing.T) {
 			{
 				Name:        "echo",
 				Description: "Echo input back",
-				InputType:   "string",
-				OutputType:  "string",
 			},
 		},
 	}
@@ -28,21 +29,30 @@ func TestGenerateGo_Simple(t *testing.T) {
 	if !strings.Contains(code, "// Auto-generated from plugin manifest: echo v0.1.0") {
 		t.Error("missing header comment")
 	}
-	if !strings.Contains(code, "package plugin") {
-		t.Error("missing package declaration")
+	if !strings.Contains(code, "package echo") {
+		t.Error("missing package declaration matching the plugin's own package")
 	}
-	if !strings.Contains(code, `import "encoding/json"`) {
-		t.Error("missing json import")
+	if !strings.Contains(code, `"github.com/cleat-team/cleat/plugin"`) {
+		t.Error("missing plugin package import")
 	}
-	if !strings.Contains(code, "type EchoPlugin struct") {
-		t.Error("expected EchoPlugin struct type")
+	if !strings.Contains(code, "func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error") {
+		t.Error("expected RegisterHostFunctions on Plugin")
 	}
-	if !strings.Contains(code, "func NewEchoPlugin") {
-		t.Error("expected NewEchoPlugin constructor")
+	if !strings.Contains(code, `scope.Register(plugin.FuncOptions{Name: "echo"}, p.echo)`) {
+		t.Error("expected a direct registration of p.echo, with no generated wrapper, for an untyped function")
 	}
-	if !strings.Contains(code, "func (p *EchoPlugin) Echo") {
-		t.Error("expected Echo method on EchoPlugin")
-	}
+
+	stub := `package echo
+
+import "context"
+
+type Plugin struct{}
+
+func (p *Plugin) echo(ctx context.Context, inputJSON string) (string, error) {
+	return inputJSON, nil
+}
+`
+	assertGoCompiles(t, code, stub)
 }
 
 func TestGenerateGo_WithTypes(t *testing.T) {
@@ -88,15 +98,116 @@ func TestGenerateGo_WithTypes(t *testing.T) {
 	if !strings.Contains(code, "type PutOutput struct") {
 		t.Error("expected PutOutput struct")
 	}
-	if !strings.Contains(code, "Key string") || !strings.Contains(code, `json:"key"`) {
-		t.Error("expected Key field with JSON tag")
+	// Not "Key string" as one substring: gofmt (this generator's own
+	// post-processing step) column-aligns struct fields, so a field
+	// preceding a longer one in source order gets padded with more than
+	// one space -- exactly what broke here the first time this was
+	// written, against the field ordering sortFields produces.
+	if !strings.Contains(code, "Key") || !strings.Contains(code, `json:"key"`) {
+		t.Error("expected a Key field with a JSON tag")
 	}
 	if !strings.Contains(code, "Data []byte") {
 		t.Error("expected Data field as []byte")
 	}
-	if !strings.Contains(code, "func (p *BlobstorePlugin) Put") {
-		t.Error("expected Put method on BlobstorePlugin")
+	if !strings.Contains(code, "p.put(ctx, input)") {
+		t.Error("expected the wrapper to call p.put with the unmarshaled input")
 	}
+	if !strings.Contains(code, "Idempotent: true") {
+		t.Error("expected Idempotent to propagate into FuncOptions")
+	}
+
+	stub := `package blobstore
+
+import "context"
+
+type Plugin struct{}
+
+func (p *Plugin) put(ctx context.Context, input PutInput) (PutOutput, error) {
+	return PutOutput{Sha256: "x", Size: int64(len(input.Data))}, nil
+}
+`
+	assertGoCompiles(t, code, stub)
+}
+
+// TestGenerateGo_InputTypedOutputRaw covers the mixed case: a typed input
+// unmarshaled for the author, but an untyped (raw JSON string) output
+// passed straight back -- no marshal step generated.
+func TestGenerateGo_InputTypedOutputRaw(t *testing.T) {
+	ir := &IR{
+		PluginName:    "mixed",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{Name: "QueryInput", Fields: []FieldIR{{Name: "q", Type: "string"}}},
+		},
+		HostFunctions: []HostFuncIR{
+			{Name: "query", InputType: "QueryInput"},
+		},
+	}
+	code, err := GenerateGo(ir)
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if !strings.Contains(code, "var input QueryInput") {
+		t.Error("expected the wrapper to unmarshal into QueryInput")
+	}
+	if !strings.Contains(code, "return p.query(ctx, input)") {
+		t.Error("expected a direct return of p.query's result, with no marshal step")
+	}
+	if strings.Contains(code, "outputJSON") {
+		t.Error("an untyped output must not generate a marshal step")
+	}
+
+	stub := `package mixed
+
+import "context"
+
+type Plugin struct{}
+
+func (p *Plugin) query(ctx context.Context, input QueryInput) (string, error) {
+	return input.Q, nil
+}
+`
+	assertGoCompiles(t, code, stub)
+}
+
+// TestGenerateGo_InputRawOutputTyped is the mirror case: an untyped input
+// passed straight through as inputJSON, with a typed output marshaled back.
+func TestGenerateGo_InputRawOutputTyped(t *testing.T) {
+	ir := &IR{
+		PluginName:    "mixed2",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{Name: "Status", Fields: []FieldIR{{Name: "ok", Type: "bool"}}},
+		},
+		HostFunctions: []HostFuncIR{
+			{Name: "check", OutputType: "Status"},
+		},
+	}
+	code, err := GenerateGo(ir)
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if strings.Contains(code, "var input") {
+		t.Error("an untyped input must not generate an unmarshal step")
+	}
+	if !strings.Contains(code, "p.check(ctx, inputJSON)") {
+		t.Error("expected the raw inputJSON passed straight through to p.check")
+	}
+	if !strings.Contains(code, "json.Marshal(output)") {
+		t.Error("expected the typed output to be marshaled")
+	}
+
+	stub := `package mixed2
+
+import "context"
+
+type Plugin struct{}
+
+func (p *Plugin) check(ctx context.Context, inputJSON string) (Status, error) {
+	return Status{Ok: true}, nil
+}
+`
+	assertGoCompiles(t, code, stub)
 }
 
 func TestGenerateGo_Streaming(t *testing.T) {
@@ -104,12 +215,14 @@ func TestGenerateGo_Streaming(t *testing.T) {
 		PluginName:    "llm",
 		PluginVersion: "0.1.0",
 		Description:   "LLM plugin",
+		Types: []TypeIR{
+			{Name: "ChatInput", Fields: []FieldIR{{Name: "prompt", Type: "string"}}},
+		},
 		HostFunctions: []HostFuncIR{
 			{
-				Name:       "chat_stream",
-				InputType:  "string",
-				OutputType: "string",
-				Streaming:  true,
+				Name:      "chat_stream",
+				InputType: "ChatInput",
+				Streaming: true,
 			},
 		},
 	}
@@ -119,12 +232,71 @@ func TestGenerateGo_Streaming(t *testing.T) {
 		t.Fatalf("GenerateGo returned error: %v", err)
 	}
 
-	if !strings.Contains(code, "PluginCallStreaming") {
-		t.Error("expected streaming method to use PluginCallStreaming")
+	if !strings.Contains(code, "streamScope, ok := scope.(plugin.StreamFuncRegistry)") {
+		t.Error("expected the StreamFuncRegistry type assertion, matching every hand-written plugin that streams")
 	}
-	if !strings.Contains(code, "<-chan StreamEvent") {
-		t.Error("expected streaming return type")
+	if !strings.Contains(code, "streamScope.RegisterStream(") {
+		t.Error("expected RegisterStream, not Register, for a streaming function")
 	}
+	if !strings.Contains(code, "<-chan plugin.StreamEvent") {
+		t.Error("expected the real plugin.StreamEvent channel type")
+	}
+
+	stub := `package llm
+
+import (
+	"context"
+
+	"github.com/cleat-team/cleat/plugin"
+)
+
+type Plugin struct{}
+
+func (p *Plugin) chatStream(ctx context.Context, input ChatInput) (<-chan plugin.StreamEvent, error) {
+	ch := make(chan plugin.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+`
+	assertGoCompiles(t, code, stub)
+}
+
+// TestGenerateGo_StreamingUntyped covers a streaming function with no
+// declared input type: the business method's signature already matches
+// plugin.PluginStreamFunc, so it is registered directly.
+func TestGenerateGo_StreamingUntyped(t *testing.T) {
+	ir := &IR{
+		PluginName:    "tail",
+		PluginVersion: "0.1.0",
+		HostFunctions: []HostFuncIR{
+			{Name: "tail_stream", Streaming: true},
+		},
+	}
+	code, err := GenerateGo(ir)
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if !strings.Contains(code, `streamScope.RegisterStream(plugin.FuncOptions{Name: "tail_stream"}, p.tailStream)`) {
+		t.Error("expected a direct registration of p.tailStream, with no generated wrapper")
+	}
+
+	stub := `package tail
+
+import (
+	"context"
+
+	"github.com/cleat-team/cleat/plugin"
+)
+
+type Plugin struct{}
+
+func (p *Plugin) tailStream(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+	ch := make(chan plugin.StreamEvent)
+	close(ch)
+	return ch, nil
+}
+`
+	assertGoCompiles(t, code, stub)
 }
 
 func TestGenerateGo_Empty(t *testing.T) {
@@ -139,33 +311,53 @@ func TestGenerateGo_Empty(t *testing.T) {
 		t.Fatalf("GenerateGo returned error: %v", err)
 	}
 
-	if !strings.Contains(code, "type EmptyPlugin struct") {
-		t.Error("expected class declaration")
+	if !strings.Contains(code, "func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {\n\treturn nil\n}") {
+		t.Error("expected a no-op RegisterHostFunctions for a plugin with no host functions")
 	}
-	if len(code) < 50 {
-		t.Error("generated code is too short")
-	}
+
+	stub := `package empty
+
+type Plugin struct{}
+`
+	assertGoCompiles(t, code, stub)
 }
 
-func TestGenerateGo_NoInputOutput(t *testing.T) {
+// TestGenerateGo_HyphenatedPluginName confirms the generated package name
+// strips hyphens the same way every real plugin directory does --
+// plugins/scheduledbackup/ for the manifest name "scheduled-backup"
+// (CLAUDE.md's "Plugin development" section).
+func TestGenerateGo_HyphenatedPluginName(t *testing.T) {
 	ir := &IR{
-		PluginName:    "trigger",
+		PluginName:    "scheduled-backup",
 		PluginVersion: "0.1.0",
-		HostFunctions: []HostFuncIR{
-			{
-				Name: "fire", // no InputType, no OutputType, no Description
-			},
-		},
+		HostFunctions: []HostFuncIR{{Name: "run"}},
 	}
 	code, err := GenerateGo(ir)
 	if err != nil {
 		t.Fatalf("GenerateGo: %v", err)
 	}
-	if !strings.Contains(code, "input []byte") {
-		t.Error("expected input []byte for untyped function")
+	if !strings.Contains(code, "package scheduledbackup") {
+		t.Errorf("expected package scheduledbackup (hyphen stripped), got:\n%s", code)
 	}
-	if !strings.Contains(code, "([]byte, error)") {
-		t.Error("expected ([]byte, error) return for untyped function")
+}
+
+// TestGenerateGo_NamespacedThirdPartyPluginName is the regression case for
+// what TestManifestRoundTrip_HelloWorld (plugin/integration_test.go) caught
+// against the real examples/third-party-plugin/plugin.json manifest: a
+// third-party plugin name is namespaced, "org/name", and the unstripped
+// slash produced an unparseable "package example/helloworld".
+func TestGenerateGo_NamespacedThirdPartyPluginName(t *testing.T) {
+	ir := &IR{
+		PluginName:    "example/hello-world",
+		PluginVersion: "0.1.0",
+		HostFunctions: []HostFuncIR{{Name: "greet"}},
+	}
+	code, err := GenerateGo(ir)
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if !strings.Contains(code, "package helloworld") {
+		t.Errorf("expected package helloworld (namespace and hyphen stripped), got:\n%s", code)
 	}
 }
 
@@ -190,7 +382,7 @@ func TestGenerateGo_UnreferencedType(t *testing.T) {
 		},
 		HostFunctions: []HostFuncIR{
 			{
-				Name:       "doStuff",
+				Name:       "do_stuff",
 				InputType:  "ReferencedType",
 				OutputType: "string",
 			},
@@ -206,4 +398,16 @@ func TestGenerateGo_UnreferencedType(t *testing.T) {
 	if !strings.Contains(code, "type UnreferencedType struct") {
 		t.Error("expected UnreferencedType struct (should be emitted in second pass)")
 	}
+
+	stub := `package test
+
+import "context"
+
+type Plugin struct{}
+
+func (p *Plugin) doStuff(ctx context.Context, input ReferencedType) (string, error) {
+	return input.Val, nil
+}
+`
+	assertGoCompiles(t, code, stub)
 }

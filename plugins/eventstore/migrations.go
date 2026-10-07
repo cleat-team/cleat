@@ -31,8 +31,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (tenant_id, stream_id, sequence)
 				);
 
-				CREATE INDEX idx_event_stream_lookup
-					ON event_stream (tenant_id, stream_id, sequence);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_stream' AND index_name = 'idx_event_stream_lookup');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_event_stream_lookup ON event_stream (tenant_id, stream_id, sequence)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_stream')
@@ -142,6 +143,99 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE event_stream
 					MODIFY event JSON NOT NULL;
 			`,
+		},
+		{
+			// cleat#2268 (follow-up to cleat#2260/#2265): replaces the
+			// read-MAX(sequence)-then-insert-with-retry shape with real
+			// per-stream serialization. See queries.go's upsertStreamHead for
+			// the mechanism. event_stream_head holds one row per stream; the
+			// row lock an UPSERT takes on it is held for the lifetime of the
+			// enclosing transaction, so a second concurrent appender to the
+			// SAME stream blocks on that row until the first commits, instead
+			// of racing a read against the same MAX(sequence) and retrying on
+			// a duplicate-key error. Appends to DIFFERENT streams share no
+			// row and don't contend at all.
+			//
+			// The backfill seeds head_sequence from each existing stream's
+			// current MAX(sequence) so the first post-migration append to an
+			// already-populated stream continues from the right value rather
+			// than colliding with sequence 1, which event_stream's own
+			// primary key already has for any stream with history. A
+			// genuinely new stream has no event_stream row yet, so the
+			// backfill has nothing to seed for it; its head row is created on
+			// first append by the same UPSERT every append already uses.
+			//
+			// RunMigrations wraps each version in one tx, and on Postgres
+			// and SQL Server DDL is transactional, so a failure here rolls
+			// back the CREATE TABLE too and the version is retried cleanly,
+			// never partially applied. MySQL's CREATE TABLE commits
+			// implicitly -- a crash between it and the backfill below
+			// leaves the table present and empty, and a retry re-runs the
+			// backfill against it. That is why the MySQL backfill below is
+			// ON DUPLICATE KEY UPDATE rather than a bare INSERT: a bare one
+			// would die on the PRIMARY key the first retry, leaving the
+			// worker unable to boot (cleat-review, cleat#2268 round 1).
+			// VALUES(head_sequence) is deprecated as of MySQL 8.0.20 in
+			// favour of a row alias (coordinator, cleat#2268 round 2) --
+			// still kept here because the alias form only parses directly
+			// after a VALUES(...) list, not after an INSERT ... SELECT ...
+			// GROUP BY (measured: MySQL rejects "AS new_head" there with a
+			// syntax error). VALUES() still works on the pinned 8.4.11 and
+			// is not scheduled for removal.
+			Version: 4,
+			Up: `
+				CREATE TABLE IF NOT EXISTS event_stream_head (
+					tenant_id     UUID NOT NULL,
+					stream_id     TEXT NOT NULL,
+					head_sequence BIGINT NOT NULL,
+					PRIMARY KEY (tenant_id, stream_id)
+				);
+
+				INSERT INTO event_stream_head (tenant_id, stream_id, head_sequence)
+				SELECT tenant_id, stream_id, MAX(sequence)
+				FROM event_stream
+				GROUP BY tenant_id, stream_id;
+			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS event_stream_head (
+					tenant_id     CHAR(36) NOT NULL,
+					stream_id     VARCHAR(255) NOT NULL,
+					head_sequence BIGINT NOT NULL,
+					PRIMARY KEY (tenant_id, stream_id)
+				);
+
+				INSERT INTO event_stream_head (tenant_id, stream_id, head_sequence)
+				SELECT tenant_id, stream_id, MAX(sequence)
+				FROM event_stream
+				GROUP BY tenant_id, stream_id
+				ON DUPLICATE KEY UPDATE
+					head_sequence = GREATEST(head_sequence, VALUES(head_sequence));
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_stream_head')
+				CREATE TABLE event_stream_head (
+					tenant_id     UNIQUEIDENTIFIER NOT NULL,
+					stream_id     NVARCHAR(255) NOT NULL,
+					head_sequence BIGINT NOT NULL,
+					PRIMARY KEY (tenant_id, stream_id)
+				);
+
+				INSERT INTO event_stream_head (tenant_id, stream_id, head_sequence)
+				SELECT tenant_id, stream_id, MAX(sequence)
+				FROM event_stream
+				GROUP BY tenant_id, stream_id;
+			`,
+			Down: `
+				DROP TABLE IF EXISTS event_stream_head;
+			`,
+			DownMySQL: `
+				DROP TABLE IF EXISTS event_stream_head;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_stream_head')
+				DROP TABLE event_stream_head;
+			`,
+			TenantScoped: []string{"event_stream_head"},
 		},
 	}
 }

@@ -63,6 +63,31 @@ type rateLimitConfig struct {
 // returns 429 Too Many Requests with standard rate limit headers.
 func (p *Plugin) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// THE PLUGIN'S OWN MANAGEMENT ROUTES ARE EXEMPT, and this is the whole
+		// reason the check exists: they are how an operator RAISES or REMOVES a
+		// limit, and a spent bucket otherwise refuses the request that would
+		// change it. That is a lockout, met at the worst possible moment --
+		// measured, cleat#2551: with a 5-per-60s limit, `PUT /rate-limits/edge`
+		// raising it to 100000 answered **429**, as did a plain GET.
+		//
+		// The exposure this creates is BOUNDED, and it is worth stating why
+		// rather than asserting that an exemption is fine:
+		//
+		//   - The core per-IP limiter (`cmd/cleat-worker`'s rateLimitMiddleware,
+		//     --rate-limit, 100/s by default) is applied OUTSIDE auth, so it
+		//     still bounds these routes. This plugin's limiter is one of two,
+		//     not the only one.
+		//   - These routes still require a tenant context (RegisterRoutes says
+		//     so, and handlePut refuses without one), so what is exempt is a
+		//     tenant managing ITS OWN limits -- not an anonymous caller.
+		//
+		// Coming FIRST, before the tenant lookup, because the exemption does not
+		// depend on which tenant is asking.
+		if isManagementRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		tid, ok := auth.TenantIDFromContext(r.Context())
 		if !ok {
 			next.ServeHTTP(w, r)

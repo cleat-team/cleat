@@ -40,6 +40,11 @@
 # is a tool applied to a format it does not model, and `on:` is nested mapping
 # with two spellings for every list; a line-oriented read of it would be the
 # fourth instance in that table.
+#
+# The `on:` parse itself lives in scripts/lib/workflow_on.py, shared with
+# check-workflow-concurrency.sh (cleat#2737) -- the two guards used to carry
+# independent copies of the same half-dozen lines, free to drift apart if
+# the parsing was ever corrected in one and not the other.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -47,14 +52,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "$REPO_ROOT" <<'PY'
 import sys, os, glob
 
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
 try:
-    import yaml
-except ImportError:
+    from workflow_on import load_triggers
+except ImportError as e:
     # Loudly. A guard that skips when its parser is missing is a guard that
     # passes on every machine that cannot run it.
-    print("ERROR: PyYAML is not installed, so this guard cannot parse any "
-          "workflow. Install it (pip install pyyaml) rather than skipping: a "
-          "check that cannot run must not report success.", file=sys.stderr)
+    print(f"ERROR: could not import scripts/lib/workflow_on.py ({e}) -- "
+          "either PyYAML is not installed (pip install pyyaml) or the lib "
+          "path is wrong. A check that cannot run must not report success.",
+          file=sys.stderr)
     sys.exit(2)
 
 root = sys.argv[1]
@@ -72,13 +79,7 @@ def as_list(v):
 
 checked, offenders = 0, []
 for p in paths:
-    with open(p) as fh:
-        doc = yaml.safe_load(fh) or {}
-    # `on` is parsed by YAML 1.1 as the boolean True. Accept both spellings
-    # rather than assuming which one this parser produced.
-    on = doc.get("on", doc.get(True))
-    if not isinstance(on, dict):
-        continue
+    on = load_triggers(p)
     pr = on.get("pull_request")
     if not isinstance(pr, dict):
         continue

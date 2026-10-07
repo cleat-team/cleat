@@ -72,7 +72,14 @@ func TestASBuildRefusesNondeterminism(t *testing.T) {
 	// first and wrote 001.wasm into cmd/cleat, which is how it was found.
 	build := func(t *testing.T) string {
 		t.Helper()
-		out, _ := exec.Command(cleatBinary, "build", "--target", "assemblyscript", "-o", t.TempDir(), dir).CombinedOutput()
+		// The exit status is NOT discarded. A build that never started produces
+		// EMPTY output, and every absence-assertion below then holds for a reason
+		// with nothing behind it -- a failed measurement rather than a result. A
+		// NON-ZERO exit is fine: an AS build fails for a missing toolchain, a
+		// failed npm install or a syntax error, and the arms assert on the TEXT.
+		// See requireBuildStarted in build_reached_the_stage_test.go.
+		out, err := exec.Command(cleatBinary, "build", "--target", "assemblyscript", "-o", t.TempDir(), dir).CombinedOutput()
+		requireBuildStarted(t, err)
 		return string(out)
 	}
 
@@ -158,6 +165,7 @@ function myWorkflow(h: HostCalls, input: string): string {
 }
 `)
 		out := build(t)
+		requireReachedStage(t, out, asBuildMarker)
 
 		if strings.Contains(out, "E002") {
 			t.Errorf("a CALLER of durable code was reported as non-deterministic.\n\n"+
@@ -200,6 +208,7 @@ function myWorkflow(h: HostCalls, input: string): string {
 }
 `)
 		out := build(t)
+		requireReachedStage(t, out, asBuildMarker)
 
 		if strings.Contains(out, "E005") {
 			t.Errorf("a pure helper was told it is missing a HostCalls parameter.\n\n"+
@@ -236,6 +245,7 @@ function myWorkflow(h: HostCalls, input: string): string {
 }
 `)
 		out := build(t)
+		requireReachedStage(t, out, asBuildMarker)
 
 		if strings.Contains(out, "E00") {
 			t.Errorf("the AS transform now CATCHES an aliased non-deterministic call.\n\n"+

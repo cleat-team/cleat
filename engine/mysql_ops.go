@@ -59,11 +59,20 @@ func (s *MySQLStore) ResolvePromise(ctx context.Context, promiseID, result strin
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// promise_seq bump, the same shape DeliverSignal uses for signal_seq
+	// (cleat#953) -- see engine/store_promises.go's ResolvePromise for the
+	// full rationale (cleat#3171). The status filter stays `= 'ready'`
+	// rather than `IN ('ready', 'suspended')`: that is this dialect's
+	// existing predicate (matches MySQLStore.DeliverSignal, not the wider
+	// one PostgreSQL/SQL Server use), and no behavioural difference today --
+	// nothing writes 'suspended' here either.
 	_, _ = s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = NOW(6)
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status = 'ready' THEN NOW(6) ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = ? AND tenant_id = ?)
-		  AND status = 'ready' AND tenant_id = ?
+		  AND tenant_id = ?
 	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
@@ -82,11 +91,14 @@ func (s *MySQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
+	// promise_seq bump: see ResolvePromise's comment above (cleat#3171).
 	_, _ = s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET next_wake_at = NOW(6)
+		UPDATE workflow_instances
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status = 'ready' THEN NOW(6) ELSE next_wake_at END
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = ? AND tenant_id = ?)
-		  AND status = 'ready' AND tenant_id = ?
+		  AND tenant_id = ?
 	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
@@ -166,7 +178,8 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 		return err
 	}
 
-	// Wake the workflow, exactly as DeliverSignal does.
+	// Wake the workflow, exactly as DeliverSignal does, with the same
+	// promise_seq bump ResolvePromise/RejectPromise use (cleat#3171).
 	//
 	// Not optional: an update is delivered at a DISPATCH POINT in the guest,
 	// and a suspended workflow reaches no dispatch point. Without this the
@@ -174,8 +187,9 @@ func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 	// which for a workflow waiting on a signal or a long sleep may be never.
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET next_wake_at = NOW(6)
-		WHERE id = ? AND tenant_id = ? AND status IN ('ready', 'suspended')
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN NOW(6) ELSE next_wake_at END
+		WHERE id = ? AND tenant_id = ?
 	`, workflowID, s.tenantID)
 	return err
 }
@@ -843,6 +857,19 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	if err != nil || len(pluginDepsJSON) == 0 || string(pluginDepsJSON) == "null" {
 		pluginDepsJSON = []byte("{}")
 	}
+
+	// entry_point_schemas is nullable with no default (migrations/mysql/005),
+	// unlike plugin_deps above -- see engine/store_deployment.go's identical
+	// comment on the Postgres path for why nil stays nil rather than folding
+	// into a placeholder value.
+	var entryPointSchemasJSON []byte
+	if len(def.EntryPointSchemas) > 0 {
+		entryPointSchemasJSON, err = json.Marshal(def.EntryPointSchemas)
+		if err != nil {
+			return fmt.Errorf("DeployWorkflowDef: marshal entry point schemas: %w", err)
+		}
+	}
+
 	// Refuse to deploy over a definition owned by another tenant.
 	//
 	// MySQL has no row-level security, so this check is the only thing between
@@ -863,8 +890,8 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length, entry_point_schemas, input_validation_disabled, exposure)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			wasm_bytes = VALUES(wasm_bytes),
 			abi_version = VALUES(abi_version),
@@ -872,8 +899,11 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			plugin_deps = VALUES(plugin_deps),
 			disabled_at = VALUES(disabled_at),
 			gc_eligible = VALUES(gc_eligible),
-			max_history_length = VALUES(max_history_length)
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, s.tenantID, def.MaxHistoryLength)
+			max_history_length = VALUES(max_history_length),
+			entry_point_schemas = VALUES(entry_point_schemas),
+			input_validation_disabled = VALUES(input_validation_disabled),
+			exposure = VALUES(exposure)
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, s.tenantID, def.MaxHistoryLength, entryPointSchemasJSON, def.InputValidationDisabled, def.Exposure.OrDefault())
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: %w", err)
 	}
@@ -887,13 +917,13 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	var err error
 	if name == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 			FROM workflow_defs WHERE tenant_id = ?
 			ORDER BY name, version DESC
 		`, s.tenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 			FROM workflow_defs WHERE name = ? AND tenant_id = ?
 			ORDER BY version DESC
 		`, name, s.tenantID)
@@ -907,9 +937,10 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	for rows.Next() {
 		var def WorkflowDef
 		var pluginDepsRaw []byte
+		var entryPointSchemasRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure); err != nil {
 			return nil, fmt.Errorf("ListWorkflowDefs: scan: %w", err)
 		}
 		def.CreatedAt = createdAt
@@ -919,6 +950,7 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
 		}
+		def.EntryPointSchemas = decodeEntryPointSchemas(s.log(), entryPointSchemasRaw, def.Name, def.Version)
 		defs = append(defs, def)
 	}
 	return defs, rows.Err()
@@ -928,13 +960,14 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
 	var def WorkflowDef
 	var pluginDepsRaw []byte
+	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 		FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -949,6 +982,7 @@ func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
 	}
+	def.EntryPointSchemas = decodeEntryPointSchemas(s.log(), entryPointSchemasRaw, name, version)
 	return &def, nil
 }
 
@@ -1855,11 +1889,13 @@ func (s *MySQLStore) SetRoutingRule(ctx context.Context, workflowName string, ta
 	return nil
 }
 
-// RemoveRoutingRule deletes a routing rule by ID.
-func (s *MySQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+// RemoveRoutingRule deletes a routing rule by ID, scoped to workflowName --
+// cleat#3168. A ruleID that belongs to a different workflow matches nothing
+// and is reported the same as a ruleID that does not exist.
+func (s *MySQLStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_routing WHERE id = ? AND tenant_id = ?
-	`, ruleID, s.tenantID)
+		DELETE FROM workflow_routing WHERE id = ? AND workflow_name = ? AND tenant_id = ?
+	`, ruleID, workflowName, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("RemoveRoutingRule: %w", err)
 	}

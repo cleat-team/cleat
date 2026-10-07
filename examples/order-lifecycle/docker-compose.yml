@@ -1,0 +1,317 @@
+# A database and a cleat worker -- the infrastructure this scenario runs on.
+# One database at a time, and the profile selects which: cleat#2560.
+#
+#   docker compose --profile postgres up -d
+#
+# The backend (backend/main.go) is deliberately NOT a service here. It is your
+# application: this file stands up what an application connects TO. Run it with
+# `go run ./backend` from the example directory; see the README.
+#
+# This mirrors cmd/cleat/templates/fullstack/docker-compose.yml, and the parts
+# that look fussy are the parts that were measured there rather than reasoned
+# about. Read the comments before simplifying them away.
+
+x-dsn:
+  # The DSNs are the only thing that genuinely differs per dialect, so they are
+  # stated once here as the defaults the services below interpolate, and the
+  # README's dialect table gives the MySQL and SQL Server values to paste.
+  #
+  # These are the IN-NETWORK names (`postgres`, `mysql`, `mssql`), because the
+  # worker reaches the database over the compose network. The deploy command in
+  # the README runs on your host and uses `localhost` instead -- two different
+  # views of the same database, which is why the commands look different.
+  #
+  # Anchors, not `x-db-urls` entries read by anything: compose ignores `x-`
+  # keys, so this block is a place to put a string once. The `--db` and its
+  # value are separate list items below because a YAML alias has to be the whole
+  # scalar -- `"--db=*dsn_migrate"` would be the nine characters `*dsn_migrate`
+  # and not a reference at all, which compose accepts and the worker rejects.
+  migrate: &dsn_migrate "${CLEAT_MIGRATE_DB_URL:-postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable}"
+  worker: &dsn_worker "${CLEAT_WORKER_DB_URL:-postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable}"
+
+services:
+  postgres:
+    # Not digest-pinned, unlike cleat's own CI: this file is an example a reader
+    # will copy into a project, and a digest frozen on the day they read it is
+    # theirs to carry, not ours to choose. 16 is cleat's minimum.
+    #
+    # Under a profile rather than always-on. Before there was a dialect arm this
+    # was the only database and needed no profile; now `up -d` with no profile
+    # would bring this up even for a MySQL reader, so every database carries one
+    # and the README names the one it means.
+    profiles: [postgres]
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cleat
+      POSTGRES_PASSWORD: cleat
+      POSTGRES_DB: cleat
+    ports:
+      - "${CLEAT_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  mysql:
+    profiles: [mysql]
+    # 8.4 is the version cleat's own multi-db CI runs; MySQL's collation is
+    # `ai_ci` here and that is load-bearing for cleat rather than incidental --
+    # it is why a case-insensitive comparison over a workflow name is a real
+    # dialect difference and not a curiosity. See cleat#2560.
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: cleat
+      MYSQL_DATABASE: cleat
+    ports:
+      - "${CLEAT_MYSQL_PORT:-3306}:3306"
+    healthcheck:
+      # `-h 127.0.0.1`, NOT `-h localhost`.
+      #
+      # THE DISCRIMINATOR IS THE CLIENT, NOT THE VALUE -- do not "fix" the MSSQL
+      # healthcheck below on the strength of this line. In the MYSQL client
+      # `localhost` is a magic string meaning "use the unix socket";
+      # `127.0.0.1` forces TCP. `sqlcmd` has no such special case, so that
+      # service's `-S localhost` is a hostname resolved to loopback -- and the
+      # MSSQL arm PASSES with it, in the same matrix run whose MySQL arm failed.
+      # That arm is the control for this paragraph: the rule is about the MySQL
+      # client, not about the string.
+      #
+      # WHY IT MATTERS HERE: every consumer of this database connects over TCP
+      # (`tcp(mysql:3306)`), so a healthcheck that answers on the socket is
+      # reporting on an interface nothing uses.
+      #
+      # AND THE WINDOW BITES ON A SINGLE SAMPLE rather than needing to persist:
+      # `service_healthy` releases on the FIRST healthy reading rather than
+      # requiring sustained health, so one early socket answer is enough to
+      # start everything downstream. (That is a fact about Compose. That it is
+      # what happened HERE is the experiment below, not this sentence.)
+      #
+      # This is also what cleat's own multi-db CI uses
+      # (`.github/workflows/multi-db-ci.yml`, `--health-cmd "mysqladmin ping -h
+      # 127.0.0.1 -u root -pcleat"`); this file diverged from it by copying
+      # docker-compose.dev.yml, which says `localhost`.
+      #
+      # THE LINE IS CAUSAL, measured by reverting ONLY it and re-running the
+      # MySQL arm -- same commit, same everything else:
+      #
+      #     -h 127.0.0.1   ->  Order lifecycle scenario (mysql) PASSES
+      #     -h localhost   ->  Order lifecycle scenario (mysql) FAILS, with the
+      #                        same `dial tcp 172.18.0.2:3306: connect:
+      #                        connection refused` at worker startup
+      #
+      # Two runs, one variable. So this is a FIX and not a hardening.
+      #
+      # THE WINDOW ITSELF IS INFERRED, NOT MEASURED, and the difference is worth
+      # keeping. What is measured is that this line decides the outcome. That the
+      # reason is a socket answer during the entrypoint's `--skip-networking`
+      # init is the explanation that fits both observations, and it has not been
+      # observed directly. The command that would settle it -- on a FAILING run,
+      # `docker inspect --format '{{json .State.Health}}' <container>`, whose
+      # probe log carries every exit code and `mysqladmin`'s own output naming
+      # the socket it used -- was not run, because it needs another failing
+      # configuration and the effect is already established. Say "the line is
+      # causal, and here is the mechanism that explains it" rather than "the
+      # mechanism is demonstrated".
+      #
+      # WHAT THE WINDOW IS NOT OBSERVABLE FROM, which a reader needs BEFORE
+      # trying to reproduce it: a cold-start poll INSIDE the container, both
+      # forms checked each iteration, had them answer at the SAME instant on an
+      # idle machine (+5.0s each, delta 0). It does not reproduce without load
+      # -- which is why three earlier local probes were all negative, and why the
+      # causal evidence had to come from CI. A reader who runs that probe and
+      # sees delta 0 has not falsified this; they have reproduced the reason it
+      # could not be measured locally.
+      #
+      # The change stands on its own merits regardless: a healthcheck must assert
+      # the interface its consumers use, and this one was asserting a socket that
+      # only the healthcheck itself was using.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pcleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      # MySQL initialises its data directory on first boot and refuses
+      # connections until it is done, which on a cold volume is tens of seconds.
+      # Without a start_period the healthcheck burns its retries against a
+      # database that is still unpacking and the service is reported unhealthy
+      # while it is merely early. Measured in cleat's own compose, which uses
+      # 60s.
+      start_period: 60s
+
+  mssql:
+    profiles: [mssql]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "${CLEAT_MSSQL_SA_PASSWORD:-CleatTest123!}"
+      MSSQL_PID: Developer
+    ports:
+      - "${CLEAT_MSSQL_PORT:-1433}:1433"
+    healthcheck:
+      # -C trusts the server's self-signed certificate. Without it sqlcmd
+      # refuses the connection and the service never reports healthy, which
+      # reads as "the database is down" rather than "the client is strict".
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "${CLEAT_MSSQL_SA_PASSWORD:-CleatTest123!}", "-Q", "SELECT 1", "-C"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # SQL Server only: cleat does NOT create its database.
+  #
+  # On MySQL the store factory issues `CREATE DATABASE IF NOT EXISTS` itself
+  # (engine/mysql_store.go), and PostgreSQL's `POSTGRES_DB` above creates one at
+  # first boot. Nothing does that for SQL Server -- cleat's own multi-db CI has
+  # an explicit `CREATE DATABASE cleat` step beside its SQL Server service for
+  # exactly this reason -- so a `sqlserver://...?database=cleat` DSN against a
+  # fresh server fails to connect, not to migrate.
+  #
+  # `ON_ERROR_STOP` is deliberately NOT set here, and this is the one place in
+  # this file that tolerates an error: the step is re-run on every `up`, and the
+  # second run's "database already exists" is the expected outcome rather than a
+  # failure. The step that must not tolerate errors is `migrate`, below.
+  mssql-db:
+    profiles: [mssql]
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    entrypoint:
+      - /opt/mssql-tools18/bin/sqlcmd
+      - -S
+      - mssql
+      - -U
+      - sa
+      - -P
+      - "${CLEAT_MSSQL_SA_PASSWORD:-CleatTest123!}"
+      - -C
+      - -Q
+      - "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
+    restart: "no"
+
+  # Schema migration as a one-shot step: a worker no longer migrates itself at
+  # every start (cleat#2117). On PostgreSQL it runs as the superuser, because
+  # DDL needs it and because the schema baseline creates the lesser role below --
+  # cleat_app -- before anything connects as it.
+  migrate:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    command:
+      # The worker does not infer the dialect from the DSN. `--driver` defaults
+      # to `postgres`, so handing it a MySQL DSN without this is a connection
+      # error rather than a dialect switch -- loud, but the message names the
+      # driver and not the mistake.
+      - "--driver=${CLEAT_DIALECT:-postgres}"
+      - "--migrate-only"
+      - "--db"
+      - *dsn_migrate
+    depends_on:
+      # `required: false` on each, because at most one of these is enabled by
+      # the active profile and compose would otherwise refuse to start the
+      # stack over the two that are not. It does NOT weaken the condition for
+      # the one that IS enabled: the dependency is still started first and
+      # `service_healthy` is still waited on. Measured rather than assumed --
+      # a one-shot beside a MySQL service reached it under `required: false`,
+      # and the same image with no `depends_on` at all could not connect.
+      postgres:
+        condition: service_healthy
+        required: false
+      mysql:
+        condition: service_healthy
+        required: false
+      mssql-db:
+        condition: service_completed_successfully
+        required: false
+    restart: "no"
+
+  # PostgreSQL only, and the reason is specific to PostgreSQL.
+  #
+  # The schema baseline creates cleat_app NOLOGIN and without a password, on
+  # purpose: a credential does not belong in a file that migrations replay.
+  # This one-shot step supplies one for local development, once the migration
+  # above has created the role to receive it.
+  #
+  # The role itself exists because every tenant-scoped table has row-level
+  # security FORCEd and PostgreSQL never applies RLS to a superuser -- see the
+  # worker's command below. MySQL has no such role and this step must not run
+  # there: MySQL's single-tenant construction is a property of the engine, not
+  # of a connection, so there is no lesser identity to connect as and nothing
+  # for it to grant. It is under the postgres profile rather than merely
+  # documented as not-for-MySQL, because a step that is skipped by instruction
+  # gets run by the next person to paste a command.
+  app-role:
+    profiles: [postgres]
+    image: postgres:16
+    environment:
+      PGPASSWORD: cleat
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -h
+      - postgres
+      - -U
+      - cleat
+      - -d
+      - cleat
+      - -c
+      - "ALTER ROLE cleat_app LOGIN PASSWORD '${CLEAT_APP_PASSWORD:-cleat-app-local-dev}';"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  cleat-worker:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it
+    # cancels its runs (cleat#2285). Docker sends SIGKILL after 10s unless told
+    # otherwise, which would cut the drain off.
+    stop_grace_period: 60s
+    command:
+      - "--driver=${CLEAT_DIALECT:-postgres}"
+      # On PostgreSQL, NOT the superuser the migration above used. Every
+      # tenant-scoped table has row-level security FORCEd, and PostgreSQL never
+      # applies RLS to a superuser -- which is what cleat_app is for.
+      # --require-auth (on by default) refuses to start over a connection that
+      # is exempt from RLS, which is what catches this if it regresses.
+      #
+      # That refusal is PostgreSQL-ONLY, and it is silent on the other two:
+      # cmd/cleat-worker/main.go gates the whole check on `--driver ==
+      # "postgres"` before it calls engine.CheckRLSEnforced, and that function
+      # queries `pg_roles` -- it could not run elsewhere. So on MySQL and SQL
+      # Server `--require-auth` is not a weaker guarantee, it is no check at
+      # all, and the dialect arm asserts a different thing there rather than
+      # the same thing with a smaller expectation. See the README.
+      - "--db"
+      - *dsn_worker
+      # Used only for the startup schema-verification's error message; this
+      # worker does not migrate itself -- see the migrate service above.
+      - "--migrate-db"
+      - *dsn_migrate
+      - "--api-addr=:8080"
+      - "--concurrency=4"
+    environment:
+      # `webhook-ingest` seals each source's signing secret before storing it, so
+      # it needs a master key. WITHOUT ONE THE WORKER STILL STARTS and `POST
+      # /ingest/sources` answers 500 -- the failure is at the first write rather
+      # than at boot, which is why it is called out here rather than left to the
+      # reader to discover.
+      #
+      # A fixed local-development value, like the app-role password above: this
+      # file is a starting point, and a real deployment supplies its own out of
+      # band. base64, 32 bytes. Rotating it makes every secret sealed under the
+      # old key unreadable -- see CLEAT_SECRET_MASTER_KEY_PREVIOUS.
+      CLEAT_SECRET_MASTER_KEY: ${CLEAT_SECRET_MASTER_KEY:-kiFstWOvEcdUe9ELx0oCTNorrTniHsyhUwLESCzufzw=}
+    ports:
+      - "${CLEAT_API_PORT:-8080}:8080"
+    depends_on:
+      # `required: false` for the same reason as `migrate`'s. The PostgreSQL arm
+      # additionally needs app-role to have finished, which is what makes the
+      # two-dependency shape worth spelling out: app-role itself depends on
+      # migrate, so on PostgreSQL the order is database -> migrate -> app-role
+      # -> worker, and each hop is a condition rather than a sleep.
+      app-role:
+        condition: service_completed_successfully
+        required: false
+      migrate:
+        condition: service_completed_successfully
+        required: false

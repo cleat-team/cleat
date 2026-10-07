@@ -28,7 +28,17 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 		}
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	// beginTxWithContext, not a plain s.db.ExecContext: this must run under
+	// s.tenantID's own SESSION_CONTEXT, not whatever the connection's pool
+	// happened to bake in at connect time -- see ListVersions' doc comment
+	// for the general shape (cleat#2210).
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("CreateSchedule: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
 		VALUES (@p1, @p2, @p3, @p4, CAST(@p5 AS NVARCHAR(MAX)), @p6, @p7, @p8, @p9, @p10, @p11, @p12, @p13, @p14)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputJSON(sch.Input), sch.DisabledAt, sch.NextRunAt, s.tenantID,
@@ -41,9 +51,18 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 		// and then told apart by ASKING whether the key is held rather than by
 		// reading an index name out of driver text.
 		//
-		// No savepoint here, unlike PostgreSQL: this path runs outside a
-		// transaction, so the failed INSERT leaves the connection usable.
+		// No savepoint: a failed INSERT does not abort the surrounding
+		// transaction on SQL Server the way it would on PostgreSQL.
+		//
+		// tx.Rollback() explicitly HERE, not left to the deferred call --
+		// lookupScheduleKey below opens its OWN beginTxWithContext, and this
+		// function's tx is still open (holding a pool connection) until the
+		// function returns. Two open transactions racing for a connection
+		// on a small pool is a self-deadlock, not merely wasteful; the same
+		// shape as startNewRunOnce's explicit tx.Rollback() before its own
+		// retry lookup, for the same reason.
 		if isMSSQLDuplicateKey(err) {
+			tx.Rollback()
 			if sch.IdempotencyKey != "" {
 				if stored, found, lerr := s.lookupScheduleKey(ctx, sch.IdempotencyKey); lerr == nil && found {
 					return scheduleIdempotencyVerdict(stored, digest)
@@ -53,13 +72,19 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 		}
 		return err
 	}
-	return nil
+	return tx.Commit()
 }
 
 // lookupScheduleKey reports the stored input digest for a key this tenant holds.
 func (s *MSSQLStore) lookupScheduleKey(ctx context.Context, key string) (sql.NullString, bool, error) {
 	var stored sql.NullString
-	err := s.db.QueryRowContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return stored, false, fmt.Errorf("lookupScheduleKey: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	err = tx.QueryRowContext(ctx, `
 		SELECT request_digest FROM workflow_schedules
 		WHERE tenant_id = @p1 AND idempotency_key = @p2
 	`, s.tenantID, key).Scan(&stored)
@@ -70,9 +95,15 @@ func (s *MSSQLStore) lookupScheduleKey(ctx context.Context, key string) (sql.Nul
 }
 
 func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ListSchedules: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone,
-		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WHERE tenant_id = @p1 ORDER BY name
 	`, s.tenantID)
@@ -106,8 +137,14 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 // the whole of the isolation on the connection this actually runs on. See the
 // note above ClaimDueSchedule.
 func (s *MSSQLStore) DeleteSchedule(ctx context.Context, name string) error {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("DeleteSchedule: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var n int
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`,
 		name, s.tenantID).Scan(&n); err != nil {
 		return err
@@ -116,14 +153,22 @@ func (s *MSSQLStore) DeleteSchedule(ctx context.Context, name string) error {
 		return ErrScheduleNotFound
 	}
 
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`, name, s.tenantID)
-	return err
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`, name, s.tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("SetScheduleEnabled: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var n int
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT count(*) FROM workflow_schedules WHERE name = @p1 AND tenant_id = @p2`,
 		name, s.tenantID).Scan(&n); err != nil {
 		return err
@@ -132,16 +177,32 @@ func (s *MSSQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 		return ErrScheduleNotFound
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_schedules
 		   SET disabled_at = CASE WHEN @p2 = 1 THEN NULL ELSE COALESCE(disabled_at, SYSUTCDATETIME()) END
 		 WHERE name = @p1 AND tenant_id = @p3
-	`, name, enabled, s.tenantID)
-	return err
+	`, name, enabled, s.tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not a plain s.db.QueryContext -- cleat#2210. The
+	// READPAST/UPDLOCK/ROWLOCK hints below hold their row locks a little
+	// longer this way (until this function's deferred tx.Rollback, rather
+	// than releasing at statement end under autocommit), which only widens
+	// the window another concurrent scheduler's READPAST skips these rows
+	// -- ClaimDueSchedule's own CAS is what actually claims one, so this
+	// does not change correctness, only how much two schedulers' polls can
+	// interleave.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetDueSchedules: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone,
 		       -- CONVERT, not the raw column. go-mssqldb scans UNIQUEIDENTIFIER
 		       -- into a Go string as its 16 raw storage bytes, not the canonical
@@ -152,7 +213,11 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		       -- string to uniqueidentifier" and NO schedule ever fires on SQL
 		       -- Server. It also lands in the cron:<tenant>:<name>:<instant>
 		       -- idempotency key, which is the at-least-once delivery guarantee.
-		       CONVERT(NVARCHAR(36), tenant_id) AS tenant_id,
+		       --
+		       -- LOWERed as well as converted: CONVERT alone returns UPPERCASE on
+		       -- SQL Server while the tenant the application wrote is lowercase,
+		       -- so this string is not the one that created the row. cleat#2983.
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
 		       misfire_policy, catch_up_limit, overlap_policy, ISNULL(last_run_id, '')
 		FROM workflow_schedules WITH (READPAST, UPDLOCK, ROWLOCK)
 		WHERE disabled_at IS NULL AND next_run_at <= SYSUTCDATETIME() AND tenant_id = @p1
@@ -183,7 +248,13 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 }
 
 func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetCompactionCandidates: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT w.id
 		FROM workflow_instances w
 		-- LEFT, not INNER: see the PostgreSQL half in engine/db.go. A missing
@@ -300,6 +371,15 @@ func (s *MSSQLStore) RecordWorkflowMemorySample(ctx context.Context, defName str
 	})
 }
 
+// WITH (HOLDLOCK) on the target MERGE below (cleat#2904/#2915): this is
+// called once per in-flight instance of a given workflow DEFINITION, from
+// however many separate workers currently hold claims on separate instances
+// of it -- the opposite of a narrow race, this is the ordinary case for any
+// definition with more than one running instance. withRollbackGuaranteedRetry
+// (the caller, RecordWorkflowMemorySample) only retries deadlock-victim and
+// snapshot-conflict errors (isMSSQLRollbackGuaranteed, mssql_retry.go) --
+// NOT a duplicate-key violation, so a race here surfaces as an unretried,
+// user-visible error rather than self-healing.
 func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName string, sampleBytes int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -315,7 +395,7 @@ func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		MERGE workflow_memory_stats AS target
+		MERGE workflow_memory_stats WITH (HOLDLOCK) AS target
 		USING (SELECT @p1 AS def_name, @p2 AS mean_bytes, @p3 AS tenant_id) AS source
 		ON target.def_name = source.def_name AND target.tenant_id = @p3
 		WHEN MATCHED THEN UPDATE SET
@@ -333,7 +413,13 @@ func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName
 }
 
 func (s *MSSQLStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load memory estimates: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name, mean_bytes FROM workflow_memory_stats WHERE tenant_id = @p1
 	`, s.tenantID)
 	if err != nil {
@@ -354,7 +440,13 @@ func (s *MSSQLStore) LoadMemoryEstimates(ctx context.Context) (map[string]float6
 }
 
 func (s *MSSQLStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load memory stats: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT DISTINCT def_name,
 			MIN(sample_bytes) OVER (PARTITION BY def_name),
 			AVG(CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
@@ -388,7 +480,13 @@ func (s *MSSQLStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats
 }
 
 func (s *MSSQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
-	defRows, err := s.db.QueryContext(ctx,
+	listTx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup memory samples: begin: %w", err)
+	}
+	defer listTx.Rollback()
+
+	defRows, err := listTx.QueryContext(ctx,
 		`SELECT DISTINCT def_name FROM workflow_memory_samples WHERE tenant_id = @p1`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup memory samples: list defs: %w", err)
@@ -406,30 +504,50 @@ func (s *MSSQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 	if err := defRows.Err(); err != nil {
 		return 0, err
 	}
+	defRows.Close()
+	listTx.Rollback()
 
+	// One transaction per def, not one shared across the whole loop: each
+	// delete keeps committing independently, matching the original
+	// autocommit-per-statement behaviour (a failure partway through leaves
+	// the earlier defs' deletes committed rather than rolling them all back).
 	var totalDeleted int64
 	for _, defName := range defNames {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_memory_samples
-			WHERE def_name = @p1
-			  AND tenant_id = @p3
-			  AND id NOT IN (
-			      SELECT id FROM (
-				  SELECT id, ROW_NUMBER() OVER (ORDER BY recorded_at DESC) AS rn
-				  FROM workflow_memory_samples
-				  WHERE def_name = @p1
-				    AND tenant_id = @p3
-			      ) AS ranked
-			      WHERE ranked.rn <= @p2
-			  )
-		`, defName, maxSamplesPerDef, s.tenantID)
+		n, err := s.cleanupMemorySamplesForDef(ctx, defName, maxSamplesPerDef)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("cleanup memory samples: delete %s: %w", defName, err)
 		}
-		n, _ := result.RowsAffected()
 		totalDeleted += n
 	}
 	return totalDeleted, nil
+}
+
+func (s *MSSQLStore) cleanupMemorySamplesForDef(ctx context.Context, defName string, maxSamplesPerDef int) (int64, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_memory_samples
+		WHERE def_name = @p1
+		  AND tenant_id = @p3
+		  AND id NOT IN (
+		      SELECT id FROM (
+			  SELECT id, ROW_NUMBER() OVER (ORDER BY recorded_at DESC) AS rn
+			  FROM workflow_memory_samples
+			  WHERE def_name = @p1
+			    AND tenant_id = @p3
+		      ) AS ranked
+		      WHERE ranked.rn <= @p2
+		  )
+	`, defName, maxSamplesPerDef, s.tenantID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return n, tx.Commit()
 }
 
 // mssqlIDChunk is the id-list chunk size deleteByWorkflowIDs and
@@ -1187,7 +1305,13 @@ func scheduleInputJSON(input json.RawMessage) string {
 // predicates one tenant deletes, disables and reschedules another tenant's
 // cron schedules through the ordinary HTTP API.
 func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return false, fmt.Errorf("ClaimDueSchedule: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_schedules
 		SET next_run_at = @p2, last_run_at = SYSUTCDATETIME(),
 		    last_run_id = CASE WHEN @p4 = '' THEN last_run_id ELSE @p4 END
@@ -1199,6 +1323,9 @@ func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expected
 	n, err := res.RowsAffected()
 	if err != nil {
 		return false, fmt.Errorf("ClaimDueSchedule: rows affected: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("ClaimDueSchedule: commit: %w", err)
 	}
 	return n == 1, nil
 }

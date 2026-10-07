@@ -554,7 +554,7 @@ func TestRegisterRoutesNilMux(t *testing.T) {
 
 func TestUnregisterAwaiterEmptyID(t *testing.T) {
 	// Must not panic or error when called with empty workflow ID.
-	unregisterAwaiter(context.Background(), nil, nil, "", "test-event")
+	unregisterAwaiter(context.Background(), nil, nil, "", "test-event", "", "", "")
 }
 
 // TestMergeInputAndTemplateNil verifies mergeInputAndTemplate handles nil template.

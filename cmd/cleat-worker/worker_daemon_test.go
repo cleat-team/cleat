@@ -51,7 +51,7 @@ type mockStore struct {
 	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 	failWorkflowFn                     func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
-	moveToDeadLetterQueueFn            func(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error
+	moveToDeadLetterQueueFn            func(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error
 	requestCancellationFn              func(ctx context.Context, workflowID, reason string) error
 	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
@@ -68,7 +68,7 @@ type mockStore struct {
 	deliverSignalIdempotentFn          func(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error)
 	validateVersionFn                  func(ctx context.Context, defName string, defVersion int) (bool, error)
 	setRoutingRuleFn                   func(ctx context.Context, workflowName string, targetVersion int, weight float64) error
-	removeRoutingRuleFn                func(ctx context.Context, ruleID string) error
+	removeRoutingRuleFn                func(ctx context.Context, workflowName, ruleID string) error
 	getRoutingRulesFn                  func(ctx context.Context, workflowName string) ([]engine.RoutingRule, error)
 	setWorkflowTagFn                   func(ctx context.Context, workflowName string, version int, tag string) error
 	removeWorkflowTagFn                func(ctx context.Context, workflowName string, tag string) error
@@ -2986,6 +2986,9 @@ func TestAPIListPromises_Nil(t *testing.T) {
 
 func TestAPIResolvePromise(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.resolvePromiseFn = func(ctx context.Context, promiseID, result string) error {
 		return nil
 	}
@@ -3011,6 +3014,9 @@ func TestAPIResolvePromise(t *testing.T) {
 
 func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	api := newTestAPIServer(ms)
 
 	body := `not-json`
@@ -3027,6 +3033,9 @@ func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
 
 func TestAPIRejectPromise(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
 		return nil
 	}
@@ -3052,6 +3061,9 @@ func TestAPIRejectPromise(t *testing.T) {
 
 func TestAPIRejectPromise_InvalidJSON(t *testing.T) {
 	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "d", DefVersion: 1}, nil
+	}
 	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/reject", nil)
@@ -3328,9 +3340,9 @@ func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID st
 	return nil, nil
 }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	if m.moveToDeadLetterQueueFn != nil {
-		return m.moveToDeadLetterQueueFn(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+		return m.moveToDeadLetterQueueFn(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp, queryState)
 	}
 	return nil
 }
@@ -3474,9 +3486,9 @@ func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, tar
 	}
 	return nil
 }
-func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	if m.removeRoutingRuleFn != nil {
-		return m.removeRoutingRuleFn(ctx, ruleID)
+		return m.removeRoutingRuleFn(ctx, workflowName, ruleID)
 	}
 	return nil
 }

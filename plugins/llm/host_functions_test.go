@@ -292,6 +292,57 @@ func TestChatDisabledProvider(t *testing.T) {
 	}
 }
 
+// TestChatUnrecognizedModelWithoutInit is a regression test for cleat#2572's
+// EstimatedCost log line: p.logger is only set by Init, and this Plugin
+// (like TestChatDisabledProvider above) never calls it, so p.logger is nil
+// here. Before the nil check on that log call, this test panicked with a nil
+// pointer dereference inside log/slog -- the path is only reachable when the
+// model is NOT in the price table, which no other test in this file
+// exercises through p.chat.
+func TestChatUnrecognizedModelWithoutInit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "ok"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+			"model": "a-self-hosted-model-not-in-any-table",
+		})
+	}))
+	defer srv.Close()
+
+	p := &Plugin{httpClient: &http.Client{}}
+	p.config = Config{
+		Providers: map[string]ProviderConfig{
+			"openai": {BaseURL: srv.URL, Enabled: true},
+		},
+	}
+	req := chatRequest{
+		Provider: "openai",
+		Model:    "a-self-hosted-model-not-in-any-table",
+		Messages: []providers.Message{{Role: "user", Content: "hello"}},
+		// req.APIKey supplied directly so effectiveAPIKey never reaches
+		// providerAPIKey, which would otherwise fail on p.deploymentSecrets
+		// being nil -- this Plugin was never Init'd.
+		APIKey: "sk-test",
+	}
+	reqJSON, _ := json.Marshal(req)
+
+	out, err := p.chat(tenantCtx(), string(reqJSON))
+	if err != nil {
+		t.Fatalf("chat() returned error: %v", err)
+	}
+	var resp providers.ChatOutput
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if !resp.EstimatedCost {
+		t.Error("expected EstimatedCost=true for a model absent from the price table")
+	}
+}
+
 func TestChatNoTenantContext(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{}

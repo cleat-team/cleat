@@ -22,21 +22,26 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("email: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "send"}, p.send); err != nil {
+	if err := plugin.RegisterTyped(scope, plugin.FuncOptions{Name: "send"}, p.send); err != nil {
 		return err
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "send_template"}, p.sendTemplate); err != nil {
+	if err := plugin.RegisterTyped(scope, plugin.FuncOptions{Name: "send_template"}, p.sendTemplate); err != nil {
 		return err
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "check_status"}, p.checkStatus); err != nil {
+	if err := plugin.RegisterTyped(scope, plugin.FuncOptions{Name: "check_status"}, p.checkStatus); err != nil {
 		return err
 	}
 	return nil
 }
 
 // ---- Input/output types ----
+//
+// Exported (cleat#2626): these are the Req/Resp types the RegisterTyped
+// call sites above publish, and cmd/cleat-gen plugin-client reads them off
+// this real registration -- never a hand-maintained manifest -- to generate
+// a typed caller-side client.
 
-type sendInput struct {
+type SendInput struct {
 	To       string   `json:"to"`
 	Subject  string   `json:"subject"`
 	BodyHTML string   `json:"body_html"`
@@ -47,12 +52,12 @@ type sendInput struct {
 	BCC      []string `json:"bcc,omitempty"`
 }
 
-type sendOutput struct {
+type SendOutput struct {
 	MessageID string `json:"message_id"`
 	Status    string `json:"status"`
 }
 
-type sendTemplateInput struct {
+type SendTemplateInput struct {
 	To           string         `json:"to"`
 	TemplateID   string         `json:"template_id"`
 	TemplateData map[string]any `json:"template_data"`
@@ -60,46 +65,42 @@ type sendTemplateInput struct {
 	ReplyTo      string         `json:"reply_to,omitempty"`
 }
 
-type sendTemplateOutput struct {
+type SendTemplateOutput struct {
 	MessageID string `json:"message_id"`
 	Status    string `json:"status"`
 }
 
-type checkStatusInput struct {
+type CheckStatusInput struct {
 	MessageID string `json:"message_id"`
 }
 
-type statusEvent struct {
+type StatusEvent struct {
 	Timestamp string `json:"timestamp"`
 	Event     string `json:"event"`
 }
 
-type checkStatusOutput struct {
+type CheckStatusOutput struct {
 	Status string        `json:"status"`
-	Events []statusEvent `json:"events"`
+	Events []StatusEvent `json:"events"`
 }
 
 // ---- Host functions ----
 
 // send sends a single transactional email via SendGrid.
-func (p *Plugin) send(ctx context.Context, inputJSON string) (string, error) {
+func (p *Plugin) send(ctx context.Context, input SendInput) (SendOutput, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
-		return "", fmt.Errorf("email: no tenant context")
+		return SendOutput{}, fmt.Errorf("email: no tenant context")
 	}
 
-	var input sendInput
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return "", fmt.Errorf("email: invalid input: %w", err)
-	}
 	if input.To == "" {
-		return "", fmt.Errorf("email: to is required")
+		return SendOutput{}, fmt.Errorf("email: to is required")
 	}
 	if input.Subject == "" {
-		return "", fmt.Errorf("email: subject is required")
+		return SendOutput{}, fmt.Errorf("email: subject is required")
 	}
 	if input.BodyHTML == "" {
-		return "", fmt.Errorf("email: body_html is required")
+		return SendOutput{}, fmt.Errorf("email: body_html is required")
 	}
 
 	from := input.From
@@ -107,7 +108,7 @@ func (p *Plugin) send(ctx context.Context, inputJSON string) (string, error) {
 		from = p.defaultFrom
 	}
 	if from == "" {
-		return "", fmt.Errorf("email: from is required (set in input or plugin config)")
+		return SendOutput{}, fmt.Errorf("email: from is required (set in input or plugin config)")
 	}
 
 	fromEmail := mail.NewEmail("", from)
@@ -154,15 +155,15 @@ func (p *Plugin) send(ctx context.Context, inputJSON string) (string, error) {
 
 	apiKey, err := p.sendGridAPIKey(ctx)
 	if err != nil {
-		return "", err
+		return SendOutput{}, err
 	}
 	response, err := sendgrid.NewSendClient(apiKey).SendWithContext(ctx, m)
 	if err != nil {
-		return "", fmt.Errorf("email: send failed: %w", err)
+		return SendOutput{}, fmt.Errorf("email: send failed: %w", err)
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("email: SendGrid returned %d: %s", response.StatusCode, response.Body)
+		return SendOutput{}, fmt.Errorf("email: SendGrid returned %d: %s", response.StatusCode, response.Body)
 	}
 
 	messageID := extractMessageID(response.Headers)
@@ -173,30 +174,24 @@ func (p *Plugin) send(ctx context.Context, inputJSON string) (string, error) {
 		"tenant", cc.TenantID,
 	)
 
-	output := sendOutput{
+	return SendOutput{
 		MessageID: messageID,
 		Status:    "sent",
-	}
-	outJSON, _ := json.Marshal(output)
-	return string(outJSON), nil
+	}, nil
 }
 
 // sendTemplate sends an email using a pre-defined SendGrid template.
-func (p *Plugin) sendTemplate(ctx context.Context, inputJSON string) (string, error) {
+func (p *Plugin) sendTemplate(ctx context.Context, input SendTemplateInput) (SendTemplateOutput, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
-		return "", fmt.Errorf("email: no tenant context")
+		return SendTemplateOutput{}, fmt.Errorf("email: no tenant context")
 	}
 
-	var input sendTemplateInput
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return "", fmt.Errorf("email: invalid input: %w", err)
-	}
 	if input.To == "" {
-		return "", fmt.Errorf("email: to is required")
+		return SendTemplateOutput{}, fmt.Errorf("email: to is required")
 	}
 	if input.TemplateID == "" {
-		return "", fmt.Errorf("email: template_id is required")
+		return SendTemplateOutput{}, fmt.Errorf("email: template_id is required")
 	}
 
 	from := input.From
@@ -204,7 +199,7 @@ func (p *Plugin) sendTemplate(ctx context.Context, inputJSON string) (string, er
 		from = p.defaultFrom
 	}
 	if from == "" {
-		return "", fmt.Errorf("email: from is required (set in input or plugin config)")
+		return SendTemplateOutput{}, fmt.Errorf("email: from is required (set in input or plugin config)")
 	}
 
 	fromEmail := mail.NewEmail("", from)
@@ -235,15 +230,15 @@ func (p *Plugin) sendTemplate(ctx context.Context, inputJSON string) (string, er
 
 	apiKey, err := p.sendGridAPIKey(ctx)
 	if err != nil {
-		return "", err
+		return SendTemplateOutput{}, err
 	}
 	response, err := sendgrid.NewSendClient(apiKey).SendWithContext(ctx, m)
 	if err != nil {
-		return "", fmt.Errorf("email: send template failed: %w", err)
+		return SendTemplateOutput{}, fmt.Errorf("email: send template failed: %w", err)
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("email: SendGrid returned %d: %s", response.StatusCode, response.Body)
+		return SendTemplateOutput{}, fmt.Errorf("email: SendGrid returned %d: %s", response.StatusCode, response.Body)
 	}
 
 	messageID := extractMessageID(response.Headers)
@@ -254,35 +249,29 @@ func (p *Plugin) sendTemplate(ctx context.Context, inputJSON string) (string, er
 		"tenant", cc.TenantID,
 	)
 
-	output := sendTemplateOutput{
+	return SendTemplateOutput{
 		MessageID: messageID,
 		Status:    "sent",
-	}
-	outJSON, _ := json.Marshal(output)
-	return string(outJSON), nil
+	}, nil
 }
 
 // checkStatus checks the delivery status of a sent email via the SendGrid
 // Activity API. If the Activity API is not enabled for the account, it
 // returns a best-effort "sent" status.
-func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, error) {
+func (p *Plugin) checkStatus(ctx context.Context, input CheckStatusInput) (CheckStatusOutput, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
-		return "", fmt.Errorf("email: no tenant context")
+		return CheckStatusOutput{}, fmt.Errorf("email: no tenant context")
 	}
 
-	var input checkStatusInput
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return "", fmt.Errorf("email: invalid input: %w", err)
-	}
 	if input.MessageID == "" {
-		return "", fmt.Errorf("email: message_id is required")
+		return CheckStatusOutput{}, fmt.Errorf("email: message_id is required")
 	}
 
 	// Query the SendGrid Activity API for message status.
 	req, err := http.NewRequestWithContext(ctx, "GET", sendgridActivityAPI, nil)
 	if err != nil {
-		return "", fmt.Errorf("email: create request: %w", err)
+		return CheckStatusOutput{}, fmt.Errorf("email: create request: %w", err)
 	}
 	plugin.SetTraceparentFromContext(ctx, req)
 
@@ -293,7 +282,7 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 
 	apiKey, err := p.sendGridAPIKey(ctx)
 	if err != nil {
-		return "", err
+		return CheckStatusOutput{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
@@ -304,7 +293,7 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("email: activity API request failed: %w", err)
+		return CheckStatusOutput{}, fmt.Errorf("email: activity API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -315,17 +304,15 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 			"status_code", resp.StatusCode,
 			"tenant", cc.TenantID,
 		)
-		output := checkStatusOutput{
+		return CheckStatusOutput{
 			Status: "sent",
-			Events: []statusEvent{},
-		}
-		outJSON, _ := json.Marshal(output)
-		return string(outJSON), nil
+			Events: []StatusEvent{},
+		}, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("email: activity API returned %d: %s", resp.StatusCode, string(body))
+		return CheckStatusOutput{}, fmt.Errorf("email: activity API returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var activityResp struct {
@@ -339,16 +326,14 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&activityResp); err != nil {
-		return "", fmt.Errorf("email: decode activity response: %w", err)
+		return CheckStatusOutput{}, fmt.Errorf("email: decode activity response: %w", err)
 	}
 
 	if len(activityResp.Messages) == 0 {
-		output := checkStatusOutput{
+		return CheckStatusOutput{
 			Status: "unknown",
-			Events: []statusEvent{},
-		}
-		outJSON, _ := json.Marshal(output)
-		return string(outJSON), nil
+			Events: []StatusEvent{},
+		}, nil
 	}
 
 	msg := activityResp.Messages[0]
@@ -366,9 +351,9 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 		}
 	}
 
-	events := []statusEvent{}
+	events := []StatusEvent{}
 	if msg.LastEvent != "" {
-		events = append(events, statusEvent{
+		events = append(events, StatusEvent{
 			Timestamp: msg.LastEvent,
 			Event:     status,
 			// We only add the most recent event for brevity.
@@ -381,12 +366,10 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 		"tenant", cc.TenantID,
 	)
 
-	output := checkStatusOutput{
+	return CheckStatusOutput{
 		Status: status,
 		Events: events,
-	}
-	outJSON, _ := json.Marshal(output)
-	return string(outJSON), nil
+	}, nil
 }
 
 // extractMessageID extracts the X-Message-Id value from the SendGrid

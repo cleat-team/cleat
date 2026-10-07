@@ -8,7 +8,356 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-06
+
+### UPGRADE NOTES — breaking
+
+- **A typed plugin registration (`plugin.RegisterTyped`) now rejects a request carrying a field
+  its `Req` struct does not declare, instead of silently dropping it.** Closes cleat#2660: a
+  `cleat/pluginclients` caller compiled against a newer SDK can send a `Req` field the deployed
+  plugin's older version does not have. Before this, `RegisterTyped` decoded with plain
+  `json.Unmarshal`, which silently drops an unrecognised field — the call still returned success,
+  and the caller had no way to tell their extra field was ignored. It now decodes with
+  `json.NewDecoder(...).DisallowUnknownFields()`, so the call fails loudly at the boundary
+  instead. **Plugin-side only** — the typed *client*'s own decode (`PluginCallTyped`,
+  `cleat/plugin.go`) is deliberately left lenient, per the owner's decision on cleat#2597 (see
+  "Plugin Clients" in [`docs/reference/sdk-api.md`](docs/reference/sdk-api.md)), because applying
+  this same strictness there would turn every additive `Resp` field into a rollout hazard for no
+  compatibility benefit. **Consequence for rollout order:** a `Req` field addition is no longer
+  unconditionally safe regardless of deploy order — the plugin must be upgraded to declare a new
+  field before any client starts sending it, or that client's calls now fail instead of the field
+  being silently dropped. Only `plugins/email` and `plugins/webhookingest` use `RegisterTyped`
+  today.
+
+- **`webhookingest.await_webhook` now requires `source_id`; an empty one errors instead of
+  matching any source.** Before this, an empty `source_id` polled across every source for the
+  tenant — a real, working filter. cleat#2649 moved `await_webhook` onto the same correlated
+  claim/register mechanism `event-triggers.await_event` uses (`eventtriggers.ClaimOrRegisterAwaiter`),
+  where every source's events are keyed by `key1 = <that source's own id>` so that two sources
+  can never wake each other's awaiters (`key1` is an equality match, not a wildcard — there is no
+  dialect-portable way to express "any source" against it without reopening the exact
+  cross-source collision the key exists to prevent). An empty `source_id` now returns
+  `webhook-ingest: source_id is required for correlated await` immediately, rather than silently
+  registering an awaiter that can never match (a permanent hang) or matching every tenant source
+  indiscriminately. cleat-review checked every tracked caller (the SDK plugin-harness workflows in
+  all five guest languages, `examples/order-lifecycle`, every webhookingest test and doc) on
+  2026-09-29 and found none relies on the any-source form. **Replay note:** a workflow already
+  mid-`await_webhook` with an empty `source_id` under the old code replays into this new error
+  once the worker upgrades — acceptable, since the feature is unreleased at production scale, but
+  worth knowing if you have a long-running workflow using it today.
+
+- **A `webhook_sources` row with `signal_workflow_id` configured no longer signals inline at
+  ingest.** cleat#2649 removed `handleIngestWebhook`'s legacy push (the same PR that adds
+  `await_webhook`'s correlated claim, to avoid leaving two delivery mechanisms for the same event
+  coexisting at ingest time — see the design doc's §13 phasing). `background.go`'s existing retry
+  sweep (`processBatch`, a ~30s tick) is the only delivery left for this static, non-correlated
+  binding, so a bound workflow now hears about a webhook on that cadence instead of immediately,
+  and the payload shape it receives from the retry path is the raw `webhook_events.payload` column
+  rather than the inline push's wrapped `{"source_id":...,"payload":...}` envelope. Whether this
+  static-binding feature is kept at all, and what `webhook_events.processed` should mean now that
+  `await_webhook` no longer reads it, is tracked separately in cleat#2689 — resolved below, retired
+  entirely.
+
+- **`signal_workflow_id`/`signal_name` are retired: the `webhook_sources` columns, the
+  `create_source`/API fields, and `background.go`'s retry/dead-letter sweep
+  (`processBatch`/`retryEvent`/`markRetryFailed`) are all removed.** cleat#2689, closing the
+  question the previous entry left open. The static, non-correlated 1:1 binding these implemented
+  cannot serve more than one concurrent workflow waiting on a shared source — exactly the
+  limitation cleat#2625/cleat#2649 built correlated `await_webhook` into existence to remove — so
+  once every source gets a correlated, per-order wait for free (cleat#2697), the binding had no
+  remaining case it served. `signal_workflow_id`/`signal_name` sent in a `POST /ingest/sources`
+  body are now **rejected with 400** naming cleat#2689, rather than silently ignored — a caller
+  configuring a binding that no longer does anything gets told so, instead of getting a 201 and a
+  source that quietly never signals. `webhook_events.retry_count`/`last_retry_at` are dropped with
+  them (written only by the deleted sweep); `status`/`error_msg`/`processed` survive unchanged,
+  still written by `handleDeleteSource`'s cancellation.
+
+  **Migration note, and an upgrade step if you are running 0.3.0, 0.3.1 or 0.3.2:** Version 10
+  (`plugins/webhookingest/migrations.go`) drops the four columns outright, with no backfill —
+  but unlike the previous entry's "0.3.0 requires a fresh database" (which is true of the
+  0.2.0→0.3.0 transition specifically, since the columns didn't exist before then), 0.3.0/0.3.1/
+  0.3.2 all shipped `signal_workflow_id` with a working push-to-signal path. **Before upgrading**,
+  run this against your database and, for every row it returns, migrate that workflow onto
+  correlated `await_webhook` (cleat#2625/cleat#2649) first:
+  ```sql
+  SELECT id, tenant_id, signal_workflow_id, signal_name
+  FROM webhook_sources
+  WHERE signal_workflow_id IS NOT NULL AND deleted_at IS NULL;
+  ```
+  Skipping this step does not fail the upgrade, but it cannot be undone afterwards: bound sources
+  stop receiving signals with no error or warning, and because v10 drops the column, the SELECT
+  above no longer works — run it first.
+
+- **`await_webhook`'s `Keys` and a source's own `correlation_key_field` must now agree on whether
+  a second correlation key exists at all, or the call errors instead of hanging forever.**
+  cleat-review's finding on cleat#2697: `Keys` (cleat#2649) and `correlation_key_field` are strict
+  equality on both sides (`""` is a sentinel, not a wildcard), so a mismatch between them was
+  silent in *both* directions before this — `{"found": false}` forever, indistinguishable from "no
+  webhook has arrived yet". Two ways to hit it: (1) calling `await_webhook` with `Keys` set against
+  a source that has no `correlation_key_field` configured — every published event's key2 is `""`
+  while the await's is the passed key, and they never meet; (2) setting `correlation_key_field` on
+  an **existing** source that already has callers doing key-less `await_webhook` calls — those
+  calls now register key2 `""` against events whose key2 is the extracted value, and silently stop
+  matching. `await_webhook` now reads the source row and errors immediately
+  (`webhook-ingest: Keys were passed but source ... has no correlation_key_field configured ...` /
+  `webhook-ingest: source ... has correlation_key_field ... configured, but no Keys were passed
+  ...`) instead of registering an awaiter that can never match. **Consequence:** adding
+  `correlation_key_field` to a source that already has key-less `await_webhook` callers is now a
+  breaking change for those callers, surfaced immediately rather than as a silent hang — update
+  every caller of that source to pass `Keys` in the same change that adds the field.
+
+- **`POST /api/workflows/{name}/start` now validates `input` against the definition's stored
+  entry-point schema by default, and a mismatch is a 400 where it previously started the run.**
+  cleat#1981, part 2 of cleat#1980's typed invocation: cleat#1980 computed a JSON Schema per entry
+  point at `cleat build` time and stored it on `workflow_defs.entry_point_schemas`, but nothing
+  validated against it until now. The 400 body names the failing field and the schema rule
+  (`required`/`type`), and no run is created for a rejected request.
+  - **A `null` value for a scalar, struct or fixed-array parameter is now a 400, where the Go
+    binding previously bound the zero value.** Owner decision on cleat#2927: `encoding/json`
+    treats `null` as a no-op for these kinds (the field keeps its zero value, no error), which is
+    the same "null looks like zero" ambiguity cleat#1065 named for absent parameters — the
+    validator now closes it for present-but-null ones too, deliberately **stricter than the
+    binding** rather than matching it. A live caller that was sending `null` to mean "use the zero
+    value" for one of these kinds now gets a 400 instead of silent success.
+  - `null` remains accepted for a pointer, slice or map parameter (`*T`, `[]T`, `map[K]V`) —
+    `encoding/json` resets these to `nil` on `null`, which is a real, distinct value these types
+    can hold, not merely the absence of one.
+  - **Definitions with no stored schema are unaffected and start untyped, as before** — this
+    includes Rust, Java and AssemblyScript (no entry-point schema emitter exists for these yet),
+    any Python build from before cleat#2914, and any Go build from before cleat#1980.
+  - **Escape hatch:** `cleatctl deploy workflow <name> <wasm-file> --no-validate-input` disables
+    validation for that one deployed version, even if it carries a schema. Per-definition only, set
+    at deploy time — there is no per-request override, so a caller cannot switch validation off for
+    its own requests.
+
+- **Python entry points now compute and validate against a JSON Schema too, from `@cleat_entry`'s
+  own type hints — two owner-ruled breaking changes, both stricter than the unmodified SDK.**
+  cleat#2914, the Python half of cleat#1980's typed invocation. `cleat build --target python` now
+  also writes a `<wasm>.schema.json` sidecar (via the new `cleat_sdk.jsonschema_emitter`), so a
+  Python workflow rebuilt and redeployed after this starts validating its input the same as a Go
+  one — the "unaffected" bullet above now covers Python builds from before this change only, not
+  Python in general. (cleat#2936 — a pre-existing bug independent of this change, where
+  `wasm.ReadMetadata` and `stamp_metadata.py` both rejected every Component Model binary outright,
+  so the `entry_points` stamp this relies on never survived on a real `componentize-py` build — is
+  now fixed; see that issue.)
+  - **Every Python parameter is nullable, not only the pointer/slice/map subset Go's binding
+    makes nullable.** `cleat_sdk.entry._from_dict`'s very first check is `if value is None: return
+    None`, unconditionally, for every declared type — so a plain required `str` or `int`
+    parameter sent JSON `null` is accepted (bound to Python `None`), unlike the equivalent Go
+    parameter, which the bullet above makes a 400.
+  - **Owner decision, 2026-10-01: a nested dataclass field's absence IS now enforced by the
+    schema, as a pre-start 400** — e.g. a declared `address: Address` where `Address` has a
+    required `city` field, and the caller's `address` object omits `city`, now gets
+    `{"error": "...", "field": "address.city", "rule": "required"}` with no run created. Before
+    this, the same payload got a 201: the resulting `TypeError` is raised *inside*
+    `export_wrapper`'s own exception boundary and reported as a completed run's
+    `{"error": "Address.__init__() missing 1 required positional argument: 'city'"}` — a run that
+    did exist, just failed immediately. A top-level parameter's absence was already enforced this
+    way since cleat#1690; this extends the same rule to every nesting level.
+  - **Owner decision, 2026-10-01: leaf and container parameter VALUES are validated by declared
+    type, and a mismatch is a 400 — broader than the null-only ruling two bullets up, and a
+    documented departure from what the unmodified SDK does.** Measured directly against
+    `_from_dict`: a `user_id: str` parameter sent the JSON number `42` was bound as the Python int
+    `42` unchanged (no coercion, no error); a `cart: list[int]` parameter sent the JSON string
+    `"notalist"` was bound as that raw string unchanged; a dataclass-typed parameter sent a
+    non-object value was passed through un-coerced the same way. All three are now a 400
+    (`"rule": "type"`) instead. "The schema must describe what the binding does, not what might be
+    nicer" (cleat#2914's own text) would have argued for the opposite — leaving these
+    unconstrained — but the owner ruled to ship strict, for the same reason as the null case: close
+    a permissiveness gap in the SDK rather than encode it permanently into the schema.
+
+- **The Go-only `cleat/ai/agent` library is deleted, and so are `cleat/ai/llm` and
+  `cleat/ai/pgvector`.** None of the three had an importer outside `cleat/ai` (verified with
+  `git grep -ln '"[^"]*/ai/\(agent\|llm\|pgvector\)"'`, which matched only `ai/agent` importing
+  `ai/llm`). **Use `run_agent` instead** — an agent is now a workflow, reached from every SDK by
+  starting it as a child; see "Agent Workflows" in
+  [`docs/reference/sdk-api.md`](docs/reference/sdk-api.md). An external caller of
+  `agent.Run(ctx, client, cfg, msg, executeTool)` has no drop-in replacement: the tool executor
+  that took a callback becomes a declarative tool list, which is the point — a callback cannot
+  survive a crash and be resumed, and a durable step can. Sanctioned by the owner's 2026-09-22
+  ruling that breaking changes are acceptable here. (cleat#1983)
+
+### Added
+
+- **Agents are usable from every SDK, because the loop is a workflow rather than a library.**
+  `cleat/agentworkflow` implements it once, and each SDK's surface is a single `run_agent`-style
+  call that starts it as a child and awaits it — `agentworkflow.RunAsChild` in Go and
+  `cleat_sdk.agent.run_agent` in Python; Rust, Java and AssemblyScript are cleat#2978
+  rather than an unasserted gap. **Each LLM turn and each tool call is a durable step**, so an
+  agent survives a crash mid-conversation and resumes without asking the model again for turns it
+  already completed and without repeating a tool call whose effect already happened. Tools come in
+  the three kinds a workflow can reach — `service` (`DurableCall`), `plugin` (`PluginCall`) and
+  `workflow` (a child, awaited) — without the model being told which. The two agent templates'
+  hand-written loops, one per language and neither tested, are deleted. (cleat#1983)
+
+- **`cleat/pluginclients` is new public SDK surface**: generated, typed callers for the bundled
+  `webhookingest` and `email` plugins (`cleat/pluginclients/webhookingest`, `cleat/pluginclients/email`),
+  replacing hand-written JSON built against `h.PluginCall`. These types ship inside the `cleat` SDK
+  module and are covered by the SDK's compatibility promise like any other exported type — see
+  "Plugin Clients" in [`docs/reference/sdk-api.md`](docs/reference/sdk-api.md) for what that promise
+  currently commits to, and what is still an open policy question (cleat#2597, cleat#2660).
+
+- **A saga publishes its own progress, and `cleat.Saga.RunWithResult` returns what it did.**
+  `SagaResult` carries the steps completed, the compensations that ran and **succeeded**, and the
+  compensations that ran and **failed** — three lists rather than two because "ran" is not
+  "succeeded": a compensation that runs and fails has undone nothing, so reporting it as unwound
+  would say the opposite of what happened. `Run`'s signature is unchanged and it delegates, so no
+  existing caller is edited to get the publishing, and `RunWithResult` is there for a caller that
+  wants the result programmatically instead of as published text. (cleat#2627)
+
+### Changed
+
+- **A saga now writes query state as a side effect of running.** `Saga.Run`, unchanged in
+  signature, publishes `status` (`"done"` on success, `"failed"` on a forward error), `failed_step`,
+  and the `compensated` / `unwind_failed` lists — plus `current_step` before each step. **This is a
+  behaviour change for every existing caller**, and it is the thing to check on upgrade: a workflow
+  that maintains its own `status` around a saga will now see the saga's value where it previously
+  saw its own. Two in-tree examples needed correcting for it — `order-lifecycle`, which must now say
+  `"approved"` once the approval gate clears (otherwise an order being charged still reads as
+  awaiting a decision, and its UI keeps offering the Approve/Reject controls), and `travel`, whose
+  cancel-after-booking path must say `"canceled"` (otherwise a cancelled booking finalizes as
+  `"done"`). The published keys are the ones `order-lifecycle` already wrote by hand, with one
+  substitution: the step in progress is `current_step`, the step's own name, rather than an
+  app-chosen word — that word is app-specific vocabulary the saga cannot know, so an author who
+  wants it still writes it. (cleat#2627)
+
+### Fixed
+
+- **`cleat build` could warn `error scanning WASM imports: invalid section size at offset N` on a
+  module that builds, deploys and runs correctly.** `ScanWasmImports` (`wasm/scan.go`) walked
+  sections with an "align to next section boundary" step that advanced one byte whenever the byte
+  after a section's content was `0x00` — but `0x00` is not padding, it is the **custom section's
+  id**, and Go emits custom sections (the `name` and `producers` sections, DWARF) on every
+  non-trivial module. The step ate the id of the first custom section that followed another
+  section, and from there the walk read section *content* as section headers. The symptom depends
+  on the trailing bytes, and both directions were measured on one artifact: on the reported module
+  the misread ends in a truncated LEB (the warning above), and on the tutorial's own module the
+  walk instead **fabricated two imports out of DWARF text** (`runtime.mallocgcSmallScanNoHeader…`,
+  `runtime.persistentalloc1…`) and returned 23 imports for a binary that declares 21. The step is
+  removed, so the walk stays synchronised across custom sections. Nothing about the produced
+  module, its schema sidecar or the deploy path was ever affected — this scanner's only caller is
+  the post-build orphan-import diagnostic (`cmd/cleat/main.go`), which prints warnings and changes
+  no exit code — but a desynchronised read that lands on an `env` + `cleat_*` pair makes that
+  diagnostic report a call path the closure analysis never missed, and on the other layout it
+  silently skips the check entirely. (cleat#3069)
+
+- **`slack-notify`'s leftover-`slack_signing_secret` boot WARN said the key "has no effect",
+  which was false** — its presence is exactly what makes `slacknotify.signing_secret` required at
+  boot (`RequiredDeploymentSecrets`, twenty lines below the WARN, keys on the same signal). An
+  operator who read only the WARN would conclude they could ignore the boot refusal that key's own
+  presence caused. The message now says the value is ignored but the presence still requires a
+  secret, and names removing the key as the one thing an outbound-only deployment needs to do.
+  `slack-notify` also now implements `plugin.HasDeploymentSecretRemedyHint`, so that
+  removal alternative is appended to the boot-refusal error itself rather than living only in a
+  WARN. (cleat#2235)
+
+- **The heartbeat fence could cancel the execution it had NOT judged, when this worker re-claimed its
+  own run after a suspend.** `heartbeatAndFenceInFlight` snapshots the in-flight set and only then asks
+  the store which runs were superseded; a suspend makes the worker re-claim its OWN run milliseconds
+  later, and claiming Stores by `wf.ID`, so the successor's registration silently replaced the judged
+  one in the three maps the fence reads. The fence then read the generation live and cancelled the
+  execution that had just claimed — which died in its pre-replay reads, and `engine/executor.go:249`
+  reported the resulting `context.Canceled` as a fatal "checksum verification failed", failing a run
+  that should simply have run on. The fence now judges against the generation it SENT rather than the
+  one live in the maps, and a run's teardown deregisters with `sync.Map.CompareAndDelete` of its own
+  entry instead of a `Delete` by id, so a predecessor finishing can no longer remove a successor's
+  registration either. The fence's WARN now also carries `sent_generation` beside `generation`, so a
+  hit reads as the re-claim it is rather than as a run superseded by itself. **Scoped to the fence and
+  its maps:** the general conversion of a fence cancel into a failed run (`engine/executor.go:249`) is
+  a separate change and is not made here. (cleat#2942)
+
+- **`llm.chat` priced a model it did not recognise as one of the provider's mid-range models,
+  silently, in both directions at once** — a spend ceiling (`Cost` is what it enforces against)
+  permitted 5x the intended spend on an under-priced model and tripped ~16x early on an
+  over-priced one. Closed by collapsing every provider's own price table (each carrying an
+  identical `default:` guess — `openai.go`, `anthropic.go`, and two more the issue had not found,
+  `gemini.go` and `mistral.go`) into one (`providers/pricing.go`), used by every provider's cost
+  computation and by `list_models`, which previously carried a second, differently-shaped table
+  (one blended $/1k figure that only agreed with the split prompt/completion rate at a 1:1 ratio,
+  which a real call never has). A model absent from the table is now priced at the provider's
+  highest known rate — conservative, the safe direction for a ceiling — and flagged via a new
+  `ChatOutput.estimated_cost` field plus a log line, rather than returned as an indistinguishable
+  mid-range number. Also fixed: Groq delegates to `OpenAIChat` for parsing, and Groq's model names
+  never matched a case in OpenAI's table, so **100% of Groq calls**, not just unrecognised ones,
+  were priced at OpenAI's rate; and cost now keys on the model the provider actually served
+  (`result.Model`) rather than the one requested (`input.Model`), so a provider that substitutes a
+  model bills at the substituted model's rate — **except Gemini, whose response carries no served-model
+  field at all** (the model only ever appears in the request URL), so `input.Model` is the only
+  candidate there; a limit of that API, not a gap in this fix. (cleat#2572)
+
+- **`deploy/mssql/900-app-role.sh` reported the `cleat_app` login ready when it had not been added
+  to `cleat_app_role`, and exited 0.** `sqlcmd` returns a SQL error through ERRORLEVEL only when
+  given `-b`, so `ALTER ROLE cleat_app_role ADD MEMBER cleat_app` failing — a database whose
+  migrate step has not run, or ran a chain without `migrations/mssql/008_app_login.sql` — printed
+  `Msg 15151 ... Cannot alter the role 'cleat_app_role', because it does not exist`, followed by
+  the script's own `cleat_app is ready ... a member of cleat_app_role` line, and then exited 0. The
+  deployment is left with a `cleat_app` that is not in the role, so every GRANT and the DENY on
+  `deployment_secrets` that the role carries are simply absent, and nothing failed. PostgreSQL's
+  script never had this (it passes `-v ON_ERROR_STOP=1`) and the `mysql` client exits non-zero on
+  its own; SQL Server was the one dialect whose client had to be asked. Found by the first test to
+  ever execute these scripts — see §3.344. (cleat#2939)
+
+- **Every example app's live run-state panel rendered empty, because
+  `backendkit.Client.GetWorkflowState` requested `/api/workflows/{id}/state` — a route that does not
+  exist.** Every call answered 404, and every caller read that as "no state", so `order-lifecycle`,
+  `integration-hub` and `ai-agent-platform` each showed a running workflow with nothing published
+  against it. The listing is `/query` with **no** `key`; `?key=` reads a single key instead. Five
+  call sites. It survived because the method's unit test pinned the dead path and served a body the
+  worker never sends — the test and the method agreed with each other, and neither asked the route.
+  (cleat#2573)
+
+- **`wasm.ReadMetadata`/`WriteMetadata` and `stamp_metadata.py` rejected every WASM Component
+  Model binary outright, so the `cleat.metadata` custom section never worked on Python's actual
+  build output.** `cleat build --target python` compiles via `componentize-py`, which emits a
+  Component Model binary, not a core module — its header shares the core module's 4-byte magic but
+  encodes what follows differently (a u16 LE version plus a u16 LE "layer" field, fixed at 1 for a
+  component, rather than the core module's single u32 LE version). The header check only ever
+  recognized the core-module encoding, so every read/write of a Python workflow's embedded metadata
+  failed with "not a valid WASM binary (bad magic/version)" / "unsupported WASM version" — including
+  the `entry_points` stamp cleat#2914 added, which this is why it shipped dormant. A worker
+  resolving a Python workflow's entry point with no explicit `__entry_point` in the start request
+  has therefore always failed outright. Reading the stamp back is a prerequisite for that path
+  rather than the whole of it: a component exports `run` no matter how many `@cleat_entry`
+  functions it has, while the stamp carries the logical name, so which of the two
+  `determineEntryPoint` should return is still open (cleat#2937). The custom-section walk itself
+  needed no change: a component's custom sections (id 0) frame identically to a core module's,
+  verified by hand-walking all 642 top-level sections of a real `componentize-py` artifact and
+  landing exactly at EOF. **Deliberately not widened**: `readImportSection`/`readImportModuleNames`
+  (`wasm/metadata.go`) and the section readers in `wasm/memory.go`/`wasm/sizereport.go` all
+  interpret non-zero section IDs with core-module-only meaning (e.g. section ID 2 means "import" in
+  a core module and "core instance" in a component) — widening those the same way would silently
+  misparse a component's bytes rather than failing loudly, so they stay core-module-only on
+  purpose. (cleat#2936)
+- **`cleatctl deploy workflow` recorded a `workflow_defs` row whose version disagreed with the
+  version stamped in the binary it stored, so a redeploy of a rebuilt workflow looped forever and
+  never ran.** The command is documented as "deploys a new version"
+  ([workflow-versioning.md](docs/explanation/workflow-versioning.md)) and assigns
+  `MAX(version)+1`, but it stored the artifact byte-for-byte — still carrying whatever
+  `cleat build --version` had written, 1 by default. `cmd/cleat-worker`'s pre-flight releases a
+  run whose binary reports a different `workflow_version` from the `workflow_defs` row it was
+  queued against, on every claim, so the run never executed. The deploy now restamps
+  `cleat.metadata`'s `workflow_version` to the version it assigns, making the binary and its row
+  agree by construction. Only that one key is rewritten: `wasm.Metadata` models the keys the
+  engine reads, and builds write others it does not (`stamp_metadata.py` adds `sdk_language`,
+  `sdk_version` and `created_at`), so the restamp patches the raw payload rather than rebuilding
+  it from the struct and dropping them. (cleat#2944)
+
+- **`cleat build --target python` stamped `workflow_version: 0`, so a Python workflow never ran.**
+  `runBuildPython` never took `--version` — `runBuildJava`, `runBuildAssemblyScript` and
+  `runBuildRust` all do — so `stamp_metadata.py`'s `env_or_arg("CLEAT_WORKFLOW_VERSION", ...)` found
+  nothing and fell back to its own default of 0. That was inert while the stamp was unreadable, and
+  stopped being inert the moment the entry above made it readable: `cmd/cleat-worker`'s version
+  pre-flight then compared that 0 against the `def_version` a deploy records (`cleat deploy` prefers
+  the stamp and defaults `--version` to 1) and released the run back to the queue on every claim,
+  so a Python workflow looped between claim and release and never executed. The Python build now
+  stamps the version it was asked for. (cleat#2936)
+
+## [0.3.0] - 2026-09-27
+
+**This release requires a fresh database.** There is no upgrade path from
+v0.2.0 — read the upgrade notes below before installing. **v0.3.1 and v0.3.2
+were patch releases within this series**: they have no sections of their own,
+and everything that changed in them is recorded here.
 
 ### UPGRADE NOTES — breaking
 
@@ -358,7 +707,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cleatctl set-deployment-secret`. A leftover `dsn` in `--plugin-config` otherwise logs a WARN at
   boot naming the replacement command; a deployment carrying a leftover `dsn` with no
   `scheduledbackup.dsn` set will now refuse to start on upgrade, where it previously started
-  fine and failed backups silently.
+  fine and used the DSN directly.
 
 - **`blobstore`'s S3 access key pair moves to deployment secrets, and its `minio-go` client
   now re-resolves credentials on a 60s TTL instead of holding a static pair for the client's
@@ -771,8 +1120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plugin.provenPluginDialects` (cleat#2306's phase 2 tracks doing this for every plugin).
 
 - **Terminating a workflow that has registered `defer` bodies is now asynchronous,
-  and runs those bodies before the workflow becomes terminal.** Migrations
-  `postgres/040`, `mssql/043` (MySQL needs none).
+  and runs those bodies before the workflow becomes terminal.**
 
   Previously `TerminateWorkflow` wrote `status = 'terminated'` and then released
   the workflow's sticky assignment and concurrency keys. The registered defers
@@ -796,12 +1144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A defer phase never changes the outcome: if it traps, times out, or cannot
     start, the recorded outcome is applied anyway and the lost cleanup is logged.
     `defer_phase_deadline` (5 minutes) bounds it.
-  - **Apply the migrations.** `postgres/040` widens `admin.claim_workflows` and
-    the claim's partial indexes; `mssql/043` widens the filtered ones. A
-    deployment running this code against the older schema keeps working — the
-    cross-tenant claim falls back with a warning naming the migration — but its
-    defer phases are never claimed, so every terminate waits out its deadline and
-    skips the cleanup.
+  - **What changed in the schema:** `admin.claim_workflows` and the partial
+    indexes its claim uses are widened; MySQL needed no change. All of it is in
+    the baseline, so there is nothing to apply.
 
   **A closing parent's `TERMINATE` children work the same way**, and the change
   matters more there because it is a bulk operation: one closing parent used to
@@ -820,7 +1165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition names are now per-tenant.** `workflow_defs`' primary key
   becomes `(tenant_id, name, version)`, and the three foreign keys that reference
   it — from `workflow_instances`, `workflow_tags` and `workflow_routing` — carry
-  `tenant_id` too. Migrations `postgres/035`, `mysql/034`, `mssql/038`.
+  `tenant_id` too.
 
   Two tenants can now each hold their own `order-processor`. Previously the name
   was a shared namespace: the second tenant to deploy one was refused, and before
@@ -836,8 +1181,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names is refused by the foreign key.
 
   **MySQL only:** `workflow_defs.tenant_id` was nullable with no default, unlike
-  the other two dialects. `mysql/034` backfills `NULL`s to the default tenant and
-  makes the column `NOT NULL DEFAULT`, as a primary-key column must be.
+  the other two dialects — which a primary-key column cannot be. It is now
+  `NOT NULL DEFAULT`, matching the other two.
 
   See IMPROVEMENT-PLAN §3.77 and D7 in `tiers.yaml`.
 
@@ -1121,8 +1466,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only remaining 409 on this endpoint, and it clears when the in-flight request is answered.
   A client that branches on `detail` keeps working. (cleat#1416)
 
-  **Schema change**, applied by `postgres/068`, `mysql/062` and `mssql/066`:
-  `workflow_update_requests` gains a `request_id` column and is keyed
+  **Schema change:** `workflow_update_requests` gains a `request_id` column and is keyed
   `(workflow_id, request_id)` instead of `(workflow_id, update_name)`. Existing rows are backfilled
   from `update_name`, which is unique per workflow under the old key, so a workflow suspended
   mid-update across the upgrade completes against the correct row.
@@ -1508,10 +1852,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fact. Measured on a live database, `assigned_to` was blank on 185 of 185 terminal runs.
   (cleat#1118)
 
-  **Schema change**, applied by `postgres/074`, `mysql/064` and `mssql/068`: `workflow_instances`
-  gains a nullable `completed_by`. `postgres/075` additionally re-emits `finalize_workflow_status`,
-  whose `done` and `failed` branches record it; the `ready` branch deliberately does not, because
-  that run goes back on the queue and recording there would name whoever yielded.
+  **Schema change:** `workflow_instances` gains a nullable `completed_by`. `finalize_workflow_status`
+  is re-emitted to record it, in its `done` and `failed` branches; the `ready` branch deliberately
+  does not, because that run goes back on the queue and recording there would name whoever yielded.
 
   Returned by both read paths — `GET /api/workflows/:id` and the workflow listing.
 
@@ -1970,8 +2313,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
-- **SQL Server 2022 is now the minimum.** `migrations/mssql/011` uses
-  `ISJSON(payload, VALUE)`, whose second argument requires 2022, so that the
+- **SQL Server 2022 is now the minimum.** The `payload` columns use
+  `ISJSON(payload, VALUE)`, whose second argument requires 2022, so that they
   payload columns accept the JSON scalars PostgreSQL and MySQL have always
   accepted — without it, `DeliverSignal` and `CreateUpdateRequest` failed on
   any SQL Server built from the shipped schema. `README.md` and
@@ -2017,6 +2360,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name remains a global namespace; squatting one is now loud instead of
   silent. IMPROVEMENT-PLAN §3.12.
 
+  **Everything above in this entry was superseded by "Workflow definition
+  names are now per-tenant" under [0.3.0] above (§3.77, D7), not just the
+  shared-definition advice.** Definition names are per-tenant now, so: a
+  deploy no longer refuses a name another tenant holds
+  (`engine.ErrWorkflowDefOwnedByAnotherTenant` is removed, and a deploy
+  returns no `409` for this at all -- there is no conflict to report, per the
+  [0.3.0] entry); the adoption window is gone (`canAdoptDef` was deleted in
+  the same change, so a tenant other than a definition's creator can no
+  longer take it over, adopted or not); the default-tenant RLS exemption is
+  gone (`tenant_id = cleat.assert_tenant_set() OR tenant_id = '00000000-...'`
+  lost its `OR` clause, so the shared-definition advice under "Who this
+  breaks" above no longer works on any dialect); and the primary key already
+  carries `tenant_id` -- `workflow_defs`' PK is `(tenant_id, name, version)`
+  on both PostgreSQL (`migrations/postgres/001_schema.sql:975`) and SQL
+  Server (`migrations/mssql/001_schema.sql:512`), so "the name remains a
+  global namespace" above is also no longer true: two tenants can hold the
+  same name today. cleat#2620.
+
 - **Workers now refuse to start on a PostgreSQL connection that bypasses
   row-level security.** Every tenant-scoped table has RLS enabled and FORCEd,
   and for `GetWorkflowByID` and `ListWorkflows` those policies are the only
@@ -2031,11 +2392,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   To upgrade:
 
-  1. Apply `migrations/postgres/005_app_role.sql`, which creates the
-     `cleat_app` role and grants it what the engine needs — no ownership, no
-     DDL.
-  2. Give it a password: `ALTER ROLE cleat_app LOGIN PASSWORD '...';` The
-     migration deliberately does not, so no credential lives in the
+  1. Give the engine a `cleat_app` role with what it needs — no ownership, no
+     DDL. 0.2.0 applied this as a numbered migration, which the 0.3.0 rebaseline
+     absorbed into the schema baseline (cleat#2416).
+  2. Give it a password: `ALTER ROLE cleat_app LOGIN PASSWORD '...';` That
+     migration deliberately did not, so no credential ever lived in the
      repository. (`docker-compose.cluster.yml` does this from
      `CLEAT_APP_PASSWORD` via `deploy/postgres/900-app-role.sh`, but
      `docker-entrypoint-initdb.d` only runs on a *first* initialisation, so an

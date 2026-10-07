@@ -1,7 +1,10 @@
 // Package webhookingest receives inbound webhooks from external services
-// (GitHub, Stripe, etc.) and delivers them as workflow signals. It manages
+// (GitHub, Stripe, etc.), storing them for a workflow to claim. It manages
 // webhook sources and events with tenant isolation, HMAC signature
-// verification, and a workflow-callable await_webhook host function.
+// verification, and a workflow-callable await_webhook host function that
+// claims a matching event through eventtriggers' correlated key-slot
+// mechanism (cleat#2649). There is no push-delivery path -- retired in
+// cleat#2689, see migrations.go v10 and CHANGELOG's UPGRADE NOTES.
 package webhookingest
 
 import (
@@ -18,7 +21,7 @@ func init() {
 	plugin.Register(plugin.PluginInfo{
 		Name:        "webhook-ingest",
 		Version:     "0.1.0",
-		Description: "Receive inbound webhooks and deliver as workflow signals",
+		Description: "Receive inbound webhooks for a workflow to claim",
 		Author:      "cleat",
 		Requires:    []string{"event-triggers"},
 	}, func() plugin.Plugin {
@@ -53,7 +56,7 @@ func (p *Plugin) Info() plugin.PluginInfo {
 	return plugin.PluginInfo{
 		Name:        "webhook-ingest",
 		Version:     "0.1.0",
-		Description: "Receive inbound webhooks and deliver as workflow signals",
+		Description: "Receive inbound webhooks for a workflow to claim",
 		Author:      "cleat",
 	}
 }

@@ -317,6 +317,36 @@ type Environment struct {
 	// stopping the loop over: the read path refuses expired keys regardless, so
 	// the failure degrades a number rather than an authentication.
 	RevokeExpiredOAuthAPIKeys func(ctx context.Context) (disabled int64, err error)
+
+	// SetTenantSuspended sets or clears a tenant's suspended flag.
+	// cleat#2534.
+	//
+	// THE HOST OWNS admin.tenants FOR THE SAME REASON IT OWNS
+	// admin.tenant_api_keys ABOVE: a plugin's cross-tenant statements run
+	// under SET LOCAL ROLE cleat_sweep, which holds no privilege on
+	// admin.tenants, so a sweep that wrote this table directly would fail
+	// with a permission error on every tick and suspend nothing. See
+	// auth.TenantStore.SetTenantSuspended, the implementation this closes
+	// over.
+	//
+	// TAKES A TENANT, unlike RevokeExpiredOAuthAPIKeys above: this acts on
+	// one specific tenant a caller names, not on every row past some cutoff.
+	//
+	// Returns auth.ErrTenantNotFound (via errors.Is) when tenantID matches no
+	// row, rather than succeeding silently -- a caller acting on a tenant id
+	// it did not just read from admin.tenants itself (a sweep reading a
+	// stale id from its own table) needs to be able to tell "suspended" from
+	// "no such tenant".
+	//
+	// NIL MEANS "THIS HOST CANNOT DO IT", the same convention as every other
+	// grant on this struct: the worker always sets it; cleattest, the
+	// embedded runner and a plugin's own unit tests construct an Environment
+	// directly and leave it nil. A caller finding it nil must fail loudly
+	// rather than silently skip the write -- unlike
+	// RevokeExpiredOAuthAPIKeys, this is not a best-effort bookkeeping sweep;
+	// a caller asked this tenant to be suspended and a silent no-op would
+	// report success for something that never happened.
+	SetTenantSuspended func(ctx context.Context, tenantID uuid.UUID, suspended bool) error
 }
 
 // MintOAuthAPIKeyRequest is what a plugin hands Environment.MintOAuthAPIKey.
@@ -551,8 +581,18 @@ type Migration struct {
 	//     an inline table-valued function and cannot raise;
 	//   - writes are refused on SQL Server by BLOCK predicates rather than by
 	//     the filter, which does not affect writes at all;
-	//   - dropping a tenant collects a table's rows on PostgreSQL only, via
-	//     admin.plugin_tables, which SQL Server does not have.
+	//   - dropping a tenant collects a table's rows on BOTH dialects, by
+	//     different mechanisms: on PostgreSQL via admin.plugin_tables
+	//     (populated from this field by registerTenantScopedTables); on SQL
+	//     Server by admin.drop_tenant scanning sys.columns directly for every
+	//     table carrying a tenant_id column, core or plugin, so this field
+	//     plays no part there and neither does the registry. SQL Server DOES
+	//     have admin.plugin_tables (it is declared in every dialect's schema
+	//     migration) -- it is simply never populated or read there. See
+	//     registerTenantScopedTables's own comment (plugin/migration.go) for
+	//     why: this exact "does not have it" phrasing was already wrong once
+	//     and corrected there (cleat#1635); it survived here uncorrected
+	//     until cleat#2238.
 	//
 	// THE REASON GIVEN HERE FOR SQL SERVER WAS WRONG until cleat#1552: "SQL
 	// Server binds a tenant to a whole connection pool
@@ -560,9 +600,12 @@ type Migration struct {
 	// Plugins never get that pool -- getPluginDB hands them the main or the
 	// plugin pool -- and a per-request tenant fits fine, via
 	// sp_set_session_context, which database/sql's connection recycle clears.
-	// engine/plugindb_tenant.go now sets it. What is still missing on SQL
-	// Server is the half this field controls: applyTenantScoping emits no
-	// CREATE SECURITY POLICY there.
+	// engine/plugindb_tenant.go now sets it. THIS PARAGRAPH USED TO END HERE
+	// saying applyTenantScoping "emits no CREATE SECURITY POLICY" on SQL
+	// Server -- that gap was closed by #1629 (2026-09-15), which is what
+	// applyTenantScopingMSSQL (plugin/migration.go) now does; stale until
+	// cleat#2238's sweep found it self-contradicting "POSTGRESQL AND SQL
+	// SERVER install a policy from this field" three paragraphs up.
 	//
 	// ONLY FOR TABLES WHOSE EVERY READER HAS A TENANT. A policy fails
 	// closed, so a plugin that also sweeps across tenants from a background
@@ -744,6 +787,31 @@ type FuncOptions struct {
 	// that finished "done" into one that fails on replay, which is a
 	// determinism break in the opposite direction from the leak this field
 	// closes.
+	//
+	// THIS COVERS THE INPUT SIDE ONLY. A host function's RETURN value has no
+	// equivalent per-function declaration, and that should not be read as
+	// nothing protects it -- three things are true at once, and a reader who
+	// stops after the first concludes the value is safer than it is:
+	//
+	//  1. engine.Redact runs on every read of PluginOutput (and PluginInput,
+	//     as a second line of defense), in all three dialects, on by default
+	//     -- nothing in production code turns it off. It masks a JSON field
+	//     whose NAME contains "token", "secret", "password", "credential",
+	//     "api_key" or "authorization" (case-insensitive, recursive into
+	//     nested objects), plus any bare value shaped like a JWT.
+	//  2. It is a FIXED NAME LIST, not a per-function declaration like this
+	//     field. A return value legitimately carrying a credential under a
+	//     name the list does not know -- "connection_string", "private_key"
+	//     -- passes through unredacted; "key" alone is not a matched
+	//     pattern, only "api_key" is.
+	//  3. It runs ON READ, not on write. The raw value is still what gets
+	//     inserted -- Redact never touches the row before it reaches the
+	//     database. A backup, a replica, or a plain SELECT against the table
+	//     sees it in the clear regardless of what an API caller is shown.
+	//
+	// So a host function whose result needs the guarantee this field gives
+	// the input -- refused before it is ever persisted -- has no mechanism
+	// today. cleat#2587.
 	SecretOnlyFields []string
 }
 

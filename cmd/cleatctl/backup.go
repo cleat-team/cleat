@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/scheduledbackup"
 )
@@ -188,6 +189,59 @@ func parseBackupFlags(args []string) (backupFlags, error) {
 	return f, nil
 }
 
+// backupDSNSecretName is scheduledbackup's own deployment secret name --
+// duplicated here rather than imported because the plugin does not export
+// it, and re-deriving a package-private literal is worse than one comment
+// pointing at where it is defined (plugins/scheduledbackup/plugin.go's
+// DeploymentSecretPrefix, "scheduledbackup.", plus the "dsn" suffix
+// backupDSN reads).
+const backupDSNSecretName = "scheduledbackup.dsn"
+
+// warnIfBackupDSNUnresolvable checks whether scheduledbackup's deployment
+// secret is set and prints a warning to stderr if it is not -- cleat#2246
+// item 1, retargeted from the tenant-facing HTTP 503 that item originally
+// asked for: #2290 deleted that API entirely, and an operator CLI has no
+// response to put a status code on. Today, config-create, config-update
+// --enabled and run all succeed silently against a deployment with no
+// secret, and the first sign of a problem is a failed row in `backup
+// history` after the background loop's next attempt.
+//
+// EXISTENCE ONLY, NOT DECRYPTABILITY, ON PURPOSE. backupDSN's actual failure
+// mode is anything GetDeploymentSecret returns, which includes an
+// undecryptable ciphertext under the wrong master key -- but checking that
+// requires the key ring reseal-deployment-secrets and retire-deployment-secret
+// take, and requiring one here would turn a metadata-only operation
+// (scheduling a cron entry) into one that needs CLEAT_SECRET_MASTER_KEY set,
+// which nothing about creating or enabling a schedule otherwise requires.
+// DeploymentSecretMeta needs no ring (see retiredeploymentsecret.go's
+// identical choice) and reports exactly the two shapes GetDeploymentSecret's
+// own query treats as "not found": no row, or disabled_at set (its SQL
+// filters `disabled_at IS NULL`, so a disabled secret and a missing one are
+// the same failure from backupDSN's point of view).
+//
+// A store or query error is reported as its own line rather than folded
+// into "not set" -- an operator who sees "could not check" and one who sees
+// "not set" should not read them as the same problem.
+func warnIfBackupDSNUnresolvable(ctx context.Context, db *sql.DB, d dialect) {
+	store := engine.NewDeploymentSecretStore(db, d.name, nil)
+	exists, disabledAt, err := store.DeploymentSecretMeta(ctx, backupDSNSecretName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not check whether %s is set: %v\n", backupDSNSecretName, err)
+		return
+	}
+	if !exists {
+		fmt.Fprintf(os.Stderr, "warning: %s is not set -- backups against this config will "+
+			"fail until it is. Run `cleatctl set-deployment-secret --name %s`.\n",
+			backupDSNSecretName, backupDSNSecretName)
+		return
+	}
+	if disabledAt.Valid {
+		fmt.Fprintf(os.Stderr, "warning: %s was retired at %s -- backups against this config "+
+			"will fail until it is set again. Run `cleatctl set-deployment-secret --name %s`.\n",
+			backupDSNSecretName, disabledAt.Time.Format(time.RFC3339), backupDSNSecretName)
+	}
+}
+
 // resolveConfigID turns --id or --name into the config's id. Exactly one of
 // idFlag/nameFlag must be non-empty -- checked by the caller, since the
 // error message differs by subcommand (config-create has neither because it
@@ -306,6 +360,9 @@ func runBackupConfigCreate(ctx context.Context, db *sql.DB, d dialect, args []st
 		return
 	}
 	fmt.Printf("created backup config %s (%s), next run %s\n", f.name, id, next.Format(time.RFC3339))
+	if enabled {
+		warnIfBackupDSNUnresolvable(ctx, db, d)
+	}
 }
 
 func runBackupConfigList(ctx context.Context, db *sql.DB, d dialect, args []string) {
@@ -446,6 +503,9 @@ func runBackupConfigUpdate(ctx context.Context, db *sql.DB, d dialect, args []st
 		return
 	}
 	fmt.Printf("updated backup config %s\n", id)
+	if f.enabled {
+		warnIfBackupDSNUnresolvable(ctx, db, d)
+	}
 }
 
 func runBackupConfigDelete(ctx context.Context, db *sql.DB, d dialect, args []string) {
@@ -518,6 +578,7 @@ func runBackupRun(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		return
 	}
 	fmt.Printf("requested an immediate backup for %s -- picked up by the background loop within 60s\n", id)
+	warnIfBackupDSNUnresolvable(ctx, db, d)
 }
 
 func runBackupHistory(ctx context.Context, db *sql.DB, d dialect, args []string) {
@@ -572,7 +633,8 @@ func runBackupHistory(ctx context.Context, db *sql.DB, d dialect, args []string)
 		"ID", "CONFIG_ID", "FILENAME", "SIZE_BYTES", "STATUS", "STARTED_AT", "COMPLETED_AT", "ERROR")
 	n := 0
 	for rows.Next() {
-		var id, configID uuid.UUID
+		var id uuid.UUID
+		var configID uuid.NullUUID
 		var filename, status string
 		var sizeBytes sql.NullInt64
 		var startedAt time.Time
@@ -591,8 +653,23 @@ func runBackupHistory(ctx context.Context, db *sql.DB, d dialect, args []string)
 		if errMsg.Valid && errMsg.String != "" {
 			errStr = errMsg.String
 		}
+		// cleat#2292 item 6. backup_history.config_id has never been NOT
+		// NULL (plugins/scheduledbackup/migrations.go v1), and v5
+		// (cleat#2247) makes it a routine outcome rather than an edge case:
+		// deleting a backup_config row with `backup config-delete` sets
+		// ON DELETE SET NULL on every history row that pointed at it, by
+		// design, so the CLI's own audit trail keeps the row rather than
+		// losing it (see v5's doc comment for why -- v3 briefly had this as
+		// ON DELETE CASCADE instead, for a drop_tenant reason that stopped
+		// applying once v4 shipped). So this scans it as nullable like its
+		// sibling columns above, rather than the zero UUID a plain
+		// uuid.UUID scan would silently produce on a NULL.
+		configIDStr := "-"
+		if configID.Valid {
+			configIDStr = configID.UUID.String()
+		}
 		fmt.Printf("%-36s  %-36s  %-32s  %-10s  %-9s  %-25s  %-25s  %s\n",
-			id, configID, filename, size, status, startedAt.Format(time.RFC3339), formatNullTime(completedAt), errStr)
+			id, configIDStr, filename, size, status, startedAt.Format(time.RFC3339), formatNullTime(completedAt), errStr)
 		n++
 	}
 	if err := rows.Err(); err != nil {

@@ -187,6 +187,17 @@ jobs:
               # session ten minutes on this check's first run. Distinguish them,
               # because "add the trailer" is the wrong instruction for a commit
               # that already has one.
+              #
+              # BOTH OF THOSE CAUSES ARE ABOUT THIS RANGE. On MERGED history the
+              # empty parse has a THIRD cause, and neither repair above applies:
+              # `COMMIT_MESSAGES` concatenation lands the block mid-body, and it
+              # is GitHub's appended block -- not the author's formatting -- that
+              # holds the final paragraph. Measured on e15d4857, 2026-09-27; see
+              # the header and CONTRIBUTING.md, "Claude-Stream".
+              #
+              # So the message below is correct where this loop runs, and would
+              # send someone to edit a message that was never wrong if the loop
+              # were ever pointed at develop.
               if git log -1 --format='%B' "$commit" | grep -qE '^Claude-Stream:'; then
                 echo "  $(git log -1 --format='%h %s' "$commit")  -- has a Claude-Stream: line that git does NOT parse as a trailer (it is not in the final paragraph -- remove the blank line before the trailer block)"
               else

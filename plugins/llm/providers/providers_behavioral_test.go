@@ -445,7 +445,17 @@ func TestGeminiChatStructuredErrorWithEmptyBody(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOpenAICostByModel(t *testing.T) {
+	// Echoes back the requested model as the served one, like a real,
+	// non-substituting provider -- pricing keys on the served model
+	// (result.Model, cleat#2572), so a handler that always answered
+	// "test-model" would price every case here as unknown regardless of
+	// tt.model. The substitution case itself is covered directly against
+	// CostFor in TestCostForUnknownModel.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{
@@ -453,20 +463,21 @@ func TestOpenAICostByModel(t *testing.T) {
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 1000, "completion_tokens": 1000, "total_tokens": 2000},
-			"model": "test-model",
+			"model": req.Model,
 		})
 	}))
 	defer srv.Close()
 
 	tests := []struct {
-		name    string
-		model   string
-		minCost float64
-		maxCost float64
+		name          string
+		model         string
+		minCost       float64
+		maxCost       float64
+		wantEstimated bool
 	}{
-		{"gpt-4-turbo", "gpt-4-turbo", 0.01, 0.05},
-		{"gpt-4o", "gpt-4o", 0.001, 0.02},
-		{"unknown-model", "gpt-3.5-turbo", 0.001, 0.02},
+		{"gpt-4-turbo", "gpt-4-turbo", 0.01, 0.05, false},
+		{"gpt-4o", "gpt-4o", 0.001, 0.02, false},
+		{"unknown-model", "gpt-3.5-turbo", 0.03, 0.05, true}, // priced at gpt-4-turbo's rate, the highest known
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -478,31 +489,41 @@ func TestOpenAICostByModel(t *testing.T) {
 			if out.Cost < tt.minCost || out.Cost > tt.maxCost {
 				t.Errorf("model %q: expected cost in [%f, %f], got %f", tt.model, tt.minCost, tt.maxCost, out.Cost)
 			}
+			if out.EstimatedCost != tt.wantEstimated {
+				t.Errorf("model %q: EstimatedCost = %v, want %v", tt.model, out.EstimatedCost, tt.wantEstimated)
+			}
 		})
 	}
 }
 
 func TestAnthropicCostByModel(t *testing.T) {
+	// See TestOpenAICostByModel: echoes the requested model as served, since
+	// pricing now keys on the served model.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": "ok"}},
 			"usage":   map[string]int{"input_tokens": 1000, "output_tokens": 1000},
-			"model":   "test-model",
+			"model":   req.Model,
 		})
 	}))
 	defer srv.Close()
 
 	tests := []struct {
-		name    string
-		model   string
-		minCost float64
-		maxCost float64
+		name          string
+		model         string
+		minCost       float64
+		maxCost       float64
+		wantEstimated bool
 	}{
-		{"opus-4-7", "claude-opus-4-7", 0.08, 0.10},
-		{"haiku-4-5", "claude-haiku-4-5", 0.001, 0.01},
-		{"sonnet-4-6", "claude-sonnet-4-6", 0.01, 0.03},
-		{"default", "claude-unknown", 0.01, 0.03},
+		{"opus-4-7", "claude-opus-4-7", 0.08, 0.10, false},
+		{"haiku-4-5", "claude-haiku-4-5", 0.001, 0.01, false},
+		{"sonnet-4-6", "claude-sonnet-4-6", 0.01, 0.03, false},
+		{"default", "claude-unknown", 0.08, 0.10, true}, // priced at opus's rate, the highest known
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -513,6 +534,9 @@ func TestAnthropicCostByModel(t *testing.T) {
 			}
 			if out.Cost < tt.minCost || out.Cost > tt.maxCost {
 				t.Errorf("model %q: expected cost in [%f, %f], got %f", tt.model, tt.minCost, tt.maxCost, out.Cost)
+			}
+			if out.EstimatedCost != tt.wantEstimated {
+				t.Errorf("model %q: EstimatedCost = %v, want %v", tt.model, out.EstimatedCost, tt.wantEstimated)
 			}
 		})
 	}
@@ -534,16 +558,17 @@ func TestGeminiCostByModel(t *testing.T) {
 	defer srv.Close()
 
 	tests := []struct {
-		name    string
-		model   string
-		minCost float64
-		maxCost float64
+		name          string
+		model         string
+		minCost       float64
+		maxCost       float64
+		wantEstimated bool
 	}{
-		{"gemini-2.5-flash", "gemini-2.5-flash", 0.0001, 0.001},
-		{"gemini-2.5-pro", "gemini-2.5-pro", 0.001, 0.01},
-		{"gemini-2.0-flash-lite", "gemini-2.0-flash-lite", 0.00001, 0.001},
-		{"gemini-2.0-flash", "gemini-2.0-flash", 0.0001, 0.001},
-		{"default", "gemini-unknown", 0.0001, 0.001},
+		{"gemini-2.5-flash", "gemini-2.5-flash", 0.0001, 0.001, false},
+		{"gemini-2.5-pro", "gemini-2.5-pro", 0.001, 0.01, false},
+		{"gemini-2.0-flash-lite", "gemini-2.0-flash-lite", 0.00001, 0.001, false},
+		{"gemini-2.0-flash", "gemini-2.0-flash", 0.0001, 0.001, false},
+		{"default", "gemini-unknown", 0.001, 0.01, true}, // priced at gemini-2.5-pro's rate, the highest known
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -555,12 +580,21 @@ func TestGeminiCostByModel(t *testing.T) {
 			if out.Cost < tt.minCost || out.Cost > tt.maxCost {
 				t.Errorf("model %q: expected cost in [%f, %f], got %f", tt.model, tt.minCost, tt.maxCost, out.Cost)
 			}
+			if out.EstimatedCost != tt.wantEstimated {
+				t.Errorf("model %q: EstimatedCost = %v, want %v", tt.model, out.EstimatedCost, tt.wantEstimated)
+			}
 		})
 	}
 }
 
 func TestMistralCostByModel(t *testing.T) {
+	// See TestOpenAICostByModel: echoes the requested model as served, since
+	// pricing now keys on the served model.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{
@@ -568,22 +602,23 @@ func TestMistralCostByModel(t *testing.T) {
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]int{"prompt_tokens": 1000, "completion_tokens": 1000, "total_tokens": 2000},
-			"model": "test-model",
+			"model": req.Model,
 		})
 	}))
 	defer srv.Close()
 
 	tests := []struct {
-		name    string
-		model   string
-		minCost float64
-		maxCost float64
+		name          string
+		model         string
+		minCost       float64
+		maxCost       float64
+		wantEstimated bool
 	}{
-		{"mistral-large", "mistral-large-latest", 0.001, 0.01},
-		{"mistral-medium", "mistral-medium-latest", 0.001, 0.01},
-		{"mistral-small", "mistral-small-latest", 0.001, 0.01},
-		{"open-mistral-nemo", "open-mistral-nemo", 0.0001, 0.001},
-		{"default", "mistral-unknown", 0.001, 0.01},
+		{"mistral-large", "mistral-large-latest", 0.001, 0.01, false},
+		{"mistral-medium", "mistral-medium-latest", 0.001, 0.01, false},
+		{"mistral-small", "mistral-small-latest", 0.001, 0.01, false},
+		{"open-mistral-nemo", "open-mistral-nemo", 0.0001, 0.001, false},
+		{"default", "mistral-unknown", 0.001, 0.01, true}, // priced at mistral-large's rate, the highest known
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -594,6 +629,9 @@ func TestMistralCostByModel(t *testing.T) {
 			}
 			if out.Cost < tt.minCost || out.Cost > tt.maxCost {
 				t.Errorf("model %q: expected cost in [%f, %f], got %f", tt.model, tt.minCost, tt.maxCost, out.Cost)
+			}
+			if out.EstimatedCost != tt.wantEstimated {
+				t.Errorf("model %q: EstimatedCost = %v, want %v", tt.model, out.EstimatedCost, tt.wantEstimated)
 			}
 		})
 	}
@@ -736,52 +774,70 @@ func TestWrapToolResult(t *testing.T) {
 	}
 }
 
-func TestGeminiCostHelper(t *testing.T) {
-	usage := Usage{PromptTokens: 1000, CompletionTokens: 1000, TotalTokens: 2000}
+// TestCostForKnownModels pins CostFor's exact output for a known model on
+// every priced provider -- cleat#2572. Any per-provider `default:` switch
+// this once was is gone; there is exactly one lookup now, and this is its
+// contract.
+func TestCostForKnownModels(t *testing.T) {
+	usage := Usage{PromptTokens: 1_000_000, CompletionTokens: 1_000_000}
 
 	tests := []struct {
-		name  string
-		model string
-		min   float64
-		max   float64
+		provider string
+		model    string
+		want     float64
 	}{
-		{"gemini-2.5-flash", "gemini-2.5-flash", 0.0001, 0.001},
-		{"gemini-2.5-pro", "gemini-2.5-pro", 0.001, 0.01},
-		{"gemini-2.0-flash-lite", "gemini-2.0-flash-lite", 0.00001, 0.001},
-		{"gemini-2.0-flash", "gemini-2.0-flash", 0.0001, 0.001},
-		{"case insensitive", "GEMINI-2.5-FLASH", 0.0001, 0.001},
-		{"default", "unknown-model", 0.0001, 0.001},
+		{"openai", "gpt-4o", 2.50 + 10.0},
+		{"openai", "gpt-4o-mini", 0.15 + 0.60},
+		{"openai", "gpt-4-turbo", 10.0 + 30.0},
+		{"anthropic", "claude-opus-4-7", 15.0 + 75.0},
+		{"anthropic", "claude-sonnet-4-6", 3.0 + 15.0},
+		{"anthropic", "claude-haiku-4-5", 0.80 + 4.0},
+		{"groq", "llama-3.3-70b", 0.59 + 0.79},
+		{"groq", "mixtral-8x7b", 0.24 + 0.24},
+		{"gemini", "gemini-2.5-flash", 0.15 + 0.60},
+		{"gemini", "gemini-2.5-pro", 1.25 + 5.00},
+		{"mistral", "mistral-large-latest", 2.0 + 6.0},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cost := geminiCost(tt.model, usage)
-			if cost < tt.min || cost > tt.max {
-				t.Errorf("geminiCost(%q): expected in [%f, %f], got %f", tt.model, tt.min, tt.max, cost)
+		t.Run(tt.provider+"/"+tt.model, func(t *testing.T) {
+			cost, known := CostFor(tt.provider, tt.model, usage)
+			if !known {
+				t.Fatalf("CostFor(%q, %q): expected known=true", tt.provider, tt.model)
+			}
+			if cost != tt.want {
+				t.Errorf("CostFor(%q, %q) = %f, want %f", tt.provider, tt.model, cost, tt.want)
 			}
 		})
 	}
 }
 
-func TestMistralCostHelper(t *testing.T) {
-	usage := Usage{PromptTokens: 1000, CompletionTokens: 1000, TotalTokens: 2000}
+// TestCostForUnknownModel is the acceptance test cleat#2572 asks for: a model
+// absent from the table must not be silently priced as one of the provider's
+// known models -- known must come back false, and the price must be the
+// provider's highest rate (the safe direction for a spend ceiling), not a
+// mid-range guess.
+func TestCostForUnknownModel(t *testing.T) {
+	usage := Usage{PromptTokens: 1_000_000, CompletionTokens: 1_000_000}
 
 	tests := []struct {
-		name  string
-		model string
-		min   float64
-		max   float64
+		provider string
+		want     float64 // the provider's most expensive known rate
 	}{
-		{"mistral-large", "mistral-large-latest", 0.001, 0.01},
-		{"mistral-medium", "mistral-medium-latest", 0.001, 0.01},
-		{"mistral-small", "mistral-small-latest", 0.001, 0.01},
-		{"open-mistral-nemo", "open-mistral-nemo", 0.0001, 0.001},
-		{"default", "unknown-model", 0.001, 0.01},
+		{"openai", 10.0 + 30.0},    // gpt-4-turbo, not gpt-4o
+		{"anthropic", 15.0 + 75.0}, // claude-opus-4-7, not claude-sonnet-4-6
+		{"groq", 0.59 + 0.79},      // llama-3.3-70b
+		{"gemini", 1.25 + 5.00},    // gemini-2.5-pro, not gemini-2.5-flash
+		{"mistral", 2.0 + 6.0},     // mistral-large-latest, not mistral-small
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cost := mistralCost(tt.model, usage)
-			if cost < tt.min || cost > tt.max {
-				t.Errorf("mistralCost(%q): expected in [%f, %f], got %f", tt.model, tt.min, tt.max, cost)
+		t.Run(tt.provider, func(t *testing.T) {
+			cost, known := CostFor(tt.provider, "a-model-cleat-has-never-heard-of", usage)
+			if known {
+				t.Fatalf("CostFor(%q, unknown model): expected known=false", tt.provider)
+			}
+			if cost != tt.want {
+				t.Errorf("CostFor(%q, unknown model) = %f, want %f (the provider's highest known rate)",
+					tt.provider, cost, tt.want)
 			}
 		})
 	}

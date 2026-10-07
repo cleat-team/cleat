@@ -21,7 +21,7 @@ class NotifyRequest:
     channel: str = "email"
 
 
-@cleat_entry
+@cleat_entry("durable_call_workflow")
 def durable_call_workflow(h: HostCalls, request: NotifyRequest) -> str:
     """A workflow that calls a notification service durably.
 

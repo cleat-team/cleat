@@ -22,7 +22,9 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/jsonschema"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/wasm"
 	"golang.org/x/time/rate"
 )
 
@@ -193,10 +195,50 @@ func (s *apiServer) storeFor(r *http.Request) (engine.WorkflowStore, error) {
 	if s.factory == nil {
 		return nil, fmt.Errorf("no store factory configured, cannot scope request to tenant %s", tid)
 	}
+	return s.openTenantStore(r, tid.String())
+}
 
-	st, lease, err := s.factory.OpenStore(r.Context(), tid.String(), s.taskQueues...)
+// openTenantStore opens a store scoped to tenant, and arranges for its lease to
+// be released when the request ends.
+//
+// The tenant is a PARAMETER rather than read from the request context, and that
+// is the whole point of the function existing separately from storeFor. cleat's
+// operator credential has no tenant, and cleat#2169's tenant-named admin routes
+// open a store for a tenant the caller is *not* -- so the tenant has to be
+// passed in. What those routes must not do is scope by the caller as well, so
+// nothing else about the request is consulted here, and the caller's own tenant
+// is deliberately not merged in or checked.
+//
+// What makes that safe — rather than a cross-tenant read — is that the scope IS
+// the authorization: a workflow the named tenant does not own is simply not
+// visible, GetWorkflowByID returns nil, and the caller gets a 404.
+//
+// THAT IS THREE SEPARATE CLAIMS, one per dialect, and they are enforced by three
+// different mechanisms rather than by one property this package can assume:
+//
+//	PostgreSQL  row-level security, with cleat.tenant_id set per transaction
+//	            (engine/db.go's setRLSOnTx)
+//	MySQL       no RLS at all — the tenant's rows live in a different physical
+//	            database, so pointing the pool at it IS the scoping. The name is
+//	            built by engine/mysql_store.go's MySQLTenantDatabaseName, and
+//	            that file's OpenIsolatedStore comment is where the hazard is
+//	            stated: a bare pool on the base DSN "silently reaches a database
+//	            with none of the tenant's rows"
+//	            (cleat#2009 is the time exactly that shipped)
+//	SQL Server  SESSION_CONTEXT set per transaction, read by the shipped
+//	            tenant-filter predicates
+//	            (TestEveryShippedTenantPolicyExistsInTheBuiltDatabase)
+//
+// Each is established for the store's OWN reads, so every query below this point
+// carries it; the engine's per-dialect isolation suites are where the enforcement
+// itself is asserted, and this comment is deliberately not a substitute for
+// them. What this package contributes is only that it names a tenant and does not
+// also scope by the caller — which is the one way these routes could have been
+// wrong.
+func (s *apiServer) openTenantStore(r *http.Request, tenant string) (engine.WorkflowStore, error) {
+	st, lease, err := s.factory.OpenStore(r.Context(), tenant, s.taskQueues...)
 	if err != nil {
-		return nil, fmt.Errorf("open store for tenant %s: %w", tid, err)
+		return nil, fmt.Errorf("open store for tenant %s: %w", tenant, err)
 	}
 	// THE LEASE IS RELEASED WHEN THE REQUEST ENDS, not when this returns.
 	//
@@ -617,6 +659,19 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		*tf.dst = t
 	}
 
+	// cleat#3009: the exclusion is applied BY THE QUERY, before the count and the
+	// page, so both are computed over the same rows. The 2b workaround filtered
+	// the fetched page instead, which is why pages came back short and the total
+	// was approximate.
+	internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
+	if ierr != nil {
+		// Fail closed: an unreadable definition set cannot be excluded, and an
+		// unfiltered list would show every internal run.
+		s.writeError(w, 500, ierr.Error())
+		return
+	}
+	filter.ExcludeDefNames = internalNames
+
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
@@ -627,6 +682,11 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, 500, err.Error())
 		return
 	}
+	// cleat#1986 slice 2b, moved into the query by cleat#3009: the internal
+	// exclusion is now a filter (filter.ExcludeDefNames above), so it is applied
+	// before offset and limit rather than to the page this handler fetched. Both
+	// the count and the rows therefore see the same set, and X-Total-Count is
+	// exact again.
 	// Header rather than an envelope: the body stays a bare array, so no
 	// existing caller breaks. handleGetInstanceEvents established this shape.
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
@@ -711,7 +771,7 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 		s.handleSetRoutingRule(w, r, id)
 	case len(parts) == 3 && parts[1] == "routing" && r.Method == http.MethodDelete:
 		// DELETE /api/workflows/:name/routing/:ruleID
-		s.handleRemoveRoutingRule(w, r, parts[2])
+		s.handleRemoveRoutingRule(w, r, id, parts[2])
 	case len(parts) == 2 && parts[1] == "tags" && r.Method == http.MethodGet:
 		// GET /api/workflows/:name/tags
 		s.handleListWorkflowTags(w, r, id)
@@ -738,6 +798,9 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	// Check if this is a query state request.
@@ -786,6 +849,9 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 func (s *apiServer) handleGetTerminalRun(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	wf, err := st.GetTerminalRun(r.Context(), id)
@@ -969,6 +1035,21 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// cleat#1986 slice 2b: an `internal` definition is not startable from the
+	// external HTTP surface, and answers exactly what an undeployed name gets.
+	//
+	// AFTER routing and AFTER the deprecation check, on the same reasoning the
+	// deprecation check uses: `targetVersion` is whatever actually chose the
+	// version -- latest, or a routing rule naming one explicitly -- so checking
+	// any earlier would test a version the request is not going to start. The
+	// class is per VERSION, so this has to be the version that would run.
+	//
+	// Before every run-creating line below, so no run is created and then
+	// abandoned.
+	if s.refuseIfInternalDef(w, r, st, name, targetVersion, "workflow definition not found") {
+		return
+	}
+
 	// Inject entry point into input if provided. plugin.MergeEntryPoint is the
 	// one place this flat-merge shape is implemented -- cleat#2108 found this
 	// handler WRAPPING instead of merging, and cleat#2114 gave the
@@ -979,6 +1060,53 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		s.writeError(w, 400, err.Error())
 		return
+	}
+
+	// cleat#1981: validate the start input against the entry point's
+	// build-time schema (cleat#1980), before any run is created.
+	//
+	// On by default for a definition that carries a schema for THIS entry
+	// point -- the owner decision recorded on the issue. A definition with
+	// no schema at all (Rust/Java/AssemblyScript, or any build from before
+	// cleat#1980) starts untyped, exactly as it did before this feature
+	// existed: EntryPointSchemas is nil for those, so the lookup below finds
+	// nothing and validation is skipped, not refused. That is NOT the same
+	// case as a schema that IS present but fails to decode -- jsonschema.Validate
+	// returns an error (not a violation) for a corrupt stored schema, and
+	// THAT fails closed with a 500 rather than silently passing the request
+	// through: the schema is this server's own artifact, not the caller's
+	// input, so its corruption is not something a 400 should describe.
+	//
+	// GetWorkflowDef resolves the entry point the SAME way execution does --
+	// determineEntryPoint reads the merged input's __entry_point field (or
+	// the WASM's single declared entry point) -- so validation and execution
+	// can never disagree about which schema applies. An entry point this
+	// cannot resolve is not refused HERE: it is refused identically whether
+	// or not this feature exists, when determineEntryPoint runs again at
+	// execution time.
+	if def, defErr := st.GetWorkflowDef(r.Context(), name, targetVersion); defErr != nil {
+		s.writeError(w, 500, defErr.Error())
+		return
+	} else if def != nil && !def.InputValidationDisabled && len(def.EntryPointSchemas) > 0 {
+		if entryPoint, epErr := determineEntryPoint(in, def.WASMBytes); epErr == nil {
+			if schema, ok := def.EntryPointSchemas[entryPoint]; ok && len(schema.Params) > 0 {
+				violation, schemaErr := jsonschema.Validate(schema.Params, input.Input)
+				if schemaErr != nil {
+					s.writeError(w, 500, fmt.Sprintf(
+						"entry point %q of %s v%d has a stored input schema that could not be parsed: %v",
+						entryPoint, name, targetVersion, schemaErr))
+					return
+				}
+				if violation != nil {
+					s.writeJSON(w, 400, map[string]string{
+						"error": violation.Error(),
+						"field": violation.Field,
+						"rule":  violation.Rule,
+					})
+					return
+				}
+			}
+		}
 	}
 
 	// Support Concurrency-Key header or JSON body field (Feature 5).
@@ -1289,6 +1417,9 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "not found") {
+		return
+	}
 	var req struct {
 		SignalName string `json:"signal_name"`
 		Payload    string `json:"payload"`
@@ -1400,6 +1531,9 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "not found") {
+		return
+	}
 	var req struct {
 		Reason string `json:"reason"`
 		// Preemptive selects the cleat#1153 behaviour: stop the workflow and
@@ -1501,6 +1635,16 @@ func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.
 		s.writeError(w, 404, "workflow not found")
 		return false
 	}
+	// cleat#1986 slice 2b: an `internal` run is NOT FOUND, not forbidden.
+	//
+	// This is the shared "does this run exist" gate, so putting the class check
+	// here covers every route that asks the question the same way -- and answers
+	// with the byte-identical body the route already uses for a run that is not
+	// there, which is the whole point of 404 over 403. It reuses `wf`, so the
+	// gate costs no extra read.
+	if s.refuseIfInternalRunLoaded(w, r, st, wf, "workflow not found") {
+		return false
+	}
 	return true
 }
 
@@ -1546,6 +1690,21 @@ func (s *apiServer) defExists(w http.ResponseWriter, r *http.Request, st engine.
 	if len(defs) == 0 {
 		s.writeError(w, 404, "workflow definition not found")
 		return false
+	}
+	// cleat#1986 slice 2b: a definition with ANY `internal` version is not found
+	// on the name-scoped routes, and answers with the same body an undeployed
+	// name gets.
+	//
+	// ANY version, not the latest: these routes address the definition BY NAME
+	// and take no version (that is why defExists lists rather than fetches), so
+	// the conservative reading of "not reachable for any route that addresses
+	// the workflow" is the one that cannot be sidestepped by deploying a newer
+	// non-internal version under the same name.
+	for _, d := range defs {
+		if d.Exposure.OrDefault() == engine.ExposureInternal {
+			s.writeError(w, 404, "workflow definition not found")
+			return false
+		}
 	}
 	return true
 }
@@ -1596,6 +1755,9 @@ func (s *apiServer) handleListRoutingRules(w http.ResponseWriter, r *http.Reques
 func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request, name string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
 	var req struct {
@@ -1651,18 +1813,26 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Request, ruleID string) {
+func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Request, name, ruleID string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
 		return
 	}
-	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
+		return
+	}
+	if err := st.RemoveRoutingRule(r.Context(), name, ruleID); err != nil {
 		// 404, not the 200 this answered for every miss before cleat#946's
 		// second half. No store checked rows-affected, so a DELETE matching
 		// nothing returned nil and an operator tearing down a canary was told it
 		// was gone while it went on shifting live traffic. A rule ID that names
 		// nothing is a bad request path, not a server fault, so it is not a 500
 		// either.
+		//
+		// A rule ID that names a DIFFERENT workflow's rule hits this same path
+		// -- cleat#3168. RemoveRoutingRule scopes its DELETE by name, so a rule
+		// belonging to some other workflow matches nothing here and is
+		// indistinguishable from a rule that was never created.
 		if errors.Is(err, engine.ErrRoutingRuleNotFound) {
 			s.writeError(w, 404, "routing rule not found: "+ruleID)
 			return
@@ -1727,6 +1897,9 @@ func (s *apiServer) handleListWorkflowTags(w http.ResponseWriter, r *http.Reques
 func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request, name string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
 	var req struct {
@@ -1802,6 +1975,9 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Request, name, tag string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfAbsentOrInternalDef(w, r, st, name, fmt.Sprintf("no workflow named %q", name)) {
 		return
 	}
 	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
@@ -1890,17 +2066,34 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 //	POST   /api/workflows/{name}/routing            409 via ValidateVersion
 //	GET    /api/workflows/{name}/tags               404 via defExists
 //	PUT    /api/workflows/{name}/tags               409 via ValidateVersion
-//	DELETE /api/workflows/{name}/tags/{tag}         unchecked -- see below
-//	DELETE /api/workflows/{name}/routing/{ruleID}   name UNUSED -- see below
+//	DELETE /api/workflows/{name}/tags/{tag}         404 via refuseIfAbsentOrInternalDef (cleat#3165)
+//	DELETE /api/workflows/{name}/routing/{ruleID}   404 via refuseIfAbsentOrInternalDef, scoped by RemoveRoutingRule (cleat#3168)
 //
-// The two DELETEs are deliberately left alone here, for different reasons.
-// The tag delete is a no-op on the store for an unknown name, and adding a 404
-// changes DELETE idempotency semantics, which is a separate argument from the
-// reader/writer disagreement this change is about. The routing delete is a
-// different defect rather than the same one: it never reads the name at all
-// (handleRemoveRoutingRule takes parts[2], the rule id), so any name in the
-// path deletes any rule id within the tenant. Filed separately; fixing it here
-// would bundle a second concern.
+// The tag delete's row above used to read "unchecked -- see below", with the
+// same idempotency argument this file's own comment on
+// refuseIfAbsentOrInternalDef still carries: DELETE is conventionally
+// idempotent, and removing a tag that is not there is a no-op success. That
+// was never shipped as a non-decision -- cleat-ports pinned the then-current
+// 200 in TestDeletingATagOnAnUnknownDefinitionCurrentlyAnswers200 "so the port
+// notices whichever way it goes" (ports/samples-go/ISSUES.md), and cleat had
+// in fact already moved to 404 (handleRemoveWorkflowTag calls
+// refuseIfAbsentOrInternalDef) before this comment was next read. Owner
+// decision on cleat#3165, verbatim via the coordinator: "recommendation
+// accepted" -- keep 404 for an unknown DEFINITION; keep 200 for an absent TAG
+// on a definition that exists, which is the idempotency case the argument
+// above was actually protecting and which refuseIfAbsentOrInternalDef never
+// touched.
+//
+// The routing delete used to be a different, unfixed defect: it never read
+// the name at all (handleRemoveRoutingRule took parts[2], the rule id, with
+// no name parameter), so any name in the path deleted any rule id within the
+// tenant. That stopped being quite true when the name parameter was added
+// for the refusal above -- "never reads the name at all" became false, while
+// the consequence (any existing name deletes any rule id) survived, because
+// RemoveRoutingRule still took only the id. cleat#3168 closed the gap:
+// RemoveRoutingRule now takes workflowName too and scopes its DELETE by it,
+// so a rule id belonging to a different workflow is ErrRoutingRuleNotFound,
+// the same as a rule id that was never created.
 //
 // The empty value is worse here than an empty list was there, because it is
 // ALSO a legitimate answer: a key that has not been published yet reads
@@ -1984,6 +2177,9 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
+		return
+	}
 	// Look up the workflow instance to get def_name and def_version.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
@@ -2052,6 +2248,9 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "workflow not found") {
+		return
+	}
 	callers, err := st.GetAllowedSignalCallers(r.Context(), id)
 	if err != nil {
 		// 404 for a workflow this tenant cannot see, same as
@@ -2084,6 +2283,9 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	var req struct {
@@ -2137,6 +2339,9 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "no such promise for this workflow") {
+		return
+	}
 	var req struct {
 		Result string `json:"result"`
 	}
@@ -2165,6 +2370,9 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, id, promiseID string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfAbsentOrInternalRun(w, r, st, id, "no such promise for this workflow") {
 		return
 	}
 	var req struct {
@@ -2218,6 +2426,9 @@ func isTerminalStatus(status string) bool {
 func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id, updateName string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if s.refuseIfInternalRun(w, r, st, id, "workflow not found") {
 		return
 	}
 	// Verify the workflow exists.
@@ -2384,6 +2595,21 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 	}
 	if schedules == nil {
 		schedules = []engine.Schedule{}
+	}
+	// cleat#3001: a schedule names its target, so this route discloses an
+	// `internal` definition's NAME without addressing a workflow -- and it is a
+	// collection, so it cannot answer 404 for one member. The schedule is kept
+	// and only its target's name is hidden: a cron-triggered internal workflow
+	// is legitimate and its schedule must stay visible.
+	if len(schedules) > 0 {
+		internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
+		if ierr != nil {
+			// Fail closed, as the run list does: an unreadable set would blank
+			// nothing and disclose every internal name in the list.
+			s.writeError(w, 500, ierr.Error())
+			return
+		}
+		hideInternalScheduleTargets(internalNames, schedules)
 	}
 	s.writeJSON(w, 200, schedules)
 }
@@ -2612,6 +2838,13 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// cleat#1986 slice 2b: this route enumerates every definition the caller's
+	// tenant owns, so it discloses an `internal` one -- its name, its versions
+	// and its active-instance counts. Same class as the run list and the
+	// OpenAPI document: filtered rather than refused, because a collection
+	// cannot answer 404 for one of its members.
+	defs = withoutInternalDefs(defs)
+
 	// Load memory stats for enrichment.
 	memoryStats := make(map[string]*engine.WorkflowMemoryStats)
 	if stats, err := st.LoadMemoryStats(r.Context()); err == nil {
@@ -2711,12 +2944,58 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// cleat#1986 slice 2c-ii. createDefRequest carries no exposure class -- the
+	// upload API has never had one -- so there is nothing a caller can TIGHTEN
+	// with, and the artifact's own source declaration is the only class this
+	// route can honour. Before this it stored `auth` for every upload, including
+	// one whose source declares `internal`, which is the fail-open half of the
+	// gap: the column said reachable while the source said otherwise. Adding a
+	// request field would be a decision about this API's surface, not a
+	// consequence of the rule, so it is deliberately not made here.
+	declared := engine.ExposureClass("")
+	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
+		declared = engine.ExposureClass(meta.Exposure)
+	}
+
+	// The per-tenant operator opt-in (cleat#1986's enforcement slice). This is
+	// a one-line call-site update forced by ResolveDeployableExposure's
+	// signature change, scoped to exactly that -- cmd/cleat-worker/ is WS-3's
+	// zone, and leaving this call uncompilable (or, worse, silently hardcoding
+	// false forever) would be strictly worse than the one-line touch. Proposed
+	// as this diff, then cleared by WS-3 reviewing it on PR #3154 before the PR
+	// landed. tid is already in scope from the request's auth context; a store
+	// that does not implement the reader is treated as "not opted in" (see
+	// TenantExposurePolicyReader's doc comment).
+	tidUUID, tidOK := auth.TenantIDFromContext(r.Context())
+	tid := ""
+	if tidOK {
+		tid = tidUUID.String()
+	}
+	tenantAllowsPublic := false
+	if reader, ok := st.(engine.TenantExposurePolicyReader); ok && tid != "" {
+		allowed, aerr := reader.AllowsPublicExposure(r.Context(), tid)
+		if aerr != nil {
+			s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "checking public exposure opt-in: " + aerr.Error()})
+			return
+		}
+		tenantAllowsPublic = allowed
+	}
+
+	exposure, expErr := engine.ResolveDeployableExposure(declared, "", tenantAllowsPublic, tid)
+	if expErr != nil {
+		// 400 rather than 500: this is the caller's artifact that cannot be
+		// stored, and the message names which class and why.
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": expErr.Error()})
+		return
+	}
+
 	def := &engine.WorkflowDef{
 		Name:       req.Name,
 		Version:    version,
 		WASMBytes:  wasmBytes,
 		ABIVersion: 1,
 		PluginDeps: req.PluginDeps,
+		Exposure:   exposure,
 	}
 
 	if err := st.DeployWorkflowDef(ctx, def); err != nil {

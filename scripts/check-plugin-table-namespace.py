@@ -53,6 +53,60 @@ TABLE = re.compile(
 )
 
 
+def strip_comments(src: str) -> str:
+    """Remove // and /* */ comments, preserving line counts and the contents
+    of string/backtick literals (which may contain // or /* and must not be
+    treated as comments -- a DDL string can quote an http:// URL).
+
+    cleat#2373: `CREATE\\s+TABLE\\s+...` matches prose too, and this tree has
+    comments reading "at CREATE TABLE time" and "CREATE TABLE time with
+    ...". Both yield a table named `time`, and two plugins each writing one
+    of those sentences report a collision that does not exist. Ported from
+    scripts/check-no-raw-rebind.py's strip_comments rather than reimplemented,
+    since a hand-written character scanner that gets string/backtick handling
+    right is not something to write twice.
+    """
+    out = []
+    i, n = 0, len(src)
+    in_string = None
+    while i < n:
+        c = src[i]
+        if in_string:
+            out.append(c)
+            if in_string == '"' and c == "\\" and i + 1 < n:
+                out.append(src[i + 1])
+                i += 2
+                continue
+            if c == in_string:
+                in_string = None
+            i += 1
+            continue
+        if c in ('"', "`"):
+            in_string = c
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            if j == -1:
+                i = n
+            else:
+                out.append("\n")
+                i = j + 1
+            continue
+        if c == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            if j == -1:
+                i = n
+            else:
+                out.append("\n" * src[i:j + 2].count("\n"))
+                i = j + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def declarations(files: dict[str, str]) -> dict[str, set[str]]:
     """table name -> the set of plugins declaring it.
 
@@ -72,7 +126,7 @@ def declarations(files: dict[str, str]) -> dict[str, set[str]]:
         if len(parts) < 2 or parts[0] != "plugins":
             continue
         plugin = parts[1]
-        for m in TABLE.finditer(src):
+        for m in TABLE.finditer(strip_comments(src)):
             owner[m.group(1)].add(plugin)
     return dict(owner)
 
@@ -162,11 +216,31 @@ def self_test() -> int:
     if declarations({"plugins/a/migrations.go": "-- no DDL here\n"}):
         failures.append("invented a declaration in a file with none")
 
+    # KNOWN-NEGATIVE, cleat#2373: two plugins, each with a comment containing
+    # "CREATE TABLE <word>" in prose, must not report a collision on <word>.
+    # This is the exact shape of the two real comments this issue was filed
+    # against (oauthprovider's "CREATE TABLE time with ..." and tenantquota's
+    # "at CREATE TABLE time, ..."), reduced to the minimum that reproduces it.
+    check(
+        "a comment mentioning CREATE TABLE in two plugins",
+        {
+            "plugins/a/migrations.go": (
+                "// unless one is given at CREATE TABLE time, and v1 gave none --\n"
+                "CREATE TABLE IF NOT EXISTS kv_store (k text)"
+            ),
+            "plugins/b/migrations.go": (
+                "// CREATE TABLE time with \"exceeds the maximum key length\"\n"
+                "CREATE TABLE IF NOT EXISTS other_table (k text)"
+            ),
+        },
+        set(),
+    )
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
         return 1
-    print("self-test passed: 5 cases (two known-positive, three known-negative)")
+    print("self-test passed: 6 cases (two known-positive, four known-negative)")
     return 0
 
 

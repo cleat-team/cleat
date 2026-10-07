@@ -83,6 +83,65 @@ func TestAGuestKilledByTheMemoryLimitIsNotReportedAsSuccess(t *testing.T) {
 	}
 }
 
+// TestAGuestRefusedByTheWasiPolicyIsNotReportedAsSuccess is the second
+// instance of 3.71's hole, reached by a different cause: a genuine WASM TRAP
+// that is neither a resource-limit trap nor a WASI exit at all.
+//
+// Demonstrated 2026-09-28 building the integration-hub tenant-sandbox wedge
+// scenario (cleat#2597): a tenant-uploaded step whose filesystem read the
+// host correctly refused (engine/wasi_policy.go's path_open, wasiFatal) was
+// reported to its caller as status=done, result="ok" through a real deployed
+// worker. The sandbox held; the WORKFLOW lied about it. Same shape as the
+// test above, and it is why that fix widened ExitStatus's `ok` return rather
+// than only its `code`: `ok == false` is every trap that is not a WASI exit,
+// which covers this cause and the OOM cause with one test each rather than
+// enumerating every way a guest can trap.
+func TestAGuestRefusedByTheWasiPolicyIsNotReportedAsSuccess(t *testing.T) {
+	ctx := context.Background()
+	wasmBytes := fenceReentryWasm(t)
+
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	defer wt.Close(ctx)
+
+	eng := NewEngine(rt, &mockCaller{},
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-refused-by-wasi-policy"))
+
+	result, _, suspended, _, _, execErr := eng.Execute(ctx, wasmBytes,
+		"read_host_file", json.RawMessage(`{}`))
+
+	if execErr == nil {
+		t.Fatalf("a workflow the WASI policy refused was reported as SUCCESS "+
+			"(result=%q suspended=%v).\n\n"+
+			"The worker stores status='done' for this. The sandbox correctly "+
+			"refused the guest's filesystem read; the workflow result did not "+
+			"say so.", result, suspended != nil)
+	}
+	if result != "" {
+		t.Errorf("execution failed but still returned a result %q; a trapped "+
+			"guest has no result to report", result)
+	}
+
+	// Name the mechanism, for the same reason the test above does: any error
+	// satisfies the check above, including an unrelated one.
+	if !strings.Contains(execErr.Error(), "trapped and never reported a result") ||
+		!strings.Contains(execErr.Error(), `cleat refuses the WASI call "path_open"`) {
+		t.Errorf("the workflow failed, but not by the WASI policy refusing "+
+			"path_open: %v\n\n"+
+			"A different error means this test is no longer exercising the "+
+			"policy trap.", execErr)
+	}
+}
+
 // TestAHealthyGuestStillSucceeds is the control: the fix must not turn working
 // workflows into failures.
 //

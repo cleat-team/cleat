@@ -118,7 +118,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 			"event_id", eventID, "error", err)
 		p.db.Exec(ctx, `
 			UPDATE ingested_events
-			SET processed = true, status = 'dead_letter', error_msg = $2
+			SET dispatch_processed = true, status = 'dead_letter', error_msg = $2
 			WHERE id = $1
 		`, eventID, "invalid event data: "+err.Error())
 		return
@@ -137,7 +137,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 		// At least one workflow was started successfully.
 		p.db.Exec(ctx, `
 			UPDATE ingested_events
-			SET processed = true, status = 'completed', error_msg = NULL
+			SET dispatch_processed = true, status = 'completed', error_msg = NULL
 			WHERE id = $1
 		`, eventID)
 		p.eventsProcessed.Add(1)
@@ -158,7 +158,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 			// No subscriptions exist — no point retrying. Mark as completed.
 			p.db.Exec(ctx, `
 				UPDATE ingested_events
-				SET processed = true, status = 'completed', error_msg = 'no matching subscriptions'
+				SET dispatch_processed = true, status = 'completed', error_msg = 'no matching subscriptions'
 				WHERE id = $1
 			`, eventID)
 			p.logger.Info("event-triggers: event completed with no subscriptions",
@@ -194,7 +194,7 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 	if newRetryCount >= maxRetries {
 		p.db.Exec(ctx, `
 			UPDATE ingested_events
-			SET retry_count = $2, error_msg = $3, last_retry_at = NOW(), status = 'dead_letter', processed = true
+			SET retry_count = $2, error_msg = $3, last_retry_at = NOW(), status = 'dead_letter', dispatch_processed = true
 			WHERE id = $1
 		`, eventID, newRetryCount, errMsg)
 		p.eventsDeadLetter.Add(1)

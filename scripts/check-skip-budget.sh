@@ -156,8 +156,10 @@ FIXTURE
 FIXTURE
 
   st_fail=0
-  echo "self-test (4 controls):"
+  st_total=0
+  echo "self-test:"
 
+  st_total=$((st_total + 1))
   out="$("$0" test-go/engine "$tmp/mixed.json" 2>&1 || true)"
   if ! grep -q "did not BUILD" <<< "$out"; then
     echo "  FAIL known-positive: a build failure was not reported as one" >&2
@@ -169,6 +171,7 @@ FIXTURE
     echo "  ok  a build failure reports the build, and not the ledger"
   fi
 
+  st_total=$((st_total + 1))
   out="$("$0" test-go/engine "$tmp/healthy.json" 2>&1 || true)"
   if grep -q "did not BUILD" <<< "$out"; then
     echo "  FAIL negative control: a healthy report was called a build failure" >&2
@@ -192,6 +195,7 @@ FIXTURE
   mkdir -p "$LEDGER_D"
   probe_frag="$LEDGER_D/zz-self-test-probe.tsv"
   printf 'self-test-job\t1\t^TestSelfTestProbe$\twritten and removed by --self-test\n' > "$probe_frag"
+  st_total=$((st_total + 1))
   frag_after="$(ledger_lines | grep -c . || true)"
   rm -f "$probe_frag"
   if [ "$frag_after" -le "$frag_before" ]; then
@@ -212,6 +216,7 @@ FIXTURE
   nl_b="$LEDGER_D/zz-self-test-victim.tsv"
   printf 'self-test-job\t1\t^TestNoTrailingNewline$\tno trailing newline here' > "$nl_a"
   printf 'self-test-victim\t1\t^TestTheNextDeclaration$\tmust survive\n' > "$nl_b"
+  st_total=$((st_total + 1))
   victim="$(ledger_lines | awk -F'\t' '$1=="self-test-victim"' | grep -c . || true)"
   rm -f "$nl_a" "$nl_b"
   if [ "$victim" -ne 1 ]; then
@@ -222,11 +227,82 @@ FIXTURE
     echo "  ok  a fragment with no trailing newline does not eat the next one"
   fi
 
+  # A LINE WHOSE FIELDS ARE SHIFTED MUST BE REJECTED, NOT SILENTLY IGNORED
+  # (cleat#2747). Reproduces cleat#2746's exact shape: a line-number prefix
+  # ahead of a correct 4-field line, so every field is present and every
+  # field is one column off. Run against a job the bogus line's own shifted
+  # "job key" (a literal "1") cannot possibly equal, which is the point --
+  # the malformed-line check has to fire regardless of which job asks,
+  # because filtering by $JOB first can never reach a line whose $1 matches
+  # no job at all.
+  mkdir -p "$LEDGER_D"
+  shifted_frag="$LEDGER_D/zz-self-test-shifted.tsv"
+  printf '1\ttest-go/engine\t1\tTestSelfTestShifted$\tshifted by a line-number prefix\n' > "$shifted_frag"
+  cat > "$tmp/trivial.json" <<'FIXTURE'
+{"Action":"pass","Test":"TestSelfTestTrivial"}
+FIXTURE
+  st_total=$((st_total + 1))
+  out="$("$0" self-test-unrelated-job "$tmp/trivial.json" 2>&1; echo "EXIT=$?")"
+  rm -f "$shifted_frag"
+  if ! grep -q "malformed line" <<< "$out"; then
+    echo "  FAIL malformed-line detection: a shifted-field line was not reported" >&2
+    st_fail=$((st_fail + 1))
+  elif ! grep -q "EXIT=1" <<< "$out"; then
+    echo "  FAIL malformed-line detection: reported the problem but did not exit 1" >&2
+    st_fail=$((st_fail + 1))
+  else
+    echo "  ok  a ledger line with shifted fields is rejected, not silently ignored"
+  fi
+
+  # A SKIP MATCHED BY BOTH A BROAD AND A SPECIFIC LINE MUST COUNT ONCE, FOR
+  # THE SPECIFIC ONE (cleat#2729). Reproduces cleat#2686/#2687's shape: a
+  # broad suffix line (no test name in its pattern, matching any skip ending
+  # in "/foo") and a specific line naming one test whose own skip also ends
+  # in "/foo". Two real skips exist -- one only the broad line should see,
+  # one both lines match -- and the ledger's declared counts (1 each) are
+  # only satisfiable if the specific line claims its own skip first.
+  overlap_frag="$LEDGER_D/zz-self-test-overlap.tsv"
+  cat > "$overlap_frag" <<'FIXTURE'
+self-test-overlap	1	/foo$	broad: matches any skip ending in /foo
+self-test-overlap	1	^TestSelfTestOverlapBar/foo$	specific: this one test's own arm
+FIXTURE
+  cat > "$tmp/overlap.json" <<'FIXTURE'
+{"Action":"pass","Test":"TestSelfTestTrivial"}
+{"Action":"skip","Test":"TestSelfTestOverlapOldThing/foo"}
+{"Action":"skip","Test":"TestSelfTestOverlapBar/foo"}
+FIXTURE
+  st_total=$((st_total + 1))
+  out="$("$0" self-test-overlap "$tmp/overlap.json" 2>&1 || true)"
+  if ! grep -q "^OK:" <<< "$out"; then
+    echo "  FAIL overlap resolution: a skip matched by both a broad and a specific" >&2
+    echo "       line was not resolved to the specific one -- got:" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    st_fail=$((st_fail + 1))
+  else
+    # KNOWN-POSITIVE: delete the specific line and confirm the SAME report now
+    # fails. If it did not, the "ok" above would be free -- satisfied by a
+    # version of the fix that just stopped checking overlaps at all, rather
+    # than one that resolves them correctly.
+    cat > "$overlap_frag" <<'FIXTURE'
+self-test-overlap	1	/foo$	broad: matches any skip ending in /foo
+FIXTURE
+    out2="$("$0" self-test-overlap "$tmp/overlap.json" 2>&1 || true)"
+    if grep -q "^OK:" <<< "$out2"; then
+      echo "  FAIL overlap resolution: removing the specific line should leave the" >&2
+      echo "       broad line over its declared count (this is the known-positive," >&2
+      echo "       and it did not fire -- the check above may be passing vacuously)" >&2
+      st_fail=$((st_fail + 1))
+    else
+      echo "  ok  a skip matched by both a broad and a specific line counts once, for the specific line"
+    fi
+  fi
+  rm -f "$overlap_frag"
+
   if [ "$st_fail" -ne 0 ]; then
-    echo "self-test: $st_fail control(s) failed" >&2
+    echo "self-test: $st_fail of $st_total control(s) failed" >&2
     exit 1
   fi
-  echo "self-test: build failures are told from ledger violations, and fragments are read"
+  echo "self-test: $st_total controls passed"
   exit 0
 fi
 
@@ -240,6 +316,65 @@ REPORT="$2"
 
 if [ ! -f "$LEDGER" ]; then
   echo "ERROR: $LEDGER is missing." >&2
+  exit 1
+fi
+
+# A LINE WHOSE FIELDS ARE SHIFTED PASSES THE EXISTING FILTER'S SHAPE TEST AND
+# FAILS ITS IDENTITY TEST, SO IT GRANTS NOTHING WHILE REPORTING NOTHING
+# (cleat#2747). The job-line selector below is `NF>=3 && $1==job`, which a
+# shifted line satisfies on NF alone -- and its $1 is whatever field a `grep
+# -n`/`cat -n` prefix or similar landed there, which is essentially never a
+# real job key, so `$1==job` is false for the CURRENT job AND for every OTHER
+# job that will ever ask. Filtering by $JOB first can never reach this line,
+# which is why every line in the WHOLE ledger is validated here, unconditional
+# on which job is being checked.
+#
+# Measured on cleat#2746: a line meant to read
+#   test-go/engine<TAB>1<TAB>TestMSSQLRetention...$<TAB>dialect-gated: ...
+# had a line-number prefix baked in ahead of it, so it read
+#   1<TAB>test-go/engine<TAB>1<TAB>TestMSSQLRetention...$<TAB>dialect-gated: ...
+# -- job key "1", count "test-go/engine", pattern "1", and a fifth field.
+# NF was 5, comfortably >= 3, and "1" matched no job's $JOB, so the line
+# granted nothing to test-go/engine (the job it was meant for) while never
+# producing an error anywhere -- indistinguishable, from every job's point of
+# view, from the line never having been written at all.
+#
+# THE CHECK: every declared line (comments and truly blank lines aside) must
+# have EXACTLY 4 tab-separated fields, and field 2 (the count) must be a
+# non-negative integer. NF==4 alone catches this specific shift, because the
+# extra prefix field pushes NF to 5; the numeric check on $2 catches a shift
+# that happens to preserve NF (swapped fields, say) where $2 would almost
+# never land on a real count. Zero is a valid count -- multiple real lines
+# declare "this job should see zero skips of this kind" -- so this is
+# non-negative, not strictly positive as a first reading of cleat#2747
+# suggested; grep -c confirms several `\t0\t__UNATTRIBUTED__\t` lines are
+# real declarations, not placeholders.
+#
+# Job-key cross-validation against the set of keys CI actually invokes
+# (cleat#2747's optional half) is deliberately left out: several workflow
+# matrices build a job key by string interpolation
+# (`test-go/${{ matrix.package.name }}`), which a static grep over the YAML
+# cannot resolve without evaluating the matrix -- exactly the "a tool applied
+# to a format it does not model" trap this repo's own CLAUDE.md warns about.
+# A cross-check that cannot see a legitimate, matrix-built key would flag it
+# as unknown, which is a worse failure mode than the one being fixed.
+malformed="$(ledger_lines | awk -F'\t' '
+  /^#/ { next }
+  NF == 0 { next }
+  NF != 4 { print "  " NF " field(s), want 4: " $0; next }
+  $2 !~ /^[0-9]+$/ { print "  field 2 (" $2 ") is not a non-negative integer: " $0 }
+')"
+if [ -n "$malformed" ]; then
+  echo "ERROR: scripts/skip-ledger.tsv or scripts/skip-ledger.d/*.tsv has a" >&2
+  echo "malformed line -- every field present, but shifted, so it grants" >&2
+  echo "nothing to any job and reports nothing until this check runs:" >&2
+  echo "$malformed" >&2
+  echo >&2
+  echo "Expected exactly 4 tab-separated fields:" >&2
+  echo "    <job key><TAB><count><TAB><test-name regex><TAB><why>" >&2
+  echo >&2
+  echo "Find the source file with:" >&2
+  echo "    grep -rn -F '<the line above>' scripts/skip-ledger.tsv scripts/skip-ledger.d/" >&2
   exit 1
 fi
 
@@ -379,12 +514,37 @@ budget="$(echo "$lines" | awk -F'\t' '{n+=$2} END{print n+0}')"
 # rather than only in aggregate.
 names="$(grep '"Action":"skip"' "$REPORT" | grep -o '"Test":"[^"]*"' | sed 's/"Test":"//; s/"$//' | LC_ALL=C sort)"
 
+# A SKIP MATCHED BY TWO LINES IS COUNTED BY BOTH, WHICH MAKES "GIVE IT ITS OWN
+# LINE" UNSATISFIABLE (cleat#2729). cleat#2686's four suffix lines --
+# /postgres$, /mssql$, /mysql$ -- match ANY skip in the job ending in that
+# arm, by design; a later, per-test line for a newly dialect-parameterised
+# test matches the SAME skip name. Checking each line against the full
+# `$names` list, as before, means the suffix line's own `got` rises by one
+# the moment the named line is added -- the named line satisfies nothing,
+# because the suffix line was never looking at a reduced set to begin with.
+#
+# FIX: EACH SKIP IS ATTRIBUTED TO AT MOST ONE LINE, MOST SPECIFIC FIRST. A
+# specific line names one or a few tests; a broad line does not name any --
+# it matches by dialect/arm suffix alone. The discriminator is whether the
+# pattern contains "Test": every per-test line's pattern is built from a Go
+# test function name, which always starts with "Test" by the language's own
+# convention, and grep -F over the whole ledger confirms the four suffix
+# lines are the ONLY ones that do not. A specific line's matches are removed
+# from the pool before any broad line gets a turn, so a name already claimed
+# by its own line is invisible to a suffix line checking what is left --
+# which is exactly the count that line's author measured before the new
+# test existed.
+specific_lines="$(echo "$lines" | awk -F'\t' '$3 == "__UNATTRIBUTED__" { next } $3 ~ /Test/')"
+broad_lines="$(echo "$lines" | awk -F'\t' '$3 == "__UNATTRIBUTED__" { next } $3 !~ /Test/')"
+
+pool="$names"
 fail=0
 attributed=0
-while IFS=$'\t' read -r _job count pattern why; do
-  [ -z "$pattern" ] && continue
-  [ "$pattern" = "__UNATTRIBUTED__" ] && continue
-  got="$(printf '%s\n' "$names" | grep -cE "$pattern" || true)"
+
+check_ledger_line() {
+  local count="$1" pattern="$2" why="$3"
+  [ -z "$pattern" ] && return
+  got="$(printf '%s\n' "$pool" | grep -cE "$pattern" || true)"
   attributed=$((attributed + got))
   if [ "$got" -ne "$count" ]; then
     echo "ERROR: ledger line for '$JOB' expects $count skip(s) matching /$pattern/, got $got." >&2
@@ -405,11 +565,45 @@ while IFS=$'\t' read -r _job count pattern why; do
       echo "  More than declared: something new is skipping under a reason written" >&2
       echo "  for something else. Give it its own line." >&2
     fi
+    if [[ "$pattern" != *Test* ]]; then
+      echo >&2
+      echo "  This line's pattern has no \"Test\" in it, so this checker treats it as" >&2
+      echo "  BROAD -- it is checked against every skip no specific line already" >&2
+      echo "  claimed, rather than against one test by name." >&2
+      if [ "$got" -gt "$count" ]; then
+        echo "  DO NOT bump this count for a newly-skipping test. Add a new line for" >&2
+        echo "  just that test instead, in its own skip-ledger.d fragment, under this" >&2
+        echo "  same job key: a specific line's matches are removed from the pool" >&2
+        echo "  before any broad line is checked (cleat#2729), so the new line" >&2
+        echo "  satisfies this error without editing this one -- and without" >&2
+        echo "  conflicting with any other concurrent PR doing the same thing." >&2
+        echo "  (Three PRs bumped this exact line instead and didn't need to:" >&2
+        echo "  cleat#2908.)" >&2
+      else
+        echo "  If a new test's own named line didn't fix this, that line's pattern" >&2
+        echo "  is missing \"Test\" too (a typo, or a name that isn't a Go test" >&2
+        echo "  identifier) and is being treated as broad when it was meant to be" >&2
+        echo "  specific." >&2
+      fi
+    fi
     echo "  reason on file: $why" >&2
     fail=1
   fi
+  # Remove this line's matches from the pool so a line processed after it --
+  # necessarily broader, since specific_lines run first -- does not see them.
+  pool="$(printf '%s\n' "$pool" | grep -vE "$pattern" || true)"
+}
+
+while IFS=$'\t' read -r _job count pattern why; do
+  check_ledger_line "$count" "$pattern" "$why"
 done <<EOF
-$lines
+$specific_lines
+EOF
+
+while IFS=$'\t' read -r _job count pattern why; do
+  check_ledger_line "$count" "$pattern" "$why"
+done <<EOF
+$broad_lines
 EOF
 
 # Whatever matched no pattern lands against the inherited remainder, which may

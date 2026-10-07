@@ -199,18 +199,42 @@ func (r *queueRig) send(tenant uuid.UUID, i int) {
 	r.p.enqueueAudit(tenant, "u", "GET", fmt.Sprintf("/q/%d", i), 200, "10.0.0.1", "agent", time.Millisecond)
 }
 
-// settle waits until every sent event is either recorded or counted lost.
+// settle waits until every sent event is recorded or counted lost, AND the host
+// has been told about every loss.
+//
+// THE SECOND CLAUSE IS NOT REDUNDANT, and its absence was a flake (cleat#2571).
+// `lose()` counts a loss and THEN calls the host hook:
+//
+//	p.q.lost[i].Add(1)
+//	p.q.lostTotal.Add(1)
+//	...
+//	p.eventsLost("audit-log", reason, 1)     <- after both counters
+//
+// so `recorded + lostTotal == sent` becomes true one statement BEFORE the host
+// is told. Every caller of settle() then reads hookLost() -- directly, or through
+// accounted(), which compares it to lostTotal -- so without this clause the
+// assertion can run inside that window and see one fewer loss than was counted.
+//
+// Reproduced by widening the gap with a 50ms sleep in `lose()`: the test failed
+// with `queue_test.go:354: the host was told of 2, want 3`, byte-identical to the
+// CI failure this was filed for. With this clause it passes under the same
+// mutation. That mutation is a diagnosis, not a fixture -- it is not committed.
+//
+// hookLost() <= lostTotal always, because the hook is called after the count, so
+// equality means every counted loss has been reported. `eventsLost` is installed
+// unconditionally by queueRig, so this cannot spin on a rig that has no hook.
 func (r *queueRig) settle(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		if r.p.q.recorded.Load()+r.p.q.lostTotal.Load() == r.p.q.sent.Load() {
+		if r.p.q.recorded.Load()+r.p.q.lostTotal.Load() == r.p.q.sent.Load() &&
+			r.hookLost() == r.p.q.lostTotal.Load() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("after 60s: sent %d, recorded %d, lost %d: events are unaccounted for",
-		r.p.q.sent.Load(), r.p.q.recorded.Load(), r.p.q.lostTotal.Load())
+	t.Fatalf("after 60s: sent %d, recorded %d, lost %d, reported %d: events are unaccounted for, or counted without the host being told",
+		r.p.q.sent.Load(), r.p.q.recorded.Load(), r.p.q.lostTotal.Load(), r.hookLost())
 }
 
 // accounted asserts the invariant and that the host's counter and the table agree with it.

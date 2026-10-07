@@ -1767,7 +1767,7 @@ func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workfl
 func (m *mockCompactStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
 	return nil
 }
-func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (m *mockCompactStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
@@ -1824,7 +1824,7 @@ func (m *mockCompactStore) GetWorkflowTags(ctx context.Context, workflowName str
 func (m *mockCompactStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
 	return nil
 }
-func (m *mockCompactStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+func (m *mockCompactStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	return nil
 }
 func (m *mockCompactStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {

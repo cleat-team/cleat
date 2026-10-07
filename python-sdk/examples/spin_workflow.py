@@ -14,7 +14,7 @@ budget is what stops it.
 from cleat_sdk import HostCalls, cleat_entry
 
 
-@cleat_entry
+@cleat_entry("spin_workflow")
 def spin_workflow(h: HostCalls, request: dict) -> str:
     # Modulo keeps the value small: the point is to burn wall-clock inside the
     # guest, not to allocate. A growing integer would eventually make this a

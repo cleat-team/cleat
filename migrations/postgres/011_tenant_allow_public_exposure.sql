@@ -1,0 +1,14 @@
+-- cleat#1986: the last piece of the exposure-class design -- a per-tenant
+-- operator opt-in for the `public` class. engine.ResolveDeployableExposure
+-- has refused `public` unconditionally since 2c-ii, naming this exact column
+-- as the thing that does not exist yet (ErrExposurePublicUnavailable). This
+-- migration only adds the column; nothing reads it until the enforcement
+-- slice that follows -- same two-step shape as 005_workflow_defs_exposure_class.sql
+-- (declare) and 2c-ii (enforce).
+--
+-- Lives on admin.tenants, beside `suspended`: the design doc says the flag
+-- "lives with the tenant record", and this is where every other per-tenant
+-- operator-set flag (suspended) already is. NOT NULL DEFAULT false, so every
+-- existing tenant reads back as "not opted in" -- the safe default the owner
+-- decision requires ("refused at deploy otherwise"), not a permissive one.
+ALTER TABLE admin.tenants ADD COLUMN IF NOT EXISTS allow_public_exposure boolean NOT NULL DEFAULT false;

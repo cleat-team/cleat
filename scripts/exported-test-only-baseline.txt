@@ -6,7 +6,6 @@ engine/adaptive_flush.go	func AdaptiveFlusher.GetRate
 engine/adaptive_flush.go	func AdaptiveFlusher.InBatchMode
 engine/app.go	func NewApp
 engine/callerrors.go	func GuestCallErrorCodes
-engine/callintent.go	func WithAmbiguityResolver
 engine/child_version.go	func ResolveChildVersion
 engine/cron.go	func NextCronTime
 engine/engine.go	func Engine.ExecuteCompiled
@@ -19,6 +18,7 @@ engine/engine.go	func WithDeferPassBudget
 engine/engine.go	func WithFetcher
 engine/engine.go	func WithPluginCallGuard
 engine/engine.go	func WithPluginCallObserver
+engine/errors.go	func NewCancelledError
 engine/errors.go	func NewRetriesExhaustedError
 engine/errors.go	func NewTimeoutError
 engine/events.go	func EventsFromRecords
@@ -70,7 +70,6 @@ engine/version_metrics.go	func LogStaleAlerts
 engine/versioned_loader.go	func NewWorkflowLoader
 engine/wasm_cache.go	func NewWASMCache
 engine/wasm_disk_cache.go	func WasmDiskCache.LookupBytes
-engine/worker_registry.go	func WorkerRegistry.ListLive
 internal/telemetry/tracing.go	func InitTracing
 migration/catalogdiff/catalogdiff.go	func AssertNoPluginObjects
 plugin/capabilities.go	func DefaultLimits
@@ -87,6 +86,7 @@ plugins/plugintest/arms.go	func RunEveryArm
 plugins/plugintest/migrations.go	func AssertMigrationsDoSomething
 plugins/plugintest/rebound.go	func ExecRebound
 plugins/plugintest/rebound.go	func QueryRowRebound
+plugins/plugintest/schema_cleanup.go	func CleanupPluginSchema
 plugins/plugintest/secrets.go	func FakeSecrets.Seed
 plugins/plugintest/secrets.go	func NewFakeSecrets
 wasm/adapter_metadata.go	func AdapterFieldNames

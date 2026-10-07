@@ -1,0 +1,280 @@
+.gitleaks.toml	migration 087
+auth/a_key_expiry_test.go	migration 038
+auth/tenant_store.go	migration 061
+auth/tenant_store.go	migration 105
+auth/tenant_store.go	migrations/mysql/104
+auth/tenant_store.go	migrations/postgres/031
+auth/tenant_store.go	migrations/postgres/105
+cmd/cleat-worker/a_migration_is_a_deploy_step_test.go	migration 103
+cmd/cleat-worker/a_plugin_start_workflow_is_tenant_scoped_test.go	migration 103
+cmd/cleat-worker/a_plugin_start_workflow_is_tenant_scoped_test.go	migrations/mysql/034
+cmd/cleat-worker/main.go	migration 079
+cmd/cleat-worker/main.go	migration 080
+cmd/cleat-worker/no_tenant_pools_test.go	038_single_tenant_guard.sql
+cmd/cleat-worker/plugin_egress.go	migration 063
+cmd/cleat-worker/setup.go	migration 052
+cmd/cleat-worker/setup.go	migration 077
+cmd/cleat-worker/setup.go	migration 080
+cmd/cleat-worker/setup.go	migration 083
+cmd/cleat-worker/setup.go	migrations/postgres/077
+cmd/cleat-worker/stream_sse.go	migration 076
+cmd/cleat-worker/tenant_isolation_mssql_test.go	migrations/mssql/055
+cmd/cleatctl/checkdb.go	migrations/postgres/033
+cmd/cleatctl/cost.go	migration 101
+cmd/cleatctl/cost.go	migrations/postgres/101
+cmd/cleatctl/droptenant.go	migrations/mssql/074
+cmd/cleatctl/droptenant.go	migrations/postgres/093
+cmd/cleatctl/droptenant.go	migrations/postgres/094
+cmd/cleatctl/droptenant.go	migrations/postgres/097
+cmd/cleatctl/droptenant.go	migrations/postgres/104
+cmd/cleatctl/droptenant_mssql.go	migrations/mssql/074
+cmd/cleatctl/droptenant_test.go	032_drop_tenant_deletes_tenant_data.sql
+cmd/cleatctl/every_subcommand_declares_its_dialects_test.go	migration 069
+cmd/cleatctl/ported.go	074_a_dropped_tenants_rows_go_with_it.sql
+cmd/cleatctl/ported.go	migrations/postgres/104
+cmd/cleatctl/queue.go	migration 093
+cmd/cleatctl/quota.go	migrations/mssql/075
+cmd/cleatctl/retiresecret.go	migration 081
+cmd/cleatctl/retiresecret.go	migrations/mssql/075
+cmd/cleatctl/setsecret.go	migrations/mssql/075
+cmd/cleatctl/settenantsetting.go	migration 039
+cmd/cleatctl/slackworkspace.go	104_a_slack_workspace_maps_to_one_tenant.sql
+cmd/cleatctl/slackworkspace_test.go	migrations/mysql/103
+cmd/cleatctl/slackworkspace_test.go	migrations/postgres/104
+cmd/cleatctl/speaks_three_dialects_test.go	migrations/mssql/074
+docs/contributor/design/cleat-execution-design.md	migration 033
+docs/contributor/migrations.md	004_fix_finalize_workflow_status_fence.sql
+docs/contributor/migrations.md	migrations/mysql/077
+docs/contributor/plugins/plugin-security.md	074_a_dropped_tenants_rows_go_with_it.sql
+docs/contributor/plugins/plugin-security.md	077_every_entity_records_when_it_last_changed.sql
+docs/durable-call-intent-design.md	migration 020
+docs/explanation/postgresql-schema.md	001_initial_schema.sql
+docs/explanation/postgresql-schema.md	077_a_plugin_policy_can_use_its_index.sql
+docs/explanation/postgresql-schema.md	migration 045
+docs/explanation/postgresql-schema.md	migration 052
+docs/explanation/postgresql-schema.md	migration 074
+docs/explanation/postgresql-schema.md	migration 075
+docs/explanation/postgresql-schema.md	migrations/postgres/072
+docs/operations/egress-policy.md	migrations/postgres/063
+docs/operations/upgrading.md	002_constraints.sql
+docs/operations/upgrading.md	008_rls_fail_closed.sql
+docs/operations/upgrading.md	migration 077
+docs/operations/workflow-retention.md	033_completed_workflow_retention_indexes.sql
+docs/operations/workflow-retention.md	101_the_finalize_procedure_stops_deleting_failed_history.sql
+docs/plugin-table-handling.md	migration 063
+docs/plugin-table-handling.md	migrations/postgres/059
+docs/plugin-table-handling.md	migrations/postgres/063
+docs/reference/database-backends.md	migrations/mysql/036
+docs/reference/database-backends.md	migrations/mysql/070
+docs/reference/workflow-lifecycle.md	038_defer_phase_marker.sql
+docs/reference/workflow-lifecycle.md	migration 101
+docs/reference/workflow-lifecycle.md	migrations/postgres/038
+docs/reference/workflow-lifecycle.md	migrations/postgres/040
+engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go	migration 103
+engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go	migrations/mssql/077
+engine/a_dropped_tenants_rows_all_go_with_it_test.go	migration 056
+engine/a_dropped_tenants_rows_all_go_with_it_test.go	migration 097
+engine/a_plugin_callers_json_survives_the_column_test.go	migrations/mysql/070
+engine/a_plugin_statement_is_scoped_to_the_workflows_tenant_test.go	migration 077
+engine/a_retired_secret_stops_resolving_test.go	migrations/mssql/073
+engine/a_retired_secret_stops_resolving_test.go	migrations/mssql/075
+engine/a_schedule_idempotency_key_tells_a_retry_from_a_collision_test.go	migrations/mssql/067
+engine/a_secret_never_crosses_tenants_at_the_store_test.go	migration 038
+engine/a_tenant_can_be_dropped_on_sql_server_test.go	074_a_dropped_tenants_rows_go_with_it.sql
+engine/a_tenant_can_be_dropped_on_sql_server_test.go	migration 066
+engine/a_tenant_can_be_dropped_on_sql_server_test.go	migration 074
+engine/a_tenant_policy_keeps_its_index_and_its_boundary_test.go	migration 063
+engine/a_test_that_drops_a_migrated_object_restores_it_test.go	migration 075
+engine/a_workflow_result_contract_is_the_intersection_test.go	migrations/mysql/070
+engine/a_workflow_result_survives_the_column_or_does_not_test.go	migrations/mysql/070
+engine/a_workflow_result_survives_the_column_or_does_not_test.go	migrations/mysql/071
+engine/admin_functions_are_not_public_test.go	migration 064
+engine/admin_functions_pin_their_search_path_test.go	migration 069
+engine/admin_functions_pin_their_search_path_test.go	migration 070
+engine/allowed_signals_writer_test.go	migration 037
+engine/an_idempotency_key_belongs_to_one_tenant_test.go	083_an_idempotency_key_belongs_to_one_tenant.sql
+engine/an_idempotency_key_belongs_to_one_tenant_test.go	migration 077
+engine/an_idempotency_key_belongs_to_one_tenant_test.go	migration 083
+engine/an_input_survives_the_column_or_does_not_test.go	migrations/mysql/070
+engine/an_input_survives_the_column_or_does_not_test.go	migrations/mysql/071
+engine/child_failure_reaches_the_parent_test.go	migration 053
+engine/claim_defers_a_held_concurrency_key_test.go	migration 058
+engine/db.go	migration 101
+engine/db.go	migrations/postgres/049
+engine/db.go	migrations/postgres/101
+engine/def_lookup_tenant_property_test.go	migration 035
+engine/deployment_secrets.go	migration 103
+engine/drop_tenant_test.go	032_drop_tenant_deletes_tenant_data.sql
+engine/fence_lost_integration_test.go	004_fix_finalize_workflow_status_fence.sql
+engine/finalize_retries_a_mysql_deadlock_on_event_count_test.go	071_the_finalize_procedure_stops_casting_the_result.sql
+engine/flush_dialect_test.go	migration 103
+engine/flush_rls_test.go	005_app_role.sql
+engine/memory_profile_rls_layer_test.go	061_the_memory_profile_has_a_policy_behind_its_predicate.sql
+engine/mssql_admin_login_defs_tenant_test.go	migration 035
+engine/mssql_admin_login_schedule_tenant_test.go	012_admin_role.sql
+engine/mssql_admin_login_schedule_tenant_test.go	migration 075
+engine/mssql_block_predicates_test.go	103_a_filtered_write_is_a_blocked_write.sql
+engine/mssql_deployment.go	migrations/mssql/036
+engine/mssql_index_parity_test.go	035_ready_and_active_indexes.sql
+engine/mssql_index_parity_test.go	043_claim_terminating_workflows.sql
+engine/mssql_index_parity_test.go	migrations/postgres/040
+engine/mssql_json_parity_test.go	037_json_column_checks.sql
+engine/mssql_lifecycle.go	010_idempotency_keys_tenant_id.sql
+engine/mssql_plugin_deps_check_test.go	036_plugin_deps_isjson.sql
+engine/mssql_plugin_deps_check_test.go	migration 036
+engine/mssql_plugin_deps_check_test.go	migration 103
+engine/mssql_rls_enforcement_test.go	migration 103
+engine/mssql_schedule_tenant_id_test.go	migration 103
+engine/mssql_signals_promises.go	012_admin_role.sql
+engine/mssql_store_integration_test.go	034_event_history_request_widen.sql
+engine/mssql_store_integration_test.go	migration 034
+engine/mssql_tenant_settings_test.go	042_tenant_settings.sql
+engine/mssql_tenant_settings_test.go	migration 103
+engine/mysql_lifecycle.go	010_idempotency_keys_tenant_id.sql
+engine/mysql_lifecycle.go	migration 058
+engine/mysql_ops.go	migrations/mssql/036
+engine/mysql_tenant_settings.go	038_single_tenant_guard.sql
+engine/mysql_tenant_settings_test.go	038_single_tenant_guard.sql
+engine/plugin_secrets_test.go	migration 038
+engine/plugindb_tenant.go	012_admin_role.sql
+engine/plugindb_tenant.go	migration 034
+engine/plugindb_tenant.go	migration 063
+engine/plugindb_tenant.go	migration 077
+engine/plugindb_tenant.go	migrations/postgres/077
+engine/postgres_rls_reachability_test.go	migration 103
+engine/procedure_migration_list_test.go	migrations/postgres/032
+engine/rls_check.go	005_app_role.sql
+engine/rls_check_test.go	005_app_role.sql
+engine/rls_gap_concurrency_and_update_requests_test.go	031_rls_gap_concurrency_and_update_requests.sql
+engine/routine_definition_drift_test.go	004_fix_finalize_workflow_status_fence.sql
+engine/schedule_tenant_test.go	005_app_role.sql
+engine/schedules_retire_through_disabled_at_test.go	migration 089
+engine/schema_doc_matches_the_database_test.go	migration 040
+engine/search_does_not_scan_every_payload_test.go	migration 033
+engine/store_backends_test.go	migration 075
+engine/store_backends_test.go	migration 103
+engine/store_backends_test.go	migrations/postgres/032
+engine/store_children.go	migration 053
+engine/store_deployment.go	migrations/mssql/036
+engine/store_promises.go	037_json_column_checks.sql
+engine/store_types.go	migration 055
+engine/store_types.go	migrations/postgres/033
+engine/store_types.go	migrations/postgres/072
+engine/store_versioning.go	migration 037
+engine/tag_tenant_key_test.go	migration 035
+engine/tenant_list.go	migration 023
+engine/tenant_secrets.go	migration 075
+engine/tenant_secrets.go	migration 081
+engine/testutil/migrations.go	migration 030
+engine/testutil/mssql_admin.go	075_the_admin_bypass_is_opt_in.sql
+engine/testutil/mssql_admin.go	migration 012
+engine/testutil/mssql_admin.go	migration 075
+engine/testutil/mssql_admin.go	migration 102
+engine/testutil/mssql_admin.go	migration 103
+engine/testutil/mssql_row_disappearance.go	migration 075
+engine/testutil/mysql_schema.go	migration 030
+engine/testutil/plugin_backend.go	migration 103
+engine/testutil/schema.go	migration 073
+engine/testutil/schema_source_guard_test.go	migration 030
+engine/the_baseline_creates_the_cluster_scoped_objects_test.go	migration 077
+engine/the_in_flight_query_runs_as_the_bypass_role_test.go	migration 073
+engine/the_plugin_grant_is_scoped_to_the_install_test.go	migration 066
+engine/the_plugin_grants_use_the_schema_the_registry_records_test.go	migration 066
+engine/the_rls_predicate_form_is_agreed_across_files_test.go	migration 075
+engine/the_tenant_assertion_is_stable_not_volatile_test.go	migration 034
+engine/the_tenant_assertion_is_stable_not_volatile_test.go	migration 071
+engine/the_tenant_assertion_is_stable_not_volatile_test.go	migrations/postgres/071
+engine/types.go	migration 053
+engine/update_request_key_test.go	migrations/postgres/068
+engine/updater.go	migrations/postgres/068
+engine/workflow_def_tenant_test.go	migration 035
+engine/workflow_list_query.go	migration 033
+migration/a_non_default_schema_test.go	020_event_intent.sql
+migration/idempotency_tenant_test.go	010_idempotency_keys_tenant_id.sql
+migration/migrations_do_not_hardcode_the_schema_test.go	005_app_role.sql
+migration/minimum_server_version.go	077_a_plugin_policy_can_use_its_index.sql
+migration/minimum_server_version.go	migration 077
+migration/mssql_admin_role_test.go	migration 012
+migration/mssql_admin_role_test.go	migration 103
+migration/mssql_json_scalar_test.go	migration 103
+migration/mysql_event_columns_test.go	migration 030
+migration/mysql_event_columns_test.go	migrations/mysql/030
+migration/mysql_single_tenant_test.go	migration 038
+migration/mysql_single_tenant_test.go	migrations/mysql/038
+migration/runner.go	020_event_intent.sql
+migration/the_postgresql_16_requirement_is_enforced_test.go	migration 077
+migration/the_shared_schema_surface_is_a_declared_list_test.go	migration 066
+migration/two_entities_record_when_they_were_created_test.go	migration 085
+migrations/mssql/003_procedures.sql	101_the_finalize_procedure_stops_deleting_failed_history.sql
+migrations/mssql/optional/cross_tenant_claim.sql	075_the_admin_bypass_is_opt_in.sql
+migrations/mssql/optional/cross_tenant_claim.sql	migration 075
+migrations/mssql/optional/cross_tenant_claim.sql	migration 103
+migrations/mysql/002_defaults.sql	migrations/mysql/078
+migrations/postgres/002_defaults.sql	migration 064
+migrations/postgres/004_scope_plugin_grants_to_the_install.sql	migration 066
+migrations/postgres/004_scope_plugin_grants_to_the_install.sql	migration 070
+plugin/crosstenant.go	migrations/postgres/063
+plugin/every_plugin_tenant_table_is_declared_tenant_scoped_test.go	migration 056
+plugin/migration.go	migration 012
+plugin/migration.go	migration 063
+plugin/no_plugin_write_casts_a_value_to_json_test.go	migrations/mysql/071
+plugin/plugin.go	migration 061
+plugin/tenant_role_password.go	migrations/postgres/064
+plugins/auditlog/audit_rows_are_scoped_to_their_tenant_test.go	migrations/postgres/063
+plugins/blobstore/blobstore_stale_refs_race_test.go	migration 012
+plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	038_single_tenant_guard.sql
+plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 012
+plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 035
+plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 075
+plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 102
+plugins/blobstore/queries.go	migration 073
+plugins/eventstore/migrations.go	migrations/mysql/070
+plugins/eventstore/queries.go	migrations/mysql/071
+plugins/eventtriggers/migrations.go	migrations/mysql/070
+plugins/featureflags/migrations.go	migrations/mysql/070
+plugins/jobqueue/background.go	migration 073
+plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	038_single_tenant_guard.sql
+plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 012
+plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 073
+plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 102
+plugins/jobqueue/migrations.go	migrations/mysql/070
+plugins/kvstore/a_sweep_can_name_itself_cross_tenant_test.go	migration 034
+plugins/kvstore/migrations.go	migrations/mysql/070
+plugins/notifications/a_dropped_tenants_notifications_rows_go_with_it_test.go	migration 103
+plugins/notifications/a_dropped_tenants_notifications_rows_go_with_it_test.go	migrations/mssql/074
+plugins/notifications/a_dropped_tenants_notifications_rows_go_with_it_test.go	migrations/postgres/066
+plugins/notifications/a_send_webhook_racing_an_open_delete_is_blocked_test.go	migration 103
+plugins/notifications/migrations.go	055_a_run_records_when_a_worker_began_executing_it.sql
+plugins/notifications/migrations.go	migrations/mysql/070
+plugins/notifications/migrations.go	migrations/mysql/078
+plugins/oauthprovider/a_sweep_disables_only_expired_oauth_keys_test.go	migration 105
+plugins/scheduledbackup/a_v4_migration_leaves_drop_tenant_working_test.go	migrations/postgres/066
+plugins/scheduledbackup/migrations.go	migrations/mssql/074
+plugins/scheduler/migrations.go	migrations/mysql/070
+plugins/tenantquota/migrations.go	migrations/mssql/094
+plugins/webhookingest/a_an_ingest_racing_an_open_delete_transaction_is_blocked_test.go	migration 103
+plugins/webhookingest/a_dropped_tenants_webhookingest_rows_go_with_it_test.go	migrations/mssql/074
+plugins/webhookingest/a_dropped_tenants_webhookingest_rows_go_with_it_test.go	migrations/postgres/082
+plugins/webhookingest/migrations.go	migrations/mysql/055
+plugins/webhookingest/migrations.go	migrations/mysql/070
+scripts/entity-contract.tsv	migration 079
+scripts/entity-contract.tsv	migration 080
+scripts/entity-contract.tsv	migration 093
+scripts/skip-ledger.d/a-deleted-row-and-an-invisible-row-are-told-apart.tsv	migration 103
+scripts/skip-ledger.d/a-finalized-result-survives-the-column.tsv	migrations/mysql/070
+scripts/skip-ledger.d/a-secret-never-crosses-tenants-at-the-store.tsv	migration 038
+scripts/skip-ledger.d/a-tenant-can-be-dropped-on-sql-server.tsv	migrations/mssql/074
+scripts/skip-ledger.d/mssql-block-predicates-are-asserted-live.tsv	migration 103
+scripts/skip-ledger.tsv	migration 101
+specs/CleatDurableCallIntent.md	101_the_finalize_procedure_stops_deleting_failed_history.sql
+specs/CleatQueueAdmission.tla	migration 097
+specs/CleatQueueAdmission.tla	migrations/postgres/094
+specs/CleatQueueAdmission.tla	migrations/postgres/098
+tests/crash/dialects_test.go	migration 075
+tests/plugin-harness/mssql_migration_rerun_test.go	migration 031
+tests/plugin-harness/testdb.go	migration 031
+tiers.yaml	023_cross_tenant_claim.sql
+tiers.yaml	038_single_tenant_guard.sql
+tiers.yaml	077_a_plugin_policy_can_use_its_index.sql
+tiers.yaml	migration 077
+tiers.yaml	migrations/postgres/077

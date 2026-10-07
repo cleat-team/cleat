@@ -94,6 +94,7 @@ var postgresCleanupTables = []string{
 	// On none of them did the real table get cleared -- the entry 2.60d added
 	// here to stop tenant_api_keys accumulating had been inert since it landed.
 	// TestCleanupPostgresTestDataClearsAdminTenantAPIKeys is the regression.
+	"admin.operator_api_keys",
 	"admin.tenant_api_keys",
 	"workflow_tags",
 	"workflow_routing",
@@ -110,6 +111,30 @@ var postgresCleanupTables = []string{
 	"workflow_instances",
 	"workflow_defs",
 	"plugin_defs",
+	// None of the four below has an FK to any table above -- each is keyed on
+	// tenant_id alone, FK'd only to admin.tenants, which this list never
+	// touches. Position doesn't matter for correctness; appended rather than
+	// inserted to keep the diff small.
+	//
+	// tenant_secrets -- cleat#2228: notifications and webhookingest seed rows
+	// here (notifications.webhook_secret.*, webhook-ingest.source_secret.*)
+	// under the default tenant, and nothing cleared them -- a later `go test`
+	// process derives its own random master key ring, so it inherits an
+	// earlier process's key_version=1 row whose actual key material differs,
+	// and TestResealSecretsCommandConvergesAndIsIdempotent fails on
+	// "secret could not be decrypted" against a database no run in that
+	// process ever wrote to.
+	"tenant_secrets",
+	// queues, tenant_domains, tenant_settings -- the same gap cleat#2228
+	// asked to be checked for: all three carry FORCE ROW LEVEL SECURITY
+	// (`grep -oE 'ALTER TABLE (ONLY )?[a-zA-Z_.]+ FORCE ROW LEVEL SECURITY'
+	// migrations/postgres/*.sql`) and were simply never added here. queues is
+	// distinct from queue_holders, already in this list -- confirmed by
+	// their separate CREATE TABLE statements and FK targets
+	// (queue_holders -> workflow_instances, queues -> admin.tenants only).
+	"queues",
+	"tenant_domains",
+	"tenant_settings",
 }
 
 // CleanupPostgresTestData deletes all rows from the cleat test tables.
@@ -747,6 +772,20 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 				EXECUTE 'GRANT EXECUTE ON FUNCTION admin.in_flight_workflow_ids() TO ` + PostgresRLSTestRole + `';
 			END IF;
 		END $$;`,
+
+		// SELECT, not the fuller cleat_app grant (001_schema.sql's
+		// `GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE admin.tenants`). Two
+		// real request-handling paths read this table under RLS today --
+		// IsTenantSuspended (handleStart) and AllowsPublicExposure
+		// (handleCreateDefinition, cleat#1986) -- and both only ever read it;
+		// writing admin.tenants is cleatctl's job (suspend-tenant,
+		// allow-public-exposure), not the worker's own request handling. This
+		// role exists to model a worker RLS actually applies to, so it needs
+		// what the worker's read paths need -- IsTenantSuspended went
+		// untested against a real database under this role until
+		// AllowsPublicExposure's falsification found the gap, because the
+		// only test exercising IsTenantSuspended over HTTP uses a mock store.
+		`GRANT SELECT ON admin.tenants TO ` + PostgresRLSTestRole,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

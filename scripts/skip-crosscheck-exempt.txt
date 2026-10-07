@@ -1,0 +1,70 @@
+# cleat#2759's OWN ratchet, separate from skip-baseline.txt and skip-ledger.tsv.
+#
+# WHY THIS FILE EXISTS RATHER THAN REUSING $added (scan() minus the
+# COMMITTED skip-baseline.txt). $added is empty the moment a developer runs
+# `check-skips.sh --update` -- which is the DOCUMENTED, recommended response
+# to a new skip, and routinely lands in the SAME commit as the test itself
+# (cleat#2756's 632107e1: test + baseline entry, one commit). At that commit,
+# scan() already matches the committed baseline exactly, so $added is empty
+# and a crosscheck keyed on it sees nothing to check -- even though the
+# runtime ledger (skip-ledger.d/) was still missing for another two commits.
+# Measured 2026-09-30 by checking out 632107e1 directly and running the
+# $added-only version of this guard: it reported "OK", the false green this
+# guard exists to prevent. A dialect-gated skip needs checking from the
+# moment it enters skip-baseline.txt, not only in the narrow window before
+# --update has been run.
+#
+# So the crosscheck runs against the FULL current scan, not $added, and
+# uses this file -- not skip-baseline.txt -- to tell "already covered by a
+# job's inherited __UNATTRIBUTED__ allowance" from "new, needs its own
+# ledger line".
+#
+# EVERY LINE HERE IS ENFORCED LIVE, not just recorded once (cleat#2761 R1).
+# The first version of this file was a frozen copy of the entire
+# skip-baseline.txt -- 304 lines, all dirs -- and nothing checked that any
+# of them still belonged. Appending an entry for a test that does not exist,
+# or one already covered by a real ledger line, both left the guard at exit
+# 0. check-skips.sh now fails if any line here is not LIVE: still present in
+# skip-baseline.txt, still dir==engine, still a Test/Benchmark/Fuzz name
+# with exactly one dialect marker (see CROSSCHECK_EXEMPT_MAX's neighbour,
+# classify(), for what that excludes and why -- R2, helper-named entries),
+# and still missing a ledger line somewhere. An entry LEAVES this file the
+# moment it gets a real skip-ledger.d/*.tsv line; the guard reports it as
+# stale rather than letting it sit. Nothing should ever be ADDED here by
+# hand -- a new dialect-gated test belongs in skip-ledger.d/, never here.
+#
+# 23 lines, all engine, all Test-prefixed, all currently uncovered by the
+# runtime ledger. Re-derive with `grep -cE '^[^#]' scripts/skip-crosscheck-exempt.txt`,
+# which must match CROSSCHECK_EXEMPT_MAX in check-skips.sh.
+#
+# cleat#2705: 26 entries left this file in the same change that named every
+# test in multi-db/mysql's and multi-db/mssql's __UNATTRIBUTED__ remainders
+# (scripts/skip-ledger.d/multi-db-ci-initial-measurement.tsv). Each of the 26
+# is a dialect-gated engine test whose OTHER-dialect coverage used to come
+# from nothing nameable -- the two jobs' catch-all lines matched no real test
+# name -- and now comes from being named in one of those two alternations,
+# which check-skips.sh's classify()/covered() can see. Nothing about the 26
+# tests themselves changed.
+engine	TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt	1
+engine	TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL	1
+engine	TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL	1
+engine	TestMSSQLClaim_ReturnsTenantIDAsCanonicalUUIDText	1
+engine	TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint	1
+engine	TestMSSQLDeadlock_ClassifiedFromTheRealDriverError	2
+engine	TestMSSQLFactoryClose	2
+engine	TestMSSQLIndexes_ReadyAndActiveExist	1
+engine	TestMSSQLIndexes_TenantReadyUsedByPlanner	2
+engine	TestMSSQLSchedules_TenantIDSurvivesTheRoundTripToStartNewRun	1
+engine	TestMSSQLSessionContext_SurvivesConnectionReuse	2
+engine	TestMSSQLSessionContext_TenantPoolsStaySeparate	2
+engine	TestMSSQLStoreBasic	1
+engine	TestMSSQLStoreFactory	2
+engine	TestMSSQLStore_BeginTxWithContext_Failure	2
+engine	TestMSSQLStore_SetSessionContext_EmptyTenant	2
+engine	TestMSSQLStore_StartNewRun_TenantID	1
+engine	TestMSSQLTenantIsolation_UnderRealSecurityPolicies	2
+engine	TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies	2
+engine	TestMSSQLTenantSettingsAreIsolatedByTheSecurityPolicy	2
+engine	TestMySQLStoreConfigOptions	1
+engine	TestMySQLStoreFactory	1
+engine	TestMySQLTenantSettings	1

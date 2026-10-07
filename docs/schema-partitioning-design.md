@@ -719,12 +719,17 @@ separately fenced.
 **Other consequences of Database over Managed Instance:**
 
 - `CREATE LOGIN` is server-level and unavailable from a user database on Azure SQL Database.
-  `migrations/mssql/012_admin_role.sql` documents the cross-tenant admin setup as `CREATE LOGIN` →
-  `CREATE USER ... FOR LOGIN` → `ALTER ROLE cleat_admin ADD MEMBER`, and the engine repeats that
-  remediation in two error messages (`engine/mssql_lifecycle.go:519`,
-  `engine/mssql_schedules.go:875`). All three need the contained-user form
-  (`CREATE USER ... WITH PASSWORD`). It fails gracefully today — `ErrCrossTenantClaimUnsupported`,
-  falling back to per-tenant claiming — so this is a docs gap, not a crash.
+  `engine/testutil/mssql_admin.go`'s `provisionMSSQLAdminLogin` documents the cross-tenant admin
+  setup as `CREATE LOGIN` → `CREATE USER ... FOR LOGIN` → `ALTER ROLE cleat_admin ADD MEMBER`
+  (the role itself is created empty by `migrations/mssql/001_schema.sql`, named `012_admin_role.sql`
+  before the SQL Server migration compaction folded it into the baseline; that filename no longer
+  exists). The contained-user form (`CREATE USER ... WITH PASSWORD`) is needed wherever this is
+  provisioned on Azure SQL Database. **This is no longer a worker startup path**: #1926 retired
+  `--claim-strategy=global` and `ErrCrossTenantClaimUnsupported` along with it — the worker's own
+  cross-tenant claim (`--claim-across-tenants`, now unconditional per-tenant rotation) needs no
+  grant on any dialect. `cleat_admin` membership still matters for `cleatctl` (see
+  `cmd/cleatctl/rlsposture.go`) and for cross-tenant test teardown (`engine/testutil/mssql_admin.go`),
+  both of which still need the `CREATE LOGIN` step above on Azure SQL Database.
 - Only the `PRIMARY` filegroup exists, so any future MSSQL partition scheme is `ALL TO ([PRIMARY])`.
   No impact today; cleat's MSSQL migrations use no filegroups.
 - Online and resumable index operations are **available**, unlike on-prem Standard where they are
@@ -781,8 +786,10 @@ above proceeds:
 - [ ] **Assert RCSI at worker startup** when the driver is `mssql`, mirroring
       `engine.CheckRLSEnforced` (`engine/rls_check.go:48`). Converts an assumption about the
       deployment into a check that fails loudly, rather than prose that rots.
-- [ ] **Document the contained-user form** of the cross-tenant admin role in
-      `migrations/mssql/012_admin_role.sql` and the two engine error messages that cite it.
+- [ ] **Document the contained-user form** of the cross-tenant admin role provisioning in
+      `engine/testutil/mssql_admin.go`'s `provisionMSSQLAdminLogin` and in `cmd/cleatctl/rlsposture.go`'s
+      warning text -- the two remaining callers that provision or require `cleat_admin` membership
+      now that #1926 retired the worker-startup error messages this item originally named.
 - [ ] Plugin-table RLS — [cleat#1277](https://github.com/cleat-team/cleat/issues/1277).
 
 ---

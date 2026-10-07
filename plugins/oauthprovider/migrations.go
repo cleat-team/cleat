@@ -63,8 +63,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
 				);
 
-				CREATE INDEX idx_oauth_sessions_tenant_user ON oauth_sessions(tenant_id, user_email);
-				CREATE UNIQUE INDEX idx_oauth_sessions_token ON oauth_sessions(session_token);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_tenant_user');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_oauth_sessions_tenant_user ON oauth_sessions(tenant_id, user_email)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_token');
+				SET @ddl := IF(@idx = 0, 'CREATE UNIQUE INDEX idx_oauth_sessions_token ON oauth_sessions(session_token)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'oauth_config')
@@ -116,13 +121,31 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE INDEX IF NOT EXISTS idx_oauth_sessions_token_hash ON oauth_sessions(token_hash);
 			`,
 			UpMySQL: `
-				ALTER TABLE oauth_sessions ADD COLUMN state VARCHAR(255);
-				ALTER TABLE oauth_sessions ADD COLUMN code_verifier TEXT;
-				ALTER TABLE oauth_sessions ADD COLUMN token_hash VARCHAR(255);
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND column_name = 'state');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE oauth_sessions ADD COLUMN state VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND column_name = 'code_verifier');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE oauth_sessions ADD COLUMN code_verifier TEXT', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND column_name = 'token_hash');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE oauth_sessions ADD COLUMN token_hash VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 				ALTER TABLE oauth_sessions MODIFY COLUMN session_token VARCHAR(255) NULL;
-				DROP INDEX idx_oauth_sessions_token ON oauth_sessions;
-				CREATE INDEX idx_oauth_sessions_state ON oauth_sessions(state);
-				CREATE INDEX idx_oauth_sessions_token_hash ON oauth_sessions(token_hash);
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_token');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_oauth_sessions_token ON oauth_sessions', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_state');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_oauth_sessions_state ON oauth_sessions(state)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_token_hash');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_oauth_sessions_token_hash ON oauth_sessions(token_hash)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_sessions') AND name = 'state')
@@ -199,8 +222,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS nonce TEXT;
 			`,
 			UpMySQL: `
-				ALTER TABLE oauth_config ADD COLUMN issuer VARCHAR(900) NOT NULL DEFAULT '';
-				ALTER TABLE oauth_sessions ADD COLUMN nonce VARCHAR(255);
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'oauth_config' AND column_name = 'issuer');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE oauth_config ADD COLUMN issuer VARCHAR(900) NOT NULL DEFAULT ''''', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND column_name = 'nonce');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE oauth_sessions ADD COLUMN nonce VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'issuer')
@@ -245,7 +273,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE oauth_config DROP COLUMN IF EXISTS client_secret;
 			`,
 			UpMySQL: `
-				ALTER TABLE oauth_config DROP COLUMN client_secret;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'oauth_config' AND column_name = 'client_secret');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE oauth_config DROP COLUMN client_secret', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'client_secret')

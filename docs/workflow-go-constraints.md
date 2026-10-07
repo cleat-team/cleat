@@ -257,6 +257,28 @@ called through an interface, so it cannot verify the call chain.
 
 **Alternative**: Use concrete types or make the function a cleat entry point.
 
+**The case you are more likely to hit**: `error` is an interface, so calling
+`err.Error()` anywhere in a cleat function triggers the same E008 — not just
+an explicitly declared interface variable.
+
+```go
+if err != nil {
+    h.DurableLog("operation failed: " + err.Error()) // ERROR: E008
+}
+```
+
+This looks like ordinary error handling, not interface dispatch, which is why
+it is easy to hit without recognizing the cause. Log a static message and
+return the error instead of formatting it into the log line — the engine
+records the returned error's text against the run:
+
+```go
+if err != nil {
+    h.DurableLog("operation failed")
+    return err
+}
+```
+
 ### Function Value Calls (E009)
 
 ```go
@@ -292,15 +314,39 @@ func CancelOrder(h cleat.HostCalls, orderID string) error { // WARNING: W003
 
 That is deliberate — it is how a workflow takes an opaque payload it parses itself — so W003 is a warning and the rule is unchanged. It is worth warning about because nothing else says so: the rule is invisible at the call site, at build time and at deploy, and it surfaces as a semantic failure in whatever the parameter was eventually used for. A workflow that used such a parameter as a lock key failed every acquire with `cleat_acquire_lock: error 1`, a message that points at locks rather than at argument binding.
 
-If you want the field rather than the payload, add a second parameter or take a struct — struct parameters are unmarshalled from the input JSON and bind by field:
+If you want the field rather than the payload, add a second parameter or take a struct. **A struct parameter binds by exact Go parameter name, like every other non-string shape — it is not bound by the struct's fields:**
 
 ```go
 type OrderRef struct {
 	OrderID string `json:"orderID"`
 }
 
-func CancelOrder(h cleat.HostCalls, ref OrderRef) error { // binds by field
+func CancelOrder(h cleat.HostCalls, ref OrderRef) error { // the key is "ref", NOT "orderID"
 ```
+
+There is no second path in the codegen: `wasm/exports.go` sets `JSONTag: p.Name()` for every parameter, and the default arm unmarshals with `json.Unmarshal([]byte(extractJSONRaw(argsJSON, %q)), &%s)` where `%q` is that same name.
+
+**So the parameter name is a key inside the request's `input` field**, and a start body nests it one level down. For `ref OrderRef`:
+
+```json
+{"entry_point": "CancelOrder", "input": {"ref": {"orderID": "ord-1"}}}
+```
+
+The old wording read as *start with the struct's fields*, which makes `{"input": {"orderID": "ord-1"}}` the natural body — and that is the one that fails. The parameter is looked up by the name `ref`, which is not there, so the run dies before the workflow starts:
+
+```
+host: export "cancel_order" failed: unmarshal ref: unexpected end of JSON input
+```
+
+That is an empty-string unmarshal, and the message names neither the binding rule nor the nesting.
+
+**The case to know is a parameter called `input`**, because its name is then the same as the field it sits inside and the key really is doubled:
+
+```json
+{"entry_point": "SyncCustomer", "input": {"input": {"customerID": "c-1"}}}
+```
+
+`{"input": {"customerID": "c-1"}}` fails identically with `unmarshal input: unexpected end of JSON input`, which reads as a malformed body rather than as a missing key. `cleattest` stubs by name, so no unit test reaches either case — it surfaces at run time against a real worker.
 
 ### Map Iteration (E021 — an error, not a warning)
 

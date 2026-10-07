@@ -92,11 +92,24 @@ as though it had been.
 
 What is true: `admin.create_tenant` does create a `tenant_<uuid>` schema and a
 login role, and `admin.grant_plugin_to_tenant` exists to `GRANT` plugin tables
-to that role. But it reads `admin.plugin_tables`, which nothing populates --
-`plugin.RegisterPluginTables` is the only writer and **has no production
-caller** (it has a full unit-test suite, so grepping the name finds plenty of
-hits; grep for calls outside `_test.go` files). So the grant loop is always
-zero-iteration, and no plugin migration issues `CREATE SCHEMA` anywhere.
+to that role. It reads `admin.plugin_tables`, which `plugin.RunMigrations`
+**does** populate as it applies plugin migrations: `registerTenantScopedTables`
+(`plugin/migration.go:1074`, called from `:700`) records every table a plugin
+migration declares `TenantScoped`, which cleat#1289 added so a table carrying
+a policy cannot outlive its tenant. So in production the registry holds **the
+declared `TenantScoped` tables** and the grant loop runs over that set --
+**not** over everything a plugin manages. Read that from the registry's
+*contents*, not from a predicate: the loop itself does not filter on
+`tenant_scoped`, and the rows are what make it a subset.
+`plugin.RegisterPluginTables` (`:751`), the older GRANT-oriented writer, still
+has no production caller, so a managed table nobody declared `TenantScoped` is
+absent from the registry. That subset/whole distinction is the one that
+matters; this paragraph said "nothing populates it" until cleat#3081, which
+stopped being true when #1289 landed.
+
+Nothing here creates a per-tenant schema from a plugin migration:
+`pluginMigrationSession` (`plugin/migration.go:192`) creates the **configured**
+plugin schema, and only when it is not `public`.
 
 Plugin migrations follow the configured schema. This paragraph said the
 opposite until 2026-09-26 — that they "pin `search_path = public`
@@ -169,8 +182,10 @@ Two differences from the PostgreSQL arm are worth knowing, both measured:
 
 ### The same BLOCK predicates now cover the core tables too
 
-Until cleat#2205 (migration `103_a_filtered_write_is_a_blocked_write.sql`,
-2026-09-24) the asymmetry above was worse on the **core** `dbo.*` tables than on
+Until cleat#2205 (the `ADD BLOCK PREDICATE` clauses on the core tables'
+`CREATE SECURITY POLICY` statements, `migrations/mssql/003_procedures.sql`
+since cleat#2438's compaction, 2026-09-24) the asymmetry above was worse on
+the **core** `dbo.*` tables than on
 plugin ones: `dbo.fn_tenant_filter` carried a `FILTER PREDICATE` only, so an
 `INSERT` or `UPDATE` on `workflow_instances`, `workflow_defs`, and the other
 core tenant-scoped tables could stamp or move a row into the *wrong* tenant
@@ -537,13 +552,29 @@ well-formed, not its contents).
 
 ### List by tenant
 
-To see which plugins a tenant uses:
+To see which plugins a tenant uses, ask what its role has been **granted**.
+Enablement is a privilege, not a row in a mapping table -- there is no
+`admin.tenant_plugins`. `admin.plugin_tables` says which tables each plugin
+manages, and `admin.grant_plugin_to_tenant` is what grants the tenant's role
+access to them:
 
 ```sql
-SELECT plugin_name, plugin_version
-FROM admin.tenant_plugins
-WHERE tenant_id = '<uuid>';
+SELECT DISTINCT pt.plugin_name
+FROM admin.plugin_tables pt
+JOIN information_schema.role_table_grants g
+  ON g.table_schema = pt.schema_name
+ AND g.table_name = pt.table_name
+WHERE g.grantee = (SELECT role_name FROM admin.tenant_roles
+                   WHERE tenant_id = '<uuid>')
+  AND g.privilege_type = 'SELECT';
 ```
+
+The join is against `information_schema.role_table_grants` rather than a
+`has_table_privilege()` predicate, and that is deliberate: measured against a
+schema where one `admin.plugin_tables` row named a table that had since been
+dropped, `has_table_privilege` raised `relation "…" does not exist` and aborted
+the whole query, while the `information_schema` view simply has no row for a
+table that is not there. A single stale row should not blank the audit.
 
 ### SQL queries for audit
 

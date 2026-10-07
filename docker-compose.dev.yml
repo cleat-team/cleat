@@ -25,7 +25,37 @@ services:
     volumes:
       - mysqldata:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pcleat"]
+      # `-h 127.0.0.1`, NOT `-h localhost`. In the MySQL client `localhost` is a
+      # magic string meaning "use the unix socket"; `127.0.0.1` forces TCP. Every
+      # consumer of this service connects over TCP, so a socket ping reports on an
+      # interface nothing here uses.
+      #
+      # THE DISCRIMINATOR IS THE CLIENT, NOT THE STRING -- do not "fix" the mssql
+      # service below on the strength of this line. That service's healthcheck
+      # says `-S localhost` and is CORRECT: `sqlcmd` has no socket special case,
+      # so `localhost` there is a hostname resolved to loopback. (Read the file
+      # rather than trusting this sentence -- it was written wrong once already,
+      # asserting that service had no healthcheck at all when it has one.)
+      #
+      # HONEST LIMIT, and it is why this changed without a prior issue: the
+      # socket/TCP window was NOT observed here. It does not reproduce without
+      # load -- a cold-start poll on an idle machine had both forms answering at
+      # the same instant -- so there is no measurement showing this host fails
+      # without the change, and this comment does not claim one.
+      #
+      # AND NOTHING IN CI EXERCISES THIS FILE, which is worth knowing before
+      # expecting a run to confirm or refute the change. No workflow and no
+      # script invokes it; the single occurrence of its name under .github/ is a
+      # comment listing files to `grep` for a pinned mssql digest
+      # (tier1-gate.yml). It is a developer convenience stack. So a green CI run
+      # says nothing about this line either way.
+      #
+      # What justifies it is the reason the sibling example's arm was worth
+      # fixing: a healthcheck must assert the interface its consumers use whether
+      # or not the window is ever demonstrated. There, on a loaded CI runner, it
+      # turned out to be real -- measured by reverting only that line, which is
+      # examples/order-lifecycle's compose and cleat#2565. Same line, same shape.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pcleat"]
       interval: 10s
       timeout: 5s
       retries: 15

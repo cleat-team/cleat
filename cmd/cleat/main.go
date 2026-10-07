@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -35,6 +36,7 @@ import (
 	"github.com/cleat-team/cleat/internal/closure"
 	"github.com/cleat-team/cleat/internal/transform"
 	"github.com/cleat-team/cleat/wasm"
+	"gopkg.in/yaml.v3"
 )
 
 var dbConnStr string
@@ -270,7 +272,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildPython(pattern, outDir, runtime, channel)
+		runBuildPython(pattern, outDir, runtime, channel, workflowVersion)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
@@ -342,7 +344,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if errCount > 0 {
 			fmt.Fprintln(os.Stderr)
 			for _, e := range cr.SortedErrors() {
-				fmt.Fprintf(os.Stderr, "  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(e.FuncName), e.Line, e.Message)
+				fmt.Fprintf(os.Stderr, "  %s: %s: %s\n", e.Code, funcLoc(e.FuncName, e.Line, e.Column), e.Message)
 				if e.Suggestion != "" {
 					fmt.Fprintf(os.Stderr, "    → %s\n", e.Suggestion)
 				}
@@ -416,7 +418,14 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		goVersion = "1.26"
 	}
 
+	if result.TargetPkg != nil {
+		checkManifestParses(result.TargetPkg.Dir)
+	}
 	wasmFile := wasmOutputName(result)
+	entryPoints := exportedEntryPointNames(result)
+	if result.TargetPkg != nil {
+		checkEntryPointsAgainstManifest(result.TargetPkg.Dir, entryPoints)
+	}
 	buildCfg := &wasm.BuildConfig{
 		SrcDir:      result.TargetPkg.Dir,
 		OutDir:      outDir,
@@ -491,7 +500,23 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		childVersions = resolveBuildChildVersions(usage.Children, channel, jsonOut)
 	}
 
-	workflowName := wasmOutputName(result)
+	// workflowLogicalName, not wasmOutputName: the metadata's WorkflowName is
+	// a workflow's identity (what `cleat deploy` registers a definition
+	// under), not a filename. Until cleat#2842 this called wasmOutputName,
+	// so every build embedded a name carrying ".wasm" -- deploy's own
+	// `--name`-less fallback trims a wasm path's suffix and so disagreed with
+	// the metadata it had just read, and `cleat deploy --dry-run` on a fresh
+	// `cleat init` project printed `Would deploy workflow "my-workflow.wasm"`.
+	workflowName := workflowLogicalName(result)
+
+	// cleat#1986 slice 2c: the source's exposure declaration, validated here.
+	// The refusal itself is exposureDeclarationError, which is a function rather
+	// than straight-line code so that it can be tested; see its doc comment.
+	if msg := exposureDeclarationError(usage); msg != "" {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		os.Exit(1)
+	}
+
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
 		WorkflowVersion:      workflowVersion,
@@ -501,7 +526,8 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		PluginDeps:           derivePluginDeps(usage),
 		ChildVersions:        childVersions,
 		ChildBindingPolicy:   channel,
-		EntryPoints:          exportedEntryPointNames(result),
+		EntryPoints:          entryPoints,
+		Exposure:             usage.Exposure,
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -515,6 +541,30 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	logBuildProgress("  Embedded metadata: %s v%d (ABI v%d)\n",
 		meta.WorkflowName, meta.WorkflowVersion, meta.ABIVersion)
 	keepTempDir = true
+
+	// cleat#1980: a sidecar next to the WASM binary, not another custom
+	// section -- wasm.Metadata is deliberately barred from carrying anything
+	// describing an entry point's parameters
+	// (wasm/metadata_carries_no_entry_point_parameters_test.go), because
+	// the host has nothing to validate a stored payload against and two
+	// CHANGELOG/issue references tell an operator so. A schema document is
+	// exactly that information, so it travels beside the binary instead:
+	// `cleatctl deploy workflow` reads it from the same path plus
+	// ".schema.json" if present, and treats its absence (an older build, or a
+	// language internal/jsonschema has no emitter for yet) the same as
+	// before this existed.
+	if schemas := buildEntryPointSchemas(result); len(schemas) > 0 {
+		schemaJSON, err := json.MarshalIndent(schemas, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding entry point schemas: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(wasmPath+".schema.json", schemaJSON, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing entry point schemas: %v\n", err)
+			os.Exit(1)
+		}
+		logBuildProgress("  Wrote %s.schema.json\n", wasmPath)
+	}
 
 	if sizeReport {
 		printSizeReport(wasmPath, fi.Size(), result, usage, target)
@@ -681,7 +731,11 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 			if f == "" {
 				f = "unknown"
 			}
-			fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
+			if e.Column > 0 {
+				fmt.Printf("::error file=%s,line=%d,col=%d,title=%s::%s\n", f, e.Line, e.Column, e.Code, e.Message)
+			} else {
+				fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
+			}
 			exitCode = 1
 		}
 		for _, w := range cr.SortedWarnings() {
@@ -725,7 +779,7 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 		exitCode = 1
 	}
 	for _, e := range cr.SortedErrors() {
-		fmt.Printf("  %s:%d: %s: %s\n", analyzer.ShortName(e.FuncName), e.Line, e.Code, e.Message)
+		fmt.Printf("  %s: %s: %s\n", funcLoc(e.FuncName, e.Line, e.Column), e.Code, e.Message)
 		if e.Suggestion != "" {
 			fmt.Printf("    → %s\n", e.Suggestion)
 		}
@@ -1106,14 +1160,7 @@ func runDeploy(args []string) {
 		fmt.Printf("  Continuing with flags-only configuration.\n")
 	}
 
-	name := *nameFlag
-	if name == "" {
-		if metaErr == nil && meta.WorkflowName != "unknown" {
-			name = meta.WorkflowName
-		} else {
-			name = strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
-		}
-	}
+	name := resolveDeployName(*nameFlag, meta, wasmPath)
 
 	connStr := *dbFlag
 	if connStr == "" {
@@ -1162,6 +1209,35 @@ func runDeploy(args []string) {
 		minVersion = meta.MinCompatibleVersion
 		if depsBytes, merr := json.Marshal(meta.PluginDeps); merr == nil {
 			pluginDepsJSON = string(depsBytes)
+		}
+	}
+
+	// cleat#3150: `cleat build` writes a `<wasm>.schema.json` sidecar next to
+	// the binary when it computed one (entrypoint_schemas.go's
+	// buildEntryPointSchemas); `cleatctl deploy workflow` already reads it
+	// (cmd/cleatctl/deploy.go), and this mirrors that read so the documented
+	// `cleat deploy` path stops silently omitting it. Absence is not an
+	// error -- an older build, or a build from a language
+	// internal/jsonschema has no emitter for yet, simply has none.
+	var entryPointSchemas map[string]engine.EntryPointSchema
+	if schemaBytes, serr := os.ReadFile(wasmPath + ".schema.json"); serr == nil {
+		if uerr := json.Unmarshal(schemaBytes, &entryPointSchemas); uerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %s.schema.json is not valid JSON, deploying without entry point schemas: %v\n", wasmPath, uerr)
+			entryPointSchemas = nil
+		}
+	}
+	// entry_point_schemas is nullable with no default (migrations/postgres/
+	// 006), unlike pluginDepsJSON above: "no schema was computed" is a real
+	// state, and a nil []byte parameter binds to SQL NULL rather than the
+	// literal `null` json.Marshal(nil map) would produce -- mirroring
+	// engine/store_deployment.go's DeployWorkflowDef.
+	var entryPointSchemasJSON []byte
+	if len(entryPointSchemas) > 0 {
+		var merr error
+		entryPointSchemasJSON, merr = json.Marshal(entryPointSchemas)
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding entry point schemas: %v\n", merr)
+			os.Exit(1)
 		}
 	}
 
@@ -1214,8 +1290,8 @@ func runDeploy(args []string) {
 	}
 
 	_, err = tx.Exec(
-		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length, tenant_id)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length, tenant_id, entry_point_schemas)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11)
 		 ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 		   wasm_bytes = EXCLUDED.wasm_bytes,
 		   abi_version = EXCLUDED.abi_version,
@@ -1223,9 +1299,10 @@ func runDeploy(args []string) {
 		   min_version = EXCLUDED.min_version,
 		   entry_points = EXCLUDED.entry_points,
 		   task_queue = EXCLUDED.task_queue,
-		   max_history_length = EXCLUDED.max_history_length`,
+		   max_history_length = EXCLUDED.max_history_length,
+		   entry_point_schemas = EXCLUDED.entry_point_schemas`,
 		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag, *maxHistoryLengthFlag,
-		deployTenantID,
+		deployTenantID, entryPointSchemasJSON,
 	)
 	if err != nil {
 		_ = tx.Rollback()
@@ -1243,6 +1320,36 @@ func runDeploy(args []string) {
 			meta.WorkflowName, meta.WorkflowVersion,
 			meta.ABIVersion, meta.MinCompatibleVersion, meta.PluginDeps)
 	}
+}
+
+// resolveDeployName picks the name `cleat deploy` registers a definition
+// under: the --name flag, then the WASM metadata's declared name, then a
+// name derived from the wasm file's own filename. meta is nil exactly when
+// it could not be read (wasm.ReadMetadata's contract) -- checked here rather
+// than passing a separate ok bool, so a caller cannot pass true with a nil
+// meta and panic on the field access.
+//
+// Extracted for the same reason resolveDeployTenant below is: testable
+// without a database, and the fallback ORDER is what cleat#2842 got wrong.
+// Until that issue's build-side fix, meta.WorkflowName unconditionally
+// carried a ".wasm" suffix (the wasm output FILENAME, not the workflow's
+// declared identity), while the no-metadata fallback already trimmed
+// wasmPath's own suffix -- so `cleat deploy --dry-run` on a fresh
+// `cleat init` project printed `Would deploy workflow "my-workflow.wasm"`,
+// disagreeing with the fallback purely because metadata happened to be
+// present. TrimSuffix here, rather than a bare assignment, means this
+// branch is correct for both an already-fixed binary (where the suffix is
+// simply absent, so TrimSuffix is a no-op) and one built by a cleat from
+// before cleat#2842 (where the suffix is present and gets removed) -- a
+// rebuild is not required to deploy an old binary under its right name.
+func resolveDeployName(nameFlag string, meta *wasm.Metadata, wasmPath string) string {
+	if nameFlag != "" {
+		return nameFlag
+	}
+	if meta != nil && meta.WorkflowName != "unknown" {
+		return strings.TrimSuffix(meta.WorkflowName, ".wasm")
+	}
+	return strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
 }
 
 // resolveDeployTenant picks the tenant a deploy is written under: the --tenant
@@ -1355,7 +1462,7 @@ func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadin
 			Code:       e.Code,
 			File:       lookupFile(result, e.FuncName),
 			Line:       e.Line,
-			Column:     0,
+			Column:     e.Column,
 			Message:    e.Message,
 			Suggestion: e.Suggestion,
 		})
@@ -1382,6 +1489,18 @@ func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadin
 	}
 
 	return out
+}
+
+// funcLoc formats a diagnostic's location as "FuncName:Line:Column" when a
+// column is available, or "FuncName:Line" when it is not (col is 0 for
+// diagnostics -- most of them -- that never computed one). Most callers used
+// to hardcode the two-field form; that stopped being able to show the
+// column E008 (cleat#2516) started reporting.
+func funcLoc(funcName string, line, col int) string {
+	if col > 0 {
+		return fmt.Sprintf("%s:%d:%d", analyzer.ShortName(funcName), line, col)
+	}
+	return fmt.Sprintf("%s:%d", analyzer.ShortName(funcName), line)
 }
 
 // lookupFile returns the base filename for a function by its fully-qualified name.
@@ -1426,8 +1545,9 @@ func shortEntryPoints(result *analyzer.AnalysisResult) []string {
 
 // exportedEntryPointNames returns the actual WASM export names generateExport
 // (wasm/exports.go) will give each entry point -- ToSnakeCase of the short Go
-// name, the same conversion wasmOutputName below already applies to the
-// first one. cleat#2066: this is what cmd/cleat-worker/setup.go's
+// name, the same conversion workflowLogicalName below already applies to the
+// first one (via wasmOutputName, in the fallback case with no manifest).
+// cleat#2066: this is what cmd/cleat-worker/setup.go's
 // determineEntryPoint needs in wasm.Metadata to resolve a start with no
 // explicit __entry_point, so it has to be the export name a caller can
 // actually invoke, not the Go source name nothing outside this build knows.
@@ -1439,11 +1559,308 @@ func exportedEntryPointNames(result *analyzer.AnalysisResult) []string {
 	return names
 }
 
-func wasmOutputName(result *analyzer.AnalysisResult) string {
-	if len(result.EntryPoints) == 0 {
-		return "output.wasm"
+// exposureDeclarationError reports why the source's `//cleat:exposure`
+// declaration cannot be stamped into build metadata, or "" when it can.
+//
+// WHY THIS IS A FUNCTION AND NOT STRAIGHT-LINE CODE IN runBuild. runBuild
+// reports a refusal by writing to stderr and calling os.Exit, so anything
+// inlined into it is untestable except by running the whole binary: a test that
+// drove it would take the test process down with it. Extracting the decision
+// keeps the refusal in one place and makes it a value a test can assert on.
+//
+// BOTH REFUSALS COULD BE LEFT TO DEPLOY, and deliberately are not. The column's
+// CHECK rejects the same two things, but the loop that would close is a slow
+// one: `cleat build` succeeds, `cleat deploy` fails, and the operator's next
+// step is to work out which artifact on disk carried the bad value. The
+// declaration is in SOURCE, and source is where a reader is looking when they
+// get it wrong.
+//
+// The CONFLICT case is the one that matters. Two files declaring different
+// classes have no correct merge -- see wasm.collectExposure -- and silently
+// taking one of them is how a workflow ends up less protected than its author
+// wrote. It is also the case `cleat deploy` CANNOT catch: both values are from
+// the closed set, so the column accepts whichever one the build happened to
+// stamp.
+//
+// Empty is not an error: it means the source declared nothing, which the deploy
+// path distinguishes from a declared class, since only a declared one can be
+// tightened.
+func exposureDeclarationError(usage *wasm.UsageInfo) string {
+	if usage == nil {
+		return ""
 	}
-	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0])) + ".wasm"
+	if usage.ExposureConflict != "" {
+		return fmt.Sprintf("//cleat:exposure declares conflicting classes (%s). "+
+			"A package may declare at most one; remove all but the intended one.", usage.ExposureConflict)
+	}
+	if usage.Exposure == "" {
+		return ""
+	}
+	if _, ok := engine.ParseExposure(usage.Exposure); !ok {
+		return fmt.Sprintf("//cleat:exposure must be one of %q, %q or %q, got %q",
+			engine.ExposureAuth, engine.ExposurePublic, engine.ExposureInternal, usage.Exposure)
+	}
+	return ""
+}
+
+// workflowLogicalName returns the workflow's declared or derived name, with
+// no file extension -- the identity `cleat deploy` registers a definition
+// under and what a client later starts via /api/workflows/<name>/start.
+// wasmOutputName below is only this name plus ".wasm", for the build's
+// OUTPUT FILE.
+//
+// The two were one function until cleat#2842: cleat.metadata's WorkflowName
+// was assigned wasmOutputName's result directly, so it carried the ".wasm"
+// file suffix too -- a workflow's identity, not a filename. `cleat deploy`'s
+// own `--name`-less fallback trims a wasm path's suffix, so the two
+// disagreed depending only on whether metadata happened to be present.
+//
+// The naming RULE below -- what this function actually decides -- predates
+// that split and is unchanged by it: names the workflow after cleat.yaml's
+// own `name:` field, not the entry point (#2048/#2049's bug) and not the
+// entry point's source file either (owner decision, 2026-09-29, cleat#2692,
+// superseding the 2026-09-26 source-file decision, cleat#2407). The
+// source-file rule broke the same way the entry-point rule did, one level
+// down: Go convention puts a package's entry file at main.go, so any two
+// workflows that are each a single main.go -- examples/integration-hub's
+// three tenant-steps packages are exactly this -- both resolved to "main",
+// indistinguishable once deployed. cleat.yaml already carries the one name
+// that has to be unique and meaningful regardless: "what `cleat deploy
+// --name` registers and what a caller names when it starts a run" (that
+// file's own header comment, in every example here). Naming the workflow
+// after it makes the built file, the deploy name and the start name one
+// string, which no source-derived rule can promise.
+func workflowLogicalName(result *analyzer.AnalysisResult) string {
+	// result.TargetPkg is nil only for a synthesized AnalysisResult (a real
+	// one always has it set, loader.go:95) -- the same case
+	// workflowManifestName's own doc comment already calls out for
+	// lookupFile below. Treated as "no manifest" rather than dereferenced.
+	if result.TargetPkg != nil {
+		if name := workflowManifestName(result.TargetPkg.Dir); name != "" {
+			return name
+		}
+	}
+	// No cleat.yaml, or one with no usable `name:` -- `cleat build` works on
+	// a bare package too (nothing above requires a manifest), and this is
+	// that fallback's own fallback. It stays at the #2407 rule -- the entry
+	// point's own source file -- rather than reverting to #2048's bug of
+	// naming after whichever entry point EntryPoints[0] happens to be
+	// (alphabetically first, per loader.go's sort.Strings): a package with no
+	// manifest but several entry points across several files is exactly the
+	// shape that bug was filed against, and the source-file rule still
+	// distinguishes them correctly. It only collides when the manifest that
+	// would have distinguished them is itself missing, which is the case
+	// this comment is naming rather than hiding.
+	if len(result.EntryPoints) == 0 {
+		return "output"
+	}
+	if file := lookupFile(result, result.EntryPoints[0]); file != "" {
+		stem := strings.TrimSuffix(file, filepath.Ext(file))
+		return wasm.ToSnakeCase(stem)
+	}
+	// lookupFile returns "" only when the entry point's position information
+	// is unavailable (fd.Pkg, fd.Pkg.Fset, or the AST node's file are nil) --
+	// not reachable through the loader's normal path, which always resolves
+	// real source files, but a caller could in principle hand this a
+	// synthesized AnalysisResult with EntryPoints set and Funcs not. Falling
+	// back to the entry-point name rather than "output" keeps that case
+	// at the OLD behaviour instead of a name carrying no information at all.
+	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0]))
+}
+
+// wasmOutputName is workflowLogicalName plus the ".wasm" extension --
+// used for the build's OUTPUT FILE (joined into a filesystem path by this
+// function's caller), never for cleat.metadata's WorkflowName. See
+// workflowLogicalName's doc comment for why the two are no longer one
+// function.
+func wasmOutputName(result *analyzer.AnalysisResult) string {
+	return workflowLogicalName(result) + ".wasm"
+}
+
+// workflowManifestNamePattern is deliberately conservative: cleat.yaml is
+// ordinary source-tree content, not privileged input, but its `name:` value
+// flows straight into filepath.Join(outDir, name+".wasm") below in
+// wasmOutputName's caller. Every real manifest in this repo is
+// lowercase-and-hyphens (`order-lifecycle`, `ai-agent-platform`, ...); this
+// accepts underscores and digits too but refuses anything that could act as
+// a path component -- a "/", a "..", or an empty string after trimming --
+// falling back to wasmOutputName's own fallback rather than ever joining an
+// unvalidated string into a filesystem path.
+var workflowManifestNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// checkManifestParses fails the build if cleat.yaml exists but is not valid
+// YAML at all. Called once, before workflowManifestName and
+// workflowManifestEntryPoints below -- both of those coalesce "no cleat.yaml"
+// and "a cleat.yaml that fails to parse" into the same "nothing to use"
+// result, because a top-level yaml.Unmarshal error looks, to each of them,
+// like any other reason to fall back. That is the right behaviour for an
+// absent file (cleat build works on a bare package with no manifest at all)
+// and the wrong one for a present, broken one: a user who wrote a cleat.yaml
+// clearly intended a manifest, and silently ignoring it -- building
+// successfully under the #2407 fallback name instead -- is exactly the
+// silent-wrong-manifest failure checkEntryPointsAgainstManifest's own doc
+// comment already exists to close for the entry_points: key specifically.
+// cleat#2813: this closes the same hole for the file as a whole, including
+// for name:, which had no failure-mode check of its own at all.
+func checkManifestParses(srcDir string) {
+	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
+	if err != nil {
+		// os.IsNotExist is the ONLY silent case -- no cleat.yaml is a
+		// supported, ordinary way to run `cleat build`. Anything else
+		// (permission denied, a directory named cleat.yaml, ...) is
+		// unexpected enough to surface rather than silently treat as
+		// "no manifest".
+		if os.IsNotExist(err) {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "Error: cleat.yaml could not be read: %v\n", err)
+		os.Exit(1)
+	}
+	var probe yaml.Node
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Error: cleat.yaml is not valid YAML (%v).\n"+
+				"cleat build reads its name: and entry_points: fields; fix the syntax "+
+				"error, or remove the file if it is not meant to be a manifest yet -- "+
+				"cleat build works on a bare package with no cleat.yaml at all.\n",
+			err)
+		os.Exit(1)
+	}
+}
+
+// workflowManifestName reads cleat.yaml's `name:` field from the workflow's
+// own source directory, or "" if there is none, its name is empty, or not
+// filename-safe. checkManifestParses above has already exited the process if
+// cleat.yaml exists and fails to parse as YAML at all, so by the time this
+// runs a read or parse error here means the file was removed, or started
+// failing to parse, in the (very short) window between the two reads --
+// treated the same as "no manifest" rather than a race worth its own error
+// path. Together with workflowManifestEntryPoints below, these are the only
+// other places `cleat build` reads cleat.yaml -- everywhere else in this
+// tree it is documentation for a human running `cleat deploy --name` by
+// hand, never a build input, which is why this file needed a YAML import it
+// did not already have.
+func workflowManifestName(srcDir string) string {
+	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
+	if err != nil {
+		return ""
+	}
+	var manifest struct {
+		Name string `yaml:"name"`
+	}
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(manifest.Name)
+	if !workflowManifestNamePattern.MatchString(name) {
+		return ""
+	}
+	return name
+}
+
+// workflowManifestEntryPoints reads cleat.yaml's `entry_points:` field from
+// the workflow's own source directory. present is false when there is no
+// cleat.yaml or the key is simply absent -- both cases workflowManifestName
+// already treats as "nothing to check". checkManifestParses above has
+// already exited the process if cleat.yaml exists and fails to parse as YAML
+// at all, so a read or parse error reaching this function means the file
+// changed underneath the two reads; see workflowManifestName's doc comment. When present is true and malformed is nil, declared
+// is the list. When present is true and malformed is non-nil, the key exists
+// but is not a list of strings -- the caller must not treat that the same as
+// absent.
+//
+// cleat#2698: until this function existed, entry_points: was inert in two
+// incompatible shapes -- a list of strings in every hand-written example, a
+// list of {name, function} maps in the agent scaffold and its generator --
+// because nothing read either one, so nothing noticed they disagreed. The
+// schema is fixed to a list of strings: the entry point is part of the
+// workflow's ABI (see the comment every hand-written examples/*/cleat.yaml
+// carries), the same snake_case names wasm.ToSnakeCase gives each one
+// (exportedEntryPointNames above), not free-form documentation.
+//
+// cleat-review (cleat#2812 R1): the first version unmarshalled straight into
+// []string and returned nil on any error, which reads the OLD {name,
+// function} map shape -- exactly the manifest every pre-#2812 `cleat init
+// --template agent` project carries, with the wrong name (agent/AgentLoop
+// never matches what cleat build actually finds) -- as "absent" and skips it
+// silently. A scalar entry_points: value does the same. Decoding the key as
+// a yaml.Node first, rather than straight into []string, is what makes
+// "the key is absent" (Kind == 0, the zero value) distinguishable from "the
+// key is present but not a list of strings" (Kind != 0, Decode fails) --
+// gopkg.in/yaml.v3's Node has no other way to represent "never populated".
+func workflowManifestEntryPoints(srcDir string) (declared []string, present bool, malformed error) {
+	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
+	if err != nil {
+		return nil, false, nil
+	}
+	var manifest struct {
+		EntryPoints yaml.Node `yaml:"entry_points"`
+	}
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return nil, false, nil
+	}
+	if manifest.EntryPoints.Kind == 0 {
+		return nil, false, nil
+	}
+	var list []string
+	if err := manifest.EntryPoints.Decode(&list); err != nil {
+		return nil, true, err
+	}
+	return list, true, nil
+}
+
+// checkEntryPointsAgainstManifest fails the build if cleat.yaml declares
+// entry_points that disagree with exported, the analyzer's own
+// exportedEntryPointNames -- the real WASM export names. cleat#2698 option
+// (b): a manifest assertion that is checked against the build, the same
+// design workflowManifestName's `name:` already gets, rather than a second
+// field to keep in sync by hand.
+//
+// An absent entry_points: is not an error -- the field is optional, and
+// this only checks it where present. A PRESENT one that is not a list of
+// strings -- the old {name, function} map shape, or a bare scalar -- fails
+// the build too (cleat-review, cleat#2812 R1): it is not documentation
+// nobody reads any more, and silently skipping it would be the exact
+// silent-wrong-manifest failure this whole feature exists to close, for the
+// one manifest shape (the pre-#2812 agent scaffold's) most likely to
+// disagree with the build. Compared as SETS, not sequences: cleat.yaml has
+// no reason to declare its entry points in the same order the analyzer's
+// own sort.Strings does, and a reordering is not the mismatch this exists
+// to catch.
+func checkEntryPointsAgainstManifest(srcDir string, exported []string) {
+	declared, present, malformed := workflowManifestEntryPoints(srcDir)
+	if !present {
+		return
+	}
+	if malformed != nil {
+		fmt.Fprintf(os.Stderr,
+			"Error: cleat.yaml's entry_points: is not a list of strings (%v).\n"+
+				"Write it as a list of the exported entry point names, e.g.:\n"+
+				"  entry_points:\n"+
+				"    - %s\n"+
+				"not the old { name, function } map form.\n",
+			malformed, strings.Join(exported, "\n    - "))
+		os.Exit(1)
+	}
+	if len(declared) == 0 {
+		return
+	}
+	got := append([]string(nil), exported...)
+	want := append([]string(nil), declared...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") == strings.Join(want, ",") {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Error: cleat.yaml's entry_points: (%s) does not match what cleat build "+
+			"actually found (%s).\n"+
+			"Update cleat.yaml, or the entry point's exported Go function, so they "+
+			"agree -- a caller starting a run by the manifest's stale name would "+
+			"otherwise fail at start time, after the run id has already been handed "+
+			"out, rather than here at build time.\n",
+		strings.Join(want, ", "), strings.Join(got, ", "))
+	os.Exit(1)
 }
 
 // derivePluginDeps infers plugin dependencies from the host functions used

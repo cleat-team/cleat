@@ -411,14 +411,16 @@ func TestShippedSchema_IsIdempotent(t *testing.T) {
 		}
 	}
 
-	// Re-applying must also leave the *right* definition in place. 003 creates
-	// finalize_workflow_status RETURNS VOID and 004 replaces it with the
-	// fence-guarded RETURNS BOOLEAN version; the DROP that makes 003
-	// re-appliable also means a re-run briefly reinstates the unguarded VOID
-	// version. That is only safe because 004 sorts after 003 and runs again
-	// too. If the ordering or the numbering ever changes, a re-applied
-	// database would silently lose the zombie-writer fence -- the guard would
-	// be gone while every test that mocks the store still passed.
+	// Re-applying must also leave the *right* definition in place.
+	// finalize_workflow_status is defined exactly once today, directly as the
+	// fence-guarded RETURNS BOOLEAN version, in 003_procedures.sql -- there is
+	// no longer an earlier migration defining an unguarded RETURNS VOID
+	// version for CREATE OR REPLACE to briefly reinstate mid-re-apply. (This
+	// comment used to describe such a pairing, across 003 and a since-merged
+	// 004; the migrations directory has since been consolidated down to four
+	// files and that window no longer exists. cleat#2417.) The assertion below
+	// stays as a regression guard against a *future* split doing the same
+	// thing, not as evidence that a zombie-writer window exists today.
 	var returnType string
 	err = db.QueryRow(`
 		SELECT pg_catalog.pg_get_function_result(p.oid)
@@ -437,18 +439,23 @@ func TestShippedSchema_IsIdempotent(t *testing.T) {
 			"the fence.", returnType)
 	}
 
-	// The same pairing, one function later: 023 creates admin.claim_workflows
-	// and 040 replaces it with a version that accepts 'terminating' and returns
-	// pending_terminal_status. 023 carries the DROP that makes it re-appliable,
-	// which means a re-run briefly reinstates the 14-column version that cannot
-	// claim a defer phase. Safe only because 040 sorts after 023 and runs again.
+	// admin.claim_workflows had the same shape of pairing at one point -- a
+	// migration defining a 14-column version that could not claim a defer
+	// phase, replaced by a later one accepting 'terminating' and returning
+	// pending_terminal_status. Both are gone: the migrations that carried them
+	// (numbered as high as 040) have been consolidated, and
+	// admin.claim_workflows is now defined exactly once, in 001_schema.sql,
+	// already in the 'terminating'-accepting, pending_terminal_status-returning
+	// shape. cleat#2417.
 	//
 	// Asserted on the column count rather than on the predicate because the
-	// count is what the Go scan depends on: a re-applied database left at 023's
-	// shape fails every cross-tenant claim with "expected 15 destination
-	// arguments in Scan, not 14", which is a loud failure, while the missing
-	// 'terminating' alone would be a silent one -- defer phases never claimed,
-	// every terminate waiting out its deadline.
+	// count is what the Go scan depends on: a database whose admin.claim_workflows
+	// regressed to the 14-column shape fails every cross-tenant claim with
+	// "expected 15 destination arguments in Scan, not 14", which is a loud
+	// failure, while a missing 'terminating' alone would be a silent one --
+	// defer phases never claimed, every terminate waiting out its deadline.
+	// That risk is why this stays a regression assertion rather than being
+	// deleted along with the stale pairing story above it.
 	var claimCols int
 	err = db.QueryRow(`
 		SELECT COALESCE(array_length(p.proallargtypes, 1), 0)
@@ -488,9 +495,18 @@ func TestShippedSchema_IsIdempotent(t *testing.T) {
 // again; but anything naming public.* broke, including create_tenant_role's
 // GRANTs on public.workflow_defs, and the engine could not see its own tables.
 //
-// The migrations now pin `SET search_path = public`. This test only has teeth
-// when the connecting role happens to share a name with a schema -- which is
-// precisely the shipped configuration, and what the cluster CI job uses.
+// No migration pins `SET search_path = public` -- since cleat#1287 the shipped
+// files deliberately do not state which schema they build into (they ask, with
+// current_schema() and `SET search_path FROM CURRENT`), so whoever applies them
+// has to answer instead. Here that answer comes from bootstrapScratchDB's own
+// pinned connection above (`SET search_path = public, pg_temp`); in production
+// it is deploy/postgres/100-apply-migrations.sh's
+// `PGOPTIONS="--search_path=$CLEAT_SCHEMA,pg_temp"`, which defaults
+// CLEAT_SCHEMA to "public"; migration.Runner answers the same question from
+// --schema. This test only has teeth when the applier's search_path actually
+// names "public" -- true of all three of those paths by default, and what the
+// cluster CI job exercises -- not because any migration file says so.
+// cleat#2417.
 func TestShippedSchema_CreatesObjectsInPublic(t *testing.T) {
 	db := bootstrapScratchDB(t)
 

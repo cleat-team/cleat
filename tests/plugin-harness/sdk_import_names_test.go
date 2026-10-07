@@ -442,6 +442,42 @@ var sdkUnreachedBaseline = map[string][]string{
 		// nothing: the guest would read whatever happened to sit at
 		// OUTPUT_OFFSET and return it as a run id.
 		"cleat_start_detached",
+
+		// The second of the same family, added with cleat#2998 -- and a
+		// DIFFERENT FAILURE MODE from the entry above, kept separate because
+		// aggregating the two misdescribes this one. cleat#3051 worked that
+		// out; this paragraph follows it rather than the other way round.
+		//
+		// cleat_start_detached has no Python binding, and this one has neither
+		// a binding nor a WIT declaration, so a guest cannot call EITHER: the
+		// failure is an ABSENT CALL, not a wrong answer.
+		//
+		// The out-pointer shape is why a table row alone would not fix it: an
+		// out-pointer addresses the guest's own linear memory while component
+		// dispatch writes into a HOST buffer. And the wrong-answer mode is not
+		// hypothetical in this family -- durable-await-signals IS declared and
+		// IS bound in Python, so its guest reads whatever sat at
+		// OUTPUT_OFFSET. That is the shape §3.267 records.
+		//
+		// THE SAME as cleat_start_detached in the respect that matters here,
+		// not different from it: neither has a WIT declaration of its own, and
+		// neither is bound. What both contrast with is durable-await-signals --
+		// the one call of the three that is declared AND bound, and so the only
+		// one whose guest reads whatever sat at OUTPUT_OFFSET.
+		//
+		// stopSurfaces carries reasonNotInTheComponentWorld here, because
+		// cleat_wait_for_event has no WIT declaration of its own to name,
+		// against reasonWitIsStillCoreABI on DurableAwaitSignals. The
+		// detached-run site carries neither: it names durable-run-detached, the
+		// declaration cleat_run_detached uses, so cleat_start_detached rides on
+		// it without one of its own. All of it is the out-pointer state
+		// §3.267 records it.
+		//
+		// Bound in Go, Rust, Java and AssemblyScript. pythonUnboundBaseline in
+		// engine/python_wasm_e2e_test.go records the same fact from
+		// python-sdk/cleat_sdk/host_calls.py, deliberately from the other
+		// source; the two move together.
+		"cleat_wait_for_event",
 	},
 
 	// assemblyscript: deliberately absent. It reaches every workflow-facing

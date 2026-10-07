@@ -31,7 +31,6 @@ engine	const _dispatcherTimeout
 engine	const errSignalAuthRequired
 engine	const settledStatusList
 engine	field lastCancellationCheck
-engine	field metrics
 engine	func (*FaultInjector).applyLatencySleep
 engine	func (*ShardedStore).tryEachShard
 engine	func Dialect.batchLimit
@@ -39,7 +38,6 @@ engine	func Dialect.timestampDiffExpr
 engine	func Dialect.workflowInstanceColumnsExtra
 engine	func getUint32LE
 engine	func isExecutionLimit
-engine	func mapMSSQLError
 engine	func putUint32LE
 engine	func redactMap
 engine	func redactSlice

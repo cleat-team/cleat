@@ -21,8 +21,11 @@ import (
 // retry window (750ms) and then dropped, and the run carried on.
 //
 // TestAWorkerAboveTheEnterRateKeepsPersistingEveryEvent is the behaviour;
-// TestEveryStoreThatFlushesPerStepIsRefusedBatchMode is what keeps a fourth
-// dialect from reopening it.
+// TestABatchFlushIsRefusedForAnyStoreThatFlushesPerStep is what keeps a fourth
+// dialect from reopening it, by keying the gate on the perStepEventFlusher
+// interface rather than a list of concrete types (cleat#2350) -- so a wrapper
+// or decorator around a non-PostgreSQL store is refused too, not just the
+// store itself.
 
 // TestAWorkerAboveTheEnterRateKeepsPersistingEveryEvent puts a flusher that is
 // ALREADY in batch mode in front of each dialect and records events through
@@ -136,7 +139,7 @@ func TestABatchFlushIsRefusedForAnyStoreThatFlushesPerStep(t *testing.T) {
 		{"a wrapper embedding *MSSQLStore", &wrappedMSSQLStore{&MSSQLStore{}}, false},
 		{"any store implementing perStepEventFlusher", aStoreThatIsNotPostgres{}, false},
 		{"a test fake that opts back in", aStoreThatStandsInForPostgres{}, true},
-		{"a store with no per-step flush", nil, true},
+		{"nil store", nil, false},
 	} {
 		if got := batchFlushSupported(tc.store); got != tc.want {
 			t.Errorf("batchFlushSupported(%s) = %v, want %v", tc.name, got, tc.want)

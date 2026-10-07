@@ -2525,7 +2525,7 @@ func (s *stubWorkflowStore) LoadEventHistoryPaginated(ctx context.Context, workf
 func (s *stubWorkflowStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
 	return nil
 }
-func (s *stubWorkflowStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *stubWorkflowStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (s *stubWorkflowStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
@@ -2572,7 +2572,7 @@ func (s *stubWorkflowStore) GetWorkflowTags(ctx context.Context, workflowName st
 func (s *stubWorkflowStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
 	return nil
 }
-func (s *stubWorkflowStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+func (s *stubWorkflowStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
 	return nil
 }
 func (s *stubWorkflowStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
@@ -2626,7 +2626,7 @@ func (m *mockCollectMetricsStore) CompleteWorkflow(ctx context.Context, workflow
 func (m *mockCollectMetricsStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
-func (m *mockCollectMetricsStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockCollectMetricsStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (m *mockCollectMetricsStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
@@ -2818,7 +2818,7 @@ func (m *mockCheckStaleStore) CompleteWorkflow(ctx context.Context, workflowID, 
 func (m *mockCheckStaleStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
-func (m *mockCheckStaleStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockCheckStaleStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (m *mockCheckStaleStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
@@ -3006,7 +3006,7 @@ func (m *mockGCStore) CompleteWorkflow(ctx context.Context, workflowID, workerID
 func (m *mockGCStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
-func (m *mockGCStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockGCStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (m *mockGCStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
@@ -3186,7 +3186,7 @@ func (m *mockPurgeStore) CompleteWorkflow(ctx context.Context, workflowID, worke
 func (m *mockPurgeStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
-func (m *mockPurgeStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockPurgeStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (m *mockPurgeStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {

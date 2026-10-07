@@ -143,11 +143,21 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 //
 // `AND tenant_id` in the candidate SELECT is the whole of that on SQL Server,
 // and it was missing (3.91). dbo.fn_tenant_filter is off for any dbo.cleat_admin
-// login (012_admin_role.sql), and requireCleatAdminMembership checks s.db -- the
-// SAME POOL this runs on -- so on any deployment where ClaimWorkflowsAcrossTenants
-// works at all, this ordinary claim was already returning every tenant's ready
-// work and the -claim-across-tenants flag was guarding a widening that had
-// already happened.
+// login (012_admin_role.sql), so nothing else on this connection would have
+// caught the omission -- this predicate is the only thing standing between a
+// dbo.cleat_admin pool and every tenant's ready work.
+//
+// #1926 retired the mechanism this comment used to contrast against: a
+// separate cross-tenant claim query (claimWorkflowsAcrossTenantsOnce), gated
+// by requireCleatAdminMembership, that ran the SAME pool this method runs on
+// without the tenant predicate. There is no such variant left to "simplify
+// into" by sharing SQL with -- every caller reaches this one function, and
+// every one of them scopes it to a single tenant. That includes
+// --claim-across-tenants: its per-tenant rotation
+// (cmd/cleat-worker/rotating_claim.go) opens a store scoped to one tenant at
+// a time via storeForTenant, so s.tenantID -- and therefore this predicate --
+// is different on each of the rotation's calls, not a fixed value from the
+// worker's own configuration.
 //
 // The other two dialects disagreed with this one, which is what settled it:
 // MySQL carries `AND tenant_id = ?` here explicitly, and PostgreSQL carries no
@@ -155,9 +165,6 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 // genuinely subject to RLS (cross_tenant_claim_test.go tests exactly that, with
 // a non-owning role). SQL Server had neither, so it was the only dialect with
 // nothing enforcing it.
-//
-// Do not "simplify" this by sharing SQL with claimWorkflowsAcrossTenantsOnce.
-// The difference between them is this one predicate, and that is the point.
 func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
@@ -172,7 +179,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 	// The LEFT JOIN reads queues without a lock hint, so it does not lock the
 	// queue rows -- those are locked in sorted order by the next step.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT w.id, CONVERT(NVARCHAR(36), w.tenant_id) AS tenant_id, w.concurrency_key, w.concurrency_key_hash,
+		SELECT w.id, LOWER(CONVERT(NVARCHAR(36), w.tenant_id)) AS tenant_id, w.concurrency_key, w.concurrency_key_hash,
 		       CASE WHEN q.name IS NOT NULL THEN 1 ELSE 0 END AS registered
 		FROM workflow_instances w WITH (READPAST, UPDLOCK, ROWLOCK)
 		LEFT JOIN queues q ON q.tenant_id = w.tenant_id AND q.name = w.concurrency_key AND q.disabled_at IS NULL
@@ -327,6 +334,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
 		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
 		    started_at = COALESCE(started_at, SYSUTCDATETIME()),
@@ -334,7 +342,7 @@ func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, li
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
 		       INSERTED.next_wake_at,
-		       CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
+		       LOWER(CONVERT(NVARCHAR(36), INSERTED.tenant_id)) AS tenant_id,
 		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
@@ -709,6 +717,7 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
 		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
 		    assigned_to = @p1,
 		    heartbeat_at = SYSUTCDATETIME(),
 		    started_at = COALESCE(started_at, SYSUTCDATETIME()),
@@ -728,7 +737,13 @@ func (s *MSSQLStore) claimStickyWorkflowsOnce(ctx context.Context, workerID stri
 		       -- equal to the worker's own tenant, so storeForTenant tried to
 		       -- open a store for them and the factory rejected them as an
 		       -- invalid UUID -- failing every workflow on SQL Server.
-		       CONVERT(NVARCHAR(36), INSERTED.tenant_id) AS tenant_id,
+		       --
+		       -- LOWERed as well as converted: CONVERT alone returns the id
+		       -- UPPERCASE while the value the application wrote is lowercase, so
+		       -- this TenantID string is not the one that created the row. The
+		       -- raw-bytes paragraph above says what CONVERT buys; this says why
+		       -- it is not the whole answer. cleat#2983.
+		       LOWER(CONVERT(NVARCHAR(36), INSERTED.tenant_id)) AS tenant_id,
 		       INSERTED.created_at,
 		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
 		       COALESCE(INSERTED.priority, 0) AS priority,
@@ -1011,7 +1026,7 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 	}
 	defer tx.Rollback()
 
-	qsJSON := marshalQueryState(queryState)
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -1020,9 +1035,9 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 		    error_op = @p5,
 		    completed_at = SYSUTCDATETIME(),
 		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = @p6
+		    query_state = COALESCE(@p6, query_state)
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}
@@ -1060,25 +1075,27 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 // back, so a deadlock no longer loses the terminal write. ErrFenceLost is
 // returned before the commit and is not an mssql.Error, so the fence
 // semantics are untouched by the retry. See withRollbackGuaranteedRetry.
-func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return withRollbackGuaranteedRetry(ctx, "move to dead letter queue", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		return s.moveToDeadLetterQueueOnce(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+		return s.moveToDeadLetterQueueOnce(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp, queryState)
 	})
 }
 
-func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = @p3, error_code = @p4, error_op = @p5,
-		    completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL
-		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p6
-	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
+		    completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL,
+		    query_state = COALESCE(@p6, query_state)
+		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p7
+	`, workflowID, workerID, errMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}
@@ -1883,8 +1900,44 @@ func (s *MSSQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID strin
 // wrapRejectedResult returns anything it does not recognise unchanged, so the
 // blanket wrap costs nothing and cannot mislabel an unrelated failure.
 func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	return wrapRejectedResult(
+	err := wrapRejectedResult(
 		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+	return wrapMSSQLFinalizeDBError(err, runID)
+}
+
+// wrapMSSQLFinalizeDBError is wrapPostgresFinalizeDBError's MSSQL
+// counterpart (cleat#2805) -- see that function's doc comment for the
+// shared reasoning (narrow scope, connection errors already intercepted
+// upstream, context cancellation treated as transient, default permanent).
+//
+// isMSSQLDeadlock and isMSSQLSnapshotError both guarantee a server-side
+// rollback (isMSSQLRollbackGuaranteed's own doc comment); isMSSQLLockTimeout
+// (SET LOCK_TIMEOUT's 1222) does not carry that guarantee but is still a
+// contention signal rather than a data problem, the same reasoning
+// isMSSQLRetryable used for it before #2792 deleted that function as
+// unreferenced. Deliberately NOT restoring isMSSQLConnectionError or
+// isMSSQLTimeout (258) here: cmd/cleat-worker's isConnectionError already
+// intercepts connection-level failures before recordTerminalFailure is ever
+// called, for all three dialects, so a second MSSQL-specific connection
+// check at this point would never fire -- see #2792's own commit message
+// for the measurement that found isMSSQLConnectionError had zero callers
+// even when it existed.
+func wrapMSSQLFinalizeDBError(err error, workflowID string) error {
+	if err == nil || errors.Is(err, ErrFenceLost) {
+		return err
+	}
+	var ce *CleatError
+	if errors.As(err, &ce) {
+		return err
+	}
+	code := ErrPermanent
+	switch {
+	case isMSSQLDeadlock(err) || isMSSQLSnapshotError(err) || isMSSQLLockTimeout(err):
+		code = ErrTransient
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		code = ErrTransient
+	}
+	return &CleatError{Code: code, Op: "finalize workflow", WorkflowID: workflowID, Err: err}
 }

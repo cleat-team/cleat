@@ -73,7 +73,7 @@ goroutine state is not replayed. The order in which channel operations
 complete depends on goroutine scheduling, which varies between runs.
 
 **Fix:** Replace channels with Cleat signals (`h.AwaitSignals`,
-`h.PollSignal`, `h.SendSignal`). Signals are replayed deterministically.
+`h.PollSignal`, `h.SignalWorkflow`). Signals are replayed deterministically.
 
 **Example:**
 ```go
@@ -117,7 +117,7 @@ execution using real wall-clock time. On replay, `time.Sleep()` would
 re-execute and wait for the full duration again, breaking both
 determinism and performance.
 
-**Fix:** Use `h.DurableSleep()` (or `h.CleatSleep()`). The host records
+**Fix:** Use `h.DurableSleep()`. The host records
 the sleep and returns immediately during replay.
 
 **Example:**
@@ -331,7 +331,7 @@ during replay. Channel operations are inherently non-deterministic.
 close(doneCh)
 
 // GOOD -- use signals instead:
-h.SendSignal(workflowID, "done", `{}`)
+h.SignalWorkflow(workflowID, "done", `{}`)
 ```
 
 ---
@@ -483,7 +483,7 @@ val := h.Random()
 **Source:** `internal/closure` (static analyzer)
 
 **Cause:** An `init()` function calls a durable function
-(`h.DurableCall`, `h.CleatSleep`, `h.CleatLog`, etc.). Durable calls
+(`h.DurableCall`, `h.DurableSleep`, `h.DurableLog`, etc.). Durable calls
 must happen inside workflow entry points, not during package
 initialization. The execution order and replay behavior of `init()`
 functions is undefined for durable calls.

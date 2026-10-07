@@ -81,7 +81,7 @@ func TestAnEventBodyIsStoredAsPublished(t *testing.T) {
 
 		if _, err := PublishEvent(context.Background(), db, quietLogger(),
 			&plugin.Environment{Dialect: plugin.DialectPostgres},
-			uuid.New(), uuid.New(), "order.created", body); err != nil {
+			uuid.New(), uuid.New(), "order.created", body, nil); err != nil {
 			t.Fatalf("PublishEvent: %v", err)
 		}
 
@@ -111,7 +111,7 @@ func TestAnEventBodyIsStoredAsPublished(t *testing.T) {
 			},
 		}
 		if _, err := PublishEvent(context.Background(), db, quietLogger(), env,
-			uuid.New(), uuid.New(), "order.created", body); err != nil {
+			uuid.New(), uuid.New(), "order.created", body, nil); err != nil {
 			t.Fatalf("PublishEvent: %v", err)
 		}
 
@@ -288,8 +288,9 @@ func (d *recordingDB) insertedEventData(t *testing.T) string {
 			continue
 		}
 		args := d.execs[i]
-		if len(args) != 4 {
-			t.Fatalf("UNMEASURED: the ingested_events INSERT took %d args, want 4", len(args))
+		if len(args) != 7 {
+			t.Fatalf("UNMEASURED: the ingested_events INSERT took %d args, want 7 "+
+				"(id, tenant_id, event_type, event_data, key1, key2, key3)", len(args))
 		}
 		s, ok := args[3].(string)
 		if !ok {

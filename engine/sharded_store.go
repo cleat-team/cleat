@@ -43,6 +43,16 @@ type Shard struct {
 // across the fleet).  Most other operations use a consistent hash of the
 // workflow ID to route to the owning shard.  Global operations (schedules,
 // reaping, listing) fan out to every shard and merge results.
+//
+// batchFlushSupported (engine.go) passes *ShardedStore today, correctly: it
+// does not implement perStepEventFlusher, and every shard is opened via
+// PostgresStoreFactory / sql.Open("postgres", ...), so the batch writer's
+// PostgreSQL-dialect SQL is safe against any of them. That is an accident of
+// what sharding currently supports, not something this type declares -- if
+// sharding ever admits a non-PostgreSQL shard dialect, ShardedStore is the
+// one production type batchFlushSupported would then classify wrongly, and
+// it would need to implement perStepEventFlusher itself (or route per-shard)
+// to stay correct. cleat#2358.
 type ShardedStore struct {
 	shards []*Shard
 	mu     sync.RWMutex
@@ -66,6 +76,52 @@ func (s *ShardedStore) SetMetrics(m *prometheus.Metrics) {
 		}
 	}
 }
+
+// MarkPayloadEncryptionEnabled implements PayloadEncryptionState by marking
+// EVERY shard, not just one. A worker configured with a key ring can route
+// any workflow to any shard (routing is a hash of the workflow ID, see
+// getShard), so every shard this worker can reach must carry the marker --
+// not only whichever shard a particular workflow happens to hash to.
+func (s *ShardedStore) MarkPayloadEncryptionEnabled(ctx context.Context) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sh := range s.shards {
+		pes, ok := sh.Store.(PayloadEncryptionState)
+		if !ok {
+			return fmt.Errorf("mark payload encryption enabled: shard %q store %T does not support it", sh.Config.Name, sh.Store)
+		}
+		if err := pes.MarkPayloadEncryptionEnabled(ctx); err != nil {
+			return fmt.Errorf("mark payload encryption enabled: shard %q: %w", sh.Config.Name, err)
+		}
+	}
+	return nil
+}
+
+// PayloadEncryptionEverEnabled implements PayloadEncryptionState by reporting
+// true if ANY shard was ever marked. A keyless worker can read from any
+// shard (ClaimWorkflow polls every one), so one sealed shard is enough to
+// refuse the whole worker -- this stops at the first shard that answers yes
+// rather than checking the rest.
+func (s *ShardedStore) PayloadEncryptionEverEnabled(ctx context.Context) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sh := range s.shards {
+		pes, ok := sh.Store.(PayloadEncryptionState)
+		if !ok {
+			return false, fmt.Errorf("check payload encryption ever enabled: shard %q store %T does not support it", sh.Config.Name, sh.Store)
+		}
+		enabled, err := pes.PayloadEncryptionEverEnabled(ctx)
+		if err != nil {
+			return false, fmt.Errorf("check payload encryption ever enabled: shard %q: %w", sh.Config.Name, err)
+		}
+		if enabled {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var _ PayloadEncryptionState = (*ShardedStore)(nil)
 
 // NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore
 // instances (one per shard). Each store is already initialized and migrated.
@@ -540,12 +596,12 @@ func (s *ShardedStore) VerifyWorkflowEvents(ctx context.Context, workflowID stri
 }
 
 // MoveToDeadLetterQueue routes by workflow ID.
-func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("no shard available for workflow %s", workflowID)
 	}
-	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp, queryState)
 }
 
 // RetryWorkflow routes by workflow ID.
@@ -1313,79 +1369,26 @@ func (s *ShardedStore) SetRoutingRule(ctx context.Context, workflowName string, 
 	return shard.Store.SetRoutingRule(ctx, workflowName, targetVersion, weight)
 }
 
-// RemoveRoutingRule deletes a routing rule from every shard, the same fan-out
-// DeleteSchedule uses, and for the same reason: the caller has an id but not
-// the key the row was placed under.
+// RemoveRoutingRule deletes a routing rule by ID, scoped to workflowName.
 //
-// It used to delegate to getShard(ruleID), which is the wrong shard almost
-// every time (cleat#946). Routing rules are written and read by workflow NAME
-// -- SetRoutingRule and GetRoutingRules both use getShard(workflowName) -- and
-// getShard is sha256(key) % len(shards), so a rule id says nothing about where
-// its row lives. The id cannot help, because it is assigned by the database
-// (`id UUID PRIMARY KEY DEFAULT gen_random_uuid()`) and has no relationship to
-// the name.
+// This used to fan out to every shard (#948, then #946's second half), because
+// the caller had an id but not the key the row was placed under: rule ids are
+// database-assigned UUIDs with no relationship to the workflow name, so
+// getShard(ruleID) was the wrong shard almost every time, and later, once
+// every dialect checked rows-affected, n-1 shards legitimately reporting
+// ErrRoutingRuleNotFound had to be walked through rather than treated as
+// failure.
 //
-// The two keys agree only by coincidence, at a rate of 1/len(shards):
-//
-//	shards   removals that reached a shard never holding the rule
-//	2        50%
-//	4        75%
-//	8        87.5%
-//
-// and the failure is silent in the worst way. No dialect checks rows-affected,
-// so a DELETE matching nothing returns nil and the API answers
-// 200 {"status":"removed"} for a rule that is still present -- and still
-// shifting live traffic, since PickVersionByRouting runs on every start.
-//
-// Fanning out is correct rather than merely safe here: rule ids are UUIDs and
-// so globally unique, so at most one shard can hold the row and deleting by id
-// on the others matches nothing. That is what makes this preferable to
-// tryEachShard, which would need each store to distinguish "deleted" from "no
-// such rule" -- an error where none exists today, changing what an unsharded
-// store does about a rule id that is simply gone.
-//
-// Cost is len(shards) statements instead of one, on an operator action that
-// happens when a canary is torn down.
-// The no-shards refusal is kept deliberately. forEachShard iterates zero
-// shards and returns nil, which would report success for a removal that could
-// not have happened -- the same silent success this change exists to remove,
-// arrived at from the other direction. TestRemoveRoutingRule_NoShard caught it.
-func (s *ShardedStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
-	s.mu.RLock()
-	n := len(s.shards)
-	s.mu.RUnlock()
-	if n == 0 {
+// cleat#3168 gives this method the same workflowName its siblings
+// (SetRoutingRule, GetRoutingRules) already route by, which removes the
+// reason for any of that: the shard holding a rule is now known in advance,
+// the same way it always was for setting or listing one.
+func (s *ShardedStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID string) error {
+	shard := s.getShard(workflowName)
+	if shard == nil {
 		return fmt.Errorf("remove_routing_rule: no shard available")
 	}
-	// Every shard is asked, as #948 established -- the rule ID is not the shard
-	// key, so there is no way to know in advance which shard holds the row.
-	//
-	// What changed with cleat#946's second half: a store now returns
-	// ErrRoutingRuleNotFound when its DELETE matches nothing, and with n shards
-	// exactly n-1 of them legitimately do not hold the rule. forEachShard stops
-	// at the FIRST error, so passing that sentinel through would abort the walk
-	// at shard 0 and never reach the shard that has it -- reintroducing #948's
-	// defect by way of fixing the reporting. It is swallowed per shard and
-	// re-raised only if no shard claimed the row.
-	found := false
-	if err := s.forEachShard(func(store WorkflowStore) error {
-		rErr := store.RemoveRoutingRule(ctx, ruleID)
-		if errors.Is(rErr, ErrRoutingRuleNotFound) {
-			return nil // not this shard; keep going
-		}
-		if rErr == nil {
-			found = true
-		}
-		return rErr
-	}); err != nil {
-		return err
-	}
-	if !found {
-		// No shard held it. Reported rather than swallowed: this is the case
-		// the API answered 200 {"status":"removed"} for.
-		return ErrRoutingRuleNotFound
-	}
-	return nil
+	return shard.Store.RemoveRoutingRule(ctx, workflowName, ruleID)
 }
 
 // GetRoutingRules returns all routing rules for a workflow.
@@ -2306,6 +2309,26 @@ func (s *ShardedStore) ResolveCallIntent(ctx context.Context, workflowID string,
 			shard.Config.Name, shard.Store)
 	}
 	return st.ResolveCallIntent(ctx, workflowID, rec, payload, workerID, generation, later)
+}
+
+// ServerNow routes by workflow ID to the shard whose session produced the
+// CreatedAt being compared against -- see callIntentClock's doc comment
+// (store_intent.go) for why it must be the SAME session, not just any
+// shard's clock. Same shape as ResolveCallIntent above, and the same
+// consequence on a shard whose store does not implement this: it degrades
+// quietly to "cannot say" on execSession.replayUnderOriginalKey's retention
+// check rather than erroring the whole call.
+func (s *ShardedStore) ServerNow(ctx context.Context, workflowID string) (time.Time, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return time.Time{}, fmt.Errorf("server_now: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	st, ok := shard.Store.(callIntentClock)
+	if !ok {
+		return time.Time{}, fmt.Errorf("server_now: shard %q store %T cannot report its clock",
+			shard.Config.Name, shard.Store)
+	}
+	return st.ServerNow(ctx, workflowID)
 }
 
 // ---------------------------------------------------------------------------

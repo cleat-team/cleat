@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI agent platform</title>
+<!--
+  A separate stylesheet and a separate script, because this page is served under
+  `style-src 'self'` and `script-src 'self'`. An inline block would need
+  'unsafe-inline', and widening the policy for one page's convenience is the
+  thing the policy exists to prevent.
+
+  The page talks ONLY to its own origin. The worker's API key is held by the
+  backend and never sent here, so there is no fetch() to :8080 anywhere in
+  app.js -- a browser that held that key would be handing the tenant to anyone
+  who opened dev tools.
+-->
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header>
+  <h1>AI agent platform</h1>
+  <p class="sub">
+    Each run is a durable workflow: it calls a model, spends from a per-run
+    budget, and can park until a human approves what it is about to do. The model
+    it calls is the <code>model-stub</code> service in this example's compose
+    file; in a deployment it is your provider.
+  </p>
+  <dl id="config" class="pairs"></dl>
+</header>
+
+<main>
+  <section>
+    <h2>Start a run</h2>
+    <form id="start-form">
+      <label>Customer
+        <input name="tenant_id" placeholder="(this backend's tenant)">
+      </label>
+      <label>Task
+        <input name="task" value="Summarise yesterday's incidents." required>
+      </label>
+      <label>Max steps
+        <input name="max_steps" type="number" min="1" step="1" id="max-steps">
+      </label>
+      <label>Budget (USD)
+        <input name="budget_usd" type="number" min="0.001" step="0.001" id="budget-usd">
+      </label>
+      <label>Artifact key
+        <input name="artifact_key" placeholder="(empty: nothing is saved)">
+      </label>
+      <button type="submit">Start</button>
+    </form>
+    <p class="hint">
+      <strong>Budget</strong> is a ceiling the <em>workflow</em> enforces, not a
+      number this page checks: a run that reaches it stops itself and reports
+      <code>budget_exceeded</code>. Set it small &mdash; a run against the stub
+      costs about a cent a step &mdash; and watch the status change. Leave
+      <strong>artifact key</strong> empty for a run that writes nothing; a run
+      that sets one saves its report through <code>blobstore</code>.
+    </p>
+    <p id="start-status" class="status"></p>
+  </section>
+
+  <section>
+    <h2>Runs</h2>
+    <p class="hint">
+      This table <strong>polls every 2 seconds</strong> and says so, because the
+      thing it watches is a durable run: it can sleep between steps and park for
+      tens of seconds on a person, and a page that refreshed only on load would
+      show a run frozen at whatever it was when you opened the tab.
+    </p>
+    <table id="runs">
+      <thead>
+        <tr><th>Run</th><th>Status</th><th>Task</th><th>Step</th><th>Spend</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="runs-empty" class="hint">No runs yet.</p>
+    <p class="hint">
+      <strong>Spend is against budget, and both come from the run itself</strong>
+      &mdash; the model's reported cost, summed by the workflow and published
+      through <code>SetQueryState</code>. Nothing here estimates it, which is why
+      the column and the final <code>spent_usd</code> in the result always agree.
+    </p>
+  </section>
+
+  <section>
+    <h2>Run detail</h2>
+    <p class="hint">
+      Pick a run above. Its <strong>query state</strong> is what the workflow
+      publishes as it goes &mdash; which step, which tool, what it has spent
+      &mdash; so this panel follows a run that is asleep without reading a single
+      event-history row.
+    </p>
+    <div id="detail" class="detail"><p class="hint">No run selected.</p></div>
+  </section>
+
+  <section>
+    <h2>What to look for</h2>
+    <p class="hint">
+      <strong>An approval is an event, not a call into the run.</strong> The
+      workflow waits with <code>event-triggers</code>' <code>await_event</code>,
+      and an event is matched by <em>(tenant, event_type)</em> &mdash; there is
+      no addressing by run id anywhere in that path. So this page refuses to
+      publish unless the run you selected is the one currently waiting; a second
+      run parked on the same tenant could otherwise take the decision. The
+      <code>run_id</code> this backend puts in the event is an audit trail, not
+      an address.
+    </p>
+    <p class="hint">
+      <strong>The wait is about 30 seconds.</strong> The workflow polls 15 times
+      two seconds apart (<code>MaxApprovalPolls</code> &times;
+      <code>ApprovalPollMs</code> in <code>agent.go</code>) and then gives up on
+      its own, reporting <code>approval_timeout</code> &mdash; a run that nobody
+      answered is not an error, it is a decision the system made. Approving takes
+      effect on the run's <em>next</em> poll, so up to two seconds of this page
+      showing <code>awaiting_approval</code> after you press the button is
+      expected.
+    </p>
+    <p class="hint">
+      <strong>A denial is not a failure.</strong> <code>approved: false</code> is
+      handed back to the model as the tool's result and the run carries on,
+      ending <code>done</code> &mdash; which is why the status after a denial
+      reads <code>approval_received</code> and never <code>approval_denied</code>.
+      <code>AgentOutput</code>'s field comment in <code>agent.go</code> lists that
+      fourth word; nothing writes it.
+    </p>
+    <p class="hint">
+      <strong>The compose file's model stub never asks for approval.</strong> It
+      always calls <code>save_report</code>, so a run started from this page
+      reaches <code>done</code> without parking and the buttons below never
+      appear. Parking is what a real model's <code>request_approval</code> call
+      produces &mdash; <code>agent_test.go</code> drives that branch, and
+      <code>agent.go</code> is where the wait lives.
+    </p>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

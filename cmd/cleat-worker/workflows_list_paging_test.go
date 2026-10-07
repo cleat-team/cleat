@@ -114,13 +114,23 @@ func TestTheTargetedFiltersReachTheStore(t *testing.T) {
 // data, which is the direction nobody checks" -- and it covers these equally.
 //
 // Asserting every field in one request also keeps the guard honest as filters
-// are added: a new one is unprotected until it appears here, and this test is
-// where a reader looks to find out which are covered.
+// are added: a new caller-settable one is unprotected until it appears here.
+//
+// THIS TABLE IS NOT THE WHOLE REGISTER, and cleat#3053 is what that cost. The
+// sentence here used to send a reader to this test to find out which filters
+// are covered, and the table then listed 7 of the handler's 11. The two TIME
+// BOUNDS are deliberately not among them -- they are asserted in
+// TestATimeWindowIsParsedAndABadOneIsRefused below, where their own argument
+// about a silently widened window lives -- so the full set is these two tests
+// read together. `started_before` reached the store asserted by nothing until
+// #3053 for exactly that reason: this table looked complete, and the one test
+// that did mention it covered only the rejection path.
 func TestEveryListFilterReachesTheStore(t *testing.T) {
 	sp := newListSpy(nil, 0)
 	get(t, sp, "/api/workflows?"+
 		"status=failed&input_contains=order-42&error_contains=timed+out&search=nightly-rollup&"+
-		"def_name=nightly&error_code=cancelled&id_prefix=0f74")
+		"def_name=nightly&error_code=cancelled&id_prefix=0f74&"+
+		"result_contains=shipped&concurrency_key=acct-9")
 
 	for _, c := range []struct {
 		param string
@@ -129,11 +139,13 @@ func TestEveryListFilterReachesTheStore(t *testing.T) {
 	}{
 		{"status", sp.got.Status, "failed"},
 		{"input_contains", sp.got.InputContains, "order-42"},
+		{"result_contains", sp.got.ResultContains, "shipped"},
 		{"error_contains", sp.got.ErrorContains, "timed out"},
 		{"search", sp.got.Search, "nightly-rollup"},
 		{"def_name", sp.got.DefName, "nightly"},
 		{"error_code", sp.got.ErrorCode, "cancelled"},
 		{"id_prefix", sp.got.IDPrefix, "0f74"},
+		{"concurrency_key", sp.got.ConcurrencyKey, "acct-9"},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s reached the store as %q, want %q -- an ignored filter "+
@@ -144,10 +156,22 @@ func TestEveryListFilterReachesTheStore(t *testing.T) {
 
 func TestATimeWindowIsParsedAndABadOneIsRefused(t *testing.T) {
 	sp := newListSpy(nil, 0)
-	get(t, sp, "/api/workflows?started_after=2026-09-10T14:00:00Z")
-	want := time.Date(2026, 9, 10, 14, 0, 0, 0, time.UTC)
-	if !sp.got.StartedAfter.Equal(want) {
-		t.Errorf("started_after = %v, want %v", sp.got.StartedAfter, want)
+	get(t, sp, "/api/workflows?started_after=2026-09-10T14:00:00Z&started_before=2026-09-12T09:30:00Z")
+	wantAfter := time.Date(2026, 9, 10, 14, 0, 0, 0, time.UTC)
+	if !sp.got.StartedAfter.Equal(wantAfter) {
+		t.Errorf("started_after = %v, want %v", sp.got.StartedAfter, wantAfter)
+	}
+	// started_before is the OTHER bound, and until cleat#3053 only its
+	// REJECTION was asserted -- a well-formed one was never shown to reach the
+	// store. That is the gap this test's own argument describes: a dropped
+	// upper bound WIDENS the window, so the failure is extra data, which is the
+	// direction nobody checks. Asserted here rather than in the enumeration
+	// test above because both bounds belong together, and because that test's
+	// table is about the filters a caller sets in one request, not the window.
+	wantBefore := time.Date(2026, 9, 12, 9, 30, 0, 0, time.UTC)
+	if !sp.got.StartedBefore.Equal(wantBefore) {
+		t.Errorf("started_before = %v, want %v -- an ignored upper bound returns MORE rows "+
+			"than the caller asked for, silently", sp.got.StartedBefore, wantBefore)
 	}
 
 	// Refused, not ignored. Dropping an unparseable bound would WIDEN the

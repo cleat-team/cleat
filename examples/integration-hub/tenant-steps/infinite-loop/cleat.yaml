@@ -1,0 +1,13 @@
+# NOT a tenant's real workflow. The wedge scenario's third adversarial probe --
+# cleat#2628, the bilateral half of cleat-review's suggestion on #2621: the
+# DBOS-isolated counterpart already verifies its sandbox bounds a runaway
+# tenant script (isolated-vm's `timeout`); this is the cleat side of the same
+# claim, so "bounded execution" is tested on both platforms rather than
+# asserted once by hand. See
+# scripts/run-integration-hub-tenant-sandbox-scenario.sh, which asserts this
+# workflow's status is FAILED, not stuck RUNNING, once the tenant's own
+# wasm-instance-timeout elapses.
+name: infinite-loop
+language: go
+entry_points:
+  - infinite_loop

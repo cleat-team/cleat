@@ -3,7 +3,9 @@
 **Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
 2026-09-25 against `develop` at `656aced4` (cleat#2050) — see
 [What was verified](#what-was-verified) at the end for what changed and what is still unverified.
-Nothing here has been built end to end.
+
+**The cleat-side half has since been built and is run on every pull request** — see
+[The assembly](#the-assembly). The rope half is stubbed, named as such, and still yours to write.
 
 **Who this is for:** your product has to talk to your customers' other systems. Each customer wants
 their CRM, their warehouse, their ERP, their Slack — and each wants slightly different rules about
@@ -76,6 +78,27 @@ every one of those adjectives.
 evaluates filter expressions, and automatically starts workflow instances when matching events are
 published." That is the routing layer of an iPaaS, already built.
 
+**`examples/integration-hub/` is the runnable one.** It exercises **all four** hitch points in this
+table at once — the ingest route, the connector dispatch as a recorded host call, the rate limit as
+edge middleware, and `notifications`' delivery sweep as a background loop — and it is executed end to
+end on every pull request by `scripts/run-integration-hub-scenario.sh`: deployed to a real
+`cleat-worker` on a real PostgreSQL, with a real inbound event, a real crash, and its record
+asserted.
+
+**What it asserts is a property rather than a completion.** The worker is `SIGKILL`ed mid-run and
+the run is allowed to resume, and what is checked afterwards is the connector's own delivery log:
+**one row, not two**. `notifications.send_webhook` is registered `Idempotent: false`, so a resumed
+run that re-executed the call would deliver the customer's event a second time; one row is the
+evidence that the call was recorded and replayed instead. A green run that never crashes does not
+test that, which is why the crash is in the scenario rather than in its documentation.
+
+The rope half is the connector's far end. The scenario registers a local HTTP sink as the connector
+and points it there — a **private** address, which cleat's egress policy refuses by default and the
+compose permits for exactly one host by name (`--plugin-egress-allow-private=sink`). That is not a
+workaround for the example's convenience: an iPaaS reaches systems *inside* the customer's network,
+so "use a publicly reachable endpoint" is the opposite of the architecture. See the example's
+README for the flag and the refusal it lifts.
+
 ---
 
 ## The distinctive win: an integration per tenant costs a row
@@ -124,6 +147,17 @@ record, per-tenant limits — and calls the tenant's step for the part that must
 workflow: no ambient filesystem, no network beyond the host functions you allow, and its durable
 calls go through the same recorder. You are not handing a tenant a scripting hook inside your own
 process; the isolation containing it is the one that already contains your own workflows.
+
+**Both halves of that are run, not merely described.** The `Integration hub scenario` CI job
+uploads `normalize-order` through `POST /api/definitions` and runs it as a child of the operator's
+workflow on a real deployed worker — the *mechanism* this section opens with. The
+`Integration hub tenant sandbox scenario` job is the *guarantee*: it uploads an adversarial step
+that tries to read the host filesystem and asserts cleat's WASI policy refuses it
+(`engine/wasi_policy.go`'s `path_open`), alongside the same `normalize-order` step as a positive
+control — a malicious-step FAIL is only meaningful next to a legitimate step that succeeds. It
+demonstrates the first of the three properties named above (no ambient filesystem); the other two
+are real properties of the same sandbox but are not what that job measures, which the job's own
+header comment says explicitly rather than leaving "the sandbox is tested" vague about which part.
 
 **Two things to get right before exposing it.**
 
@@ -327,6 +361,36 @@ payloads; see `CHANGELOG.md`'s breaking-changes entry for the migration note. `n
 outbound `send_webhook` delivery got the same requirement the same PR: `POST /webhooks` also
 rejects a missing secret, and `PUT /webhooks/{id}` can rotate one but can no longer clear it.
 
+**The event type is a second header, and the body's `event_type` is ignored for routing.** `POST
+/ingest/{source_id}` takes the event's name from `X-Github-Event`, then `X-Event-Type`, and falls
+back to the literal `"webhook"` when neither is present (`plugins/webhookingest/routes.go`). A JSON
+field called `event_type` is carried through as payload and changes nothing about how the event is
+stored or matched.
+
+**It is the second header on a route whose other header this page documents, and the mistake is
+silent where it is made.** A body-only event type is *accepted* — 201, stored,
+`status = completed` — under the default name, so the ingress reports success and the event is in
+the table. It surfaces later and somewhere else: a workflow's `await_webhook` filters on the name it
+was given, matches nothing, and the run fails a full wait-window later with
+
+    no contact.updated event from source 6f6036cb-… within 30s
+
+**That message points at the ingress, which is working.** "No event arrived" is what a webhook that
+was never delivered says, so the natural next step is to check the delivery — which is fine, and the
+event has `completed` beside it the whole time:
+
+    SELECT event_type, status FROM webhook_events;
+     webhook | completed
+
+Measured while building [`examples/integration-hub/`](../../examples/integration-hub/README.md),
+whose README states the header beside its `curl`. A pointer here rather than only there, because
+this is the page that lists what the route requires and a reader is entitled to assume the list is
+the list.
+
+**Not a body fallback.** Header-first with `X-Github-Event` is deliberate — GitHub sends it — and
+reading the body's field as a fallback would be a behaviour change rather than a correction for
+this.
+
 **Schema drift in a customer's system.** Nothing detects it. Your integration fails, and *where it
 lands depends on how it failed*: a call that exhausted its retry policy is dead-lettered, while a
 parse error or an error returned by the workflow is a plain `failed` run that never reaches the DLQ.
@@ -363,3 +427,10 @@ redrive verbs); the claim that `ratelimiter` falls back to memory when no databa
 refuses to start, cleat#1581); the claim that `--dead-letter-retention-days` alone bounds a poison
 event (a plainly-failed one is bounded by `--retention-days`); and the tenant-supplied-logic gap,
 which was shipped and unnarrated.
+
+**Added since drafting (2026-09-28, cleat#2544):** the ingest route's **event-type header**, in
+"Failure modes to design against". This page documented the route's *other* header — the signature —
+and 400/401/503 carefully, and said nothing about how the event is *named*, so a reader could
+reasonably conclude the list was the list. There was no markdown anywhere in the repository
+mentioning `X-Event-Type` or `X-Github-Event` when this was filed; `examples/integration-hub/README.md`
+now states it beside its `curl`, and this page points at that rather than duplicating it.

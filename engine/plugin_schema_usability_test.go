@@ -351,6 +351,19 @@ var knownColumnAsymmetries = []columnAsymmetry{
 	// statement that must supply the value and the schema that requires it are
 	// in different files, with nothing tying them together.
 	{Table: "event_subscriptions", Column: "id", Dialect: "mysql", Plugin: "event-triggers"},
+
+	// cleat#2830: event_awaiters.id has no MySQL column default (Postgres:
+	// DEFAULT gen_random_uuid(); MySQL: MODIFY id CHAR(36) NOT NULL, no
+	// default -- migrations.go). upsertAwaiter (queries.go:20) is the ONLY
+	// production INSERT into event_awaiters
+	// (`git grep -ni 'INSERT INTO event_awaiters' -- '*.go'`, excluding
+	// tests, returns nothing else) and it explicitly generates `id` in every
+	// dialect's own VALUES clause -- gen_random_uuid() (Default), UUID()
+	// (MySQL), NEWID() (MSSQL) -- not just MySQL's. Stronger than the
+	// event_subscriptions entry above: no dialect's write here depends on a
+	// column-level default at all, so the schema asymmetry is inert on every
+	// dialect, not compensated for one and relied on for the others.
+	{Table: "event_awaiters", Column: "id", Dialect: "mysql", Plugin: "event-triggers"},
 }
 
 // presentOn lists the dialects that do (or do not) have a table.

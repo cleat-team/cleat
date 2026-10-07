@@ -43,7 +43,7 @@ func TestTenantIsolationOverHTTP_Postgres(t *testing.T) {
 	// POSTGRES_USER bootstrap role is a superuser). Run against that role and
 	// both tenants see every row no matter how correct the policies are --
 	// which is exactly what this test did on the first attempt, and what
-	// migrations/postgres/005_app_role.sql exists to prevent in production.
+	// cleat_app exists to prevent in production.
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 

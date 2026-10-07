@@ -45,10 +45,9 @@ import (
 //     (not a y/N, which is too easy to reflexively type for an operation
 //     this destructive) unless --yes is passed for scripted use.
 //   - Refuses the default tenant outright, matching the guard
-//     migrations/postgres/032_drop_tenant_deletes_tenant_data.sql adds to
-//     admin.drop_tenant itself -- checked here too so the operator gets a
-//     clear error before a confirmation prompt, not just relies on the SQL
-//     guard firing.
+//     admin.drop_tenant itself carries (migrations/postgres/001_schema.sql)
+//     -- checked here too so the operator gets a clear error before a
+//     confirmation prompt, not just relies on the SQL guard firing.
 //   - Prints the pre-deletion counts again after a successful delete, as
 //     the audit record: this command has no dedicated audit table (a
 //     bigger schema change than Finding S3's scope), so the printed output
@@ -59,7 +58,7 @@ import (
 
 // dropTenantTableCounts mirrors the rows dropping a tenant removes, for the
 // dry-run / confirmation / audit output. Keep this list in sync with
-// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql.
+// admin.drop_tenant (migrations/postgres/001_schema.sql).
 //
 // "Removes", not "admin.drop_tenant deletes", because two of these go by
 // foreign key rather than by a DELETE inside the function, and the operator
@@ -221,7 +220,7 @@ func runDropTenant(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	}
 
 	// Mirrors the guard admin.drop_tenant itself now enforces
-	// (migrations/postgres/032_drop_tenant_deletes_tenant_data.sql) --
+	// (migrations/postgres/001_schema.sql) --
 	// checked here too so the operator gets a clear, specific error before
 	// any confirmation prompt, rather than the SQL function's exception
 	// surfacing after they have already typed a confirmation.

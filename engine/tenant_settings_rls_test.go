@@ -167,7 +167,7 @@ func TestATenantCannotSeeAnotherTenantsSettingsRow(t *testing.T) {
 
 	// Confirm the premise before measuring anything: cleat_app must be able to
 	// SELECT this table at all. 039 issues no GRANT, relying on
-	// 005_app_role.sql's ALTER DEFAULT PRIVILEGES to cover tables the migration
+	// the schema baseline's ALTER DEFAULT PRIVILEGES to cover tables the migration
 	// role creates later. That is a claim about PostgreSQL behaviour and not
 	// visible in either file, so it is checked rather than assumed -- if it
 	// were false, every assertion below would "pass" on a permission error.
@@ -187,9 +187,9 @@ func TestATenantCannotSeeAnotherTenantsSettingsRow(t *testing.T) {
 		var n int
 		if err := tx.QueryRow(`SELECT count(*) FROM tenant_settings`).Scan(&n); err != nil {
 			t.Fatalf("counting settings rows as cleat_app: %v\n\n"+
-				"If this is a permission error, 005_app_role.sql's ALTER DEFAULT "+
-				"PRIVILEGES did not reach migrations/postgres/039_tenant_settings.sql "+
-				"and that migration needs an explicit GRANT.", err)
+				"If this is a permission error, the schema baseline's ALTER DEFAULT "+
+				"PRIVILEGES did not reach the tenant_settings table "+
+				"(migrations/postgres/001_schema.sql) and that table needs an explicit GRANT.", err)
 		}
 		return n
 	}

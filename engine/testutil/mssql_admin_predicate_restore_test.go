@@ -93,3 +93,70 @@ func TestMSSQLAdminDBRefcountsOverlappingCallers(t *testing.T) {
 		t.Fatalf("predicate form after both callers' Cleanup = %q, want \"plain\"", got)
 	}
 }
+
+// cleat#2831: a `go test -timeout` panic skips every pending t.Cleanup, so an
+// interrupted run can leave the predicate on 'admin' with no live caller in
+// ANY process left to restore it. This simulates exactly that shape --
+// dirtying the predicate directly, the way an interrupted process's last
+// write would leave it, without going through MSSQLAdminDB's own
+// Cleanup-skipping path, which a live test cannot trigger without an actual
+// timeout -- and checks that the next schema setup (what every MSSQL test
+// does first) notices and heals it before anything else runs.
+func TestSetupMSSQLFullSchemaSelfHealsAnAdminPredicateLeftDirtyByAnInterruptedRun(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+	db := MSSQLTestDB(t)
+	SetupMSSQLFullSchema(t, db)
+
+	// The real dirtying mechanism, not just the row: applyMSSQLCrossTenantOptIn
+	// also flips fn_tenant_filter's policy definition, so this leaves the
+	// database in the actual 'admin' state an interrupted MSSQLAdminDB call
+	// would -- consistent even if the self-heal under test regresses, rather
+	// than a row that merely lies (cleat-review's N3 on cleat#2831's review).
+	applyMSSQLCrossTenantOptIn(t, db)
+
+	// The self-heal under test: the next schema setup -- what every MSSQL
+	// test calls before doing anything else -- must notice the dirty
+	// predicate and restore it, rather than trusting it.
+	SetupMSSQLFullSchema(t, db)
+
+	var form string
+	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
+		t.Fatalf("read admin.rls_predicate_form: %v", err)
+	}
+	if form != "plain" {
+		t.Fatalf("predicate form after a fresh SetupMSSQLFullSchema call = %q, want \"plain\" -- "+
+			"a dirty predicate left by an interrupted prior run should self-heal here (cleat#2831)", form)
+	}
+}
+
+// The self-heal above must not clobber a legitimately-live 'admin' state: a
+// concurrent or overlapping test elsewhere in this process that is still
+// inside an MSSQLAdminDB call needs the predicate to stay 'admin' until its
+// own Cleanup runs. Mirrors TestMSSQLAdminDBRefcountsOverlappingCallers'
+// concern, but on the setup side rather than the Cleanup side.
+func TestSetupMSSQLFullSchemaDoesNotClobberALiveAdminCaller(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+	db := MSSQLTestDB(t)
+	SetupMSSQLFullSchema(t, db)
+
+	_ = MSSQLAdminDB(t, db) // live caller: refcount 1, form now 'admin', Cleanup registered
+
+	// While that caller is still live (its Cleanup has not run -- we are
+	// still inside this test), a concurrent test's own schema setup must not
+	// rip the predicate out from under it.
+	SetupMSSQLFullSchema(t, db)
+
+	var form string
+	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
+		t.Fatalf("read admin.rls_predicate_form: %v", err)
+	}
+	if form != "admin" {
+		t.Fatalf("predicate form clobbered by a concurrent SetupMSSQLFullSchema call while a live "+
+			"MSSQLAdminDB caller still holds it = %q, want \"admin\" (cleat#2831's self-heal must "+
+			"guard on the refcount, not just the predicate value)", form)
+	}
+}

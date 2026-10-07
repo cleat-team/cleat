@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,13 @@ import (
 )
 
 var randRead = rand.Read
+
+// ErrTenantNotFound is returned by a write keyed on a tenant id that matched
+// no row, so a caller can tell "changed" from "there is no such tenant"
+// rather than getting the same nil error for both. A background sweep
+// reading a stale id (a tenant deleted between its read and its write) needs
+// this distinction as much as an HTTP caller eventually will.
+var ErrTenantNotFound = errors.New("auth: tenant not found")
 
 // TenantStore provides CRUD operations for tenants and their API keys.
 //
@@ -114,10 +122,26 @@ func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string
 // low-entropy user-chosen password. The hash exists so the plaintext key
 // is never persisted and so lookups can use a DB equality index
 // (ResolveTenantFromAPIKey does `WHERE key_hash = $1`); it is not a
-// password-verification barrier. CodeQL go/weak-sensitive-data-hashing
-// alert #12 flags this call; dismissed with that reasoning. If a caller
-// is ever added that lets a tenant supply their own key text, that
-// precondition breaks and this needs to move to bcrypt/scrypt/argon2
+// password-verification barrier. CodeQL's go/weak-sensitive-data-hashing
+// rule flags this call; dismissed with that reasoning, and the RULE ID is
+// the anchor here deliberately rather than an alert number.
+//
+// A dismissal is keyed to a fingerprint that includes the location, so a
+// refactor that moves this call re-raises it as a NEW alert carrying no
+// memory of the decision. That has already happened once: alert #12 was
+// dismissed against line 53, the hash moved here when it was factored into
+// the shared createAPIKey below, and the same finding returned as alert #16.
+// An earlier version of this comment named #12, which was closed -- so a
+// reader who followed it found a dismissed alert and concluded nothing was
+// outstanding, while #16 sat open for three weeks.
+//
+// Go has no inline CodeQL suppression (the // codeql[...] form covers C/C++,
+// C#, Java, JS/TS, Python, Ruby, Swift and Kotlin, not Go), so a future
+// refactor can re-raise this again. CHECK FOR AN OPEN ALERT rather than
+// trusting a number recorded in this comment.
+//
+// If a caller is ever added that lets a tenant supply their own key text,
+// that precondition breaks and this needs to move to bcrypt/scrypt/argon2
 // (golang.org/x/crypto is already a dependency) with a versioned-hash
 // migration path for existing rows.
 func (s *TenantStore) CreateAPIKey(ctx context.Context, tenantID uuid.UUID, description, rawKey string) error {
@@ -249,7 +273,7 @@ func resolveAPIKeyStmt(dialect string) string {
 		// the keys live in the base database the DSN names.
 		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
 	case DialectMSSQL:
-		return `SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
+		return `SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
 	default:
 		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
 	}
@@ -388,6 +412,94 @@ func (s *TenantStore) RevokeExpiredOAuthAPIKeys(ctx context.Context) (int64, err
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// SetTenantSuspended sets or clears a tenant's suspended flag.
+//
+// Extracted from cmd/cleatctl/suspendtenant.go, which used to inline this
+// UPDATE directly. cleatctl calls this now, and so does
+// plugins/tenantlifecycle's trial-expiry sweep, through
+// plugin.Environment.SetTenantSuspended -- one implementation instead of two.
+// cleat#866 is what two implementations of one write path disagreeing about
+// where a row lives looks like; this table has no reason to risk it a second
+// time.
+//
+// Works on every dialect. Unlike CreateTenant and the API-key writes above,
+// an UPDATE ... SET suspended = ? WHERE tenant_id = ? needs no
+// RETURNING-shaped workaround, so there is no dialect this refuses.
+//
+// Returns ErrTenantNotFound when the update affects zero rows, rather than
+// succeeding silently. A caller acting on a tenant id it did not just read
+// from this same table -- the sweep, eventually an admin route -- needs to
+// be able to tell "suspended" from "no such tenant" rather than getting the
+// same nil error for both.
+func (s *TenantStore) SetTenantSuspended(ctx context.Context, tenantID uuid.UUID, suspended bool) error {
+	res, err := s.db.ExecContext(ctx, setTenantSuspendedStmt(s.dialect), suspended, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrTenantNotFound, tenantID)
+	}
+	return nil
+}
+
+// setTenantSuspendedStmt mirrors createAPIKeyStmt's per-dialect table naming:
+// admin.tenants on PostgreSQL and SQL Server, the unqualified tenants on
+// MySQL, which has no admin schema.
+func setTenantSuspendedStmt(dialect string) string {
+	switch dialect {
+	case DialectMySQL:
+		return `UPDATE tenants SET suspended = ? WHERE tenant_id = ?`
+	case DialectMSSQL:
+		return `UPDATE admin.tenants SET suspended = @p1 WHERE tenant_id = @p2`
+	default:
+		return `UPDATE admin.tenants SET suspended = $1 WHERE tenant_id = $2`
+	}
+}
+
+// SetTenantAllowsPublicExposure sets or clears a tenant's operator opt-in for
+// the `public` exposure class (cleat#1986). The write half of
+// engine.TenantExposurePolicyReader -- this works on all three dialects,
+// unlike the read interface, for the same reason SetTenantSuspended does: an
+// `UPDATE ... WHERE tenant_id = ?` needs no RETURNING-shaped workaround, so
+// there is no dialect this refuses. MySQL's row simply has no multi-tenant
+// read path consulting it (D1), not a write path that cannot reach it.
+//
+// Returns ErrTenantNotFound when the update affects zero rows, same
+// reasoning as SetTenantSuspended: an operator acting on a tenant id it did
+// not just read from this same table needs to be able to tell "granted" from
+// "there is no such tenant".
+func (s *TenantStore) SetTenantAllowsPublicExposure(ctx context.Context, tenantID uuid.UUID, allow bool) error {
+	res, err := s.db.ExecContext(ctx, setTenantAllowsPublicExposureStmt(s.dialect), allow, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrTenantNotFound, tenantID)
+	}
+	return nil
+}
+
+// setTenantAllowsPublicExposureStmt mirrors setTenantSuspendedStmt's per-dialect
+// table naming exactly.
+func setTenantAllowsPublicExposureStmt(dialect string) string {
+	switch dialect {
+	case DialectMySQL:
+		return `UPDATE tenants SET allow_public_exposure = ? WHERE tenant_id = ?`
+	case DialectMSSQL:
+		return `UPDATE admin.tenants SET allow_public_exposure = @p1 WHERE tenant_id = @p2`
+	default:
+		return `UPDATE admin.tenants SET allow_public_exposure = $1 WHERE tenant_id = $2`
+	}
 }
 
 // GenerateAPIKey generates a random API key string.

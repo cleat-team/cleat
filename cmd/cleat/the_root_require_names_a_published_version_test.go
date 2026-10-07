@@ -21,18 +21,25 @@ import (
 //
 // IT READS THIS CHECKOUT'S FILE, NOT THE DEFAULT BRANCH'S, and that is what
 // makes it able to stop the change that breaks the rule. The template tests
-// resolve the SDK through the module proxy, whose @latest for an UNTAGGED
-// module is a pseudo-version of the DEFAULT BRANCH -- so a bad require fails
-// there on the commit AFTER the one that introduced it, and the introducing PR
-// stays green. cleat#2452 is the worked example: green itself, red for the two
-// commits following it, and not gatable by the PR that caused it.
+// used to resolve the SDK through the module proxy, whose @latest for an
+// untagged module is a pseudo-version of the DEFAULT BRANCH -- so a bad require
+// failed there on the commit AFTER the one that introduced it, and the
+// introducing PR stayed green. cleat#2452 is the worked example: green itself,
+// red for the two commits following it, and not gatable by the PR that caused
+// it. (The past tense is deliberate, and it has been earned twice in one day:
+// the sentence used to be present tense while the paragraph below said those
+// same tests built against this checkout -- cleat#3078 -- and the helper that
+// made them do so was itself removed in cleat#3083, once the tag removed the
+// pseudo-version this file is about.)
 //
-// IT ALSO CARRIES WHAT THIS CHANGE GAVE UP. The template tests above now build
-// against this checkout rather than the proxy, because a pull request cannot
-// validate a property that depends on the default branch's content. Measured:
-// with that change they pass on a tree whose require is still v0.3.0. This is
-// what says so instead, and it fails on the branch that introduces a bad
-// version rather than the one after it.
+// IT ALSO CARRIED WHAT A CHANGE GAVE UP, AND THAT HAS SINCE BEEN GIVEN BACK.
+// For a while the template tests built against this checkout rather than the
+// proxy, because a pull request cannot validate a property that depends on the
+// default branch's content. They no longer do -- cleat#3083 removed that helper,
+// once the submodule was tagged and `@latest` stopped being a moving head -- so
+// a bad require fails in the template tests again. This test is kept because it
+// fails EARLIER and reads this checkout's own cleat/go.mod rather than a pushed
+// head, not because nothing else would catch the version any more.
 func TestTheRootRequireNamesAPublishedVersion(t *testing.T) {
 	mod := filepath.Join(repoRoot(t), "cleat", "go.mod")
 	data, err := os.ReadFile(mod)

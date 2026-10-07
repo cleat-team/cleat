@@ -1,0 +1,300 @@
+# PostgreSQL, a cleat worker, and the model provider -- the infrastructure this
+# scenario runs on.
+#
+# The application backend is deliberately NOT a service here, exactly as in
+# examples/order-lifecycle and examples/integration-hub: it is your application,
+# this file stands up what an application connects TO, and `go run ./backend`
+# from the example directory starts it on the host.
+# scripts/run-ai-agent-platform-scenario.sh drives the same flow with `curl`,
+# because the CI job's job is to run the README's DOCUMENTED COMMANDS rather
+# than a program of its own.
+#
+# What would sit outside this file in a deployment is the model provider, and
+# that is `model-stub` below.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cleat
+      POSTGRES_PASSWORD: cleat
+      POSTGRES_DB: cleat
+    ports:
+      - "${CLEAT_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # Schema migration as a one-shot step: a worker no longer migrates itself at
+  # every start (cleat#2117). Runs as the postgres superuser, because DDL needs
+  # it, and because the baseline creates the lesser role below -- cleat_app, in
+  # migrations/postgres/001_schema.sql -- before anything connects as it.
+  migrate:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    command:
+      - "--migrate-only"
+      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # The baseline creates cleat_app NOLOGIN and without a password, on purpose:
+  # a credential does not belong in a file that migrations replay
+  # (migrations/postgres/001_schema.sql).
+  app-role:
+    image: postgres:16
+    environment:
+      PGPASSWORD: cleat
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -h
+      - postgres
+      - -U
+      - cleat
+      - -d
+      - cleat
+      - -c
+      - "ALTER ROLE cleat_app LOGIN PASSWORD '${CLEAT_APP_PASSWORD:-cleat-app-local-dev}';"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # THE ROPE END, STANDING IN FOR YOUR MODEL PROVIDER.
+  #
+  # The model call is a real durable host call to the bundled `llm` plugin; what
+  # is stubbed is only what answers it. In a deployment this service does not
+  # exist and the plugin's base_url points at OpenAI, Anthropic or a self-hosted
+  # vLLM instead; here it exists so the whole thing runs with no API key, and it
+  # COUNTS THE REQUESTS IT RECEIVES, which is what makes the scenario's central
+  # claim measurable.
+  #
+  # That claim is "a replayed agent run does not re-ask the model". The count is
+  # the whole assertion: after a SIGKILL mid-run, the resumed run must leave the
+  # count where it was. A run that re-asked would double it.
+  #
+  # It replies like a small agent rather than echoing: on a request that carries
+  # no tool result yet it asks for `save_report`, and once it sees one it
+  # answers in text. That is what gives the run a loop to crash in the middle
+  # of -- a provider that always answered immediately would finish before the
+  # kill could land.
+  model-stub:
+    image: python:3-alpine
+    command:
+      - python3
+      - -c
+      - |
+        import http.server, json, threading
+
+        lock = threading.Lock()
+        hits = 0
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                global hits
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                body = self.rfile.read(n) if n else b'{}'
+                with lock:
+                    hits += 1
+                if self.path.endswith('/v1/chat/completions'):
+                    req = json.loads(body or b'{}')
+                    messages = req.get('messages', [])
+                    roles = [m.get('role') for m in messages]
+                    # The USER's text, not every message's: an assistant turn
+                    # carries the tool call it asked for, so matching on the
+                    # whole conversation would make a run that asked for
+                    # approval ask for it again on every turn.
+                    task = " ".join((m.get('content') or '') for m in messages
+                                    if m.get('role') == 'user').lower()
+                    if 'tool' in roles:
+                        # A tool result is already in the conversation, so the
+                        # agent has what it asked for and answers in text.
+                        msg = {"role": "assistant",
+                               "content": "Saved the report and summarised: two incidents, both resolved by a rollback."}
+                    elif 'approve' in task:
+                        # THE APPROVAL PATH IS SELECTED BY THE TASK TEXT, so the
+                        # scenario can reach `request_approval` -- and therefore
+                        # the app's approve button -- without a second stub or a
+                        # second provider. A task that does not mention approval
+                        # follows the tool-call path below.
+                        msg = {"role": "assistant", "content": "",
+                               "tool_calls": [{"id": "call_1", "type": "function",
+                                               "function": {"name": "request_approval",
+                                                            "arguments": json.dumps({"reason": "roll back the deploy"})}}]}
+                    else:
+                        msg = {"role": "assistant", "content": "",
+                               "tool_calls": [{"id": "call_1", "type": "function",
+                                               "function": {"name": "save_report",
+                                                            "arguments": json.dumps({"body": "Two incidents yesterday, both resolved by a rollback."})}}]}
+                    out = {"id": "chatcmpl-stub", "object": "chat.completion",
+                           "model": req.get('model', 'agent-stub-1'),
+                           "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}],
+                           "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150}}
+                    self.reply(200, out)
+                else:
+                    self.reply(404, {"error": "not found"})
+
+            def do_GET(self):
+                # The counter the scenario reads. Deliberately on the same
+                # service, so there is no second thing to stand up and no way
+                # for the count to describe a different server than the model.
+                with lock:
+                    self.reply(200, {"requests": hits})
+
+            def reply(self, code, obj):
+                payload = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *a):
+                pass
+
+        http.server.HTTPServer(('0.0.0.0', 9100), Handler).serve_forever()
+    ports:
+      # Exposed so the scenario on the HOST can read the request count. The
+      # worker reaches it by service name over the compose network.
+      - "${CLEAT_MODEL_STUB_PORT:-9100}:9100"
+
+  # THE PLUGIN CONFIG IS WRITTEN INTO A VOLUME, NOT BIND-MOUNTED FROM THE REPO,
+  # and the reason is measured rather than stylistic.
+  #
+  # ON THE RUNTIME THIS WAS MEASURED AGAINST, a host bind mount did not deliver
+  # the host's files at all -- and it failed in a way that names the wrong thing.
+  # With colima (a VM-backed runtime) active, a single-FILE target was created as
+  # a DIRECTORY, so the worker died with:
+  #
+  #   failed to read plugin config file ... file=/etc/cleat/plugin-config.json
+  #   error="read /etc/cleat/plugin-config.json: is a directory"
+  #
+  # which names the CONFIG rather than the mount, and would send a reader to
+  # check JSON that is perfectly valid. It failed the same way binding from
+  # /tmp, and a bind of the whole DIRECTORY did not show its files either.
+  #
+  # WHAT IS NOT CLAIMED: that single-file binds are uniquely unsupported, or
+  # that any other runtime is broken. Docker Desktop and OrbStack were both
+  # stopped here, so the comparison was unavailable. A named volume worked and
+  # needs no host path, which is why it is what this file ships -- the shape
+  # that cannot fail this way, on any runtime.
+  #
+  # The JSON lives here rather than in a tracked plugin-config.json because
+  # there is no way to get a tracked file into the container without the bind
+  # mount this service exists to avoid -- one copy, in the place that uses it.
+  plugin-config:
+    image: alpine
+    volumes:
+      - plugin-config:/etc/cleat
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        mkdir -p /etc/cleat
+        cat > /etc/cleat/plugin-config.json <<'JSON'
+        {
+          "mode": "db",
+          "providers": {
+            "openai": {
+              "base_url": "http://model-stub:9100/v1",
+              "default_model": "agent-stub-1",
+              "enabled": true,
+              "requires_deployment_key": false
+            }
+          }
+        }
+        JSON
+        # `mode` and `providers` sit at the SAME level on purpose, which looks
+        # like a mistake and is not: every plugin's Init receives the whole
+        # --plugin-config file and there is no per-plugin section
+        # (cmd/cleat-worker/main.go, and
+        # a_shared_plugin_config_enablement_test.go which pins it). So the top
+        # level is a namespace several plugins read from by accident, and the
+        # two plugins' key sets must not collide. `mode` is ratelimiter's,
+        # `providers` is llm's.
+        #
+        # `requires_deployment_key: false` is what makes this runnable with no
+        # API key. The field is a POINTER upstream so that an omitted one means
+        # "a key is required" and an explicit false opts out -- a plain bool
+        # could not carry that distinction. See plugins/llm/plugin.go.
+    restart: "no"
+
+  cleat-worker:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it
+    # cancels its runs (cleat#2285). Docker sends SIGKILL after 10s unless told
+    # otherwise, which would cut the drain off. The scenario SIGKILLs the
+    # container outright, so this matters less here than it does for a graceful
+    # stop -- but a reader who switches the kill to `stop` should not silently
+    # lose the drain.
+    stop_grace_period: 60s
+    command:
+      # NOT the postgres superuser above. Every tenant-scoped table has
+      # row-level security FORCEd, and PostgreSQL never applies RLS to a
+      # superuser -- which is what cleat_app is for, created by
+      # migrations/postgres/001_schema.sql. --require-auth (on by default)
+      # refuses to start over a connection that is exempt from RLS, which is
+      # what catches this if it regresses.
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      # Used only for the startup schema-verification's error message; this
+      # worker does not migrate itself -- see the migrate service above.
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--api-addr=:8080"
+      - "--concurrency=4"
+      # The `llm` plugin's provider config, and the `ratelimiter` plugin's mode,
+      # in ONE file -- see plugin-config.json, which explains why they share it.
+      - "--plugin-config=/etc/cleat/plugin-config.json"
+      # THE PERMISSION THIS SCENARIO NEEDS, AND THE FLAG THAT IS NOT IT.
+      #
+      # cleat's egress policy refuses loopback and RFC1918 addresses by default.
+      # The model stub is on the compose network, so without a permission the
+      # model call is refused and every run fails at step one.
+      #
+      # THIS flag -- --plugin-egress-allow-private -- is the right one HERE
+      # because the call is made by a PLUGIN (`plugins/llm`), and the flag
+      # permits a private host by NAME for plugin egress. The value is the host
+      # as it appears in the URL, which is the compose service name.
+      #
+      # IT WOULD NOT HELP A WORKFLOW'S OWN FETCH. The flag's own help text says
+      # so: "It applies to PLUGIN egress only. A workflow's own fetches and the
+      # embedded runner are unaffected: a guest is code cleat did not write, and
+      # nothing it supplies should reach a private address whatever is
+      # configured here." A guest fetch to a private host needs
+      # --egress-allowlist (the deployment policy) AND the requesting tenant's
+      # own grant, because egress needs both permissions. See searchDocs in
+      # agent.go for why this scenario's retrieval is not a fetch.
+      - "--plugin-egress-allow-private=model-stub"
+    environment:
+      # `blobstore` seals nothing, but `event-triggers` publishes events and the
+      # agent's approval path depends on it. Set anyway so a worker started from
+      # this file matches a real one; a deployment supplies its own out of band.
+      # base64, 32 bytes.
+      CLEAT_SECRET_MASTER_KEY: ${CLEAT_SECRET_MASTER_KEY:-kiFstWOvEcdUe9ELx0oCTNorrTniHsyhUwLESCzufzw=}
+    volumes:
+      # The same volume the `plugin-config` one-shot above wrote into. Read-only
+      # here: the worker consumes the config and has no business rewriting it.
+      - plugin-config:/etc/cleat:ro
+    ports:
+      - "${CLEAT_API_PORT:-8080}:8080"
+    depends_on:
+      app-role:
+        condition: service_completed_successfully
+      # Ordering is the whole dependency: the worker exits 1 on a missing config
+      # file (it reads it before anything else), so starting it in parallel with
+      # the writer is a race the worker loses about half the time.
+      plugin-config:
+        condition: service_completed_successfully
+      model-stub:
+        condition: service_started
+
+volumes:
+  # Named, and namespaced by COMPOSE_PROJECT_NAME, so two checkouts running this
+  # file concurrently do not share a config. `docker compose down -v` removes it,
+  # which is what scripts/run-ai-agent-platform-scenario.sh does in its trap.
+  plugin-config:

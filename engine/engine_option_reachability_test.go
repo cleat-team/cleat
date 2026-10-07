@@ -102,13 +102,6 @@ var engineOptionsNotWired = map[string]string{
 	// Wiring the guard before the thing it guards would be backwards.
 	"WithPluginCallGuard": "cleat#878: guards WASM plugin calls, which are themselves unwired -- see 3.315",
 
-	// EMBEDDER API, and deliberately degrading. Consulted when replay finds a
-	// call dispatched but never recorded; nil returns ("", false), which
-	// engine/callintent.go documents as leaving the ambiguity "exactly as it
-	// was ... and not a worse one". So an unset resolver is the designed
-	// default and the enhancement simply does not happen.
-	"WithAmbiguityResolver": "cleat#878 EMBEDDER API: nil is the designed default; degrades to no-op",
-
 	// EMBEDDER API. An escape hatch for a caller that knowingly wants replay
 	// against a mismatched version. There is deliberately no CLI flag -- a
 	// worker should not offer this -- so no in-repo caller is correct.

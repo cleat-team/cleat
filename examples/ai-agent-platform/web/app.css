@@ -1,0 +1,321 @@
+/*
+  Served as its own file rather than as an inline <style> block: the page runs
+  under `style-src 'self'`, and an inline block would need 'unsafe-inline'. The
+  same reason the script is its own file -- see the comment in index.html.
+
+  No external font and no CDN, for the same policy reason and one more: this page
+  is served by an example's backend on localhost, and a page that needs the
+  network to render is a page that looks broken the moment the network is what
+  you are testing.
+*/
+
+:root {
+  --bg: #10141a;
+  --panel: #171d26;
+  --line: #29323f;
+  --text: #dde3ec;
+  --muted: #8b97a8;
+  --ok: #3fb950;
+  --wait: #d29922;
+  --bad: #f85149;
+  --accent: #58a6ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 0 4rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header,
+main {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+h1 {
+  margin: 2rem 0 0.25rem;
+  font-size: 1.6rem;
+}
+
+h3 {
+  margin: 1.5rem 0 0.25rem;
+  font-size: 0.95rem;
+}
+
+p.sub {
+  margin: 0 0 1rem;
+  color: var(--muted);
+}
+
+section {
+  margin-top: 2.5rem;
+}
+
+h2 {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+code,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+/*
+  `.pairs` is the inline dt/dd layout, and it is used for three lists that are
+  the same shape: the backend's settings, a run's query state, and a finished
+  run's result. One class rather than three, because three would be three things
+  to keep in step for no gain -- and the state list is built from a table whose
+  length changes, so a per-list class would drift first.
+*/
+.pairs {
+  margin: 0.5rem 0 1rem;
+}
+
+.pairs dt {
+  display: inline;
+  color: var(--muted);
+}
+
+.pairs dd {
+  display: inline;
+  margin: 0 1.5rem 0 0.4rem;
+}
+
+/*
+  dt and dd are blockified by any flex or grid container, which would put every
+  value on its own line and leave the labels floating above nothing. That is why
+  this is an inline layout over a plain block parent and not a grid.
+*/
+
+form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin: 0 0 0.5rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+input,
+button {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+input {
+  min-width: 12rem;
+}
+
+button {
+  cursor: pointer;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button:hover {
+  background: #1d2634;
+}
+
+button.secondary {
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0 0.75rem;
+}
+
+th {
+  text-align: left;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+th,
+td {
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr.selected td {
+  background: var(--panel);
+}
+
+/*
+  A failed run's error is the one cell that has to stay readable at any width,
+  so it wraps rather than widening the table.
+*/
+.run-error {
+  margin: 0.25rem 0 0.75rem;
+  padding: 0.5rem 0.6rem;
+  border-left: 3px solid var(--bad);
+  background: var(--panel);
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+
+.pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.pill.ok {
+  color: var(--ok);
+}
+
+.pill.wait {
+  color: var(--wait);
+}
+
+.pill.bad {
+  color: var(--bad);
+}
+
+/*
+  The neutral class for a run that is simply working. It is deliberately not the
+  same colour as .wait: `budget_exceeded` and `approval_timeout` want an
+  operator's attention and `tool_call` does not, and a page where they look alike
+  is a page where the eye has nowhere to land.
+*/
+.pill.info {
+  color: var(--accent);
+}
+
+.hint {
+  margin: 0.5rem 0;
+  max-width: 48rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.status {
+  margin: 0.5rem 0 0;
+  font-size: 0.88rem;
+  min-height: 1.3em;
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.bad {
+  color: var(--bad);
+}
+
+.detail {
+  margin-top: 0.75rem;
+}
+
+.detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.detail-engine {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.detail-task {
+  margin: 0.5rem 0;
+  font-size: 1.05rem;
+}
+
+.approval {
+  display: block;
+  margin: 1.25rem 0 0;
+  padding: 0.75rem 1rem 1rem;
+  border: 1px solid var(--wait);
+  border-radius: 8px;
+}
+
+.approval h3 {
+  margin-top: 0;
+  color: var(--wait);
+}
+
+.approval-buttons {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+/*
+  A run's output is whatever the model wrote, so it is rendered as preformatted
+  text that wraps rather than scrolls: a horizontally scrolling block hides the
+  end of a long report behind an affordance nobody notices, and the report is the
+  point of the run.
+*/
+pre.output {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.88rem;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --panel: #f4f6f9;
+    --line: #d6dce5;
+    --text: #1b2027;
+    --muted: #5b6675;
+    --ok: #1a7f37;
+    --wait: #9a6700;
+    --bad: #cf222e;
+    --accent: #0969da;
+  }
+
+  code,
+  .mono {
+    color: var(--text);
+  }
+
+  button:hover {
+    background: #e7edf6;
+  }
+}

@@ -344,6 +344,47 @@ class CleatTestHarness(HostCalls):
             1 for r in self.call_history if r.service == service and r.operation == operation
         )
 
+    def _known_bare_plugin_names(self) -> set[str]:
+        """Bare plugin names this harness could recognise from a service name.
+
+        THE UNION IS LOAD-BEARING, not belt-and-braces. A call stub is
+        CONSUMED when its call is made (``_call_stubs.pop``), so neither source
+        alone covers both cases that matter:
+
+          * registered but never called -> only in ``_call_stubs``
+          * registered, called, consumed -> only in ``call_history``
+
+        cleat#2567.
+        """
+        services = {s.service for s in self._call_stubs}
+        services |= {r.service for r in self.call_history}
+        return {s.removeprefix("plugin:") for s in services if s.startswith("plugin:")}
+
+    def _refuse_unmatchable_service(self, service: str) -> None:
+        """Refuse an assertion over a name that cannot match the call it means.
+
+        ``plugin_call`` derives ``service = f"plugin:{plugin_name}"``, so a bare
+        plugin name is not an alternative spelling -- it is a name that can never
+        match the record the author meant. Left alone it certifies the opposite
+        of what it says: an absence assertion over a call that happened still
+        returns True, because nothing was ever recorded under that name.
+
+        ONLY PLUGIN SERVICES CAN BE CHECKED THIS WAY, and that is not a
+        shortcoming of the guard. For ``call``, ``send`` and ``schedule_invoke``
+        the service is CALLER-SUPPLIED, so any string can match, and
+        ``assert_not_called("email", "send")`` over a deliberately unstubbed
+        ``email`` is a meaningful assertion rather than a vacuous one --
+        asserting the workflow did not take a path. Refusing those would demand
+        a stub for the thing you are asserting was never called, which is
+        backwards. The name is decidable exactly where the harness derives it.
+        """
+        if service in self._known_bare_plugin_names():
+            raise AssertionError(
+                f'no stub registered for service "{service}"\n'
+                f'plugin services are registered as "plugin:<name>", '
+                f'e.g. "plugin:{service}"'
+            )
+
     def assert_called(self, service: str, operation: str) -> bool:
         """Return True if a call to the given service+operation was made.
 
@@ -358,7 +399,15 @@ class CleatTestHarness(HostCalls):
         -------
         bool
             True if the call appears in the history.
+
+        Raises
+        ------
+        AssertionError
+            If ``service`` is the bare form of a plugin service this harness
+            knows about, where it can never match. See
+            :meth:`_refuse_unmatchable_service`.
         """
+        self._refuse_unmatchable_service(service)
         return self.call_count(service, operation) > 0
 
     def assert_not_called(self, service: str, operation: str) -> bool:
@@ -375,7 +424,16 @@ class CleatTestHarness(HostCalls):
         -------
         bool
             True if the call does NOT appear in the history.
+
+        Raises
+        ------
+        AssertionError
+            If ``service`` is the bare form of a plugin service this harness
+            knows about, where it can never match -- so the ``True`` this would
+            otherwise return certifies the opposite of what it says. See
+            :meth:`_refuse_unmatchable_service`.
         """
+        self._refuse_unmatchable_service(service)
         return self.call_count(service, operation) == 0
 
     def last_call(self, service: str, operation: str) -> CallRecord | None:
@@ -699,13 +757,41 @@ class CleatTestHarness(HostCalls):
         )
 
     def plugin_call(self, plugin_name: str, function_name: str, input: Any) -> str:
+        # Plugin calls are recorded under the namespaced service name the
+        # base class dispatches on -- `host_calls.py` calls
+        # `_call_or_raise(f"plugin:{plugin_name}", ...)` -- which is also
+        # the name a stub is registered under via `stub_call`.  Recording
+        # the bare plugin name here would make `call_history` disagree
+        # with both.  See cleat#2547.
+        service = f"plugin:{plugin_name}"
+        req_str = self._marshal(input)
+
         # Check for stubs — try matching registered stubs
         for i, stub in enumerate(self._call_stubs):
-            if stub.service == f"plugin:{plugin_name}" and stub.operation == function_name:
+            if stub.service == service and stub.operation == function_name:
                 self._call_stubs.pop(i)
+                self.call_history.append(
+                    CallRecord(
+                        service=service,
+                        operation=function_name,
+                        request=req_str,
+                        response=stub.response,
+                        error=stub.error,
+                    )
+                )
                 if stub.error:
                     raise RuntimeError(stub.error)
                 return stub.response
+
+        self.call_history.append(
+            CallRecord(
+                service=service,
+                operation=function_name,
+                request=req_str,
+                response="",
+                error="no stub registered",
+            )
+        )
         raise RuntimeError(
             f"CleatTestHarness: no stub registered for plugin {plugin_name}.{function_name}"
         )

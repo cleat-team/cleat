@@ -167,6 +167,8 @@ func (c *cleanupFakeConn) ExecContext(ctx context.Context, query string, args []
 		return c.execDeleteWorkflowRefs()
 	case strings.Contains(query, "WITH deleted AS"):
 		return c.execCleanupExpired()
+	case strings.Contains(query, "GROUP BY bc2.sha256"):
+		return c.execReconcileRefCounts()
 	default:
 		return c.fakeConn.ExecContext(ctx, query, args)
 	}
@@ -227,6 +229,31 @@ func (c *cleanupFakeConn) execCleanupExpired() (driver.Result, error) {
 	}
 
 	return &fakeResult{rowsAffected: int64(len(sha256Counts))}, nil
+}
+
+// cleanup phase 2b: recompute ref_count from a live count of blob_index rows
+// for every blob_content row, mirroring reconcileRefCounts (queries.go).
+func (c *cleanupFakeConn) execReconcileRefCounts() (driver.Result, error) {
+	c.store.mu.Lock()
+	defer c.store.mu.Unlock()
+
+	counts := make(map[string]int64)
+	for hex := range c.store.blobContent {
+		counts[hex] = 0
+	}
+	for _, row := range c.store.blobIndex {
+		hex := fmt.Sprintf("%x", row.sha256Bytes)
+		counts[hex]++
+	}
+
+	var changed int64
+	for hex, cnt := range counts {
+		if cr, ok := c.store.blobContent[hex]; ok && cr.refCount != cnt {
+			cr.refCount = cnt
+			changed++
+		}
+	}
+	return &fakeResult{rowsAffected: changed}, nil
 }
 
 // cleanup phase 3: delete orphaned blob_content and return their sha256 + storage_backend

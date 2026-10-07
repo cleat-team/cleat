@@ -1,4 +1,4 @@
-name: my-workflow
+name: {{printf "%q" .ProjectName}}
 language: go
 entry_points:
   - process

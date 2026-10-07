@@ -2,14 +2,12 @@ package eventtriggers
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
-	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -20,7 +18,7 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	}
 	if err := scope.Register(plugin.FuncOptions{
 		Name: "await_event",
-		// NEITHER. It selects the latest UNPROCESSED event, so a replay can
+		// NEITHER. It selects the oldest UNPROCESSED event, so a replay can
 		// match a different one -- and on the not-found path it WRITES, calling
 		// registerAwaiter before returning a successful "no event" output.
 		// That output is recorded, so under cleat#1318 a replay returns it and
@@ -42,8 +40,9 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 // ---- Input/output types ----
 
 type awaitEventInput struct {
-	EventType string `json:"event_type"`
-	TimeoutMs int64  `json:"timeout_ms"`
+	EventType string   `json:"event_type"`
+	TimeoutMs int64    `json:"timeout_ms"`
+	Keys      []string `json:"keys,omitempty"`
 }
 
 type awaitEventOutput struct {
@@ -56,8 +55,10 @@ type awaitEventOutput struct {
 
 // ---- Host functions ----
 
-// awaitEvent queries for the latest matching unprocessed event for the
-// workflow's tenant.  If a matching event is found, it is returned and the
+// awaitEvent queries for the oldest matching unprocessed event for the
+// workflow's tenant -- oldest, not newest, so a backlog of the same event
+// type drains in order rather than starving whichever event arrived first
+// (cleat#2641). If a matching event is found, it is returned and the
 // workflow proceeds.  If none is found, the output {"found": false} is
 // returned and the workflow engine will retry according to its retry policy.
 //
@@ -78,72 +79,76 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		return "", fmt.Errorf("event-triggers: event_type is required")
 	}
 
-	// Query for the latest matching unprocessed event for this tenant + type.
-	var (
-		eventID    uuid.UUID
-		eventType  string
-		eventData  []byte
-		receivedAt time.Time
-	)
-
-	err := plugin.ScanRow(p.db.QueryRow(ctx,
-		queryLatestUnprocessedEvent.For(p.dialect),
-		cc.TenantID, input.EventType), &eventID, &eventType, &eventData, &receivedAt)
-
-	if errors.Is(err, sql.ErrNoRows) {
-		// No matching event found -- register as an awaiter so the publish
-		// handler can signal this workflow when a matching event arrives.
-		if cc.WorkflowID != "" {
-			// Not `Found: false` on failure: that is a success report, and it
-			// is exactly the lie cleat#1473 is about.
-			if err := p.registerAwaiter(ctx, cc.TenantID, cc.WorkflowID, input.EventType); err != nil {
-				return "", err
+	// The claim/register mechanism itself lives in ClaimOrRegisterAwaiter
+	// (claim.go), exported so webhookingest (cleat#2649) reuses the same
+	// mechanism rather than building a second, divergent one -- awaitEvent
+	// is now a thin wrapper over it, not a second copy.
+	var outJSON []byte
+	claimed, err := ClaimOrRegisterAwaiter(ctx, p.db, p.dialect, p.logger,
+		cc.TenantID, cc.WorkflowID, input.EventType, input.Keys,
+		func(c *ClaimedEvent) error {
+			// Built and marshaled BEFORE Commit, deliberately, via this
+			// hook: marshaling after commit would mean a marshal failure --
+			// e.g. corrupted event_data, as happened on cleat#2645's own CI
+			// run -- reports an error while the event stays durably
+			// consumed with no way to ever report it again: a lost event
+			// dressed up as a failure. A failure here instead rolls the
+			// claim back, so the row stays unprocessed and the next claim
+			// can retry it (cleat#2654).
+			out := awaitEventOutput{
+				Found:      true,
+				EventID:    c.EventID.String(),
+				EventType:  c.EventType,
+				EventData:  json.RawMessage(c.EventData),
+				ReceivedAt: c.ReceivedAt.Format(time.RFC3339),
 			}
+			var marshalErr error
+			outJSON, marshalErr = json.Marshal(out)
+			if marshalErr != nil {
+				return fmt.Errorf("event-triggers: marshal await_event output: %w", marshalErr)
+			}
+			return nil
+		})
+	if err != nil {
+		return "", err
+	}
+	if claimed == nil {
+		// No matching event found -- ClaimOrRegisterAwaiter already
+		// registered cc.WorkflowID as an awaiter (if non-empty), so the
+		// publish handler can signal this workflow when a matching event
+		// arrives. Not `Found: false` reported as an error: that would be
+		// the lie cleat#1473 is about, from the other direction.
+		out := awaitEventOutput{Found: false}
+		notFoundJSON, marshalErr := json.Marshal(out)
+		if marshalErr != nil {
+			// Nothing was consumed on this path, so there is no durability
+			// concern here -- but a discarded error here used to return ""
+			// on failure, indistinguishable from Found:false's own JSON. A
+			// caller could not tell "no event yet" from "marshalling
+			// broke", which is the same lie cleat#1473 is about.
+			return "", fmt.Errorf("event-triggers: marshal await_event output: %w", marshalErr)
 		}
-
-		output := awaitEventOutput{Found: false}
-		outJSON, _ := json.Marshal(output)
-		return string(outJSON), nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("event-triggers: query events: %w", err)
+		return string(notFoundJSON), nil
 	}
 
-	// Mark the event as consumed.
-	_, err = p.db.Exec(ctx, `
-		UPDATE ingested_events
-		SET processed = true, status = 'consumed'
-		WHERE id = $1
-	`, eventID)
-	if err != nil {
-		p.logger.Error("event-triggers: mark event consumed", "event_id", eventID, "error", err)
-		// Continue even if marking fails.
-	}
-
+	// ClaimOrRegisterAwaiter already unregistered any pending awaiter row for
+	// this workflow + event type + keys as part of the same claim -- see its
+	// own doc comment for why that reuses the exact key1/key2/key3 the claim
+	// matched against, never a differently-keyed row still legitimately
+	// waiting.
 	p.logger.Info("event-triggers: event consumed via await_event",
-		"event_id", eventID,
-		"event_type", eventType,
+		"event_id", claimed.EventID,
+		"event_type", claimed.EventType,
 		"tenant", cc.TenantID,
 		"workflow_id", cc.WorkflowID,
 	)
 
-	// Clean up any pending awaiter registration for this workflow + event type.
-	unregisterAwaiter(ctx, p.db, p.logger, cc.WorkflowID, input.EventType)
-
-	output := awaitEventOutput{
-		Found:      true,
-		EventID:    eventID.String(),
-		EventType:  eventType,
-		EventData:  json.RawMessage(eventData),
-		ReceivedAt: receivedAt.Format(time.RFC3339),
-	}
-	outJSON, _ := json.Marshal(output)
 	return string(outJSON), nil
 }
 
-// registerAwaiter records that the given workflow is waiting for an event of
-// the specified type.  This allows the publish handler to deliver a signal
-// when a matching event arrives.
+// registerAwaiterCore records that the given workflow is waiting for an
+// event of the specified type. This allows the publish handler to deliver a
+// signal when a matching event arrives.
 // RETURNS ITS ERROR, and that is the whole of cleat#1473.
 //
 // It used to log and return nothing, so awaitEvent's caller could not tell a
@@ -158,11 +163,21 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // returns its error -- so registration was the one write whose failure was
 // swallowed, and propagating makes the function uniform. A visible error beats
 // an invisible wait.
-func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType string) error {
-	_, err := p.db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(p.dialect), p.dialect),
-		workflowID, tenantID, eventType)
+//
+// A free function, not a (*Plugin) method: both awaitEvent (via
+// ClaimOrRegisterAwaiter, claim.go) and webhookingest's awaitWebhook (same
+// path) need the SAME write, and neither is a Plugin method on
+// event-triggers. The method wrapper this replaced (cleat#2697,
+// scripts/check-test-only-code.sh) had lost its last production caller the
+// moment awaitEvent was rewritten to call ClaimOrRegisterAwaiter directly --
+// every remaining caller was a test, which is exactly the shape that check
+// exists to catch.
+func registerAwaiterCore(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect, logger *slog.Logger, tenantID, workflowID, eventType, key1, key2, key3 string) error {
+	regKey := registrationKey(workflowID, eventType, key1, key2, key3)
+	_, err := db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(dialect), dialect),
+		workflowID, tenantID, eventType, key1, key2, key3, regKey)
 	if err != nil {
-		p.logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)
+		logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)
 		return fmt.Errorf("event-triggers: register awaiter: %w", err)
 	}
 	return nil

@@ -1,12 +1,8 @@
 package engine
 
 import (
-	"context"
-	"database/sql/driver"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"strings"
 
 	mssql "github.com/microsoft/go-mssqldb"
@@ -20,7 +16,6 @@ const (
 	mssqlErrDuplicateKeyObj  = 2601 // cannot insert duplicate key row (unique index)
 	mssqlErrUniqueConstraint = 2627 // violation of UNIQUE/PRIMARY KEY constraint
 	mssqlErrSnapshotConflict = 3960 // snapshot isolation update conflict
-	mssqlErrTimeout          = 258  // wait operation timed out
 	mssqlErrLockTimeout      = 1222 // lock request time out period exceeded (SET LOCK_TIMEOUT)
 	mssqlErrForeignKeyRef    = 547  // the INSERT/UPDATE/DELETE statement conflicted with a constraint
 )
@@ -163,39 +158,14 @@ func isMSSQLSnapshotError(err error) bool {
 	return containsAny(err.Error(), "snapshot isolation", "update conflict")
 }
 
-// isMSSQLTimeout returns true if the error is a timeout or a deadline.
-// Handles context deadlines, SQL Server error 258, and network timeouts.
-//
-// context.Canceled is deliberately excluded: cancellation is a decision, not a
-// transient fault, and retrying it would ignore the caller.
-func isMSSQLTimeout(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	if errors.Is(err, context.Canceled) {
-		return false
-	}
-	if hasNumber(err, mssqlErrTimeout) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return true
-	}
-	return containsAny(err.Error(), "timeout expired", "timed out", "query timeout", "i/o timeout")
-}
-
 // isMSSQLLockTimeout checks for SET LOCK_TIMEOUT's own error (1222), distinct
-// from isMSSQLTimeout's 258: 258 is a client/network wait timing out, 1222 is
-// the server refusing to wait past a session's own configured bound on a lock
-// request. Deliberately NOT included in isMSSQLRetryable -- the caller that
-// sets a lock timeout (claim Step 4, cleat#1963) wants to treat this as "no
-// claim this round" and let its own poll loop retry later, not as a
-// transaction to replay immediately against a lock that is probably still
-// held.
+// from a client/network wait timing out (error 258, which this package no
+// longer classifies -- see cleat#2792): 1222 is the server refusing to wait
+// past a session's own configured bound on a lock request. Deliberately not
+// treated as rollback-guaranteed -- the caller that sets a lock timeout
+// (claim Step 4, cleat#1963) wants to treat this as "no claim this round"
+// and let its own poll loop retry later, not as a transaction to replay
+// immediately against a lock that is probably still held.
 func isMSSQLLockTimeout(err error) bool {
 	if err == nil {
 		return false
@@ -206,56 +176,6 @@ func isMSSQLLockTimeout(err error) bool {
 	return containsAny(err.Error(), "lock request time out period exceeded")
 }
 
-// isMSSQLConnectionError checks for network-level errors that may be transient.
-func isMSSQLConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) {
-		return false
-	}
-	// driver.ErrBadConn is database/sql's own signal that the connection died.
-	if errors.Is(err, driver.ErrBadConn) ||
-		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-	return containsAny(err.Error(),
-		"connection reset",
-		"connection refused",
-		"connection closed",
-		"broken pipe",
-		"no such host",
-		"unreachable",
-		"tls handshake",
-		"transport endpoint is not connected",
-		"server does not support",
-	)
-}
-
-// isMSSQLRetryable returns true if the error is transient and the operation
-// should be retried. Covers deadlocks, snapshot conflicts, timeouts, and
-// connection failures.
-//
-// Note for callers: a *retryable* error is not automatically a *safe-to-retry*
-// operation. Deadlocks and snapshot conflicts guarantee the transaction was
-// rolled back, so replaying it is sound. A timeout or a dropped connection
-// leaves the transaction's fate unknown -- the commit may have succeeded with
-// only the acknowledgement lost -- so replaying a non-idempotent statement can
-// double-apply it. See IMPROVEMENT-PLAN §2.26.
-func isMSSQLRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-	return isMSSQLDeadlock(err) ||
-		isMSSQLSnapshotError(err) ||
-		isMSSQLTimeout(err) ||
-		isMSSQLConnectionError(err)
-}
-
 // isMSSQLRollbackGuaranteed reports whether the error guarantees the server
 // rolled the transaction back, which is what makes an unconditional retry safe
 // even for non-idempotent work.
@@ -264,23 +184,6 @@ func isMSSQLRollbackGuaranteed(err error) bool {
 		return false
 	}
 	return isMSSQLDeadlock(err) || isMSSQLSnapshotError(err)
-}
-
-// mapMSSQLError maps a SQL Server error to a standard CleatError.
-// Deadlocks and transient errors -> ErrTransient (retryable).
-// Duplicate keys -> ErrCancelled (idempotent).
-// Other errors -> ErrPermanent.
-func mapMSSQLError(op, workflowID string, err error) error {
-	if err == nil {
-		return nil
-	}
-	if isMSSQLRetryable(err) {
-		return NewTransientError(op, workflowID, err)
-	}
-	if isMSSQLDuplicateKey(err) {
-		return NewCancelledError(op, workflowID, err)
-	}
-	return NewPermanentError(op, workflowID, err)
 }
 
 // MSSQLConnectionString builds a SQL Server connection string.

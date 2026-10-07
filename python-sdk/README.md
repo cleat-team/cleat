@@ -5,11 +5,13 @@ Python SDK for the [Cleat](https://github.com/cleat-team/cleat) durable executio
 ```python
 from cleat_sdk import HostCalls, cleat_entry
 
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, name: str) -> str:
     resp = h.cleat_call("greeter", "Greet", {"name": name})
     return resp
 ```
+
+`@cleat_entry("my_workflow")` names the workflow explicitly, and **the parenthesised form is the preferred one** — `cleat_entry`'s own comment in `cleat_sdk/entry.py` calls the bare `@cleat_entry` *legacy*. The bare form is still accepted: with no argument the decorator falls through to the function's own name, which is the same string this spelling passes. Every example below uses the parenthesised form.
 
 ## Installation
 
@@ -37,7 +39,7 @@ class GreetingRequest:
     name: str
     language: str = "en"
 
-@cleat_entry
+@cleat_entry("hello_workflow")
 def hello_workflow(h: HostCalls, request: GreetingRequest) -> str:
     h.cleat_log(f"Hello workflow started for {request.name}")
     response = h.cleat_call(
@@ -120,7 +122,7 @@ state that any caller can read via `GET /api/workflows/:id/query?key=X`.
 `print()` / `stdout` writes to the **host console** -- it is non-deterministic and **not** replayed. During replay, `print()` output will only appear if the workflow code actually executes (e.g., cached results skip execution entirely).
 
 ```python
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, name: str) -> str:
     # WRONG: stdout output is not deterministic, not visible in replay
     print(f"Processing {name}")
@@ -168,14 +170,14 @@ The `examples/` directory contains ready-to-run workflows:
 
 ```python
 # CORRECT: synchronous code
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, name: str) -> str:
     h.cleat_log(f"Processing {name}")
     result = h.cleat_call("service", "Op", {"name": name})
     return result
 
 # WRONG: async is not supported
-# @cleat_entry
+# @cleat_entry("my_workflow")
 # async def my_workflow(h: HostCalls, name: str) -> str:  ...  # won't work
 ```
 
@@ -210,7 +212,7 @@ def fetch_data(h: HostCalls, url: str) -> dict:
     response, status = h.cleat_fetch(url, "GET")
     return json.loads(response)
 
-@cleat_entry
+@cleat_entry("process_order")
 def process_order(h: HostCalls, order_id: str) -> dict:
     data = fetch_data(h, f"https://api.example.com/orders/{order_id}")
     h.cleat_sleep(5000)           # instead of asyncio.sleep(5)
@@ -388,7 +390,7 @@ The Virtual Object pattern models long-lived stateful entities that process sign
 ```python
 from cleat_sdk import HostCalls, cleat_entry
 
-@cleat_entry
+@cleat_entry("counter_entity")
 def counter_entity(h: HostCalls, instance_key: str) -> str:
     # Scope all state operations to this entity instance
     h.set_scope("counter", instance_key)
@@ -477,7 +479,7 @@ if found:
 Update handlers provide synchronous request-response for external clients:
 
 ```python
-@cleat_entry
+@cleat_entry("approval_workflow")
 def approval_workflow(h: HostCalls, input: str) -> str:
     # Register an "approve" update handler with validation
     def approve_handler(payload: str) -> str:
@@ -546,7 +548,7 @@ Cleat does **not** have an `all_handlers_finished` equivalent (found in Temporal
 1. **Manual handler counting** -- Track handler invocations with state keys:
 
 ```python
-@cleat_entry
+@cleat_entry("tracked_workflow")
 def tracked_workflow(h: HostCalls, input: str) -> str:
     pending_handlers = 0
 
@@ -565,7 +567,7 @@ def tracked_workflow(h: HostCalls, input: str) -> str:
 2. **Durable promises** -- External callers signal completion via promises:
 
 ```python
-@cleat_entry
+@cleat_entry("promise_tracked_workflow")
 def promise_tracked_workflow(h: HostCalls, input: str) -> str:
     promise_id = h.create_promise("all_handlers_done")
 
@@ -591,15 +593,15 @@ A single Python file can export multiple workflow entry points using `@cleat_ent
 ```python
 from cleat_sdk import HostCalls, cleat_entry
 
-@cleat_entry
+@cleat_entry("place_order")
 def place_order(h: HostCalls, input: str) -> str:
     return h.cleat_call("orders", "Place", input)
 
-@cleat_entry
+@cleat_entry("cancel_order")
 def cancel_order(h: HostCalls, input: str) -> str:
     return h.cleat_call("orders", "Cancel", input)
 
-@cleat_entry
+@cleat_entry("get_order_status")
 def get_order_status(h: HostCalls, input: str) -> str:
     return h.cleat_call("orders", "Status", input)
 ```
@@ -846,7 +848,7 @@ In-memory test harness for unit-testing workflows without a running host. Simula
 ```python
 from cleat_sdk import HostCalls, cleat_entry, CleatTestHarness
 
-@cleat_entry
+@cleat_entry("GreetWorkflow")
 def GreetWorkflow(h: HostCalls, name: str) -> str:
     h.cleat_log(f"Hello {name}")
     return h.cleat_call("greeter", "Greet", {"name": name})

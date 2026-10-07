@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
@@ -95,6 +96,10 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/scheduledbackup"
 	_ "github.com/cleat-team/cleat/plugins/scheduler"
 	_ "github.com/cleat-team/cleat/plugins/slacknotify"
+	// WS-1's addition, per WORKSTREAM.md: leaving this unwired is a plugin
+	// that exists but never runs, worse than the cross-stream edit.
+	// cleat#2534.
+	_ "github.com/cleat-team/cleat/plugins/tenantlifecycle"
 	_ "github.com/cleat-team/cleat/plugins/tenantquota"
 	_ "github.com/cleat-team/cleat/plugins/webhookingest"
 	//
@@ -895,6 +900,16 @@ func main() {
 		shardDBs := make([]*sql.DB, len(configs))
 		shardPoolCount = len(configs)
 		shardFactories := make([]engine.StoreFactory, 0, len(configs))
+		// cleat#2195: one reserved heartbeat pool PER SHARD, built through
+		// that shard's own PostgresStoreFactory exactly as #2192's non-sharded
+		// arms build theirs -- see the construction loop below and the
+		// ShardedStore wrap-up after it.
+		var heartbeatStores []engine.WorkflowStore
+		var heartbeatClosers []func() error
+		if *heartbeatMaxConnections > 0 {
+			heartbeatStores = make([]engine.WorkflowStore, len(configs))
+			heartbeatClosers = make([]func() error, len(configs))
+		}
 		for i, cfg := range configs {
 			dsn := cfg.ConnStr
 			if cfg.Schema != "" && cfg.Schema != "public" && !strings.Contains(dsn, "search_path=") {
@@ -920,6 +935,14 @@ func main() {
 
 			shardDBs[i] = sdb
 			f := engine.NewPostgresStoreFactory(sdb, cfg.Schema)
+			// WithDSN is required by OpenIsolatedStore below (cleat#2195): it
+			// opens its own pool on this DSN rather than reusing sdb, and
+			// refuses without one rather than silently falling back to the
+			// shared execution pool, which would defeat the whole point of a
+			// reserved heartbeat pool. dsn, not cfg.ConnStr: it already has
+			// the schema's search_path appended above, matching what sdb
+			// itself connects with.
+			f.WithDSN(dsn)
 			f.WithLogger(logger)
 			if payloadEncryption != nil {
 				f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
@@ -933,6 +956,23 @@ func main() {
 			}
 			stores[i] = s
 			closers[i] = closer.Close
+
+			// Reserved heartbeat pool for THIS shard, same reasoning #2192 gives
+			// for the non-sharded arms: built through f (this shard's own
+			// factory), so it gets the same database, schema and connector
+			// settings as this shard's execution store -- never a bare
+			// sql.Open, which is exactly what sent #2192's first MySQL version
+			// at the wrong database.
+			if *heartbeatMaxConnections > 0 {
+				hs, hcloser, err := f.OpenIsolatedStore(ctx, defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					sdb.Close()
+					logger.ErrorContext(context.Background(), "shard heartbeat pool open failed", "worker_id", workerID, "shard", cfg.Name, "error", err)
+					os.Exit(1)
+				}
+				heartbeatStores[i] = hs
+				heartbeatClosers[i] = hcloser.Close
+			}
 		}
 
 		shardedStore, err := engine.NewShardedStore(configs, stores, closers)
@@ -941,6 +981,23 @@ func main() {
 			os.Exit(1)
 		}
 		store = shardedStore
+
+		// Wrapped in a SECOND ShardedStore built from the SAME configs, in the
+		// SAME order, as the execution one above. getShard's routing
+		// (engine/sharded_store.go) is a pure function of the workflow ID and
+		// len(shards) -- same configs, same order, same shard count means
+		// identical routing, so a heartbeat for a workflow on shard N lands on
+		// shard N's own reserved pool rather than some other shard's.
+		if *heartbeatMaxConnections > 0 {
+			heartbeatShardedStore, err := engine.NewShardedStore(configs, heartbeatStores, heartbeatClosers)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "failed to create sharded heartbeat store", "worker_id", workerID, "error", err)
+				os.Exit(1)
+			}
+			heartbeatStore = heartbeatShardedStore
+			defer heartbeatShardedStore.Close()
+			logger.InfoContext(context.Background(), "sharded heartbeat DB pools configured", "worker_id", workerID, "shards", len(configs), "max_connections_per_shard", *heartbeatMaxConnections)
+		}
 
 		// Span every shard, not just the first. This used to be `factory = f`
 		// under `if i == 0`, which was harmless while the factory was only used
@@ -970,12 +1027,11 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
-		// heartbeatStore is intentionally left nil here. cleat#2009's reserved
-		// heartbeat pool is not wired for the sharded path: HeartbeatBatchFenced
-		// would need to run per-shard, against each shard's own connection
-		// pool, and no shard-aware heartbeat routing exists yet. Every shard
-		// falls back to heartbeating through its own store, same as before
-		// this change -- a known scope limit, not a silent gap.
+		// heartbeatStore (above, inside the per-shard loop) is now wired for
+		// the sharded path too -- cleat#2195, closing the scope limit #2009's
+		// comment used to record here. With --heartbeat-max-connections=0 it
+		// stays nil and every shard falls back to heartbeating through its own
+		// execution store, same as before.
 		// Start idempotency key cleanup on each shard. Sharding is a
 		// PostgreSQL configuration -- shardDBs come from the postgres
 		// connection strings above -- so the driver is named explicitly rather
@@ -1400,6 +1456,51 @@ func main() {
 		logger.Info("service endpoints registered", "services", strings.Join(names, ","))
 	}
 
+	// cleat#1984. Parsed and validated at boot, same reasoning as
+	// --service-endpoints above: a malformed or wired-to-nothing lookup is a
+	// configuration mistake, and the moment to report one is startup, not the
+	// first ambiguity a crash produces, possibly days later.
+	ambiguityLookup, alErr := parseAmbiguityLookup(*ambiguityLookupFlag)
+	if alErr != nil {
+		logger.Error("--ambiguity-lookup is not usable", "error", alErr)
+		os.Exit(1)
+	}
+	if len(ambiguityLookup) > 0 {
+		if err := validateAmbiguityLookupOps(ambiguityLookup, parseWriteAheadIntentOps(writeAheadIntentOps)); err != nil {
+			logger.Error("--ambiguity-lookup is not usable", "error", err)
+			os.Exit(1)
+		}
+		keys := make([]string, 0, len(ambiguityLookup))
+		for k := range ambiguityLookup {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		logger.Info("ambiguity lookups registered", "operations", strings.Join(keys, ","))
+	}
+
+	// cleat#2897, decision (c) on cleat#1984. Same boot-time reasoning as
+	// --ambiguity-lookup above, plus a second validation that the two
+	// mechanisms were not both configured for one operation (see
+	// validateIdempotencyKeyOps's doc comment for why that is refused rather
+	// than given a silent precedence).
+	idempotencyKeyOps, ikErr := parseIdempotencyKeyOps(*idempotencyKeyOpsFlag)
+	if ikErr != nil {
+		logger.Error("--idempotency-key-ops is not usable", "error", ikErr)
+		os.Exit(1)
+	}
+	if len(idempotencyKeyOps) > 0 {
+		if err := validateIdempotencyKeyOps(idempotencyKeyOps, ambiguityLookup, parseWriteAheadIntentOps(writeAheadIntentOps)); err != nil {
+			logger.Error("--idempotency-key-ops is not usable", "error", err)
+			os.Exit(1)
+		}
+		keys := make([]string, 0, len(idempotencyKeyOps))
+		for k := range idempotencyKeyOps {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		logger.Info("idempotency-key replay registered", "operations", strings.Join(keys, ","), "retention", idempotencyKeyRetention.String())
+	}
+
 	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
 
 	// cleat#1565: egress needs BOTH the operator's permission and the
@@ -1427,6 +1528,31 @@ func main() {
 	authResolver, arErr := auth.NewTenantStoreForDialect(db, *driver)
 	if arErr != nil {
 		logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
+		os.Exit(1)
+	}
+
+	// WS-4's addition to WS-3's file, declared as WORKSTREAM.md asks: leaving
+	// this unwired is worse than the cross-stream edit. The credential exists
+	// (migrations/{postgres/010,mysql/008,mssql/009}_operator_api_keys.sql, and
+	// `cleatctl operator-key create` mints one), so a worker that could not
+	// authenticate one would ship a credential nothing accepts.
+	//
+	// ON `db`, the same connection authResolver was just built on, and for the
+	// reason spelled out at the auth.MiddlewareWithMux call site below: operator
+	// keys live in the base database the DSN names, and on MySQL a tenant-scoped
+	// pool is a different database entirely. Built on `store` -- which is
+	// factory.OpenStore(ctx, defaultTenantID, ...) -- every operator key would
+	// 401 on MySQL while its row sat in the base database. cleat#866 for the
+	// tenant keys, and the same shape here.
+	//
+	// The dialect is the same *driver value authResolver was handed, so this
+	// cannot fail where that did not. It is still checked rather than ignored:
+	// `operatorResolver, _ :=` would put a nil resolver on the request path and
+	// turn a startup error into a panic on the first operator request, and a
+	// future split (a different driver here, say) would be silent.
+	operatorResolver, orErr := auth.NewOperatorStoreForDialect(db, *driver)
+	if orErr != nil {
+		logger.ErrorContext(context.Background(), "cannot build the operator key resolver, so no operator key could be authenticated", "worker_id", workerID, "error", orErr)
 		os.Exit(1)
 	}
 
@@ -1469,6 +1595,16 @@ func main() {
 		RevokeExpiredOAuthAPIKeys: func(ctx context.Context) (int64, error) {
 			return authResolver.RevokeExpiredOAuthAPIKeys(ctx)
 		},
+		// WS-1's addition to WS-3's file, same declaration WORKSTREAM.md asks
+		// for and the same reason as the two grants above: plugins/
+		// tenantlifecycle's trial-expiry sweep cannot reach admin.tenants
+		// itself (a plugin's cross-tenant statement runs as cleat_sweep,
+		// which holds no privilege on that table), so the write goes through
+		// the host's own connection, the same authResolver already built for
+		// HostResolver. cleat#2534.
+		SetTenantSuspended: func(ctx context.Context, tenantID uuid.UUID, suspended bool) error {
+			return authResolver.SetTenantSuspended(ctx, tenantID, suspended)
+		},
 		Done:       ctx.Done(),
 		Dialect:    plugin.Dialect(factory.Dialect()),
 		EventsLost: pluginEventsLostHook(metricsInstance),
@@ -1502,7 +1638,7 @@ func main() {
 	// Run core schema migrations before plugin migrations.
 	//
 	// On a separate connection when --migrate-db is set: --db may be an
-	// unprivileged role (see migrations/postgres/005_app_role.sql), which is
+	// unprivileged role (cleat_app), which is
 	// what makes it subject to row-level security, and such a role cannot
 	// run DDL. Falls back to db so an unsplit deployment behaves as before.
 	migrateDB := db
@@ -1601,6 +1737,20 @@ func main() {
 		os.Exit(0)
 	}
 
+	// cleat#2324: now that the schema is current (migrated or verified
+	// above), ask whether this database has ever had payload encryption
+	// configured, and refuse to proceed if this worker has no key ring --
+	// see checkPayloadEncryptionState's doc comment. Placed AFTER the
+	// migrate-or-verify block on purpose: payload_encryption_ever_enabled is
+	// itself a migration (008), so checking before the schema is confirmed
+	// current would refuse a worker on a legitimately-out-of-date database
+	// for the wrong reason, and a --migrate-only job -- which never reaches
+	// here -- has no key ring to be keyless about.
+	if err := checkPayloadEncryptionState(ctx, store, payloadEncryption); err != nil {
+		logger.ErrorContext(context.Background(), err.Error(), "worker_id", workerID)
+		os.Exit(1)
+	}
+
 	// Publish this worker's secret keys and run the secrets startup check, as
 	// ONE span under the shared secret-key gate, now that the schema is current.
 	//
@@ -1622,6 +1772,7 @@ func main() {
 	if err := registerWithKeyCheck(ctx, workerRegistry, secretStore, engine.WorkerRegistration{
 		WorkerID:         workerID,
 		Hostname:         hostnameOrEmpty(),
+		Address:          podAddress(hostnameOrEmpty(), *workerServiceName),
 		PID:              os.Getpid(),
 		Concurrency:      *concurrency,
 		ConnectionBudget: *clusterConnectionBudgetFlag,
@@ -2007,11 +2158,16 @@ func main() {
 	if *migrateDBURL != "" {
 		budget.Migrate = migratePoolMaxConns
 	}
-	// --heartbeat-max-connections has no effect on a sharded deployment yet
-	// (see its flag doc), so counting it there would charge the budget for a
-	// pool that was never opened.
-	if *heartbeatMaxConnections > 0 && *shardsFile == "" {
-		budget.Heartbeat = *heartbeatMaxConnections
+	// cleat#2195: a sharded deployment now opens one reserved heartbeat pool
+	// PER SHARD, so the term is shardPoolCount * the per-shard ceiling here --
+	// the same shape as budget.Shards two lines up -- rather than the single
+	// pool the non-sharded arms open.
+	if *heartbeatMaxConnections > 0 {
+		if *shardsFile != "" {
+			budget.Heartbeat = shardPoolCount * *heartbeatMaxConnections
+		} else {
+			budget.Heartbeat = *heartbeatMaxConnections
+		}
 	}
 	// WHO ACTUALLY HAS A POOL PER TENANT, asked rather than assumed.
 	//
@@ -2134,10 +2290,14 @@ func main() {
 		flushRetryWindow:                 *flushRetryWindow,
 		privateHosts:                     pluginPrivateHosts,
 		serviceEndpoints:                 serviceEndpoints,
+		ambiguityLookup:                  ambiguityLookup,
+		idempotencyKeyOps:                idempotencyKeyOps,
+		idempotencyKeyRetention:          *idempotencyKeyRetention,
 		egressAllow:                      egressAllow,
 		secrets:                          secretStore,
 		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
+		internalAuthSecret:               os.Getenv("CLEAT_INTERNAL_AUTH_KEY"),
 		connectionShare:                  share,
 		connectionBudgetParts:            budget,
 		clusterConnectionBudget:          *clusterConnectionBudgetFlag,
@@ -2351,11 +2511,6 @@ func main() {
 			// writer put the key in the base database, and the API
 			// answered 401 to every request with no key that could work.
 			// cleat#866.
-			authResolver, arErr := auth.NewTenantStoreForDialect(db, *driver)
-			if arErr != nil {
-				logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
-				os.Exit(1)
-			}
 			//
 			// HOST BINDING GOES ON FIRST, so that after auth.MiddlewareWithMux wraps
 			// it below the order is auth OUTSIDE, host binding INSIDE.
@@ -2377,6 +2532,26 @@ func main() {
 			}
 
 			handler = auth.MiddlewareWithMux(authResolver, true, mux, pluginAuthExemptPatterns...)(handler)
+
+			// WS-4's addition to WS-3's file, declared as WORKSTREAM.md asks:
+			// leaving this unwired is worse than the cross-stream edit, because
+			// an operator key that no middleware recognises is a credential the
+			// operator can mint, copy and present, and that is answered "invalid
+			// or revoked API key" on every route. cleat#2169.
+			//
+			// OUTERMOST, and applied after the line above so that it is. It has
+			// to be outside auth.MiddlewareWithMux: that one resolves the key
+			// against admin.tenant_api_keys and 401s everything else, so an
+			// operator key would be refused as a bad TENANT key before anything
+			// could tell it apart. Being outside also keeps an operator request
+			// out of HostBindingMiddlewareWithMux -- correct rather than
+			// incidental, since host binding stops one tenant's key being used
+			// against another tenant's domain and an operator has no domain.
+			//
+			// Installed with the rest of the auth chain, under --require-auth:
+			// with authentication off nothing is gated, so there is no decision
+			// for this to make.
+			handler = auth.OperatorMiddleware(operatorResolver)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//
@@ -2457,8 +2632,11 @@ func main() {
 			handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
 		}
 
+		// No Addr field: this server is bound by the explicit net.Listen
+		// below, not by srv.ListenAndServe, so an Addr here would be read by
+		// nothing and would put *apiAddr in two places with only one of them
+		// honoured (cleat#3136).
 		srv := &http.Server{
-			Addr:         *apiAddr,
 			Handler:      handler,
 			ReadTimeout:  *httpReadTimeout,
 			WriteTimeout: *httpWriteTimeout,
@@ -2466,8 +2644,28 @@ func main() {
 		}
 		go func() {
 			defer recoverBackgroundGoroutine(logger, workerID, "http-api-listener")
-			logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", workerID, "addr", *apiAddr)
-			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			// Listen explicitly, then Serve on the listener, so the log can
+			// report the address the socket ACTUALLY bound rather than the one
+			// that was configured. srv.ListenAndServe did the listen
+			// internally, so `--api-addr ":0"` logged `addr=:0` -- not an
+			// address any caller can connect to, while the kernel had already
+			// chosen the real port and the only record of it was a socket
+			// nobody read. A caller that asks for an ephemeral port needs to
+			// read the bound one back, and this is where it is published: the
+			// quick-start tests (cleat#3131) can then start the worker on ":0"
+			// and stop pre-choosing a number, which is the race they had.
+			//
+			// This is a behaviour change to a working path in WS-3's zone
+			// (cmd/cleat-worker/, WORKSTREAM.md), so it was requested from
+			// WS-3 rather than taken under the "unwired mechanism" exception,
+			// and recorded on cleat#3136.
+			ln, err := net.Listen("tcp", *apiAddr)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "HTTP server listen error", "worker_id", workerID, "addr", *apiAddr, "error", err)
+				return
+			}
+			logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", workerID, "addr", ln.Addr().String())
+			if err := srv.Serve(ln); err != http.ErrServerClosed {
 				logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", workerID, "error", err)
 			}
 		}()
@@ -2482,7 +2680,6 @@ func main() {
 	if *pprofAddr != "" {
 		go func() {
 			defer recoverBackgroundGoroutine(logger, workerID, "pprof-listener")
-			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
 			// An explicit Server rather than http.ListenAndServe, for the
 			// ReadHeaderTimeout (gosec G114/G112): the convenience function
 			// cannot set one, so a client that opens a connection and sends
@@ -2495,13 +2692,69 @@ func main() {
 			// the API server above is built with its own mux, so profiling
 			// endpoints are not reachable there. Worth keeping that way --
 			// a heap profile from this process contains workflow payloads.
+			//
+			// No Addr field, and net.Listen before Serve: with ListenAndServe
+			// the bind happened internally, so `--pprof-addr ":0"` logged
+			// `addr=:0` -- an address no caller can connect to -- while the
+			// kernel had already chosen the real port. Same defect cleat#3136
+			// fixed for the API listener (cleat#3139).
 			pprofSrv := &http.Server{
-				Addr:              *pprofAddr,
 				ReadHeaderTimeout: 10 * time.Second,
 			}
-			if err := pprofSrv.ListenAndServe(); err != nil {
+			ln, err := net.Listen("tcp", *pprofAddr)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "pprof server listen error", "worker_id", workerID, "addr", *pprofAddr, "error", err)
+				return
+			}
+			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", ln.Addr().String())
+			if err := pprofSrv.Serve(ln); err != nil {
 				logger.ErrorContext(context.Background(), "pprof server error", "worker_id", workerID, "error", err)
 			}
+		}()
+	}
+
+	// Start the internal-holds listener for cleat#2196's reaper-to-worker
+	// veto channel. Shaped like --pprof-addr above: its own opt-in address,
+	// off by default, never on the API port and never in k8s/service.yaml
+	// or the Helm chart's Service. Unlike pprof, it IS wired into graceful
+	// shutdown (the api-addr pattern above, not the pprof one) -- a reaper
+	// mid-query during a rolling restart should see a clean connection
+	// close rather than an abrupt reset, and (unlike the API server) there
+	// is no in-flight work for this listener to wait on, so it can shut
+	// down the moment ctx is cancelled rather than needing --shutdown-grace.
+	if *internalAddr != "" {
+		// Read from the Worker rather than the environment a second time: the
+		// reaper's half of this channel (cleat#2196 step 4) needs the same
+		// secret to ASK with, on a worker that may never serve this listener,
+		// and one read means the two halves cannot be configured to disagree.
+		internalSecret := w.internalAuthSecret
+		if internalSecret == "" {
+			logger.ErrorContext(context.Background(), "--internal-addr is set but CLEAT_INTERNAL_AUTH_KEY is not -- "+
+				"the internal holds listener would authenticate no caller at all, which is worse than not starting it",
+				"worker_id", workerID)
+			os.Exit(1)
+		}
+		internalSrv := newInternalHoldsServer(internalSecret, w)
+		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "internal-holds-listener")
+			// net.Listen before Serve so the log names the BOUND address rather
+			// than the configured one: `--internal-addr ":0"` would otherwise
+			// log `addr=:0`, which no caller can connect to (cleat#3139, same
+			// defect cleat#3136 fixed for the API listener).
+			ln, err := net.Listen("tcp", *internalAddr)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "internal holds listen error", "worker_id", workerID, "addr", *internalAddr, "error", err)
+				return
+			}
+			logger.InfoContext(context.Background(), "internal holds listening", "worker_id", workerID, "addr", ln.Addr().String())
+			if err := internalSrv.Serve(ln); err != http.ErrServerClosed {
+				logger.ErrorContext(context.Background(), "internal holds server error", "worker_id", workerID, "error", err)
+			}
+		}()
+		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "internal-holds-shutdown")
+			<-ctx.Done()
+			internalSrv.Shutdown(context.Background())
 		}()
 	}
 

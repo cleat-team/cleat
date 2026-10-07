@@ -1,6 +1,6 @@
 [package]
 name = "cleat-sdk"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 description = "Rust SDK for cleat durable execution framework — WASM host call bindings"
 publish = false

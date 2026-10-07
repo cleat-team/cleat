@@ -44,9 +44,10 @@ func TestJavaExampleEntryPointResolutionLive(t *testing.T) {
 	}
 
 	outDir := t.TempDir()
-	buildCmd := exec.Command(cleatBinary, "build", "--target", "java", "-o", outDir, javaDir)
-	buildCmd.Dir = repoRoot
-	if out, buildErr := buildCmd.CombinedOutput(); buildErr != nil {
+	// javaBuild fails with the cause named when the Gradle wrapper could not
+	// fetch its distribution; without that, a 502 in CI fails this test for a
+	// reason that has nothing to do with entry-point resolution. cleat#3039.
+	if out, buildErr := javaBuild(t, repoRoot, javaDir, outDir); buildErr != nil {
 		t.Fatalf("cleat build --target java: %v\n%s", buildErr, out)
 	}
 

@@ -217,7 +217,7 @@ func TestDeadLetteringDoesNotDependOnTheGuestsWording(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var sawDLQ, sawFail bool
 			ms := &mockStore{}
-			ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string) error {
+			ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 				sawDLQ = true
 				return nil
 			}
@@ -227,7 +227,7 @@ func TestDeadLetteringDoesNotDependOnTheGuestsWording(t *testing.T) {
 			}
 			w := newTestWorker(ms)
 
-			w.recordTerminalFailureWithHistory(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "", tc.history)
+			w.recordTerminalFailureWithHistory(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "", tc.history, nil)
 
 			if sawDLQ != tc.wantDLQ || sawFail == tc.wantDLQ {
 				t.Errorf("routing for %q: dead-letter=%v fail=%v, want dead-letter=%v fail=%v\n  %s",
@@ -259,7 +259,7 @@ func TestTheSameHistoryRoutesTheSameWayWhateverTheGuestSaid(t *testing.T) {
 	for i, msg := range messages {
 		var sawDLQ bool
 		ms := &mockStore{}
-		ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string) error {
+		ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 			sawDLQ = true
 			return nil
 		}
@@ -267,7 +267,7 @@ func TestTheSameHistoryRoutesTheSameWayWhateverTheGuestSaid(t *testing.T) {
 			return nil
 		}
 		w := newTestWorker(ms)
-		w.recordTerminalFailureWithHistory(testInstance("wording-wf"), time.Now(), msg, "", "", history)
+		w.recordTerminalFailureWithHistory(testInstance("wording-wf"), time.Now(), msg, "", "", history, nil)
 
 		if i == 0 {
 			first = sawDLQ
@@ -305,7 +305,7 @@ func TestTheLimitOfWhatPositionCanTell(t *testing.T) {
 
 	var sawDLQ bool
 	ms := &mockStore{}
-	ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string) error {
+	ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 		sawDLQ = true
 		return nil
 	}
@@ -316,7 +316,7 @@ func TestTheLimitOfWhatPositionCanTell(t *testing.T) {
 
 	// The guest caught the exhaustion and failed on its own logic instead.
 	w.recordTerminalFailureWithHistory(testInstance("caught-then-failed"), time.Now(),
-		"validation failed: customer id must be numeric", "", "", history)
+		"validation failed: customer id must be numeric", "", "", history, nil)
 
 	if !sawDLQ {
 		t.Error("this case is dead-lettered ON PURPOSE. It is indistinguishable from a run " +
@@ -349,7 +349,7 @@ func TestAPanicIsNeverDeadLettered(t *testing.T) {
 			var sawDLQ, sawFail bool
 			var gotCode, gotOp string
 			ms := &mockStore{}
-			ms.moveToDeadLetterQueueFn = func(_ context.Context, _, _ string, _ int64, _, _, _ string) error {
+			ms.moveToDeadLetterQueueFn = func(_ context.Context, _, _ string, _ int64, _, _, _ string, _ map[string]string) error {
 				sawDLQ = true
 				return nil
 			}
@@ -418,7 +418,7 @@ func TestRecordTerminalFailureWithHistory_NotifiesTerminal(t *testing.T) {
 	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
 
 	wf := testInstance("notify-on-fail-wf")
-	w.recordTerminalFailureWithHistory(wf, time.Now(), "boom", engine.ErrUnknown.String(), "", nil)
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "boom", engine.ErrUnknown.String(), "", nil, nil)
 
 	select {
 	case <-w.parentWakeCh:
@@ -442,7 +442,7 @@ func TestRecordTerminalFailureWithHistory_NotifiesTerminal(t *testing.T) {
 // task_queue's own third status exists to remove. cleat#1976.
 func TestRecordTerminalFailureWithHistory_DeadLetteredNotifiesDistinctly(t *testing.T) {
 	ms := &mockStore{}
-	ms.moveToDeadLetterQueueFn = func(context.Context, string, string, int64, string, string, string) error {
+	ms.moveToDeadLetterQueueFn = func(context.Context, string, string, int64, string, string, string, map[string]string) error {
 		return nil
 	}
 	w := newTestWorker(ms)
@@ -455,7 +455,7 @@ func TestRecordTerminalFailureWithHistory_DeadLetteredNotifiesDistinctly(t *test
 		Err: "retries exhausted", RetriesExhausted: true,
 	}}
 	wf := testInstance("notify-dlq-wf")
-	w.recordTerminalFailureWithHistory(wf, time.Now(), "retries exhausted", "", "", history)
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "retries exhausted", "", "", history, nil)
 
 	if len(obs.calls) != 1 {
 		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
@@ -500,6 +500,65 @@ func TestReleaseOrFail_NotifiesTerminal(t *testing.T) {
 	}
 	if samples := failedTotalFor(t, w, defName); len(samples) == 0 {
 		t.Error("a panic-terminated workflow was not counted in cleat_workflows_failed_total")
+	}
+}
+
+// TestRecordTerminalFailureWithHistory_PublishesQueryStateToFailWorkflow is
+// cleat#2520's FailWorkflow half: the failing replay's own queryState (what
+// eng.Replay returned before the caller decided this run had failed) must
+// reach the store, not the nil this call site used to pass while the value
+// sat in scope three frames up. See TestRecordTerminalFailureWithHistory_
+// PublishesQueryStateToDeadLetterQueue below for the sibling that goes
+// through MoveToDeadLetterQueue instead -- cleat#2650, filed because fixing
+// this half left that one exactly where it started.
+func TestRecordTerminalFailureWithHistory_PublishesQueryStateToFailWorkflow(t *testing.T) {
+	var gotQueryState map[string]string
+	ms := &mockStore{}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+		gotQueryState = queryState
+		return nil
+	}
+	w := newTestWorker(ms)
+
+	wantQueryState := map[string]string{"phase": "charging"}
+	w.recordTerminalFailureWithHistory(testInstance("publishes-query-state-wf"), time.Now(),
+		"boom", engine.ErrUnknown.String(), "", nil, wantQueryState)
+
+	if len(gotQueryState) != len(wantQueryState) || gotQueryState["phase"] != "charging" {
+		t.Errorf("FailWorkflow received queryState=%v, want %v -- a failed run's published "+
+			"state was dropped on the way to the store", gotQueryState, wantQueryState)
+	}
+}
+
+// TestRecordTerminalFailureWithHistory_PublishesQueryStateToDeadLetterQueue is
+// cleat#2650: the DLQ twin of the test above. A run that exhausts its retries
+// on the very segment that published new query state must not lose that
+// state on the way to MoveToDeadLetterQueue -- no earlier segment finalized
+// successfully, so nothing else in the system ever persists it. Before this
+// fix, MoveToDeadLetterQueue's own UPDATE had no query_state clause at all,
+// so this value reached writeTerminalFailure's scope (once cleat#2520 fixed
+// the executor to stop returning nil there) and was then silently dropped one
+// call further on.
+func TestRecordTerminalFailureWithHistory_PublishesQueryStateToDeadLetterQueue(t *testing.T) {
+	var gotQueryState map[string]string
+	ms := &mockStore{}
+	ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+		gotQueryState = queryState
+		return nil
+	}
+	w := newTestWorker(ms)
+
+	history := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted", RetriesExhausted: true,
+	}}
+	wantQueryState := map[string]string{"phase": "charging"}
+	w.recordTerminalFailureWithHistory(testInstance("publishes-query-state-dlq-wf"), time.Now(),
+		"retries exhausted", "", "", history, wantQueryState)
+
+	if len(gotQueryState) != len(wantQueryState) || gotQueryState["phase"] != "charging" {
+		t.Errorf("MoveToDeadLetterQueue received queryState=%v, want %v -- the final failing "+
+			"replay's own published state was dropped on the way to the store", gotQueryState, wantQueryState)
 	}
 }
 

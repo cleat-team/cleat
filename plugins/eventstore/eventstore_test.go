@@ -105,12 +105,12 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 }
 
 // execAppend handles insertEvent (queries.go): a plain INSERT with the
-// caller-computed sequence as an argument, not a RETURNING/OUTPUT clause --
-// see queries.go's comment on why handleAppend now reads the next sequence
-// in its own statement (queryMaxSeq below) rather than a subquery of this
-// INSERT. Returns a duplicate-key-shaped error, matching isPKConflict's own
-// substring check, if the (tenant, stream, sequence) triple already exists
-// -- the same race handleAppend's retry loop exists to recover from.
+// sequence appendOnce claimed from event_stream_head (queryUpsertStreamHead
+// below) as an argument, not a RETURNING/OUTPUT clause. Still returns a
+// duplicate-key-shaped error if the (tenant, stream, sequence) triple
+// already exists, though cleat#2268's per-stream serialization means
+// nothing in production should reach it anymore -- kept as a defensive
+// simulation, not because any current caller retries on it.
 func (c *fakeConn) execAppend(args []driver.NamedValue) (driver.Result, error) {
 	if c.store.failOnAppend {
 		return nil, fmt.Errorf("fakeConn: simulated append failure")
@@ -161,10 +161,17 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "COALESCE(MAX(sequence)"):
+	case strings.Contains(query, "event_stream_head"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
-		return c.queryMaxSeq(args)
+		return c.queryUpsertStreamHead(args)
+	case strings.Contains(query, "COALESCE(MAX(sequence)"):
+		// handleSSE's own inline initial-position query (routes.go) --
+		// distinct from upsertStreamHead above despite the similar shape;
+		// this one is a plain read, never a write.
+		c.store.mu.RLock()
+		defer c.store.mu.RUnlock()
+		return c.querySSEInitialSeq(args)
 	case strings.Contains(query, "event, created_at"):
 		// Read events query: SELECT sequence, event, created_at ...
 		c.store.mu.RLock()
@@ -201,7 +208,46 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	}, nil
 }
 
-func (c *fakeConn) queryMaxSeq(args []driver.NamedValue) (driver.Rows, error) {
+// queryUpsertStreamHead handles upsertStreamHead (queries.go): the fake
+// dialect is "" (zero value), which plugin.Query.For falls back to Default
+// for, so this always sees the Postgres-shaped
+// "INSERT ... ON CONFLICT ... RETURNING head_sequence" text. It needs no
+// separate table in this fake: computing the current max and adding one
+// reproduces the same external behavior as a real head-counter table
+// (cleat#2268) without modeling its own concurrency, which the real
+// dialect-backed tests (not this fake) exercise.
+func (c *fakeConn) queryUpsertStreamHead(args []driver.NamedValue) (driver.Rows, error) {
+	tidStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(tidStr)
+	if err != nil {
+		return nil, err
+	}
+	streamID, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	var maxSeq int64
+	for _, e := range c.store.events {
+		if e.tenantID == tid && e.streamID == streamID && e.sequence > maxSeq {
+			maxSeq = e.sequence
+		}
+	}
+
+	return &fakeRows{
+		columns: []string{"head_sequence"},
+		data:    [][]driver.Value{{maxSeq + 1}},
+	}, nil
+}
+
+// querySSEInitialSeq handles handleSSE's own inline
+// "SELECT COALESCE(MAX(sequence), 0) ..." query (routes.go) -- a plain read
+// of the current max, independent of event_stream_head and unaffected by
+// cleat#2268.
+func (c *fakeConn) querySSEInitialSeq(args []driver.NamedValue) (driver.Rows, error) {
 	tidStr, err := argString(args, 1)
 	if err != nil {
 		return nil, err

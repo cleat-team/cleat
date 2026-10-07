@@ -69,6 +69,14 @@ var unrestrictedSubcommands = map[string]string{
 	// through d.rebind, asserted directly by TestQuotaStatementsRebindPerDialect.
 	"quota": "ported to all three; tenant_quota is control-plane like tenant_settings (plugins read one shared env.DB, no per-tenant MySQL routing), and every statement goes through d.rebind (cleat#2046)",
 
+	// tenant_trials is tenantlifecycle's own table, same shape as tenant_quota
+	// above: one shared env.DB, no per-tenant MySQL routing, and
+	// runSetTenantTrial's read-then-write (settenanttrial.go) is plain
+	// portable SQL through d.rebindArgs -- no dialect-specific upsert syntax,
+	// which is exactly what tripped TestEveryInlineStatementParsesOnPostgres
+	// on the first version of this command. cleat#2534.
+	"set-tenant-trial": "ported to all three; tenant_trials is control-plane like tenant_quota, and every statement goes through d.rebindArgs",
+
 	// All three, and the SQL is not this package's: it calls auditlog.VerifyChain and
 	// auditlog.ChainedTenants, whose statements carry a per-dialect arm each and are
 	// exercised on PostgreSQL, MySQL and SQL Server by plugins/auditlog's
@@ -84,6 +92,18 @@ var unrestrictedSubcommands = map[string]string{
 	// per-tenant-database question to get wrong.
 	"set-deployment-secret":    "ported to all three; deployment_secrets has no tenant dimension, same reasoning as set-secret (cleat#1992 part 1)",
 	"retire-deployment-secret": "ported to all three; deployment_secrets has no tenant dimension, same reasoning as retire-secret (cleat#1992 part 1)",
+
+	// All three, and this one is exactly the case this map's neighbourhood
+	// describes: an operator key lives in a table MySQL writes BARE -- there is
+	// no admin schema there, migrations/mysql/008_operator_api_keys.sql says why
+	// -- which is the same difference that makes revoke-api-key postgres-only in
+	// portedOn above. What makes all three work here is that the SQL is not
+	// cleatctl's: every statement carries a per-dialect arm in
+	// auth/operator_store.go (resolveOperatorStmt, createOperatorStmt,
+	// listOperatorStmt, revokeOperatorStmt), and the command calls those rather
+	// than issuing its own -- which is also what keeps
+	// auth.TenantStore.RevokeAPIKey's defect from recurring. cleat#2169.
+	"operator-key": "ported to all three; auth/operator_store.go carries a per-dialect arm for every statement, so the missing admin schema on MySQL is answered there (cleat#2169)",
 }
 
 // Every subcommand main.go dispatches declares the dialects it runs on.

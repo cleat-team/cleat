@@ -20,7 +20,7 @@ Use cases include:
   retry budget is exhausted
 
 Cleat exposes the `cleat.HostCalls.AwaitSignals` method to wait for one or
-more signals, optionally with a timeout.
+more signals, with a timeout.
 
 ## Signal mechanics
 
@@ -87,16 +87,25 @@ func submitExpense(h cleat.HostCalls, input ReportInput) (string, error) {
     // Wait for a human to send an "approval" signal.
     h.DurableLog("waiting for human approval")
 
-    var status ApprovalStatus
-    err := h.AwaitSignals("approval",
-        cleat.WithTimeout(72*time.Hour),
-        cleat.WithSignalPayload(&status),
-    )
-    if err != nil {
-        // Timeout or error during signal wait.
+    res := h.AwaitSignals([]string{"approval"}, 72*time.Hour)
+    if res.Err != nil {
+        // A failure while waiting -- distinct from the wait expiring.
+        h.SetQueryState("status", "escalated")
+        h.DurableLog("approval wait failed, escalating")
+        return "", fmt.Errorf("approval wait failed for %s: %w", reportID, res.Err)
+    }
+    if res.TimedOut {
+        // No decision within the window.
         h.SetQueryState("status", "escalated")
         h.DurableLog("approval timed out, escalating")
-        return "", fmt.Errorf("approval timeout for %s: %w", reportID, err)
+        return "", fmt.Errorf("approval timeout for %s", reportID)
+    }
+
+    var status ApprovalStatus
+    if err := json.Unmarshal([]byte(res.Payload), &status); err != nil {
+        h.SetQueryState("status", "escalated")
+        h.DurableLog("approval payload was not valid JSON, escalating")
+        return "", fmt.Errorf("invalid approval payload for %s: %w", reportID, err)
     }
 
     if !status.Approved {
@@ -119,9 +128,10 @@ func submitExpense(h cleat.HostCalls, input ReportInput) (string, error) {
 
 | Line(s) | What it does |
 |---------|--------------|
-| `AwaitSignals("approval", ...)` | Pauses the workflow until the `approval` signal is received |
-| `WithTimeout(72*time.Hour)` | If no signal arrives within 72 hours, `AwaitSignals` returns an error |
-| `WithSignalPayload(&status)` | Deserialises the incoming signal payload into the `ApprovalStatus` struct |
+| `AwaitSignals([]string{"approval"}, 72*time.Hour)` | Pauses the workflow until the `approval` signal arrives, or 72 hours pass |
+| `res.Err` | Set when the wait failed. Test it **first** — a call the runtime rejects sets both this and `TimedOut` |
+| `res.TimedOut` | Set when the window closes with no signal, and also on a rejected call, which is why `Err` is tested first |
+| `json.Unmarshal([]byte(res.Payload), &status)` | Deserialises the signal payload into the `ApprovalStatus` struct |
 | `h.SetQueryState(...)` | Stores queryable state so external systems can check workflow status without polling the signal |
 
 ### Auto-approval for small amounts
@@ -168,37 +178,53 @@ continues execution.
 
 ## Signal timeouts
 
-The `WithTimeout` option tells `AwaitSignals` how long to wait before giving
-up. When the timeout fires, `AwaitSignals` returns an error. Your workflow
-can inspect this error and take alternative action:
+The second argument to `AwaitSignals` is how long to wait before giving up.
+When the window closes with no signal, the result's `TimedOut` field is set
+and `Err` stays nil, so a workflow can tell "nobody decided" apart from "the
+wait failed" and take alternative action:
 
 ```go
-err := h.AwaitSignals("approval",
-    cleat.WithTimeout(72*time.Hour),
-    cleat.WithSignalPayload(&status),
-)
-if err != nil {
+res := h.AwaitSignals([]string{"approval"}, 72*time.Hour)
+if res.TimedOut {
     // Escalate to a different channel, notify on-call, etc.
-    notifyOnCallEngineer(h, reportID)
+    h.DurableLog("approval timed out, escalating to on-call")
     h.SetQueryState("status", "escalated")
-    return "", fmt.Errorf("escalated: %w", err)
+    return "", fmt.Errorf("approval timed out for %s", reportID)
 }
 ```
 
-If you omit `WithTimeout`, the workflow waits **indefinitely** (until the
-workflow is manually terminated or the signal arrives).
+**The timeout is required, and there is no indefinite wait.** Pass a
+`time.Duration` long enough for the decision you are waiting on. A value that
+rounds to 0 milliseconds — anything under 1ms — is **rejected** rather than
+treated as "wait forever": a 0ms await has no deadline to expire and would
+never return, so the runtime returns an error instead of hanging. For a
+non-blocking check, use `h.PollSignals` instead.
+
+**Test `Err` before `TimedOut`.** When the window merely closes, `Err` is nil
+and `TimedOut` is set — but that rejection sets **both**, so `TimedOut` alone
+cannot tell "nobody decided" from "the call was refused". The example above
+checks `Err` first for that reason: the ordering is load-bearing, not style.
 
 ## Awaiting multiple signals
 
-Pass multiple signal names to `AwaitSignals`. The call returns when **any
-one** of them arrives:
+Pass several signal names in the slice. The call returns when **any one** of
+them arrives, and `Name` says which:
 
 ```go
-result, err := h.AwaitSignals("approve", "reject", "escalate")
+res := h.AwaitSignals([]string{"approve", "reject", "escalate"}, 72*time.Hour)
+switch res.Name {
+case "approve":
+    h.DurableLog("approved")
+case "reject":
+    h.DurableLog("rejected")
+case "escalate":
+    h.DurableLog("escalated")
+}
 ```
 
-The returned `result` contains the name of the signal that was received and
-its payload. Use this pattern for workflows with more than two outcomes.
+`Name` and `Payload` describe the signal that arrived; `Payload` is the JSON
+the sender sent. Check `Err` and `TimedOut` first — when either is set, `Name`
+is empty. Use this pattern for workflows with more than two outcomes.
 
 ## Complete end-to-end example
 
@@ -244,8 +270,10 @@ curl http://localhost:8080/api/workflows/wf_exp_abc123/query?key=approved_by
 
 ## Best practices
 
-- **Always set a timeout** for human-in-the-loop signals. Workflows that wait
-  indefinitely consume resources and are easy to forget about.
+- **The timeout is required, so choose it deliberately.** It is the longest you
+  are willing to let the decision sit unresolved; when it expires, `TimedOut`
+  is set and your workflow decides what happens next. A wait nobody is coming
+  back to answer holds the run and is easy to forget about.
 - **Store queryable state** before and after the signal wait so external
   dashboards can report on workflow status without polling the signal
   infrastructure.

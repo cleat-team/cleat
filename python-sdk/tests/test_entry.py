@@ -9,12 +9,13 @@ bytearray before each test.
 """
 
 import json
+from dataclasses import InitVar, dataclass, field
 
 import pytest
 
 try:
     from cleat_sdk import memory
-    from cleat_sdk.entry import _unwrap_result, cleat_entry
+    from cleat_sdk.entry import _from_dict, _unwrap_result, cleat_entry
     from cleat_sdk.host_calls import HostCalls
 except ImportError as e:
     pytest.skip(
@@ -355,3 +356,365 @@ class TestUnwrapResult:
 
         result = _unwrap_result(ResultStr())
         assert result == {"error": "not none"}
+
+
+# ---------------------------------------------------------------------------
+# The registry key, which is what the build reads
+# ---------------------------------------------------------------------------
+
+
+class TestTheRegistryKeyIsTheWorkflowName:
+    """cleat#2976: every decorator form must register under a NAME.
+
+    ``jsonschema_emitter._find_entry`` locates the entry by
+    ``wrapper.__name__`` and RETURNS the registry key as the workflow name;
+    ``json.dumps({workflow_name: ...})`` is what turns that key into the
+    document. So the key is the address the build uses, and it has to be a name
+    in every form the SDK documents -- a function object there is a TypeError at
+    the emitter's ``main()``, not a lookup miss.
+
+    THE TESTS ABOVE DO NOT COVER THIS AND COULD NOT HAVE. ``test_cleat_entry_basic``
+    decorates with a bare ``@cleat_entry`` and asserts the wrapper runs
+    end-to-end -- which it did, because the defect was never in what the wrapper
+    does. It was in what the registry is keyed by, and only reading the registry
+    can see that; the build's side of it is asserted in
+    ``cmd/cleat/python_json_schema_emitter_test.go``.
+    """
+
+    @staticmethod
+    def _registry():
+        import sys
+
+        return getattr(sys.modules[__name__], "_cleat_entry_wrappers", {})
+
+    def test_a_bare_decorator_registers_under_the_functions_own_name(self):
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry
+        def bare_named_workflow(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        assert "bare_named_workflow" in self._registry(), (
+            "the bare form did not register under the function's name; keys were "
+            f"{list(self._registry())}"
+        )
+
+    def test_no_form_registers_under_a_function_object(self):
+        """The regression itself, stated as a property rather than a case.
+
+        Asserting one form's key would have missed the other two: the same
+        branch was copy-pasted into ``cleat_entry``, ``virtual_object`` and
+        ``query_handler``, so all three keyed the registry by a function object
+        when used bare.
+        """
+        from cleat_sdk.entry import cleat_entry, query_handler, virtual_object
+
+        @cleat_entry
+        def bare_regression_entry(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        @virtual_object
+        def bare_regression_object(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        @query_handler
+        def bare_regression_query(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        non_strings = [k for k in self._registry() if not isinstance(k, str)]
+        assert non_strings == [], (
+            "the registry is keyed by something that is not a name, so the schema "
+            f"emitter -- which matches on the key -- finds no entry for it: {non_strings}"
+        )
+
+    def test_the_parenthesised_form_still_registers_under_its_argument(self):
+        """The control: the fix must not have moved the explicit form's key."""
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry("ExplicitDifferentFromIdentifier")
+        def paren_control(h: HostCalls, x: str) -> str:
+            return "{}"
+
+        assert "ExplicitDifferentFromIdentifier" in self._registry()
+        assert "paren_control" not in self._registry(), (
+            "the explicit name must win over the identifier, exactly as "
+            "TestComputePythonEntryPointSchemaUsesTheDecoratorsOwnName asserts on the "
+            "build side"
+        )
+
+
+class TestExposureDeclaration:
+    """cleat#1986, Python half: ``@cleat_entry(expose=...)``.
+
+    Go validates ``//cleat:exposure <class>`` at BUILD time (cleat#1986 slice
+    2c-i) and refuses an unrecognised value before it ever reaches a sidecar
+    or a deploy. This is the Python equivalent, validated at DECORATION
+    time (which for Python *is* build time -- the decorator runs the moment
+    the module is imported, the same import ``cleat build`` performs to
+    compute a schema at all) for the identical reason: a bad value must fail
+    loudly where it is written, not ride a deploy that reads it as "no
+    declaration" and enforces nothing.
+    """
+
+    def test_a_valid_class_is_stamped_on_the_wrapper(self):
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry("InventorySync", expose="internal")
+        def inventory_sync(h: HostCalls, item_id: str) -> str:
+            return "{}"
+
+        assert inventory_sync._cleat_expose == "internal"
+
+    def test_omitted_expose_stamps_none_not_auth(self):
+        """None means "no declaration", not a literal "auth" -- the
+        distinction jsonschema_emitter's omitempty-equivalent depends on to
+        tell "declared auth" apart from "declared nothing" (see that
+        module's main()).
+        """
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry
+        def undeclared_workflow(h: HostCalls) -> str:
+            return "{}"
+
+        assert undeclared_workflow._cleat_expose is None
+
+    @pytest.mark.parametrize("bad", ["Internal", "internal ", "secrets", ""])
+    def test_an_unrecognised_class_is_refused_at_decoration_time(self, bad):
+        from cleat_sdk.entry import cleat_entry
+
+        if bad == "":
+            # "" is not a real case ("" means omitted at the Python call
+            # site -- there is no way to type a literal empty expose= that
+            # differs from leaving it out), included to document that fact
+            # rather than to assert a refusal: it is the same code path as
+            # "omitted".
+            @cleat_entry(expose=bad)
+            def empty_is_omitted(h: HostCalls) -> str:
+                return "{}"
+
+            assert empty_is_omitted._cleat_expose is None
+            return
+
+        with pytest.raises(ValueError, match="expose must be one of"):
+
+            @cleat_entry(expose=bad)
+            def refused_workflow(h: HostCalls) -> str:
+                return "{}"
+
+    def test_the_parenthesised_name_form_and_expose_compose(self):
+        """expose is captured by cleat_entry's own closure, outside
+        _resolve_dual_form's name/bare-form dispatch entirely -- this pins
+        that an explicit name and an expose declaration do not interfere
+        with each other: the registry key is still the explicit name, and
+        the wrapper still carries the expose value.
+        """
+        import sys
+
+        from cleat_sdk.entry import cleat_entry
+
+        @cleat_entry("ExplicitName", expose="public")
+        def composed_workflow(h: HostCalls) -> str:
+            return "{}"
+
+        registry = getattr(sys.modules[__name__], "_cleat_entry_wrappers", {})
+        assert registry.get("ExplicitName") is composed_workflow, (
+            "the explicit name must still be the registry key with expose set, "
+            f"got keys {list(registry)}"
+        )
+        assert composed_workflow._cleat_expose == "public"
+
+
+class TestFromDictDataclassConversion:
+    """``_from_dict``'s dataclass branch, focused on the source of the kwargs.
+
+    The loop reads ``inspect.signature`` and not ``dataclasses.fields``,
+    because fields() omits InitVar pseudo-fields and lists ``init=False``
+    fields that ``__init__`` will not accept. The version that read fields()
+    was wrong in both directions (cleat#2940):
+
+    * an InitVar was invisible, so a dataclass with a REQUIRED one could not
+      be built through this binding whatever the payload carried;
+    * an ``init=False`` field was listed, so a payload value for one was
+      passed as a keyword and crashed construction.
+    """
+
+    def test_a_required_initvar_is_supplied_and_reaches_the_initialiser(self):
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[int]
+
+            def __post_init__(self, seed):
+                self.seed_seen = seed
+
+        built = _from_dict({"sku": "a", "seed": 3}, Order)
+        assert (built.sku, built.seed_seen) == ("a", 3)
+
+    def test_an_initvar_with_a_default_still_takes_it_when_the_payload_omits_it(self):
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[int] = 7
+
+            def __post_init__(self, seed):
+                self.seed_seen = seed
+
+        assert _from_dict({"sku": "a"}, Order).seed_seen == 7
+
+    def test_omitting_a_required_initvar_still_raises_and_names_it(self):
+        """The case that keeps the fix honest: the payload really is
+        incomplete, and no reflection can invent the value."""
+
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[int]
+
+            def __post_init__(self, seed):
+                pass
+
+        with pytest.raises(
+            TypeError, match="missing 1 required positional argument: 'seed'"
+        ):
+            _from_dict({"sku": "a"}, Order)
+
+    def test_an_initvar_annotation_is_unwrapped_before_recursing(self):
+        """``InitVar[X]`` is a WRAPPER, not a type -- recursing with it
+        would convert against a non-type, so the inner type is what the
+        payload has to satisfy."""
+
+        @dataclass
+        class Inner:
+            n: int
+
+        @dataclass
+        class Order:
+            sku: str
+            seed: InitVar[Inner]
+
+            def __post_init__(self, seed):
+                self.seed_seen = seed
+
+        built = _from_dict({"sku": "a", "seed": {"n": 3}}, Order)
+        assert isinstance(built.seed_seen, Inner)
+        assert built.seed_seen.n == 3
+
+    def test_an_init_false_field_is_ignored_rather_than_passed_as_a_keyword(self):
+        @dataclass
+        class Order:
+            sku: str
+            total: int = field(init=False)
+
+            def __post_init__(self):
+                self.total = 0
+
+        built = _from_dict({"sku": "a", "total": 99}, Order)
+        assert built.sku == "a"
+        # 0 from __post_init__, not 99 from the payload: the field is not a
+        # constructor parameter, so the payload's value for it is ignored.
+        assert built.total == 0
+
+    def test_a_payload_the_constructor_takes_nothing_from_is_refused(self):
+        """``@dataclass(init=False)`` with no hand-written ``__init__`` has an
+        EMPTY signature, so nothing in the payload can be supplied and the
+        class would be built entirely from its defaults. cleat#2940 left that
+        silent -- this version of the test pinned the silence; cleat#3058
+        refuses it, naming the type and the keys.
+
+        The refusal is the NARROW one: only a payload from which nothing can
+        be read is loss. The three tests below pin the boundaries that keep it
+        narrow, so a later reader can see the scope was chosen rather than
+        overlooked."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int = 0
+
+        with pytest.raises(TypeError, match=r"NoInit\(\) takes no constructor arguments"):
+            _from_dict({"a": 1}, NoInit)
+
+    def test_an_empty_payload_against_a_constructor_taking_nothing_still_constructs(self):
+        """Nothing was dropped, because there was nothing to drop -- so the
+        guard must not fire. This is what keeps it from becoming "init=False
+        dataclasses are refused"."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int = 0
+
+        assert _from_dict({}, NoInit).a == 0
+
+    def test_a_stray_key_on_an_ordinary_dataclass_is_still_tolerated(self):
+        """The pre-existing rule, deliberately untouched: a forward-compatible
+        client, or a server that added a field, sends a key this dataclass does
+        not know, and that has to keep working."""
+
+        @dataclass
+        class Order:
+            sku: str
+
+        built = _from_dict({"sku": "a", "added_by_a_newer_client": 1}, Order)
+        assert built.sku == "a"
+
+    def test_a_payload_of_only_unknown_keys_on_an_ordinary_dataclass_is_still_ignored(self):
+        """Deliberately NOT changed, and pinned so the choice is visible
+        rather than an oversight. The guard refuses only a payload from which
+        nothing CAN be read; here the constructor HAS parameters, so the
+        payload is tolerated and the object built from defaults -- exactly as
+        before cleat#3058. This is the case that option 1 as written in that
+        issue would have made fail for every forward-compatible client."""
+
+        @dataclass
+        class Order:
+            sku: str = "unset"
+
+        assert _from_dict({"nope": 1}, Order).sku == "unset"
+
+    def test_a_dataclass_that_disables_init_but_writes_one_still_receives_keywords(self):
+        """The companion case, and the one that keeps the test above from
+        reading as "init=False is broken": a hand-written ``__init__`` IS
+        the signature, so its keywords arrive as they always did."""
+
+        @dataclass(init=False)
+        class NoInit:
+            a: int
+
+            def __init__(self, a: int = 5):
+                self.a = a
+
+        assert _from_dict({"a": 1}, NoInit).a == 1
+
+    def test_a_var_keyword_constructor_receives_the_payload_keys(self):
+        """A ``**kw`` parameter accepts keywords the signature does not name,
+        so unmatched payload keys belong to it. Measured before this fix: the
+        ``fields()`` loop passed a field-matching key and ``**kw`` took it, and
+        reading the signature made that key look unmatched so it STOPPED
+        arriving -- working to quiet loss, with no error on either side
+        (cleat#3058)."""
+
+        @dataclass(init=False)
+        class KWOnly:
+            a: int = 0
+
+            def __init__(self, **kw):
+                self.received = dict(kw)
+
+        assert _from_dict({"a": 1}, KWOnly).received == {"a": 1}
+
+    def test_a_named_parameter_is_not_also_passed_through_as_a_var_keyword(self):
+        """The companion, and the one that keeps the pass-through from being a
+        blanket forward: a key that matched a NAMED parameter is that
+        parameter's, and must not be duplicated into ``**kw`` as well."""
+
+        @dataclass(init=False)
+        class Mixed:
+            a: int = 0
+
+            def __init__(self, a: int = 0, **kw):
+                self.a = a
+                self.received = dict(kw)
+
+        built = _from_dict({"a": 1, "other": 2}, Mixed)
+        assert built.a == 1
+        assert built.received == {"other": 2}

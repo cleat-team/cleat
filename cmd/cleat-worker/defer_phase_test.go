@@ -204,7 +204,7 @@ func TestExecuteWorkflowOnADeferPhaseNeverWritesAFailure(t *testing.T) {
 	store.loadEventHistoryFn = func(context.Context, string) ([]engine.EventRecord, error) {
 		return nil, errors.New("history is unreadable")
 	}
-	store.moveToDeadLetterQueueFn = func(context.Context, string, string, int64, string, string, string) error {
+	store.moveToDeadLetterQueueFn = func(context.Context, string, string, int64, string, string, string, map[string]string) error {
 		t.Error("a defer phase was dead-lettered; its outcome was already decided")
 		return nil
 	}

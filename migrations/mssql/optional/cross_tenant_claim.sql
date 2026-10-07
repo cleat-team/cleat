@@ -11,9 +11,13 @@
 --
 -- WHEN YOU NEED THIS
 -- ------------------
--- Only if you run a worker with --claim-across-tenants. Without it the worker
--- claims work for its own tenant, which is the default and is what most
--- deployments want. cleat#1541.
+-- Only if you run a worker with --claim-across-tenants -- which DEFAULTS ON
+-- (cmd/cleat-worker/config.go), so most deployments already have it, not the
+-- other way around. cleat#1541 predates #1926, which retired the old
+-- BYPASSRLS-only claim mechanism this default used to gate; the per-tenant
+-- rotation that replaced it needs no grant to claim, so turning the flag on
+-- no longer implies applying this migration. See "WHAT IT COSTS" below for
+-- what still does.
 --
 -- WHAT IT COSTS, MEASURED
 -- -----------------------
@@ -26,9 +30,12 @@
 --   this one     NO                            Index Scan    5760
 --
 -- The disjunction is free for a query that supplies its own tenant and costs
--- the seek for one that relies on RLS to supply it. 40 of cleat's 58
--- tenant-scoped statements carry their own predicate; the ones that cannot are
--- ClaimWorkflowsAcrossTenants and BatchHeartbeat, which scan by design.
+-- the seek for one that relies on RLS to supply it. Most of cleat's
+-- tenant-scoped statements carry their own predicate; HeartbeatBatchFenced is
+-- the one that cannot and scans by design, because one worker legitimately
+-- holds instances across many tenants. (Claiming itself does not need this
+-- bypass: #1926 replaced the old cross-tenant claim query with per-tenant
+-- rotation, each claim scoped to its own tenant.)
 --
 -- APPLY IT WITH
 -- -------------
@@ -56,7 +63,7 @@ IF @fn IS NULL
     THROW 50075, N'dbo.fn_tenant_filter does not exist; apply the numbered migrations first', 1;
 
 IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_admin' AND type = N'R')
-    THROW 50075, N'the dbo.cleat_admin role does not exist; migration 012_admin_role.sql has not been applied', 1;
+    THROW 50075, N'the dbo.cleat_admin role does not exist; apply the numbered migrations first (the role is created by 001_schema.sql)', 1;
 
 IF OBJECT_ID(N'admin.rls_predicate_form') IS NULL
     THROW 50075, N'admin.rls_predicate_form does not exist; migration 075 has not been applied, and without it nothing records which predicate is installed', 1;

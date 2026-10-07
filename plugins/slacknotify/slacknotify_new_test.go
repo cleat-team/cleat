@@ -362,6 +362,16 @@ type fakeInteractiveDeploymentSecrets struct {
 	routeKey         string
 	routeKeyPrevious string
 	errOnGet         error
+
+	// gets counts Get calls per name. It exists for
+	// TestSN_InteractiveCallback_RefusalOrderDoesNotReadTheSecret, which pins
+	// that the three cheap refusals in handleInteractiveCallback (absent
+	// headers, unparseable timestamp, stale timestamp) decide from the
+	// request alone without reaching a deployment-secret read, while a
+	// request whose headers are fresh and correctly signed reads the signing
+	// secret exactly once. Nil-tolerant: Get allocates it on first call, so
+	// the older tests that build this fake without the field are unaffected.
+	gets map[string]int
 }
 
 // Each of the three known names answers its field verbatim, including when
@@ -373,6 +383,10 @@ type fakeInteractiveDeploymentSecrets struct {
 // would stop being a known-positive for that check if this fake started
 // synthesizing its own "not set" error for the same case.
 func (f *fakeInteractiveDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	if f.gets == nil {
+		f.gets = make(map[string]int)
+	}
+	f.gets[name]++
 	if f.errOnGet != nil {
 		return "", f.errOnGet
 	}
@@ -385,6 +399,12 @@ func (f *fakeInteractiveDeploymentSecrets) Get(ctx context.Context, name string)
 		return f.routeKeyPrevious, nil
 	}
 	return "", fmt.Errorf("fakeInteractiveDeploymentSecrets: %q not set", name)
+}
+
+// getsFor reports how many times Get was called for name, and is safe on a
+// fake whose gets map was never allocated (that is zero, not a panic).
+func (f *fakeInteractiveDeploymentSecrets) getsFor(name string) int {
+	return f.gets[name]
 }
 
 // signSlackRequest computes the timestamp and signature headers a real
@@ -775,6 +795,112 @@ func TestSN_InteractiveCallback_FutureStampedRequest(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for a request stamped an hour in the future, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSN_InteractiveCallback_RefusalOrderDoesNotReadTheSecret pins the check
+// ORDER inside handleInteractiveCallback (cleat#2235): the two signature
+// headers and the freshness window are each decided from the request alone,
+// before the deployment-secret lookup -- a database read plus a decrypt. The
+// route is auth-exempt (cleat#2172), so a request that never gets past those
+// cheap checks is the common case for drive-by anonymous traffic, and it must
+// not pay for the read the fast path exists to avoid.
+//
+// The assertion is on the COUNT, not the status, and that is the point of the
+// test. Asserting the four status codes alone would pass with the lookup moved
+// above the header checks: the same three requests still get the same three
+// 401s, and the only thing that changed is the database work. Counting the
+// reads is what makes the order observable at all.
+//
+// Falsified by moving the `secret, err := p.signingSecret(...)` block above
+// the header/freshness checks: the three want=0 cases then read the secret
+// once each and go red, while the want=1 case still reads it once and stays
+// green -- so the pin separates the order it names rather than reddening
+// wholesale.
+func TestSN_InteractiveCallback_RefusalOrderDoesNotReadTheSecret(t *testing.T) {
+	const signingSecretName = "slacknotify.signing_secret"
+	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-123%3Asig%3Abutton-click%22%7D"
+
+	freshTS := fmt.Sprintf("%d", time.Now().Unix())
+	_, freshSig := signSlackRequest(testSigningSecret, body)
+	staleTS := fmt.Sprintf("%d", time.Now().Unix()-400)
+
+	newReq := func() *http.Request {
+		req := httptest.NewRequest("POST", "/slack/interactive", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req
+	}
+
+	cases := []struct {
+		name string
+		req  *http.Request
+		want int
+	}{
+		{
+			// No X-Slack headers at all: refused before anything is read.
+			name: "absent signature headers",
+			req:  newReq(),
+			want: 0,
+		},
+		{
+			name: "unparseable timestamp",
+			req: func() *http.Request {
+				r := newReq()
+				r.Header.Set("X-Slack-Request-Timestamp", "not-a-number")
+				r.Header.Set("X-Slack-Signature", "v0=whatever")
+				return r
+			}(),
+			want: 0,
+		},
+		{
+			name: "stale timestamp",
+			req: func() *http.Request {
+				r := newReq()
+				r.Header.Set("X-Slack-Request-Timestamp", staleTS)
+				r.Header.Set("X-Slack-Signature", "v0=whatever")
+				return r
+			}(),
+			want: 0,
+		},
+		{
+			// Fresh and correctly signed: the lookup is reached exactly once.
+			// The downstream status is left unasserted -- this case exists to
+			// prove the count, and the route it carries resolves to whatever
+			// the tenant/route checks make of it, which other tests pin.
+			name: "fresh and correctly signed",
+			req: func() *http.Request {
+				r := newReq()
+				r.Header.Set("X-Slack-Request-Timestamp", freshTS)
+				r.Header.Set("X-Slack-Signature", freshSig)
+				return r
+			}(),
+			want: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, mux := interactiveServer(t)
+			fake := &fakeInteractiveDeploymentSecrets{
+				secret:   testSigningSecret,
+				routeKey: testRouteSigningKey,
+			}
+			p.deploymentSecrets = fake
+			p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+				return nil
+			}
+
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, tc.req)
+
+			if got := fake.getsFor(signingSecretName); got != tc.want {
+				t.Errorf("reads of %q = %d, want %d -- the cheap header/freshness refusals must decide "+
+					"from the request alone, ahead of the deployment-secret read", signingSecretName, got, tc.want)
+			}
+			if tc.want == 0 && rec.Code != http.StatusUnauthorized {
+				t.Errorf("expected 401 for %q, got %d: %s", tc.name, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -1437,9 +1563,17 @@ func TestSN_UpdateConfigRefetchError(t *testing.T) {
 // ===========================================================================
 
 // TestSN_InitWarnsOnLeftoverSigningSecret covers legacySlackConfig's WARN
-// (cleat#2172): a slack_signing_secret left over in --plugin-config does
-// nothing now -- Config has no field for it -- and used to do so silently.
-// Same shape as email's TestInitWarnsOnLeftoverSendGridAPIKey.
+// (cleat#2172): the VALUE of a slack_signing_secret left over in
+// --plugin-config does nothing now -- Config has no field for it -- and used
+// to be read silently. Same shape as email's
+// TestInitWarnsOnLeftoverSendGridAPIKey.
+//
+// cleat#2235: the message must not say the key "has no effect", which is false
+// -- RequiredDeploymentSecrets a few lines below returns
+// slacknotify.signing_secret exactly when this key is present, so its PRESENCE
+// still gates the boot. The assertions below are on the TEXT, not just on a
+// WARN existing, because the defect this guards against is a false sentence
+// and no status can see one.
 func TestSN_InitWarnsOnLeftoverSigningSecret(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plugin{}
@@ -1459,6 +1593,20 @@ func TestSN_InitWarnsOnLeftoverSigningSecret(t *testing.T) {
 	}
 	if !strings.Contains(got, "level=WARN") {
 		t.Errorf("expected the leftover-key message at WARN level, got log output: %q", got)
+	}
+	// cleat#2235: the presence consequence must be stated, and the false
+	// "no effect" claim must not come back.
+	if !strings.Contains(got, "slacknotify.signing_secret") {
+		t.Errorf("expected the WARN to name slacknotify.signing_secret -- the key whose requirement the "+
+			"legacy key's presence triggers -- got log output: %q", got)
+	}
+	if !strings.Contains(got, "required at boot") {
+		t.Errorf("expected the WARN to say the legacy key's presence still requires a signing secret, "+
+			"got log output: %q", got)
+	}
+	if strings.Contains(got, "has no effect") {
+		t.Errorf("the WARN must not claim the leftover key has no effect -- its presence gates "+
+			"RequiredDeploymentSecrets -- got log output: %q", got)
 	}
 }
 
@@ -1487,6 +1635,37 @@ func TestSN_DeploymentSecretPrefix(t *testing.T) {
 	p := &Plugin{}
 	if got := p.DeploymentSecretPrefix(); got != "slacknotify." {
 		t.Errorf("expected DeploymentSecretPrefix() = %q, got %q", "slacknotify.", got)
+	}
+}
+
+// TestSN_DeploymentSecretRemedyHint pins the hint that
+// checkRequiredDeploymentSecrets (cmd/cleat-worker/setup.go) appends to the
+// boot refusal when RequiredDeploymentSecrets names
+// slacknotify.signing_secret. Unlike blobstore's hint -- "opt out of the two
+// secrets entirely" -- this one is also the operator's only way to learn WHY
+// the secret is required at all: the refusal names the secret, never the
+// legacy slack_signing_secret whose presence made it necessary. So the
+// assertion below is on the key being named, not merely on a non-empty string.
+//
+// The var assertion is deliberate and is the reason this test exists at all:
+// the method is reached only through an interface type-assertion in the worker
+// (lp.Plugin.(plugin.HasDeploymentSecretRemedyHint)), so a rename or signature
+// change here would not break any caller at compile time -- it would silently
+// drop the hint from the refusal, which is the "a mechanism wired to nothing
+// reads as done" shape.
+func TestSN_DeploymentSecretRemedyHint(t *testing.T) {
+	var _ plugin.HasDeploymentSecretRemedyHint = (*Plugin)(nil)
+
+	got := (&Plugin{}).DeploymentSecretRemedyHint()
+	if got == "" {
+		t.Fatal("DeploymentSecretRemedyHint() is empty; the boot refusal would carry no remedy")
+	}
+	if !strings.Contains(got, "slack_signing_secret") {
+		t.Errorf("hint must name the legacy slack_signing_secret key -- it is the trigger the refusal "+
+			"cannot name -- got %q", got)
+	}
+	if !strings.Contains(strings.ToLower(got), "remove") {
+		t.Errorf("hint must state the non-secret remedy (removing the legacy key), got %q", got)
 	}
 }
 

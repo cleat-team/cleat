@@ -24,7 +24,8 @@ func TestATagCanBePointedAtAVersion(t *testing.T) {
 	var gotName, gotTag string
 	var gotVersion int
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return true, nil },
 		setWorkflowTagFn: func(_ context.Context, name string, version int, tag string) error {
 			gotName, gotVersion, gotTag = name, version, tag
 			return nil
@@ -53,7 +54,8 @@ func TestATagCanBePointedAtAVersion(t *testing.T) {
 func TestPointingATagAtADeprecatedVersionIsRefused(t *testing.T) {
 	called := false
 	ms := &mockStore{
-		validateVersionFn: func(_ context.Context, _ string, _ int) (bool, error) { return false, nil },
+		listWorkflowDefsFn: deployedDef("checkout"),
+		validateVersionFn:  func(_ context.Context, _ string, _ int) (bool, error) { return false, nil },
 		setWorkflowTagFn: func(_ context.Context, _ string, _ int, _ string) error {
 			called = true
 			return nil
@@ -81,7 +83,10 @@ func TestATagRequiresBothANameAndAVersion(t *testing.T) {
 		{"zero version", `{"tag":"stable","version":0}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			api := newTestAPIServer(&mockStore{})
+			// The definition must exist, or the request is refused 404 by the
+			// existence check before the body is read and every case below
+			// would pass for the wrong reason (cleat#3003).
+			api := newTestAPIServer(&mockStore{listWorkflowDefsFn: deployedDef("checkout")})
 			rec := httptest.NewRecorder()
 			api.handleWorkflows(rec, httptest.NewRequest(http.MethodPut,
 				"/api/workflows/checkout/tags", strings.NewReader(tc.body)))
@@ -138,6 +143,7 @@ func TestNoTagsIsAnObjectNotNull(t *testing.T) {
 func TestATagCanBeRemoved(t *testing.T) {
 	var removedName, removedTag string
 	ms := &mockStore{
+		listWorkflowDefsFn: deployedDef("checkout"),
 		removeWorkflowTagFn: func(_ context.Context, name, tag string) error {
 			removedName, removedTag = name, tag
 			return nil
@@ -157,44 +163,51 @@ func TestATagCanBeRemoved(t *testing.T) {
 	}
 }
 
-// TestDeletingATagOnAnUnknownDefinitionAnswers200 pins the one path cleat#942's
-// enumeration named and cleat#945 deliberately did not change.
+// TestDeletingATagOnAnUnknownDefinitionIs404 records the decision this path
+// carried an open question about until cleat#3003, and pins the answer.
 //
-//	DELETE /api/workflows/<never-deployed>/tags/stable  ->  200
+//	DELETE /api/workflows/<never-deployed>/tags/stable  ->  404
 //
-// THIS TEST DECIDES NOTHING. It records which convention is in force so that
-// changing it is a decision someone makes rather than one that happens.
+// This test used to pin the OTHER answer -- 200, on the idempotency argument --
+// and its own comment listed the two cases and said that changing it would be a
+// decision someone makes rather than one that happens. This is that decision
+// being made, so the comment is kept as the record rather than deleted.
 //
-// The case FOR leaving it: DELETE is conventionally idempotent, and removing a
-// tag that is not there is a no-op success. A 404 changes that.
+// What decided it. The thing that does not exist is the DEFINITION, not the
+// tag, and "the tag was removed" and "there is no such workflow" sharing one
+// response means a caller who typos the workflow name is told the deletion
+// succeeded. #945 had already made the reads 404 and the writes 409, and this
+// was the last path where an unknown definition was silently fine.
 //
-// The case AGAINST: the thing that does not exist is the DEFINITION, not the
-// tag. "The tag was removed" and "there is no such workflow" share one
-// response, so a caller who typos the workflow name is told the deletion
-// succeeded. #945 has already decided that an unknown definition is a 404 on
-// the name-scoped reads, and the writes answer 409. This is the last path where
-// an unknown definition is silently fine.
+// The idempotency argument is real and is not what it looks like here: it is an
+// argument about repeating a DELETE on a definition that EXISTS, and that case
+// is unaffected -- handleRemoveWorkflowTag still answers 200 for a tag that is
+// not there on a definition that is.
 //
-// WHY IT LIVES HERE AND NOT ONLY IN THE PORT. cleat-ports pins this too, in
-// ports/samples-go/tests/identifier_test.go, and that pin is where the question
-// was first written down. But the port does not gate merges in this repo --
-// docs/promotion-checklist.md is explicit that a finding is protected only once
-// it is a hermetic test in cleat-team/cleat. Without this, someone finishing
-// #945's job for consistency changes handleRemoveWorkflowTag, every test here
-// passes, and the port tells them later and elsewhere. That is a live risk
-// rather than a hypothetical one: making the reads 404 is exactly the change
-// that invites making this one 404 too.
+// # Why 404 and not 409
 //
-// It FAILS on 404 rather than accepting either answer. A test that passed on
-// both would pin nothing -- it could not fail, which is the shape this repo
-// keeps finding. If you are reading this because it went red, the convention
-// has been decided the other way: assert 404 here, update the port's pin, and
-// record the decision in that repo's ports/samples-go/ISSUES.md #8.
-func TestDeletingATagOnAnUnknownDefinitionAnswers200(t *testing.T) {
-	var asked bool
+// The writes answered 409 for an unknown name until cleat#3003, and this path
+// inherited that framing. 409 was wrong for it: a name that was never deployed
+// is an identifier that resolves to nothing, which is 404 everywhere else in
+// this API, and it is also the observable difference from an `internal` name's
+// 404. A caller could tell "something is here and it is refused" from "nothing
+// is here" by the status alone, which is exactly what `internal` answering 404
+// instead of 403 exists to prevent. See
+// an_internal_definition_is_not_reachable_over_http_test.go.
+//
+// # The pin in cleat-ports still says 200
+//
+// ports/samples-go/tests/identifier_test.go is where this question was first
+// written down, and it is a different repository: it was not updated in the
+// same change and needs a follow-up (filed as an issue when cleat#3003 landed).
+// A reader who finds that pin disagreeing with this test should treat this one
+// as authoritative -- docs/promotion-checklist.md is explicit that a finding is
+// protected only once it is a hermetic test in cleat-team/cleat.
+func TestDeletingATagOnAnUnknownDefinitionIs404(t *testing.T) {
+	asked := false
 	ms := &mockStore{
-		listWorkflowDefsFn: deployedDef("checkout"), // "unknown" is any other name
-		removeWorkflowTagFn: func(_ context.Context, name, tag string) error {
+		listWorkflowDefsFn: deployedDef("checkout"), // "never-deployed" is any other name
+		removeWorkflowTagFn: func(_ context.Context, _, _ string) error {
 			asked = true
 			return nil
 		},
@@ -204,23 +217,22 @@ func TestDeletingATagOnAnUnknownDefinitionAnswers200(t *testing.T) {
 	api.handleWorkflows(rec, httptest.NewRequest(http.MethodDelete,
 		"/api/workflows/never-deployed/tags/stable", nil))
 
-	switch rec.Code {
-	case 200:
-		// Current behaviour. The store was still asked, which is the part that
-		// makes this idempotent rather than merely quiet.
-		if !asked {
-			t.Error("answered 200 without asking the store to remove anything, so the " +
-				"idempotency is a short-circuit rather than a real no-op delete")
-		}
-	case 404:
-		t.Errorf("DELETE on an unknown definition now answers 404, so the idempotency " +
-			"question has been decided the other way.\n\n" +
-			"That may well be right -- see the two cases above. Update this test to " +
-			"assert 404, update the pin in cleat-ports " +
-			"(ports/samples-go/tests/identifier_test.go), and record the decision in " +
-			"that repo's ports/samples-go/ISSUES.md #8.")
-	default:
-		t.Errorf("DELETE on an unknown definition answered %d: %s -- neither convention",
+	if rec.Code != 404 {
+		t.Fatalf("DELETE on an unknown definition answered %d, want 404: %s\n\n"+
+			"A 200 here is the last path on which an unknown definition is silently "+
+			"fine, and it is distinguishable from an internal one's 404.",
 			rec.Code, rec.Body.String())
+	}
+	if asked {
+		t.Error("the store was asked to remove a tag from a definition that does not " +
+			"exist, so the refusal did not come before the write")
+	}
+	// cleat#3165's usability half: the message names the workflow the caller
+	// asked for, so a typo in the name is visible in the response rather than
+	// a generic "workflow definition not found" that could be any of the four
+	// routes refuseIfAbsentOrInternalDef guards.
+	if !strings.Contains(rec.Body.String(), "never-deployed") {
+		t.Errorf("the 404 body does not name the workflow the caller asked for: %s",
+			rec.Body.String())
 	}
 }

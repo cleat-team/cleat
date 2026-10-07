@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -11,20 +12,85 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 // handleAdminRoutes routes /api/admin/instances/* requests.
 //
 // Every route below is gated on callerOwnsTarget: the admin operations are
 // destructive and take no tenant parameter, so this layer is the only
-// enforcement point there is.
+// enforcement point there is. The tenant is not named in the URL, so the
+// operation runs against the CALLER's tenant — which means an operator
+// credential, having no tenant, is refused here with a 401. That refusal is
+// deliberately preserved: the cross-tenant capability lives in a URL that says
+// which tenant (see handleAdminRoutesForTenant) rather than in making every
+// existing route ambiently cross-tenant.
 func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
+	s.dispatchAdmin(w, r, strings.TrimPrefix(r.URL.Path, "/api/admin/instances/"), "")
+}
+
+// handleAdminRoutesForTenant routes /api/admin/tenants/{tenant}/instances/*
+// requests: the form an operator credential uses to act on a tenant that is not
+// its own (cleat#2169).
+//
+// The tenant is in the PATH rather than resolved from the workflow id, and that
+// is a decision rather than a convenience. Resolving it would need a read that
+// spans tenants, which this store cannot do and should not be given: PostgreSQL
+// scopes by RLS (cleat.tenant_id), MySQL by the tenant's own database, SQL
+// Server by its tenant predicates. Naming the tenant instead makes the SCOPE
+// the authorization — the store is opened for the named tenant, so a workflow
+// that tenant does not own is not visible at all and the caller gets a 404.
+// There is no new read capability to reason about, and none to get wrong.
+//
+// ADDITIVE, so a tenant caller's behaviour on an existing URL is unchanged.
+func (s *apiServer) handleAdminRoutesForTenant(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/admin/tenants/")
+	tenant, tail, ok := strings.Cut(rest, "/")
+	if !ok || tenant == "" || !strings.HasPrefix(tail, "instances/") {
+		s.writeError(w, 404, "not found")
+		return
+	}
+	// Parsed and RE-EMITTED rather than merely checked, and both halves matter.
+	//
+	// Checked, because the tenant string is bound to cleat.tenant_id on
+	// PostgreSQL, where a non-UUID is a cast error raised by the policy rather
+	// than a clean refusal — a 500 for what is a malformed request, and one that
+	// would read as a cleat bug.
+	//
+	// Re-emitted, because this is the first place in the tree where a tenant
+	// reaches a store from an HTTP request rather than from an authenticated
+	// uuid.UUID. codeql flagged exactly that on this PR, at
+	// engine/mysql_store.go:1006, where MySQL builds "CREATE DATABASE IF NOT
+	// EXISTS `"+dbName+"`" from the tenant — a concatenated statement that is
+	// safe only because every previous caller passed a UUID it had already
+	// parsed. Validity-checking the caller's string is not enough for that sink:
+	// uuid.Parse accepts several spellings (braces, a urn: prefix, bare 32-hex),
+	// so the string that arrives and the string that should be used are
+	// different values. tid.String() is the one canonical lowercase form.
+	//
+	// It is also the cleat#2993 lesson at a new boundary: an identifier that
+	// crosses one should be normalised there, not compared in whatever case it
+	// arrived.
+	tid, err := uuid.Parse(tenant)
+	if err != nil {
+		s.writeError(w, 400, "tenant must be a UUID")
+		return
+	}
+	s.dispatchAdmin(w, r, strings.TrimPrefix(tail, "instances/"), tid.String())
+}
+
+// dispatchAdmin is the body both route families share: parse the action out of
+// the path, resolve the store the operation runs against, run it.
+//
+// namedTenant is "" for the id-only family and the URL's tenant for the
+// tenant-named one; which of the two it is changes only how the store is
+// resolved, so the parsing and the dispatch are written once.
+func (s *apiServer) dispatchAdmin(w http.ResponseWriter, r *http.Request, path, namedTenant string) {
 	if !*enableAdminAPI {
 		s.writeError(w, 404, "not found")
 		return
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, "/api/admin/instances/")
 	if path == "" || path == "/" {
 		s.writeError(w, 400, "bad request")
 		return
@@ -75,11 +141,114 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 	// scope no matter who asked. That was invisible while the store methods
 	// were stubs: they returned "not implemented yet" from whichever store
 	// reached them.
-	st, ok := s.callerOwnsTarget(w, r, id)
+	st, ok := s.adminTargetStore(w, r, id, namedTenant)
 	if !ok {
 		return
 	}
 	action(w, r, id, st)
+}
+
+// adminTargetStore resolves the store an admin operation runs against, and
+// confirms the target exists inside it.
+//
+// The two families ask different questions and the difference is the point.
+//
+// namedTenant == "" is the id-only form, and the store is the CALLER's, so
+// ownership is callerOwnsTarget's comparison against the caller's tenant.
+//
+// A named tenant is the operator form. There the SCOPE is the check: the store
+// is opened for the named tenant, so GetWorkflowByID can only return nil or a
+// row that tenant owns, and there is no second comparison that could get out of
+// step with it. What remains is authorization — who is allowed to name a
+// tenant — and the answer is an operator credential, or a tenant key naming
+// itself.
+func (s *apiServer) adminTargetStore(w http.ResponseWriter, r *http.Request, id, namedTenant string) (engine.WorkflowStore, bool) {
+	if namedTenant == "" {
+		return s.callerOwnsTarget(w, r, id)
+	}
+
+	if _, isOperator := auth.OperatorFromContext(r.Context()); !isOperator {
+		caller, isTenant := auth.TenantIDFromContext(r.Context())
+		if isTenant {
+			// A tenant key may name only itself. EqualFold for the same reason
+			// callerOwnsTarget uses it: a UUID is case-insensitive, and a
+			// dialect that hands one back in the other case must not turn a
+			// legitimate request into a 404.
+			if !strings.EqualFold(caller.String(), namedTenant) {
+				s.writeError(w, 404, "not found")
+				return nil, false
+			}
+		} else {
+			// NO IDENTITY, and this is the one branch that cannot inherit the
+			// id-only route's posture — which is what it was first written as,
+			// and it was wrong.
+			//
+			// callerOwnsTarget lets a request with no tenant through, and that is
+			// safe THERE because the store it ends up using is s.store: ONE
+			// CONSTANT scope, which no request can redirect. The reasoning
+			// ("there is one tenant and nothing to keep apart") does not transfer
+			// here, because this route opens a store for whatever the URL NAMES.
+			// Measured before this refusal existed, with --require-auth=false and
+			// no identity on the request:
+			//
+			//   /api/admin/tenants/<tenantB>/instances/wf-b/force-complete
+			//     -> opened a store for tenantB, ran, 200 {"status":"completed"}
+			//
+			// audited as operator=unknown -- nothing authenticated, and a
+			// workflow destroyed on a tenant chosen by the caller. So an
+			// unauthenticated request could reach ANY tenant, which is strictly
+			// more than the id-only route could do before this PR.
+			//
+			// Refused rather than documented, because the route's whole
+			// justification is that the SCOPE is the authorization, and with no
+			// identity there is nothing to authorize the naming. The id-only
+			// routes keep their --require-auth=false behaviour unchanged.
+			s.writeError(w, http.StatusUnauthorized,
+				"authentication required: a tenant may only be named by an operator credential or by that tenant's own key")
+			return nil, false
+		}
+	}
+
+	st, ok := s.scopedStoreForTenant(w, r, namedTenant)
+	if !ok {
+		return nil, false
+	}
+	wf, err := st.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return nil, false
+	}
+	if wf == nil {
+		// One response for "does not exist" and "belongs to another tenant",
+		// which here are the same thing: the store cannot see a row the named
+		// tenant does not own. Distinguishing them would need the cross-tenant
+		// read this design exists to avoid, and would turn the route into an
+		// oracle for which workflow IDs are real.
+		s.writeError(w, 404, "not found")
+		return nil, false
+	}
+	return st, true
+}
+
+// scopedStoreForTenant opens a store for a NAMED tenant, writing the response
+// itself when it cannot.
+//
+// It is scopedStore's counterpart for a route that already knows which tenant it
+// means. scopedStore cannot serve that route at all: it resolves the tenant FROM
+// the request and refuses with a 401 when there is none — which is precisely what
+// an operator request is, since an operator has no tenant.
+func (s *apiServer) scopedStoreForTenant(w http.ResponseWriter, r *http.Request, tenant string) (engine.WorkflowStore, bool) {
+	if s.factory == nil {
+		s.writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("no store factory configured, cannot scope request to tenant %s", tenant))
+		return nil, false
+	}
+	st, err := s.openTenantStore(r, tenant)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	return st, true
 }
 
 // callerOwnsTarget reports whether the caller's tenant owns workflow id, and
@@ -139,7 +308,21 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 }
 
 // operatorFromContext extracts the operator identity from the request context.
+// operatorFromContext is the audit attribution recorded against an admin
+// action: WHO took it.
+//
+// The operator branch is checked first, and it is not merely precedence. An
+// operator request has no tenant at all (auth.OperatorMiddleware sets one
+// identity or the other, never both), so before cleat#2169 landed this function
+// answered "unknown" for every operator -- an audit record that names no one,
+// on the actions that most need naming. Operator.String's "operator:" prefix is
+// what keeps the two answers apart here: the field holds a tenant UUID, and a
+// key_id is a UUID too, so an unprefixed attribution would be indistinguishable
+// from a tenant's.
 func operatorFromContext(r *http.Request) string {
+	if op, ok := auth.OperatorFromContext(r.Context()); ok {
+		return op.String()
+	}
 	if tid, ok := auth.TenantIDFromContext(r.Context()); ok {
 		return tid.String()
 	}

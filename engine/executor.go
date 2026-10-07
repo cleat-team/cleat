@@ -142,6 +142,33 @@ func (e *Engine) registeredLanguages() []string {
 	return langs
 }
 
+// replayAbortedBeforeGuest reports whether a failed checksum verification is
+// really an ABORTED replay rather than a mismatch, and returns the error to
+// surface if so (nil otherwise).
+//
+// Both execution paths run the verifier during pre-replay, and the verifier's
+// own reads are ordinary context-taking DB reads -- so a fence cancel
+// (cleat#2008 fix 1) or a worker shutdown arrives here as context.Canceled.
+// Reporting that as a checksum failure does three wrong things at once: it
+// mislabels the error, it counts the cancellation in
+// RecordReplayChecksumFailure, and it turns a hand-over into a fatal replay
+// error. Proceeding is no better, because every later read on that context
+// fails the same way. cleat#2942.
+func replayAbortedBeforeGuest(ctx context.Context, workflowID string, verr error) error {
+	// The context's own error is preferred as the WRAPPED cause when the
+	// context is why we are here: the verifier can return a plain
+	// "load history: ... context canceled" that does not wrap
+	// context.Canceled, and callers use errors.Is to tell a stopped replay from
+	// a broken one. The verifier's own text is still carried for the log.
+	if cerr := ctx.Err(); cerr != nil {
+		return fmt.Errorf("host: workflow %s: replay aborted before the guest ran: %v: %w", workflowID, verr, cerr)
+	}
+	if errors.Is(verr, context.Canceled) || errors.Is(verr, context.DeadlineExceeded) {
+		return fmt.Errorf("host: workflow %s: replay aborted before the guest ran: %w", workflowID, verr)
+	}
+	return nil
+}
+
 // executeWithBackend runs a workflow execution (fresh or replay) using the
 // given WasmBackend. The backend handles compilation and execution; the
 // Engine manages the execSession, history, timeouts, and result handling.
@@ -241,6 +268,9 @@ func (e *Engine) executeWithBackend(
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if verr := e.workflowEventVerifier(ctx, e.workflowID); verr != nil {
+				if aerr := replayAbortedBeforeGuest(ctx, e.workflowID, verr); aerr != nil {
+					return "", nil, nil, nil, nil, aerr
+				}
 				e.log().WarnContext(ctx, "checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", verr)
 				if e.Metrics != nil {
 					e.Metrics.RecordReplayChecksumFailure(ctx)
@@ -323,7 +353,7 @@ func (e *Engine) executeWithBackend(
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(context.Background())
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
 	}
 	if callErr != nil && session.suspendErr == nil {
 		// Non-suspend error (trap, panic, timeout, or cancellation).
@@ -356,7 +386,7 @@ func (e *Engine) executeWithBackend(
 		}
 		session.releaseHeldScopes(context.Background())
 		if guestCompleted {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
 		}
 		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
 			// wasmTrapError, not fmt.Errorf("%s"): resolveWasmTrap returns an
@@ -366,12 +396,12 @@ func (e *Engine) executeWithBackend(
 			// opposite of what wasmTrapError.Unwrap was written for. Keeping
 			// the enriched text as the message and callErr as the cause gives
 			// both.
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(&wasmTrapError{
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, session.classifyFailure(&wasmTrapError{
 				cause: callErr,
 				msg:   fmt.Sprintf("host: workflow %s: execution failed: %s", e.workflowID, enriched),
 			})
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
 	}
 
 	// res may be nil here. Every error return in the wasmtime backend is
@@ -415,7 +445,7 @@ func (e *Engine) executeWithBackend(
 			}
 			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 			if cnErr != nil {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 			}
 			susResult.ContinueAsNewHandled = true
 			susResult.NewRunID = newRunID
@@ -525,6 +555,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if err := e.workflowEventVerifier(ctx, e.workflowID); err != nil {
+				if aerr := replayAbortedBeforeGuest(ctx, e.workflowID, err); aerr != nil {
+					return "", nil, nil, nil, nil, aerr
+				}
 				e.log().WarnContext(ctx, "replay checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", err)
 				if e.Metrics != nil {
 					e.Metrics.RecordReplayChecksumFailure(ctx)
@@ -601,7 +634,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
+					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
@@ -673,12 +706,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
 			// See the note at the other resolveWasmTrap site: %s dropped the
 			// cause and broke errors.Is/errors.As for every trap.
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, &wasmTrapError{
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, &wasmTrapError{
 				cause: err,
 				msg:   fmt.Sprintf("host: workflow %s: execution failed: %s", e.workflowID, enriched),
 			}
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
 	}
 
 	// Workflow completed successfully. Release any held scopes.

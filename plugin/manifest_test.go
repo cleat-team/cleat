@@ -276,6 +276,232 @@ func TestValidateTypeDefUnsupportedFieldType(t *testing.T) {
 	}
 }
 
+// TestValidateTypeDefFieldReferencesDefinedType is cleat#2776: a field's
+// type can now name another entry in types, the same allowance
+// validateTypeRef already gave a host function's top-level input/output.
+func TestValidateTypeDefFieldReferencesDefinedType(t *testing.T) {
+	types := map[string]TypeDef{
+		"BlobInfo": {
+			Type: "object",
+			Fields: map[string]FieldDef{
+				"key":  {Type: "string"},
+				"size": {Type: "int64"},
+			},
+		},
+	}
+	err := validateTypeDef(TypeDef{
+		Type: "object",
+		Fields: map[string]FieldDef{
+			"blob": {Type: "BlobInfo"},
+		},
+	}, types, "testType")
+	if err != nil {
+		t.Errorf("expected no error for a field referencing a defined type, got: %v", err)
+	}
+}
+
+// TestValidateTypeDefFieldReferencesUndefinedType confirms the fix is a
+// widening, not a removal: a name that resolves to nothing is still
+// rejected, whether or not it happens to collide with a builtin's spelling.
+func TestValidateTypeDefFieldReferencesUndefinedType(t *testing.T) {
+	types := map[string]TypeDef{
+		"BlobInfo": {Type: "object"},
+	}
+	err := validateTypeDef(TypeDef{
+		Fields: map[string]FieldDef{
+			"blob": {Type: "NotDefined"},
+		},
+	}, types, "testType")
+	if err == nil {
+		t.Fatal("expected error for a field referencing an undefined type name")
+	}
+	if !strings.Contains(err.Error(), "unsupported type") {
+		t.Errorf("expected 'unsupported type', got: %v", err)
+	}
+}
+
+// TestValidateManifestRejectsSelfReferencingFieldType is cleat#2806's R1:
+// a self-referencing field (Node.next: Node) validates at the
+// validateTypeDef level -- "Node" is a real name in types -- but
+// internal/plugingen generates it as a Go struct field BY VALUE, and
+// go/types rejects that with "invalid recursive type: Node refers to
+// itself" (measured against the real generator while fixing this). This
+// used to be documented here as a deliberate allowance; it is a rejection
+// instead, at the ValidateManifest level, since validateTypeDef alone has
+// no way to see the cycle -- it only checks whether one name resolves.
+func TestValidateManifestRejectsSelfReferencingFieldType(t *testing.T) {
+	m := &Manifest{
+		Name: "linked", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Node": {
+				Type: "object",
+				Fields: map[string]FieldDef{
+					"value": {Type: "string"},
+					"next":  {Type: "Node", Optional: true},
+				},
+			},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"push": {Description: "push", Input: TypeDef{Type: "Node"}, Output: TypeDef{Type: "Node"}},
+		},
+	}
+	err := ValidateManifest(m)
+	if err == nil {
+		t.Fatal("expected an error for a self-referencing field type")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected the error to name a cycle, got: %v", err)
+	}
+}
+
+// TestValidateManifestRejectsIndirectTypeCycle is the A -> B -> A shape
+// cleat-review's #2806 review named but did not measure: no single type
+// references itself, but the chain does, and it has the identical
+// downstream consequence -- a Go struct that contains a struct that
+// contains itself, still "invalid recursive type", just one hop removed
+// from the field that names the cycle.
+func TestValidateManifestRejectsIndirectTypeCycle(t *testing.T) {
+	m := &Manifest{
+		Name: "mutual", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"A": {Type: "object", Fields: map[string]FieldDef{"b": {Type: "B"}}},
+			"B": {Type: "object", Fields: map[string]FieldDef{"a": {Type: "A"}}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "A"}, Output: TypeDef{Type: "A"}},
+		},
+	}
+	err := ValidateManifest(m)
+	if err == nil {
+		t.Fatal("expected an error for an indirect A -> B -> A type cycle")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected the error to name a cycle, got: %v", err)
+	}
+}
+
+// TestValidateManifestAllowsAcyclicArrayAndMapReferences confirms the
+// cycle check does not over-reach: a type used as an array's item type or
+// a map's value type does not need to be complete "up front" the way a
+// direct field reference does -- Go generates a slice/map element, not an
+// embedded struct -- so an acyclic reference through those positions must
+// still validate.
+func TestValidateManifestAllowsAcyclicArrayAndMapReferences(t *testing.T) {
+	m := &Manifest{
+		Name: "collections", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Item": {Type: "object", Fields: map[string]FieldDef{"name": {Type: "string"}}},
+			"Bag": {Type: "object", Fields: map[string]FieldDef{
+				"items": {Type: "array", Items: &FieldDef{Type: "Item"}},
+				"byKey": {Type: "map", KeyType: &FieldDef{Type: "string"}, ValueType: &FieldDef{Type: "Item"}},
+			}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "Bag"}, Output: TypeDef{Type: "Bag"}},
+		},
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Errorf("expected no error for acyclic array/map references, got: %v", err)
+	}
+}
+
+// TestValidateManifestAllowsTreeViaArraySelfReference is cleat#2806 R2: a
+// type referencing itself as an array item (the ordinary shape of a tree,
+// "children": array of Node) is NOT a by-value cycle -- Go generates
+// []Node, which does not need the complete type up front, and it compiles
+// today on develop. An earlier version of the cycle check treated an
+// array's item type as an edge and rejected this, contradicting its own
+// doc comment ("not caught here on purpose") and regressing a shape
+// develop already accepted -- measured through the real pipeline
+// (ValidateManifest -> FromManifest -> GenerateGo -> assertGoCompiles in
+// internal/plugingen) before this test was written.
+func TestValidateManifestAllowsTreeViaArraySelfReference(t *testing.T) {
+	m := &Manifest{
+		Name: "tree", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Node": {Type: "object", Fields: map[string]FieldDef{
+				"value":    {Type: "string"},
+				"children": {Type: "array", Items: &FieldDef{Type: "Node"}},
+			}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "Node"}, Output: TypeDef{Type: "Node"}},
+		},
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Errorf("expected no error for a tree via an array of the same type, got: %v", err)
+	}
+}
+
+// TestValidateManifestAllowsMapOfSelfReference is the map-value mirror of
+// TestValidateManifestAllowsTreeViaArraySelfReference, same reasoning:
+// map[string]Node does not need the complete type up front either.
+func TestValidateManifestAllowsMapOfSelfReference(t *testing.T) {
+	m := &Manifest{
+		Name: "maptree", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Node": {Type: "object", Fields: map[string]FieldDef{
+				"value": {Type: "string"},
+				"kids":  {Type: "map", KeyType: &FieldDef{Type: "string"}, ValueType: &FieldDef{Type: "Node"}},
+			}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "Node"}, Output: TypeDef{Type: "Node"}},
+		},
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Errorf("expected no error for a map whose value type is the same type, got: %v", err)
+	}
+}
+
+// TestLoadAndValidateManifestWithFieldReferencingDefinedType is the
+// end-to-end case: a real manifest, through LoadManifest and
+// ValidateManifest, where one type's field is another type's name rather
+// than an inlined copy of its shape.
+func TestLoadAndValidateManifestWithFieldReferencingDefinedType(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "plugin.json")
+	content := `{
+		"name": "messaging",
+		"version": "0.1.0",
+		"description": "A plugin whose fields reference a shared shape",
+		"author": "cleat",
+		"types": {
+			"Attachment": {
+				"type": "object",
+				"fields": {
+					"filename": { "type": "string" },
+					"size": { "type": "int64" }
+				}
+			},
+			"Message": {
+				"type": "object",
+				"fields": {
+					"body": { "type": "string" },
+					"attachment": { "type": "Attachment" }
+				}
+			}
+		},
+		"host_functions": {
+			"send": {
+				"description": "Send a message",
+				"input": { "type": "Message" },
+				"output": { "type": "object", "fields": { "ok": { "type": "bool" } } }
+			}
+		}
+	}`
+	if err := os.WriteFile(manifestPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("LoadManifest failed: %v", err)
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("ValidateManifest failed: %v", err)
+	}
+}
+
 func TestValidateTypeDefEmptyFields(t *testing.T) {
 	err := validateTypeDef(TypeDef{}, nil, "emptyType")
 	if err != nil {

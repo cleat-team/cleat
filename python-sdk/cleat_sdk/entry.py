@@ -190,20 +190,115 @@ def _from_dict(
                 type_hints = {}
             _cache[target_type] = type_hints
 
-        # Build kwargs from the input dict, recursing per field.
+        # Build kwargs from the input dict, recursing per parameter.
+        #
+        # The source is `inspect.signature`, NOT `dataclasses.fields`. fields()
+        # omits InitVar pseudo-fields -- they are not stored attributes -- so
+        # an InitVar was invisible here, and a dataclass with a REQUIRED one
+        # could not be constructed through this binding at all, whatever the
+        # payload carried (cleat#2940). signature() is the callable that
+        # `target_type(**kwargs)` below actually invokes, and it is the same
+        # source `jsonschema_emitter.py` reads, so the emitted schema and this
+        # binding agree by construction rather than by coincidence.
+        #
+        # The same source also excludes `field(init=False)`, which fields()
+        # lists and __init__ does not accept -- passing one used to raise
+        # "unexpected keyword argument" from the call below.
+        #
+        # A payload the constructor takes NOTHING from is refused rather than
+        # tolerated, and the line between the two is the point: a key the
+        # signature does not have is a stray key, but a payload from which
+        # nothing at all was read is loss -- the object would be built
+        # entirely from its defaults and nothing would say so.
+        #
+        # This is ONE of the two shapes cleat#2940 changed for the worse -- the
+        # other is the VAR_KEYWORD case handled below. For
+        # `@dataclass(init=False)` with no hand-written `__init__` the
+        # signature is empty, and reading fields() used to raise "takes no
+        # arguments" -- by accident, because it passed a keyword the class did
+        # not accept. Restoring the failure, with a message naming the type and
+        # the keys, is scoped to what that change altered; the stray-key rule
+        # below is left exactly as it was (cleat#3058).
+        params = inspect.signature(target_type).parameters
+        if not params and value:
+            raise TypeError(
+                f"{target_type.__name__}() takes no constructor arguments, so "
+                f"none of the payload keys {sorted(value)} can be supplied; "
+                f"refusing to build it from its defaults alone"
+            )
+
         kwargs = {}
-        for f in dataclasses.fields(target_type):
-            if f.name not in value:
-                # Field absent from input -- rely on dataclass field
-                # default, or let __init__ raise TypeError.
+        for name, param in params.items():
+            if name not in value:
+                # Absent from input -- rely on the dataclass default, or let
+                # __init__ raise TypeError for a required one. An ordinary
+                # required field and a required InitVar fail identically
+                # there, because the payload is equally incomplete for both.
                 continue
-            field_type = type_hints.get(f.name, f.type)
-            kwargs[f.name] = _from_dict(value[f.name], field_type, _cache)
+            field_type = type_hints.get(name, param.annotation)
+            # An InitVar's annotation is the WRAPPER -- `InitVar[int]`, not
+            # `int` -- so recursing with it would convert against a non-type.
+            # Unwrap through the public `.type` attribute.
+            if isinstance(field_type, dataclasses.InitVar):
+                field_type = field_type.type
+            kwargs[name] = _from_dict(value[name], field_type, _cache)
+
+        # A VAR_KEYWORD parameter accepts keywords the signature does not name,
+        # so payload keys it did not match above belong to it. Measured on
+        # three revisions: the fields() loop passed a field-matching key here
+        # and `**kw` took it; reading the signature made that key look
+        # unmatched and it STOPPED arriving -- working -> quiet loss, with no
+        # error either side. Restoring it is what the parameter is for
+        # (cleat#3058). Their types are unknown to this binding, so they are
+        # passed exactly as they came.
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            kwargs.update({k: v for k, v in value.items() if k not in params})
 
         return target_type(**kwargs)
 
     # ---- Fallthrough: return value unchanged ----
     return value
+
+
+# ---------------------------------------------------------------------------
+# Shared binding-shape derivation
+# ---------------------------------------------------------------------------
+
+
+def _classify_entry_params(
+    func: Callable, hints: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """Splits *func*'s parameters into workflow params and required params,
+    skipping the injected HostCalls parameter.
+
+    The SINGLE derivation of this binding shape -- ``_make_entry`` (runtime
+    dispatch, below) and ``cleat_sdk.jsonschema_emitter`` (cleat#2914, the
+    static JSON Schema emitter) both call this rather than each re-deriving
+    the field list independently, so the schema cannot drift from what the
+    binding actually does. ``internal/jsonschema``'s Go emitter states the
+    identical reason for reading ``analyzer.EntryPointFields`` rather than
+    recomputing it.
+
+    A parameter is "required" if it carries no default -- ``export_wrapper``
+    below refuses an input missing any name in this list
+    (``missing = [p for p in required_param_names if p not in input_data]``)
+    before the function is ever called; a parameter WITH a default is left
+    out of input_data-presence checking entirely and simply keeps its
+    Python-level default when absent.
+    """
+    sig = inspect.signature(func)
+    workflow_param_names: list[str] = []
+    required_param_names: list[str] = []
+    for pname in sig.parameters:
+        # The HostCalls parameter is injected by the framework and is never
+        # part of the serialised input JSON.
+        if pname in hints and hints[pname] is HostCalls:
+            continue
+        workflow_param_names.append(pname)
+        param = sig.parameters[pname]
+        if param.default is inspect.Parameter.empty:
+            required_param_names.append(pname)
+    return workflow_param_names, required_param_names
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +404,69 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     )
 
 
-def cleat_entry(name: str | None = None) -> Callable:
+def _resolve_dual_form(
+    name: str | Callable | None,
+    make_entry: Callable[[Callable, str | None], Callable],
+) -> Callable:
+    """Resolve ``@d``, ``@d()`` and ``@d("name")`` into one decorator call.
+
+    ``make_entry(func, explicit_name)`` builds the wrapper, where
+    ``explicit_name`` is the caller's name or ``None`` when the caller gave
+    none -- and ``None`` is not "no name is possible", it is the instruction to
+    use the FUNCTION'S OWN NAME.
+
+    THIS IS ONE FUNCTION RATHER THAN THREE COPIES, and that is the fix rather
+    than a tidy-up. ``cleat_entry``, ``virtual_object`` and ``query_handler``
+    each carried this branch verbatim:
+
+        if callable(name):
+            # ``name`` is actually the decorated function.
+            return _make_entry(name)
+
+    and each of them was wrong in the same way: the single argument of the
+    bare form is the decorated FUNCTION, and it was passed straight into the
+    slot the workflow NAME is read from. So ``entry_name`` was a function
+    object, ``module._cleat_entry_wrappers`` was keyed by it, and
+    ``jsonschema_emitter._find_entry`` -- which matches on that key being the
+    workflow name -- found nothing.
+
+    Three copies meant three places to fix and three places to forget, which is
+    the shape the bug arrived in. cleat#2976.
+    """
+    if callable(name):
+        # BARE FORM: ``@cleat_entry`` with no parentheses. The argument is the
+        # decorated function and the name slot is EMPTY, so make_entry falls
+        # through to func.__name__ -- the same key the parenthesised form
+        # produces for a function of that name, because that is what "defaults
+        # to the Python function name" means in both.
+        return make_entry(name, None)
+
+    return lambda func: make_entry(func, name)
+
+
+_EXPOSURE_CLASSES = frozenset({"public", "auth", "internal"})
+"""The closed set of exposure classes (cleat#1986). Must match the three
+``engine.ExposureClass`` values on the Go side (``engine/store_types.go``) --
+there is nothing to import across the language boundary, so this is a
+deliberate, hand-kept mirror rather than a shared source."""
+
+
+def cleat_entry(name: str | None = None, expose: str | None = None) -> Callable:
     """Mark a function as a Cleat workflow entry point.
 
     The decorated function **must** accept a :class:`HostCalls` instance as
     its first parameter.  Additional parameters are deserialised from the
     workflow input JSON by name.
+
+    **Exposure class (cleat#1986):** ``expose`` declares this entry point's
+    exposure class -- one of ``"public"``, ``"auth"`` or ``"internal"``. This
+    is the Python counterpart of Go's ``//cleat:exposure <class>`` directive,
+    and it is validated here, at decoration time, for the same reason Go
+    validates at build time: an unrecognised value should fail loudly where it
+    is written, not ride silently into a deploy that reads it as "no
+    declaration" (``auth``) and enforces nothing. Omitted means no
+    declaration -- today's behaviour, deployed as ``auth`` unless a deploy
+    flag overrides it.
 
     **Typed parameter construction:** If a parameter's type annotation is a
     :func:`dataclasses.dataclass`, the decorator automatically constructs an
@@ -347,7 +499,7 @@ def cleat_entry(name: str | None = None) -> Callable:
             amount: float
             shipping_address: Address
 
-        @cleat_entry
+        @cleat_entry("place_order")
         def place_order(h: HostCalls, input: OrderInput) -> str:
             # ``input`` is an ``OrderInput`` instance, not a raw dict.
             # ``input.shipping_address`` is an ``Address`` instance.
@@ -358,6 +510,9 @@ def cleat_entry(name: str | None = None) -> Callable:
     name:
         Optional explicit export name for the workflow.  Defaults to the
         Python function name.
+    expose:
+        Optional exposure class declaration: ``"public"``, ``"auth"`` or
+        ``"internal"``.  Omitted means no declaration.
 
     Returns
     -------
@@ -371,7 +526,7 @@ def cleat_entry(name: str | None = None) -> Callable:
     ``wrapper._is_cleat_entry = True`` for introspection.
     """
 
-    def _make_entry(func: Callable) -> Callable:
+    def _make_entry(func: Callable, explicit_name: str | None) -> Callable:
         # ---- resolve workflow parameter names (skip injected HostCalls) ----
         hints = get_type_hints(func)
         sig = inspect.signature(func)
@@ -414,19 +569,12 @@ def cleat_entry(name: str | None = None) -> Callable:
                     f"`from cleat_sdk.host_calls import HostCalls`."
                 )
 
-        workflow_param_names: list[str] = []
-        required_param_names: list[str] = []
-        for pname in all_param_names:
-            # The HostCalls parameter is injected by the framework and is never
-            # part of the serialised input JSON.
-            if pname in hints and hints[pname] is HostCalls:
-                continue
-            workflow_param_names.append(pname)
-            param = sig.parameters[pname]
-            if param.default is inspect.Parameter.empty:
-                required_param_names.append(pname)
+        workflow_param_names, required_param_names = _classify_entry_params(func, hints)
 
-        workflow_name = name if name is not None else func.__name__
+        # The name this entry is registered under, and the key every reader of
+        # the registry matches on. explicit_name is None for the bare form and
+        # for @cleat_entry(), both of which mean the function's own name.
+        workflow_name = explicit_name if explicit_name is not None else func.__name__
 
         @functools.wraps(func)
         def export_wrapper(args_str: str) -> str:
@@ -511,21 +659,43 @@ def cleat_entry(name: str | None = None) -> Callable:
         # Mark the wrapper for introspection tooling.
         export_wrapper._is_cleat_entry = True  # type: ignore[attr-defined]
 
+        # cleat#1986. Read by jsonschema_emitter._find_entry and carried into
+        # the <wasm>.schema.json sidecar it emits -- None (no declaration)
+        # is omitted there, never written as a literal "auth". See the
+        # validation above for why this is never anything but a class in
+        # _EXPOSURE_CLASSES or None.
+        export_wrapper._cleat_expose = expose  # type: ignore[attr-defined]
+
         # Inject WitWorld into the decorated function's module so
         # componentize-py can discover the entry point at build time.
         _inject_witworld(func, export_wrapper, workflow_name)
 
         return export_wrapper
 
-    # ------------------------------------------------------------------
-    # Support both ``@cleat_entry`` (without parentheses, legacy) and
-    # ``@cleat_entry(...)`` (with parentheses, preferred).
-    # ------------------------------------------------------------------
-    if callable(name):
-        # ``name`` is actually the decorated function.
-        return _make_entry(name)
+    # "" means the same as omitted -- matching engine.ExposureClass's own
+    # convention on the Go side, where "" is "no declaration" and every
+    # other value is validated. _make_entry's closure over `expose` sees
+    # this normalised value: Python resolves a closure variable when the
+    # closure RUNS, not when it is defined, and _make_entry runs later,
+    # from _resolve_dual_form below.
+    if expose == "":
+        expose = None
 
-    return _make_entry
+    # expose is a cleat_entry(...)-level argument, not part of the bare-vs-
+    # parenthesised ambiguity _resolve_dual_form exists for, so it is
+    # validated here -- once, at the point @cleat_entry(expose=...) is
+    # actually evaluated -- rather than inside _make_entry, which runs once
+    # per decoration either way and would validate at the same moment.
+    if expose is not None and expose not in _EXPOSURE_CLASSES:
+        raise ValueError(
+            f"@cleat_entry(expose={expose!r}): expose must be one of "
+            f"{sorted(_EXPOSURE_CLASSES)} or omitted, got {expose!r}."
+        )
+
+    # Support both ``@cleat_entry`` (without parentheses, legacy) and
+    # ``@cleat_entry(...)`` (with parentheses, preferred). See
+    # _resolve_dual_form for why this is not inlined here.
+    return _resolve_dual_form(name, _make_entry)
 
 
 def virtual_object(name: str | None = None) -> Callable:
@@ -560,16 +730,13 @@ def virtual_object(name: str | None = None) -> Callable:
         handler.
     """
 
-    def _make_entry(func: Callable) -> Callable:
-        entry_name = name if name is not None else func.__name__
+    def _make_entry(func: Callable, explicit_name: str | None) -> Callable:
+        entry_name = explicit_name if explicit_name is not None else func.__name__
         decorated = cleat_entry(entry_name)(func)
         decorated._is_virtual_object = True  # type: ignore[attr-defined]
         return decorated
 
-    if callable(name):
-        return _make_entry(name)
-
-    return _make_entry
+    return _resolve_dual_form(name, _make_entry)
 
 
 def query_handler(name: str | None = None) -> Callable:
@@ -609,13 +776,10 @@ def query_handler(name: str | None = None) -> Callable:
         host runtime distinguishes queries by the ``_is_query_handler`` flag.
     """
 
-    def _make_entry(func: Callable) -> Callable:
-        entry_name = name if name is not None else func.__name__
+    def _make_entry(func: Callable, explicit_name: str | None) -> Callable:
+        entry_name = explicit_name if explicit_name is not None else func.__name__
         decorated = cleat_entry(entry_name)(func)
         decorated._is_query_handler = True  # type: ignore[attr-defined]
         return decorated
 
-    if callable(name):
-        return _make_entry(name)
-
-    return _make_entry
+    return _resolve_dual_form(name, _make_entry)

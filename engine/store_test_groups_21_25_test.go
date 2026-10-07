@@ -37,7 +37,7 @@ func TestRetryWorkflow(t *testing.T) {
 				t.Fatal("ClaimWorkflow returned nil")
 			}
 
-			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation, "exhausted", "err", "op"); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation, "exhausted", "err", "op", nil); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 
@@ -456,7 +456,7 @@ func TestDeleteDeadLetteredWorkflows(t *testing.T) {
 				t.Fatal("ClaimWorkflow returned nil")
 			}
 
-			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation, "done", "code", "op"); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation, "done", "code", "op", nil); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 
@@ -533,7 +533,7 @@ func TestDeleteCompletedWorkflows(t *testing.T) {
 			}
 
 			dlqWF := mkRun("dlq")
-			if err := store.MoveToDeadLetterQueue(ctx, dlqWF.ID, "worker-dlq", dlqWF.Generation, "dead", "E_DEAD", "op"); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, dlqWF.ID, "worker-dlq", dlqWF.Generation, "dead", "E_DEAD", "op", nil); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 

@@ -63,23 +63,18 @@ func OpenAIChat(ctx context.Context, client *http.Client, apiKey, baseURL string
 		choices[i] = Choice{Message: c.Message, FinishReason: c.FinishReason}
 	}
 
-	var cost float64
-	switch input.Model {
-	case "gpt-4o":
-		cost = float64(result.Usage.PromptTokens)*2.50/1_000_000 + float64(result.Usage.CompletionTokens)*10.0/1_000_000
-	case "gpt-4o-mini":
-		cost = float64(result.Usage.PromptTokens)*0.15/1_000_000 + float64(result.Usage.CompletionTokens)*0.60/1_000_000
-	case "gpt-4-turbo":
-		cost = float64(result.Usage.PromptTokens)*10.0/1_000_000 + float64(result.Usage.CompletionTokens)*30.0/1_000_000
-	default:
-		cost = float64(result.Usage.PromptTokens)*2.50/1_000_000 + float64(result.Usage.CompletionTokens)*10.0/1_000_000
-	}
+	// Priced on the model the provider actually served (result.Model), not
+	// the one requested (input.Model) -- a provider that quietly substitutes
+	// a model must not have that substitution billed at the wrong rate.
+	// cleat#2572.
+	cost, known := CostFor("openai", result.Model, result.Usage)
 
 	return ChatOutput{
-		Choices: choices,
-		Usage:   result.Usage,
-		Cost:    cost,
-		Model:   result.Model,
+		Choices:       choices,
+		Usage:         result.Usage,
+		Cost:          cost,
+		Model:         result.Model,
+		EstimatedCost: !known,
 	}, nil
 }
 

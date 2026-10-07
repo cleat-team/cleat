@@ -155,6 +155,37 @@ func readWasmStringValidated(mem api.Memory, ptr, length, maxLen uint32) (string
 	return string(data), true
 }
 
+// readOutBufString reads a value this process just WROTE into guest memory,
+// through whichever memory the session is using.
+//
+// BOTH ROUTES ARE REQUIRED, and the raw-buffer one is not a test convenience.
+// writeResult already routes through it -- the wasmtime backend has no
+// api.Module to pass, so a call reaching the host with m == nil causes the
+// write to land in the context's slice. A read that asked m.Memory() for that
+// value would panic on a nil module. That is not hypothetical:
+// registerCleatWaitForEvent passes nil exactly as registerCleatAwaitSignals
+// does, so a reader ignoring the context would have panicked on every wasmtime
+// worker the first time the loop re-read a claim's output. Found by building
+// the replay test, which drives the loop with no module at all.
+//
+// The guest pointer is checked the way writeResult checks it: ptr comes from
+// the guest, and a slice expression past the end of linear memory panics.
+func readOutBufString(ctx context.Context, m api.Module, ptr, length, maxLen uint32) (string, bool) {
+	if length == 0 || length > maxLen {
+		return "", false
+	}
+	if rawBuf, ok := ctx.Value(wasmMemBufKey{}).([]byte); ok && rawBuf != nil {
+		if uint64(ptr)+uint64(length) > uint64(len(rawBuf)) {
+			return "", false
+		}
+		return string(rawBuf[ptr : ptr+length]), true
+	}
+	if m == nil {
+		return "", false
+	}
+	return readWasmStringValidated(m.Memory(), ptr, length, maxLen)
+}
+
 // readWasmPayload reads a payload argument -- a request body, an HTTP body, a
 // stored value -- from WASM linear memory.
 //

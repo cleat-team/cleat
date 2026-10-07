@@ -65,12 +65,48 @@ Because the queue forces the method and nothing can bypass it, the back-merge is
 a three-step operation with an admin action in the middle:
 
 1. Set the ruleset's `merge_method` to `MERGE`.
-2. Merge the back-merge PR — "Create a merge commit".
+2. **Enqueue** the back-merge PR, and leave the ruleset on `MERGE` until it has
+   finished merging.
 3. Restore it to `SQUASH`.
 
 Step 1 and 3 are the owner's; they are item 155 of `#2058`. **Do not leave the
 queue on `MERGE`** — `feature/* -> develop` is squash by design, and a queue set
 to `MERGE` silently stops doing that for every PR that follows.
+
+**The flip must precede the ENQUEUE, not merely the merge — and this was learned
+the expensive way on v0.3.2.** The three steps above used to read "1. Set the
+method to `MERGE`. 2. Merge the back-merge PR. 3. Restore it", which is not wrong
+so much as under-specified: it reads as though the method is consulted when the
+merge happens, so any flip that precedes the merge is sufficient. **It is
+captured when the entry is ENQUEUED.** Measured:
+
+| | |
+|---|---|
+| back-merge PR enqueued | in the same call as the flip, microseconds before it took |
+| ruleset reads `MERGE` | for the full fifteen minutes the entry sat in the queue (verified live at both ends) |
+| it merged | still as a **squash** — one parent, lineage lost |
+
+Nothing failed. No check went red. `MERGE` was the true state of the ruleset
+throughout. The step-2 wording above is therefore "**Enqueue**", not "Merge",
+because that is the ordering that matters, and the ruleset must stay on `MERGE`
+until the entry has actually merged — restoring right after the enqueue would
+leave the merge itself to whatever method is live when it lands.
+
+**Verify the result by parent count, and the expected value depends on the PR.**
+Every state field is identical either way — `MERGED` is true, the checks are
+green, `mergeStateStatus` is `CLEAN` — so only the parent count distinguishes a
+squashed back-merge from a correct one:
+
+```bash
+gh api repos/cleat-team/cleat/commits/$(git rev-parse origin/develop) \
+  --jq '.parents | length'          # back-merge: expect 2.  feature/*: expect 1.
+git merge-base --is-ancestor vX.Y.Z origin/develop && echo "tag is an ancestor"
+```
+
+A bare parent count means nothing without the PR kind: a `feature/*` squash is
+correct at **1**, and a back-merge is correct at **2**. Applying the wrong
+expectation gives a confident wrong answer, which is why both are stated here
+rather than the number alone.
 
 **The failure this prevents is not hypothetical, and it is silent.** #1798 existed
 to make `v0.2.0` an ancestor of `develop`, and its own body argued that "a real
@@ -308,6 +344,24 @@ pattern above missed it entirely without that flag.
 That grep will not find the Homebrew formula, which is Ruby — but as of
 cleat#2068 nothing here needs to bump it by hand.
 
+**That grep is not the SDK version check, and does not stand in for one
+(cleat#2454).** It reaches one of the six places an SDK version lives — the
+Rust metadata stamper, via `--include="*.rs"` — and is structurally blind to
+the Python, Java and AssemblyScript ones, and to `pyproject.toml`, because
+none of those carry a bare `vX.Y.Z` in a `.go`/`.rs`/`.mod` file. Verify SDK
+version agreement with the script written for exactly this:
+
+```bash
+scripts/check-sdk-version-agreement.py --expected <version>
+```
+
+For each SDK it compares the manifest against every stamper that embeds the
+same version (see its docstring for the full list — e.g. python:
+`python-sdk/pyproject.toml` against `python-sdk/cleat_sdk/version.py` and
+`python-sdk/scripts/stamp_metadata.py`) and fails on any mismatch. The Go SDK
+is deliberately excluded: `wasm/build.go` derives `sdkVersion` rather than
+hardcoding it, so there is nothing for the script to compare.
+
 It also will not find `python-sdk/pyproject.toml`, which is TOML
 (`version = "0.2.0"`, no `v` prefix, so the pattern's own anchor can't see
 it). Bump it by hand on the release branch before tagging. This one is not
@@ -354,13 +408,51 @@ the template's install/test logic goes through a normal PR here, same as any
 other file; only `url`/`sha256` are generated, and they never live in this
 repo as real values, so there is nothing here to go stale between releases.
 
-**Token rotation.** `HOMEBREW_TAP_TOKEN` expires (fine-grained PATs always
-do). If the `homebrew-bump` job starts failing with `401`/`403` pushing to
-the tap, or ahead of the token's known expiry, an owner regenerates a
-fine-grained PAT scoped identically (`cleat-team/homebrew-tap`, Contents:
-read and write, no other repos or permissions) and updates the
-`HOMEBREW_TAP_TOKEN` Actions secret on `cleat-team/cleat`. Nothing else in
-this workflow needs to change when the token is rotated.
+**`homebrew-bump` has two failures that look alike and have different remedies.**
+Read the message before acting: get this wrong and you rotate a healthy token
+without touching the actual fault.
+
+| the job fails with | what it means | the remedy |
+|---|---|---|
+| `401`/`403` from the server | the credential expired or lost its scope | **rotate** — an owner regenerates a fine-grained PAT scoped identically (`cleat-team/homebrew-tap`, Contents: read and write, no other repos or permissions) and updates `HOMEBREW_TAP_TOKEN` on `cleat-team/cleat` |
+| `fatal: unable to access '…': URL rejected: Malformed input to a URL function` | git rejected the **URL**, before sending any request — so the token's *value* is malformed, not its credential | **re-set the same token's value**, cleanly — below |
+
+**Rotating ahead of a known expiry is still right** — fine-grained PATs always
+expire and this one is no exception. Nothing below changes that; it is only about
+telling that failure apart from one that looks like it.
+
+`URL rejected: Malformed input to a URL function` **cannot be produced by a
+`401` or a `403`.** Those are HTTP responses; this error happens while parsing
+the URL, before a request exists. So the message alone says which case you are
+in, and neither of the other two candidate causes — an expired token, a wrongly
+scoped one — is involved.
+
+That case is not hypothetical. Measured 2026-09-27 on v0.3.2 (run 36326029213,
+attempt 1): the other three jobs succeeded, and within `homebrew-bump` the
+checkout, the tarball hash and the formula render all succeeded — only the push
+failed. The secret existed, unexpired, and correctly scoped.
+
+**The malformation is stray whitespace or a control character — and not the
+obvious one.** A trailing newline is the intuitive guess and it is wrong: git has
+a case for that and reports it differently (`warning: url contains a newline in
+its password component`). Verified by running each against the real tap URL — a
+carriage return, a space or a tab produces the observed message; a newline does
+not.
+
+Re-set the value with:
+
+```bash
+printf '%s' '<token>' | gh secret set HOMEBREW_TAP_TOKEN -R cleat-team/cleat
+```
+
+`printf '%s'` and not `echo`, which appends the newline that this is so often
+mistaken for.
+
+**But note what is not recoverable.** Actions secrets are write-only, and a
+fine-grained PAT's value is shown once, at creation. So "re-set the value" is
+available only to someone who still holds it. If nobody does, a new PAT is the
+only route — that is a rotation, and the first row above applies. Either way,
+read the message before regenerating anything.
 
 **Verifying it worked**, either by re-deriving the CI job's own steps
 locally with a fake tag (the same check `packaging/homebrew/formula_test.go`'s
@@ -546,6 +638,137 @@ restore it to `SQUASH` afterwards, per
 is the one that gets skipped, and skipping it — by omission or by squash — is how
 `main` and `develop` diverge; the two `git` commands in that section are how you
 tell, and they are worth running before the next release rather than after.
+
+**Check what the enqueue did, not what it said.** `gh pr merge` is the one command
+here whose message and exit status are both uninformative, and **both directions are
+measured** — this applies to every enqueue, not only this step:
+
+- **The message is evidence in neither direction.** A *successful* enqueue prints
+  `! The merge strategy for develop is set by the merge queue`. That is a
+  refusal-shaped line, and it is what success looks like.
+- **The exit status is evidence in neither direction either.** `gh pr merge` exits
+  `0` on a refusal as well. The sharpest instance, from WS-1 (2026-09-27):
+  enqueueing a **draft** PR printed `Pull request is a draft` and **exited 0**. A
+  zero status on a refusal is the shape `gofmt -l && echo clean` has — the command
+  reporting success about a thing it did not do.
+
+So read the queue, which is the only view showing both the outcome and the
+**position**:
+
+```bash
+gh api graphql -f query="{repository(owner:\"cleat-team\",name:\"cleat\"){
+  pullRequest(number:<PR>){mergeQueueEntry{state position}}}}" \
+  --jq '.data.repository.pullRequest.mergeQueueEntry
+        | if . == null then "NOT IN QUEUE" else "\(.state) pos \(.position)" end'
+```
+
+An empty queue reads `NOT IN QUEUE` — which is also what a merged PR reads, hence the
+next paragraph.
+
+Position is not decoration: the queue evaluates your PR against **the entries ahead
+of it**, not against `develop`, so a `CLEAN`/`MERGEABLE` PR can sit `UNMERGEABLE` at
+position 3 because it collides with the one in front of it. An entry evicted for that
+reason still reads `OPEN`, so "still queued" and "silently kicked out" are the same
+reading if you poll only the PR state.
+
+**And when you want the whole queue rather than one PR's entry, ask for the queue.**
+`mergeQueueEntry` answers a question about a single PR and cannot show you what else is
+waiting, so assembling the picture from it takes one call per PR — each answering a
+smaller question than you asked. `mergeQueue` returns every entry with its position and
+state together:
+
+```bash
+gh api graphql -f query='{repository(owner:"cleat-team",name:"cleat"){
+  mergeQueue(branch:"develop"){entries(first:10){nodes{
+    position state pullRequest{number}}}}}}' \
+  --jq '.data.repository.mergeQueue.entries.nodes[]
+        | "pos=\(.position) \(.state) #\(.pullRequest.number)"'
+```
+
+    pos=1 AWAITING_CHECKS #2536
+    pos=2 AWAITING_CHECKS #2546
+    pos=3 AWAITING_CHECKS #2543
+
+The two are companions rather than alternatives: this is the only view that shows the
+queue **as a queue**, which is what makes an entry's position readable in context.
+**`branch` is an ARGUMENT here, not a field** — `mergeQueue.branch` errors, and it is
+the shape a reader will try first.
+
+**A long wait at position 1 is a CI pass, not a stall — and the queue's own runs are
+where you see it.** The queue does not check your branch tip; it builds the merge commit
+it *would* create and runs the checks against **that**, which is how it can tell whether
+your PR survives the entries ahead of it — and, as below, that commit is the one that
+lands:
+
+```bash
+gh run list --event merge_group --limit 20 \
+  --json headBranch,status,name --jq '.[] | "\(.status)  \(.name)\n    \(.headBranch)"'
+```
+
+    queued  CI/CD Pipeline
+        gh-readonly-queue/develop/pr-2543-340a862612222a9682c9a29c92cf616fb57ad76a
+    completed  DCO Check
+        gh-readonly-queue/develop/pr-2543-340a862612222a9682c9a29c92cf616fb57ad76a
+
+Read that ref before drawing anything from it. It sits under `refs/heads/`, so **a
+workflow gated on `refs/heads/main` will not match it** and will not run for a queued
+PR — which is the point of the name.
+
+**The `<sha>` in it is not the PR's head; it names the parent that this PR's merge
+commit will have.** It is the commit the trial was merged *onto* — the head of the queue
+at that moment, which for an entry behind another is the **pre-computed** merge of the
+entry ahead of it, before that entry has landed.
+
+That is checkable from the graph rather than only observable, which is what makes it a
+mechanism: `pr-2536-8395ac2d…` corresponds to a merge commit whose parent is `8395ac2d`,
+and `pr-2543-340a8626…` to one whose parent is `340a8626`. Compare it against the PR's
+head and it will not match — `#2543`'s head was `0c8aeca1`, which its ref never named.
+
+**And the trial merge is the commit that lands.** The queue raises the ref, runs the
+checks against it, and that same commit reaches `develop` — measured on `#2536`, whose
+queue ref pointed at `f01820b0` before merging and whose merge commit is `f01820b0`.
+
+So the wait is a real CI pass rather than a formality, and the precise reason is worth
+stating because the loose version is falsifiable: **the checks that GATE the merge are
+the checks that apply to what ships.** Develop's ordinary push CI does run on the landed
+commit too — measured on `f01820b0`, `gh run list` shows eight `push` runs against the
+same SHA — but by then the merge has happened, so those gate nothing. It is the
+`merge_group` runs that decided, and they decided against the commit that shipped.
+
+**And an entry behind another is queued, not stalled.** Two PRs sitting at positions 2
+and 3 while a third holds position 1 is the queue working — it evaluates one entry at a
+time, against the entries ahead. **Position is the only field that says so:** `state`
+reads `AWAITING_CHECKS` for every entry in the queue, including the one that is running,
+so it cannot distinguish the head from the two waiting behind it.
+
+**The `state` field has five values, and one of them reads like another.** Enumerate them
+from the schema rather than by watching traffic — the type is the authority and it is one
+call:
+
+```bash
+gh api graphql -f query='{__type(name:"MergeQueueEntryState"){enumValues{name description}}}'
+```
+
+| state | means |
+|---|---|
+| `QUEUED` | the entry has entered the queue |
+| `AWAITING_CHECKS` | the queue is checking the trial merge |
+| `MERGEABLE` | checks passed, the merge is imminent |
+| `UNMERGEABLE` | **it will not merge as it stands** |
+| `LOCKED` | the schema says only "currently locked" |
+
+**`UNMERGEABLE` is the one worth knowing, because a reader would misread it as
+`AWAITING_CHECKS`.** Both say "not merged yet"; only one of them is going to merge. That
+is the same distinction `position` draws for a different pair, and it is the state
+someone polling their own PR most needs to recognise — an entry that cannot merge looks
+exactly like one that is still waiting unless you read this field.
+
+**And a null is ambiguous, so read the PR state beside it.** A PR that has merged and
+a PR that was never enqueued both return `null` for `mergeQueueEntry`:
+
+```bash
+gh pr view <PR> --json state,mergedAt     # OPEN + mergedAt=null + no entry == nothing happened
+```
 
 ### 8. Verify CI
 

@@ -41,7 +41,12 @@ type RLSBypassReason struct {
 // (docker-compose.cluster.yml uses POSTGRES_USER=cleat; CI and local
 // development use `postgres`), so the policies were present, correct, tested,
 // and bypassed in practice by every connection that ever ran against them.
-// migrations/postgres/005_app_role.sql adds the role to connect as instead.
+// The schema baseline creates the role to connect as instead -- cleat_app. It
+// is named rather than cited by file: the postgres migrations were compacted
+// into a generated baseline in 0.3.0 (cleat#2416), and a comment that names a
+// migration file is a comment that has to be found and corrected at the next
+// compaction. This one was not, and told readers to apply a file that had been
+// deleted (cleat#2553).
 //
 // A nil, empty slice means RLS is enforced. Errors are returned only for
 // failures to interrogate the database.
@@ -152,8 +157,16 @@ func FormatRLSBypass(reasons []RLSBypassReason) string {
 	}
 	b.WriteString("\n\nGetWorkflowByID and ListWorkflows have no application-level tenant filter, " +
 		"so on this connection they return every tenant's data.")
-	b.WriteString("\n\nTo fix: apply migrations/postgres/005_app_role.sql, give the cleat_app role " +
-		"a password (ALTER ROLE cleat_app LOGIN PASSWORD '...'), and point --db at it. " +
+	// THE INSTRUCTION NAMES THE STATE AND THE OBJECT, NEVER A FILE. It used to
+	// say "apply migrations/postgres/005_app_role.sql", and that file was
+	// deleted by the 0.3.0 postgres compaction -- so the engine was printing a
+	// wrong instruction, at an operator, at the moment tenant isolation had
+	// already failed (cleat#2553). A runtime message that cites a migration
+	// path is a message with an expiry date, and this one expired.
+	b.WriteString("\n\nTo fix: connect as the cleat_app role instead of the owner. The schema " +
+		"baseline creates it NOLOGIN and without a password, on purpose, so give it " +
+		"one -- ALTER ROLE cleat_app LOGIN PASSWORD '...' -- and point --db at it. " +
+		"If the role does not exist at all, the schema baseline has not been applied. " +
 		"Keep the owner DSN for --migrate-db, which still needs DDL rights.")
 	return b.String()
 }

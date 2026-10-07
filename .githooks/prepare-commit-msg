@@ -66,8 +66,66 @@ git interpret-trailers \
 # Already present -- an explicit --trailer, or an amend of a stamped commit --
 # is left exactly as written. The config is a default for commits that do not
 # say, not an override of ones that do.
+#
+# ASK GIT'S OWN TRAILER PARSER WHETHER IT IS ALREADY THERE, NOT A GREP OVER
+# THE RAW FILE. cleat#2588, found on #2621's first review round:
+# stream-trailer-check.yml reads `%(trailers:key=Claude-Stream,valueonly)`,
+# which is git's parser applied to the FINAL PARAGRAPH only -- a line that
+# matches "Claude-Stream: ..." anywhere else in the message (the common case
+# is a blank line between it and the trailer block at the end) is invisible
+# to that reader. A raw grep over the whole file cannot tell the two apart,
+# so it was satisfied by exactly that shape, exited early thinking the
+# trailer was already there, and the check downstream found nothing --
+# stream-trailer-check.yml's own header names the identical failure it sees
+# on OTHER commits' messages ("TWO CAUSES, ONE SYMPTOM, DIFFERENT REPAIRS").
+#
+# `git interpret-trailers --parse` is the same parser: it prints only what
+# the final paragraph actually contains as trailers, which is what
+# `%(trailers:...)` also reads. Trust that, not a text match.
 # ---------------------------------------------------------------------------
+if git interpret-trailers --parse "$MSG_FILE" | grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]'; then
+	exit 0
+fi
+
+# The parser does not see one. If a line that LOOKS like one exists anywhere
+# in the raw message, this is a MALFORMED message, not an absent trailer --
+# but DO NOT REFUSE HERE. cleat#2588's second review round (cleat-review,
+# confirmed independently by the coordinator and by this hook's own author
+# in a scratch repo): prepare-commit-msg runs BEFORE the commit-message
+# editor opens, for every path that could actually repair this --
+# `commit --amend` and `rebase -i`'s `reword` both hand the ALREADY-malformed
+# message to this hook first, and a hook that exits non-zero here aborts
+# before the editor is ever invoked. Refusing at this point does not give
+# the author a chance to fix it; it blocks the only paths that could.
+# Measured with git 2.50.1: `commit --amend --no-edit` on such a commit was
+# refused with HEAD unchanged; a `reword` was refused with the rebase left
+# stuck, rescheduled. `--no-verify` skips this hook's sibling commit-msg but
+# not this hook, so it does not help either. The only escape from a refusal
+# placed here was `--amend -F <already-fixed-file>` -- not "fix the message
+# by hand", which is what this warning used to say while refusing to let
+# anyone reach the editor to do it.
+#
+# So: skip stamping (do not add a second, correctly-placed trailer next to
+# the broken one -- that would leave two Claude-Stream lines, one of which
+# the check still can't read) and let the message through as-is, warning
+# rather than failing. `.githooks/commit-msg` runs on the FINAL message,
+# after any editor has had its chance, and refuses it there if it is still
+# broken -- but not for a pick that opens no editor (below). THIS hook runs
+# whenever git actually CREATES the commit -- a cherry-pick, or a rebase
+# onto a base that moved -- and only warns, as below; measured, git 2.50.1.
+# A pick git fast-forwards, because the parent is unchanged, reuses the
+# existing commit object and runs neither hook. In every case an
+# already-malformed commit passes through unrefused; CI's Stream Trailer
+# Check is the backstop, same as before this fix existed. See commit-msg
+# for the refusal and its regression tests.
 if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
+	echo "prepare-commit-msg: warning: this message has a line matching" >&2
+	echo "'Claude-Stream: ...' that git's trailer parser does not read as a" >&2
+	echo "trailer (it is not in the message's final paragraph). Not stamping" >&2
+	echo "over it -- edit the message to fix this. commit-msg refuses it once" >&2
+	echo "you're done editing; an unchanged rebase pick or a cherry-pick runs" >&2
+	echo "no editor and no commit-msg, so it goes through regardless, and" >&2
+	echo "CI's Stream Trailer Check reports it. See .githooks/commit-msg." >&2
 	exit 0
 fi
 

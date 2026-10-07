@@ -217,6 +217,57 @@ func TestAssertNotCalledFails(t *testing.T) {
 	}
 }
 
+// The next three pin cleat#2539, where a plugin call never entered callHistory —
+// so over one call AssertCalled always failed and AssertNotCalled always passed,
+// whichever it had actually done. The first two are the two arms; the third is
+// the control, because a fix that made AssertNotCalled fail unconditionally would
+// satisfy the second on its own.
+
+func TestAssertCalledSeesAPluginCall(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("notifications", "send_webhook").Return(`{"ok":true}`, nil)
+
+	if _, err := env.H().PluginCall("notifications", "send_webhook", "{}"); err != nil {
+		t.Fatalf("plugin call failed: %v", err)
+	}
+
+	// Must not call Fatalf. Before cleat#2539 this always did.
+	env.AssertCalled(t, "notifications", "send_webhook")
+}
+
+func TestAssertNotCalledFailsOverAPluginCall(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("notifications", "send_webhook").Return(`{"ok":true}`, nil)
+
+	if _, err := env.H().PluginCall("notifications", "send_webhook", "{}"); err != nil {
+		t.Fatalf("plugin call failed: %v", err)
+	}
+
+	mt := &mockT{}
+	env.AssertNotCalled(mt, "notifications", "send_webhook")
+	if !mt.fatalfCalled {
+		t.Fatal("AssertNotCalled PASSED over a plugin call that demonstrably happened. " +
+			"(cleat#2539) An assertion that cannot fail certifies whatever it is pointed at, " +
+			"and this is the arm whose failure is discovered never rather than on first run.")
+	}
+}
+
+// The control. A plugin that is STUBBED but never CALLED must still satisfy
+// AssertNotCalled -- otherwise the fix above is satisfied by an assertion that
+// simply always fails, which is the same defect pointing the other way.
+func TestAssertNotCalledPassesWhenThePluginCallWasNotMade(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("notifications", "send_webhook").Return(`{"ok":true}`, nil)
+
+	_, err := env.H().PluginCall("notifications", "other_function", "{}")
+	if err == nil {
+		t.Fatal("expected the unstubbed function to error, so this test proves " +
+			"that SOMETHING was attempted and only the named call is absent")
+	}
+
+	env.AssertNotCalled(t, "notifications", "send_webhook")
+}
+
 // ---------------------------------------------------------------------------
 // 8. AfterSignal -> AwaitSignals receives it
 // ---------------------------------------------------------------------------
@@ -315,8 +366,10 @@ func TestDurableSleep(t *testing.T) {
 		close(slept)
 	}()
 
-	// Give the goroutine a moment to enter the sleep.
-	time.Sleep(5 * time.Millisecond)
+	// The goroutine is parked in the sleep, so nothing but an advance can wake
+	// it. This assertion is only meaningful once it is parked: before that it
+	// holds for a goroutine that has not started either.
+	env.WaitForParked(t)
 
 	// Should still be blocked.
 	select {
@@ -665,7 +718,7 @@ func TestAwaitSignalsWithTimeout(t *testing.T) {
 		result <- env.H().AwaitSignals([]string{"never"}, 100*time.Millisecond)
 	}()
 
-	time.Sleep(5 * time.Millisecond)
+	env.WaitForParked(t)
 
 	// Advance time past the deadline.
 	env.AdvanceTime(200 * time.Millisecond)
@@ -744,8 +797,9 @@ func TestSignalDuringDurableSleep(t *testing.T) {
 	// Wait for the signal to be delivered.
 	<-signalDone
 
-	// Give the sleep goroutine time to register.
-	time.Sleep(5 * time.Millisecond)
+	// The sleep goroutine is parked, so the advance below is the only thing
+	// that can wake it.
+	env.WaitForParked(t)
 
 	// Advance time past the sleep deadline.
 	env.AdvanceTime(6 * time.Second)
@@ -1172,8 +1226,9 @@ func TestAdvanceTimeAndDrainSleeps(t *testing.T) {
 		close(slept)
 	}()
 
-	// Give goroutine time to enter sleep.
-	time.Sleep(5 * time.Millisecond)
+	// The sleeper must be registered before the clock moves, or the drain
+	// returns vacuously and the advance does not count.
+	env.WaitForParked(t)
 
 	// AdvanceTimeAndDrain should block until the sleeper is drained.
 	env.AdvanceTimeAndDrain(2 * time.Second)
@@ -1203,7 +1258,7 @@ func TestAdvanceTimeAndDrainPreScheduledSignal(t *testing.T) {
 	// Pre-schedule a signal to arrive at the same time the goroutine wakes.
 	env.AfterSignal(1*time.Second, "wake", `{"msg":"hello"}`)
 
-	time.Sleep(5 * time.Millisecond)
+	env.WaitForParked(t)
 
 	// Advance past the sleep; the pre-scheduled signal should be delivered.
 	env.AdvanceTimeAndDrain(2 * time.Second)
@@ -1229,28 +1284,14 @@ func TestAdvanceTimeAndDrainMultipleSleeps(t *testing.T) {
 		close(slept2)
 	}()
 
-	// Wait for the sleeper to be registered rather than sleeping a fixed 5ms
-	// and hoping. AdvanceTimeAndDrain returns as soon as it sees zero pending
-	// sleepers, so advancing before the goroutine has registered drains
-	// nothing -- while still moving the clock forward. The sleep that
-	// registers afterwards then wants a deadline past the new now, and no
-	// further advance is coming, so it hangs until the test's timeout.
-	waitForSleeper := func(what string) {
-		t.Helper()
-		for i := 0; i < 500; i++ {
-			env.mu.Lock()
-			n := len(env.sleepRecs)
-			env.mu.Unlock()
-			if n > 0 {
-				return
-			}
-			time.Sleep(time.Millisecond)
-		}
-		t.Fatalf("timed out waiting for %s to be registered", what)
-	}
+	// WaitForParked is the precondition AdvanceTimeAndDrain needs: the drain
+	// returns as soon as it sees zero pending sleepers, which is also true
+	// before the goroutine has registered anything -- see its doc comment.
+	// This test used to hand-roll that wait in a local `waitForSleeper`
+	// closure, which is the workaround cleat#3091 exists to remove.
 
 	// First advance: should drain first sleep.
-	waitForSleeper("first DurableSleep")
+	env.WaitForParked(t)
 	env.AdvanceTimeAndDrain(1 * time.Second)
 	select {
 	case <-slept1:
@@ -1263,8 +1304,9 @@ func TestAdvanceTimeAndDrainMultipleSleeps(t *testing.T) {
 	// *before* the goroutine enters the second DurableSleep, so reaching here
 	// says nothing about whether that sleep is registered yet -- this is the
 	// window the original test left unguarded, and it is why the job failed
-	// intermittently under CI load while passing locally.
-	waitForSleeper("second DurableSleep")
+	// intermittently under CI load while passing locally. WaitForParked closes
+	// it without a sleep.
+	env.WaitForParked(t)
 	env.AdvanceTimeAndDrain(1 * time.Second)
 	select {
 	case <-slept2:
@@ -1290,8 +1332,10 @@ func TestSignalSynchronousDelivery(t *testing.T) {
 		close(received)
 	}()
 
-	// Let goroutine reach AwaitSignals.
-	time.Sleep(5 * time.Millisecond)
+	// Park the goroutine in AwaitSignals first, so the signal below is the
+	// delivered-to-a-waiter path this test is named for rather than the
+	// consumed-on-entry path.
+	env.WaitForParked(t)
 
 	// Signal should be delivered synchronously via Gosched.
 	env.Signal("greeting", `{"msg":"hello"}`)

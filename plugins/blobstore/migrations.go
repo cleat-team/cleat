@@ -54,8 +54,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (tenant_id, ` + "`key`" + `)
 				);
 
-				CREATE INDEX idx_blob_tenant_created ON blob_index(tenant_id, created_at DESC);
-				CREATE INDEX idx_blob_expires ON blob_index(expires_at);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'blob_index' AND index_name = 'idx_blob_tenant_created');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_blob_tenant_created ON blob_index(tenant_id, created_at DESC)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'blob_index' AND index_name = 'idx_blob_expires');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_blob_expires ON blob_index(expires_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'blob_content')
@@ -98,8 +103,14 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE blob_content ALTER COLUMN data DROP NOT NULL;
 			`,
 			UpMySQL: `
-				ALTER TABLE blob_content ADD COLUMN storage_backend VARCHAR(255) NOT NULL DEFAULT 'memory';
-				ALTER TABLE blob_content ADD COLUMN s3_key TEXT;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'blob_content' AND column_name = 'storage_backend');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE blob_content ADD COLUMN storage_backend VARCHAR(255) NOT NULL DEFAULT ''memory''', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'blob_content' AND column_name = 's3_key');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE blob_content ADD COLUMN s3_key TEXT', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 				ALTER TABLE blob_content MODIFY COLUMN data LONGBLOB NULL;
 			`,
 			UpMSSQL: `
@@ -135,7 +146,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (workflow_id, sha256)
 				);
 
-				ALTER TABLE blob_index ADD COLUMN deleted_at TIMESTAMP(6);
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'blob_index' AND column_name = 'deleted_at');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE blob_index ADD COLUMN deleted_at TIMESTAMP(6)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_blob_refs')

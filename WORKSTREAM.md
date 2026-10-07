@@ -358,6 +358,23 @@ a red develop is fixed at once:
 - A red `engine-race.yml` run opens a tracking issue on its own. A real `WARNING: DATA RACE` is
   treated the same way as a red develop.
 
+**R11 — Routing is two acts: post the trace, and send the message.** A routed PR and an unrouted
+one are the *same artifact* — `comments: 0`, `reviews: 0`, checks settled green (cleat#3007). So
+at routing time the author posts, as the **leading line** of a comment,
+
+    ROUTED — sent to <reviewer> for a verdict on <full sha>
+
+and sends the reviewer the ask in the same act — two acts, one moment. `ROUTED` is reserved for
+the request so it never collides with the answer's `NOT A VERDICT —` / `FINAL OK —`, and a trace
+expires with the head it names, so a moved head needs a fresh line rather than one that "carried
+over". **The token is a claim about an act the PR cannot observe, not proof of it** — the lane's
+queue is messages, not the PR feed — so the detector stays the population one: **a routed PR is
+served, or it is not**, and an unserved PR is evidence of a stall only once you have asked whose
+*other* PRs were served. **Two omissions, both measured on 2026-10-03:** a trace with no message
+(cleat#3013, #3017), and a message **to the coordinator** with no trace (cleat#3035). The second
+reads as routed to its own author, because reporting produces a transcript that the artifact does
+not — **the coordinator is a side channel for *state*; the lane is *the ask*.**
+
 ---
 
 ## Verification protocol
@@ -851,6 +868,64 @@ OrbStack and containers are per-session). The same tree is reachable as `/locals
 — which is what `scripts/section-blocks.sh` does, and it is also how the `cleat-wt-*` worktrees
 resolve back to the stream that owns them.
 
+### A bad git identity passes `DCO Check` and fails `CLA Assistant`
+
+Added 2026-09-27, after #2494 went red on `CLA Assistant` for a reason that had nothing to do
+with its contents. **Revised 2026-09-28**, when the placeholder this section described was
+removed — see "What is no longer true" below.
+
+The **mechanism** is configured and documented — `core.hooksPath` points at `.githooks`,
+`cleat.stream` is set, so `prepare-commit-msg` stamps both trailers (CONTRIBUTING.md §DCO).
+What the checks read is the identity underneath them, and the two read it differently:
+
+| check | what it matches | with an author email that maps to no account |
+|---|---|---|
+| `DCO Check` | that a `Signed-off-by` trailer **exists** | **passes** — it never reads the value |
+| `CLA Assistant` | the commit **author's email** against a signed CLA | **fails** |
+
+So a DCO-green PR can be un-mergeable, and the red check names the CLA rather than the identity —
+the obvious reading of the failure ("sign the CLA") is not the problem and cannot fix it. **That
+asymmetry is this section's real content and nothing below changes it.**
+
+**What is no longer true: this clone carried `c@local`, and it does not any more.** Resolved
+2026-09-28, owner-authorised:
+
+    $ git config --show-origin user.email
+    file:/Users/rcownie/.gitconfig	rcownie@users.noreply.github.com
+    $ git config --local --get-all user.email        # empty — no clone-local entry
+
+Anyone using the per-commit override is unaffected, because the override wins either way; anyone
+*not* overriding moved from an identity that **cannot** satisfy `CLA Assistant` to one that can.
+The instruction this section carried — *"fix it per commit; do not change the shared config"* —
+was the bounded alternative to editing a file every worktree reads, and its stated reason was that
+editing it moves another stream's identity under it mid-task. That protects against an
+**unannounced** change; this one was authorised and strictly widening, so the command below is now
+a general remedy rather than the rule for this clone.
+
+**Wherever a clone does carry a bad identity, the per-commit override is the tool:**
+
+    git -c user.name=rcownie -c user.email=rcownie@users.noreply.github.com \
+      commit --amend --no-edit --reset-author -s
+
+`-s` re-signs as the new identity, and the stale `Signed-off-by` from the old one has to be
+removed or the commit ends up carrying two.
+
+**What makes an identity bad is that it maps to no account, not that it is clone-local.**
+`cleat-62e358cb` still carries a clone-local `richard.cownie@pobox.com` and was deliberately left
+alone: it maps to a real account and satisfies the CLA. `c@local` was broken because it maps to
+none.
+
+**Same trap one artefact over: annotated tags carry a tagger, and it is immutable.** `v0.3.0` and
+`v0.3.1` are `c <c@local>`; `v0.3.2` is `rcownie <rcownie@users.noreply.github.com>`. Re-derive:
+
+    for t in v0.3.0 v0.3.1 v0.3.2; do
+      git for-each-ref "refs/tags/$t" --format='%(refname:short) %(taggername) <%(taggeremail)>'
+    done
+
+That is not CLA-relevant — a tag is not a commit in a PR — but for a public release the tagger is
+provenance a third party reads, and **two published tags carry one that maps to no account** while
+the most recent does not.
+
 ### DSNs
 
 Each row was connected to on 2026-09-04 by the stream that owns it.
@@ -1066,7 +1141,7 @@ an older git. Re-derive elsewhere: `git init`, commit, `git worktree add`, commi
 | file | protocol |
 |---|---|
 | `IMPROVEMENT-PLAN.md` | Edit only your own `§` sections. **Do not pick a number — run `scripts/next-section-number.sh`.** Blocks are per stream (WS-1 `3.200–299`, WS-2 `3.300–399`, WS-3 `3.400–499`; `scripts/section-blocks.sh`), and `.githooks/pre-commit` refuses a commit that adds one outside yours. The script reads `origin/develop`, so it cannot see a number already claimed by an *open* PR — open two at once and it hands out the same number twice. Take the second by hand and say so in the PR. Closed sections are archived by `scripts/archive-closed-sections.py`, never deleted. |
-| `scripts/skip-ledger.tsv` | **Add a line; never edit a number.** A job's budget is the sum of its lines, so two streams adding skips do not contend for one total. Attribute a new skip by test name, never by delta. `test-go/engine` and `cluster` move together — the cluster job also runs `./engine/...`. |
+| `scripts/skip-ledger.d/`, `scripts/skip-ledger.tsv` | **Add a line; never edit a number.** A job's budget is the sum of its lines, so two streams adding skips do not contend for one total. Attribute a new skip by test name, never by delta. **Put a NEW declaration in `scripts/skip-ledger.d/<slug>.tsv`, not in the single `.tsv`:** the directory is one file per declaration, so two streams' additions never touch the same file, whereas `skip-ledger.tsv` is one shared file that *does* contend — which is the whole reason the directory exists. `scripts/check-skip-budget.sh` reads and sums both, so either location is charged. `test-go/engine` and `cluster` move together — the cluster job also runs `./engine/...`. |
 | `scripts/skip-baseline.txt` | Never hand-edit. Regenerate with `scripts/check-skips.sh --update` **after** rebasing. A count going down is the point; a count going up needs a sentence. |
 | `scripts/deadcode-baseline.txt` | Same; `scripts/check-test-only-code.sh --update`. A shrinking baseline is the honest evidence that wiring landed. |
 | `migrations/{postgres,mysql,mssql}/` | Numbered per dialect. **Take the next free number above the dialect's high-water mark** — see below; the reserved blocks are gone. |

@@ -6,16 +6,24 @@ package engine
 // two facts meet, and one tenant can delete, disable and reschedule another
 // tenant's cron schedules over the ordinary HTTP API.
 //
-// Why the login is a cleat_admin member rather than might be. A non-default
-// tenant's workflows only run if the dispatch loop can see across tenants:
-// that is what migrations 023 and 024 exist for, and on SQL Server the
-// exemption is IS_ROLEMEMBER(N'cleat_admin') = 1 inside dbo.fn_tenant_filter
-// itself (012_admin_role.sql). GetDueSchedulesAcrossTenants and
-// ClaimReadyAcrossTenants both call requireCleatAdminMembership and fail
-// loudly without it. So a working multi-tenant SQL Server deployment has
-// granted the role, and MSSQLStore.WithTenant returns a copy sharing s.db --
-// one pool, one login. Every tenant-scoped store the worker hands a request is
-// therefore unfiltered.
+// Why the login is a cleat_admin member rather than might be, AT THE TIME this
+// was written (IMPROVEMENT-PLAN 3.86-era). A non-default tenant's workflows
+// only ran if the dispatch loop could see across tenants: on PostgreSQL that
+// was migrations 023 and 024, and on SQL Server the exemption was
+// IS_ROLEMEMBER(N'cleat_admin') = 1 inside the shipped fn_tenant_filter itself
+// (migrations/mssql/012_admin_role.sql, now folded into the baseline); cleat#1541
+// (migration 075, also folded) made that admission opt-in via
+// migrations/mssql/optional/cross_tenant_claim.sql, and the shipped predicate
+// has not carried it since.
+// GetDueSchedulesAcrossTenants, ClaimReadyAcrossTenants and
+// requireCleatAdminMembership were all removed in #1926, which replaced that
+// widened claim with unconditional per-tenant rotation needing no grant at
+// all -- so a working multi-tenant SQL Server deployment no longer needs
+// cleat_admin membership for its OWN dispatch loop. What #1926 did not change:
+// cleatctl and cross-tenant test teardown (engine/testutil/mssql_admin.go)
+// still provision that membership, and MSSQLStore.WithTenant returns a copy
+// sharing s.db -- one pool, one login. Every tenant-scoped store built over
+// SUCH a pool is therefore unfiltered, which is what this test still proves.
 //
 // This is where SQL Server and PostgreSQL diverge, and it is worth naming
 // because the PostgreSQL side got it right. There the exemption is a separate
@@ -48,7 +56,12 @@ import (
 )
 
 // adminLoginStores returns two tenant-scoped stores over one cleat_admin
-// pool: the shape a multi-tenant SQL Server worker actually runs.
+// pool: AT THE TIME this was written (3.86-era), the shape a multi-tenant
+// SQL Server worker's dispatch loop ran under. #1926 retired that --
+// unconditional per-tenant rotation needs no cleat_admin grant at all -- so
+// today the pool this builds is the one cleatctl and cross-tenant test
+// teardown (engine/testutil/mssql_admin.go) still hold, not the dispatch
+// loop's own.
 //
 // Named for the connection rather than for schedules, because the mechanism is
 // table-independent -- 3.86's audit reaches every SQL Server statement that
@@ -56,9 +69,12 @@ import (
 // mssql_admin_login_tags_tenant_test.go is the second caller.
 //
 // Note what this does NOT do. It does not grant anything, weaken a policy or
-// reach past the store API. The connection is the one the product requires for
-// cross-tenant dispatch and the calls are the ones the HTTP handler makes
-// (cmd/cleat-worker/server.go:993-1005, through scopedStore).
+// reach past the store API. The connection is one that genuinely exists in a
+// deployment today (cleatctl, cross-tenant test teardown), and its callers
+// (this file, mssql_admin_login_tags_tenant_test.go, and the cascade,
+// control_plane and defs variants -- grep -n "adminLoginStores(t)"
+// engine/*_test.go for the current list) exercise ordinary store methods
+// through the public API, not anything privileged.
 func adminLoginStores(t *testing.T) (a, b *MSSQLStore) {
 	t.Helper()
 	backend := &MSSQLBackend{}

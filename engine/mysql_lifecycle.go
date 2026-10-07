@@ -222,6 +222,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
 		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    started_at = COALESCE(started_at, NOW(6)),
@@ -549,6 +550,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		SET status = 'running',
 		    signal_seq_at_claim = signal_seq,
 		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
 		    assigned_to = ?,
 		    heartbeat_at = NOW(6),
 		    started_at = COALESCE(started_at, NOW(6)),
@@ -656,7 +658,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	}
 	defer tx.Rollback()
 
-	qsJSON := marshalQueryState(queryState)
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -665,9 +667,9 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 		    error_op = ?,
 		    completed_at = NOW(6),
 		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = ?
+		    query_state = COALESCE(?, query_state)
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
-	`, errorMsg, errorCode, errorOp, qsJSON, workflowID, workerID, s.tenantID, generation)
+	`, errorMsg, errorCode, errorOp, qsParam, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
 	}
@@ -1118,19 +1120,21 @@ func (s *MySQLStore) HeartbeatBatchFenced(ctx context.Context, workerID string, 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts. This is a terminal status similar to
 // 'failed' but indicates the workflow was retried without success.
-func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = ?, error_code = ?, error_op = ?,
-		    completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL
+		    completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL,
+		    query_state = COALESCE(?, query_state)
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
-	`, errMsg, errorCode, errorOp, workflowID, workerID, s.tenantID, generation)
+	`, errMsg, errorCode, errorOp, qsParam, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
 	}
@@ -1230,6 +1234,98 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 	`, timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), tx.Commit()
+}
+
+// ListStaleHolders satisfies StaleHolderReaper. Same tenant scoping and
+// same status='running'/heartbeat_at predicate as ReapStaleInstances --
+// see that method's doc and StaleHolderReaper's doc for why the two are
+// allowed to race.
+func (s *MySQLStore) ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, generation, assigned_to FROM workflow_instances
+		WHERE status = 'running'
+		  AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
+		  AND tenant_id = ?
+		ORDER BY heartbeat_at
+		LIMIT ?
+	`, timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: %w", err)
+	}
+	defer rows.Close()
+
+	var holders []StaleHold
+	for rows.Next() {
+		var h StaleHold
+		var assignedTo sql.NullString
+		if err := rows.Scan(&h.Key.WorkflowID, &h.Key.Generation, &assignedTo); err != nil {
+			return nil, fmt.Errorf("list stale holders: scan: %w", err)
+		}
+		h.AssignedTo = assignedTo.String
+		holders = append(holders, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list stale holders: rows: %w", err)
+	}
+	return holders, tx.Commit()
+}
+
+// ReapStaleInstancesExcept satisfies StaleHolderReaper. Identical to
+// ReapStaleInstances, with one added predicate excluding any (id,
+// generation) row-value pair named in exclude. MySQL's row subquery IN
+// (documented since 4.1, unlike its table-value-constructor VALUES syntax
+// which is 8.0.19+ only) is used rather than an array bind, because the
+// driver has no array parameter type to bind a Go slice to -- the
+// placeholder list is built to match len(exclude), and an empty exclude
+// renders no clause at all rather than an empty, always-false IN().
+func (s *MySQLStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	excludeClause := ""
+	args := []any{timeout.Microseconds(), s.tenantID}
+	if len(exclude) > 0 {
+		pairs := make([]string, len(exclude))
+		for i, k := range exclude {
+			pairs[i] = "(?, ?)"
+			args = append(args, k.WorkflowID, k.Generation)
+		}
+		excludeClause = "AND (id, generation) NOT IN (" + strings.Join(pairs, ", ") + ")\n\t\t          "
+	}
+	args = append(args, reapLimitArg(limit))
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id IN (
+		    SELECT id FROM (
+		        SELECT id FROM workflow_instances
+		        WHERE status = 'running'
+		          AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
+		          AND tenant_id = ?
+		          `+excludeClause+`
+		        ORDER BY heartbeat_at
+		        LIMIT ?
+		    ) t
+		)
+	`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	return int(n), tx.Commit()
@@ -1443,10 +1539,42 @@ func (s *MySQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID strin
 // wrapRejectedResult returns anything it does not recognise unchanged, so the
 // blanket wrap costs nothing and cannot mislabel an unrelated failure.
 func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	return wrapRejectedResult(
+	err := wrapRejectedResult(
 		s.finalizeWorkflowSegmentRetrying(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+	return wrapMySQLFinalizeDBError(err, runID)
+}
+
+// wrapMySQLFinalizeDBError is wrapPostgresFinalizeDBError's MySQL
+// counterpart (cleat#2805) -- see that function's doc comment for the
+// shared reasoning (narrow scope, connection errors already intercepted
+// upstream, context cancellation treated as transient, default permanent).
+//
+// isDeadlockError (1213) and isLockWaitTimeout (1205) are the same
+// classifiers finalizeWorkflowSegmentRetrying, above, already uses to RETRY
+// internally up to 8 times -- reaching this point on either code means
+// every retry also lost. That does not change the classification: the
+// server still guarantees each losing attempt's transaction was rolled
+// back, so the failure is still about contention, not data, and ErrTransient
+// still means "an operator/retry-policy may reasonably try this workflow
+// again", which remains true after 8 losses to the same kind of contention.
+func wrapMySQLFinalizeDBError(err error, workflowID string) error {
+	if err == nil || errors.Is(err, ErrFenceLost) {
+		return err
+	}
+	var ce *CleatError
+	if errors.As(err, &ce) {
+		return err
+	}
+	code := ErrPermanent
+	switch {
+	case isDeadlockError(err) || isLockWaitTimeout(err):
+		code = ErrTransient
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		code = ErrTransient
+	}
+	return &CleatError{Code: code, Op: "finalize workflow", WorkflowID: workflowID, Err: err}
 }
 
 // finalizeWorkflowSegmentRetrying retries finalizeWorkflowSegmentInner's whole
@@ -1476,9 +1604,33 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 // NO SLEEP BETWEEN ATTEMPTS, for the same reason as the start path: the
 // victim's lock is already released by the time this returns, so there is
 // nothing to wait for and a backoff would only add latency to the path a
-// worker is blocking on to report a workflow's outcome.
+// worker is blocking on to report a workflow's outcome. THAT ARGUMENT
+// ANSWERS ONE QUESTION ONLY -- "is there a lock left to wait out" -- and
+// the answer is no. It does not answer a SEPARATE question this call site
+// actually has: whether N lockstep losers, released together, re-collide
+// with EACH OTHER on an immediate retry. A sleep would likely reduce that
+// too (cleat-review, reviewing cleat#2033), but raising the budget alone
+// already measured clean (see below), so this file does not carry an
+// unneeded mechanism on the strength of a plausible argument for it.
+//
+// 16, NOT 8 -- MEASURED, cleat#2033. Unlike the start path, this call site's
+// contenders do not only shrink: with N finalizers racing the SAME fence,
+// a losing attempt can deadlock against ANOTHER loser rather than the
+// eventual winner, so more than one attempt is the common case here, not
+// the exception. Instrumenting every exit (success or a non-retryable
+// error) across 1000 rounds of 12 concurrent racers against a real MySQL
+// 8.4.11: mean 2.65 attempts, p50=3, p90=5, p99=7, deepest ever reached
+// was the 9th attempt (0-indexed 8) -- never beyond it in 12,000 calls.
+// At the OLD bound of 8, that tail is exactly where it bites: 52 of 12,000
+// racer-calls (0.43%) exhausted all 8 attempts and returned this error to
+// the caller -- cleat#2033's CI failure, reproduced locally rather than
+// assumed. 16 gives roughly 2x headroom over the observed worst case and
+// measured clean (0 of 12,000) at the same sample size. Like the start
+// path, the extra headroom costs nothing when unused: a deadlock victim's
+// lock is already released, so a 16th attempt is exactly as cheap as a
+// 2nd.
 func (s *MySQLStore) finalizeWorkflowSegmentRetrying(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	const maxAttempts = 8
+	const maxAttempts = 16
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {

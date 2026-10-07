@@ -187,23 +187,17 @@ func AnthropicChat(ctx context.Context, client *http.Client, apiKey, baseURL str
 		TotalTokens:      result.Usage.InputTokens + result.Usage.OutputTokens,
 	}
 
-	var cost float64
-	switch input.Model {
-	case "claude-opus-4-7":
-		cost = float64(usage.PromptTokens)*15.0/1_000_000 + float64(usage.CompletionTokens)*75.0/1_000_000
-	case "claude-sonnet-4-6":
-		cost = float64(usage.PromptTokens)*3.0/1_000_000 + float64(usage.CompletionTokens)*15.0/1_000_000
-	case "claude-haiku-4-5":
-		cost = float64(usage.PromptTokens)*0.80/1_000_000 + float64(usage.CompletionTokens)*4.0/1_000_000
-	default:
-		cost = float64(usage.PromptTokens)*3.0/1_000_000 + float64(usage.CompletionTokens)*15.0/1_000_000
-	}
+	// Priced on the model the provider actually served (result.Model), not
+	// the one requested (input.Model) -- see the matching comment in
+	// openai.go. cleat#2572.
+	cost, known := CostFor("anthropic", result.Model, usage)
 
 	return ChatOutput{
-		Choices: []Choice{choice},
-		Usage:   usage,
-		Cost:    cost,
-		Model:   result.Model,
+		Choices:       []Choice{choice},
+		Usage:         usage,
+		Cost:          cost,
+		Model:         result.Model,
+		EstimatedCost: !known,
 	}, nil
 }
 

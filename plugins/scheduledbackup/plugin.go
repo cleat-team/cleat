@@ -19,9 +19,20 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cleat-team/cleat/plugin"
 )
+
+// healthWindow is how long Health keeps reporting unhealthy after a LATER
+// attempt has resolved scheduledbackup.dsn again -- see Health's own doc
+// comment for why that is measured from the recovery, not from the original
+// failure, unlike auditlog's (plugins/auditlog/queue.go) otherwise-identical
+// window. Same value as auditlog's, though: a resolved-but-recent outage is
+// still a fact an operator has to see, not a reason for the host to stop
+// serving.
+const healthWindow = 5 * time.Minute
 
 func init() {
 	plugin.Register(plugin.PluginInfo{
@@ -54,6 +65,24 @@ type Plugin struct {
 	// than killed, see runDueBackups. It exists so tests can wait for a
 	// dispatched backup to actually finish without a fixed sleep.
 	bgBackups sync.WaitGroup
+
+	// lastDSNUnavailable is the UnixNano time of the most recent scheduled
+	// backup attempt that found scheduledbackup.dsn unresolvable
+	// (background.go's executeScheduledBackup, not warnIfBackupDSNUnresolvable's
+	// CLI check -- Health is driven by an actual attempt failing, not by a
+	// query run for its own sake). 0 means no attempt has ever failed this way.
+	//
+	// lastDSNResolved is the UnixNano time of the most recent attempt that
+	// resolved it successfully. Health (below) compares the two: if
+	// lastDSNUnavailable is the more recent of the pair (including the case
+	// where nothing has ever resolved it), the plugin stays degraded with no
+	// decay, because the deployment is still, right now, unable to back up.
+	// Only once a later success moves lastDSNResolved ahead does the signal
+	// start to decay, over healthWindow from THAT success -- not from the
+	// original failure, which is what "cleared on the next successful
+	// backupDSN" refers to.
+	lastDSNUnavailable atomic.Int64
+	lastDSNResolved    atomic.Int64
 }
 
 // Config controls backup storage and pg_dump output location.
@@ -220,3 +249,60 @@ func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
 	}
 	return nil, nil
 }
+
+// Health reports scheduledbackup as unhealthy when the most recent scheduled
+// backup attempt found scheduledbackup.dsn unresolvable, and stays unhealthy
+// -- with NO decay -- for as long as no later attempt has resolved it.
+// Healthy otherwise (plugin.HasHealth). Driven by the attempt path
+// (background.go's executeScheduledBackup, on the same failure that writes
+// backupErrDSNUnavailable to backup_history) rather than a query run here
+// for its own sake -- the same "attempt path, not a query" shape cleat#2246
+// asks for, mirroring auditlog's lost-event health signal
+// (plugins/auditlog/queue.go).
+//
+// UNLIKE auditlog, this does not simply decay healthWindow after the
+// failure. auditlog's losses recur on every request, so a fixed window after
+// the last one is a reasonable proxy for "is this still happening". A
+// scheduled backup recurs once per cron period -- for a daily schedule, a
+// naive 5-minute decay would report degraded for 5 of every 1,440 minutes,
+// well under any `for:` duration an alert would reasonably use, so the
+// signal this exists to provide would never fire in practice. Instead the
+// plugin stays degraded for as long as the LATEST attempt is a failure with
+// no later success, however long ago that failure was, and only starts to
+// decay once a subsequent attempt actually resolves the secret -- for
+// healthWindow after THAT success, not after the original failure. An
+// operator therefore sees "still broken" persist across cron periods, and
+// "recently recovered" for a bounded time after it is fixed, rather than
+// either latching forever or decaying before anyone could act on it.
+//
+// This is a signal for an operator watching worker health, not a gate:
+// RequiredDeploymentSecrets already refuses to boot when a leftover
+// --plugin-config dsn makes the secret mandatory, and backupDSN's own error
+// already fails the individual attempt -- neither of those needed Health to
+// exist. Health exists for the deployment that has never had that
+// precondition and is quietly failing every attempt anyway.
+func (p *Plugin) Health() error {
+	failedAt := p.lastDSNUnavailable.Load()
+	if failedAt == 0 {
+		return nil // no attempt has ever failed this way
+	}
+	resolvedAt := p.lastDSNResolved.Load()
+	if resolvedAt <= failedAt {
+		// The latest attempt is the failure itself, or nothing has resolved
+		// it since -- stay degraded regardless of how long ago that was.
+		return fmt.Errorf("scheduledbackup: a scheduled backup attempt found scheduledbackup.dsn "+
+			"unresolvable %s ago and no later attempt has resolved it -- see backup_history for the affected config(s)",
+			time.Since(time.Unix(0, failedAt)).Round(time.Second))
+	}
+	// A later attempt resolved it -- decay for healthWindow from THAT
+	// success, not from the original failure.
+	if time.Since(time.Unix(0, resolvedAt)) > healthWindow {
+		return nil
+	}
+	return fmt.Errorf("scheduledbackup: a scheduled backup attempt found scheduledbackup.dsn "+
+		"unresolvable %s ago, resolved %s ago -- see backup_history for the affected config(s)",
+		time.Since(time.Unix(0, failedAt)).Round(time.Second),
+		time.Since(time.Unix(0, resolvedAt)).Round(time.Second))
+}
+
+var _ plugin.HasHealth = (*Plugin)(nil)

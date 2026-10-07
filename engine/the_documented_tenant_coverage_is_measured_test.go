@@ -87,7 +87,28 @@ func readDialect(t *testing.T, root, dialect string) string {
 		if err != nil {
 			t.Fatalf("UNMEASURED: reading %s: %v", e.Name(), err)
 		}
-		b.Write(src)
+		// COMMENTS STRIPPED, because every scan below is a substring or regex
+		// search over the whole file and cannot tell a construct from a
+		// sentence about one. The failure that prompted it: this file's MySQL
+		// arm counts occurrences of "ENABLE ROW LEVEL SECURITY", "CREATE POLICY"
+		// and "ADD FILTER PREDICATE", and migrations/mysql/008_operator_api_keys.sql
+		// documents that MySQL has NO row-level security by SAYING so ("zero
+		// CREATE POLICY or ROW LEVEL SECURITY statements across
+		// migrations/mysql/*.sql"). That sentence made the count 1 on a tree
+		// where the answer is 0, and failed this test against a document that
+		// was right. Prose documenting an ABSENCE is the prose most likely to
+		// name the thing, so a comment-blind scan punishes the clearest writing
+		// first.
+		//
+		// MEASURED before it was added, so it does not quietly move a number the
+		// document asserts: migrations/postgres reads 81 constructs either way,
+		// migrations/mssql 56 either way, and the only file whose count changes
+		// is the one whose comment prompted this -- mysql 1 -> 0.
+		//
+		// stripSQLComments is mssql_uuid_projection_test.go's, shared rather
+		// than duplicated: it blanks comments while PRESERVING byte offsets, so
+		// a line number in any failure message stays true.
+		b.WriteString(stripSQLComments(string(src)))
 		b.WriteByte('\n')
 		n++
 	}

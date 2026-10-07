@@ -66,7 +66,7 @@ func MyWorkflow(ctx *cleat.HostCalls, input MyInput) (MyOutput, error) {
 ```python
 from cleat_sdk import HostCalls, cleat_entry
 
-@cleat_entry
+@cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     pass
 ```
@@ -124,7 +124,7 @@ workflow.Sleep(ctx, 5*time.Second)
 
 **Cleat (Go):**
 ```go
-h.Sleep(5 * time.Second)
+h.DurableSleep(5 * time.Second)
 ```
 
 **Cleat (Python) — note milliseconds:**
@@ -239,7 +239,7 @@ func PaymentWorkflow(h cleat.HostCalls, order Order) error {
 
 **Cleat (Python):**
 ```python
-@cleat_entry
+@cleat_entry("payment_workflow")
 def payment_workflow(h: HostCalls, order: dict) -> str:
     # Reserve inventory
     reserve_resp = h.call("inventory", "Reserve", order.get("items"))
@@ -294,7 +294,7 @@ deadlines, and child workflow options. Cleat passes `HostCalls` directly.
   Temporal Go uses `time.Duration` (nanosecond precision) and Temporal Python uses
   `timedelta` / seconds.
 - **Workaround**: Use constants: `h.sleep(5000)` for 5 seconds in Python;
-  `h.Sleep(5 * time.Second)` in Go.
+  `h.DurableSleep(5 * time.Second)` in Go.
 
 ### 4. No Namespace/Visibility
 

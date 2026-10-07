@@ -1,0 +1,15 @@
+# The workflow's identity: what `cleat deploy --name` registers and what a
+# caller names when it starts a run.
+#
+# entry_points is snake_case while the Go function is ProvisionTenant, because
+# the entry point is part of the ABI and C/WASM callers do not have Go's
+# naming. The built artifact is named for THIS FIELD, `name:` below --
+# b2b-saas-control-plane.wasm (cleat#2692) -- not the entry point and not its
+# source file either. Getting entry_points out of step with the Go function
+# is silent at deploy time and 404-shaped at start time -- a run for a
+# workflow whose entry point does not exist fails after the run id has been
+# handed out.
+name: b2b-saas-control-plane
+language: go
+entry_points:
+  - provision_tenant

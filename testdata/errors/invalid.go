@@ -49,6 +49,46 @@ func BadWithInterfaceDispatch(h cleat.HostCalls, reader io.Reader) error {
 	return err
 }
 
+// BadWithErrError calls err.Error() -- a method on the built-in error
+// interface -- inside a string concatenation on a line that also holds a
+// perfectly valid h.DurableLog call. cleat#2516's exact shape: ordinary
+// idiomatic error handling, not a hand-declared interface variable.
+func BadWithErrError(h cleat.HostCalls) error {
+	err := failingOp()
+	if err != nil {
+		h.DurableLog("operation failed: " + err.Error())
+		return err
+	}
+	return nil
+}
+
+func failingOp() error {
+	return nil
+}
+
+// errHolder stores an error in a struct field, for BadWithFieldErrError.
+type errHolder struct {
+	err error
+}
+
+// BadWithFieldErrError calls Error() on an error reached through a struct
+// FIELD rather than a bare identifier. cleat#2799: checkInterfaceDispatch
+// used to require the receiver to be a plain *ast.Ident, so this form got
+// no E008 at all -- not merely a misleading one, no diagnostic whatsoever.
+func BadWithFieldErrError(h cleat.HostCalls) {
+	x := errHolder{err: failingOp()}
+	if x.err != nil {
+		h.DurableLog("failed: " + x.err.Error())
+	}
+}
+
+// BadWithCallResultErrError calls Error() directly on a function's return
+// value, with no intermediate variable at all. cleat#2799's other missed
+// shape -- the receiver is a *ast.CallExpr, not an *ast.Ident.
+func BadWithCallResultErrError(h cleat.HostCalls) {
+	h.DurableLog("failed: " + failingOp().Error())
+}
+
 // BadWithFuncValue stores a function in a variable and calls it.
 func BadWithFuncValue(h cleat.HostCalls) {
 	fn := func() {

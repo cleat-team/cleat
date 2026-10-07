@@ -32,6 +32,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 // Kept in the same order as postgresCleanupTables; TestCleanupTableListsAgree
 // fails if the three drift apart again.
 var mysqlCleanupTables = []string{
+	"operator_api_keys",
 	"tenant_api_keys",
 	"workflow_tags",
 	"workflow_routing",
@@ -48,6 +49,11 @@ var mysqlCleanupTables = []string{
 	"workflow_instances",
 	"workflow_defs",
 	"plugin_defs",
+	// See postgresCleanupTables' comments on these four entries -- cleat#2228.
+	"tenant_secrets",
+	"queues",
+	"tenant_domains",
+	"tenant_settings",
 }
 
 // CleanupMySQLTestData removes all test data from MySQL tables.

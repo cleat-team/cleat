@@ -126,6 +126,21 @@ DISCOVERY_ROOTS = ("python-sdk", "crates", "packages")
 DISCOVERY_SUFFIXES = {".py", ".rs", ".sh", ".js", ".ts"}
 DISCOVERY_SKIP = ("node_modules", "/build/", "/target/", "/dist/")
 
+# Files that match SDK_VERSION_FIELD but are not a stamper -- test DATA that
+# happens to assign the same-shaped field, not something a real build emits.
+# cleat#3183: python-sdk/tests/test_stamp_metadata.py's "sdk_version": "0.3.2"
+# is one entry of a hand-built dict literal proving inject_metadata/
+# read_metadata round-trip a WHOLE metadata dict correctly (cleat#2936) -- the
+# value is arbitrary test data with no reason to track python-sdk/pyproject.
+# toml's real version, and adding it to SDKS would make every future version
+# bump fail this test file's assertion for a reason unrelated to what it
+# tests. Each entry needs a comment like this one: an exclusion list with no
+# reason attached is indistinguishable from one that is silently growing to
+# cover a real, un-checked stamper.
+DISCOVERY_EXCLUDE_FILES = {
+    "python-sdk/tests/test_stamp_metadata.py",
+}
+
 
 def discovered_sites(root: Path) -> set[str]:
     """Every file under the SDK trees that ASSIGNS a version."""
@@ -139,6 +154,8 @@ def discovered_sites(root: Path) -> set[str]:
                 continue
             rel = str(path.relative_to(root))
             if any(part in rel for part in DISCOVERY_SKIP):
+                continue
+            if rel in DISCOVERY_EXCLUDE_FILES:
                 continue
             if SDK_VERSION_FIELD.search(path.read_text(encoding="utf-8", errors="replace")):
                 found.add(rel)
@@ -337,6 +354,34 @@ def self_test() -> int:
             f"Add each to SDKS (and to SITES) or every release could ship it stale -- "
             f"this is the direction that reports 0 problems when it goes wrong."
         )
+
+    # THE EXCLUSION MECHANISM ITSELF, on a synthetic tree rather than the real
+    # repo (cleat#3183): the check above proves today's exclusion list matches
+    # today's tree, which says nothing about whether excluding a NAME actually
+    # suppresses it, or whether exclusion is scoped to that name rather than
+    # swallowing everything. Both directions, because an exclusion that is too
+    # wide is the more dangerous failure -- it reads as "nothing new to
+    # declare" exactly like a correct one does.
+    cases += 1
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        excluded_rel = next(iter(DISCOVERY_EXCLUDE_FILES))
+        for rel in (excluded_rel, "python-sdk/tests/not_excluded.py"):
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('sdk_version = "9.9.9"\n')
+        found = discovered_sites(root)
+        if excluded_rel in found:
+            failures.append(
+                f"discovery-exclusion case: {excluded_rel} was discovered despite "
+                f"being in DISCOVERY_EXCLUDE_FILES -- the exclusion does nothing"
+            )
+        if "python-sdk/tests/not_excluded.py" not in found:
+            failures.append(
+                "discovery-exclusion case: python-sdk/tests/not_excluded.py was not "
+                "discovered although it is not excluded -- the exclusion is swallowing "
+                "files it should not, which would silently hide a real, un-checked stamper"
+            )
 
     if failures:
         for f in failures:

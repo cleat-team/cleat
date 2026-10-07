@@ -831,7 +831,7 @@ func TestMSSQLStore_GetWorkflowDef_Success(t *testing.T) {
 	pluginDepsJSON := []byte(`{"plugin1":"v1.0"}`)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(3), wasmBytes, int64(2), int64(1), pluginDepsJSON, createdAt, nil, false},
+			{"test-wf", int64(3), wasmBytes, int64(2), int64(1), pluginDepsJSON, createdAt, nil, false, nil, false, "auth"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -871,7 +871,7 @@ func TestMSSQLStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 	createdAt := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(1), []byte("wasm"), int64(1), int64(0), nil, createdAt, nil, false},
+			{"test-wf", int64(1), []byte("wasm"), int64(1), int64(0), nil, createdAt, nil, false, nil, false, "auth"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1602,7 +1602,7 @@ func TestMSSQLStore_ResolvePromise_Success(t *testing.T) {
 	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET status = 'resolved'", affected: 1},
-		{match: "SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 
@@ -1621,7 +1621,7 @@ func TestMSSQLStore_RejectPromise_Success(t *testing.T) {
 	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET status = 'rejected'", affected: 1},
-		{match: "SET next_wake_at", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
 	})
 	defer db.Close()
 

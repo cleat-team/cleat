@@ -129,6 +129,14 @@ var crossTenantLedger = map[string]bypassKind{
 	// tenant dimension -- token_hash IS NULL is what scopes it to
 	// never-completed rows, not tenant_id. See background.go's doc comment.
 	"plugins/oauthprovider/background.go:(*Plugin).sweepExpiredSessions": kindGlobalSweep,
+	// cleat#2534: trial expiry, cut off by expires_at with no tenant
+	// dimension -- "which trials anywhere have expired" is the predicate.
+	// The bypass lives in sweep, not Run: Run only starts the ticker loop,
+	// and marking ctx there and relying on it to flow down through every
+	// p.sweep(ctx) call is what let TestSweep_MultiBackend/mssql call sweep
+	// directly with an unmarked ctx and get zero rows back with no error --
+	// see sweep's own doc comment.
+	"plugins/tenantlifecycle/background.go:(*Plugin).sweep": kindGlobalSweep,
 
 	// One transaction claims and advances every tenant's due rows.
 	"plugins/eventtriggers/background.go:(*Plugin).Run": kindClaimAcrossTenants,
@@ -138,7 +146,6 @@ var crossTenantLedger = map[string]bypassKind{
 	// could sit beside it without sharing a marked ctx -- same statement,
 	// same reasoning as the Run entry above, just no longer inlined there.
 	"plugins/jobqueue/background.go:(*Plugin).sweepAbandonedJobs": kindClaimAcrossTenants,
-	"plugins/webhookingest/background.go:(*Plugin).Run":           kindClaimAcrossTenants,
 	"plugins/scheduler/background.go:(*Plugin).runDueSchedules":   kindClaimAcrossTenants,
 	// scheduledbackup's runDueBackups USED to be here, with a reason covering
 	// both a per-tenant claim and the orphan sweep. cleat#2247 removed the
@@ -193,6 +200,15 @@ func (s crossTenantSite) key() string { return s.File + ":" + s.Func }
 // --others --exclude-standard so that a call site added in an untracked file is
 // still seen. A guard that only reads committed files is blind to exactly the
 // change being reviewed.
+//
+// --others ALSO surfaces a package's own throwaway scratch directory, which
+// --exclude-standard does not catch because nothing in .gitignore names it:
+// internal/plugingen's assertGoCompiles writes real, untracked .go files
+// under a dot-prefixed .compiletest-NNN/ (deliberately in-module) and
+// deletes them when its test ends, so this glob can match a file mid-create
+// or mid-delete when both packages run in one `go test` invocation
+// (cleat#2811). Skipping any dot/underscore-prefixed path segment matches
+// the same convention `go build ./...` already uses to ignore it.
 func trackedGoFiles(t *testing.T, root string) []string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", root, "ls-files",
@@ -202,6 +218,9 @@ func trackedGoFiles(t *testing.T, root string) []string {
 	}
 	var files []string
 	for _, rel := range strings.Fields(string(out)) {
+		if isGoToolIgnored(rel) {
+			continue
+		}
 		if strings.HasSuffix(rel, "_test.go") {
 			continue
 		}
@@ -238,15 +257,19 @@ func scanCrossTenantSites(t *testing.T, root string, files []string) []crossTena
 		if err != nil {
 			t.Fatalf("parse %s: %v", rel, err)
 		}
+		assertDefaultPluginImportName(t, f, rel)
+		tracked := gateBareIdentOnPackage(isAcrossAllTenants, f.Name.Name == "plugin")
+		assertNoPackageScopeReferenceEscapes(t, f, fset, rel, tracked)
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
 			name := funcName(fn)
+			assertNoTrackedReferenceEscapes(t, fn, fset, rel, name, tracked)
 			ast.Inspect(fn, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || !isAcrossAllTenants(call.Fun) {
+				if !ok || !tracked(call.Fun) {
 					return true
 				}
 				site := crossTenantSite{

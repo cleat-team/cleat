@@ -19,8 +19,10 @@
 //     release, so a PR cannot pull the one that reflects its own change. The test builds the repository's own
 //     Dockerfile and points CLEAT_WORKER_IMAGE at it. The DEFAULT is asserted separately (below), so renaming
 //     it in the compose file is still seen.
-//   - the two host ports (CLEAT_PG_PORT, CLEAT_API_PORT), so a runner that already has something on 5432 or
-//     8080 does not fail a test about the template.
+//   - the two host ports (CLEAT_PG_PORT, CLEAT_API_PORT), set to 0 so DOCKER allocates them and the test
+//     reads back what it bound. A runner with something already on 5432 or 8080 does not fail a test about the
+//     template, and -- since cleat#3131 -- neither does the gap between the test picking a port and compose
+//     binding it, which is what cleat#3122's race was and what a hold cannot close on Linux.
 //
 // It asserts the state the README says the run reaches, `done` with `status` = `complete`, not merely that curl
 // returned a run id: a route or entry-point bug can produce a 2xx with an id and fail a moment later
@@ -38,20 +40,161 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-func freeTCPPort(t *testing.T) int {
+// holdTCPPort reserves a kernel-assigned TCP port and returns it WITH ITS
+// LISTENER STILL OPEN, plus the release the caller owes it. The contract is two
+// lines and both matter:
+//
+//   - hold the port across every OTHER port this test picks, so no two picks can
+//     come back with one number;
+//   - release it BEFORE the consumer binds it -- not after. On Linux a live hold
+//     refuses the bind outright, whatever the consumer's address.
+//
+// WHY A HELD LISTENER RATHER THAN freeTCPPort's RELEASED ONE (cleat#3122). The
+// previous helper closed its listener before returning, so the number was free
+// again the moment it was handed back, and two sequential calls could come back
+// with the same one. That is the mechanism the report's evidence points at: in a
+// merge-group run, postgres bound the port and reached Healthy, and then the
+// worker -- the only other service publishing it -- failed with
+//
+//	Bind for 0.0.0.0:45265 failed: port is already allocated
+//
+// Holding makes the duplicate impossible by construction: the first port is still
+// bound when the second is chosen. It also narrows the other branch -- the kernel
+// will not hand 127.0.0.1:P to another allocator while this listener holds it, and
+// every allocator here asks for 127.0.0.1:0 -- though see below for what it does
+// not close.
+//
+// WHY THE RELEASE IS BEFORE THE BIND, AND NOT AFTER: THE PLATFORMS DIFFER, AND
+// LINUX IS THE ONE CI RUNS. Measured with SO_REUSEADDR set on both sides, by
+// binding 127.0.0.1:P and then attempting each of these on the same stack:
+//
+//	                               macOS (Darwin)   Linux (in a container)
+//	wildcard after specific         ADMITTED         REFUSED (EADDRINUSE, 98)
+//	specific after wildcard         ADMITTED         REFUSED (98)
+//	same address, either order      REFUSED          REFUSED
+//
+// So the overlap is BSD behaviour, NOT a property of SO_REUSEADDR -- and on Linux
+// a live hold refuses EVERY consumer's bind, wildcard included. A first version of
+// this helper held through the consumer's bind and said "CI is Linux, where
+// SO_REUSEADDR has the same effect"; that was wrong, and on Linux it would have
+// produced the very `port is already allocated` failure this change exists to
+// remove, on compose's 0.0.0.0:P publish and on the workers' ":P" alike. Found in
+// review by cleat-review and reproduced here.
+//
+// The macOS docker measurement that appeared to support holding through the bind
+// was vacuous, and it is worth recording why so nobody re-derives it: on macOS the
+// docker VM is a SEPARATE NETWORK STACK, so a `docker run -p $P:80` publishing
+// inside it cannot observe a host listener at all. Measure both sockets on one
+// stack or measure nothing.
+//
+// WHAT IT DOES NOT DO: close the cross-allocator race. Releasing before the bind
+// leaves a gap on every platform, and no local hold can close it for a wildcard
+// consumer on Linux. What closes it is having the consumer allocate the port and
+// report it back, and every real site now does that -- none of them needing this
+// helper any more:
+//
+//   - the fullstack template test, via compose's own random host port (cleat#3131);
+//   - both quick-start tests, via startWorkerWithDiscoveredPort: the worker binds
+//     `127.0.0.1:0` and the test reads `ln.Addr()` back from its log;
+//   - driveTheProxy, via discoverProxyAddr: the scratch proxy binds `127.0.0.1:0`
+//     and the test reads its bound address back from its own log.
+//
+// The worker and proxy halves both needed a REPORTING fix first, not an absent
+// consumer. Before cleat#3136 (#3137) the worker logged its CONFIGURED `--api-addr`,
+// so `":0"` reported `":0"` and no caller could read back the bound port -- which is
+// what this comment said until cleat-review read the source. The proxy carried the
+// identical gap -- `-listen 127.0.0.1:$(CLEAT_WEB_PORT)`, handed a number and
+// reporting it nowhere -- until this change (cleat#3131).
+//
+// One site still needs it: TestHoldTCPPortKeepsThePortReservedUntilReleased, which
+// exercises the helper itself.
+func holdTCPPort(t *testing.T) (port int, release func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("finding a free port: %v", err)
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	// A leak-guard, not the release point: it only matters if the test Fatals
+	// before its own release(). Closing twice is harmless.
+	t.Cleanup(func() { ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port, func() { ln.Close() }
+}
+
+// composePublishedPort asks the running compose project which host port it actually bound.
+// That is the difference between choosing a port and being told one: docker does the
+// allocation and the bind as one act, so there is no interval for anything to take the
+// number in (cleat#3131).
+//
+// It reads the project's own record rather than guessing from output text. `docker compose
+// port` prints "0.0.0.0:<port>" -- and "[::]:<port>" on hosts with IPv6 enabled -- so the
+// port is what follows the LAST colon, and a project that is not running prints nothing.
+// Both of those must fail here rather than becoming port 0, which would silently send the
+// test at whatever is listening on the wildcard.
+func composePublishedPort(t *testing.T, dir string, env []string, service string, containerPort int) int {
+	t.Helper()
+	cmd := exec.Command("docker", "compose", "port", service, fmt.Sprintf("%d", containerPort))
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("docker compose port %s %d: %v", service, containerPort, err)
+	}
+	text := strings.TrimSpace(string(out))
+	if i := strings.LastIndex(text, ":"); i >= 0 {
+		text = text[i+1:]
+	}
+	port, convErr := strconv.Atoi(text)
+	if convErr != nil || port <= 0 {
+		t.Fatalf("docker compose port %s %d printed %q, which is not a host port",
+			service, containerPort, strings.TrimSpace(string(out)))
+	}
+	return port
+}
+
+// TestHoldTCPPortKeepsThePortReservedUntilReleased asserts the property the helper
+// is FOR: while a port is held the kernel will not hand it to anyone else, and
+// once released a consumer can bind it.
+//
+// The first assertion is the load-bearing one and it is a direct observation of
+// the state the fix creates -- release-on-return reddens it, which was verified.
+// What it buys is stated as a consequence rather than asserted separately: a
+// number the kernel will not hand out cannot be handed out TWICE, so two picks
+// with the first hold still live cannot collide -- which is the branch of
+// cleat#3122 holding closes.
+//
+// A distinctness assertion ("pick twice, expect different ports") was written
+// first and REMOVED, on cleat-review's objection and my own measurement: the
+// kernel walks its ephemeral range rather than re-offering the number just freed
+// (2000 sequential listen/close draws reused a port zero times on macOS), so that
+// assertion stays GREEN through the release-on-return mutation it would exist to
+// catch. An assertion over a draw the system almost never takes reports the code
+// as correct for reasons that have nothing to do with the code. The construction
+// above is the honest form, and this paragraph is here so it is not re-added.
+func TestHoldTCPPortKeepsThePortReservedUntilReleased(t *testing.T) {
+	port, release := holdTCPPort(t)
+
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+		ln.Close()
+		t.Errorf("port %d was still bindable while it was held, so nothing is reserved: "+
+			"a second caller -- or a container -- can take it, and two picks can return one "+
+			"number, which is cleat#3122", port)
+	}
+
+	release()
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Errorf("port %d was not released by release(): %v", port, err)
+		return
+	}
+	ln.Close()
 }
 
 func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
@@ -75,7 +218,6 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 		t.Fatalf("cleat init --template fullstack: %v\n%s", err, out)
 	}
 	proj := filepath.Join(root, "my-fullstack-app")
-	resolveScaffoldAgainstThisCheckout(t, proj)
 
 	// The default image is what a newcomer pulls; the test substitutes it, so pin the default here.
 	compose, err := os.ReadFile(filepath.Join(proj, "docker-compose.yml"))
@@ -113,13 +255,23 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	}
 	t.Cleanup(func() { exec.Command("docker", "rmi", "-f", image).Run() })
 
-	pgPort, apiPort := freeTCPPort(t), freeTCPPort(t)
+	// DOCKER PICKS BOTH PORTS AND THE TEST READS THEM BACK, which removes the window rather
+	// than narrowing it (cleat#3131). `CLEAT_PG_PORT=0` is not "no port" -- it is an explicit
+	// request for the allocation, measured: compose publishes `0.0.0.0:33290` and
+	// `docker compose port postgres 5432` reports it back. Nothing is chosen before the bind,
+	// so nothing can be taken in between, which is the branch a hold cannot close: on Linux a
+	// live hold refuses the consumer's bind outright, so it must be released before `make up`
+	// and the gap is inherent (see holdTCPPort's own note).
+	//
+	// The scaffold is untouched: its template still publishes 5432 and 8080 by default for a
+	// newcomer reading the README. This test is setting the same two variables it already
+	// substituted, to a value that means "you choose".
 	env := append(os.Environ(),
 		"PATH="+filepath.Dir(cleatBinary)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"COMPOSE_PROJECT_NAME=cleat-template-test-"+suffix,
 		"CLEAT_WORKER_IMAGE="+image,
-		fmt.Sprintf("CLEAT_PG_PORT=%d", pgPort),
-		fmt.Sprintf("CLEAT_API_PORT=%d", apiPort),
+		"CLEAT_PG_PORT=0",
+		"CLEAT_API_PORT=0",
 	)
 	runMake := func(target string) (string, error) {
 		cmd := exec.Command("make", target)
@@ -133,6 +285,16 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	if out, err := runMake("up"); err != nil {
 		t.Fatalf("make up: %v\n%s", err, out)
 	}
+	// READ BACK what docker bound, rather than choosing and hoping. The discovered values go
+	// into env, which `runMake` reads at call time, so `make deploy` and `make run` -- which
+	// reach postgres and the API by these numbers -- get the real ones.
+	pgPort := composePublishedPort(t, proj, env, "postgres", 5432)
+	apiPort := composePublishedPort(t, proj, env, "cleat-worker", 8080)
+	env = append(env,
+		fmt.Sprintf("CLEAT_PG_PORT=%d", pgPort),
+		fmt.Sprintf("CLEAT_API_PORT=%d", apiPort),
+	)
+	t.Logf("docker allocated CLEAT_PG_PORT=%d and CLEAT_API_PORT=%d", pgPort, apiPort)
 	base := fmt.Sprintf("http://localhost:%d", apiPort)
 	dumpLogs := func() {
 		if t.Failed() {
@@ -203,11 +365,31 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	driveTheProxy(t, proj, env, keyMatch[1])
 }
 
+// discoverProxyAddr reads the scratch proxy's own "proxy listening on" log line to learn the
+// address it actually bound -- the same shape startWorkerWithDiscoveredPort reads the worker's,
+// and for the same reason: with CLEAT_WEB_PORT=0 the kernel allocates the port and the proxy
+// binds it as one act, closing the cross-allocator gap a pre-chosen, held port cannot (cleat#3131).
+// It cannot wait on waitForHealthzAt first, because that needs the address to poll.
+func discoverProxyAddr(t *testing.T, log *lockedBuffer, within time.Duration) string {
+	t.Helper()
+	addrRe := regexp.MustCompile(`proxy listening on (\S+)`)
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if m := addrRe.FindStringSubmatch(log.String()); m != nil {
+			return m[1]
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("the proxy never logged its bound address within %v -- that is a startup failure, "+
+		"not a slow start; its log:\n%s", within, log.String())
+	return ""
+}
+
 // driveTheProxy runs the scaffold's own `make web` and drives it the way index.html does.
 func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
 	t.Helper()
-	webPort := freeTCPPort(t)
-	webEnv := append(append([]string{}, env...), fmt.Sprintf("CLEAT_WEB_PORT=%d", webPort))
+	// CLEAT_WEB_PORT=0, discovered via discoverProxyAddr below -- see its doc comment.
+	webEnv := append(append([]string{}, env...), "CLEAT_WEB_PORT=0")
 
 	// First, no key: it must refuse to start, not start and answer 401 to everything.
 	noKey := exec.Command("make", "web")
@@ -227,8 +409,9 @@ func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
 		t.Fatalf("make web: %v", err)
 	}
 	t.Cleanup(func() { killProcessGroup(cmd) })
-	web := fmt.Sprintf("http://127.0.0.1:%d", webPort)
-	waitForHealthzAt(t, web+"/", 90*time.Second, &proxyLog) // `go run` compiles first
+	addr := discoverProxyAddr(t, &proxyLog, 90*time.Second) // `go run` compiles first
+	web := "http://" + addr
+	waitForHealthzAt(t, web+"/", 90*time.Second, &proxyLog)
 
 	call := func(method, path string, hdr map[string]string, body string) (int, http.Header, string) {
 		t.Helper()
@@ -588,4 +771,47 @@ func waitForHealthz(t *testing.T, url string) {
 		time.Sleep(300 * time.Millisecond)
 	}
 	t.Fatalf("worker at %s did not become healthy within 30s", url)
+}
+
+// startWorkerWithDiscoveredPort starts cleat-worker with `--api-addr 127.0.0.1:0` -- so the
+// kernel allocates the port and the worker binds it as ONE act -- and reads the bound port
+// back from the worker's own "HTTP API listening" log line. That closes the cross-allocator
+// race holdTCPPort cannot: nothing can take the number between the allocation and the bind,
+// because the allocator and the consumer are the same process (cleat#3131).
+//
+// It returns the base URL built from the ADDRESS the worker logged, NOT from "localhost":
+// the worker logs `127.0.0.1:<port>`, and substituting "localhost" here would resolve ::1
+// first and trade a port race for a family mismatch -- the ::1-vs-IPv4 hazard ci.yml's
+// Test Go steps call out. The log carries the bound address only because of cleat#3136
+// (fixed in #3137); before that it carried the configured `:0`.
+//
+// The caller owns the returned cmd and must kill it -- the sites below install a t.Cleanup.
+// The worker's output is captured so a startup failure can be PRINTED rather than read as a
+// slow start: "never logged an address" and "still coming up" would otherwise be identical.
+func startWorkerWithDiscoveredPort(t *testing.T, workerBin, dsn string) (base string, cmd *exec.Cmd) {
+	t.Helper()
+	var log lockedBuffer
+	cmd = exec.Command(workerBin, "--db", dsn, "--api-addr", "127.0.0.1:0")
+	cmd.Stdout, cmd.Stderr = &log, &log
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start cleat-worker: %v", err)
+	}
+	addrRe := regexp.MustCompile(`"addr":"(127\.0\.0\.1:[0-9]+)"`)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(log.String(), "\n") {
+			// Only the API-listening record: the same worker also logs "pprof
+			// listening" and "internal holds listening" with their own addr fields.
+			if !strings.Contains(line, "HTTP API listening") {
+				continue
+			}
+			if m := addrRe.FindStringSubmatch(line); m != nil {
+				return "http://" + m[1], cmd
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("cleat-worker never logged its bound API address within 30s -- that is a startup "+
+		"failure, not a slow start; its log:\n%s", log.String())
+	return "", cmd
 }

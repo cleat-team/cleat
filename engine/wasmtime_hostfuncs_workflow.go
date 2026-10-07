@@ -278,6 +278,46 @@ func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) err
 	})
 }
 
+func (b *wasmtimeBackend) registerCleatWaitForEvent(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_wait_for_event") {
+		return nil
+	}
+
+	// b.hostFunc, never a raw linker.FuncWrap: it brackets the guest's epoch
+	// budget around the call (check-hostfunc-budget.sh).
+	return b.hostFunc(linker, "env", "cleat_wait_for_event", func(caller *wasmtime.Caller,
+		pluginPtr, pluginLen, funcPtr, funcLen, inputPtr, inputLen, namesPtr, namesLen int32,
+		timeoutMs int64, outPtr, outMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		pluginName, ok := wasmtimeReadServiceName(buf, pluginPtr, pluginLen)
+		if !ok {
+			return errBadParamInt64
+		}
+		functionName, ok := wasmtimeReadServiceName(buf, funcPtr, funcLen)
+		if !ok {
+			return errBadParamInt64
+		}
+		inputJSON, ok := wasmtimeReadPayload(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		signalNames, ok := wasmtimeReadStringValidated(buf, namesPtr, namesLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		w, ok := h.(eventWaiter)
+		if !ok {
+			return errBadParamInt64
+		}
+		return w.WaitForEvent(ctxWithMem(context.Background(), buf), nil, pluginName, functionName,
+			inputJSON, signalNames, timeoutMs, uint32(outPtr), uint32(outMaxLen))
+	})
+}
+
 func (b *wasmtimeBackend) registerCleatSetQueryState(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("set_query_state") {
 		return nil

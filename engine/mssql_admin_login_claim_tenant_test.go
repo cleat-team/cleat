@@ -18,17 +18,24 @@ package engine
 //   PostgreSQL  no Go predicate, but claims inside beginTxWithRLS, and the
 //               application role does NOT hold BYPASSRLS -- so RLS really does
 //               scope it. That is the documented design (3.86).
-//   SQL Server  no Go predicate AND no enforcement, because dbo.fn_tenant_filter
-//               is off for any dbo.cleat_admin login (012_admin_role.sql).
+//   SQL Server  no Go predicate AND no enforcement, once dbo.fn_tenant_filter
+//               has been switched to the form that admits any dbo.cleat_admin
+//               login (migrations/mssql/optional/cross_tenant_claim.sql --
+//               the shipped predicate, migrations/mssql/003_procedures.sql,
+//               has no such admission since cleat#1541).
 //
 // So SQL Server was the only dialect with nothing enforcing it, and the fix is
 // to match MySQL rather than to make a judgement call.
 //
-// WHY THE GRANT IS ALWAYS PRESENT WHERE IT MATTERS. requireCleatAdminMembership
-// checks s.db -- the SAME POOL claimWorkflowsOnce uses. So on any deployment
-// where ClaimWorkflowsAcrossTenants works at all, the ordinary claim was already
-// unscoped, and the -claim-across-tenants flag was guarding a widening that had
-// already happened unconditionally. The flag was decorative on this dialect.
+// WHY THE GRANT WAS ALWAYS PRESENT WHERE IT MATTERED, AT THE TIME. This
+// paragraph describes 3.91-era code: requireCleatAdminMembership,
+// ClaimWorkflowsAcrossTenants and the --claim-strategy=global mechanism
+// it names were all removed in #1926, which replaced the widened claim with
+// unconditional per-tenant rotation. What the removal did not change is that
+// any pool holding dbo.cleat_admin membership -- granted today for cleatctl
+// or for cross-tenant test teardown, see engine/testutil/mssql_admin.go --
+// shares that membership across every statement the pool issues, WithTenant
+// included. That is the property this test still exercises.
 //
 // Measured before the fix, tenant B's ORDINARY ClaimWorkflows:
 //
@@ -39,9 +46,17 @@ package engine
 // NOTE THE CASE, because the first probe of this passed while printing that.
 // CONVERT(NVARCHAR(36), tenant_id) returns UPPERCASE and the fixture constants
 // are lowercase, so `wf.TenantID == unscopedTenantA` was false for a row that
-// plainly belonged to tenant A. Every comparison here is case-insensitive, and
-// the same hazard is live in cmd/cleat-worker/setup.go:storeForTenant, which
-// compares tenant strings with ==.
+// plainly belonged to tenant A. Every comparison here is case-insensitive.
+//
+// The same SHAPE appears in cmd/cleat-worker/setup.go:storeForTenant, which
+// compares tenant strings with == -- but that one is NOT live, and the reason is
+// worth writing down rather than re-deriving. The value it compares against is
+// w.storeTenantID, which is always the all-zeros UUID (cmd/cleat-worker/main.go
+// sets it from a constant, and no flag overrides that). The all-zeros UUID
+// contains no letters, so its case cannot vary: `tenantID == w.storeTenantID` is
+// true for the default tenant and false for every other, whichever case the
+// projection produced. It is safe by the shape of the constant rather than by
+// design, which is a different thing -- cleat#2983.
 
 import (
 	"context"

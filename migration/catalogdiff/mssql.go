@@ -43,31 +43,27 @@ func normalizeMSSQLName(name, kind string) string {
 	return name
 }
 
-// snapshotMSSQL builds a Catalog for a SQL Server database. Every Table's
-// RowSecurity is nil and Policies is empty here, as with MySQL.
+// snapshotMSSQL builds a Catalog for a SQL Server database.
 //
-// That is a GAP, not a fact about the dialect, and this comment said the
-// opposite until cleat#2434. It read: "Core migrations create no SECURITY
-// POLICY objects on this dialect -- tenant isolation on SQL Server is a
-// contained-user/role mechanism, not row-level security". Both halves are
-// false, and both were checkable: a chain-built database carries **14**
-// SECURITY POLICY objects holding **56** predicates (14 FILTER + 14 AFTER
-// INSERT + 14 AFTER UPDATE + 14 BEFORE UPDATE), and they are ordinary row-level
-// security -- sys.security_policies joined to sys.security_predicates, with
-// dbo.fn_tenant_filter as the predicate function.
+// Every Table's RowSecurity and Policies, plus Catalog.Schemas and
+// Catalog.Roles, are now populated here -- cleat#2432. Until that issue this
+// comment described the opposite: RowSecurity was nil and Policies empty on
+// every table, and before THAT, cleat#2434, the comment claimed the dialect
+// had no row-level security at all, which was also false (a chain-built
+// database carries 14 SECURITY POLICY objects holding 56 predicates). Both
+// gaps were real for a while and neither was a fact about the dialect -- see
+// cleat#2434's history, kept below the query that closes it, rather than
+// repeating the measurement here a third time.
 //
-// The consequence is worse than a missing feature. A comment that says the
-// class does not exist is a comment that stops the next reader from adding the
-// check, and it makes the instrument's silence read as a finding. The baseline
-// generated under cleat#2434 could have lost all 56 predicates and this file
-// would still have reported an empty diff.
-//
-// So a consumer of this package that needs the class compared must do it
-// itself: scripts/gen-mssql-baseline -mode=supplementary reads
-// sys.security_policies and sys.security_predicates directly, and its
-// known-positive battery includes the case where this diff is CLEAN while that
-// check fails. Adding the comparison here would be the better repair and is
-// deliberately not done in the compaction change -- see cleat#2434.
+// The queries below are the same ones scripts/gen-mssql-baseline's
+// -mode=supplementary check already runs and has validated independently
+// (security policies/predicates, schemas, roles) -- ported here rather than
+// re-derived, because cleat#2434's own comment named this file as "the better
+// repair" for exactly this gap. Column/index/identity GRANULARITY (width,
+// precision, scale, collation, INCLUDE columns, filtered-index predicates,
+// sort order) and triggers' own settings (QUOTED_IDENTIFIER, ANSI_NULLS,
+// is_disabled) remain supplementary-only -- cleat#2432 scoped this change to
+// the load-bearing subset and left those as a follow-up.
 func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	cat := &Catalog{
 		Dialect:  migration.DialectMSSQL,
@@ -111,7 +107,8 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 
 		colRows, err := db.QueryContext(ctx, `
 			SELECT c.name, ty.name, c.is_nullable,
-			       COALESCE(OBJECT_DEFINITION(c.default_object_id), '')
+			       COALESCE(OBJECT_DEFINITION(c.default_object_id), ''),
+			       COALESCE(c.collation_name, '')
 			FROM sys.columns c
 			JOIN sys.types ty ON ty.user_type_id = c.user_type_id
 			WHERE c.object_id = @p1
@@ -123,12 +120,12 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		for colRows.Next() {
 			var name, dtype string
 			var nullable bool
-			var def string
-			if err := colRows.Scan(&name, &dtype, &nullable, &def); err != nil {
+			var def, collation string
+			if err := colRows.Scan(&name, &dtype, &nullable, &def, &collation); err != nil {
 				colRows.Close()
 				return nil, fmt.Errorf("catalogdiff: scanning column for %s: %w", qname, err)
 			}
-			t.Columns = append(t.Columns, Column{Name: name, DataType: dtype, Nullable: nullable, Default: def})
+			t.Columns = append(t.Columns, Column{Name: name, DataType: dtype, Nullable: nullable, Default: def, Collation: collation})
 		}
 		if err := colRows.Err(); err != nil {
 			return nil, fmt.Errorf("catalogdiff: columns for %s: %w", qname, err)
@@ -211,12 +208,36 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 			WHERE kc.parent_object_id = @p1 AND kc.type = 'UQ'
 			GROUP BY kc.name
 			UNION ALL
+			-- cleat#2447. sys.foreign_keys carries the delete/update actions
+			-- and its own is_not_trusted, none of which were compared -- the
+			-- same shape as the CHECK constraint's is_not_trusted above, and
+			-- for the same reason: two definitions that render identically
+			-- here (ON DELETE CASCADE vs no action) are NOT the same
+			-- constraint, and the emitter (scripts/gen-mssql-baseline/emit.go,
+			-- refAction) already reads both actions -- only the comparator
+			-- was missing them. The CASE mapping matches refAction exactly
+			-- (CASCADE/SET_NULL/SET_DEFAULT, NO_ACTION omitted) so the same
+			-- FK renders identically on both sides of -mode=verify.
 			SELECT fk.name, 'FOREIGN KEY (' + STRING_AGG(pc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) + ') REFERENCES ' + OBJECT_NAME(fk.referenced_object_id)
+				+ CASE fk.delete_referential_action_desc
+					WHEN 'CASCADE' THEN ' ON DELETE CASCADE'
+					WHEN 'SET_NULL' THEN ' ON DELETE SET NULL'
+					WHEN 'SET_DEFAULT' THEN ' ON DELETE SET DEFAULT'
+					ELSE ''
+				  END
+				+ CASE fk.update_referential_action_desc
+					WHEN 'CASCADE' THEN ' ON UPDATE CASCADE'
+					WHEN 'SET_NULL' THEN ' ON UPDATE SET NULL'
+					WHEN 'SET_DEFAULT' THEN ' ON UPDATE SET DEFAULT'
+					ELSE ''
+				  END
+				+ CASE WHEN fk.is_not_trusted = 1 THEN ' WITH NOCHECK' ELSE '' END
 			FROM sys.foreign_keys fk
 			JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
 			JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
 			WHERE fk.parent_object_id = @p1
-			GROUP BY fk.name, fk.referenced_object_id
+			GROUP BY fk.name, fk.referenced_object_id, fk.delete_referential_action_desc,
+				fk.update_referential_action_desc, fk.is_not_trusted
 			ORDER BY 1
 		`, tr.objectID)
 		if err != nil {
@@ -239,11 +260,78 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		cat.Tables[qname] = t
 	}
 
+	// Security policies and predicates -- cleat#2432, the gap cleat#2434's own
+	// comment on this function used to describe and leave unclosed.
+	//
+	// A policy's is_enabled is folded into EVERY predicate line it owns,
+	// rather than carried as a separate RowSecurity-only fact: a policy that
+	// targets a table gets exactly one RowSecurity{Enabled: ...} line for that
+	// table (set once, below, from whichever predicate row is seen first --
+	// every predicate of one policy reports the same is_enabled, so "first" and
+	// "only" coincide), and that line's mere presence is itself the signal
+	// "this table has an active policy" -- a dropped policy removes the line
+	// entirely rather than changing a boolean, which is the stronger of the two
+	// signals a known-positive can depend on.
+	//
+	// Unlike PostgreSQL, SQL Server has no owner-bypass knob on a security
+	// policy -- RowSecurity.Forced has no SQL Server analogue and is left
+	// unset (false) rather than hardcoded true, so it never fabricates a
+	// comparable fact the platform does not have.
+	polRows, err := db.QueryContext(ctx, `
+		SELECT sp.name, sp.is_enabled, p.predicate_type_desc, COALESCE(p.operation_desc, ''),
+		       p.predicate_definition,
+		       OBJECT_SCHEMA_NAME(p.target_object_id), OBJECT_NAME(p.target_object_id)
+		FROM sys.security_policies sp
+		JOIN sys.security_predicates p ON p.object_id = sp.object_id
+		ORDER BY sp.name, p.predicate_type_desc, COALESCE(p.operation_desc, '')
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("catalogdiff: security policies: %w", err)
+	}
+	for polRows.Next() {
+		var policyName, predType, opDesc, def, tschema, tname string
+		var enabled bool
+		if err := polRows.Scan(&policyName, &enabled, &predType, &opDesc, &def, &tschema, &tname); err != nil {
+			polRows.Close()
+			return nil, fmt.Errorf("catalogdiff: scanning security policy: %w", err)
+		}
+		qname := tschema + "." + tname
+		t, ok := cat.Tables[qname]
+		if !ok {
+			// The predicate targets a table this snapshot excluded (only
+			// schemaMigrationsTable today) or one sys.tables did not return --
+			// skip rather than panic; nothing core-migration-owned does this.
+			continue
+		}
+		if t.RowSecurity == nil {
+			t.RowSecurity = &RowSecurity{Enabled: enabled}
+		}
+		command := predType
+		if opDesc != "" {
+			command += " " + opDesc
+		}
+		t.Policies = append(t.Policies, Policy{
+			Name:    policyName + "/" + predType + "/" + opDesc,
+			Command: command,
+			Using:   def,
+		})
+	}
+	if err := polRows.Err(); err != nil {
+		return nil, fmt.Errorf("catalogdiff: security policies: %w", err)
+	}
+	polRows.Close()
+
+	// 'TR' (triggers) joined cleat#2432: a trigger object carries its own
+	// schema_id and OBJECT_DEFINITION returns its body exactly as it does for
+	// a procedure or function, so widening this one IN-list is the whole
+	// change -- no separate sys.triggers query is needed for name/body/schema,
+	// only for the settings (is_disabled, QUOTED_IDENTIFIER/ANSI_NULLS) that
+	// remain supplementary-only per this file's header comment.
 	rtRows, err := db.QueryContext(ctx, `
 		SELECT s.name, o.name, o.type_desc, COALESCE(OBJECT_DEFINITION(o.object_id), '')
 		FROM sys.objects o
 		JOIN sys.schemas s ON s.schema_id = o.schema_id
-		WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+		WHERE o.type IN ('P', 'FN', 'IF', 'TF', 'TR')
 		ORDER BY s.name, o.name
 	`)
 	if err != nil {
@@ -286,6 +374,58 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		return nil, fmt.Errorf("catalogdiff: listing grants: %w", err)
 	}
 	grantRows.Close()
+
+	// Schemas -- cleat#2432. schema_id < 16384 excludes SQL Server's own
+	// fixed/built-in schemas (dbo itself is 1, so it IS included -- dbo is a
+	// migration-visible fact, not a server internal); this is the exact
+	// predicate scripts/gen-mssql-baseline's supplementary "schemas" check
+	// already uses and has validated.
+	schemaRows, err := db.QueryContext(ctx, `
+		SELECT name FROM sys.schemas WHERE schema_id < 16384 ORDER BY name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("catalogdiff: listing schemas: %w", err)
+	}
+	for schemaRows.Next() {
+		var name string
+		if err := schemaRows.Scan(&name); err != nil {
+			schemaRows.Close()
+			return nil, fmt.Errorf("catalogdiff: scanning schema: %w", err)
+		}
+		cat.Schemas = append(cat.Schemas, name)
+	}
+	if err := schemaRows.Err(); err != nil {
+		return nil, fmt.Errorf("catalogdiff: listing schemas: %w", err)
+	}
+	schemaRows.Close()
+
+	// Database roles -- EXISTENCE only, cleat#2432. is_fixed_role excludes
+	// SQL Server's own built-in roles (db_owner, db_datareader, ...) and the
+	// name exclusion drops 'public', which is type='R' but not is_fixed_role
+	// and would otherwise appear identically on every database compared.
+	// Membership is deliberately not captured here -- it is a deployment
+	// fact, not a schema fact, matching the supplementary check's own stated
+	// reasoning for the same exclusion.
+	roleRows, err := db.QueryContext(ctx, `
+		SELECT name FROM sys.database_principals
+		WHERE type = 'R' AND is_fixed_role = 0 AND name <> 'public'
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("catalogdiff: listing roles: %w", err)
+	}
+	for roleRows.Next() {
+		var name string
+		if err := roleRows.Scan(&name); err != nil {
+			roleRows.Close()
+			return nil, fmt.Errorf("catalogdiff: scanning role: %w", err)
+		}
+		cat.Roles = append(cat.Roles, name)
+	}
+	if err := roleRows.Err(); err != nil {
+		return nil, fmt.Errorf("catalogdiff: listing roles: %w", err)
+	}
+	roleRows.Close()
 
 	return cat, nil
 }

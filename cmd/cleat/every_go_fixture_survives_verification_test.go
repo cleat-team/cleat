@@ -38,7 +38,23 @@ var goFixtureExpectations = map[string]string{
 	// declared by a //cleat:require directive in that package rather than in
 	// this fixture. It must verify cleanly -- if it does not, the directive is
 	// not being read from imported packages again.
-	"dagguest":     "",
+	"dagguest": "",
+	// cleat#1983: the same shape one level over -- its only route to the five
+	// host calls the agent loop makes is cleat/agentworkflow's //cleat:require
+	// directive. It must verify cleanly, and the import check in
+	// wasm/a_workflow_agent_wires_its_imports_from_an_imported_package_test.go
+	// is what proves the five are actually wired.
+	"agentguest": "",
+	// cleat#1983: the Go half of the acceptance test's CLIENT. Its only route
+	// to ChildWorkflow/AwaitChild is agentworkflow.RunAsChild, so like
+	// agentguest it depends on the directive being read from an imported
+	// package rather than on anything in this file.
+	"agentclient": "",
+	// cleat#1983: the workflow tool's child in the same test -- the fixture the
+	// crash scenario starts through ChildWorkflow and counts the runs of. One
+	// DurableCall and nothing exotic; listed because a fixture holding Go files
+	// that is not listed is a fixture nothing checks.
+	"summarise":    "",
 	"deferfunc":    "",
 	"durablesend":  "",
 	"fencereentry": "",
@@ -71,6 +87,14 @@ var goFixtureExpectations = map[string]string{
 	"signalworkflow": "",
 	"spin":           "",
 	"updatedispatch": "",
+	// cleat#2407: two entry points split across two files, used by
+	// TestWasmOutputName_CrossFileEntryPointsNameTheRightFile to prove
+	// wasmOutputName resolves the SELECTED entry point's own file rather
+	// than some other rule (alphabetically-first filename, package name).
+	// Nothing unusual about the shape otherwise -- two single-string-param
+	// entry points -- so it must verify cleanly like every other fixture
+	// here.
+	"wasmnamecrossfile": "",
 
 	// cleat#1614's floor assertion. The same Retrier.Wait as methodglobalh
 	// below, reaching the host through a cleat.HostCalls field on the
@@ -89,6 +113,14 @@ var goFixtureExpectations = map[string]string{
 	// pre-1614 message, which told the author to declare the very global that
 	// makes this panic.
 	"methodglobalh": "a method cannot reach the host through a package-level",
+
+	// cleat#1986 slice 2c. A workflow declaring its exposure class in source
+	// with //cleat:exposure. It must verify cleanly -- the directive is
+	// metadata, not a threading rule, and a fixture that declared an exposure
+	// and then failed verification would be reporting the wrong thing about
+	// the declaration path. The declaration itself is asserted by
+	// TestABuiltFixtureDeclaresItsExposureFromSource in wasm/.
+	"exposure": "",
 }
 
 // TestEveryGoFixtureMatchesItsExpectedVerification is cleat#1313.

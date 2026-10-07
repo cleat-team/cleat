@@ -393,6 +393,12 @@ linters:
         text: "G704"
         path: 'plugins/oauthprovider/oidc\.go$'
 
+      # G704 SSRF (taint) used to be excluded for examples/integration-hub/backend/main.go,
+      # which built its own request to reach a plugin's routes. cleat#2550 gave backendkit a
+      # PluginRoute method, the example calls it, and the exclusion stopped covering anything
+      # -- verified by removing it and linting: 0 issues. Deleted rather than left, because a
+      # grant covering nothing reads as a live decision.
+
       # G101 hard-coded credentials, plugins/oauthprovider/routes.go, 3 sites: the provider endpoint table
       # (authorize, token and userinfo URLs). The file's own comment records that nothing in the map is read
       # as a credential; the trigger is the word `token` in a URL key.

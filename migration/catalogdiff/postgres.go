@@ -76,7 +76,8 @@ func snapshotPostgres(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		}
 
 		colRows, err := db.QueryContext(ctx, `
-			SELECT column_name, data_type, is_nullable, COALESCE(column_default, '')
+			SELECT column_name, data_type, is_nullable, COALESCE(column_default, ''),
+			       COALESCE(collation_name, '')
 			FROM information_schema.columns
 			WHERE table_schema = $1 AND table_name = $2
 			ORDER BY ordinal_position
@@ -85,12 +86,12 @@ func snapshotPostgres(ctx context.Context, db *sql.DB) (*Catalog, error) {
 			return nil, fmt.Errorf("catalogdiff: columns for %s: %w", qname, err)
 		}
 		for colRows.Next() {
-			var name, dtype, nullable, def string
-			if err := colRows.Scan(&name, &dtype, &nullable, &def); err != nil {
+			var name, dtype, nullable, def, collation string
+			if err := colRows.Scan(&name, &dtype, &nullable, &def, &collation); err != nil {
 				colRows.Close()
 				return nil, fmt.Errorf("catalogdiff: scanning column for %s: %w", qname, err)
 			}
-			t.Columns = append(t.Columns, Column{Name: name, DataType: dtype, Nullable: nullable == "YES", Default: def})
+			t.Columns = append(t.Columns, Column{Name: name, DataType: dtype, Nullable: nullable == "YES", Default: def, Collation: collation})
 		}
 		if err := colRows.Err(); err != nil {
 			return nil, fmt.Errorf("catalogdiff: columns for %s: %w", qname, err)

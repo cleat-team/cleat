@@ -23,6 +23,7 @@ func TestMyWorkflow(t *testing.T) {
 
     h := env.H() // returns the HostCalls interface
     // ... run your workflow via h
+    _ = h // the point above is the call, not a use of its result
 }
 ```
 
@@ -89,7 +90,9 @@ func TestApprovalWorkflow(t *testing.T) {
     h := env.H()
 
     // Start the workflow in a goroutine; it will block on AwaitSignals.
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount": 5000}`)
         if err != nil {
             t.Errorf("workflow failed: %v", err)
@@ -98,6 +101,12 @@ func TestApprovalWorkflow(t *testing.T) {
 
     // Simulate a manager approving the request.
     env.Signal("approved", `{"reviewer": "alice", "note": "looks good"}`)
+
+    // Wait for the workflow before the test returns. Without this the test
+    // passes whether or not the workflow ever ran, and a failure reported by
+    // the goroutine after the test has completed panics rather than failing
+    // one test.
+    <-done
 }
 ```
 
@@ -119,6 +128,35 @@ func TestApprovalTimeout(t *testing.T) {
     env.AdvanceTime(25 * time.Hour)
 }
 ```
+
+> **`TestApprovalTimeout` above and `TestApprovalWorkflow_Timeout` below are still
+> *not* joined, and the reason is now the SDK a reader resolves rather than the
+> harness** (cleat#3098). The missing piece exists: `env.WaitForParked(t)` landed
+> in **cleat#3091** and is on `develop`. But this page is written for someone
+> following the tutorial, who resolves the **published** SDK — `go get
+> github.com/cleat-team/cleat/cleat@latest` — and `WaitForParked` is not in the
+> current release (`git show v0.3.2:cleat/cleattest/cleattest.go | grep -c
+> WaitForParked` → `0`). A joined block here would therefore not compile for the
+> reader it is written for, and the snippet guard resolves the same `@latest`, so
+> it would fail there too once these pages are covered (cleat#3112). **These two
+> join when a release carrying `WaitForParked` is published.**
+>
+> The mechanism behind that is worth knowing on its own, because it is what a
+> join alone runs into. `AdvanceTime` moves a clock that the deadline is measured
+> **from**, not one it is measured *against*: `AwaitSignals(…, 24*time.Hour)`
+> computes `deadline = now + 24h` at the instant the workflow reaches it, so an
+> advance that lands first is **included in** the deadline rather than passing
+> it — a `25h` advance leaves the deadline at `+49h`, nothing fires, and `<-done`
+> blocks forever. `WaitForParked` is the barrier that orders the park before the
+> advance, and with it the two blocks join and pass.
+>
+> Measured 2026-10-04, this block assembled as a real test: with `<-done` added and
+> no barrier it **hangs** — the goroutine parks in `durableAwaitSignalsImpl` and
+> nothing fires its deadline. Un-joined it passes, and it is **near-vacuous rather
+> than occasionally so**: instrumented, the workflow had not reached `AwaitSignals`
+> at the moment the test function returned in **9 of 10 runs**, and the test passed
+> all ten. The `t.Error` in the goroutine is therefore almost never reached — the
+> assertion is real code that the test does not run.
 
 ## Testing timeouts with AdvanceTime
 
@@ -205,8 +243,9 @@ if status != "confirmed" {
 
 ```go
 env.SetVersion(2)
-err := MyWorkflow(env.H(), input)
+err := MyWorkflow(env.H(), `{"order_id":"ord_1"}`)
 // ... assertions ...
+_ = err // the assertions below report on calls, not on this error
 
 env.AssertCalled(t, "new_service", "NewOp")
 env.AssertNotCalled(t, "old_service", "LegacyOp")
@@ -226,7 +265,6 @@ env.AssertContinued(t, `{"user_id":"usr_1","items":["item_3","item_4"]}`)
 package myworkflow_test
 
 import (
-    "encoding/json"
     "strings"
     "testing"
     "time"
@@ -246,16 +284,22 @@ func TestApprovalWorkflow_Success(t *testing.T) {
 
     h := env.H()
 
+    // Join the goroutine before asserting. AssertCalled reads the call history
+    // once, so it races the workflow goroutine unless that goroutine has
+    // finished -- and a sleep placed BEFORE Signal cannot order an event that
+    // happens AFTER it.
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount":5000,"requested_by":"user_42"}`)
         if err != nil {
             t.Errorf("workflow failed: %v", err)
         }
     }()
 
-    // Advance time slightly and send approval signal.
-    time.Sleep(10 * time.Millisecond) // yield to goroutine scheduler
     env.Signal("approved", `{"reviewer":"alice","note":"approved"}`)
+
+    <-done
 
     // Verify ledger was updated.
     env.AssertCalled(t, "ledger", "RecordApproval")
@@ -290,20 +334,46 @@ func TestApprovalWorkflow_Rejected(t *testing.T) {
 
     h := env.H()
 
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount":5000,"requested_by":"user_42"}`)
         if err != nil {
             t.Errorf("workflow failed: %v", err)
         }
     }()
 
-    time.Sleep(10 * time.Millisecond)
     env.Signal("rejected", `{"reviewer":"bob","reason":"budary limit exceeded"}`)
+
+    <-done
 
     // Verify no ledger update was made on rejection.
     env.AssertNotCalled(t, "ledger", "RecordApproval")
 }
 ```
+
+> Corrected 2026-10-04 (cleat#3087): both tests above used to sleep for 10 ms
+> "to yield to the goroutine scheduler" before signalling. The sleep does not
+> do that job. `AssertCalled` reads the call history **once** and fails if the
+> call is not there yet, so it races the workflow goroutine -- and a sleep
+> before `Signal` cannot order an event that happens after it. Running this
+> block as a real test, `-count=20 -race`: it **fails most runs with the sleep
+> in place**, and **0 runs out of 20 once the goroutine is joined**, in every
+> sample. Only the second is a stable number -- the failure rate with the sleep
+> is a draw, which moved 15-17 across runs here and 12-19 in review. Joining is
+> also what the harness's own `AdvanceTimeAndDrain` comment recommends: draining
+> is not joining, and joining stays the caller's job — a `sync.WaitGroup` or a
+> plain `done` channel. The `time` import
+> stays: `TestApprovalWorkflow_Timeout` needs `time.Hour`.
+>
+> `TestApprovalWorkflow_Timeout` is the one test here that is **not** joined,
+> unlike the two around it: joining it hangs. See the note under
+> `TestApprovalTimeout` above (cleat#3098).
+
+> Corrected 2026-10-04 (cleat#3027): this example imported `encoding/json` and
+> never used it, so it did not compile as published. Found by compiling the
+> block -- assembled into a test module and run through `go vet` -- which is the
+> same check that found the Saga snippet in the tutorials. The import is gone.
 
 ## Replay testing
 
@@ -315,14 +385,14 @@ func TestReplayWorkflow(t *testing.T) {
 
     // Phase 1: record.
     env.EnableReplay()
-    err := MyWorkflow(env.H(), input)
+    err := MyWorkflow(env.H(), `{"order_id":"ord_1"}`)
     if err != nil {
         t.Fatalf("recording run failed: %v", err)
     }
 
     // Phase 2: replay.
     env.StartReplay()
-    err = MyWorkflow(env.H(), input)
+    err = MyWorkflow(env.H(), `{"order_id":"ord_1"}`)
     if err != nil {
         t.Fatalf("replay run failed: %v", err)
     }
@@ -331,6 +401,11 @@ func TestReplayWorkflow(t *testing.T) {
     env.AssertReplayDivergence(t, 0)
 }
 ```
+
+> Corrected 2026-10-04 (cleat#3027): this block called `MyWorkflow(env.H(),
+> input)` and never declared `input` -- `undefined: input`, from compiling the
+> block as published. Every other call in this page passes an inline literal, so
+> that is what it does now.
 
 ## Running tests
 

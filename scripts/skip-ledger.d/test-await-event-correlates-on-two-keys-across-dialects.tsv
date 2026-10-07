@@ -1,0 +1,1 @@
+test-go/plugins	2	^TestAwaitEventCorrelatesOnTwoKeysAcrossDialects/(mysql|mssql)$	cleat#2647: dialect-gated per SUBTEST via testutil.TestDB. mysql and mssql skip in this PostgreSQL-only job while postgres RUNS. The design doc's two-key known-positive row, proving key2 (not just key1) is in the predicate. Measured by NAME with only CLEAT_TEST_DB set.

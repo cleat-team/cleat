@@ -100,6 +100,46 @@ its own name that it had not opened.
 A message that already names a stream is left alone, so `git commit --trailer`
 and a rebase onto a checkout that never set the config both work.
 
+**A `Claude-Stream:` line separated from the rest of the trailer block by a
+blank line is invisible to git's own trailer parser**, which is what
+`Stream Trailer Check` reads — so it is a malformed message, not an absent
+trailer, and the two get different treatment. `prepare-commit-msg` notices
+but does not refuse it: that hook runs *before* the commit-message editor
+opens, so refusing there would block the only ways to fix it (`commit
+--amend`, `rebase -i`'s `reword` both hand it the already-malformed message
+first). It lets the message through unstamped and warns instead.
+`.githooks/commit-msg` — installed by the same `core.hooksPath` setting —
+runs on the *final* message, after any editor, and refuses it there if it
+is still broken. `commit-msg` never runs for a pick that opens no editor.
+`prepare-commit-msg` runs whenever git actually creates the commit (a
+`cherry-pick`, or a rebase onto a base that moved) and only warns; a pick
+git fast-forwards, because the parent is unchanged, reuses the existing
+commit object and runs neither hook. In every case an already-malformed
+commit passes through unrefused, and `Stream Trailer Check` is the
+backstop, same as before this split existed. See `commit-msg`'s own doc
+comment for the measured repair paths this is built around (cleat#2588).
+
+**On `develop`, read it with an anchored grep — not the trailer parser.** Every
+commit merged there is a squash, and `squash_merge_commit_message=COMMIT_MESSAGES`
+concatenates the constituent messages, so each one's trailer block lands
+mid-body. `%(trailers:key=Claude-Stream,valueonly)` then returns **empty for a
+commit that plainly carries the line** — 9 of 9 measured 2026-09-17. The text is
+in the commit; the parser is reading the wrong paragraph. (GitHub also appends a
+block of its own after a `---------` separator, which is the paragraph that wins;
+the giveaway is its lowercase `Co-authored-by:` against the hook's capitalised
+`Co-Authored-By:`.)
+
+`Stream Trailer Check` reads a pull request's own commits for exactly this
+reason. The predicate that works on merged history is:
+
+```
+git log -1 --format='%B' <sha> | grep -qE '^Claude-Stream:'
+```
+
+Anything else resolving authorship from merged history needs the same treatment.
+An empty parse there reports a formatting limitation, not an unattributed commit
+— and those two lead to opposite conclusions about who did the work.
+
 The same setting enables `.githooks/pre-commit`, which refuses a commit that
 adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
 CI cannot check that — it asserts uniqueness and block membership, both of
@@ -282,18 +322,51 @@ go test -count=1 -v ./internal/transform/...
 
 # Cluster integration tests (requires Docker)
 # Starts a PostgreSQL cluster via docker-compose, then runs tests
+#
+# -timeout=1200s, not 120s (cleat#2252). ./engine/... runs every
+# dialect-independent test regardless of which DSNs are set, so "one dialect
+# configured" is not "one dialect's worth of work" -- measured 2026-09-30,
+# fresh single-purpose Docker containers, no other load, `time go test
+# -count=1 -p 1 -timeout=<generous> ./engine/...` with only the named DSN
+# set:
+#
+#   postgres only:  452s (engine) +   4s (engine/testutil)
+#   mysql only:     378s (engine) +   3s (engine/testutil)
+#   mssql only:     574s (engine) +   3s (engine/testutil)
+#   all three:      640s (engine) +   2s (engine/testutil)
+#
+# All four already exceed the old 120s by 3-5x on a dedicated, unloaded
+# machine; CI and a shared dev box run slower still. 1200s is roughly 2x the
+# worst measured figure (mssql), not the figure itself -- see "Any number you
+# write down carries a date and the command that re-derives it" in this
+# project's CLAUDE.md: re-run the command above before trusting these numbers
+# again, don't just trust this comment.
+#
+# A TIMEOUT HERE LEAVES SHARED TEST-DATABASE STATE DIRTY, not just a slow
+# result. `go test`'s own timeout panic skips every test's t.Cleanup, so a
+# helper that flips session-level state for its duration and restores it in
+# Cleanup (e.g. engine/testutil's MSSQLAdminDB, which flips
+# admin.rls_predicate_form to 'admin' for the duration of a call) never gets
+# to restore it. The next run then fails somewhere else entirely --
+# TestMSSQLAdminDBRestoresThePlainPredicateAfterUse reading 'admin' where it
+# expects 'plain' is the exact, reproduced symptom (cleat#2252): it looks like
+# an unrelated new failure, and it is old, dirty state from a timeout in a
+# PREVIOUS run. If ./engine/... has ever hit its timeout on your test
+# databases, drop and recreate them before trusting the next run's failures --
+# do not debug what a stale predicate or partially-applied fixture leaves
+# behind.
 CLEAT_TEST_DB=postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable \
-  go test -count=1 -p 1 -timeout=120s ./engine/...
+  go test -count=1 -p 1 -timeout=1200s ./engine/...
 
 # MySQL backend tests (requires MySQL 8.0+ at localhost:3306)
 # Skipped if CLEAT_TEST_MYSQL is not set
 CLEAT_TEST_MYSQL=root:cleat@tcp(localhost:3306)/cleat \
-  go test -count=1 -p 1 -timeout=120s ./engine/...
+  go test -count=1 -p 1 -timeout=1200s ./engine/...
 
 # SQL Server backend tests (requires SQL Server 2017+ at localhost:1433)
 # Skipped if CLEAT_TEST_MSSQL is not set
 CLEAT_TEST_MSSQL=sqlserver://sa:CleatTest123!@localhost:1433?database=master \
-  go test -count=1 -p 1 -timeout=120s ./engine/...
+  go test -count=1 -p 1 -timeout=1200s ./engine/...
 
 # Rust crates
 cd crates/cleat-macro && cargo test
@@ -307,6 +380,19 @@ cd packages/cleat-as && npm test
 > integration tests. See `docker-compose.cluster.yml` for the default Postgres,
 > MySQL, and SQL Server configurations. The compose file defines all three
 > database services for local multi-backend development.
+
+> **Note:** `testutil.SuiteTestDB` gives a package's tests one database per
+> suite name (e.g. `cleat_test_cleat_worker`), created once and never reset.
+> `CleanupPostgresTestData` deletes rows per test but is opt-in and has no
+> callers in `cmd/cleat-worker`, so a test in that package that does not call
+> it sees rows a previous run left behind (a run that never got claimed, a
+> workflow stuck waiting on a key) persist across every later local run of
+> `go test`, however many days apart. A test that assumes it is looking at an
+> otherwise-empty queue, or claims from the database with no scoping of its
+> own, can see this as a false failure (cleat#2214). If a database-backed test
+> starts failing locally in a way CI does not reproduce, checking for leftover
+> state in that suite's database is worth doing before assuming a real
+> regression; `DROP DATABASE cleat_test_<suite>` clears it.
 
 ## Proving a test can fail
 

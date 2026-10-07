@@ -18,6 +18,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// defaultWebhookEventType is the event_type handleIngestWebhook assigns when
+// neither X-Github-Event nor X-Event-Type is present. awaitWebhook
+// (host_functions.go) defaults an unset AwaitWebhookInput.EventType to the
+// same value, so a caller matching order-lifecycle's shape (no custom
+// header sent, EventType left unset on the await call) keeps working
+// unchanged under the correlated claim -- the claim is keyed on an EXACT
+// event_type (eventtriggers.queryOldestUnprocessedEventForClaim), so the
+// two sides have to agree on a default rather than each independently
+// treating "unset" as "no filter", which is what the old two-step poll did.
+const defaultWebhookEventType = "webhook"
+
 func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("webhook-ingest: nil mux")
@@ -65,24 +76,28 @@ func WebhookIngestSecretName(id uuid.UUID) string {
 // ---- types ----
 
 type webhookSourceJSON struct {
-	ID               uuid.UUID `json:"id"`
-	TenantID         uuid.UUID `json:"tenant_id"`
-	Name             string    `json:"name"`
-	SourceType       string    `json:"source_type"`
-	SecretConfigured bool      `json:"secret_configured"`
-	Enabled          bool      `json:"enabled"`
-	SignalWorkflowID string    `json:"signal_workflow_id,omitempty"`
-	SignalName       string    `json:"signal_name,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID                  uuid.UUID `json:"id"`
+	TenantID            uuid.UUID `json:"tenant_id"`
+	Name                string    `json:"name"`
+	SourceType          string    `json:"source_type"`
+	SecretConfigured    bool      `json:"secret_configured"`
+	Enabled             bool      `json:"enabled"`
+	CorrelationKeyField string    `json:"correlation_key_field,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type createSourceRequest struct {
-	Name             string        `json:"name"`
-	SourceType       string        `json:"source_type"`
-	Secret           plugin.Secret `json:"secret,omitempty"`
-	SignalWorkflowID string        `json:"signal_workflow_id,omitempty"`
-	SignalName       string        `json:"signal_name,omitempty"`
+	Name       string        `json:"name"`
+	SourceType string        `json:"source_type"`
+	Secret     plugin.Secret `json:"secret,omitempty"`
+	// CorrelationKeyField names a top-level field in the inbound JSON
+	// payload whose value becomes this source's events' key2 (cleat#2649,
+	// P1). Optional: a source with no field declared publishes with only
+	// key1 (its own id) set, so an await_webhook call naming Keys for it
+	// can never match -- the field is what makes per-order correlation
+	// possible at all for a source shared across many orders.
+	CorrelationKeyField string `json:"correlation_key_field,omitempty"`
 }
 
 type webhookEventJSON struct {
@@ -128,16 +143,6 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	discoverCtx := plugin.AcrossAllTenants(r.Context(),
 		"webhook ingest: the source id identifies the tenant, so there is none to scope by")
 
-	// COALESCE(signal_workflow_id, ''): the column is nullable with no
-	// default (migrations.go v3) and handleCreateSource writes NULL for a
-	// source created with no signal_workflow_id, but this scans into a plain
-	// Go string -- an uncoalesced NULL fails every ingest on such a source
-	// with "converting NULL to string is unsupported". background.go's
-	// queryUnprocessedWebhookEvents already coalesced this column; these
-	// three SELECTs (here, handleGetSource, handleListSources) had not.
-	// Found running handleCreateSource+handleIngestWebhook against a real
-	// database for the first time (cleat#1992's dialect coverage) -- the
-	// in-memory fake driver has no NULL to fail to scan.
 	// deleted_at IS NULL: a deleted source reads as gone (404), the same as
 	// one that never existed, rather than as merely disabled (403) --
 	// cleat#2199. handleDeleteSource never removes the row, so without this
@@ -145,12 +150,12 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// instead of behaving like the caller asked it to stop existing.
 	var source webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(discoverCtx, plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND deleted_at IS NULL
 	`, p.dialect), sourceID), &source.ID, &source.TenantID, &source.Name, &source.SourceType,
-		&source.SecretConfigured, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
-		&source.CreatedAt, &source.UpdatedAt)
+		&source.SecretConfigured, &source.Enabled,
+		&source.CorrelationKeyField, &source.CreatedAt, &source.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
 		return
@@ -250,7 +255,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		eventType = r.Header.Get("X-Event-Type")
 	}
 	if eventType == "" {
-		eventType = "webhook"
+		eventType = defaultWebhookEventType
 	}
 
 	eventID := uuid.New()
@@ -377,9 +382,39 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// key1 = this source's own id, ALWAYS -- not conditional on
+	// CorrelationKeyField being set. cleat#2649, owner decision: source
+	// identity has to be part of every event's correlation key, not only a
+	// tenant-configured one, or two sources that both leave the field unset
+	// (or that happen to declare the same field name) could wake each
+	// other's awaiters the moment both share event_type's "webhook" default.
+	// The full claim/register match is (tenant_id, event_type, key1, key2,
+	// key3) together (plugins/eventtriggers/queries.go), so key1 alone
+	// already makes every source's events disjoint from every other
+	// source's regardless of what event_type collapses to.
+	//
+	// key2 is this source's declared field, extracted from the parsed
+	// payload -- empty if the source declares none, extraction fails, or
+	// the value doesn't fit a correlation key slot (keySlots' own 128-byte
+	// / no-trailing-space rules). A source with no usable key2 still
+	// publishes (key1 alone is a valid, if only source-scoped rather than
+	// per-order, correlation), it just cannot be the target of an
+	// await_webhook call that also passes Keys naming an order id -- the
+	// same "found:false forever, no crash" shape any correlation mismatch
+	// already has.
+	keys := []string{sourceID.String()}
+	if source.CorrelationKeyField != "" {
+		if v, ok := extractCorrelationKeyValue(body, source.CorrelationKeyField); ok {
+			keys = append(keys, v)
+		} else {
+			p.logger.Warn("webhook-ingest: correlation_key_field configured but not usable on this payload",
+				"source_id", sourceID, "field", source.CorrelationKeyField, "event_id", eventID)
+		}
+	}
+
 	matched, pubErr := eventtriggers.PublishEvent(
 		tenantCtx, p.db, p.logger, p.env,
-		eventID, source.TenantID, eventType, eventDataJSON,
+		eventID, source.TenantID, eventType, eventDataJSON, keys,
 	)
 	if pubErr != nil {
 		p.logger.Error("webhook-ingest: publish event failed", "error", pubErr)
@@ -388,42 +423,6 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 			"event_id", eventID,
 			"workflows_started", matched,
 		)
-	}
-
-	// Also deliver a signal if this source is bound to a workflow (legacy path).
-	if source.SignalWorkflowID != "" {
-		signalPayload := map[string]any{
-			"source_id":   sourceID.String(),
-			"event_id":    eventID.String(),
-			"event_type":  eventType,
-			"received_at": now.Format(time.RFC3339),
-		}
-		if json.Valid(body) {
-			signalPayload["payload"] = json.RawMessage(body)
-		} else {
-			signalPayload["payload"] = string(body)
-		}
-		payloadBytes, _ := json.Marshal(signalPayload)
-		signalName := source.SignalName
-		if signalName == "" {
-			signalName = "webhook_received"
-		}
-		if p.env != nil && p.env.SignalWorkflow != nil {
-			if serr := p.env.SignalWorkflow(tenantCtx, source.SignalWorkflowID, signalName, string(payloadBytes)); serr != nil {
-				p.logger.Error("webhook-ingest: signal delivery failed",
-					"workflow_id", source.SignalWorkflowID,
-					"error", serr,
-				)
-			} else {
-				p.db.Exec(tenantCtx, plugin.Rebind(`
-					UPDATE webhook_events SET processed = true, status = 'completed' WHERE id = $1
-				`, p.dialect), eventID)
-				p.logger.Info("webhook-ingest: signal delivered",
-					"workflow_id", source.SignalWorkflowID,
-					"event_id", eventID,
-				)
-			}
-		}
 	}
 
 	p.writeJSON(w, 201, map[string]any{
@@ -448,7 +447,7 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	// and for GET /ingest/events, which is deliberately NOT filtered the
 	// same way -- see handleDeleteSource.
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE tenant_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
@@ -464,8 +463,8 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s webhookSourceJSON
 		if err := plugin.ScanRow(rows, &s.ID, &s.TenantID, &s.Name, &s.SourceType,
-			&s.SecretConfigured, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
-			&s.CreatedAt, &s.UpdatedAt); err != nil {
+			&s.SecretConfigured, &s.Enabled,
+			&s.CorrelationKeyField, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			p.logger.Error("webhook-ingest: scan source", "error", err)
 			continue
 		}
@@ -488,8 +487,34 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
+		return
+	}
+
+	// signal_workflow_id/signal_name were retired in cleat#2689 along with
+	// the static push-to-signal mechanism they configured
+	// (background.go, deleted entirely). createSourceRequest no longer
+	// declares them, so a plain json.Unmarshal into it silently drops an
+	// unknown field -- a caller migrating an old integration would get a
+	// 201 and a source that quietly never signals, with nothing telling
+	// it why. Reject instead. Ignore a decode error here: a genuinely
+	// malformed body is reported once, below, by the real decode.
+	var retired struct {
+		SignalWorkflowID string `json:"signal_workflow_id"`
+		SignalName       string `json:"signal_name"`
+	}
+	if err := json.Unmarshal(body, &retired); err == nil {
+		if retired.SignalWorkflowID != "" || retired.SignalName != "" {
+			p.writeError(w, 400, "signal_workflow_id/signal_name were retired in cleat#2689 and no "+
+				"longer do anything; use a correlated await_webhook call instead (cleat#2625/#2649)")
+			return
+		}
+	}
+
 	var req createSourceRequest
-	if !plugin.ReadJSONBody(w, r, &req) {
+	if err := json.Unmarshal(body, &req); err != nil {
+		p.writeError(w, 400, fmt.Sprintf("invalid JSON: %v", err))
 		return
 	}
 	if req.Name == "" {
@@ -512,15 +537,6 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 	const secretConfigured = true
-
-	var signalWorkflowID any
-	if req.SignalWorkflowID != "" {
-		signalWorkflowID = req.SignalWorkflowID
-	}
-	signalName := req.SignalName
-	if signalName == "" {
-		signalName = "webhook_received"
-	}
 
 	// The secret is written FIRST. If it fails, nothing else has happened --
 	// no orphaned source row. If the INSERT below fails after this succeeds,
@@ -546,9 +562,9 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	// coverage) -- the in-memory fake driver binds by Ordinal and cannot see
 	// this class of defect.
 	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
-		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret_configured, enabled, created_at, updated_at, signal_workflow_id, signal_name)
-		VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9)
-	`, p.dialect), tid, id, req.Name, req.SourceType, secretConfigured, now, now, signalWorkflowID, signalName)
+		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret_configured, enabled, created_at, updated_at, correlation_key_field)
+		VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8)
+	`, p.dialect), tid, id, req.Name, req.SourceType, secretConfigured, now, now, req.CorrelationKeyField)
 	if err != nil {
 		p.logger.Error("webhook-ingest: create source",
 			"error", err, "orphaned_secret_configured", secretConfigured)
@@ -562,17 +578,16 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	p.logger.Info("webhook-ingest: source created", "id", id, "tenant", tid)
 
 	p.writeJSON(w, 201, map[string]any{
-		"id":                 id,
-		"tenant_id":          tid,
-		"name":               req.Name,
-		"source_type":        req.SourceType,
-		"secret_configured":  secretConfigured,
-		"signal_workflow_id": req.SignalWorkflowID,
-		"signal_name":        signalName,
-		"enabled":            true,
-		"endpoint_url":       endpointURL,
-		"created_at":         now,
-		"updated_at":         now,
+		"id":                    id,
+		"tenant_id":             tid,
+		"name":                  req.Name,
+		"source_type":           req.SourceType,
+		"secret_configured":     secretConfigured,
+		"correlation_key_field": req.CorrelationKeyField,
+		"enabled":               true,
+		"endpoint_url":          endpointURL,
+		"created_at":            now,
+		"updated_at":            now,
 	})
 }
 
@@ -595,12 +610,12 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 	// deleted_at IS NULL -- see handleListSources.
 	var s webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
 	`, p.dialect), id, tid), &s.ID, &s.TenantID, &s.Name, &s.SourceType,
-		&s.SecretConfigured, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
-		&s.CreatedAt, &s.UpdatedAt)
+		&s.SecretConfigured, &s.Enabled,
+		&s.CorrelationKeyField, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
 		return
@@ -649,19 +664,19 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	// idempotency contract, just one that no longer depends on the row
 	// having been physically removed.
 	//
-	// BOTH UPDATES BELOW SHARE ONE TRANSACTION. cleat-review on #2221: an
-	// event ingested before the delete, whose inline signal failed (the
-	// SignalWorkflow call in handleIngestWebhook), was left processed=false,
-	// status='pending' -- and nothing about the delete stopped the background
-	// retry sweep (background.go's processBatch) from later delivering it.
-	// Measured on all three dialects: a source with one such event, deleted,
-	// then swept, produced one new signal delivery for event_type
-	// 'completed' -- a forged event accepted during exactly the compromise
-	// window the delete is meant to shut off still reached the workflow.
-	// Doing this in the same transaction as the soft-delete means the two
-	// statements can never observably disagree: no reader can see the source
-	// marked deleted while a pending event for it is still eligible for
-	// retry, or the reverse.
+	// BOTH UPDATES BELOW SHARE ONE TRANSACTION. Originally cleat-review on
+	// #2221: an event ingested before the delete, whose inline signal failed
+	// (the SignalWorkflow call handleIngestWebhook made at the time), was
+	// left processed=false, status='pending' -- and nothing about the delete
+	// stopped the background retry sweep (background.go's processBatch,
+	// since removed -- cleat#2689) from later delivering it to the bound
+	// workflow. That specific mechanism is gone, but the reason for keeping
+	// both statements atomic is not just that one bug: doing this in the
+	// same transaction as the soft-delete means the two statements can never
+	// observably disagree -- no reader (GET /ingest/events, or the
+	// ingested_events cancellation just below) can see the source marked
+	// deleted while a pending event for it still reads as live, or the
+	// reverse.
 	tx, err := p.db.Begin(r.Context())
 	if err != nil {
 		p.logger.Error("webhook-ingest: begin delete source", "error", err)
@@ -686,13 +701,14 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// processed = true, same as every other terminal status this table has
-	// ('completed', 'dead_letter') -- 'cancelled' joins them as a third.
-	// cleat-review took the open question below to the owner, who chose (A):
-	// a delete stops an event reaching an awaiting workflow too, not only the
-	// background PUSH retry. host_functions.go's awaitWebhook now filters on
-	// this the same way processBatch's query does, so this UPDATE closes off
-	// both delivery paths, not just the one this fix started from.
+	// processed = true / status = 'cancelled': this table's only two live
+	// values as of cleat#2689 (the legacy signal-push retry sweep that used
+	// to also produce 'completed'/'dead_letter' is retired). This UPDATE by
+	// itself does not stop awaitWebhook's claim -- that claims from
+	// eventtriggers' ingested_events, not from this table -- it exists so
+	// GET /ingest/events reports a deleted source's events as settled rather
+	// than forever 'pending'. The THIRD statement below is what actually
+	// closes off delivery through the claim path.
 	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
 		UPDATE webhook_events
 		SET status = 'cancelled', processed = true, error_msg = 'source deleted'
@@ -701,6 +717,39 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	`, p.dialect), id, tid); err != nil {
 		tx.Rollback()
 		p.logger.Error("webhook-ingest: cancel pending events on delete", "error", err)
+		p.writeError(w, 500, "failed to delete source")
+		return
+	}
+
+	// THIRD statement, same transaction, same reasoning as the one above --
+	// cleat#2649. Once await_webhook claims from eventtriggers' own
+	// ingested_events (key1 = this source's id) instead of webhook_events,
+	// cleat#2199's guarantee ("no event of a deleted source ever reaches an
+	// awaiting workflow") has to reach THAT table too, or a webhook ingested
+	// before the delete but not yet claimed would still be handed to a
+	// workflow racing this delete -- silently reopening the exact bug
+	// cleat#2199 closed, through the new claim path instead of the old one.
+	// key1 = id.String() is safe with no event_type filter: key1 is always
+	// this source's own id (routes.go's handleIngestWebhook), and no other
+	// plugin or source ever writes that value into ingested_events.key1, so
+	// this can only ever match rows this source itself published.
+	//
+	// dispatch_processed = true is ALSO set here, and it did not need to be
+	// before cleat#2663/#2822 split it from `processed`: this UPDATE relied
+	// on the shared column to block eventtriggers' subscription-dispatch
+	// sweep (queryUnprocessedEvents) too, as a side effect rather than by
+	// design. After the split, `processed` alone stops delivery to an
+	// AWAITER but no longer stops a matching event_subscriptions row from
+	// being dispatched for a deleted source's event. Decided in #2822
+	// (closing #2820, which asked the question): a deleted source's events
+	// are inert on both paths, matching webhook_events' own cancellation.
+	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
+		UPDATE ingested_events
+		SET status = 'cancelled', processed = true, dispatch_processed = true, error_msg = 'source deleted'
+		WHERE tenant_id = $1 AND key1 = $2 AND processed = false
+	`, p.dialect), tid, id.String()); err != nil {
+		tx.Rollback()
+		p.logger.Error("webhook-ingest: cancel pending correlated events on delete", "error", err)
 		p.writeError(w, 500, "failed to delete source")
 		return
 	}
@@ -833,4 +882,86 @@ func webhookPayload(body []byte) any {
 	}
 	// Not JSON: carried as a string, which json.Marshal will quote and escape.
 	return string(body)
+}
+
+// extractCorrelationKeyValue reads a top-level field out of an inbound
+// webhook's JSON body and returns it as a correlation-key value. cleat#2649.
+//
+// TOP-LEVEL ONLY, no dotted-path lookup: the field is a tenant-declared name
+// (createSourceRequest.CorrelationKeyField), not an expression language, and
+// the design doc's own constraint (§1: "cannot index inside a JSON payload
+// portably") is about the STORED event table, not this Go-level read of one
+// payload at ingest -- but a nested lookup would still be scope this issue
+// never asked for, so it stays flat until a real caller needs otherwise.
+//
+// Returns ("", false) whenever the value would not become a valid, USABLE
+// correlation key: body is not JSON, the field is absent, its value isn't a
+// JSON string/number/bool (an object or array has no single scalar to
+// correlate on), or the value fails keySlots' own rules (over 128 bytes, or
+// ends in a space -- see keys.go for why the latter matters on two of three
+// dialects). Every one of these is "this webhook can't be correlated by that
+// field this time", never a reason to fail the ingest itself: the caller
+// falls back to publishing with key1 (source id) alone, which is a valid,
+// if source-scoped-only, correlation.
+func extractCorrelationKeyValue(body []byte, field string) (string, bool) {
+	if !json.Valid(body) {
+		return "", false
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		// Valid JSON that isn't an object at the top level (an array, a bare
+		// string/number) -- no top-level field to read.
+		return "", false
+	}
+	raw, present := payload[field]
+	if !present {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return validCorrelationKeyValue(s)
+	}
+	// Not a JSON string -- accept a number or bool by its literal text
+	// (e.g. an integer order id sent unquoted), reject an object/array/null,
+	// which have no single scalar to correlate on.
+	//
+	// MATCHED BY RAW JSON TEXT, NOT NUMERIC VALUE -- cleat-review's finding
+	// on this PR. "order_id":1000 and "order_id":1e3 are the same number
+	// and different correlation keys, because correlation matching is
+	// always string equality (keys.go), never JSON-aware comparison -- a
+	// PSP that serialises the same value two different ways across
+	// requests (unlikely for an id, but not impossible for one computed
+	// rather than stored verbatim) correlates as if they were different
+	// orders. Use a string field for a correlation key where the sender's
+	// serialisation is not otherwise pinned.
+	var scalar any
+	if err := json.Unmarshal(raw, &scalar); err != nil {
+		return "", false
+	}
+	switch scalar.(type) {
+	case float64, bool:
+		return validCorrelationKeyValue(strings.TrimSpace(string(raw)))
+	default:
+		return "", false
+	}
+}
+
+// maxCorrelationKeyBytes mirrors eventtriggers.maxCorrelationKeyBytes
+// (keys.go), which is unexported -- keySlots is the only enforcement this
+// package could otherwise rely on, and by the time that runs (inside
+// PublishEvent) the only recourse is a logged error on every future webhook
+// from a misconfigured source. Checking here instead degrades a single
+// extraction to "not usable" rather than repeating that error forever.
+const maxCorrelationKeyBytes = 128
+
+// validCorrelationKeyValue applies keySlots' own constraints (keys.go) so an
+// extracted value that would fail there is treated as "not usable" here
+// instead of surfacing as a PublishEvent error on every future webhook from
+// this source -- the caller is external, so a configuration mismatch (a
+// field whose values run long) must degrade rather than break ingest.
+func validCorrelationKeyValue(v string) (string, bool) {
+	if v == "" || len(v) > maxCorrelationKeyBytes || strings.HasSuffix(v, " ") {
+		return "", false
+	}
+	return v, true
 }

@@ -20,8 +20,30 @@ PostgreSQL (or MySQL/SQL Server) connection URL. The worker connects to your
 existing database; it does not manage it. Example:
 
     --db "postgres://user:pass@localhost:5432/cleat?sslmode=disable"
-    --db "mysql://user:pass@tcp(localhost:3306)/cleat"
+    --db "user:pass@tcp(localhost:3306)/cleat"
     --db "sqlserver://user:pass@localhost:1433?database=cleat"
+
+The MySQL form carries no `mysql://` scheme prefix, and that is deliberate: `go-sql-driver/mysql`
+has no concept of a scheme and does not strip one, so a `mysql://` DSN is unusable — in two
+different ways, depending on its shape:
+
+- `mysql://user:pass@host:3306/db` is rejected by the driver's own parser, which reads the address
+  as a network name and reports `default addr for network 'host:3306' unknown`. It never reaches a
+  server, so the message names neither the DSN nor the scheme.
+- `mysql://user:pass@tcp(host:3306)/db` parses, with `mysql` read as the username, so the connection
+  is attempted as that literal user and refused as one (`Access denied for user 'mysql'@…`).
+
+Neither message names the scheme, which is why the tools refuse such a DSN rather than letting it
+through. `cleatctl` rejects a `mysql://`-prefixed DSN before any driver sees it, naming the scheme
+and giving the correct form (cleat#2962); `cleat`'s PostgreSQL-only subcommands refuse a MySQL-shaped
+DSN too, naming the dialect. Dialect detection still *recognises* a `mysql://` prefix — as a
+heuristic for what someone may paste, not as a claim that the DSN connects — so a recognised shape
+is not a working one here (cleat#2938).
+
+A MySQL session whose `time_zone` is not UTC introduces a DST-sized blind spot in
+`--idempotency-key-retention`'s bound — see `docs/durable-calls.md`'s "Compared against the
+store's own clock" section for the exact `time_zone` DSN parameter to pin it, if that precision
+matters to your deployment.
 
 ---
 
@@ -156,13 +178,18 @@ configured.
 |------|---------|-------------|
 | int | `200` | Maximum stale instances the reaper reclaims per tick (`0` = unbounded) |
 
-The reaper reclaims any instance whose heartbeat predates
-`max(2 × --heartbeat-interval, 10s)`. **Any stall that outlasts that window ages
-every running instance past it at once**, because they all heartbeat through the
-same table — a migration holding `ACCESS EXCLUSIVE` at worker boot, a database
-failover, a paused volume. Without a bound, the sweep after the stall reclaims
-the entire running set in one statement and every in-flight workflow replays
-simultaneously, against a database that has just finished whatever stalled it.
+The reaper reclaims any instance whose heartbeat predates the **reclaim
+window** — derived from `--heartbeat` as
+`--heartbeat + 3 × the database-call deadline + the retry interval + 1s`, about
+**14.5s** at the default 5s heartbeat, or exactly `--reclaim-timeout` when that
+is set. (This is *not* the membership lease, `max(2 × --heartbeat, 10s)`, which
+answers a different question and is swept separately.) **Any stall that outlasts
+that window ages every running instance past it at once**, because they all
+heartbeat through the same table — a migration holding `ACCESS EXCLUSIVE` at
+worker boot, a database failover, a paused volume. Without a bound, the sweep
+after the stall reclaims the entire running set in one statement and every
+in-flight workflow replays simultaneously, against a database that has just
+finished whatever stalled it.
 
 No data is lost — fencing guarantees that — but it is a self-inflicted
 thundering herd at the moment the database can least absorb one. See
@@ -207,9 +234,10 @@ A worker can poll multiple queues. Example:
 |------|---------|-------------|
 | duration | `5s` | Heartbeat interval |
 
-The worker updates its heartbeat in the database at this interval. Stale
-instances (missing two consecutive heartbeats) are reaped and made available
-to other workers.
+The worker updates its heartbeat in the database at this interval. A run whose
+heartbeat predates the **reclaim window** (see `--reclaim-timeout`, and note it
+is not the lease below) is treated as abandoned and made available to other
+workers.
 
 **Must be below 150s.** `cleat-worker` refuses to start otherwise. A secret
 writer (`set-secret`, `reseal-secrets`) counts a worker as live for five minutes
@@ -217,6 +245,28 @@ after its last heartbeat, and the worker re-checks its secrets after a gap longe
 than `max(2 × --heartbeat, 10s)`. At 150s or more that threshold reaches the
 writer's five minutes, so a stalled worker could be written past and resume
 without noticing.
+
+---
+
+### --reclaim-timeout
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0` | How long a run may go without a heartbeat before another worker may claim it (`0` = derive from `--heartbeat`) |
+
+`0` derives it as the window `--max-reclaim-per-tick` documents (about 14.5s at
+the default heartbeat), which is the historical behaviour and changes nothing.
+Set it to decouple the two: the heartbeat is how often a **live** worker checks
+in, while this is how long a **dead** one's work stays stranded — and a database
+outage stops the heartbeat without the worker being dead. Sizing it to a failover
+window (tens of seconds for streaming replication, longer for managed Multi-AZ)
+buys outage tolerance at the cost of that much extra delay before a crashed
+worker's runs are recovered.
+
+Refused if below `2 × --heartbeat`, which would reclaim runs whose workers are
+heartbeating normally. It does **not** move the worker-membership lease, which
+answers a different question — which workers exist, for shard distribution — and
+still follows `--heartbeat`.
 
 ---
 
@@ -475,6 +525,23 @@ This flag does **not** cover most other places workflow data is stored --
 and `idempotency_keys.error_msg` are all plaintext whether or not this flag is
 set. See cleat#2312 for the full per-column measurement.
 
+**A worker started without this flag refuses to start if this database has
+ever had it enabled (cleat#2324).** A sealed column carries no envelope or
+version prefix (by design -- see `engine/encryption.go`'s doc comment), so a
+keyless worker cannot recognise ciphertext by inspecting a row; without this
+guard it would read a sealed column as plaintext, silently. The database
+remembers "payload encryption was enabled here" the first time any worker
+starts with `--encrypt-sensitive-payloads` and a key ring configured
+(`payload_encryption_ever_enabled`, migration 008), and every worker started
+without one checks that marker before doing anything else.
+
+The marker is insert-only -- nothing in this release clears it. A deployment
+that enabled this flag and later wants to run keyless again has no supported
+path back short of operating on `payload_encryption_ever_enabled` directly,
+and should not do so without first confirming (e.g. via
+`cleatctl reseal-payloads`'s own accounting) that no sealed row remains
+anywhere a keyless worker could read.
+
 ---
 
 ## Plugins
@@ -667,6 +734,79 @@ Maximum burst size allowed above the per-tenant rate limit. Only meaningful
 when `--rate-limit-per-tenant` is set to a non-zero value.
 
 ---
+
+### --worker-service-name
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Headless Kubernetes Service (clusterIP: None) selecting this worker's pods |
+
+When set, the worker publishes `<hostname>.<this>` — the per-pod DNS name the
+headless Service gives it — in `admin.workers.address`, so another worker can
+reach it **by name** rather than by a pod IP that changes on every restart.
+
+This is the address half of the reaper-to-worker veto channel
+([cleat#2196](https://github.com/cleat-team/cleat/issues/2196)), and it has to
+be set on **every** worker, not only the ones answering: each worker both asks
+and may be asked. Empty (the correct value outside Kubernetes, or inside it
+without this headless Service) means "my address is not known to be resolvable",
+and this worker's runs are reclaimed on the ordinary timeout with no veto
+attempted. It is wired into `k8s/deployment.yaml` and the Helm chart by default.
+
+### --internal-addr
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Listen address for `/internal/holds`, reached by other workers only |
+
+Shaped exactly like `--pprof-addr`: its own opt-in address, empty by default,
+never served on the ordinary API port and never wired into ingress. When set,
+the worker answers `GET /internal/holds/{run_id}?generation=G` from its **own
+in-process** map of what it is executing — never by re-querying the database,
+because the case this exists for is a worker whose own path to the database has
+degraded, where a database query is exactly as blind as the heartbeat the reaper
+already does not trust.
+
+Authentication is `CLEAT_INTERNAL_AUTH_KEY`, an **environment variable, not a
+flag** (a flag value is visible in `ps`), whose value every worker in the
+deployment shares. The secret is read once at startup and used for both halves
+of the channel, so a worker needs it set whether it answers this listener or
+only asks. `--internal-addr` set without the variable refuses to start rather
+than serving a listener that would authenticate no caller.
+
+This is a **narrow, interim** mechanism, symmetric (every worker is both caller
+and callee) and tenant-blind (a hold query names a run and a generation, nothing
+about a tenant). It is meant to be retired once
+[cleat#2169](https://github.com/cleat-team/cleat/issues/2169)'s general
+operator-credential design lands — it is deliberately not that.
+
+## The reaper's veto channel
+
+With the two flags above set, `reapOnce` asks the worker named in a stale row
+whether it still holds that run before reclaiming it, and a `"yes, and I am
+making progress"` defers that row by **one extra reclaim window** — no more.
+The database stays the only authority on who holds a run: the channel never
+grants ownership, and generation fencing is unchanged.
+
+**The veto is bounded, and it costs liveness in exactly one direction.** A row
+stale by one reclaim window is asked; a row stale by **two** is reclaimed
+without being asked at all, whatever its holder would have said. So an honest
+holder — or a lying one — can delay its own run's reclaim by one window and no
+further.
+
+**Every failure to get a definite "yes" is a reclaim.** A worker that is
+unreachable is treated exactly as one that is dead: a dial error, a timeout, a
+non-200, a malformed answer, or no published address all mean the row is swept
+on the ordinary timeout. That is deliberate — the alternative strands a
+genuinely dead worker's runs forever — and it is why the channel is an
+optimisation over fencing rather than a new source of truth.
+
+One consequence worth knowing when tuning: a worker's row in `admin.workers` is
+retained for **longer than the membership lease** (`max(2 × --heartbeat, 10s)`)
+— long enough to cover the whole window in which its runs can still be asked
+about, since the workers this resolves are precisely the ones whose heartbeats
+have stopped. The connection share is unaffected: it is still divided by the
+lease.
 
 ## WASM
 
@@ -1155,12 +1295,13 @@ everything downstream of it -- event history, state, child workflows, schedules
 widened query required; the mechanism that replaced it requires none of it —
 not for the claim and not for the due-schedule read. It is kept because a
 deployment may still carry those grants, and because `admin.in_flight_workflow_ids`
-(the plugin sweep, migration 073) still uses the same `cleat_dispatcher` role.
+(`migrations/postgres/001_schema.sql`'s `ALTER FUNCTION ... OWNER TO
+cleat_dispatcher`, the plugin sweep) still uses the same `cleat_dispatcher` role.
 
 | dialect | what the deployment must do |
 |---------|-----------------------------|
-| PostgreSQL | Apply **both** `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` as a superuser. 023 creates `cleat_dispatcher` (`NOLOGIN BYPASSRLS`) to own the claim function; 024 adds the due-schedule read to the same role. They are separate grants on purpose — with 023 alone, workflows execute but cron never fires, and the warning names the file you are missing. |
-| SQL Server | **Two steps since cleat#1541, and the first one is new.** (1) Apply `migrations/mssql/optional/cross_tenant_claim.sql`, which is deliberately *not* in the auto-applied set. (2) Add the worker's principal to the `cleat_admin` role -- see `012_admin_role.sql` for the exact statements; it ships with no members. One grant then covers both the claim and the schedule read, because `fn_tenant_filter` is bound to every table involved. **Step 2 alone does nothing**: the shipped predicate no longer mentions `IS_ROLEMEMBER`, so a member reads `IS_ROLEMEMBER = 1` and still sees zero rows. |
+| PostgreSQL | **Nothing, for either half.** A fresh deployment needs neither migration: rotation reads the tenant list from `admin.tenants` (which carries no row-level security) and then does the per-tenant work under each tenant's own RLS context, granting nothing special. A deployment that already applied `023_cross_tenant_claim.sql` (creating `cleat_dispatcher`, `NOLOGIN BYPASSRLS`) keeps it, because `admin.in_flight_workflow_ids` (`migrations/postgres/001_schema.sql`'s `ALTER FUNCTION ... OWNER TO cleat_dispatcher`, the plugin sweep) still uses that role -- but the role is no longer required for the claim or the due-schedule read, and `024_cross_tenant_schedules.sql` is not required at all. |
+| SQL Server | **Two steps since cleat#1541, and the first one is new.** (1) Apply `migrations/mssql/optional/cross_tenant_claim.sql`, which is deliberately *not* in the auto-applied set. (2) Add the worker's principal to the `cleat_admin` role -- created empty by `migrations/mssql/001_schema.sql` (this file was named `012_admin_role.sql` before the SQL Server migration compaction folded it into the baseline). One grant then covers both the claim and the schedule read, because `fn_tenant_filter` is bound to every table involved. **Step 2 alone does nothing**: the shipped predicate no longer mentions `IS_ROLEMEMBER`, so a member reads `IS_ROLEMEMBER = 1` and still sees zero rows. |
 | MySQL | **Not supported on the default topology.** `MySQLStoreFactory` gives each tenant its own physical database (`cleat_<tenant_id>`), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. The worker warns once and claims its own tenant. A MySQL deployment pointed at a *single shared* database does work, since there isolation really is just a `tenant_id` predicate. |
 
 If the flag is set but the store cannot claim across tenants -- wrong dialect,
@@ -1256,8 +1397,11 @@ rows over 200 tenants:
 | with the bypass | **no** | **Index Scan** | **5760** |
 
 So the cost lands on the statements that cannot name a tenant --
-`ClaimWorkflowsAcrossTenants` and `BatchHeartbeat`, which scan by design -- and
-on any future statement that forgets to. Applying the opt-in accepts that on
+`HeartbeatBatchFenced`, which scans by design because one worker legitimately
+holds instances across many tenants -- and on any future statement that
+forgets to. (Claiming itself no longer scans cross-tenant: #1926 replaced the
+old `ClaimWorkflowsAcrossTenants` with unconditional per-tenant rotation, each
+claim scoped to one tenant.) Applying the opt-in accepts the scan cost on
 every tenant-scoped table, which is why it is a deliberate act rather than the
 default.
 
@@ -1268,30 +1412,38 @@ and restores both the plain predicate and the marker the worker reads.
 you do not have to infer it from silence:
 
 ```
-INFO  cross-tenant workflow claim is available
-INFO  cross-tenant due-schedule read is available
+INFO  cross-tenant workflow claim is available by tenant rotation; no database grant is required
+INFO  cross-tenant due-schedule read is available by tenant rotation; no database grant is required
 ```
 
-or, on a deployment that applied 023 but not 024:
+or, if this worker cannot rotate at all (no per-tenant store factory, or a
+store that cannot enumerate tenants):
 
 ```
-INFO  cross-tenant workflow claim is available
-WARN  cross-tenant due-schedule read is NOT available; only this worker's own
-      tenant's cron will fire
-      reason=admin.get_due_schedules does not exist; apply
-             migrations/postgres/024_cross_tenant_schedules.sql
+WARN  claim-across-tenants is set but this worker cannot serve other tenants;
+      it will claim and fire cron for its own tenant only
+      reason=<why the store can't rotate>
 ```
+
+**There is no longer a state where one loop is available and the other is
+not.** #1926 replaced the two migration-gated widened queries (023's claim,
+024's schedule read) with one rotation mechanism that both loops share, so one
+`rotatingClaimAvailability` check now answers for both -- which is why the WARN
+names neither 023 nor 024 and points at nothing to apply. A deployment that
+never ran either migration is unaffected either way.
 
 It is a report, not a gate -- refusing to start would contradict the degradation
-above, and would turn a revoked `GRANT` into an outage for the worker's own
-tenant, which was never affected.
+above, and would turn a store that cannot rotate into an outage for the
+worker's own tenant, which was never affected.
 
-On PostgreSQL it also checks something no runtime error explains: whether the
-function's **owner still has `BYPASSRLS`**. Losing that attribute does fail --
-every call raises `cleat.tenant_id is not set` (P0001), because the policies are
-fail-closed -- but that message names neither the function nor the missing
-privilege, and there is no path from it to `ALTER ROLE cleat_dispatcher
-BYPASSRLS`. The startup line names it.
+**It does not check `BYPASSRLS`.** This paragraph used to describe a PostgreSQL
+check for a lost `BYPASSRLS` grant on `cleat_dispatcher` -- that check belonged
+to the widened `admin.claim_workflows` query #1926 retired, and went with it:
+`reportCrossTenantCapability` (`cmd/cleat-worker/setup.go`) calls only
+`rotatingClaimAvailability`, which asks nothing about role attributes. Confirm
+with `grep -rn CheckCrossTenantCapability --include='*.go' .` -- the only
+non-test hit is `setup.go`'s own comment recording that the function was
+retired with #1926; it is not defined anywhere in `engine/`.
 
 ---
 

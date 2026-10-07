@@ -1,0 +1,1 @@
+test-go/plugins	1	^TestMySQLV4BackfillSurvivesARerun$	cleat#2268 round 2 (G2): MySQL-only, skips as a WHOLE (a single t.Skip at the top, not per-dialect subtests -- it exercises migration v4's MySQL-specific backfill re-run, which has no Postgres or SQL Server equivalent) in this PostgreSQL-only job. Runs wherever CLEAT_TEST_MYSQL is set.

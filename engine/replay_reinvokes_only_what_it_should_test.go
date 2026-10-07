@@ -171,7 +171,16 @@ func scanRegistrations(t *testing.T, keep func(body string) bool) map[string]boo
 	// a brace inside one of these literals would cut the match short. None does
 	// today; if one is added, this scan quietly stops seeing that registration,
 	// which is why the non-vacuity checks below exist.
-	re := regexp.MustCompile(`Register\(plugin\.FuncOptions\{([^}]*)\}`)
+	//
+	// The optional "Typed(?:scope,\s*)?" half matches
+	// plugin.RegisterTyped(scope, plugin.FuncOptions{...}, fn) (cleat#2626) as
+	// well as the plain scope.Register(plugin.FuncOptions{...}, fn) form --
+	// without it, this scan silently stopped seeing any registration
+	// converted to RegisterTyped, which is exactly the "scan is broken"
+	// case TestTheDeliberatelyNotReInvokedStayThatWay's non-vacuity check
+	// exists to catch (and did: it caught this while the migration was in
+	// progress).
+	re := regexp.MustCompile(`Register(?:Typed)?\((?:scope,\s*)?plugin\.FuncOptions\{([^}]*)\}`)
 	nameRe := regexp.MustCompile(`Name:\s*"([^"]+)"`)
 
 	got := map[string]bool{}

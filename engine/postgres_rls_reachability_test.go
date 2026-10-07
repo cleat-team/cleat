@@ -3,6 +3,7 @@ package engine
 import (
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -134,16 +135,23 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 	byDesign, byDesignFoundNames := resolveByDesignMarkers(t, files)
 	var unexpected []string
 	for _, f := range found {
-		key := shortPos(f.pos)
-		if _, ok := remaining[key]; ok {
-			delete(remaining, key)
+		if _, ok := remaining[f.key]; ok {
+			delete(remaining, f.key)
 			continue
 		}
-		if _, ok := byDesign[key]; ok {
-			delete(byDesign, key)
+		// byDesign is keyed differently ON PURPOSE: resolveByDesignMarkers
+		// re-derives "basefile:line" from a "// rls-by-design: <name>"
+		// marker's position on every run, so it already tracks the
+		// statement across an unrelated edit above it -- the exact problem
+		// f.key solves for knownRLSFaults and knownUnreadableStatements.
+		// Matching it against f.key here would be comparing two keys built
+		// by different rules and would never hit.
+		posKey := shortPos(f.pos)
+		if _, ok := byDesign[posKey]; ok {
+			delete(byDesign, posKey)
 			continue
 		}
-		unexpected = append(unexpected, key+"  ->  "+f.table+"  ("+f.why+")")
+		unexpected = append(unexpected, f.key+"  ->  "+f.table+"  ("+f.why+")  (at "+posKey+")")
 	}
 	sort.Strings(unexpected)
 	if len(unexpected) > 0 {
@@ -187,12 +195,11 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 	}
 	var unexplained []string
 	for _, u := range unreadable {
-		key := shortPos(u.pos)
-		if _, ok := stillUnreadable[key]; ok {
-			delete(stillUnreadable, key)
+		if _, ok := stillUnreadable[u.key]; ok {
+			delete(stillUnreadable, u.key)
 			continue
 		}
-		unexplained = append(unexplained, key)
+		unexplained = append(unexplained, u.key+"  (at "+shortPos(u.pos)+")")
 	}
 	sort.Strings(unexplained)
 	if len(unexplained) > 0 {
@@ -221,7 +228,7 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 		len(knownUnreadableStatements))
 }
 
-type rlsFault struct{ pos, table, why string }
+type rlsFault struct{ pos, key, table, why string }
 
 // knownRLSFaults are the two instances censused in cleat#1178. Each must still
 // match a real statement -- see the staleness check above.
@@ -246,6 +253,14 @@ type rlsFault struct{ pos, table, why string }
 // An empty map is not a reason to delete the mechanism. The next statement
 // written on s.db against an RLS table is the case it exists for, and it will
 // be reported rather than exempted.
+//
+// KEYED BY statementKey, NOT "file:line" (cleat#2200). terminal_run.go:132
+// above is a historical citation of the OLD keying, kept because it is what
+// actually happened; a NEW entry here must use statementKey's format --
+// "<Receiver>.<Func>: <printed call prefix>" -- the same fix applied to
+// knownUnreadableStatements and for the identical reason: a line number
+// drifts under an unrelated edit and cannot tell a moved statement from a
+// different one that happens to land where the moved one used to be.
 var knownRLSFaults = map[string]string{
 	// Empty again as of cleat#1677. The adaptive_flush.go:253 entry that stood
 	// here was written by cleat#1672 -- which found the fault, could not choose
@@ -368,8 +383,18 @@ func resolveByDesignMarkers(t *testing.T, files []string) (byPos map[string]stri
 //
 // Keep the two labelled, so the second class is visibly zero rather than
 // buried among the first.
+//
+// KEYED BY statementKey, NOT "file:line" (cleat#2200). The db.go
+// entry below used to be "db.go:2198", then #2192 moved it to "db.go:2211"
+// for a doc comment landing above it that had nothing to do with this
+// statement -- the guard caught the move only because the old key stopped
+// matching anything it found. A DIFFERENT unreadable statement landing on
+// that same line later would have been exempted silently; a line number
+// cannot tell the two cases apart. The new key is the enclosing function
+// plus a printed prefix of the call itself, which an unrelated edit above or
+// below the statement cannot change.
 var knownUnreadableStatements = map[string]string{
-	"db.go:2336": "built at runtime: `CREATE SCHEMA IF NOT EXISTS ` + pq.QuoteIdentifier(" +
+	"PostgresStoreFactory.OpenStore: f.db.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+pq.QuoteIdentifier(f.schemaName))": "built at runtime: `CREATE SCHEMA IF NOT EXISTS ` + pq.QuoteIdentifier(" +
 		"f.schemaName), where the schema name is a field. The literal half is DDL naming no " +
 		"table, but the guard reports the statement rather than the half it can read -- a " +
 		"partial resolution could be dropping a FROM clause, which is the failure this whole " +
@@ -394,14 +419,14 @@ var knownUnreadableStatements = map[string]string{
 	// teaching sqlTextOf to evaluate a called function's switch, which would have to
 	// pick (or union) branches for every future caller of this guard, not just these
 	// seven -- the same "a partial resolution reintroduces the failure as a
-	// convenience" argument db.go:2198's entry above makes.
-	"deployment_secrets.go:201": "putDeploymentSecretUpdateStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:210": "putDeploymentSecretInsertStmt(s.dialect): INSERT INTO deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:225": "getDeploymentSecretStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:253": "deploymentSecretMetaStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:285": "retireDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:390": "listDeploymentSecretsForResealStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
-	"deployment_secrets.go:435": "resealDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+	// convenience" argument the OpenStore entry above makes.
+	"DeploymentSecretStore.PutDeploymentSecret: s.db.ExecContext(ctx, putDeploymentSecretUpdateStmt(s.dialect), sealed, version, name)":                          "putDeploymentSecretUpdateStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+	"DeploymentSecretStore.PutDeploymentSecret: s.db.ExecContext(ctx, putDeploymentSecretInsertStmt(s.dialect), name, sealed, version)":                          "putDeploymentSecretInsertStmt(s.dialect): INSERT INTO deployment_secrets, no tenant_id column, not an RLS table",
+	"DeploymentSecretStore.GetDeploymentSecret: s.db.QueryRowContext(ctx, getDeploymentSecretStmt(s.dialect), name)":                                             "getDeploymentSecretStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"DeploymentSecretStore.DeploymentSecretMeta: s.db.QueryRowContext(ctx, deploymentSecretMetaStmt(s.dialect), name)":                                           "deploymentSecretMetaStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"DeploymentSecretStore.RetireDeploymentSecret: s.db.ExecContext(ctx, retireDeploymentSecretStmt(s.dialect), name)":                                           "retireDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+	"DeploymentSecretStore.ResealDeploymentSecrets: s.db.QueryContext(ctx, listDeploymentSecretsForResealStmt(s.dialect))":                                       "listDeploymentSecretsForResealStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
+	"DeploymentSecretStore.ResealDeploymentSecrets: s.db.ExecContext(ctx, resealDeploymentSecretStmt(s.dialect), next, cur, r.name, r.keyVersion, r.ciphertext)": "resealDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
 }
 
 // receiversWithoutRLS are store types whose backends have no row-level
@@ -440,6 +465,54 @@ func receiverTypeName(fn *ast.FuncDecl) string {
 		return t.Name
 	}
 	return ""
+}
+
+// statementKey identifies a statement this guard has an opinion about --
+// readable or not -- by where it is WRITTEN, not by where it sits (cleat#2200).
+// shortPos(pos) is a line number, and #2192 had to move knownUnreadableStatements'
+// db.go entry from :2198 to :2211 for an unrelated doc-comment edit above it --
+// the guard caught that move only because the old key stopped matching
+// anything. A DIFFERENT statement landing on :2211 later would have been
+// exempted silently; nothing about a line number says which statement it is.
+// Used by both knownUnreadableStatements and knownRLSFaults, the two maps in
+// this file that name a statement by its source position rather than by a
+// marker comment (statementsWithoutATenantByDesign's markers already solve
+// this a different way -- see resolveByDesignMarkers).
+//
+// KEYED BY THE ENCLOSING FUNCTION, THEN A PREFIX OF THE CALL'S OWN PRINTED
+// SOURCE. The function qualifier separates identical-looking calls in
+// different receivers; the printed prefix separates sibling calls within one
+// function -- deployment_secrets.go's seven entries are structurally
+// identical `s.db.<Kind>Context(ctx, <helper>(s.dialect), ...)` calls to
+// seven different helper names, and the helper name is what the prefix
+// captures. Printed rather than sliced from the source file directly, so
+// gofmt's own line-wrapping inside the call's arguments cannot change the
+// key -- printer.Fprint reconstructs the call from the AST, and
+// strings.Fields collapses whatever whitespace that produces to single
+// spaces before truncating.
+func statementKey(fn *ast.FuncDecl, call *ast.CallExpr, fset *token.FileSet) string {
+	qualifier := fn.Name.Name
+	if recv := receiverTypeName(fn); recv != "" {
+		qualifier = recv + "." + qualifier
+	}
+	var buf strings.Builder
+	if err := printer.Fprint(&buf, fset, call); err != nil {
+		return qualifier + ": <unprintable>"
+	}
+	// 120, not the 60 first tried: at 60 the db.go entry below truncates to
+	// "...pq.Quot", cutting off which field QuoteIdentifier is called on. A
+	// second CREATE SCHEMA call in the same function, quoting a DIFFERENT
+	// field, would print identically up to that point and collide on this
+	// key -- found by deliberately making that edit and watching the guard
+	// fail to notice. 120 holds every current entry's full call text
+	// (longest today is 107 chars, resealDeploymentSecretStmt's), so this is
+	// headroom against that collision, not evidence today's entries need it.
+	const maxLen = 120
+	text := strings.Join(strings.Fields(buf.String()), " ")
+	if len(text) > maxLen {
+		text = text[:maxLen]
+	}
+	return qualifier + ": " + text
 }
 
 func shortPos(p string) string {
@@ -556,7 +629,8 @@ func rlsFaultsInFunc(fn *ast.FuncDecl, fset *token.FileSet, rls map[string]bool,
 
 	note := func(call *ast.CallExpr, table, why string) {
 		faults = append(faults, rlsFault{
-			pos: fset.Position(call.Pos()).String(), table: table, why: why,
+			pos: fset.Position(call.Pos()).String(), key: statementKey(fn, call, fset),
+			table: table, why: why,
 		})
 	}
 
@@ -604,8 +678,10 @@ func rlsFaultsInFunc(fn *ast.FuncDecl, fset *token.FileSet, rls map[string]bool,
 			// floor assertion below was satisfied by statements it could say
 			// nothing about.
 			unreadable = append(unreadable, rlsFault{
-				pos: fset.Position(call.Pos()).String(), table: "?",
-				why: "the query is not resolvable from the source, so this guard has no opinion about it",
+				pos:   fset.Position(call.Pos()).String(),
+				key:   statementKey(fn, call, fset),
+				table: "?",
+				why:   "the query is not resolvable from the source, so this guard has no opinion about it",
 			})
 			return true
 		case argNonSQL:

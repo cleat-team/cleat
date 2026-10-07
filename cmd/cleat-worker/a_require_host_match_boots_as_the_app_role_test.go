@@ -26,7 +26,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -81,12 +80,18 @@ func TestRequireHostMatchBootsAsTheAppRoleAndServesOnEveryDialect(t *testing.T) 
 			}
 			args := func(extra ...string) []string {
 				a := []string{"--driver=" + c.name, "--db=" + appDSN, "--migrate-db=" + ownerDSN,
-					"--require-host-match", fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t))}
+					"--require-host-match"}
 				return append(a, extra...)
 			}
 
 			// 1. THE REFUSAL IS STILL THERE, and it is the check's own. No domain is registered.
-			code, out := runWorker(t, bin, nil, args()...)
+			//
+			// --api-addr is load-bearing on THIS call and nowhere else: the refusal is
+			// checkHostBindingConfigured, which runs inside the API-listener setup
+			// (main.go), so a worker with no API listener never reaches it and serves on
+			// instead of exiting. hostMatchServes appends its own, so only this call has
+			// to say so.
+			code, out := runWorker(t, bin, nil, append(args(), "--api-addr=127.0.0.1:0")...)
 			if code == 0 {
 				t.Fatalf("a worker with --require-host-match and no registered domain exited 0; the check must refuse")
 			}
@@ -173,7 +178,7 @@ func TestRequireHostMatchBootsAsTheAppRoleAndServesOnEveryDialect(t *testing.T) 
 func pgAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
 	t.Helper()
 	if _, err := owner.Exec(`ALTER ROLE cleat_app LOGIN PASSWORD 'cleat-2258-pw'`); err != nil {
-		t.Fatalf("giving cleat_app a login (is 005_app_role.sql applied?): %v", err)
+		t.Fatalf("giving cleat_app a login (is the schema baseline applied?): %v", err)
 	}
 	u, err := url.Parse(ownerDSN)
 	if err != nil {
@@ -254,12 +259,11 @@ var startupKeyRE = regexp.MustCompile(`cleat_sk_[A-Za-z0-9_-]+`)
 // remembered in *key from an earlier boot of the same database, since it is printed once). It reports whether the worker came up.
 func hostMatchServes(t *testing.T, bin string, args []string, key *string, probe func(base, key string)) (bool, string) {
 	t.Helper()
-	var apiAddr string
-	for _, a := range args {
-		if v, ok := strings.CutPrefix(a, "--api-addr="); ok {
-			apiAddr = v
-		}
-	}
+	// Boot on an ephemeral port and learn the real one from the worker's own
+	// "HTTP API listening" line, instead of pre-choosing a port with freePort and
+	// racing another process for it between the probe and the bind (cleat#3138 --
+	// the race cleat#3136 removed for the API listener itself).
+	args = append(args, "--api-addr=127.0.0.1:0")
 	cmd := exec.Command(bin, args...)
 	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -275,11 +279,16 @@ func hostMatchServes(t *testing.T, bin string, args []string, key *string, probe
 	}()
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(60 * time.Second)
+	var apiAddr string
 	for time.Now().Before(deadline) {
 		select {
 		case <-exited:
 			return false, out.String()
 		default:
+		}
+		if apiAddr = boundAPIAddr(out.String()); apiAddr == "" {
+			time.Sleep(300 * time.Millisecond)
+			continue
 		}
 		if resp, err := client.Get("http://" + apiAddr + "/healthz"); err == nil {
 			resp.Body.Close()

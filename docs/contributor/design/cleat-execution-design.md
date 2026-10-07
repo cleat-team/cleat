@@ -773,7 +773,7 @@ Mitigation options, from simplest to most impactful:
 - **Increase the heartbeat interval:** Raising the interval from 5 seconds to 30 seconds reduces throughput by 6x. The tradeoff is slower dead-worker detection: up to 60 seconds (two missed intervals at 30s) versus 10 seconds (two missed at 5s) — acceptable for many workloads.
 - **Skip the heartbeat_at index:** If stale-worker detection uses an out-of-band mechanism (Patroni session health checks or a worker-side lease), the UPDATE can be a HOT (Heap-Only Tuple) update that avoids index maintenance.
 
-Without batching, heartbeat UPDATE throughput saturates PostgreSQL at roughly the same concurrent-workflow scale as INSERT throughput. With batching, the heartbeat load is negligible: a handful of UPDATEs per second regardless of workflow count.
+Without batching, heartbeat UPDATE throughput saturates PostgreSQL at roughly the same concurrent-workflow scale as INSERT throughput. **With batching, the STATEMENT count is negligible -- a handful of UPDATEs per second regardless of workflow count -- but that is not the same as negligible cost.** Batching cuts statements, not row versions: a thousand running workflows still produce a thousand new tuples per interval, each with its own WAL record and vacuum work. And `heartbeat_at` is a column in two indexes (`idx_instances_heartbeat`, `idx_instances_stale`; `migrations/postgres/001_schema.sql`), so unless the third mitigation above is taken, every heartbeat also writes two B-tree index entries and cannot use PostgreSQL's heap-only-tuple (HOT) update path. cleat#2608.
 
 **Bottleneck 3 — Worker memory:**
 
@@ -2367,9 +2367,9 @@ func (h *host) executeHTTPCall(service, op string, requestJSON string, idempoten
 
 The `attempt` field tracks which retry succeeded, for debugging.
 
-**What this guarantees:** Even if the host crashes after the payment service processed the charge but before the response was recorded, the next worker will replay step 4, generate the SAME idempotency key, and the payment service will return the original result (or 409 Conflict with the original result) rather than processing a duplicate charge.
+**What this guarantees:** Even if the host crashes after the payment service processed the charge but before the response was recorded, the next worker will replay step 4, generate the SAME idempotency key, and the payment service will return the original result — or, for a request still being processed when the replay arrives, 409 Conflict with no body, not "with the original result": that is what Stripe's own idempotency contract returns for a concurrent request under one key, and the corrected text here matches it rather than a result the service never actually sends. The engine reads that 409 as "retry the send, this key is still resolving" (cleat#2897, implemented), not as a failure.
 
-**Services that don't support idempotency:** For services without idempotency support, the host can still detect potential duplicates. If step N has no recorded response in the event history but the worker is replaying, it logs a warning and makes the call anyway — this is the best-effort case. Most payment-grade APIs (Stripe, Adyen, Braintree, Square) support idempotency keys. The design can't fix services that don't.
+**Services that don't support idempotency:** **Corrected — this paragraph described a mechanism that was never built, and cleat#2897 confirmed it (2026-10-01): a repo-wide search for its own wording (`it logs a warning and makes the call anyway`) finds no implementation outside this sentence.** What actually ships for an operation with no idempotency key is louder, not best-effort: a pending write-ahead-intent row found on replay is reported as `[AMBIGUOUS]` to the workflow (`docs/durable-calls.md` §3), which is a refusal to silently repeat the call, not a warning-and-proceed. Most payment-grade APIs (Stripe, Adyen, Braintree, Square) support idempotency keys; the design does not need a best-effort fallback for the ones that don't, because the fallback it has already fails loudly.
 
 **Event history schema addition:**
 

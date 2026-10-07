@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -80,6 +81,10 @@ type embedRequest struct {
 	Provider string   `json:"provider"`
 	Model    string   `json:"model"`
 	Input    []string `json:"input"`
+}
+
+type listModelsRequest struct {
+	Provider string `json:"provider"`
 }
 
 // normalizeOutput ensures consistent ChatOutput structure across all providers.
@@ -227,6 +232,17 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 	if err != nil {
 		output.Error = err.Error()
 	}
+	if output.EstimatedCost && p.logger != nil {
+		// A field nothing reads is not a signal (cleat#2572) -- log it so an
+		// operator running a model cleat has no rate for learns that from
+		// the run, not just from a JSON field a workflow may never inspect.
+		// p.logger is nil for a Plugin built without Init (every test in
+		// this package does), same as the unguarded slog.Default() fallback
+		// Init itself applies -- guarded here rather than defaulted, since
+		// this package has no constructor test code is required to use.
+		p.logger.Warn("llm: priced by fallback rate, not an exact one",
+			"provider", req.Provider, "model", output.Model, "cost", output.Cost)
+	}
 
 	normalizeOutput(&output)
 
@@ -288,9 +304,7 @@ func (p *Plugin) embed(ctx context.Context, inputJSON string) (string, error) {
 }
 
 func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, error) {
-	var req struct {
-		Provider string `json:"provider"`
-	}
+	var req listModelsRequest
 	if err := json.Unmarshal([]byte(inputJSON), &req); err != nil {
 		return "", fmt.Errorf("llm: invalid input: %w", err)
 	}
@@ -301,39 +315,44 @@ func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, erro
 	}
 
 	models := map[string][]modelInfo{
-		"openai": {
-			{"gpt-4o", 0.0125},
-			{"gpt-4o-mini", 0.00075},
-			{"gpt-4-turbo", 0.040},
-			{"text-embedding-3-small", 0.00002},
-		},
-		"anthropic": {
-			{"claude-opus-4-7", 0.090},
-			{"claude-sonnet-4-6", 0.018},
-			{"claude-haiku-4-5", 0.0048},
-		},
-		"groq": {
-			{"llama-3.3-70b", 0.001},
-			{"mixtral-8x7b", 0.0005},
-		},
+		// ollama is deliberately not derived from providers.prices: it is not
+		// a priced table at all, every model is free, and it carries no
+		// entry there for that reason (see providers/pricing.go).
 		"ollama": {
 			{"llama3.2", 0},
 			{"mistral", 0},
 			{"codellama", 0},
 		},
-		"gemini": {
-			{"gemini-2.5-flash", 0.00075},
-			{"gemini-2.5-pro", 0.00625},
-			{"gemini-2.0-flash", 0.00050},
-			{"gemini-2.0-flash-lite", 0.000375},
-		},
-		"mistral": {
-			{"mistral-large-latest", 0.008},
-			{"mistral-medium-latest", 0.005},
-			{"mistral-small-latest", 0.004},
-			{"open-mistral-nemo", 0.0006},
-		},
 	}
+	for _, provider := range []string{"openai", "anthropic", "groq", "gemini", "mistral"} {
+		rates := providers.ProviderModels(provider)
+		names := make([]string, 0, len(rates))
+		for name := range rates {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		list := make([]modelInfo, 0, len(names))
+		for _, name := range names {
+			rate := rates[name]
+			// Cost1K blends prompt and completion into one $/1000-token
+			// figure for display -- cleat#2572: before this it was a
+			// separately hand-maintained number that only agreed with the
+			// split prompt/completion rate providers actually bill at (see
+			// CostFor) at a 1:1 prompt:completion ratio, which a real call
+			// never has. It is now derived from that same rate, so the two
+			// cannot drift, but it is still only an approximation of what a
+			// specific call will cost.
+			list = append(list, modelInfo{
+				Name:   name,
+				Cost1K: (rate.PromptPerMillion + rate.CompletionPerMillion) / 2 / 1000,
+			})
+		}
+		models[provider] = list
+	}
+	// text-embedding-3-small is priced by OpenAIEmbed, not the chat table
+	// CostFor draws on, so it is listed here rather than in
+	// providers/pricing.go.
+	models["openai"] = append(models["openai"], modelInfo{Name: "text-embedding-3-small", Cost1K: 0.00002})
 
 	if req.Provider != "" {
 		result, ok := models[req.Provider]

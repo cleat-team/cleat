@@ -177,7 +177,7 @@ func TestWriteTerminalFailure_ReleasesInsteadOfFailingDuringShutdown(t *testing.
 				w.cancel()
 			}
 			wf := &engine.WorkflowInstance{ID: "wf-1", DefName: "d", DefVersion: 1, Generation: 1}
-			applied, _ := w.writeTerminalFailure(wf, "call aborted: context canceled", engine.ErrUnknown.String(), "", false, nil)
+			applied, _ := w.writeTerminalFailure(wf, "call aborted: context canceled", engine.ErrUnknown.String(), "", false, nil, nil)
 
 			if shuttingDown {
 				if failed.Load() != 0 || applied {
@@ -221,7 +221,7 @@ func TestAFinalizeCancelledByShutdownIsReleasedNotRetriedNotFailed(t *testing.T)
 	w.cancel()
 
 	wf := &engine.WorkflowInstance{ID: "wf-1", DefName: "d", DefVersion: 1, Generation: 1}
-	applied, dead := w.writeTerminalFailure(wf, "finalize workflow: begin tx: context canceled", engine.ErrUnknown.String(), "", false, nil)
+	applied, dead := w.writeTerminalFailure(wf, "finalize workflow: begin tx: context canceled", engine.ErrUnknown.String(), "", false, nil, nil)
 
 	if applied || dead || failed.Load() != 0 {
 		t.Errorf("a cancelled finalize was recorded as a failure (applied=%v dead=%v failWorkflow calls=%d)", applied, dead, failed.Load())

@@ -177,10 +177,14 @@ func TestEachSuspensionPointIsADispatchPoint(t *testing.T) {
 			suspend: func(t *testing.T, env *TestEnv) {
 				// cleattest's sleep blocks until the mock clock moves, so the
 				// sleep runs on its own goroutine and the test advances time.
-				// Same idiom as TestSendSignalAndWaitTimeout.
+				// WaitForParked first: an advance that lands before the sleep
+				// registers does not count and the join below would block
+				// (cleat#3091). DurableSleep does register a sleep record, so
+				// this can wait for it -- unlike TestSendSignalAndWaitTimeout,
+				// which the comment here used to name as the same idiom.
 				done := make(chan struct{})
 				go func() { defer close(done); env.H().DurableSleep(10 * time.Millisecond) }()
-				time.Sleep(20 * time.Millisecond)
+				env.WaitForParked(t)
 				env.AdvanceTime(20 * time.Millisecond)
 				<-done
 			},

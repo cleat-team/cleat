@@ -9,6 +9,7 @@ package cleattest
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
@@ -197,11 +198,24 @@ type promiseState struct {
 	settled chan struct{}
 }
 
+// pluginCallResponse is one answer in a pluginCallStub's sequence.
+type pluginCallResponse struct {
+	result string
+	err    error
+}
+
+// pluginCallStub is every response registered for one plugin+function pair,
+// answered in registration order as pluginCallImpl consumes them. calls
+// counts how many real calls this pair has already answered; once it
+// reaches the end of responses, the LAST response repeats -- a single
+// Return() therefore still answers every call the same way (the case nearly
+// every existing test uses), and a second Return() sequences a second,
+// different answer instead of being silently unreachable. cleat#2522.
 type pluginCallStub struct {
 	pluginName   string
 	functionName string
-	result       string
-	err          error
+	responses    []pluginCallResponse
+	calls        int
 }
 
 type PluginCallStubBuilder struct {
@@ -210,13 +224,35 @@ type PluginCallStubBuilder struct {
 	functionName string
 }
 
-func (b *PluginCallStubBuilder) Return(result string, err error) {
+// Return appends one more answer for this plugin+function and returns the
+// builder, so
+//
+//	env.OnPluginCall("x", "poll").Return(`{"found":false}`, nil)
+//	env.OnPluginCall("x", "poll").Return(`{"found":true}`, nil)
+//
+// answers the first call to poll with "false" and every call after with
+// "true" -- the shape a polling workflow's wait loop needs (miss, then hit,
+// then steady state) and previously had no way to express: before
+// cleat#2522, a second Return() for the same plugin+function registered a
+// second stub that pluginCallImpl's first-match scan could never reach, so
+// it silently changed nothing and the test passed against only the first
+// call's path.
+func (b *PluginCallStubBuilder) Return(result string, err error) *PluginCallStubBuilder {
+	b.env.mu.Lock()
+	defer b.env.mu.Unlock()
+	resp := pluginCallResponse{result: result, err: err}
+	for _, stub := range b.env.pluginCallStubs {
+		if stub.pluginName == b.pluginName && stub.functionName == b.functionName {
+			stub.responses = append(stub.responses, resp)
+			return b
+		}
+	}
 	b.env.pluginCallStubs = append(b.env.pluginCallStubs, &pluginCallStub{
 		pluginName:   b.pluginName,
 		functionName: b.functionName,
-		result:       result,
-		err:          err,
+		responses:    []pluginCallResponse{resp},
 	})
+	return b
 }
 
 func (e *TestEnv) OnPluginCall(pluginName, functionName string) *PluginCallStubBuilder {
@@ -292,10 +328,14 @@ type TestEnv struct {
 	detachedRuns   []DetachedRun
 	sleepRecs      []sleepRecord
 	signalWaiters  []signalWaiter
-	randomSeq      []int64
-	randomIdx      int
-	deferCounter   int
-	promises       map[string]promiseState // keyed by promiseID
+	// parkedTimeout bounds WaitForParked. Unexported and set in NewTestEnv
+	// rather than a const, so this package's own tests can shrink it and
+	// exercise the expiry path without a five-second test.
+	parkedTimeout time.Duration
+	randomSeq     []int64
+	randomIdx     int
+	deferCounter  int
+	promises      map[string]promiseState // keyed by promiseID
 	// Virtual object scope. Modelled here because HostCallsImpl no longer
 	// keeps it locally when the host hooks are wired (cleat#984): a test
 	// double that left these nil would make GetScope fall back to the
@@ -380,6 +420,7 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		retryBehaviors:           make(map[string]*retryBehavior),
 		childWorkflowCallHistory: make([]ChildWorkflowCallRecord, 0),
 		ConcurrencyKeys:          make(map[string]string),
+		parkedTimeout:            5 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -553,11 +594,25 @@ func (e *TestEnv) AdvanceTime(d time.Duration) {
 // serviced. It spins with runtime.Gosched for up to 100 iterations or
 // until no sleepers/waiters remain.
 //
-// This is best-effort: in edge cases where a workflow immediately
-// re-enters a sleep or signal loop, the count may never reach zero,
-// and the function returns after the spin limit. Tests that need
-// deterministic drain should use a sync.WaitGroup or other explicit
-// synchronization.
+// PRECONDITION: a workflow goroutine must ALREADY be parked when this is
+// called. The loop below exits on len(sleepRecs)+len(signalWaiters) == 0,
+// and that is true in two states which are not the same — everything has
+// drained, and NOTHING HAS REGISTERED YET. So when the clock moves before
+// the goroutine reaches its DurableSleep or AwaitSignals, this returns on
+// its FIRST iteration having already advanced the clock; the goroutine then
+// computes its deadline off the moved clock (see durableAwaitSignalsImpl's
+// `deadline := nowTime.Add(...)`) and parks until the test's own timeout.
+//
+// Measured on cleat#3091: a goroutine whose only call is AwaitSignals
+// stalls 20 of 20 runs, in both orderings, and a *second* advance recovers
+// only 5 of 10 — it succeeds exactly when the goroutine happened to
+// register first. The count is not a census to trust; the point is that the
+// exit test cannot separate the two states at all.
+//
+// Establish the precondition with WaitForParked when the workflow is not
+// known to have parked. Draining is not joining: a sync.WaitGroup or a
+// plain `done` channel still joins the goroutine afterwards, and is the
+// ordinary idiom — this primitive does not replace it.
 func (e *TestEnv) AdvanceTimeAndDrain(d time.Duration) {
 	e.AdvanceTime(d)
 	for i := 0; i < 100; i++ {
@@ -569,6 +624,75 @@ func (e *TestEnv) AdvanceTimeAndDrain(d time.Duration) {
 			return
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// WaitForParked blocks until at least one goroutine started by the test has
+// parked on a durable sleep or an AwaitSignals wait, then returns.
+//
+// It is the precondition AdvanceTime and AdvanceTimeAndDrain need and cannot
+// establish for themselves (cleat#3091). Both move the simulated clock, and
+// a workflow that has not reached its sleep or its AwaitSignals yet computes
+// its deadline off the moved clock — so the advance does not count and the
+// goroutine parks until the test's own timeout. A `time.Sleep` before the
+// advance is the idiom that replaces this today, and it is a race: 5ms is
+// usually enough and says nothing about when it is not.
+//
+// Call it before each advance:
+//
+//	go func() {
+//		err := ApprovalWorkflow(h, `{"amount": 5000}`)
+//		if err == nil {
+//			t.Error("expected a timeout")
+//		}
+//		done <- struct{}{}
+//	}()
+//	env.WaitForParked(t)               // the goroutine is now inside AwaitSignals
+//	env.AdvanceTime(25 * time.Hour)    // the timeout it is waiting for fires
+//	<-done                             // joined, and no longer racing the clock
+//
+// It is bounded rather than blocking forever, and FAILS the test on expiry:
+// a caller that waits for a park the workflow never performs would otherwise
+// hang until the package timeout with nothing saying what was awaited, and
+// the failure mode this primitive exists to remove — advancing with no
+// parked goroutine — is silent, so the two must not be made to look alike.
+//
+// t may be nil, for callers that have no *testing.T: the Example functions
+// in this package have none. With a nil t the expiry cannot fail anything, so
+// it is reported on stderr and returns, and the caller's own assertion — an
+// example's Output comment — is what fails afterwards. Reporting it matters
+// even though the caller will fail regardless: an example that stalls for the
+// bound and then writes the wrong output is otherwise indistinguishable from
+// one whose workflow parked and produced the wrong value, and those two send a
+// reader to different places. A caller that can pass a t should always pass
+// one. (Raised by cleat-review on PR #3124, where the silent branch without
+// this line was the one place the two failures did look alike.)
+func (e *TestEnv) WaitForParked(t TestingT) {
+	const poll = 100 * time.Microsecond
+	bound := e.parkedTimeout
+	deadline := time.Now().Add(bound)
+	for {
+		e.mu.Lock()
+		n := len(e.sleepRecs) + len(e.signalWaiters)
+		e.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			msg := fmt.Sprintf("cleattest: WaitForParked: no goroutine parked on a "+
+				"durable sleep or AwaitSignals within %s", bound)
+			if t != nil {
+				t.Fatalf("%s", msg) // %s, not msg: vet rejects a non-constant format string
+			}
+			// No TestingT, so nothing can be failed here and an Example has no
+			// assertion to run until its Output is compared. Say it on stderr
+			// rather than returning mutely: otherwise a stall is
+			// indistinguishable from a park that happened, and the reader gets
+			// an output mismatch with no statement of what was awaited.
+			fmt.Fprintln(os.Stderr, msg+" (no TestingT was passed, so it is reported here)")
+			return
+		}
+		time.Sleep(poll)
 	}
 }
 
@@ -1675,6 +1799,20 @@ func settledErr(status, errorMsg string) error {
 	return nil
 }
 
+// pluginCallImpl records into the same history the call assertions read. It did
+// not, and that made AssertNotCalled unable to fail over a plugin call: both
+// assertions iterate callHistory, plugin calls were absent from it, so over one
+// call AssertCalled always failed and AssertNotCalled always passed -- whichever
+// the call actually did. AssertCalled's failure is discovered on first run;
+// AssertNotCalled's is discovered never, because it certifies whatever it is
+// pointed at. cleat#2539.
+//
+// The Service/Operation pair is the plugin and function name, the same shape a
+// durable call records, so a durable call and a plugin call that share both names
+// are indistinguishable to the assertions. That is deliberate rather than
+// overlooked -- it is what keeps AssertCalled(t, plugin, function) reading the way
+// OnPluginCall(plugin, function) is written -- and whether the record should also
+// name which kind it was is left open on cleat#2539 rather than decided here.
 func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (resp string, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1685,12 +1823,39 @@ func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (re
 	}
 	defer func() { e.replayRecord("PluginCall", replayKey, resp, retErr) }()
 
+	// Recorded on the same paths durableCallImpl records on -- the stub match and
+	// the no-stub error -- and NOT on a replay-cache hit above, which replays a
+	// call already in the history rather than making a new one.
+	rec := CallRecord{
+		Service:   pluginName,
+		Operation: functionName,
+		Request:   inputJSON,
+	}
+
+	// Find the matching stub and advance it. idx clamps to the last
+	// registered response, so a single Return() (nearly every existing
+	// stub) still answers every call the same way, and a sequence of
+	// Return()s is consumed in order with the last one repeating once
+	// exhausted -- see pluginCallStub's doc comment for why that shape
+	// rather than an error on the call past the end.
 	for _, stub := range e.pluginCallStubs {
 		if stub.pluginName == pluginName && stub.functionName == functionName {
-			return stub.result, stub.err
+			idx := stub.calls
+			if idx >= len(stub.responses) {
+				idx = len(stub.responses) - 1
+			}
+			stub.calls++
+			resp := stub.responses[idx]
+			rec.Response = resp.result
+			rec.Err = resp.err
+			e.callHistory = append(e.callHistory, rec)
+			return resp.result, resp.err
 		}
 	}
-	return "", fmt.Errorf("cleattest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
+	err := fmt.Errorf("cleattest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
+	rec.Err = err
+	e.callHistory = append(e.callHistory, rec)
+	return "", err
 }
 
 // signalWorkflowImpl delivers a signal to a target workflow.

@@ -157,8 +157,36 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// UpstreamStatusError carries the HTTP status the Cleat worker actually
+// returned, recoverable with errors.As.
+//
+// cleat#2718: classifyError used to return a plain error built with
+// fmt.Errorf, which has no field a caller can read the status back out of.
+// Every example backend that maps a Client error to an HTTP response had no
+// way to ask "was this a 401?" and so mapped everything to 502 (bad gateway)
+// -- including a genuine 401, which sent an operator or a retry policy to the
+// wrong layer (the gateway looked broken; authentication had refused).
+//
+// classifyError attaches this to every non-2xx response, including the ones
+// that also carry a more specific sentinel like ErrIdempotencyKeyInputMismatch
+// -- Go's multi-%w wrapping (1.20+) lets errors.Is and errors.As both walk
+// past it, so a caller checking for a specific sentinel is unaffected and a
+// caller that only wants the status still gets it.
+type UpstreamStatusError struct {
+	// Status is the HTTP status code the worker returned.
+	Status int
+	// Body is the raw response body, truncated to 4096 bytes by doRequest.
+	Body []byte
+}
+
+func (e *UpstreamStatusError) Error() string {
+	return fmt.Sprintf("unexpected status %d: %s", e.Status, strings.TrimSpace(string(e.Body)))
+}
+
 // classifyError turns a refusal into a typed error where the server named one,
-// and keeps the old opaque form otherwise.
+// and keeps the old opaque form otherwise. Every path returns an error that
+// satisfies errors.As(err, &(*UpstreamStatusError)(nil)) -- see
+// UpstreamStatusError's own doc comment for why that matters.
 //
 // The server answers a refused idempotency key with a machine-readable `detail`
 // alongside the human `error`. Without this, both arrive as
@@ -168,7 +196,7 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 // Errors are WRAPPED, not replaced, so the message still carries the server's
 // own words and errors.Is still answers the question the caller asked.
 func classifyError(status int, body []byte) error {
-	generic := fmt.Errorf("unexpected status %d: %s", status, strings.TrimSpace(string(body)))
+	generic := &UpstreamStatusError{Status: status, Body: body}
 	if status != http.StatusConflict {
 		return generic
 	}
@@ -180,9 +208,9 @@ func classifyError(status int, body []byte) error {
 	}
 	switch detail.Detail {
 	case "idempotency_key_input_mismatch":
-		return fmt.Errorf("%w: %s", ErrIdempotencyKeyInputMismatch, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%w: %w", ErrIdempotencyKeyInputMismatch, generic)
 	case "idempotency_key_definition_mismatch":
-		return fmt.Errorf("%w: %s", ErrIdempotencyKeyDefinitionMismatch, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%w: %w", ErrIdempotencyKeyDefinitionMismatch, generic)
 	}
 	return generic
 }
@@ -464,7 +492,23 @@ func (c *Client) QueryState(ctx context.Context, id, key string) (string, error)
 
 // GetWorkflowState retrieves the full state (query state) of a workflow.
 func (c *Client) GetWorkflowState(ctx context.Context, id string) (map[string]string, error) {
-	u := c.BaseURL + "/api/workflows/" + url.PathEscape(id) + "/state"
+	// THE ROUTE IS /query WITH NO key, NOT /state, and this method called the
+	// latter until 2026-09-28 -- a route that does not exist. Every call
+	// answered 404, every caller treated that as "no state", and three shipped
+	// example backends rendered a run's state panel as empty.
+	//
+	// The worker's dispatch is `cmd/cleat-worker/server.go` `handleWorkflows`:
+	// the :id/:verb pairs it accepts are start, signal, cancel, retry, terminal,
+	// history, stream, query, dag, promises, routing and tags. There is no
+	// `state` among them -- `/api/instances/{id}/state` exists, on a DIFFERENT
+	// prefix, which is what made the name look right.
+	//
+	// `?key=` is OPTIONAL and its ABSENCE is the list: with no key,
+	// `handleGetQueryState` calls `ListQueryState` and answers
+	// `{"state": {...every key the run published...}}`. With a key it answers
+	// `{"key":k,"value":v}` -- which is what `QueryState` below uses. So the two
+	// methods differ by the parameter's presence, not by a different verb.
+	u := c.BaseURL + "/api/workflows/" + url.PathEscape(id) + "/query"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -477,11 +521,18 @@ func (c *Client) GetWorkflowState(ctx context.Context, id string) (map[string]st
 	}
 	defer resp.Body.Close()
 
-	var state map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+	// The envelope is decoded, not the bare map: the route wraps the state in
+	// `{"state": ...}` so that a listing and a keyed read are distinguishable at
+	// the top level. Decoding straight into a map[string]string against this
+	// route would fail; against the OLD route it succeeded, because the test
+	// that covered it served a bare map the worker never sends.
+	var out struct {
+		State map[string]string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	return state, nil
+	return out.State, nil
 }
 
 // GetHistory retrieves the event history of a workflow with pagination.
@@ -547,6 +598,73 @@ func (c *Client) CallPlugin(ctx context.Context, pluginName, functionName, input
 		return "", fmt.Errorf("read response: %w", err)
 	}
 	return string(body), nil
+}
+
+// PluginRoute performs an authenticated request against a route a PLUGIN
+// registered, rather than against the workflow API.
+//
+// WHY THIS EXISTS. Client's typed methods cover the /api/* resources, and
+// CallPlugin covers the plugin HOST-FUNCTION path (/api/plugins/{plugin}/{fn}).
+// Neither reaches the routes a plugin mounts itself in RegisterRoutes — which
+// are on the same mux and are part of the worker's public surface.
+// plugins/notifications alone registers six, and there is no host-function
+// substitute for the case that found this: it registers send_webhook and
+// nothing that lists deliveries, so a delivery log exists ONLY as an HTTP route
+// (cleat#2550).
+//
+// Without this an app that fronts a plugin spells the URL itself, which means
+// either hand-rolling the request — losing the API key, the timeout and the
+// error classification on the way — or reaching into Client.HTTPClient and
+// Client.BaseURL to rebuild what this method already does correctly.
+//
+// path must begin with "/". It is joined to the Client's BaseURL, and the HOST
+// therefore cannot be influenced by the caller: a path is appended to a URL
+// that already has an authority, so nothing a caller passes can redirect the
+// request — and the API key riding this client's transport — anywhere else.
+//
+// body is marshalled as JSON when non-nil; out is decoded from the response
+// when non-nil. A refusal is classified exactly as every other method's,
+// through doRequest, so a caller gets the same typed errors.
+func (c *Client) PluginRoute(ctx context.Context, method, path string, body, out any) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("plugin route %q must begin with %q: it is appended to the "+
+			"client's base URL, and a relative path would be resolved against the wrong "+
+			"base", path, "/")
+	}
+
+	var reqBody io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal request body: %w", err)
+		}
+		reqBody = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reqBody)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("plugin route %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	if out == nil {
+		// Drain, so the connection can be reused rather than torn down by the
+		// client on a body nobody read.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode %s %s response: %w", method, path, err)
+	}
+	return nil
 }
 
 // Health reports whether the worker is ready to serve: GET /readyz answers 200 (its database answered

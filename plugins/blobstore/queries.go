@@ -3,6 +3,30 @@ package blobstore
 import "github.com/cleat-team/cleat/plugin"
 
 // Dialect-specific query variants for structurally different SQL.
+//
+// Every MSSQL MERGE below carries WITH (HOLDLOCK) on its target (cleat#2904/
+// #2915): SQL Server under READ COMMITTED can evaluate WHEN NOT MATCHED true
+// on two concurrent writers racing the same not-yet-existing key, and
+// HOLDLOCK is what closes that window. Reachability, checked per statement
+// rather than assumed:
+//   - upsertBlobContent / upsertBlobContentData are keyed on sha256, which is
+//     content-addressed -- two independent callers uploading identical bytes
+//     (the same config file, the same empty payload) compute the identical
+//     fresh key, and both are reachable from host_functions.go's blobPut
+//     AND routes.go's HTTP PUT, two callers with no serialization between
+//     them. memoryBackend.Put's own Backend interface doc comment requires
+//     "safe for concurrent use".
+//   - upsertBlobIndex / upsertBlobIndexWithTTL are keyed on (tenant_id,
+//     [key]), a tenant-chosen string -- ordinary multi-request concurrency
+//     (two HTTP PUTs, or a host-call racing an HTTP PUT) can target the
+//     identical fresh key within one tenant.
+//   - upsertBlobRef is keyed on (workflow_id, sha256). Different workflow
+//     instances never share a workflow_id, so the reachable race is
+//     narrower: a zombie worker (reaped and reclaimed mid-step, see
+//     engine/flush.go's "a zombie worker's flush, racing a reclaim") still
+//     executing blobPut for a workflow concurrently with the worker that
+//     reclaimed it -- the same hazard class engine/ already fences against
+//     for its own event history, which this plugin's host call is not.
 var upsertBlobContent = plugin.Query{
 	Default: `INSERT INTO blob_content (sha256, size, ref_count, storage_backend, s3_key)
 VALUES ($1, $2, 1, $3, $4)
@@ -12,7 +36,7 @@ SET ref_count = blob_content.ref_count + 1`,
 VALUES ($1, $2, 1, $3, $4)
 ON DUPLICATE KEY UPDATE
 ref_count = ref_count + 1`,
-	MSSQL: `MERGE blob_content AS target
+	MSSQL: `MERGE blob_content WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, 1, $3, $4)) AS source (sha256, size, ref_count, storage_backend, s3_key)
 ON target.sha256 = source.sha256
 WHEN MATCHED THEN UPDATE SET ref_count = target.ref_count + 1
@@ -29,7 +53,7 @@ SET data = EXCLUDED.data`,
 VALUES ($1, $2, $3, 0, 'memory')
 ON DUPLICATE KEY UPDATE
 data = VALUES(data)`,
-	MSSQL: `MERGE blob_content AS target
+	MSSQL: `MERGE blob_content WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, 0, 'memory')) AS source (sha256, size, data, ref_count, storage_backend)
 ON target.sha256 = source.sha256
 WHEN MATCHED THEN UPDATE SET data = source.data
@@ -41,7 +65,7 @@ var upsertBlobRef = plugin.Query{
 	Default: `INSERT INTO workflow_blob_refs (workflow_id, sha256)
 VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 	MySQL: `INSERT IGNORE INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`,
-	MSSQL: `MERGE workflow_blob_refs AS target
+	MSSQL: `MERGE workflow_blob_refs WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2)) AS source (workflow_id, sha256)
 ON target.workflow_id = source.workflow_id AND target.sha256 = source.sha256
 WHEN NOT MATCHED THEN INSERT (workflow_id, sha256) VALUES (source.workflow_id, source.sha256);`,
@@ -60,7 +84,7 @@ ON DUPLICATE KEY UPDATE
 sha256 = VALUES(sha256), size = VALUES(size),
 content_type = VALUES(content_type), tags = VALUES(tags),
 expires_at = NULL`,
-	MSSQL: `MERGE blob_index AS target
+	MSSQL: `MERGE blob_index WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, $4, $5, $6)) AS source ([key], tenant_id, sha256, size, content_type, tags)
 ON target.tenant_id = source.tenant_id AND target.[key] = source.[key]
 WHEN MATCHED THEN UPDATE SET
@@ -84,7 +108,7 @@ ON DUPLICATE KEY UPDATE
 sha256 = VALUES(sha256), size = VALUES(size),
 content_type = VALUES(content_type), tags = VALUES(tags),
 expires_at = VALUES(expires_at)`,
-	MSSQL: `MERGE blob_index AS target
+	MSSQL: `MERGE blob_index WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, $4, $5, $6, $7)) AS source ([key], tenant_id, sha256, size, content_type, tags, expires_at)
 ON target.tenant_id = source.tenant_id AND target.[key] = source.[key]
 WHEN MATCHED THEN UPDATE SET
@@ -174,6 +198,65 @@ INNER JOIN (
 	FROM @deleted
 	GROUP BY sha256
 ) cnt ON bc.sha256 = cnt.sha256;`,
+}
+
+// reconcileRefCounts recomputes blob_content.ref_count from a direct count of
+// blob_index rows, for every blob_content row, unconditionally. cleat#2250:
+// deleteChunksReturning above only decrements ref_count for blob_index rows
+// it is ITSELF deleting (expired or soft-deleted) -- a blob_index row removed
+// any other way (admin.drop_tenant's hard DELETE FROM blob_index WHERE
+// tenant_id = $1, migrations/postgres/001_schema.sql and
+// migrations/mssql/003_procedures.sql) is invisible to that join, so its
+// content's ref_count never reflects the loss. A blob shared with a surviving
+// tenant stays over-counted forever; a blob unique to the dropped tenant can
+// never reach ref_count <= 0 and so is never collected by phase 3, leaking
+// both the blob_content row and its backend bytes (memory or S3).
+//
+// This recomputes from the live table rather than tracking every removal
+// path's effect incrementally, which is what made the bug possible in the
+// first place: ANY future code path that deletes a blob_index row without
+// going through this package's own SQL is invisible to an incremental
+// decrement by construction, but cannot be invisible to a count of what is
+// actually there. Run after phase 2's own deletes (so newly-expired rows are
+// already gone and correctly excluded) and before phase 3's collection (which
+// depends on ref_count being accurate).
+//
+// A LEFT JOIN, not an inner one: a blob_content row with zero remaining
+// blob_index rows (every reference removed, by any mechanism) must reconcile
+// to 0, not be skipped because the join found nothing.
+//
+// KNOWN COST, ACCEPTED TRADEOFF: this scans every blob_index and blob_content
+// row on every sweep tick (cleanupInterval, default hourly), whether or not
+// anything needs reconciling -- the WHERE clause only limits which rows get
+// WRITTEN, and counting correctly requires reading every row regardless of an
+// index on sha256 (an index would make the scan cheaper per row, not change
+// its O(table size) nature, since the query needs a count across every row
+// rather than a lookup of a few keys). This is inherent to catching a
+// blob_index row removed with no event to key off, which is the point of
+// this phase. See cleat#2873 if this ever needs to be cheaper.
+var reconcileRefCounts = plugin.Query{
+	Default: `UPDATE blob_content bc
+SET ref_count = sub.cnt
+FROM (
+	SELECT bc2.sha256, COUNT(bi.sha256) AS cnt
+	FROM blob_content bc2
+	LEFT JOIN blob_index bi ON bi.sha256 = bc2.sha256
+	GROUP BY bc2.sha256
+) sub
+WHERE bc.sha256 = sub.sha256 AND bc.ref_count <> sub.cnt`,
+	MySQL: `UPDATE blob_content bc
+LEFT JOIN (
+	SELECT sha256, COUNT(*) AS cnt FROM blob_index GROUP BY sha256
+) sub ON sub.sha256 = bc.sha256
+SET bc.ref_count = COALESCE(sub.cnt, 0)
+WHERE bc.ref_count <> COALESCE(sub.cnt, 0)`,
+	MSSQL: `UPDATE bc
+SET bc.ref_count = COALESCE(sub.cnt, 0)
+FROM blob_content bc
+LEFT JOIN (
+	SELECT sha256, COUNT(*) AS cnt FROM blob_index GROUP BY sha256
+) sub ON sub.sha256 = bc.sha256
+WHERE bc.ref_count <> COALESCE(sub.cnt, 0)`,
 }
 
 var deleteBlobIndexExpired = plugin.Query{

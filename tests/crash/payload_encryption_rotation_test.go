@@ -60,12 +60,19 @@ func writeShardsFile(t *testing.T, connStr string) string {
 // own conn_str instead, which is the entire reason the shadowed-variable bug
 // (cleat#2305) had no test that could see it: nothing in this package
 // started a worker this way before this file.
-func startShardedWorker(t *testing.T, bin, shardsFile, taskQueue, svcURL string, extraFlags ...string) *worker {
+//
+// dbName is the --migrate-db target, separate from the shard's own conn_str
+// (which the caller already built via writeShardsFile against the same
+// database). cleat#2324: this is parameterised, not hardcoded to
+// crashDatabase, so this suite's one sharded, always-encrypted test
+// (TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext) can point at
+// payloadEncryptionDatabase instead -- see harness_test.go's comment on why.
+func startShardedWorker(t *testing.T, dbName, bin, shardsFile, taskQueue, svcURL string, extraFlags ...string) *worker {
 	t.Helper()
 	w := &worker{log: &strings.Builder{}}
 	args := []string{
 		"--shards-file", shardsFile,
-		"--migrate-db", ensureCrashDatabase(t),
+		"--migrate-db", ensureDatabaseNamed(t, dbName),
 		"--task-queue", taskQueue,
 		"--bench-svc-url", svcURL,
 		"--poll", "200ms",
@@ -163,7 +170,10 @@ func base64ContainsMarker(encoded, marker string) bool {
 // checksums on (the default, and this test's configuration) -- the workflow
 // ends FAILED rather than completing.
 func TestPayloadEncryptionKeyRotationWiresIntoARealWorker(t *testing.T) {
-	db := ownerDB(t)
+	// cleat#2324: every worker below is encrypted, so this shares
+	// payloadEncryptionDatabase rather than crashDatabase -- see
+	// harness_test.go's comment on why.
+	db := ownerDBFor(t, payloadEncryptionDatabase)
 	defer db.Close()
 
 	suffix := uniqueSuffix()
@@ -186,7 +196,7 @@ func TestPayloadEncryptionKeyRotationWiresIntoARealWorker(t *testing.T) {
 	defer releaseCharge()
 
 	keyA := writeEncryptionKeyFile(t)
-	first := startWorker(t, bin, taskQueue, svc.srv.URL,
+	first := startWorkerOn(t, payloadEncryptionDatabase, bin, taskQueue, svc.srv.URL,
 		"--encrypt-sensitive-payloads", "--encryption-key-file", keyA)
 	startWorkflow(t, db, wfID, marker, taskQueue)
 
@@ -223,7 +233,7 @@ func TestPayloadEncryptionKeyRotationWiresIntoARealWorker(t *testing.T) {
 	defer releaseShip() // see the comment on the earlier defer releaseCharge()
 
 	keyB := writeEncryptionKeyFile(t)
-	second := startWorker(t, bin, taskQueue, svc.srv.URL,
+	second := startWorkerOn(t, payloadEncryptionDatabase, bin, taskQueue, svc.srv.URL,
 		"--encrypt-sensitive-payloads", "--encryption-key-file", keyB,
 		"--encryption-key-file-previous", keyA)
 
@@ -274,7 +284,13 @@ func TestPayloadEncryptionKeyRotationWiresIntoARealWorker(t *testing.T) {
 // encryption flag must leave the marker in plain text in event_history --
 // if it does not, eventTextContains cannot be trusted anywhere in this file.
 func TestPayloadEncryptionWiringKnownPositive(t *testing.T) {
-	db := ownerDB(t)
+	// cleat#2324: this test's whole point is a KEYLESS worker starting and
+	// writing plaintext, so it needs a database that has never seen
+	// --encrypt-sensitive-payloads -- payloadEncryptionDatabase cannot promise
+	// that once TestPayloadEncryptionKeyRotationWiresIntoARealWorker (declared
+	// above it in this file) has run. See harness_test.go's comment on
+	// payloadEncryptionKnownPositiveDatabase.
+	db := ownerDBFor(t, payloadEncryptionKnownPositiveDatabase)
 	defer db.Close()
 
 	suffix := uniqueSuffix()
@@ -288,7 +304,7 @@ func TestPayloadEncryptionWiringKnownPositive(t *testing.T) {
 	release := svc.holdOperation("Charge")
 	defer release() // see TestPayloadEncryptionKeyRotationWiresIntoARealWorker's comment on this pattern
 
-	w := startWorker(t, bin, taskQueue, svc.srv.URL) // no encryption flags at all
+	w := startWorkerOn(t, payloadEncryptionKnownPositiveDatabase, bin, taskQueue, svc.srv.URL) // no encryption flags at all
 	startWorkflow(t, db, wfID, marker, taskQueue)
 
 	// Checked while the workflow is still "running", not after it completes:
@@ -414,7 +430,10 @@ func TestEncryptionKeyFilePreviousWithoutCurrentIsRefusedByARealWorker(t *testin
 // is exactly how cleat#2305's sharded half survived this file's first
 // version unnoticed.
 func TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext(t *testing.T) {
-	db := ownerDB(t)
+	// cleat#2324: every worker below is encrypted, so this shares
+	// payloadEncryptionDatabase rather than crashDatabase -- see
+	// harness_test.go's comment on why.
+	db := ownerDBFor(t, payloadEncryptionDatabase)
 	defer db.Close()
 
 	suffix := uniqueSuffix()
@@ -424,14 +443,14 @@ func TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext(t *testing.T) {
 
 	deployFixture(t, db, taskQueue)
 	bin := buildWorker(t)
-	shardsFile := writeShardsFile(t, appDSN(t))
+	shardsFile := writeShardsFile(t, appDSNFor(t, payloadEncryptionDatabase))
 
 	svc := newChargeService(t)
 	releaseCharge := svc.holdOperation("Charge")
 	defer releaseCharge() // see TestPayloadEncryptionKeyRotationWiresIntoARealWorker's comment on this pattern
 
 	keyA := writeEncryptionKeyFile(t)
-	first := startShardedWorker(t, bin, shardsFile, taskQueue, svc.srv.URL,
+	first := startShardedWorker(t, payloadEncryptionDatabase, bin, shardsFile, taskQueue, svc.srv.URL,
 		"--encrypt-sensitive-payloads", "--encryption-key-file", keyA)
 	startWorkflow(t, db, wfID, marker, taskQueue)
 
@@ -459,7 +478,7 @@ func TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext(t *testing.T) {
 	defer releaseShip()
 
 	keyB := writeEncryptionKeyFile(t)
-	second := startShardedWorker(t, bin, shardsFile, taskQueue, svc.srv.URL,
+	second := startShardedWorker(t, payloadEncryptionDatabase, bin, shardsFile, taskQueue, svc.srv.URL,
 		"--encrypt-sensitive-payloads", "--encryption-key-file", keyB,
 		"--encryption-key-file-previous", keyA)
 

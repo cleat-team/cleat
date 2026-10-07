@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -178,6 +179,18 @@ func ValidateManifest(m *Manifest) error {
 				errs = append(errs, err.Error())
 			}
 		}
+		// cleat#2806, R1: a field naming a defined type is only safe to
+		// generate as a Go struct member BY VALUE when the reference graph
+		// is acyclic. Measured live: Envelope{next: Envelope} validated
+		// under the field-type-reference fix above and then generated Go
+		// that fails with "invalid recursive type: Envelope refers to
+		// itself" -- the field-type relaxation is correct for the acyclic
+		// case (traced in the commit that added it) and wrong for this one,
+		// which validation alone cannot see without walking the graph. An
+		// indirect cycle (A -> B -> A) has the identical shape.
+		if err := validateNoTypeCycles(m.Types); err != nil {
+			errs = append(errs, err.Error())
+		}
 	}
 
 	if len(errs) > 0 {
@@ -210,6 +223,19 @@ func validateTypeRef(td TypeDef, types map[string]TypeDef, context string) error
 }
 
 // validateTypeDef validates a type definition, including its fields.
+//
+// A field's type may be a builtin (below) or the name of another entry in
+// types -- the same "simple type, inline object, or defined type" allowance
+// validateTypeRef already gives a host function's top-level input/output
+// (cleat#2776: the two validators disagreed about whether defined types are
+// a thing, and a field had no way to say "this is a Message" without
+// inlining the whole shape at every use site). internal/plugingen already
+// resolves a field's type name against the generated types when it is not
+// one of the builtins below (from_manifest.go's goType/pyType/rustType each
+// have a `default: return t // assume it's a named type` fallback, and
+// fieldDefToFieldIR's array/map cases already carry a named ItemsType/
+// ValueType through unresolved) -- this was a validation-only gap, not a
+// codegen one, so accepting it here has no downstream migration to do.
 func validateTypeDef(td TypeDef, types map[string]TypeDef, context string) error {
 	validFieldTypes := map[string]bool{
 		"string": true, "int64": true, "float64": true,
@@ -220,8 +246,107 @@ func validateTypeDef(td TypeDef, types map[string]TypeDef, context string) error
 		if fd.Type == "" {
 			return fmt.Errorf("%s field %q: type is required", context, fieldName)
 		}
-		if !validFieldTypes[fd.Type] {
-			return fmt.Errorf("%s field %q: unsupported type %q", context, fieldName, fd.Type)
+		if validFieldTypes[fd.Type] {
+			continue
+		}
+		if _, ok := types[fd.Type]; ok {
+			continue
+		}
+		return fmt.Errorf("%s field %q: unsupported type %q (must be a simple type, object, enum, array, optional, map, or a defined type)", context, fieldName, fd.Type)
+	}
+	return nil
+}
+
+// fieldTypeRefs returns the names a type's fields directly reference into
+// types -- via a field's OWN type only -- restricted to names that
+// actually resolve, since an unresolvable name is already reported by
+// validateTypeDef.
+//
+// Deliberately does NOT walk into an array's item type or a map's value
+// type (cleat#2806 R2, a real regression measured and fixed, not a
+// preventive restriction): Node{children: array of Node} and
+// Node{kids: map[string]Node} both generate as []Node / map[string]Node,
+// neither of which needs the complete type up front the way a struct
+// field held by value does, and both compile today on develop. An
+// earlier version of this function added Items.Type and ValueType.Type
+// as edges, which rejected exactly that legal, common (a tree) shape --
+// contradicting validateNoTypeCycles' own doc comment, which already said
+// array/map wrapping was "not caught here on purpose" while the code did
+// the opposite. Verified through the real pipeline (ValidateManifest ->
+// FromManifest -> GenerateGo) that both the array-tree and map-tree
+// shapes validate and the generated Go compiles, and that a direct
+// self-reference (Node{next: Node}) is still rejected.
+func fieldTypeRefs(td TypeDef, types map[string]TypeDef) []string {
+	var refs []string
+	for _, fd := range td.Fields {
+		if _, ok := types[fd.Type]; ok {
+			refs = append(refs, fd.Type)
+		}
+	}
+	return refs
+}
+
+// validateNoTypeCycles rejects a reference cycle anywhere in the named-type
+// graph -- a direct self-reference (Envelope.next: Envelope) or an
+// indirect one (A -> B -> A) has the identical consequence downstream:
+// internal/plugingen generates a Go struct field of the named type BY
+// VALUE, and go/types rejects a struct that contains itself, directly or
+// through another struct, with "invalid recursive type" (cleat#2806, R1,
+// measured against the real generator). A cycle broken by "array"/"map"/
+// "optional" wrapping is not caught here on purpose: those generate a
+// slice, a map, or an omitted field respectively, none of which need the
+// complete type up front, so they are not the shape this function exists
+// to reject -- only a field naming another type DIRECTLY (or through
+// another such direct reference) is.
+func validateNoTypeCycles(types map[string]TypeDef) error {
+	names := make([]string, 0, len(types))
+	for name := range types {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	const (
+		unvisited = 0
+		visiting  = 1
+		done      = 2
+	)
+	state := make(map[string]int, len(types))
+	var path []string
+	var visit func(name string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case done:
+			return nil
+		case visiting:
+			// path may hold ancestors OUTSIDE the cycle (an unrelated root
+			// C that happens to lead into a separate A -> B -> A loop
+			// without itself being part of it) -- trim to where name first
+			// appears, so the message names only the cycle, not the path
+			// that reached it.
+			start := 0
+			for i, p := range path {
+				if p == name {
+					start = i
+					break
+				}
+			}
+			cycle := append(append([]string{}, path[start:]...), name)
+			return fmt.Errorf("type reference cycle: %s", strings.Join(cycle, " -> "))
+		}
+		state[name] = visiting
+		path = append(path, name)
+		for _, ref := range fieldTypeRefs(types[name], types) {
+			if err := visit(ref); err != nil {
+				return err
+			}
+		}
+		path = path[:len(path)-1]
+		state[name] = done
+		return nil
+	}
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return err
 		}
 	}
 	return nil

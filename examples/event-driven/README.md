@@ -194,7 +194,7 @@ Build the example workflow to WASM:
 cleat build -o /tmp/out ./examples/event-driven/
 
 # Deploy the WASM module:
-cleat deploy --name event-driven /tmp/out/handle_signup.wasm
+cleat deploy --name event-driven /tmp/out/subscription_workflow.wasm
 ```
 
 ## Architecture

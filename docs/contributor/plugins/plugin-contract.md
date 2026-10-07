@@ -132,6 +132,34 @@ for as long as the pattern existed (cleat#2183). Every discarding call site
 must appear in `tenantOkDiscardLedger`, checked bidirectionally the same way
 C2's and C15/C16's ledgers are.
 
+### C20 — every `plugin.ForTenant` call site is declared
+
+**Guard:** `TestEveryPluginForTenantCallIsDeclared`
+(`plugin/a_plugin_for_tenant_is_declared_test.go`)
+
+`plugin.ForTenant(ctx, tenantID)` re-marks a context's tenant for a plugin's
+own SQL (cleat#2125) — the SQL-side counterpart to C16's `Secrets.ForTenant`,
+for the same reason: a plugin calls it when it has no request-scoped `ctx` to
+inherit a tenant from, a background loop with no request or an
+unauthenticated request naming its own tenant out-of-band. Nothing tracked
+where it was called before this (cleat#2164) — a plugin calling it on a
+REQUEST context silently makes every tenant-scoped operation on that request
+act as another tenant, including #1992's `Environment.Secrets` request-path
+methods, whose design depends on the tenant coming from the context.
+Measured: tenant B's request context, `plugin.ForTenant(reqB, A)`,
+`Secrets.Get` returned tenant A's value. Every call site must appear in
+`pluginForTenantLedger`, checked bidirectionally the same way C2's and
+C15/C16/C17's ledgers are.
+
+Kept as a separate ledger from `secretsForTenantLedger` (C16) for the same
+reason that ledger gives for staying separate from `perTenantLoopLedger`
+(C15): the two check different shapes closely enough that folding them
+together would make one ledger's diff answer a question about the other's
+scanner. Numbered C20, after C19 in HTTP middleware below, for the same
+reason C15's own text gives for its number — added later, kept in Tenant
+isolation because that is where it belongs, not renumbered into the middle
+of an existing sequence.
+
 ---
 
 ## Storage and dialects

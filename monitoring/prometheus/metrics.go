@@ -52,6 +52,18 @@ type Metrics struct {
 	reader *sdkmetric.ManualReader
 	mp     *sdkmetric.MeterProvider
 
+	// internalDefs is the set of definition names this process has learned are
+	// `internal`, consulted by ServeHTTP to drop their series before rendering
+	// (cleat#3001). It is ADDITIVE: a name, once learned internal, is never
+	// removed, so a definition loosened back to a wider class stays hidden for
+	// the life of the process -- over-hiding a series, which is safe, rather
+	// than leaking a name.
+	//
+	// The WORKER populates it, where it resolves a definition's class; the serve
+	// path cannot, because a scrape carries no tenant and a worker serves many.
+	internalMu   sync.RWMutex
+	internalDefs map[string]struct{}
+
 	// --- Counters (Int64Counter) ---
 	workflowsStarted        metric.Int64Counter
 	workflowsCompleted      metric.Int64Counter
@@ -1689,12 +1701,124 @@ func (m *Metrics) ServeHTTP() http.Handler {
 			return
 		}
 
+		// cleat#3001: an `internal` definition's NAME must not reach this
+		// unauthenticated scrape. The series are process-global while the class
+		// is per-tenant, so the decision is made here -- one place -- over the
+		// names the worker has noted, rather than at the sixteen record sites.
+		dropInternalSeries(&rm, m.isInternalDef)
+
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		if err := writePrometheusText(w, &rm); err != nil {
 			// Partial write may have occurred; nothing we can do.
 			return
 		}
 	})
+}
+
+// NoteInternalDefs records definition names this process has learned are
+// `internal`, so ServeHTTP drops their series. Additive and safe for concurrent
+// use; an empty name is ignored.
+func (m *Metrics) NoteInternalDefs(names ...string) {
+	if m == nil || len(names) == 0 {
+		return
+	}
+	m.internalMu.Lock()
+	defer m.internalMu.Unlock()
+	if m.internalDefs == nil {
+		m.internalDefs = make(map[string]struct{}, len(names))
+	}
+	for _, n := range names {
+		if n != "" {
+			m.internalDefs[n] = struct{}{}
+		}
+	}
+}
+
+func (m *Metrics) isInternalDef(name string) bool {
+	m.internalMu.RLock()
+	defer m.internalMu.RUnlock()
+	_, ok := m.internalDefs[name]
+	return ok
+}
+
+// nameLabelKeys are the series labels that carry a definition name. A data
+// point labelled with an internal name under either is dropped from the scrape.
+var nameLabelKeys = [...]attribute.Key{"workflow_name", "def_name"}
+
+// dropInternalSeries removes, IN PLACE, every data point whose series names a
+// definition the caller reports as internal (cleat#3001).
+//
+// It filters the collected metricdata rather than the rendered text, because a
+// text filter cannot tell a label value from a description that mentions one --
+// and rather than at the record sites, because those are sixteen and the scrape
+// is one. A metric whose points all drop renders nothing: writeMetric already
+// returns early on an empty point slice.
+func dropInternalSeries(rm *metricdata.ResourceMetrics, isInternal func(string) bool) {
+	for si := range rm.ScopeMetrics {
+		for mi := range rm.ScopeMetrics[si].Metrics {
+			m := &rm.ScopeMetrics[si].Metrics[mi]
+			switch data := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				data.DataPoints = keepPublicPoints(data.DataPoints, isInternal)
+				m.Data = data
+			case metricdata.Sum[float64]:
+				data.DataPoints = keepPublicPoints(data.DataPoints, isInternal)
+				m.Data = data
+			case metricdata.Gauge[int64]:
+				data.DataPoints = keepPublicPoints(data.DataPoints, isInternal)
+				m.Data = data
+			case metricdata.Gauge[float64]:
+				data.DataPoints = keepPublicPoints(data.DataPoints, isInternal)
+				m.Data = data
+			case metricdata.Histogram[int64]:
+				data.DataPoints = keepPublicHistogramPoints(data.DataPoints, isInternal)
+				m.Data = data
+			case metricdata.Histogram[float64]:
+				data.DataPoints = keepPublicHistogramPoints(data.DataPoints, isInternal)
+				m.Data = data
+			default:
+				// A metric type not listed above would pass through UNFILTERED --
+				// fail-open. Nothing emits one today (every instrument in this file
+				// is a Sum, Gauge or Histogram), so this is unreachable rather than
+				// merely unhandled; a new instrument of another type
+				// (ExponentialHistogram, say) must add its case HERE, not assume
+				// this comment covers it. cleat-review, on #3123.
+			}
+		}
+	}
+}
+
+func keepPublicPoints[N int64 | float64](points []metricdata.DataPoint[N], isInternal func(string) bool) []metricdata.DataPoint[N] {
+	kept := points[:0]
+	for _, dp := range points {
+		if seriesNamesInternal(dp.Attributes, isInternal) {
+			continue
+		}
+		kept = append(kept, dp)
+	}
+	return kept
+}
+
+func keepPublicHistogramPoints[N int64 | float64](points []metricdata.HistogramDataPoint[N], isInternal func(string) bool) []metricdata.HistogramDataPoint[N] {
+	kept := points[:0]
+	for _, dp := range points {
+		if seriesNamesInternal(dp.Attributes, isInternal) {
+			continue
+		}
+		kept = append(kept, dp)
+	}
+	return kept
+}
+
+// seriesNamesInternal reports whether a data point's series is labelled with a
+// definition name the caller treats as internal.
+func seriesNamesInternal(attrs attribute.Set, isInternal func(string) bool) bool {
+	for _, k := range nameLabelKeys {
+		if v, ok := attrs.Value(k); ok && isInternal(v.AsString()) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Lifecycle ---
@@ -1730,16 +1854,6 @@ func (m *Metrics) mergeAttrs(attrs ...attribute.KeyValue) []attribute.KeyValue {
 
 // --- Prometheus text format writer ---
 
-// stripTotalSuffix removes the _total suffix from a metric name if present.
-// This is used for # HELP and # TYPE lines where Prometheus convention omits
-// the suffix for counter metrics.
-func stripTotalSuffix(name string) string {
-	if strings.HasSuffix(name, "_total") {
-		return name[:len(name)-6]
-	}
-	return name
-}
-
 // writePrometheusText formats a ResourceMetrics tree into Prometheus
 // exposition format and writes it to w.
 func writePrometheusText(w io.Writer, rm *metricdata.ResourceMetrics) error {
@@ -1761,15 +1875,11 @@ func writeMetric(w io.Writer, m metricdata.Metrics) error {
 		if len(data.DataPoints) == 0 {
 			return nil
 		}
-		helpName := m.Name
 		typ := "counter"
 		if !data.IsMonotonic {
 			typ = "gauge"
-		} else {
-			// Strip _total suffix only for counter metrics in HELP/TYPE lines.
-			helpName = stripTotalSuffix(helpName)
 		}
-		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", helpName, m.Description, helpName, typ); err != nil {
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", m.Name, m.Description, m.Name, typ); err != nil {
 			return err
 		}
 		for _, dp := range data.DataPoints {
@@ -1783,14 +1893,11 @@ func writeMetric(w io.Writer, m metricdata.Metrics) error {
 		if len(data.DataPoints) == 0 {
 			return nil
 		}
-		helpName := m.Name
 		typ := "counter"
 		if !data.IsMonotonic {
 			typ = "gauge"
-		} else {
-			helpName = stripTotalSuffix(helpName)
 		}
-		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", helpName, m.Description, helpName, typ); err != nil {
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", m.Name, m.Description, m.Name, typ); err != nil {
 			return err
 		}
 		for _, dp := range data.DataPoints {

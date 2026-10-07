@@ -28,6 +28,15 @@ type Catalog struct {
 	Tables   map[string]*Table // key: schema-qualified table name, e.g. "public.workflow_instances"
 	Routines map[string]string // key: schema-qualified routine identity, value: normalized definition text
 	Grants   []string          // normalized, sorted grant lines
+
+	// Schemas and Roles are populated on SQL Server only, where migrations can
+	// create both as first-class objects (CREATE SCHEMA, CREATE ROLE) with no
+	// equivalent "which table owns this" home to attach them to the way a
+	// column or index attaches to a table. Empty on every other dialect -- not
+	// because the concept does not exist there, but because nothing in this
+	// package has yet needed it compared on Postgres or MySQL. cleat#2432.
+	Schemas []string // schema names, excluding SQL Server's own built-ins
+	Roles   []string // database role NAMES only -- membership is a deployment fact, not a schema fact
 }
 
 // Table is one table's structural shape.
@@ -50,6 +59,18 @@ type Column struct {
 	DataType string
 	Nullable bool
 	Default  string
+	// Collation is the column's collation, empty when the dialect reports
+	// none. cleat#2882: it is a FIELD rather than folded into DataType, and
+	// that requires the canonicalize line below to render it -- a field this
+	// struct carries but that line does not print reaches no comparison at
+	// all. mysql.go's autoIncrementAttribute comment records the same trap
+	// from the other side, where folding was the chosen repair.
+	//
+	// A collation change is otherwise invisible to this instrument on every
+	// dialect, and on PostgreSQL and MySQL to anything: only MSSQL has a
+	// check, and it lives in gen-mssql-baseline's manual acceptance script,
+	// which does not run in CI.
+	Collation string
 }
 
 // Index is one index, keyed by name with its full definition text.
@@ -229,8 +250,8 @@ func canonicalize(c *Catalog) []string {
 		cols := append([]Column(nil), t.Columns...)
 		sort.Slice(cols, func(i, j int) bool { return cols[i].Name < cols[j].Name })
 		for _, col := range cols {
-			lines = append(lines, fmt.Sprintf("TABLE %s COLUMN %s type=%s nullable=%t default=%s",
-				tname, col.Name, col.DataType, col.Nullable, oneLine(col.Default)))
+			lines = append(lines, fmt.Sprintf("TABLE %s COLUMN %s type=%s nullable=%t default=%s collation=%s",
+				tname, col.Name, col.DataType, col.Nullable, oneLine(col.Default), col.Collation))
 		}
 
 		idxs := append([]Index(nil), t.Indexes...)
@@ -271,6 +292,18 @@ func canonicalize(c *Catalog) []string {
 	sort.Strings(grants)
 	for _, g := range grants {
 		lines = append(lines, "GRANT "+oneLine(g))
+	}
+
+	schemas := append([]string(nil), c.Schemas...)
+	sort.Strings(schemas)
+	for _, s := range schemas {
+		lines = append(lines, "SCHEMA "+oneLine(s))
+	}
+
+	roles := append([]string(nil), c.Roles...)
+	sort.Strings(roles)
+	for _, r := range roles {
+		lines = append(lines, "ROLE "+oneLine(r))
 	}
 
 	sort.Strings(lines)

@@ -6,6 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/cleat-team/cleat/auth"
+	"github.com/google/uuid"
 )
 
 // suspend-tenant / resume-tenant: the reversible half of tenant lifecycle.
@@ -123,15 +126,23 @@ func runSuspendTenant(ctx context.Context, db *sql.DB, d dialect, args []string,
 		}
 	}
 
-	updStmt, updArgs, err := d.rebindArgs(
-		`UPDATE admin.tenants SET suspended = $1 WHERE tenant_id = $2`,
-		suspend, tenantID)
+	// auth.TenantStore.SetTenantSuspended, not an inline UPDATE: this file used
+	// to carry its own copy of this statement, and plugins/tenantlifecycle's
+	// trial-expiry sweep needs the same write -- one implementation, not two
+	// (cleat#866).
+	tenantUUID, err := uuid.Parse(tenantID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: not a tenant UUID: %q: %v\n", tenantID, err)
+		osExit(1)
+		return
+	}
+	store, err := auth.NewTenantStoreForDialect(db, d.name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
 		return
 	}
-	if _, err := db.ExecContext(ctx, updStmt, updArgs...); err != nil {
+	if err := store.SetTenantSuspended(ctx, tenantUUID, suspend); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
 		return

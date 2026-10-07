@@ -14,7 +14,8 @@ for f in migrations/postgres/*.sql; do psql -U postgres -d cleat -f "$f"; done
 
 ### PostgreSQL 16 is required, not merely recommended
 
-From migration `077_a_plugin_policy_can_use_its_index.sql` onward the schema uses
+The schema's `GRANT cleat_sweep ... WITH INHERIT FALSE` (`migrations/postgres/001_schema.sql`,
+originally added by migration `077_a_plugin_policy_can_use_its_index.sql`) uses
 syntax that does not exist before PostgreSQL 16:
 
 ```sql
@@ -89,9 +90,12 @@ CREATE TABLE workflow_defs (
     task_queue TEXT NOT NULL DEFAULT 'default',
     abi_version INTEGER NOT NULL DEFAULT 1,
     plugin_deps JSONB NOT NULL DEFAULT '{}',
+    entry_point_schemas JSONB,
     gc_eligible BOOLEAN NOT NULL DEFAULT false,
     disabled_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    exposure TEXT NOT NULL DEFAULT 'auth' CHECK (exposure IN ('public', 'auth', 'internal')),
+    input_validation_disabled BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (tenant_id, name, version)
 );
 ```
@@ -111,7 +115,10 @@ that prose yet — not that the column does not exist.
 | `min_version` | INTEGER | Minimum compatible version for replay |
 | `max_history_length` | INTEGER | Max events before compaction triggers (0 = default) |
 | `dag_spec` | JSONB | DAG structure for visualization (optional) |
+| `entry_point_schemas` | JSONB | Per-entry-point JSON Schema (params, result), keyed by export name; NULL for a pre-cleat#1980 build or a language with no emitter yet |
 | `created_at` | TIMESTAMPTZ | Deployment timestamp |
+| `exposure` | TEXT | One of `public`, `auth` (default), `internal` -- cleat#1986. Enforced, not just documented: a `CHECK` constraint refuses any other value. Written at deploy from `cleatctl deploy --exposure`, and the default applied when the caller passes none (slice 2a). A Go workflow may also declare its class in SOURCE with `//cleat:exposure`, which `cleat build` validates -- an unknown class, or two files declaring different ones, fails the build -- and stamps into the module's metadata (slice 2c-i). All three deploy paths read that stamp and apply the **tighten-only rule** (slice 2c-ii): the stored class is the stricter of the declared and the requested, a request to loosen is refused by name, and a class that does not parse in the metadata is refused rather than read as "no declaration". `public` is refused as the RESOLVED class, so an artifact whose source declares it is caught too. |
+| `input_validation_disabled` | BOOLEAN | cleat#1981: opts this version out of start-input validation against `entry_point_schemas`, even when a schema exists. Set only at deploy time (`cleatctl deploy workflow --no-validate-input`); there is no per-request override. |
 
 **Indexes**:
 
@@ -163,6 +170,8 @@ CREATE TABLE workflow_instances (
     signal_seq_at_claim BIGINT NOT NULL DEFAULT 0,
     signal_consumed_seq BIGINT NOT NULL DEFAULT 0,
     signal_consumed_at_claim BIGINT NOT NULL DEFAULT 0,
+    promise_seq BIGINT NOT NULL DEFAULT 0,
+    promise_seq_at_claim BIGINT NOT NULL DEFAULT 0,
     reclaim_count BIGINT NOT NULL DEFAULT 0,
     started_at TIMESTAMPTZ,
     concurrency_key TEXT,
@@ -306,9 +315,9 @@ CREATE INDEX idx_workflow_signals_queue
 whole of the table's semantics.** A signal is a *delivery*, and a name is not an
 identity: sending `approve` twice before the workflow consumes it produces two
 rows, and a workflow that accumulates — a counter, one approval per reviewer, a
-batch of items — receives both. The table was keyed on the name until 2026-09-05
-(`migrations/postgres/041_signal_queue.sql`), which made the second delivery
-overwrite the first with no error.
+batch of items — receives both. The table was keyed on the name until 2026-09-05,
+when the surrogate key above (now `migrations/postgres/001_schema.sql`) replaced
+it, which made the second delivery overwrite the first with no error.
 
 So the table is a FIFO queue per `(workflow_id, signal_name)`, ordered by `id`.
 `delivered_at` cannot serve as the order: two deliveries in the same microsecond
@@ -584,10 +593,21 @@ rows of one workflow may share.
 
 ### Current State
 
-Schema migrations are currently **manual**. There is no automated migration
-tool. Changes are applied by running `migrations/postgres/*.sql` (which use
-`CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
-for idempotent application).
+Migrations are **automated, and applied as a deploy step**. Every migration ships
+inside the `cleat-worker` binary (an embedded `migrations.FS`; cleat#1968) and is
+applied by `cleat-worker --migrate-only`, which exits when it is done. A normal
+worker start **does not migrate**: it verifies the schema and refuses if the
+binary ships a migration the database has not applied (cleat#2117).
+`--migrate-on-start` is the opt-in for a single node with no deploy step.
+
+> Corrected 2026-10-03 (cleat#2995). This read *"Schema migrations are currently
+> **manual**. There is no automated migration tool. Changes are applied by
+> running `migrations/postgres/*.sql`"* — which **contradicted the Future Plans
+> bullet directly below it**, the one saying auto-migration *"shipped, and then
+> made a deploy step (cleat#2117)"*. It also named the one method that does not
+> work: a `psql -f migrations/postgres/*.sql` loop builds the tables but never
+> writes `schema_migrations`, so a worker started against the result reports the
+> database as never migrated. And unlike the embedded copy, it needs a checkout.
 
 ### Future Plans
 
@@ -725,7 +745,7 @@ them.
 | Mechanism | `CREATE POLICY ... FOR ALL USING (tenant_id = current_setting('cleat.tenant_id')::uuid)` | Not available — application-layer `WHERE tenant_id = ?` on every query | `CREATE SECURITY POLICY ... ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.<table>` |
 | Session context | `current_setting('cleat.tenant_id', true)` | N/A | `SESSION_CONTEXT(N'tenant_id')` |
 | Predicate function | Inline policy expression | N/A | Inline TVF returning `1` when `SESSION_CONTEXT` matches |
-| Bypass | Superuser — unconditionally, and `FORCE ROW LEVEL SECURITY` does not close it (that closes the separate *table owner* exemption; see `migrations/postgres/005_app_role.sql`) | N/A | **None by default.** Since migration 075 the shipped `fn_tenant_filter` is `@tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)` and names no role at all; sysadmin gets no exemption either. An `IS_ROLEMEMBER(N'cleat_admin')` form exists and must be opted into. |
+| Bypass | Superuser — unconditionally, and `FORCE ROW LEVEL SECURITY` does not close it (that closes the separate *table owner* exemption; see the `cleat_app` role) | N/A | **None by default.** Since migration 075 the shipped `fn_tenant_filter` is `@tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)` and names no role at all; sysadmin gets no exemption either. An `IS_ROLEMEMBER(N'cleat_admin')` form exists and must be opted into. |
 | Fail-closed | **On reads.** NULL context returns no rows | Yes (queries without tenant filter return no rows for other tenants) | **On reads.** Unset context returns no rows — and accepts a write, see below |
 | Block predicates | Not implemented (filter only) | N/A | **Not implemented (filter only).** `grep -c 'BLOCK PREDICATE' migrations/mssql/*.sql` → 0, against `ADD FILTER PREDICATE` in 8 files. |
 
@@ -796,7 +816,7 @@ are the *only* isolation there is — neither carries an application-level
 and there is no setting that changes that. A superuser connection therefore
 returns every tenant's data from those calls, however the policies are written.
 
-`005_app_role.sql` creates the role to use instead: `cleat_app`, which owns
+The schema baseline creates the role to use instead: `cleat_app`, which owns
 nothing, has no DDL rights, and is `NOSUPERUSER NOBYPASSRLS`. Ownership matters
 as much as superuser here — an owner is exempt from its own policies unless
 `FORCE` is set, so a role that owns nothing is subject to them unconditionally,

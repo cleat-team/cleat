@@ -145,21 +145,39 @@ func deleteTenantStmtForTest(dialect testutil.Dialect) string {
 // row behind on every run and skewed the next run's delta.
 func deleteSecretRowForTest(t *testing.T, db *sql.DB, dialect testutil.Dialect, tenant uuid.UUID, name string) {
 	t.Helper()
+	deleteSecretRowForTestChecked(t, db, dialect, tenant, name)
+}
+
+// deleteSecretRowForTestChecked is deleteSecretRowForTest, returning the number
+// of rows the DELETE affected. A caller that knows the row exists (cleat#2126:
+// it just wrote the row this cleanup is removing) can assert on the count, so a
+// cleanup that removes nothing on SQL Server fails instead of reporting the
+// silent success this same RLS gap produced in this file's own first version.
+func deleteSecretRowForTestChecked(t *testing.T, db *sql.DB, dialect testutil.Dialect, tenant uuid.UUID, name string) int64 {
+	t.Helper()
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Errorf("cleanup: acquire a connection: %v", err)
-		return
+		return 0
 	}
 	defer conn.Close()
 	if dialect == testutil.DialectMSSQL {
 		if _, err := conn.ExecContext(ctx,
 			`EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant.String()); err != nil {
 			t.Errorf("cleanup: scope the connection to tenant %s: %v", tenant, err)
-			return
+			return 0
 		}
 	}
-	if _, err := conn.ExecContext(ctx, deleteSecretStmtForTest(dialect), tenant.String(), name); err != nil {
+	res, err := conn.ExecContext(ctx, deleteSecretStmtForTest(dialect), tenant.String(), name)
+	if err != nil {
 		t.Errorf("cleanup: delete %q for tenant %s: %v", name, tenant, err)
+		return 0
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		t.Errorf("cleanup: rows affected deleting %q for tenant %s: %v", name, tenant, err)
+		return 0
+	}
+	return n
 }
