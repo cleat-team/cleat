@@ -120,11 +120,11 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 	// mixed-endian byte order, which scans without error into a different id.
 	// See its doc comment, and plugins/scheduler for the same pattern.
 	var configID plugin.GUID
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
+	err := p.db.QueryRow(ctx, `
 			SELECT id
 			FROM pd_config
 			WHERE id = $1 AND tenant_id = $2 AND enabled = true
-		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&configID)
+		`, input.ConfigID, cc.TenantID).Scan(&configID)
 	if err != nil {
 		return "", fmt.Errorf("pagerduty: config not found or disabled")
 	}
@@ -189,11 +189,11 @@ func (p *Plugin) resolveIncident(ctx context.Context, inputJSON string) (string,
 	// request-path Secrets.Get, and for why the scan target is plugin.GUID
 	// rather than uuid.UUID.
 	var configID plugin.GUID
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
+	err := p.db.QueryRow(ctx, `
 			SELECT id
 			FROM pd_config
 			WHERE id = $1 AND tenant_id = $2 AND enabled = true
-		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&configID)
+		`, input.ConfigID, cc.TenantID).Scan(&configID)
 	if err != nil {
 		return "", fmt.Errorf("pagerduty: config not found or disabled")
 	}

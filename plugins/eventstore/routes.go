@@ -264,18 +264,18 @@ func (p *Plugin) appendOnce(ctx context.Context, tenantID uuid.UUID, streamID st
 
 	var head int64
 	if p.dialect == plugin.DialectMySQL {
-		if _, err := tx.Exec(ctx, plugin.Rebind(upsertStreamHead.For(p.dialect), p.dialect),
+		if _, err := tx.Exec(ctx, upsertStreamHead.For(p.dialect),
 			tenantID, streamID); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("upsert stream head: %w", err)
 		}
-		if err := tx.QueryRow(ctx, plugin.Rebind(selectStreamHead.For(p.dialect), p.dialect),
+		if err := tx.QueryRow(ctx, selectStreamHead.For(p.dialect),
 			tenantID, streamID).Scan(&head); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("read stream head: %w", err)
 		}
 	} else {
-		if err := tx.QueryRow(ctx, plugin.Rebind(upsertStreamHead.For(p.dialect), p.dialect),
+		if err := tx.QueryRow(ctx, upsertStreamHead.For(p.dialect),
 			tenantID, streamID).Scan(&head); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("upsert stream head: %w", err)
@@ -301,7 +301,7 @@ func (p *Plugin) appendOnce(ctx context.Context, tenantID uuid.UUID, streamID st
 		}
 	}
 
-	if _, err := tx.Exec(ctx, plugin.Rebind(insertEvent.For(p.dialect), p.dialect),
+	if _, err := tx.Exec(ctx, insertEvent.For(p.dialect),
 		tenantID, streamID, *sequence, string(body)); err != nil {
 		if !isPKConflict(err) {
 			tx.Rollback()
@@ -318,20 +318,20 @@ func (p *Plugin) appendOnce(ctx context.Context, tenantID uuid.UUID, streamID st
 		// Resync: see this function's doc comment. A writer outside
 		// event_stream_head's lock already used *sequence.
 		var floor int64
-		if err := tx.QueryRow(ctx, plugin.Rebind(selectMaxSequence.For(p.dialect), p.dialect),
+		if err := tx.QueryRow(ctx, selectMaxSequence.For(p.dialect),
 			tenantID, streamID).Scan(&floor); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("resync: read max sequence: %w", err)
 		}
 		floor++
-		if _, err := tx.Exec(ctx, plugin.Rebind(resyncStreamHead.For(p.dialect), p.dialect),
+		if _, err := tx.Exec(ctx, resyncStreamHead.For(p.dialect),
 			tenantID, streamID, floor); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("resync: raise stream head: %w", err)
 		}
 		*sequence = floor
 
-		if _, err := tx.Exec(ctx, plugin.Rebind(insertEvent.For(p.dialect), p.dialect),
+		if _, err := tx.Exec(ctx, insertEvent.For(p.dialect),
 			tenantID, streamID, *sequence, string(body)); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("resync: insert after resync: %w", err)
@@ -445,11 +445,11 @@ func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Get the latest sequence so far so we only stream new events.
 	var lastSeq int64
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err := p.db.QueryRow(r.Context(), `
 		SELECT COALESCE(MAX(sequence), 0)
 		FROM event_stream
 		WHERE tenant_id = $1 AND stream_id = $2
-	`, p.dialect), tid, streamID).Scan(&lastSeq)
+	`, tid, streamID).Scan(&lastSeq)
 	if err != nil {
 		p.logger.Error("eventstore: sse initial seq", "stream", streamID, "error", err)
 		return
@@ -466,12 +466,12 @@ func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
 			return
 
 		case <-ticker.C:
-			rows, err := p.db.Query(ctx, plugin.Rebind(`
+			rows, err := p.db.Query(ctx, `
 				SELECT sequence, event
 				FROM event_stream
 				WHERE tenant_id = $1 AND stream_id = $2 AND sequence > $3
 				ORDER BY sequence ASC
-			`, p.dialect), tid, streamID, lastSeq)
+			`, tid, streamID, lastSeq)
 			if err != nil {
 				p.logger.Error("eventstore: sse poll", "stream", streamID, "error", err)
 				continue

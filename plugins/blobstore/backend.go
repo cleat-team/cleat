@@ -55,7 +55,7 @@ func (b *memoryBackend) Put(ctx context.Context, sha256Str string, data []byte, 
 	if err != nil {
 		return fmt.Errorf("blobstore: decode sha256: %w", err)
 	}
-	_, err = b.db.Exec(ctx, plugin.Rebind(upsertBlobContentData.For(b.dialect), b.dialect),
+	_, err = b.db.Exec(ctx, upsertBlobContentData.For(b.dialect),
 		sha256Bytes, len(data), data)
 	return err
 }
@@ -66,7 +66,7 @@ func (b *memoryBackend) Get(ctx context.Context, sha256Str string) ([]byte, erro
 		return nil, fmt.Errorf("blobstore: decode sha256: %w", err)
 	}
 	var data []byte
-	err = b.db.QueryRow(ctx, plugin.Rebind(`SELECT data FROM blob_content WHERE sha256 = $1`, b.dialect), sha256Bytes).Scan(&data)
+	err = b.db.QueryRow(ctx, `SELECT data FROM blob_content WHERE sha256 = $1`, sha256Bytes).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("blobstore: content not found: %s", sha256Str)
 	}

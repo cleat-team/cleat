@@ -141,7 +141,7 @@ type dueBackup struct {
 // older than 1 hour as failed, under the assumption that the worker crashed or
 // timed out.
 func (p *Plugin) cleanupOrphanedHistory(ctx context.Context) {
-	result, err := p.db.Exec(ctx, plugin.Rebind(cleanupOrphanedHistoryQuery.For(p.dialect), p.dialect))
+	result, err := p.db.Exec(ctx, cleanupOrphanedHistoryQuery.For(p.dialect))
 	if err != nil {
 		p.logger.Error("scheduledbackup: cleanup orphaned history", "error", err)
 		return
@@ -171,7 +171,7 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 	}
 	defer tx.Rollback() // no-op after Commit
 
-	rows, err := tx.Query(ctx, plugin.Rebind(dueBackupsQuery.For(p.dialect), p.dialect))
+	rows, err := tx.Query(ctx, dueBackupsQuery.For(p.dialect))
 	if err != nil {
 		p.logger.Error("scheduledbackup: query due backups", "error", err)
 		return
@@ -268,10 +268,10 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 
 	// Create history entry with status "running".
 	historyID := uuid.New()
-	_, err := p.db.Exec(bookkeepCtx, plugin.Rebind(`
+	_, err := p.db.Exec(bookkeepCtx, `
 		INSERT INTO backup_history (id, config_id, filename, status, started_at, created_at)
 		VALUES ($1, $2, $3, 'running', $4, $4)
-	`, p.dialect), historyID, configID, filename, now)
+	`, historyID, configID, filename, now)
 	if err != nil {
 		p.logger.Error("scheduledbackup: create history entry", "config_id", configID, "error", err)
 		return
@@ -348,10 +348,10 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 			"config_id", configID, "history_id", historyID, "error", errMsg,
 		)
 
-		p.db.Exec(bookkeepCtx, plugin.Rebind(`
+		p.db.Exec(bookkeepCtx, `
 			UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
 			WHERE id = $2
-		`, p.dialect), backupErrPgDumpFailed, historyID)
+		`, backupErrPgDumpFailed, historyID)
 		return
 	}
 
@@ -369,10 +369,10 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 		"size_bytes", sizeBytes,
 	)
 
-	p.db.Exec(bookkeepCtx, plugin.Rebind(`
+	p.db.Exec(bookkeepCtx, `
 		UPDATE backup_history SET status = 'completed', size_bytes = $1, completed_at = now()
 		WHERE id = $2
-	`, p.dialect), sizeBytes, historyID)
+	`, sizeBytes, historyID)
 }
 
 // markBackupFailed records a failed backup attempt in backup_history, under
@@ -392,10 +392,10 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 // re-scope -- see runDueBackups' doc comment -- so plain ctx is correct, not
 // a shortcut.
 func (p *Plugin) markBackupFailed(ctx context.Context, historyID uuid.UUID, errCode string) {
-	if _, err := p.db.Exec(ctx, plugin.Rebind(`
+	if _, err := p.db.Exec(ctx, `
 		UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
 		WHERE id = $2
-	`, p.dialect), errCode, historyID); err != nil {
+	`, errCode, historyID); err != nil {
 		p.logger.Error("scheduledbackup: recording backup failure", "history_id", historyID, "error", err)
 	}
 }
@@ -433,11 +433,11 @@ func (p *Plugin) updateNextRunTx(ctx context.Context, tx plugin.PluginTx, config
 		}
 	}
 
-	_, err := tx.Exec(ctx, plugin.Rebind(`
+	_, err := tx.Exec(ctx, `
 		UPDATE backup_config
 		SET last_run_at = $1, next_run_at = $2, updated_at = now()
 		WHERE id = $3
-	`, p.dialect), now, nextRunAt, configID)
+	`, now, nextRunAt, configID)
 
 	if err != nil && p.dialect == plugin.DialectPostgres {
 		// Not optional (see engine/db.go's own use of this same pattern):

@@ -155,7 +155,7 @@ func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 	}
 	defer tx.Rollback() // no-op after Commit
 
-	rows, err := tx.Query(ctx, plugin.Rebind(dueSchedulesQuery.For(p.dialect), p.dialect))
+	rows, err := tx.Query(ctx, dueSchedulesQuery.For(p.dialect))
 	if err != nil {
 		p.logger.Error("scheduler: query due schedules", "error", err)
 		return 0, 0, 0
@@ -203,11 +203,11 @@ func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 		if !next.IsZero() {
 			nextRunAtUpdate = &next
 		}
-		if _, err := tx.Exec(ctx, plugin.Rebind(`
+		if _, err := tx.Exec(ctx, `
 			UPDATE schedules
 			SET last_run_at = $1, next_run_at = $2, updated_at = now()
 			WHERE id = $3
-		`, p.dialect), now, nextRunAtUpdate, s.id); err != nil {
+		`, now, nextRunAtUpdate, s.id); err != nil {
 			p.logger.Error("scheduler: update schedule after claim",
 				"id", s.id, "error", err)
 		}

@@ -129,12 +129,12 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(r.Context(), `
 		SELECT limit_key, max_requests, window_seconds, created_at, updated_at
 		FROM rate_limits
 		WHERE tenant_id = $1
 		ORDER BY limit_key
-	`, p.dialect), tid)
+	`, tid)
 	if err != nil {
 		p.logger.Error("rate-limiter: list", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to list rate limits")
@@ -188,7 +188,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(upsertQuery.For(p.dialect), p.dialect), tid, key, req.MaxRequests, req.WindowSeconds)
+	_, err := p.db.Exec(r.Context(), upsertQuery.For(p.dialect), tid, key, req.MaxRequests, req.WindowSeconds)
 	if err != nil {
 		p.logger.Error("rate-limiter: upsert", "key", key, "tenant", tid, "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to set rate limit")
@@ -229,10 +229,10 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(r.Context(), `
 		DELETE FROM rate_limits
 		WHERE tenant_id = $1 AND limit_key = $2
-	`, p.dialect), tid, key)
+	`, tid, key)
 	if err != nil {
 		p.logger.Error("rate-limiter: delete", "key", key, "tenant", tid, "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to delete rate limit")

@@ -93,11 +93,11 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 	// Look up the Slack config, verifying tenant ownership.
 	var webhookURL plugin.Secret
 	var defaultChannel *string
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
+	err := p.db.QueryRow(ctx, `
 			SELECT webhook_url, default_channel
 			FROM slack_config
 			WHERE id = $1 AND tenant_id = $2 AND enabled = true
-		`, p.dialect), input.ConfigID, tenantID).Scan(&webhookURL, &defaultChannel)
+		`, input.ConfigID, tenantID).Scan(&webhookURL, &defaultChannel)
 	if err != nil {
 		return "", fmt.Errorf("slack-notify: config not found or disabled")
 	}

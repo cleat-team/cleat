@@ -174,7 +174,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // exists to catch.
 func registerAwaiterCore(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect, logger *slog.Logger, tenantID, workflowID, eventType, key1, key2, key3 string) error {
 	regKey := registrationKey(workflowID, eventType, key1, key2, key3)
-	_, err := db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(dialect), dialect),
+	_, err := db.Exec(ctx, upsertAwaiter.For(dialect),
 		workflowID, tenantID, eventType, key1, key2, key3, regKey)
 	if err != nil {
 		logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)

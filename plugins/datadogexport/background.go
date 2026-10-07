@@ -142,21 +142,21 @@ type ddSeriesPayload struct {
 // lease failure.
 func (p *Plugin) tryAcquireOrRenewLease(ctx context.Context) {
 	// 1. Try to renew if we are already the holder.
-	n, err := p.db.Exec(ctx, plugin.Rebind(leaseSQL.renewIfHolder.For(p.dialect), p.dialect), leaseName, p.workerID)
+	n, err := p.db.Exec(ctx, leaseSQL.renewIfHolder.For(p.dialect), leaseName, p.workerID)
 	if err == nil && n > 0 {
 		p.logger.Debug("datadog-export: lease renewed", "worker", p.workerID)
 		return
 	}
 
 	// 2. Try to grab an expired lease.
-	n, err = p.db.Exec(ctx, plugin.Rebind(leaseSQL.grabExpired.For(p.dialect), p.dialect), p.workerID, leaseName)
+	n, err = p.db.Exec(ctx, leaseSQL.grabExpired.For(p.dialect), p.workerID, leaseName)
 	if err == nil && n > 0 {
 		p.logger.Debug("datadog-export: acquired expired lease", "worker", p.workerID)
 		return
 	}
 
 	// 3. Try to insert a brand new lease (first worker).
-	_, err = p.db.Exec(ctx, plugin.Rebind(leaseSQL.insertNew.For(p.dialect), p.dialect), leaseName, p.workerID)
+	_, err = p.db.Exec(ctx, leaseSQL.insertNew.For(p.dialect), leaseName, p.workerID)
 	if err == nil {
 		p.logger.Debug("datadog-export: created new lease", "worker", p.workerID)
 		return
@@ -168,7 +168,7 @@ func (p *Plugin) tryAcquireOrRenewLease(ctx context.Context) {
 
 // isLeader checks whether this worker currently holds a valid lease.
 func (p *Plugin) isLeader(ctx context.Context) bool {
-	row := p.db.QueryRow(ctx, plugin.Rebind(leaseSQL.checkLeader.For(p.dialect), p.dialect), leaseName, p.workerID)
+	row := p.db.QueryRow(ctx, leaseSQL.checkLeader.For(p.dialect), leaseName, p.workerID)
 	var one int
 	if err := row.Scan(&one); err != nil {
 		return false
@@ -281,12 +281,12 @@ func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 	}
 
 	// Query workflow counts by status for this tenant.
-	statusRows, err := p.db.Query(ctx, plugin.Rebind(`
+	statusRows, err := p.db.Query(ctx, `
 			SELECT status, COUNT(*) AS count
 			FROM workflow_instances
 			WHERE tenant_id = $1
 			GROUP BY status
-		`, p.dialect), cfg.TenantID)
+		`, cfg.TenantID)
 	if err != nil {
 		return fmt.Errorf("query workflow stats: %w", err)
 	}

@@ -58,11 +58,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	var version int
 	var createdAt, updatedAt time.Time
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err := p.db.QueryRow(r.Context(), `
 		SELECT value, version, created_at, updated_at
 		FROM kv_store
 		WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
-	`, p.dialect), tid, key).Scan(&value, &version, &createdAt, &updatedAt)
+	`, tid, key).Scan(&value, &version, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "key not found")
 		return
@@ -132,7 +132,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		var newVersion int
 		if p.dialect == plugin.DialectMySQL {
 			// MySQL: UPDATE without RETURNING
-			rows, execErr := p.db.Exec(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
+			rows, execErr := p.db.Exec(r.Context(), updateKVReturning.For(p.dialect),
 				plugin.JSONColumn{Raw: value}, tid, key, expectedVersion)
 			if execErr != nil {
 				p.logger.Error("kvstore: put (update)", "key", key, "error", execErr)
@@ -143,9 +143,9 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 				p.writeError(w, 409, "conflict: version mismatch")
 				return
 			}
-			err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
+			err = p.db.QueryRow(r.Context(), `SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, tid, key).Scan(&newVersion)
 		} else {
-			err = p.db.QueryRow(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
+			err = p.db.QueryRow(r.Context(), updateKVReturning.For(p.dialect),
 				plugin.JSONColumn{Raw: value}, tid, key, expectedVersion).Scan(&newVersion)
 		}
 		if errors.Is(err, sql.ErrNoRows) {
@@ -192,7 +192,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		// engine/mysql_ops.go for the same rows-affected caveat elsewhere
 		// in this codebase). So rows == 1 is an unambiguous "this call
 		// created it".
-		rows, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
+		rows, execErr := p.db.Exec(r.Context(), upsertKV.For(p.dialect),
 			tid, key, plugin.JSONColumn{Raw: value})
 		if execErr != nil {
 			p.logger.Error("kvstore: put (upsert)", "key", key, "error", execErr)
@@ -204,9 +204,9 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		} else {
 			statusCode = 200 // updated
 		}
-		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
+		err = p.db.QueryRow(r.Context(), `SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, tid, key).Scan(&newVersion)
 	} else {
-		err = p.db.QueryRow(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
+		err = p.db.QueryRow(r.Context(), upsertKV.For(p.dialect),
 			tid, key, plugin.JSONColumn{Raw: value}).Scan(&newVersion)
 		if newVersion == 1 {
 			statusCode = 201 // created
@@ -242,10 +242,10 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(r.Context(), `
 		DELETE FROM kv_store
 		WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
-	`, p.dialect), tid, key)
+	`, tid, key)
 	if err != nil {
 		p.logger.Error("kvstore: delete", "key", key, "error", err)
 		p.writeError(w, 500, "failed to delete key")
@@ -296,7 +296,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("kvstore: list", "error", err)
 		p.writeError(w, 500, "failed to list keys")

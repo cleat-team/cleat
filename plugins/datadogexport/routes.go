@@ -126,10 +126,10 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), `
 			INSERT INTO dd_config (tenant_id, id, name, site, metrics_prefix, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-		`, p.dialect), tid, id, req.Name, site, prefix, now)
+		`, tid, id, req.Name, site, prefix, now)
 	if err != nil {
 		p.logger.Error("datadog-export: create config",
 			"error", err, "orphaned_secret", DatadogAPIKeySecretName(id))
@@ -163,12 +163,12 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(r.Context(), `
 			SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
-		`, p.dialect), tid)
+		`, tid)
 	if err != nil {
 		p.logger.Error("datadog-export: list configs", "error", err)
 		p.writeError(w, 500, "failed to list configs")
@@ -216,11 +216,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c configJSON
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.Name, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.Name, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "config not found")
 		return
@@ -304,7 +304,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			WHERE id = $%d AND tenant_id = $%d
 		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Exec(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("datadog-export: update config", "error", err)
 		p.writeError(w, 500, "failed to update config")
@@ -329,11 +329,11 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated config.
 	var c configJSON
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, name, site, metrics_prefix, enabled, created_at, updated_at
 			FROM dd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.Name, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.Name, &c.Site, &c.MetricsPrefix, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("datadog-export: re-fetch config", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated config")
@@ -360,10 +360,10 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(r.Context(), `
 			DELETE FROM dd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid)
+		`, id, tid)
 	if err != nil {
 		p.logger.Error("datadog-export: delete config", "error", err)
 		p.writeError(w, 500, "failed to delete config")

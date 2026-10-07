@@ -8,6 +8,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- **`plugin.Rebind` is deprecated.** (cleat#2270, finishing cleat#2259's split.) `plugin.RebindArgs`
+  now translates SQL Server itself rather than delegating to `Rebind`, so every dialect is
+  translated in exactly one place. The ~190 call sites across `plugins/**` that paired a redundant
+  `plugin.Rebind(query, dialect)` wrapper with a `plugin.PluginDB`/`plugin.PluginTx` method
+  (`p.db.Exec`/`Query`/`QueryRow`) — safe but doing nothing, since the adapter already calls
+  `RebindArgs` internally — have been removed. `Rebind` itself is kept as a shim for an
+  out-of-tree plugin or a caller holding a raw driver handle; prefer `RebindArgs` directly, or
+  `plugins/plugintest.ExecRebound`/`QueryRebound`/`QueryRowRebound` in a test.
+
 ## [0.4.0] - 2026-10-06
 
 ### UPGRADE NOTES — breaking

@@ -117,10 +117,10 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	id := uuid.New()
 
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), `
 		INSERT INTO schedules (tenant_id, id, name, cron, workflow_name, input, enabled, next_run_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
-	`, p.dialect), tid, id, req.Name, req.Cron, req.WorkflowName, inputBytes, enabled, next)
+	`, tid, id, req.Name, req.Cron, req.WorkflowName, inputBytes, enabled, next)
 	if err != nil {
 		p.logger.Error("scheduler: create", "error", err)
 		p.writeError(w, 500, "failed to create schedule")
@@ -147,12 +147,12 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(r.Context(), `
 		SELECT id, name, cron, workflow_name, input, enabled, last_run_at, next_run_at, created_at, updated_at
 		FROM schedules
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
-	`, p.dialect), tid)
+	`, tid)
 	if err != nil {
 		p.logger.Error("scheduler: list", "error", err)
 		p.writeError(w, 500, "failed to list schedules")
@@ -195,11 +195,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var s schedule
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 		SELECT id, name, cron, workflow_name, input, enabled, last_run_at, next_run_at, created_at, updated_at
 		FROM schedules
 		WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid),
+	`, id, tid),
 		&s.ID, &s.Name, &s.Cron, &s.WorkflowName,
 		&s.Input, &s.Enabled, &s.LastRunAt, &s.NextRunAt,
 		&s.CreatedAt, &s.UpdatedAt,
@@ -241,9 +241,9 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Fetch the existing schedule to determine the cron expression.
 	var currentCron string
 	var currentEnabled bool
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = p.db.QueryRow(r.Context(), `
 		SELECT cron, enabled FROM schedules WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid).Scan(&currentCron, &currentEnabled)
+	`, id, tid).Scan(&currentCron, &currentEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "schedule not found")
 		return
@@ -316,7 +316,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" WHERE id = $%d AND tenant_id = $%d", argIdx, argIdx+1)
 	args = append(args, id, tid)
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	_, err = p.db.Exec(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("scheduler: update", "id", id, "error", err)
 		p.writeError(w, 500, "failed to update schedule")
@@ -343,9 +343,9 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(r.Context(), `
 		DELETE FROM schedules WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid)
+	`, id, tid)
 	if err != nil {
 		p.logger.Error("scheduler: delete", "id", id, "error", err)
 		p.writeError(w, 500, "failed to delete schedule")
@@ -378,9 +378,9 @@ func (p *Plugin) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	var name, cron, workflowName string
 	var inputBytes []byte
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = p.db.QueryRow(r.Context(), `
 		SELECT name, cron, workflow_name, input FROM schedules WHERE id = $1 AND tenant_id = $2
-	`, p.dialect), id, tid).Scan(&name, &cron, &workflowName, &inputBytes)
+	`, id, tid).Scan(&name, &cron, &workflowName, &inputBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "schedule not found")
 		return
