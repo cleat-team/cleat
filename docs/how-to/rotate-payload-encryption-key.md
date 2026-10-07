@@ -166,6 +166,32 @@ any worker starts writing it:
    `cmd/cleatctl/reseal_payloads_two_workers_test.go`,
    `TestPayloadKeyRotationAcrossTwoWorkers`.
 
+## SIGHUP does not replace either procedure above, yet
+
+Since cleat#2298 (PR 2), every worker that catches `SIGHUP` re-reads
+`--encryption-key-file`/`--encryption-key-file-previous` and tries to apply
+them, alongside the tenant-secrets reload `use-secrets.md` documents. For
+this key specifically, **that reload can never actually change which bytes
+"current" and "previous" mean, by construction:** `loadPayloadKeyRing`
+assigns the fixed labels "version 2" to whatever `--encryption-key-file`
+holds and "version 1" to `--encryption-key-file-previous`'s, on every call,
+regardless of content -- there is no `--encryption-key-file-version` flag
+the way `CLEAT_SECRET_MASTER_KEY_VERSION` exists on the secrets side. So a
+SIGHUP that finds either file's content changed is refused outright (the
+engine's reuse-safety check, `engine.ReloadableKeyRing.Reload`, sees the
+same label carrying different bytes and treats it as the operator mistake
+that check exists to catch) -- logged, a failure metric incremented, old key
+kept, nothing corrupted, but also **nothing rotated**.
+
+**So a SIGHUP sent fleet-wide for a tenant-secrets rotation is harmless to
+a worker's payload key** (its files are presumably untouched, and an
+untouched file reloads as a clean no-op) **but SIGHUP is not yet a way to
+execute either procedure above.** Both still require a restart at the step
+that changes which bytes a worker's `--encryption-key-file[-previous]`
+flags point at. Extending the payload ring to read its version numbers
+from a file too, the way the secrets ring already does, would close this
+gap; tracked separately as cleat#3203 rather than folded into cleat#2298.
+
 ## What is not covered, either way
 
 - **An external KMS.** The key is supplied directly, from a file.

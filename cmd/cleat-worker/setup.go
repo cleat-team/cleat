@@ -1529,8 +1529,50 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 // persisted anywhere (see engine.PayloadEncryption's doc comment), so this
 // is a convention, not a compatibility requirement.
 //
-// Returns (nil, nil) when currentKeyFile is empty: encryption is off.
-func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.PayloadEncryption, error) {
+// Returns (nil, nil, nil) when currentKeyFile is empty: encryption is off.
+//
+// THE RETURNED *engine.ReloadableKeyRing IS THE SAME ONE pe IS BUILT
+// AROUND (cleat#2298, PR 2) -- nil exactly when pe is nil, non-nil only
+// when encryption is configured. A caller that wants to reload the key
+// later (the SIGHUP handler, main.go) holds onto this return value
+// directly rather than reaching inside pe, which has no exported accessor
+// for it.
+func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.PayloadEncryption, *engine.ReloadableKeyRing, error) {
+	ring, err := loadPayloadKeyRing(currentKeyFile, previousKeyFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ring == nil {
+		return nil, nil, nil
+	}
+	reloadable := engine.NewReloadableKeyRing(ring)
+	pe, err := engine.NewPayloadEncryptionWithReloadableRing(reloadable)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid encryption key ring: %w", err)
+	}
+	return pe, reloadable, nil
+}
+
+// loadPayloadKeyRing reads --encryption-key-file and, optionally,
+// --encryption-key-file-previous, and builds the *engine.KeyRing
+// loadPayloadEncryption wraps in a *engine.PayloadEncryption.
+//
+// EXTRACTED FROM loadPayloadEncryption (cleat#2298's PR 2), rather than
+// loadPayloadEncryption calling engine.NewPayloadEncryptionWithRing twice,
+// so that a SIGHUP reload can build the candidate ring on its own, without
+// constructing (and discarding) a *engine.PayloadEncryption it has no use
+// for -- the reload swaps the live PayloadEncryption's *engine.ReloadableKeyRing
+// directly, via its Reload method, not by replacing the PayloadEncryption
+// value itself. Both callers read the files fresh every time: a boot call
+// and a SIGHUP call are the same operation at two different moments, which
+// is the property that makes reload meaningful at all (see
+// engine.SecretKeyRingFromEnv's doc comment for the file-vs-environment
+// reasoning; the payload side has always read from files, never env vars).
+//
+// Returns (nil, nil) when currentKeyFile is empty: encryption is off. This
+// is the same "no master key configured" state engine.NewReloadableKeyRing
+// already treats as legal.
+func loadPayloadKeyRing(currentKeyFile, previousKeyFile string) (*engine.KeyRing, error) {
 	if currentKeyFile == "" {
 		if previousKeyFile != "" {
 			return nil, fmt.Errorf("--encryption-key-file-previous requires --encryption-key-file")
@@ -1546,11 +1588,11 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 		return nil, fmt.Errorf("decode encryption key: %w", err)
 	}
 	if previousKeyFile == "" {
-		pe, err := engine.NewPayloadEncryption(strings.TrimSpace(string(currentData)))
+		ring, err := engine.NewKeyRing(engine.VersionedKey{Version: 2, Key: currentKey})
 		if err != nil {
 			return nil, fmt.Errorf("invalid encryption key — expected a base64-encoded 256-bit AES key: %w", err)
 		}
-		return pe, nil
+		return ring, nil
 	}
 	previousData, err := os.ReadFile(previousKeyFile)
 	if err != nil {
@@ -1567,11 +1609,7 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 	if err != nil {
 		return nil, fmt.Errorf("build encryption key ring: %w", err)
 	}
-	pe, err := engine.NewPayloadEncryptionWithRing(ring)
-	if err != nil {
-		return nil, fmt.Errorf("invalid encryption key ring: %w", err)
-	}
-	return pe, nil
+	return ring, nil
 }
 
 // checkPayloadEncryptionState is cleat#2324's startup guard.
@@ -1984,6 +2022,30 @@ type Worker struct {
 	// pass-through a worker started without CLEAT_SECRET_MASTER_KEY has always
 	// had for plugins.
 	secrets *engine.SecretStore
+
+	// deploymentSecrets, secretsRing and payloadRing are cleat#2298 PR 2's
+	// SIGHUP reload fields. deploymentSecrets is the counterpart to secrets
+	// above -- not resolved through the plugin call path at all, but needed
+	// here so reloadKeyRingsOnSIGHUP can run M4's candidate-opens-everything
+	// check against it too, the same way it does against secrets.
+	// secretsRing is the SAME *engine.ReloadableKeyRing secrets and
+	// deploymentSecrets are both built around (main.go); payloadRing is the
+	// one payloadEncryption is built around, or nil if payload encryption is
+	// not configured on this worker at all (see loadPayloadEncryption's doc
+	// comment: nil exactly when payloadEncryption is nil).
+	deploymentSecrets *engine.DeploymentSecretStore
+	secretsRing       *engine.ReloadableKeyRing
+	payloadRing       *engine.ReloadableKeyRing
+
+	// payloadKeyFile and payloadKeyFilePrevious are COPIES of
+	// --encryption-key-file and --encryption-key-file-previous, taken once
+	// at construction rather than read from the flags directly inside
+	// reloadKeyRingsOnSIGHUP -- the same reason w.concurrency and
+	// w.clusterConnectionBudget below are copies rather than *concurrency/
+	// *clusterConnectionBudgetFlag reads: a test can build a *Worker with
+	// whatever paths it wants, with no global flag to mutate and restore.
+	payloadKeyFile         string
+	payloadKeyFilePrevious string
 
 	// Worker membership, and this worker's slice of the cluster connection
 	// budget. cleat#1487.
