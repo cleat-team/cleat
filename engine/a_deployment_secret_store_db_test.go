@@ -345,3 +345,64 @@ func TestResealDeploymentSecretsConvergesAndPreservesPlaintext(t *testing.T) {
 		t.Fatalf("second run: Resealed=%d Current=%d Converged=%v, want 0/1/true", again.Resealed, again.Current, again.Converged())
 	}
 }
+
+// TestDeploymentSecretCheckKeyRingCandidateChecksTheCandidate mirrors
+// TestCheckKeyRingCandidateChecksTheCandidateNotTheStoresOwnRing
+// (a_secret_rotation_test.go) for deployment secrets -- cleat#2298's M4,
+// extended to the half of "every stored secret" that had no boot-time
+// check at all before this (DeploymentSecretStore's own doc comment on the
+// write-gate gap; the read-side census had the identical gap and this is
+// its first test).
+func TestDeploymentSecretCheckKeyRingCandidateChecksTheCandidate(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectPostgres)
+	t.Cleanup(func() { db.Close() })
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+
+	v1 := VersionedKey{Version: 1, Key: make32ByteKey("m4-candidate-v1")}
+	v2 := VersionedKey{Version: 2, Key: make32ByteKey("m4-candidate-v2")}
+	ringV1, err := NewKeyRing(v1)
+	if err != nil {
+		t.Fatalf("NewKeyRing(v1): %v", err)
+	}
+	ringV2, err := NewKeyRing(v2)
+	if err != nil {
+		t.Fatalf("NewKeyRing(v2): %v", err)
+	}
+
+	s := NewDeploymentSecretStore(db, string(testutil.DialectPostgres), ringV1)
+	ctx := t.Context()
+	const name = "cleat-2298-m4-candidate.api_key"
+	if err := s.PutDeploymentSecret(ctx, name, "v"); err != nil {
+		t.Fatalf("seed under v1: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM deployment_secrets WHERE name = $1`, name) //nolint:errcheck // best-effort cleanup
+	})
+
+	beforeV1Only, err := s.CheckKeyRingCandidate(ctx, ringV1)
+	if err != nil {
+		t.Fatalf("CheckKeyRingCandidate(v1): %v", err)
+	}
+	beforeV2Only, err := s.CheckKeyRingCandidate(ctx, ringV2)
+	if err != nil {
+		t.Fatalf("CheckKeyRingCandidate(v2): %v", err)
+	}
+
+	// Both calls ran against the SAME store, whose own live ring (v1) never
+	// changed -- the two answers differ only because the CANDIDATE argument
+	// did, which is the property this check exists to have.
+	if beforeV1Only.Unopenable[1] != 0 {
+		t.Errorf("candidate v1: Unopenable[1] = %d, want 0 -- the row IS sealed under v1", beforeV1Only.Unopenable[1])
+	}
+	if beforeV2Only.Unopenable[1] == 0 {
+		t.Error("candidate v2-only: Unopenable[1] = 0, want > 0 -- a v2-only candidate cannot open a v1 row")
+	}
+
+	nilCandidate, err := s.CheckKeyRingCandidate(ctx, nil)
+	if err != nil {
+		t.Fatalf("CheckKeyRingCandidate(nil): %v", err)
+	}
+	if nilCandidate.Unopenable[1] == 0 {
+		t.Error("nil candidate: Unopenable[1] = 0, want > 0")
+	}
+}

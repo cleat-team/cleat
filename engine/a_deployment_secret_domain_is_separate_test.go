@@ -32,13 +32,14 @@ func make32ByteKey(label string) []byte {
 // seal and open its own ciphertext before trusting any test that expects it
 // to fail.
 func TestDeploymentSecretRoundTrips(t *testing.T) {
-	s := &DeploymentSecretStore{ring: testDeploymentMasterKey(t)}
+	ring := testDeploymentMasterKey(t)
+	s := &DeploymentSecretStore{ring: NewReloadableKeyRing(ring)}
 
-	sealed, err := s.seal("email.sendgrid_api_key", "sk-real-value")
+	sealed, err := s.seal(ring, "email.sendgrid_api_key", "sk-real-value")
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	got, err := s.open("email.sendgrid_api_key", sealed, 1)
+	got, err := s.open(ring, "email.sendgrid_api_key", sealed, 1)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -55,28 +56,28 @@ func TestDeploymentSecretRoundTrips(t *testing.T) {
 // "the default: SAME KEY RING" -- so it has to be exercised, not assumed.
 func TestDeploymentSecretDomainIsSeparateFromTenantSecrets(t *testing.T) {
 	ring := testDeploymentMasterKey(t)
-	dep := &DeploymentSecretStore{ring: ring}
-	tenant := &SecretStore{ring: ring}
+	dep := &DeploymentSecretStore{ring: NewReloadableKeyRing(ring)}
+	tenant := &SecretStore{ring: NewReloadableKeyRing(ring)}
 
 	const sharedIdentifier = "shared-name"
 
 	// A tenant secret sealed under an ID equal to a deployment secret name
 	// must NOT open as that deployment secret.
-	tenantSealed, err := tenant.seal(sharedIdentifier, "tenant-value")
+	tenantSealed, err := tenant.seal(ring, sharedIdentifier, "tenant-value")
 	if err != nil {
 		t.Fatalf("tenant seal: %v", err)
 	}
-	if _, err := dep.open(sharedIdentifier, tenantSealed, 1); err == nil {
+	if _, err := dep.open(ring, sharedIdentifier, tenantSealed, 1); err == nil {
 		t.Fatal("a tenant secret's ciphertext opened as a deployment secret -- domain separation is broken")
 	}
 
 	// And the inverse: a deployment secret must not open as a tenant secret
 	// under the matching tenant ID.
-	depSealed, err := dep.seal(sharedIdentifier, "deployment-value")
+	depSealed, err := dep.seal(ring, sharedIdentifier, "deployment-value")
 	if err != nil {
 		t.Fatalf("deployment seal: %v", err)
 	}
-	if _, err := tenant.open(sharedIdentifier, depSealed, 1); err == nil {
+	if _, err := tenant.open(ring, sharedIdentifier, depSealed, 1); err == nil {
 		t.Fatal("a deployment secret's ciphertext opened as a tenant secret -- domain separation is broken")
 	}
 }
@@ -113,13 +114,14 @@ func TestDeploymentSecretKeyDerivationIsIsolatedByInfoStringAlone(t *testing.T) 
 // deployment_secrets.go's seal doc comment claims: "a row copied to another
 // name ... fails to open rather than decrypting to something."
 func TestDeploymentSecretCiphertextIsBoundToItsName(t *testing.T) {
-	s := &DeploymentSecretStore{ring: testDeploymentMasterKey(t)}
+	ring := testDeploymentMasterKey(t)
+	s := &DeploymentSecretStore{ring: NewReloadableKeyRing(ring)}
 
-	sealed, err := s.seal("email.sendgrid_api_key", "sk-real-value")
+	sealed, err := s.seal(ring, "email.sendgrid_api_key", "sk-real-value")
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if _, err := s.open("llm.providers.openai.api_key", sealed, 1); err == nil {
+	if _, err := s.open(ring, "llm.providers.openai.api_key", sealed, 1); err == nil {
 		t.Fatal("a ciphertext sealed under one name opened under a different name -- AAD binding is broken")
 	}
 }

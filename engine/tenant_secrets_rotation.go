@@ -26,7 +26,26 @@ type SecretKeyCheck struct {
 
 // CheckKeyRing counts rows by key_version across every tenant and sorts each
 // version into "this ring can open it", "this ring can open it but it is not
-// current", and "this ring has no key for it".
+// current", and "this ring has no key for it" -- against the ring this store
+// has LIVE right now. Used at boot (checkSecretsUsable).
+//
+// See CheckKeyRingCandidate for the cleat#2298 variant that checks a
+// not-yet-installed ring instead -- this method is now that one, called with
+// s.ring.Load().
+func (s *SecretStore) CheckKeyRing(ctx context.Context) (SecretKeyCheck, error) {
+	return s.CheckKeyRingCandidate(ctx, s.ring.Load())
+}
+
+// CheckKeyRingCandidate is CheckKeyRing against an EXPLICIT ring rather than
+// whichever one this store currently has loaded -- cleat#2298's M4: before
+// installing a reloaded ring, a caller must confirm every stored secret
+// still opens under it, under the SAME shared lock registerWithKeyCheck
+// already takes at boot (engine.RegisterUnderKeyGate), so a SIGHUP reload
+// and another worker's boot cannot both be deciding the registry is safe at
+// once. This method does not take the lock or touch the registry itself --
+// that orchestration is cmd/cleat-worker's, once something calls Reload at
+// all (cleat#2298's follow-up PR) -- it is only the "does everything still
+// open" question, asked about a ring that is not live yet.
 //
 // THE READ IS THE ONE CountSecrets USES, tenant by tenant with suspended tenants
 // included, and for the reason cleat#2123 records: an unscoped read cannot see
@@ -35,9 +54,9 @@ type SecretKeyCheck struct {
 // which is exactly the wrong answer for the check whose whole purpose is to
 // refuse a worker that cannot open a row (specs/CleatKeyRotation.tla, S1).
 //
-// A store with no ring reports every row as unopenable, which is true: it has
-// no key for any of them.
-func (s *SecretStore) CheckKeyRing(ctx context.Context) (SecretKeyCheck, error) {
+// A nil candidate reports every row as unopenable, which is true: it has no
+// key for any of them.
+func (s *SecretStore) CheckKeyRingCandidate(ctx context.Context, candidate *KeyRing) (SecretKeyCheck, error) {
 	byVersion := map[int]int{}
 	err := s.forEachTenant(ctx, func(tctx context.Context, tid string) error {
 		return s.execTenantScoped(tctx, func(q querier) error {
@@ -59,15 +78,15 @@ func (s *SecretStore) CheckKeyRing(ctx context.Context) (SecretKeyCheck, error) 
 	if err != nil {
 		return SecretKeyCheck{}, err
 	}
-	chk := SecretKeyCheck{Unopenable: map[int]int{}, OnPrevious: map[int]int{}, Configured: s.ring.Versions()}
+	chk := SecretKeyCheck{Unopenable: map[int]int{}, OnPrevious: map[int]int{}, Configured: candidate.Versions()}
 	for version, n := range byVersion {
 		chk.Total += n
 		switch {
-		case s.ring == nil:
+		case candidate == nil:
 			chk.Unopenable[version] = n
-		case version == s.ring.current.Version:
+		case version == candidate.Current().Version:
 		default:
-			if _, ok := s.ring.Key(version); ok {
+			if _, ok := candidate.Key(version); ok {
 				chk.OnPrevious[version] = n
 			} else {
 				chk.Unopenable[version] = n
@@ -160,10 +179,20 @@ func (s *SecretStore) ResealSecrets(ctx context.Context, dryRun bool) (SecretRes
 	if s == nil || s.db == nil {
 		return res, ErrNoSecretDB
 	}
-	if s.ring == nil {
+	// ONE Load() for the whole sweep (cleat#2298's S2): "cur" already names
+	// one fixed version for every row this call reseals, so the ring that
+	// version came from must stay fixed for the call too, or a Reload
+	// landing mid-sweep could seal a LATER row under a ring whose "current"
+	// no longer matches the "cur" this call is comparing key_version
+	// against. A Reload mid-sweep is not an error -- it just means this
+	// sweep finishes under the ring it started with, and a second run
+	// picks up whatever is current by then, the same as it already would
+	// across two separate restarts.
+	ring := s.ring.Load()
+	if ring == nil {
 		return res, ErrNoSecretMasterKey
 	}
-	cur := s.ring.current.Version
+	cur := ring.Current().Version
 
 	err := s.forEachTenant(ctx, func(tctx context.Context, tid string) error {
 		res.Tenants++
@@ -197,17 +226,17 @@ func (s *SecretStore) ResealSecrets(ctx context.Context, dryRun bool) (SecretRes
 				res.Current++
 				continue
 			}
-			plaintext, err := s.open(tid, r.ciphertext, r.keyVersion)
+			plaintext, err := s.open(ring, tid, r.ciphertext, r.keyVersion)
 			if err != nil {
 				res.Unreadable = append(res.Unreadable, UnreadableSecret{
 					TenantID: tid, Name: r.name, KeyVersion: r.keyVersion, Reason: err.Error()})
 				continue
 			}
-			next, err := s.seal(tid, plaintext)
+			next, err := s.seal(ring, tid, plaintext)
 			if err != nil {
 				return fmt.Errorf("re-seal %q for tenant %s: %w", r.name, tid, err)
 			}
-			back, err := s.open(tid, next, cur)
+			back, err := s.open(ring, tid, next, cur)
 			if err != nil {
 				return fmt.Errorf("re-sealed %q for tenant %s does not open: %w", r.name, tid, err)
 			}

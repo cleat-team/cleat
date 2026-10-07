@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
 
@@ -71,10 +72,11 @@ type SecretStore struct {
 	db      *sql.DB
 	dialect string
 
-	// ring holds the master keys this deployment can use. Nil means secrets
+	// ring holds the master keys this deployment can use, reloadable
+	// (cleat#2298) without a restart. A nil LOADED ring means secrets
 	// cannot be used, which is distinct from "there are none" -- see
 	// CountSecrets and the worker's startup check.
-	ring *KeyRing
+	ring *ReloadableKeyRing
 
 	// beforeResealWrite, when set, runs between reseal's read of a row and its
 	// conditional write. It exists so a test can land a concurrent set-secret
@@ -97,18 +99,38 @@ type SecretStore struct {
 // be 32 bytes or nil.
 func NewSecretStore(db *sql.DB, dialect string, master []byte) (*SecretStore, error) {
 	if master == nil {
-		return &SecretStore{db: db, dialect: dialect}, nil
+		return &SecretStore{db: db, dialect: dialect, ring: NewReloadableKeyRing(nil)}, nil
 	}
 	ring, err := NewKeyRing(VersionedKey{Version: 1, Key: master})
 	if err != nil {
 		return nil, err
 	}
-	return &SecretStore{db: db, dialect: dialect, ring: ring}, nil
+	return &SecretStore{db: db, dialect: dialect, ring: NewReloadableKeyRing(ring)}, nil
 }
 
 // NewSecretStoreWithRing builds a store around a key ring. A nil ring is the
 // same as no master key.
+//
+// The ring is wrapped in a PRIVATE, unshared *ReloadableKeyRing (cleat#2298)
+// -- reloadable in the sense that the type supports it, but nothing outside
+// this function holds the handle Reload would need, so this constructor
+// behaves exactly as it did before: not reloadable at all. See
+// NewSecretStoreWithReloadableRing for a caller that wants to share a ring
+// (with DeploymentSecretStore, typically) or call Reload directly.
 func NewSecretStoreWithRing(db *sql.DB, dialect string, ring *KeyRing) *SecretStore {
+	return &SecretStore{db: db, dialect: dialect, ring: NewReloadableKeyRing(ring)}
+}
+
+// NewSecretStoreWithReloadableRing builds a store around a *ReloadableKeyRing
+// the caller already holds -- cleat#2298. Unlike NewSecretStoreWithRing, the
+// handle is SHARED: a Reload call the caller makes on this same ring takes
+// effect on the very next seal/open this store performs, with no restart.
+// Pass the SAME instance to NewDeploymentSecretStoreWithReloadableRing to
+// keep the two stores' key material reloaded together, in one call.
+func NewSecretStoreWithReloadableRing(db *sql.DB, dialect string, ring *ReloadableKeyRing) *SecretStore {
+	if ring == nil {
+		ring = NewReloadableKeyRing(nil)
+	}
 	return &SecretStore{db: db, dialect: dialect, ring: ring}
 }
 
@@ -118,6 +140,20 @@ func NewSecretStoreWithRing(db *sql.DB, dialect string, ring *KeyRing) *SecretSt
 //	CLEAT_SECRET_MASTER_KEY_VERSION        its key_version; default 1
 //	CLEAT_SECRET_MASTER_KEY_PREVIOUS       base64, 32 bytes: the key being retired
 //	CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION  its key_version; REQUIRED with the key
+//
+// EACH OF THE FOUR ALSO HAS A _FILE FORM (cleat#2298's M1) --
+// CLEAT_SECRET_MASTER_KEY_FILE, _VERSION_FILE, _PREVIOUS_FILE,
+// _PREVIOUS_VERSION_FILE -- a path whose CONTENT is read fresh on every
+// call, in place of the inline value. A running process's environment
+// cannot change, so a reload triggered by SIGHUP has nothing to re-read
+// unless the real value lives on disk instead: an operator who wants
+// in-place rotation sets the _FILE variable once, at boot, pointing at a
+// mounted secret that is updated by an atomic rename, and this function
+// picks up whatever it contains the next time it is called -- at boot, or
+// again on reload, with no process restart in between. The inline and
+// _FILE forms of one name are mutually exclusive (see
+// resolveSecretKeyInput): setting both is refused rather than silently
+// preferring one.
 //
 // It returns (nil, nil) when no key is configured at all, which is a legitimate
 // state (a deployment that uses no secrets) and is distinct from a
@@ -135,41 +171,84 @@ func SecretKeyRingFromEnv(getenv func(string) string) (*KeyRing, error) {
 		prevKey = "CLEAT_SECRET_MASTER_KEY_PREVIOUS"
 		prevVer = "CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION"
 	)
-	current, err := MasterKeyFromEnv(getenv(curKey))
+	curKeyVal, err := resolveSecretKeyInput(getenv, curKey)
+	if err != nil {
+		return nil, err
+	}
+	curVerVal, err := resolveSecretKeyInput(getenv, curVer)
+	if err != nil {
+		return nil, err
+	}
+	prevKeyVal, err := resolveSecretKeyInput(getenv, prevKey)
+	if err != nil {
+		return nil, err
+	}
+	prevVerVal, err := resolveSecretKeyInput(getenv, prevVer)
+	if err != nil {
+		return nil, err
+	}
+
+	current, err := MasterKeyFromEnv(curKeyVal)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", curKey, err)
 	}
-	previous, err := MasterKeyFromEnv(getenv(prevKey))
+	previous, err := MasterKeyFromEnv(prevKeyVal)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", prevKey, err)
 	}
 	if current == nil {
-		for _, name := range []string{curVer, prevKey, prevVer} {
-			if strings.TrimSpace(getenv(name)) != "" {
-				return nil, fmt.Errorf("%s is set but %s is not: a key ring needs its current key", name, curKey)
+		for _, name := range []string{curVerVal, prevKeyVal, prevVerVal} {
+			if strings.TrimSpace(name) != "" {
+				return nil, fmt.Errorf("%s (or its _FILE form) is set but %s is not: a key ring needs its current key",
+					curVer, curKey)
 			}
 		}
 		return nil, nil
 	}
-	version, err := KeyVersionFromEnv(getenv(curVer), 1, curVer)
+	version, err := KeyVersionFromEnv(curVerVal, 1, curVer)
 	if err != nil {
 		return nil, err
 	}
 	if previous == nil {
-		if strings.TrimSpace(getenv(prevVer)) != "" {
-			return nil, fmt.Errorf("%s is set but %s is not", prevVer, prevKey)
+		if strings.TrimSpace(prevVerVal) != "" {
+			return nil, fmt.Errorf("%s (or its _FILE form) is set but %s is not", prevVer, prevKey)
 		}
 		return NewKeyRing(VersionedKey{Version: version, Key: current})
 	}
-	pv, err := KeyVersionFromEnv(getenv(prevVer), 0, prevVer)
+	pv, err := KeyVersionFromEnv(prevVerVal, 0, prevVer)
 	if err != nil {
 		return nil, err
 	}
 	if pv == 0 {
-		return nil, fmt.Errorf("%s is set but %s is not: rows sealed under the previous key carry a "+
-			"version, and guessing it would mislabel them", prevKey, prevVer)
+		return nil, fmt.Errorf("%s (or its _FILE form) is set but %s is not: rows sealed under the previous "+
+			"key carry a version, and guessing it would mislabel them", prevKey, prevVer)
 	}
 	return NewKeyRing(VersionedKey{Version: version, Key: current}, VersionedKey{Version: pv, Key: previous})
+}
+
+// resolveSecretKeyInput returns name's effective value: read directly from
+// the environment, or from the file named by name+"_FILE" if THAT is set
+// instead. See SecretKeyRingFromEnv's doc comment for why the _FILE form
+// exists at all.
+//
+// BOTH SET IS REFUSED, not resolved by precedence. An operator who set both
+// almost certainly means to be changing which one takes effect -- mid
+// migration from the inline form to the file form, say -- and silently
+// preferring one would hide exactly the ambiguity that mistake creates.
+func resolveSecretKeyInput(getenv func(string) string, name string) (string, error) {
+	direct := strings.TrimSpace(getenv(name))
+	filePath := strings.TrimSpace(getenv(name + "_FILE"))
+	if direct != "" && filePath != "" {
+		return "", fmt.Errorf("both %s and %s are set; set exactly one", name, name+"_FILE")
+	}
+	if filePath == "" {
+		return direct, nil
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", name+"_FILE", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // SecretKeyVersionError is returned when a stored secret is sealed under a
@@ -234,14 +313,23 @@ func tenantKey(master []byte, tenantID string) ([]byte, error) {
 	return out, nil
 }
 
-// seal encrypts under the CURRENT key. The version it belongs to is
-// s.ring.Current().Version, which is immutable for the life of the store, so a
-// caller that writes the version beside the ciphertext cannot disagree with it.
-func (s *SecretStore) seal(tenantID, plaintext string) (string, error) {
-	if s.ring == nil {
+// seal encrypts under ring's CURRENT key. The version a row belongs to is
+// ring.Current().Version, so a caller that writes the version beside the
+// ciphertext in the SAME statement, from the SAME ring value, cannot
+// disagree with it.
+//
+// TAKES ring EXPLICITLY, rather than loading s.ring itself (cleat#2298's
+// S2): every caller Loads ONCE for its whole operation and passes that one
+// snapshot to every seal/open call it makes, so a Reload landing mid-call
+// cannot make a caller write a ciphertext sealed under one ring's current
+// key alongside a version number read from a DIFFERENT, later ring -- see
+// PutSecret for where that would otherwise happen between this call and its
+// own version read.
+func (s *SecretStore) seal(ring *KeyRing, tenantID, plaintext string) (string, error) {
+	if ring == nil {
 		return "", ErrNoSecretMasterKey
 	}
-	key, err := tenantKey(s.ring.current.Key, tenantID)
+	key, err := tenantKey(ring.Current().Key, tenantID)
 	if err != nil {
 		return "", err
 	}
@@ -268,13 +356,15 @@ func (s *SecretStore) seal(tenantID, plaintext string) (string, error) {
 // which is not the same as a key that is present and wrong: the first is a
 // configuration the operator can complete, the second is corruption or a
 // mislabelled row.
-func (s *SecretStore) open(tenantID, stored string, keyVersion int) (string, error) {
-	if s.ring == nil {
+//
+// TAKES ring EXPLICITLY -- see seal's doc comment for why.
+func (s *SecretStore) open(ring *KeyRing, tenantID, stored string, keyVersion int) (string, error) {
+	if ring == nil {
 		return "", ErrNoSecretMasterKey
 	}
-	k, ok := s.ring.Key(keyVersion)
+	k, ok := ring.Key(keyVersion)
 	if !ok {
-		return "", &SecretKeyVersionError{Version: keyVersion, Configured: s.ring.Versions()}
+		return "", &SecretKeyVersionError{Version: keyVersion, Configured: ring.Versions()}
 	}
 	key, err := tenantKey(k.Key, tenantID)
 	if err != nil {
@@ -319,7 +409,15 @@ func (s *SecretStore) PutSecret(ctx context.Context, tenantID, name, value strin
 	if !validSecretName(name) {
 		return fmt.Errorf("secret name %q must match [A-Za-z0-9_.-]{1,128}", name)
 	}
-	sealed, err := s.seal(tenantID, value)
+	// ONE Load() for this whole call (cleat#2298's S2): the ciphertext and
+	// the version written beside it below both come from this SAME ring
+	// snapshot, so a Reload landing between seal and the version read could
+	// not otherwise make this write disagree with itself -- sealing under
+	// one ring's current key while labelling the row with a LATER ring's
+	// current version, which that later ring may hold under different key
+	// bytes entirely.
+	ring := s.ring.Load()
+	sealed, err := s.seal(ring, tenantID, value)
 	if err != nil {
 		return err
 	}
@@ -327,7 +425,10 @@ func (s *SecretStore) PutSecret(ctx context.Context, tenantID, name, value strin
 	// both arms below. A row whose key_version disagrees with the key that
 	// sealed it opens under the wrong key or under none, and no later read can
 	// tell which -- so the two values are never written separately.
-	version := s.ring.current.Version
+	//
+	// ring is never nil here: seal already returned ErrNoSecretMasterKey
+	// above and this line was never reached, for exactly that case.
+	version := ring.Current().Version
 	return s.gatedWrite(ctx, version, func(q querier) error {
 		_, err := q.ExecContext(ctx, putSecretUpdateStmt(s.dialect), sealed, version, tenantID, name)
 		if err != nil {
@@ -409,7 +510,7 @@ func (s *SecretStore) GetSecret(ctx context.Context, tenantID, name string) (str
 	if err != nil {
 		return "", err
 	}
-	return s.open(tenantID, sealed, keyVersion)
+	return s.open(s.ring.Load(), tenantID, sealed, keyVersion)
 }
 
 // CountSecrets reports how many secrets exist across all tenants, retired
@@ -571,7 +672,11 @@ func countTenantSecretsStmt(dialect string) string {
 }
 
 // HasMasterKey reports whether secrets can be used at all.
-func (s *SecretStore) HasMasterKey() bool { return s != nil && s.ring != nil }
+// HasMasterKey checks the LOADED ring, not the wrapper: every constructor
+// always wraps a ring in a *ReloadableKeyRing (cleat#2298), even an empty
+// one, so s.ring itself is never nil once s is constructed, and a check
+// against the wrapper would always read true.
+func (s *SecretStore) HasMasterKey() bool { return s != nil && s.ring.Load() != nil }
 
 // KeyVersions lists the key versions this store can open, ascending; nil when
 // it holds no key. It is what a worker publishes to the registry.
@@ -579,7 +684,7 @@ func (s *SecretStore) KeyVersions() []int {
 	if s == nil {
 		return nil
 	}
-	return s.ring.Versions()
+	return s.ring.Load().Versions()
 }
 
 func validSecretName(name string) bool {

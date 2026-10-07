@@ -59,7 +59,7 @@ import (
 // therefore bookkeeping for KeyRing's own dedup checks, never read back from a
 // row -- see NewPayloadEncryptionWithRing.
 type PayloadEncryption struct {
-	ring *KeyRing
+	ring *ReloadableKeyRing
 }
 
 // tenantForAAD resolves the tenant a row's ciphertext must be bound to.
@@ -175,6 +175,26 @@ func (pe *PayloadEncryption) forTenantWithInfo(tenantID, info string) (*tenantCi
 	if tenantID == "" {
 		return nil, ErrNoTenantForEncryption
 	}
+	// pe == nil is a legal, fails-closed caller shape (TestPluginPayloadsFailsClosedWithNoEncryptor,
+	// SealForPlugin/OpenForPlugin called on a zero-value encryptor) -- and it
+	// has to be checked BEFORE touching pe.ring, which a nil pe cannot do at
+	// all: pe.ring.Load() is a field read on pe first and a method call on
+	// the result second, and the field read on a nil pe panics regardless of
+	// Load's own nil-receiver safety.
+	var snapshot *KeyRing
+	if pe != nil {
+		// ONE Load() for this whole call (cleat#2298's S2): every reader
+		// below -- deriving the current key here, and
+		// openUnderPreviousKeys/openUnderPreviousKeysDerivedOnly later via
+		// tc.ring -- sees the SAME ring, never two different ones if a
+		// Reload lands mid-call. Two separate pe.ring.Load() calls (one
+		// here, one implicit in a second field read) could otherwise
+		// straddle a concurrent Reload: this call would derive under the
+		// OLD current key while tc.ring already points at the NEW ring's
+		// previous-key set, which may not even contain the key this call
+		// just derived from.
+		snapshot = pe.ring.Load()
+	}
 	// A 32-byte current key is an invariant NewPayloadEncryption and
 	// NewPayloadEncryptionWithRing both enforce, and it has to be re-checked
 	// HERE because the derivation silently tolerates a bad one.
@@ -189,11 +209,10 @@ func (pe *PayloadEncryption) forTenantWithInfo(tenantID, info string) (*tenantCi
 	// ciphertext keyed off an empty master and reported success. Those two tests
 	// caught it; without them the loud failure would have become a silent one.
 	//
-	// A nil ring reads the same as a zero-value key (len 0) -- pe.currentKey
-	// handles both a nil *PayloadEncryption's ring and a ring with no current
-	// key configured, so this one check covers "never configured" and "half
-	// configured" identically.
-	cur, curLen := pe.currentKey()
+	// A nil snapshot reads the same as a zero-value key (len 0) -- currentKey
+	// handles both "never configured" (snapshot itself nil) and "half
+	// configured" (a non-nil ring with a short current key) identically.
+	cur, curLen := currentKey(snapshot)
 	if curLen != 32 {
 		return nil, fmt.Errorf("payload encryption: master key is %d bytes, want 32", curLen)
 	}
@@ -202,18 +221,21 @@ func (pe *PayloadEncryption) forTenantWithInfo(tenantID, info string) (*tenantCi
 	if _, err := io.ReadFull(r, derived); err != nil {
 		return nil, fmt.Errorf("payload encryption: derive tenant key: %w", err)
 	}
-	return &tenantCipher{tenantID: tenantID, derived: derived, master: cur, ring: pe.ring, info: info}, nil
+	return &tenantCipher{tenantID: tenantID, derived: derived, master: cur, ring: snapshot, info: info}, nil
 }
 
-// currentKey returns the ring's current key and its length, or (nil, 0) if no
-// ring is configured at all -- kept as one function so every caller that needs
-// "is this thing configured" asks it the same way pe.ring == nil would answer,
-// without repeating the nil check.
-func (pe *PayloadEncryption) currentKey() ([]byte, int) {
-	if pe == nil || pe.ring == nil {
+// currentKey returns ring's current key and its length, or (nil, 0) if ring
+// is nil -- kept as one function so every caller that needs "is this thing
+// configured" asks it the same way, without repeating the nil check. Takes
+// an explicit snapshot rather than reading pe.ring itself, so a caller that
+// already Loaded once for this call (forTenantWithInfo) cannot be tempted
+// into a second, potentially different, read -- see that function's doc
+// comment.
+func currentKey(ring *KeyRing) ([]byte, int) {
+	if ring == nil {
 		return nil, 0
 	}
-	cur := pe.ring.Current()
+	cur := ring.Current()
 	return cur.Key, len(cur.Key)
 }
 
@@ -281,14 +303,35 @@ func NewPayloadEncryption(keyBase64 string) (*PayloadEncryption, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &PayloadEncryption{ring: ring}, nil
+	return &PayloadEncryption{ring: NewReloadableKeyRing(ring)}, nil
 }
 
 // NewPayloadEncryptionWithRing builds a PayloadEncryption around a full key
 // ring: a current key that seals every new write, and any number of previous
 // keys that are read-only (cleat#1992). See PayloadEncryption's own doc
 // comment for why a previous key's Version is never persisted anywhere.
+//
+// The ring is wrapped in a PRIVATE, unshared *ReloadableKeyRing (cleat#2298)
+// -- reloadable in the sense that the type supports it, but nothing outside
+// this function holds the handle Reload would need, so this constructor is
+// exactly as reloadable as it was before: not at all. Every existing caller
+// keeps compiling and behaving identically. See
+// NewPayloadEncryptionWithReloadableRing for the constructor a caller that
+// DOES want to reload (sharing one ring with other stores, or calling
+// Reload directly) should use instead.
 func NewPayloadEncryptionWithRing(ring *KeyRing) (*PayloadEncryption, error) {
+	if ring == nil {
+		return nil, fmt.Errorf("payload encryption: a key ring is required")
+	}
+	return &PayloadEncryption{ring: NewReloadableKeyRing(ring)}, nil
+}
+
+// NewPayloadEncryptionWithReloadableRing builds a PayloadEncryption around a
+// *ReloadableKeyRing the caller already holds -- cleat#2298. Unlike
+// NewPayloadEncryptionWithRing, the handle is SHARED: a Reload call the
+// caller makes on this same ring takes effect on the very next seal/open
+// this PayloadEncryption performs, with no restart.
+func NewPayloadEncryptionWithReloadableRing(ring *ReloadableKeyRing) (*PayloadEncryption, error) {
 	if ring == nil {
 		return nil, fmt.Errorf("payload encryption: a key ring is required")
 	}
