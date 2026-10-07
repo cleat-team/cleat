@@ -16,7 +16,7 @@ toolchain go1.27.1
 // wasm/build.go's sdkRequiredVersion has no version here to fall back to
 // otherwise, since this file IS the source it reads.
 require (
-	github.com/cleat-team/cleat v0.3.2
+	github.com/cleat-team/cleat v0.4.0
 	github.com/google/uuid v1.6.0
 )
 
