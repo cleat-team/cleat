@@ -1663,48 +1663,6 @@ func TestJQMigrations(t *testing.T) {
 }
 
 // ===========================================================================
-// RegisterCommands
-// ===========================================================================
-
-func TestJQRegisterCommands(t *testing.T) {
-	p := &Plugin{}
-	cmds := p.RegisterCommands()
-	if len(cmds) == 0 {
-		t.Fatal("expected at least one command")
-	}
-	if cmds[0].Name != "jobqueue-enqueue" {
-		t.Errorf("expected Name 'jobqueue-enqueue', got %q", cmds[0].Name)
-	}
-	if cmds[0].Description == "" {
-		t.Error("expected non-empty Description")
-	}
-	if cmds[0].Run == nil {
-		t.Error("expected Run function to be non-nil")
-	}
-}
-
-func TestJQRegisterCommandsRunNoDSN(t *testing.T) {
-	p := &Plugin{}
-	cmds := p.RegisterCommands()
-	if len(cmds) == 0 {
-		t.Fatal("no commands registered")
-	}
-
-	// Valid flags but no DSN should produce a "database URL required" error.
-	err := cmds[0].Run([]string{
-		"--tenant=00000000-0000-0000-0000-000000000001",
-		"--queue=test-queue",
-		"--payload={}",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing DSN, got nil")
-	}
-	if !strings.Contains(err.Error(), "database URL required") {
-		t.Errorf("expected 'database URL required' error, got: %v", err)
-	}
-}
-
-// ===========================================================================
 // RegisterRoutes — nil mux
 // ===========================================================================
 
@@ -2109,66 +2067,6 @@ func TestJQ_Init_NilLogger(t *testing.T) {
 	}
 	if p.logger == nil {
 		t.Error("expected logger to be set")
-	}
-}
-
-// ===========================================================================
-// RegisterCommands — missing required flags
-// ===========================================================================
-
-func TestJQ_RegisterCommands_MissingArgs(t *testing.T) {
-	p := &Plugin{}
-	cmds := p.RegisterCommands()
-	if len(cmds) == 0 {
-		t.Fatal("no commands registered")
-	}
-
-	// Missing tenant flag.
-	err := cmds[0].Run([]string{
-		"--queue=test-queue",
-		"--payload={}",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing tenant, got nil")
-	}
-	if !strings.Contains(err.Error(), "tenant and queue are required") {
-		t.Errorf("expected 'tenant and queue are required' error, got: %v", err)
-	}
-
-	// Missing queue flag.
-	err = cmds[0].Run([]string{
-		"--tenant=00000000-0000-0000-0000-000000000001",
-		"--payload={}",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing queue, got nil")
-	}
-	if !strings.Contains(err.Error(), "tenant and queue are required") {
-		t.Errorf("expected 'tenant and queue are required' error, got: %v", err)
-	}
-}
-
-// ===========================================================================
-// RegisterCommands — invalid UUID
-// ===========================================================================
-
-func TestJQ_RegisterCommands_InvalidTenantUUID(t *testing.T) {
-	p := &Plugin{}
-	cmds := p.RegisterCommands()
-	if len(cmds) == 0 {
-		t.Fatal("no commands registered")
-	}
-
-	err := cmds[0].Run([]string{
-		"--tenant=not-a-uuid",
-		"--queue=test-queue",
-		"--payload={}",
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid tenant UUID, got nil")
-	}
-	if !strings.Contains(err.Error(), "invalid tenant UUID") {
-		t.Errorf("expected 'invalid tenant UUID' error, got: %v", err)
 	}
 }
 

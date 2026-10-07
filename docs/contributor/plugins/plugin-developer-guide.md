@@ -333,21 +333,6 @@ Not called if the process is killed (`SIGKILL`, OOM), and **not called for a plu
 failed** — the same rule `HasHealth` follows. If your `Init` returns an error it owns the cleanup of
 whatever it opened, because the worker cannot see what state it left you in.
 
-### HasCommands — CLI subcommands
-
-```go
-func (p *Plugin) RegisterCommands() []plugin.Command {
-    return []plugin.Command{{
-        Name:        "my-plugin-do-thing",
-        Description: "Do the thing from the command line",
-        Run: func(args []string) error {
-            // Do CLI work
-            return nil
-        },
-    }}
-}
-```
-
 ## Patterns Learned from the Blobstore Plugin
 
 ### 1. Logical deletion for shared data
