@@ -637,6 +637,22 @@ export class JsonBuilder {
   }
 
   /**
+   * Add a field whose value is already-serialized JSON text, spliced in
+   * verbatim rather than built through the typed add/start methods above.
+   *
+   * For exactly the case none of the other methods can express: a value
+   * whose shape this builder's caller does not control, such as a
+   * caller-supplied JSON Schema document for an LLM tool's parameters. The
+   * caller is responsible for `rawJson` being valid JSON -- this does not
+   * parse or validate it, only splices it in.
+   */
+  addRawJsonField(key: string, rawJson: string): void {
+    this.pushComma();
+    this.emitKey(key);
+    this.emit(rawJson);
+  }
+
+  /**
    * Add a boolean field to the current object.
    */
   addBool(key: string, val: bool): void {

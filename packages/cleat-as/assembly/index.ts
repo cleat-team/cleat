@@ -34,6 +34,7 @@
  * @packageDocumentation
  */
 
+export * from "./agent";
 export * from "./memory";
 export * from "./host-calls";
 export * from "./cleat-entry";
