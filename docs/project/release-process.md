@@ -100,8 +100,17 @@ squashed back-merge from a correct one:
 ```bash
 gh api repos/cleat-team/cleat/commits/$(git rev-parse origin/develop) \
   --jq '.parents | length'          # back-merge: expect 2.  feature/*: expect 1.
-git merge-base --is-ancestor vX.Y.Z origin/develop && echo "tag is an ancestor"
+scripts/check-ref-ancestry.sh vX.Y.Z origin/develop
 ```
+
+**Run that second line from a full clone, not a shallow one.** A bare `git
+merge-base --is-ancestor` used to sit here, and cleat#2463 is the reason it no
+longer does on its own: the same command, run by hand against a shallow
+checkout, reported a tag as unreachable and `git describe` as fatal, read as
+"develop's history may have been rewritten" -- when the whole of it was
+`.git/shallow`. `scripts/check-ref-ancestry.sh` refuses (exit 2, `UNMEASURED`)
+rather than answer from a checkout that cannot, instead of repeating that
+incident.
 
 A bare parent count means nothing without the PR kind: a `feature/*` squash is
 correct at **1**, and a back-merge is correct at **2**. Applying the wrong
@@ -112,17 +121,30 @@ rather than the number alone.
 to make `v0.2.0` an ancestor of `develop`, and its own body argued that "a real
 merge is the only shape that works" because a squash "carries the content, not the
 lineage". It was squashed by this queue regardless — its merge commit `4753106e`
-has **one** parent — and the lineage never arrived:
+has **one** parent — and the lineage had not arrived as of that measurement,
+**2026-09-17**:
 
 ```bash
-git merge-base --is-ancestor v0.2.0 origin/develop   # exit 1
-git describe --tags --abbrev=0 origin/develop        # v0.1.0 -- the release before main's v0.2.0
+scripts/check-ref-ancestry.sh v0.2.0 origin/develop   # exit 1 on 2026-09-17
+git describe --tags --abbrev=0 origin/develop         # v0.1.0 -- the release before main's v0.2.0
 ```
 
-(`v0.1.0` is a lightweight tag on an ordinary commit that `develop` does contain;
-`v0.2.0` is annotated and sits on `main` alone. So `describe` is not failing — it
-is answering correctly about the tag it can reach, and the answer is the wrong
+(`v0.1.0` is a lightweight tag on an ordinary commit that `develop` did contain;
+`v0.2.0` is annotated and sat on `main` alone. So `describe` was not failing — it
+was answering correctly about the tag it could reach, and the answer was the wrong
 release.)
+
+**This is a dated measurement, not a standing fact — re-running the same command
+today reports exit 0.** `cleat#2500` (2026-09-27, "back-merge main into develop —
+lineage, after the first was squashed", `cleat#2058`) is the repair: a correctly
+two-parented back-merge that finally carried `v0.2.0`'s lineage into `develop`.
+CLAUDE.md's own rule applies to this paragraph as much as anywhere else in this
+file — an undated fact that turns out wrong gets fixed in the same PR that finds
+it, which is what happened here while verifying the command above still runs: it
+does, and it answers the opposite of what this paragraph used to say without a
+date attached. The pedagogical point stands (a squashed back-merge looks like a
+successful merge everywhere except the parent count), only the live reproduction
+has moved on.
 
 Nothing failed; no check went red; the branch model is simply wrong. A squashed
 back-merge looks like a successful merge in every place you would normally look,
@@ -185,9 +207,17 @@ becomes continuous, and why anything written about this repo's release process
 before that date describes a world that no longer exists.
 
 ```bash
-git merge-base --is-ancestor origin/develop origin/main && echo connected
-git diff --stat origin/main origin/develop     # empty: same content
+scripts/check-ref-ancestry.sh origin/develop origin/main   # exit 0 at the moment of the repair
+git diff --stat origin/main origin/develop     # empty: same content, also at that moment
 ```
+
+**That first line is a point-in-time check, not a standing one — re-run it
+today and it reports exit 1.** `develop` is an ancestor of `main` exactly when
+the repair lands and not continuously after: `develop` keeps moving on every
+ordinary merge, `main` only catches up at the next release's back-merge. The
+command above is worth keeping as the way to verify a *specific* repair (this
+one, or the next back-merge after it) at the moment it lands, not as a live
+health check of the two branches on an arbitrary day.
 
 The repair took two attempts, and the failure is the clearest possible
 illustration of why it was needed. PR #463 merged `develop` into `main`
