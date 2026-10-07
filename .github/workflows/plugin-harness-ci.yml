@@ -1,5 +1,11 @@
 name: Plugin Harness Tests
 
+# cleat#3073: surfaces the triggering activity type in the run's display
+# title, so a PR body edit's run set is distinguishable from the one it
+# shares a SHA with. Full rationale in ci.yml, next to the same expression.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
 # CGO on, everywhere in this file. It was "0" in all four jobs, which does not
 # skip a check -- NewWasmtimeBackend is behind //go:build cgo, so disabling CGO
 # removed the primary backend. The same defect 2.70 fixed in multi-db-ci.yml, in
