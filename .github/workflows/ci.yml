@@ -240,6 +240,27 @@ jobs:
           scripts/check-onboarding-go-version.sh
           LINT_GUARD_EOF
 
+      # Four SDK stampers (AssemblyScript, Java, Python, Rust) each carry the
+      # version in their own manifest and their own injection script, with no
+      # single source of truth -- so a release bump that touches one site and
+      # misses another ships silently stale. cleat#3183 was exactly that: an
+      # undeclared discovery site the self-test's own declared-vs-discovered
+      # case would have caught, had anything run it.
+      #
+      # --self-test was never wired into CI at all before this -- only
+      # release-smoke.yml ran the PLAIN check (with --expected), and only on a
+      # release branch. A self-test nobody runs is "the mechanism that exists
+      # and is wired to nothing reads as done" (cleat#3184): it caught #3183
+      # the moment it was written, but only because WS-1 happened to run it by
+      # hand during an unrelated version bump.
+      - name: SDK version agreement guard
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "SDK version agreement guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-sdk-version-agreement.py --self-test
+          scripts/check-sdk-version-agreement.py
+          LINT_GUARD_EOF
+
       # ONE source for the Go toolchain: go.mod's `toolchain` line (cleat#2216). CI floated on
       # `go-version: stable` (which resolved to 1.27.1 the day #2215's panic appeared) and one workflow sat
       # on a hard-coded 1.26. Every go.mod/go.work carries the same go+toolchain pair, every setup-go step
