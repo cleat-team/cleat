@@ -326,22 +326,30 @@ func scanSDKHelperMethods(t *testing.T, sdk string) []sdkHelperMethod {
 					return true
 				}
 				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || !startsUpper(sel.Sel.Name) {
+				if !ok {
 					return true
 				}
 				switch x := sel.X.(type) {
 				case *ast.Ident: // h.Method(...) where h is a HostCalls parameter
 					switch {
-					case params[x.Name]:
+					case startsUpper(sel.Sel.Name) && params[x.Name]:
 						record(key, sel.Sel.Name, "parameter")
 					case recvName != "" && x.Name == recvName:
-						// s.Method(...) on this method's OWN receiver: an
+						// s.method(...) on this method's OWN receiver: an
 						// SDK-internal delegation, not a host call. Resolved
-						// transitively below.
+						// transitively below. Exported or not: the startsUpper
+						// gate exists to keep a random x.Method() from being
+						// read as a host call, but the safety for THIS branch
+						// comes from the key (recvType + "." + name), which
+						// closure() resolves against out[...] and is simply
+						// empty if the target carries no row -- not from the
+						// casing. cleat#2969: a same-receiver call to an
+						// unexported method was dropped here entirely, so
+						// anything it called contributed nothing to this row.
 						recordDelegate(key, recvType+"."+sel.Sel.Name)
 					}
 				case *ast.SelectorExpr: // s.h.Method(...) where h is a HostCalls field
-					if !fields[x.Sel.Name] {
+					if !startsUpper(sel.Sel.Name) || !fields[x.Sel.Name] {
 						return true
 					}
 					if id, ok := x.X.(*ast.Ident); ok && (recvName == "" || id.Name == recvName) {

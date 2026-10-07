@@ -149,7 +149,7 @@ func HostCallsMethod(sel *types.Selection) bool {
 // nil adapter, and it returns a zero value at run time. cleat#2627 was the
 // first change that had to update both lists in lockstep, and only one of the
 // two was covered by a test -- so TestEverySDKHelperRowIsAcceptedByTheGate
-// (wasm) now checks them against each other through SDKDurableHelperNames.
+// (wasm) now checks them against each other through SDKDurableHelperName.
 var sdkDurableHelpers = map[string]bool{
 	"Saga.AddStepCall": true,
 
