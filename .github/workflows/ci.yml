@@ -31,6 +31,18 @@
 # ---------------------------------------------------------------------------
 name: CI/CD Pipeline
 
+# cleat#3073: a PR body edit gives the run its own concurrency group (see
+# below) rather than cancelling the run it followed, so the SAME head SHA
+# can carry two run sets of this workflow with the same check names and
+# different outcomes -- and nothing on either run recorded which activity
+# produced it. `gh api .../runs/<id> --jq .display_title` was the field
+# someone reached for to tell them apart, and it was identical on both
+# (GitHub derives it from the PR title or head commit, not the activity
+# type). This appends the activity type cheaply, from a value the
+# concurrency expression below already computes.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
 on:
   push:
     branches: [main, develop]
