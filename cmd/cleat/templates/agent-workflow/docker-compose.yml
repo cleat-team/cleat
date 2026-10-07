@@ -1,0 +1,83 @@
+services:
+  postgres:
+    # Deliberately NOT digest-pinned, unlike the twelve sites cleat's own CI and
+    # compose files use (see .github/workflows/tier1-gate.yml for the reasoning).
+    # This file is scaffolded into someone else's project, and a digest frozen on
+    # the day they ran `cleat init` is theirs to carry, not ours to choose. 16 is
+    # cleat's minimum supported PostgreSQL -- see README.
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cleat
+      POSTGRES_PASSWORD: cleat
+      POSTGRES_DB: cleat
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # Schema migration, as a one-shot deploy step (cleat#2117): a worker no
+  # longer migrates itself at every start. Runs as the postgres superuser --
+  # DDL needs it, and the schema baseline creates the lesser role below --
+  # cleat_app -- so nothing else can connect before it has run.
+  migrate:
+    image: ghcr.io/cleat-team/cleat-worker:latest
+    command:
+      - "--migrate-only"
+      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # The schema baseline creates cleat_app NOLOGIN and without a password,
+  # deliberately: a credential does not belong in a file that migrations
+  # commit and replay. This one-shot step supplies one for local development,
+  # once the migration above has created the role to receive it.
+  app-role:
+    image: postgres:16
+    environment:
+      PGPASSWORD: cleat
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -h
+      - postgres
+      - -U
+      - cleat
+      - -d
+      - cleat
+      - -c
+      - "ALTER ROLE cleat_app LOGIN PASSWORD '${CLEAT_APP_PASSWORD:-cleat-app-local-dev}';"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  worker:
+    image: ghcr.io/cleat-team/cleat-worker:latest
+    # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it cancels its runs
+    # (cleat#2285). Docker sends SIGKILL after 10s unless told otherwise, which would cut the drain off.
+    stop_grace_period: 60s
+    command:
+      # NOT the postgres superuser above. Every tenant-scoped table has row-
+      # level security FORCEd, and PostgreSQL never applies RLS to a
+      # superuser -- which is what cleat_app is for. --require-auth
+      # (on by default) refuses to start over a connection that is exempt
+      # from RLS, which is what catches this if it regresses.
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      # Used only for the startup schema-verification's error message; this
+      # worker does not migrate itself -- see the migrate service above.
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--api-addr=:8080"
+      - "--plugin-config=/etc/cleat/plugins.json"
+    ports:
+      - "8080:8080"
+    depends_on:
+      app-role:
+        condition: service_completed_successfully
+    volumes:
+      - ./plugin-config.json:/etc/cleat/plugins.json:ro
