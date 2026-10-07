@@ -73,7 +73,7 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 	// computed below rather than pinned here as a fixed string: a fixed
 	// string would silently stop testing the rule the moment any
 	// scaffold's own source layout changed.
-	for _, template := range []string{"basic", "agent", "workflow", "fullstack"} {
+	for _, template := range []string{"basic", "agent", "agent-workflow", "workflow", "fullstack"} {
 		t.Run(template, func(t *testing.T) {
 			root := t.TempDir()
 			name := "p_" + template
