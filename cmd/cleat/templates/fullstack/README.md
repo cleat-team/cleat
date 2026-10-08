@@ -38,9 +38,9 @@ Two things that can differ on your machine:
   `CLEAT_API_PORT=8081 make up`) and use the same values for every `make` target,
   `make web` included (it forwards to that port; `CLEAT_WEB_PORT` moves the page off 3000).
 - **The worker image.** `docker-compose.yml` uses
-  `ghcr.io/cleat-team/cleat-worker:latest`, which is published with each release.
-  If `docker pull` says `denied`, no release has published it yet: build it from a
-  cleat checkout and point compose at it,
+  `ghcr.io/cleat-team/cleat-worker:latest`, which is published with each release
+  and public -- no login needed to pull it. To develop against a local build
+  instead, build it from a cleat checkout and point compose at it,
   `docker build -t cleat-worker:local . && CLEAT_WORKER_IMAGE=cleat-worker:local make up`.
 
 ## What is wired, and why
