@@ -30,6 +30,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/tenantctx"
+	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/wasm"
@@ -2342,6 +2343,21 @@ type Worker struct {
 	keyExpiryWindow         time.Duration
 	deadLetterRetentionDays int
 
+	// schemaMigrator is the SAME *migration.Runner main() uses for the one-time
+	// startup check (cleat#2117) -- reused rather than rebuilt, so a periodic
+	// runtime recheck can never disagree with boot about what "current" means.
+	// Nil in a Worker built without the full main() setup (most unit tests),
+	// which schemaCheckLoop treats as "nothing to check" rather than a panic.
+	schemaMigrator      *migration.Runner
+	schemaCheckInterval time.Duration
+	// schemaBehind is read by healthReport() on every /readyz request without
+	// touching the database -- set only by schemaCheckLoop, matching dbReach's
+	// own "state already in memory" rule (see health.go's package doc).
+	schemaBehind    atomic.Bool
+	schemaStateMu   sync.Mutex
+	schemaLastCheck migration.SchemaState
+	schemaLastErr   error
+
 	// Version GC. versionGCInterval is the switch: 0 means the sweep never
 	// runs and GC is reachable only through cleatctl or the HTTP endpoint.
 	// cleat#1315.
@@ -2706,6 +2722,10 @@ func (w *Worker) Run() {
 	// health tracker to expect a run. versionGCLoop registers itself once it
 	// knows it is actually going to keep running. cleat#2004.
 	w.initLoopCtxUnmonitored("version_gc")
+	// schema_check (cleat#2264) is the same shape: launched unconditionally,
+	// no-ops when w.schemaMigrator is nil (a Worker built without the full
+	// main() setup, which most unit tests are).
+	w.initLoopCtxUnmonitored("schema_check")
 	initLoopCtx("compaction")
 	if *metricsSweepInterval > 0 {
 		initLoopCtx("metrics_sweep")
@@ -2817,6 +2837,10 @@ func (w *Worker) Run() {
 	// Retention loop.
 	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
 	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
+
+	// Runtime schema-version recheck (cleat#2264).
+	w.registerLoopFunc("schema_check", w.schemaCheckLoop)
+	w.launchLoop("schema_check", w.schemaCheckLoop)
 
 	// Version GC. Separate loop rather than a fourth arm of retentionLoop:
 	// its interval is its own flag, it is off by default while --retention-days
@@ -6173,6 +6197,127 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays, de
 			w.healthTracker.recordRun("retention")
 			w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
 		}
+	}
+}
+
+// schemaCheckDeadline bounds schemaCheckLoop's Verify call. Longer than
+// dbCallDeadline() on purpose: Verify issues several reads (the core
+// tracking table, plugin.VerifyMigrations' own per-plugin checks), not the
+// single bounded call that family of constants is sized for.
+const schemaCheckDeadline = 10 * time.Second
+
+// schemaCheckLoop periodically re-verifies the schema against this binary,
+// the same check main() runs once at boot (cleat#2117) -- cleat#2264: a
+// database restored from an older backup, or rolled back, while workers are
+// already running is otherwise never noticed, because nothing after boot
+// looks again. Feeds /readyz's schema_behind reason; does not affect
+// /livez, because a schema mismatch is a reason to stop sending this worker
+// traffic, not evidence the process itself is stuck.
+//
+// TICK-FIRST, not sweep-first, matching the loop registry's own house
+// style (see retentionLoop's comment) -- unlike retention, there is nothing
+// to gain from running at t=0: a worker that got this far already passed
+// the startup check this loop re-runs.
+func (w *Worker) schemaCheckLoop() {
+	defer w.wg.Done()
+	if w.schemaMigrator == nil {
+		// Built without the full main() setup (most unit tests, and any
+		// embedding that never configured one) -- nothing to check against.
+		//
+		// Registered with the health tracker HERE, not unconditionally at
+		// startup, for the same reason versionGCLoop's identical guard is
+		// (cleat#2004): initLoopCtxUnmonitored("schema_check") gives
+		// launchLoop a context to start this goroutine with regardless, but
+		// a Worker with no migrator must not be reported as a stale loop for
+		// a check that was never going to run.
+		return
+	}
+	interval := w.schemaCheckInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	w.healthTracker.registerLoop("schema_check")
+	w.healthTracker.setInterval("schema_check", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.getLoopCtx("schema_check").Done():
+			return
+		case <-ticker.C:
+			w.healthTracker.recordRun("schema_check")
+			w.runSchemaCheck()
+		}
+	}
+}
+
+// runSchemaCheck is schemaCheckLoop's single tick, split out so a test can
+// call it directly without waiting on a ticker.
+func (w *Worker) runSchemaCheck() {
+	ctx, cancel := context.WithTimeout(w.ctx, schemaCheckDeadline)
+	defer cancel()
+
+	err := verifySchema(ctx, w.schemaMigrator, w.db, plugin.Dialect(w.dbDialect), w.plugList, w.schemaName,
+		func(msg string, args ...any) {
+			w.logger.WarnContext(context.Background(), msg, append([]any{"worker_id", w.id}, args...)...)
+		})
+
+	var behindErr *migration.SchemaBehindError
+	var pluginBehindErr *plugin.PluginSchemaBehindError
+	switch {
+	case errors.As(err, &behindErr):
+		w.schemaStateMu.Lock()
+		w.schemaLastCheck = behindErr.State
+		w.schemaLastErr = err
+		w.schemaStateMu.Unlock()
+		w.schemaBehind.Store(true)
+		w.logger.ErrorContext(context.Background(), "readiness check: "+err.Error(), "worker_id", w.id)
+	case errors.As(err, &pluginBehindErr):
+		w.schemaStateMu.Lock()
+		w.schemaLastErr = err
+		w.schemaStateMu.Unlock()
+		w.schemaBehind.Store(true)
+		w.logger.ErrorContext(context.Background(), "readiness check: "+err.Error(), "worker_id", w.id)
+	case err != nil:
+		// Could not establish either way -- a connectivity blip, most likely,
+		// already covered by /readyz's own database_unreachable reason via
+		// dbReach. Leaving schemaBehind as it was avoids claiming a schema
+		// finding this tick did not actually make.
+		w.schemaStateMu.Lock()
+		w.schemaLastErr = err
+		w.schemaStateMu.Unlock()
+		w.logger.WarnContext(context.Background(), "could not re-verify the schema version", "worker_id", w.id, "error", err)
+	default:
+		// Current. schemaLastCheck is left at whatever the last BEHIND
+		// finding (if any) recorded -- verifySchema's happy path does not
+		// hand back a SchemaState, and this tick is not worth a second
+		// Verify call just to refresh an admin-route diagnostic nobody
+		// gates on. schemaLastErr clearing is what matters: it is what
+		// says the state below is current and good.
+		w.schemaStateMu.Lock()
+		w.schemaLastErr = nil
+		w.schemaStateMu.Unlock()
+		w.schemaBehind.Store(false)
+	}
+}
+
+// schemaSnapshot is runSchemaCheck's cached verdict, read by healthReport() on
+// every /readyz and /api/admin/health request without touching the database --
+// the same "state already in memory" rule dbReach.snapshot() follows.
+type schemaSnapshot struct {
+	Behind bool
+	Err    error
+	State  migration.SchemaState
+}
+
+func (w *Worker) schemaSnapshot() schemaSnapshot {
+	w.schemaStateMu.Lock()
+	defer w.schemaStateMu.Unlock()
+	return schemaSnapshot{
+		Behind: w.schemaBehind.Load(),
+		Err:    w.schemaLastErr,
+		State:  w.schemaLastCheck,
 	}
 }
 

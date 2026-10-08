@@ -28,6 +28,11 @@ const (
 	reasonDraining        = "draining"
 	reasonMemoryPressure  = "memory_pressure"
 	reasonPluginUnhealthy = "plugin_unhealthy"
+	// reasonSchemaBehind: cleat#2264. Set by schemaCheckLoop's periodic
+	// re-verification, the runtime counterpart to the startup refusal
+	// cleat#2117 added -- a database restored from an older backup, or
+	// rolled back, while this worker is already running and serving.
+	reasonSchemaBehind = "schema_behind"
 )
 
 // healthReport is everything the four handlers report, computed once per request from state that is
@@ -48,6 +53,7 @@ type healthReport struct {
 	memoryPressure    float64
 	draining          bool
 	db                dbSnapshot
+	schema            schemaSnapshot
 }
 
 func (w *Worker) healthReport() healthReport {
@@ -82,6 +88,15 @@ func (w *Worker) healthReport() healthReport {
 		r.notReady = append(r.notReady, reasonStarting)
 	case !r.db.Reachable:
 		r.notReady = append(r.notReady, reasonDatabase)
+	}
+	// cleat#2264: readiness only, like draining and database above -- a
+	// schema mismatch is a reason to stop sending this worker traffic, not
+	// evidence /livez's "is the process stuck" question should say yes.
+	// Reads schemaCheckLoop's own cached verdict; never touches the
+	// database itself (see this file's own package doc).
+	r.schema = w.schemaSnapshot()
+	if r.schema.Behind {
+		r.notReady = append(r.notReady, reasonSchemaBehind)
 	}
 	if w.memoryController != nil {
 		if p := w.memoryController.Pressure(); p > 0 {
@@ -208,6 +223,16 @@ func (s *apiServer) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 	if !rep.db.FailingSince.IsZero() {
 		db["unreachable_since"] = rep.db.FailingSince.UTC().Format(time.RFC3339)
 	}
+	// cleat#2264.
+	schema := map[string]any{"behind": rep.schema.Behind}
+	if rep.schema.Err != nil {
+		schema["last_error"] = rep.schema.Err.Error()
+	}
+	if rep.schema.Behind {
+		schema["latest_shipped"] = rep.schema.State.LatestShipped
+		schema["latest_applied"] = rep.schema.State.LatestApplied
+		schema["pending"] = rep.schema.State.Pending
+	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"live":                      len(rep.notLive) == 0,
 		"ready":                     len(rep.notReady) == 0,
@@ -219,5 +244,6 @@ func (s *apiServer) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 		"memory_pressure":           rep.memoryPressure,
 		"draining":                  rep.draining,
 		"database":                  db,
+		"schema":                    schema,
 	})
 }

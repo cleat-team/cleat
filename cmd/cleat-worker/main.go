@@ -2365,6 +2365,8 @@ func main() {
 		metricsSweepInterval:             *metricsSweepInterval,
 		keyExpiryWindow:                  *keyExpiryWindow,
 		retentionInterval:                *retentionInterval,
+		schemaMigrator:                   migrator,
+		schemaCheckInterval:              *schemaCheckInterval,
 		versionGCInterval:                *versionGCInterval,
 		versionGCMinVersions:             *versionGCMinVersions,
 		versionGCMaxAge:                  *versionGCMaxAge,
