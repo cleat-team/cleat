@@ -1,9 +1,4 @@
 engine/concurrency_key_holder.go	GetConcurrencyKeyHolder	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/mssql_events.go	CountEventHistory	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/mssql_events.go	IsHistorySwept	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/mssql_events.go	LoadEventHistory	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/mssql_events.go	LoadEventHistoryPaginated	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/mssql_events.go	StreamEventHistory	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/mssql_lifecycle.go	CountRunnableWorkflows	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/mssql_lifecycle.go	RetryWorkflow	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/mssql_lifecycle.go	childrenClosedByTerminate	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
