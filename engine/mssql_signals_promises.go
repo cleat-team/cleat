@@ -530,11 +530,13 @@ func (s *MSSQLStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID s
 	// BOTH a tenant-scoped transaction AND an explicit tenant predicate, and
 	// the predicate is the load-bearing half here.
 	//
-	// dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection
-	// (migrations/mssql/012_admin_role.sql), which is what a multi-tenant
-	// deployment must use -- so on this dialect the WHERE clause is the whole
-	// of the isolation, not defence in depth behind it. Written without the
-	// predicate first and caught by
+	// dbo.fn_tenant_filter has no bypass at all by default -- since cleat#1541
+	// the shipped predicate checks SESSION_CONTEXT('tenant_id') and nothing
+	// else, so even a dbo.cleat_admin connection is filtered unless a
+	// deployment has separately applied the optional
+	// migrations/mssql/optional/cross_tenant_claim.sql. So on this dialect the
+	// WHERE clause is the whole of the isolation, not defence in depth behind
+	// it. Written without the predicate first and caught by
 	// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate.
 	//
 	// The transaction still matters for the single-tenant deployments where the
