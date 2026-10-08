@@ -249,9 +249,10 @@ def unwrap_version_comments(text):
     discards it as a fragment that is "only comments and whitespace", and the
     baseline applies CLEANLY with no trigger at all.
 
-    Nothing reports it. catalogdiff reads no MySQL triggers (acceptance
-    section 0), so the differential is empty; the file applies; the count of
-    statements is nobody's assertion. The chain never uses this form -- it
+    Nothing reported it until cleat#2882 taught catalogdiff to read MySQL
+    triggers too (originally found: acceptance section 0) -- before that, the
+    differential was empty, the file applied, and the count of statements was
+    nobody's assertion. The chain never uses this form -- it
     writes `CREATE TRIGGER … END//` with its own DELIMITER -- so the version
     comment is purely a dump artifact, and unwrapping restores the chain's
     shape.

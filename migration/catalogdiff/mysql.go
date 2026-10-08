@@ -13,7 +13,24 @@ import (
 // row-level-security or policy concept in this schema, so every Table's
 // RowSecurity is nil and Policies is empty -- Diff treats an absent
 // RowSecurity the same on both sides, so this never produces a spurious
-// difference between two MySQL snapshots.
+// difference between two MySQL snapshots. Catalog.Schemas is also left empty
+// on this dialect, and deliberately so: on MySQL a schema IS the database (see
+// the grants query below), so there is no narrower namespace a Schemas list
+// could name without comparing the per-test database name against itself.
+//
+// Triggers are captured (folded into Routines, matching how PROCEDURE and
+// FUNCTION are keyed below) -- cleat#2882. information_schema.routines is
+// PROCEDURE/FUNCTION only; a trigger is a separate catalog object and was
+// invisible to this snapshot entirely until this change, which is live
+// today: migrations/mysql/003_procedures.sql defines
+// tenants_org_id_immutable (BEFORE UPDATE on tenants, enforcing org_id
+// immutability), and a database missing that trigger presented identical
+// rows to every query this function made.
+//
+// Roles are deliberately NOT captured here, unlike mssql.go's Catalog.Roles.
+// Whether any MySQL CREATE ROLE object exists in this tree was not resolved
+// when this change was made -- see cleat#2882's remaining scope rather than
+// treating this silence as "checked, none exist".
 func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	cat := &Catalog{
 		Dialect:  migration.DialectMySQL,
@@ -240,6 +257,36 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		return nil, fmt.Errorf("catalogdiff: listing routines: %w", err)
 	}
 	rtRows.Close()
+
+	// Triggers -- cleat#2882, see this function's header comment. Keyed as
+	// "TRIGGER "+name, matching the "PROCEDURE "+name / "FUNCTION "+name shape
+	// the routines loop above already uses, so canonicalize needs no change --
+	// a Routines entry renders as one comparable line regardless of which
+	// query populated it. ACTION_TIMING, EVENT_MANIPULATION and
+	// EVENT_OBJECT_TABLE are folded into the value alongside the body so a
+	// trigger that fires on a different event or a different table, but
+	// keeps an identical body, still produces a difference.
+	trigRows, err := db.QueryContext(ctx, `
+		SELECT trigger_name, action_timing, event_manipulation, event_object_table, action_statement
+		FROM information_schema.triggers
+		WHERE trigger_schema = DATABASE()
+		ORDER BY trigger_name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("catalogdiff: listing triggers: %w", err)
+	}
+	for trigRows.Next() {
+		var name, timing, event, table, stmt string
+		if err := trigRows.Scan(&name, &timing, &event, &table, &stmt); err != nil {
+			trigRows.Close()
+			return nil, fmt.Errorf("catalogdiff: scanning trigger for %s: %w", name, err)
+		}
+		cat.Routines["TRIGGER "+name] = fmt.Sprintf("%s %s ON %s FOR EACH ROW %s", timing, event, table, stmt)
+	}
+	if err := trigRows.Err(); err != nil {
+		return nil, fmt.Errorf("catalogdiff: listing triggers: %w", err)
+	}
+	trigRows.Close()
 
 	// table_schema is deliberately left OUT of the comparable string. On every other
 	// dialect a schema is a namespace that can genuinely differ from another schema in
