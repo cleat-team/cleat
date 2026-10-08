@@ -95,8 +95,10 @@ def check(pr_body, closing_issues_json):
         "  - add a closing reference as a bare number, e.g. 'Closes #1234'\n"
         "    (not 'cleat#1234' -- see the Closing References check), or\n"
         "  - say so explicitly if this genuinely closes nothing, e.g. 'Closes nothing.'\n"
-        "    or 'Does not fix #N' when the PR is a step toward an issue it does not\n"
-        "    close yet.\n\n"
+        "    or 'Does not fix it.' / 'Does not close it.' when the PR is a step toward\n"
+        "    an issue it does not close yet. Do NOT repeat the number: a bare '#N' after\n"
+        "    the keyword arms GitHub's own parser, and the negated-closing-reference\n"
+        "    check will flag it.\n\n"
         "Silence here is exactly what left cleat#1116 open for two days after its fix\n"
         "had already merged."
     )
