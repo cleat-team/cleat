@@ -33,7 +33,7 @@ func TestNewReturnsAUsablePlugin(t *testing.T) {
 func TestTenantLifecycleInit(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     &engine.SQLDBAdapter{DB: &sql.DB{}},
+		DB:     &engine.SQLDBAdapter{DB: &sql.DB{}, Dialect: plugin.DialectPostgres},
 		Logger: slog.Default(),
 	}
 	if err := p.Init(context.Background(), env); err != nil {
@@ -52,7 +52,7 @@ func TestTenantLifecycleInit(t *testing.T) {
 
 func TestTenantLifecycleInitWithNilLoggerDefaults(t *testing.T) {
 	p := &Plugin{}
-	env := &plugin.Environment{DB: &engine.SQLDBAdapter{DB: &sql.DB{}}}
+	env := &plugin.Environment{DB: &engine.SQLDBAdapter{DB: &sql.DB{}, Dialect: plugin.DialectPostgres}}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
