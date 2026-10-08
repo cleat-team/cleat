@@ -284,8 +284,11 @@ built, already executed and already in CI.** That belongs here, where the
 number is read, and not only in the other pairs' READMEs.
 
 On the **integration-hub** pair — the one that exercises the WASM sandbox, the
-differentiator #2597 names — the two sides' application code is all but equal:
-`app total` is cleat **215** against DBOS **200**, a ratio of **1.075x**. The
+differentiator #2597 names — the two sides' application code is close to
+parity: `app total` is cleat **215** against DBOS **166**, a ratio of
+**1.30x** (cleat#3041 corrected DBOS's side from 200 -- it had included 34
+lines of hand-rolled test-driver scaffolding cleat's side never pays, since
+Go's `testing` package supplies cleat's equivalent for free). The
 third pair (`b2b-saas-control-plane`) is 641 against 468, **1.37x**. cleat
 carries a one-off 124-line platform cost on the sandbox pair that DBOS carries
 nothing for, because DBOS has no primitive for tenant-supplied code at all. See

@@ -443,32 +443,37 @@ is SMALLER") was read as evidence in
 `examples/order-lifecycle-dbos-port/README.md`, and is corrected there in
 this same PR.
 
-**One residual asymmetry of the same class remains, and it is named here
-rather than smoothed over — but this PR does not remove it.** DBOS's
-counted `unit tests` row is its test file minus the three behaviour
-functions, and that remainder still includes the hand-rolled `main()`
-driver, config/launch and exit-code plumbing `isolated-wedge.test.ts`
-needs because the port runs `node run-tests.js` rather than a test
-framework, where Go's `testing` package supplies cleat's equivalent for
-free. So part of that 72 is scaffolding cleat's side excludes, and
-**leaving it in the sum flatters cleat by up to those lines** — the wrong
-direction for a pair whose whole purpose is to be the CONTROL. It is left
-in the table anyway because pulling it out is a second design question
-(what counts as "the test file" on a side with no test runner), and this
-PR answers only the behaviour-assertion asymmetry cleat#2642 names;
-stating the residual lets a reader subtract it rather than be misled by a
-silence. It is filed as **cleat#3041** rather than left to this paragraph
-alone.
+**Corrected 2026-10-08 (cleat#3041):** this section used to say the
+residual below was left in the sum. DBOS's counted `unit tests` row was
+its test file minus the three behaviour functions, and that remainder
+still included the hand-rolled `main()` driver, config/launch and
+exit-code plumbing `isolated-wedge.test.ts` needs because the port runs
+`node run-tests.js` rather than a test framework, where Go's `testing`
+package supplies cleat's equivalent for free — so part of the old 72 was
+scaffolding cleat's side excludes, and leaving it in the sum flattered
+cleat by up to those lines, the wrong direction for a pair whose whole
+purpose is to be the CONTROL. The owner ruled **A** on cleat#3041: adjust
+the DBOS column so the two rows measure the same kind of code. The
+boundary drawn is the driver orchestration (`DBOS.setConfig`/`launch`,
+the positive-control gate, `shutdown`, the two `process.exit` codes) plus
+the top-level `main().catch(...)` crash handler — **34** lines, now its
+own excluded row below, in the same shape as `e2e harness machinery`. The
+stuck-loop/SIGKILL/sentinel branch stays IN `unit tests`: it asserts a
+BEHAVIOUR (a genuinely wedged isolate cannot be terminated) that cleat's
+side has an analogous assertion for, not scaffolding. `unit tests` is now
+**38**, and the DBOS-isolated app total moves from 200 to **166** —
+re-derive both with `scripts/dbos-pair-loc.sh integration-hub`.
 
 | role | cleat | DBOS-isolated |
 |---|---:|---:|
 | tenant code | **55** | **24** |
 | host runner | **25** | **54** |
-| unit tests | **50** | **72** |
+| unit tests | **50** | **38** |
 | behaviour assertions | **85** | **50** |
-| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **200** |
+| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **166** |
 | platform (own line — not summed above) | **124** | **0** |
 | e2e harness machinery (own line — not summed above, see below) | **154** | **42** |
+| unit test driver (own line — not summed above, see below — cleat#3041) | **0** | **34** |
 
 *Bare `DBOS.runStep` (no sandbox) is deliberately not a row or a column
 here either — it is the CONTROL, reported separately below, at **104**
@@ -502,10 +507,12 @@ tracks edits rather than silently drifting):
   `TenantStepName` (`TestSyncCustomer_RunsTheTenantsOwnStep`,
   `TestSyncCustomer_ATenantStepThatFailsNamesItsStep`). DBOS-isolated's is
   `isolated-wedge.test.ts` **minus its three `test…()` behaviour
-  functions**, which are counted in the row below instead — what remains
-  is that file's `main()` driver, config/launch, helpers and exit-code
-  plumbing (see the "sixth shape" paragraph above for why that remainder
-  stays in the sum, and for the residual it carries).
+  functions** (counted in the row below instead) **and minus its
+  hand-rolled test driver** (counted in `unit test driver` below instead
+  — cleat#3041; see the correction above). What remains is the shared
+  scaffolding (imports, the `CLAIM` string, the state flags, `log`,
+  `SAFETY_MARGIN_MS`, `delay`) plus the stuck-loop/SIGKILL/sentinel
+  branch, which asserts a behaviour rather than driving the test run.
 - **behaviour assertions**: the three tenant behaviours each side tests —
   positive control, `read-host-file` refusal, and the `infinite-loop`
   timeout. cleat's are the three `# ---- <behaviour>` banner blocks inside
@@ -523,6 +530,12 @@ tracks edits rather than silently drifting):
   not double-count it) for cleat, and `scripts/run-integration-hub-dbos-scenario.sh`
   for DBOS-isolated — see immediately below for why these are shown but
   not summed.
+- **unit test driver** (cleat#3041): nothing for cleat, which gets this for
+  free from Go's `testing` package — `isolated-wedge.test.ts`'s driver
+  orchestration (`DBOS.setConfig`/`launch`, the positive-control gate,
+  `shutdown`, the two `process.exit` codes) plus the top-level
+  `main().catch(...)` crash handler for DBOS-isolated. See the correction
+  above for why this is its own row rather than part of `unit tests`.
 
 **Why the two harness scripts get their own excluded row instead of being
 folded into "unit tests" or dropped.** cleat's harness script is 239 lines
@@ -555,12 +568,16 @@ rather than receive it from DBOS.
 **So the honest reading of this table is not a single number — it is
 several separate claims, each real:**
 
-1. **The like-for-like application-code TOTAL is roughly equal — cleat
-   larger by 215 to 200 — and that near-parity is a real reading now, not
-   a placement artefact.** An earlier version of this table reported
-   **130 vs. 200, with cleat SMALLER**; that gap was a placement artefact
-   rather than a cost difference, and cleat#2642 removed it (see "the
-   sixth shape" above for the mechanism and the direction). 215 vs. 200 is
+1. **The like-for-like application-code TOTAL is cleat larger by 215 to
+   166, and that gap is a real reading now, not a placement or scaffolding
+   artefact.** An earlier version of this table reported **130 vs. 200,
+   with cleat SMALLER**; that gap was a placement artefact rather than a
+   cost difference, and cleat#2642 removed it (see "the sixth shape" above
+   for the mechanism and the direction). The total then read 215 vs. 200
+   until cleat#3041 found that DBOS-isolated's side of it still included
+   34 lines of hand-rolled test-driver scaffolding cleat's side never
+   counted (see the correction above) — removing it moved DBOS-isolated's
+   total to 166 without touching cleat's. 215 vs. 166 is
    tenant code + host runner + unit tests + behaviour assertions on both
    sides, up from 124 vs. 140 before cleat#2628's third tenant behaviour.
    Read this as "the pair's case for cleat does not rest on line-count
