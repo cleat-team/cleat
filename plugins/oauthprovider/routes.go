@@ -496,6 +496,14 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// cleat#1611 Section B. This handler's trace belongs to the browser or
+	// IdP that called it, arriving on the INBOUND request -- there is no
+	// CallContext here, this is an HTTP handler, not a workflow step. Every
+	// use of r.Context() below is deliberately ctx instead, so the token
+	// exchange, discovery/JWKS fetches (getJSON) and the GitHub
+	// verified-email lookup all join it rather than going out untraced.
+	ctx := plugin.WithInboundTraceparent(r.Context(), r.Header.Get(plugin.TraceparentHeader))
+
 	provider := r.PathValue("provider")
 	if !validProviders[provider] {
 		p.writeError(w, http.StatusBadRequest, "invalid provider")
@@ -528,7 +536,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// to scope the lookup by. The UPDATE further down, which runs after tid is
 	// known, is scoped with ForTenant rather than inheriting this.
 	err := plugin.ScanRow(p.db.QueryRow(
-		plugin.AcrossAllTenants(r.Context(), "oauth callback: the state parameter identifies the tenant, so there is none to scope by"),
+		plugin.AcrossAllTenants(ctx, "oauth callback: the state parameter identifies the tenant, so there is none to scope by"),
 		`
 			SELECT id, tenant_id, provider, code_verifier, nonce
 			FROM oauth_sessions
@@ -551,7 +559,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := p.getConfig(r.Context(), tid, provider)
+	cfg, err := p.getConfig(ctx, tid, provider)
 	if err != nil {
 		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
 		// provider has no client secret set" (an operator setup step was
@@ -583,7 +591,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ep, err := p.resolveEndpoints(r.Context(), provider, cfg)
+	ep, err := p.resolveEndpoints(ctx, provider, cfg)
 	if err != nil {
 		p.logger.Error("oauth: resolve endpoints", "provider", provider, "error", err)
 		p.writeError(w, http.StatusBadGateway, "provider discovery failed")
@@ -600,13 +608,14 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	data.Set("grant_type", "authorization_code")
 	data.Set("code_verifier", codeVerifier.String)
 
-	tokenReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
+	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		p.writeError(w, http.StatusInternalServerError, "failed to create token request")
 		return
 	}
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenReq.Header.Set("Accept", "application/json")
+	plugin.SetTraceparentFromContext(ctx, tokenReq)
 
 	tokenResp, err := p.httpClient.Do(tokenReq)
 	if err != nil {
@@ -653,7 +662,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// account, and `sub` is the account. cleat#2340.
 	var identity resolvedIdentity
 	if tokenResult.IDToken != "" && provider == providerOIDC {
-		claims, err := p.validateIDToken(r.Context(), tokenResult.IDToken, cfg.Issuer, cfg.ClientID, storedNonce.String)
+		claims, err := p.validateIDToken(ctx, tokenResult.IDToken, cfg.Issuer, cfg.ClientID, storedNonce.String)
 		if err != nil {
 			p.logger.Error("oauth: id_token validation", "provider", provider, "error", err)
 			p.writeError(w, http.StatusUnauthorized, "id_token validation failed")
@@ -681,12 +690,13 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		p.finishLogin(w, r, tid, provider, sessionID, identity, tokenResult.ExpiresIn)
 		return
 	}
-	userReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, userinfoURL, nil)
+	userReq, err := http.NewRequestWithContext(ctx, http.MethodGet, userinfoURL, nil)
 	if err != nil {
 		p.writeError(w, http.StatusInternalServerError, "failed to create userinfo request")
 		return
 	}
 	userReq.Header.Set("Authorization", "Bearer "+tokenResult.AccessToken)
+	plugin.SetTraceparentFromContext(ctx, userReq)
 
 	userResp, err := p.httpClient.Do(userReq)
 	if err != nil {
@@ -723,7 +733,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// /user/emails, which labels each address verified or not, and the scope
 	// that lets us read it (user:email, in the endpoints table).
 	if provider == "github" {
-		verified, verr := p.githubVerifiedEmail(r.Context(), tokenResult.AccessToken, ep.userEmailsURL)
+		verified, verr := p.githubVerifiedEmail(ctx, tokenResult.AccessToken, ep.userEmailsURL)
 		if verr != nil {
 			// Not fatal: an address we could not confirm is exactly the
 			// unverified case below, and the login still has the /user

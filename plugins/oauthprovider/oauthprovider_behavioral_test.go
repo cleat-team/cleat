@@ -1559,6 +1559,88 @@ func TestOA_Callback_Success(t *testing.T) {
 	}
 }
 
+// TestOA_Callback_PropagatesInboundTraceparent is the end-to-end half of
+// cleat#1611's handleCallback and githubVerifiedEmail entries.
+// plugin/every_outbound_call_joins_the_trace_test.go only proves
+// SetTraceparentFromContext is CALLED at each site; it cannot tell a real
+// propagation from one fed a context carrying no trace at all, which is
+// exactly the no-op the stale debt entries warned a naive fix would be. This
+// drives a real callback -- github, so it also exercises the /user/emails
+// hop -- with an inbound traceparent header the way a browser actually sends
+// one, and reads back what each of the three outbound requests put on the
+// wire.
+func TestOA_Callback_PropagatesInboundTraceparent(t *testing.T) {
+	const inboundTraceID = "0af7651916cd43dd8448eb211c80319c"
+
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+
+	var tokenTP, userinfoTP, emailsTP string
+	mockMux := http.NewServeMux()
+	mockMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		tokenTP = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"mock-at","expires_in":3600}`))
+	})
+	mockMux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		userinfoTP = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"email":"ada@example.com","id":4242}`))
+	})
+	mockMux.HandleFunc("/user/emails", func(w http.ResponseWriter, r *http.Request) {
+		emailsTP = r.Header.Get("traceparent")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"email":"ada@example.com","primary":true,"verified":true}]`))
+	})
+	srv := httptest.NewServer(mockMux)
+	defer srv.Close()
+
+	origEndpoints := endpoints
+	endpoints = map[string]providerEndpoints{
+		"github": {
+			tokenURL:      srv.URL + "/token",
+			userinfoURL:   srv.URL + "/userinfo",
+			userEmailsURL: srv.URL + "/user/emails",
+		},
+	}
+	defer func() { endpoints = origEndpoints }()
+
+	p.httpClient = srv.Client()
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000911")
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: "github",
+		State: "trace-callback-state", CodeVerifier: "v",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	store.mu.Unlock()
+	store.AddOAuthConfig(testTenantID, "github", "cid", "cs", "http://localhost/cb", "", true)
+	store.AddAllowedIdentity(testTenantID, "github", identityTypeEmail, "ada@example.com")
+
+	req := httptest.NewRequest("GET", "/oauth/github/callback?code=x&state=trace-callback-state", nil)
+	req.Header.Set(plugin.TraceparentHeader, "00-"+inboundTraceID+"-00f067aa0ba902b7-01")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	for name, got := range map[string]string{
+		"token exchange (handleCallback)":    tokenTP,
+		"userinfo (handleCallback)":          userinfoTP,
+		"/user/emails (githubVerifiedEmail)": emailsTP,
+	} {
+		if got == "" {
+			t.Errorf("%s: outbound request carries no traceparent at all", name)
+		} else if !strings.Contains(got, inboundTraceID) {
+			t.Errorf("%s: traceparent does not carry the inbound trace-id: got %q, want trace-id %q",
+				name, got, inboundTraceID)
+		}
+	}
+}
+
 func TestOA_Callback_TokenExchangeError(t *testing.T) {
 	store := newFakeDBStore()
 	p, handler := setupTestPlugin(t, store)

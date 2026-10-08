@@ -173,6 +173,7 @@ func (p *Plugin) githubVerifiedEmail(ctx context.Context, accessToken, emailsURL
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
+	plugin.SetTraceparentFromContext(ctx, req)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
