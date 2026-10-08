@@ -180,7 +180,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 			return packDurableCallResult(int(written), callFailureCode, 1)
 		}
 		written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-		return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+		return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 	}
 
 	resp, err := s.callService(callCtx, service, operation, requestJSON, step)
@@ -225,7 +225,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	}
 
 	written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-	return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+	return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 }
 
 // replayRetryAttempts consumes the call_attempt_failed events at the head of
@@ -319,7 +319,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "key_replay_resolved"))
 				}
 				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-				return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+				return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 			}
 
 			// Ask, before giving up. A resolver that can look the operation up
@@ -333,7 +333,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
 				}
 				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-				return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+				return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 			case AmbiguityNotSent:
 				// The service confirmed this call never arrived: a definite,
 				// retryable failure, not an ambiguity. Same packing as a fresh
@@ -376,7 +376,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		}
 
 		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
-		return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+		return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 	}
 
 	// Past recorded history — switch to fresh execution.
@@ -577,7 +577,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			s.recordEvent(rec)
 
 			written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
-			return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+			return packDurableCallResult(int(written), writeErrorClass(writtenEC), writtenEC)
 		}
 
 		lastErr = callErr

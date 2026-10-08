@@ -534,6 +534,22 @@ const (
 	// the identical buffer fails identically. The fix is a bigger buffer or a
 	// smaller payload, and both are the caller's.
 	CallErrorOutputTruncated // non-retryable
+
+	// CallErrorOutputWriteFailed means the host could not write the response
+	// into the guest's memory at all -- unlike CallErrorOutputTruncated, where
+	// a prefix lands, here NOTHING did. cleat#3207: before this code existed,
+	// writeOut mapped every non-truncation write error onto errCode 0, so the
+	// call this guest made actually ran on the host (and, for e.g.
+	// cleat_child_workflow, had a real, recorded side effect) but reported a
+	// SUCCESSFUL empty result -- indistinguishable from a legitimate empty
+	// string, with no error anywhere.
+	//
+	// Non-retryable, and for a different reason than the two above: the write
+	// failure does not mean the underlying call failed. Re-issuing it risks a
+	// duplicate of whatever already happened. Treat this as "the result is
+	// unknown, not the call" -- the same posture as a cancelled or
+	// presumed-lost run -- and fail the step rather than guess.
+	CallErrorOutputWriteFailed // non-retryable
 )
 
 // CallError is a structured error returned by DurableCall and its variants.
