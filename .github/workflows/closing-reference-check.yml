@@ -53,6 +53,37 @@
 # In .github/workflows/, which WORKSTREAM.md's shared-files table gives to
 # WS-3 -- added under that row's exception, "another stream may add there
 # when leaving the mechanism unwired would be worse, say so in the comment".
+#
+# cleat#2696 (owner decision, Option B, 2026-10-08): the REQUIRED context
+# "Closing References" is now a classic commit STATUS this job posts
+# explicitly (permissions: statuses: write, below), not GitHub Actions'
+# own implicit per-run check-run. The bug this fixes: a required CHECK-RUN
+# does not supersede an earlier check-run of the same name on the same SHA
+# in the aggregate `statusCheckRollup` GitHub actually gates on -- a stale
+# FAILURE from this job's first run (the malformed `Closes cleat#N` case)
+# survived a SECOND, GREEN run 3 minutes later on the same head, because
+# `edited` (the body-fix trigger, load-bearing for a base retarget --
+# cleat#2483) creates a second check-run rather than updating the first.
+# Reproduced independently 2026-10-08 on the original PR's own immutable
+# SHA (cleat#2696's issue thread has both query shapes and the exact
+# reproduction). A classic status has no such aggregate: each POST to
+# `/repos/{owner}/{repo}/statuses/{sha}` with the same `context` simply
+# *is* the status for that context -- there is nothing to accumulate, so
+# the bug class cannot recur by construction, not by mitigation.
+#
+# THE JOB IS RENAMED so Actions' own implicit check-run (one per workflow
+# run, unavoidable, name = job name) no longer collides with "Closing
+# References" -- if it still shared that name, the exact accumulation this
+# fixes would simply move from "two check-runs" to "a check-run and a
+# status, both claiming the same context", which is no fix at all. The
+# renamed job's own check-run is informational only; it is not in
+# .github/required-checks.txt and nothing gates on it.
+#
+# `.github/required-checks.txt`'s "Closing References" line is UNCHANGED --
+# GitHub's required-status-check evaluator matches by context/name
+# regardless of whether the source is a check-run or a classic status, so
+# no ruleset or branch-protection change is needed, and this is why the
+# owner's grant here is a permission only.
 # ---------------------------------------------------------------------------
 name: Closing Reference Check
 
@@ -71,13 +102,53 @@ permissions:
   # negated-reference step below. contents:read alone does not reach the
   # Pulls API.
   pull-requests: read
+  # cleat#2696: to POST/update the classic commit status this job now posts
+  # explicitly for the required "Closing References" context -- the
+  # Statuses API, not the Checks API (that would need checks:write instead,
+  # and would not fix the bug -- see the header comment above).
+  statuses: write
 
 jobs:
   closing-references:
-    name: Closing References
+    # Renamed from "Closing References" -- see the header comment. This
+    # name is NOT in .github/required-checks.txt and gates nothing; it is
+    # Actions' own per-run check-run, left informational on purpose.
+    name: Closing References Runner
     runs-on: ubuntu-latest
 
     steps:
+      # cleat#2696. One target SHA, computed once, for both event shapes:
+      # the PR's own head commit on `pull_request` (what required-status-check
+      # evaluation keys on, and NOT a synthetic merge SHA -- confirmed
+      # empirically against this repo's own workflow runs), and the merge
+      # group's own commit on `merge_group`.
+      - name: Resolve the target SHA for the Closing References status
+        id: sha
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # PENDING, posted first, so a PR does not read as "no status yet" for
+      # however long this job takes to reach its first real check --
+      # matching the near-instant "in progress" a required check-run gives
+      # today. Superseded by the completed status below regardless of how
+      # this job ends, because every path here runs `if: always()`.
+      - name: Post a pending Closing References status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api "repos/$REPO/statuses/$SHA" \
+            -f state=pending \
+            -f context="Closing References" \
+            -f description="Checking closing references..." \
+            -f target_url="$TARGET_URL"
+
       - name: Already checked on the pull request
         if: github.event_name == 'merge_group'
         run: echo "closing references validated on the pull request"
@@ -151,6 +222,32 @@ jobs:
       - name: Code-span closing-keyword self-test
         if: github.event_name != 'merge_group'
         run: scripts/check-code-span-closing-keywords.sh --self-test
+
+      # cleat#2696. `if: always()` is load-bearing: a failed step above
+      # skips every later step that lacks it, and the whole point of this
+      # one is to report FAILURE in that case, not to be skipped along with
+      # the rest. `job.status` reflects every step's outcome so far,
+      # including one that already failed, which is why this can run last
+      # and still report correctly without duplicating each step's own
+      # exit code by hand.
+      - name: Post the final Closing References status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          JOB_STATUS: ${{ job.status }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          case "$JOB_STATUS" in
+            success) state=success; desc="Closing references validated." ;;
+            *)       state=failure; desc="Closing references check failed -- see the linked run." ;;
+          esac
+          gh api "repos/$REPO/statuses/$SHA" \
+            -f state="$state" \
+            -f context="Closing References" \
+            -f description="$desc" \
+            -f target_url="$TARGET_URL"
 
   closing-reference-declared:
     name: Closing Reference Declared
