@@ -115,7 +115,8 @@ NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
   backup run (--id <uuid> | --name <name>)
                                   request an immediate backup: sets next_run_at to now.
                                   Picked up by the background loop within 60s -- this
-                                  does not run pg_dump itself.
+                                  does not run pg_dump itself. Refuses on a disabled
+                                  config, which the background loop never picks up.
   backup history [--id <uuid> | --name <name>] [--limit N]
                                   list backup attempts, newest first (default limit 50)
 `, scheduledbackup.ConfigNameRule)
@@ -565,8 +566,40 @@ func runBackupRun(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		osExit(1)
 		return
 	}
+
+	// cleat#2292 item 3. background.go's dueBackupsQuery only claims rows
+	// WHERE enabled = true, so advancing next_run_at on a disabled config and
+	// printing "picked up ... within 60s" below would be a promise the
+	// background loop never keeps, with nothing telling the operator why.
+	// backupConfigGetByIDSQL already selects enabled among its other columns
+	// and had no caller until this one -- reused rather than writing a
+	// narrower SELECT next to it.
+	var gotID uuid.UUID
+	var cfgName, cron string
+	var retentionDays int
+	var enabled bool
+	stmt, stmtArgs, err := d.rebindArgs(backupConfigGetByIDSQL, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebinding backup config lookup: %v\n", err)
+		osExit(1)
+		return
+	}
+	row := db.QueryRowContext(ctx, stmt, stmtArgs...)
+	if err := plugin.ScanRow(row, &gotID, &cfgName, &cron, &retentionDays, &enabled); err != nil {
+		fmt.Fprintf(os.Stderr, "checking whether config %s is enabled: %v\n", id, err)
+		osExit(1)
+		return
+	}
+	if !enabled {
+		fmt.Fprintf(os.Stderr, "backup config %s (%s) is disabled -- the background loop only picks up "+
+			"enabled configs, so this run would never happen. Run `backup config-update --id %s --enabled` "+
+			"first, or target a different config.\n", id, cfgName, id)
+		osExit(1)
+		return
+	}
+
 	now := time.Now().UTC()
-	stmt, stmtArgs, err := d.rebindArgs(backupConfigRequestRunSQL, now, now, id)
+	stmt, stmtArgs, err = d.rebindArgs(backupConfigRequestRunSQL, now, now, id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rebinding backup run request: %v\n", err)
 		osExit(1)
