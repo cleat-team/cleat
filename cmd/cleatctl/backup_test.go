@@ -198,8 +198,29 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 			// backup run is request-only: it must advance next_run_at to
 			// approximately now, and must not touch backup_history or invoke
 			// pg_dump (there is no DSN configured in this test at all).
+			//
+			// cleat#2292 item 4: the doc comment above asserted "must not
+			// touch backup_history" while nothing here checked it -- a
+			// mutation that started inserting a history row on `run` would
+			// have stayed green. Scoped to this test's own config id, not a
+			// bare count(*), because backup_history is the shared TestDB
+			// table every dialect subtest and every other test in this
+			// package reads and writes.
+			historyCountForThisConfig := func() int {
+				var n int
+				stmt, stmtArgs := mustRebindArgs(t, tc.d, `SELECT count(*) FROM backup_history WHERE config_id = $1`, id)
+				if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&n); err != nil {
+					t.Fatalf("counting backup_history for config %s: %v", id, err)
+				}
+				return n
+			}
+			beforeHistoryCount := historyCountForThisConfig()
 			before := time.Now().UTC().Add(-time.Minute)
 			runBackupRun(ctx, db, tc.d, []string{"--name", name})
+			if n := historyCountForThisConfig(); n != beforeHistoryCount {
+				t.Fatalf("backup_history rows for config %s: %d before `run`, %d after -- `run` must not write backup_history, only the background loop does",
+					id, beforeHistoryCount, n)
+			}
 			var nextRunAt time.Time
 			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT next_run_at FROM backup_config WHERE id = $1`, id)
 			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&nextRunAt); err != nil {
