@@ -1298,13 +1298,17 @@ func main() {
 		// never fired -- the previous-only flag was silently ignored
 		// (cleat-review, #2308).
 		{
-			pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+			// The ring return value is discarded here: this block's result is
+			// unconditionally overwritten by the duplicate block below before
+			// payloadRing is ever read, same as payloadEncryption would be if
+			// its own nil-check below did not read it first. Keeping both
+			// assignments made this one ineffectual (ineffassign/SA4006).
+			pe, _, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 			if perr != nil {
 				logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 				os.Exit(1)
 			}
 			payloadEncryption = pe
-			payloadRing = pring
 			if payloadEncryption != nil {
 				if *encryptionKeyFilePrevious != "" {
 					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
