@@ -332,6 +332,88 @@ func TestReloadKeyRingsOnSIGHUP_SecretsFailureRevertsAnAlreadyMovedPayloadRing(t
 	}
 }
 
+// A counterpart to the both-or-neither test above, one level in: cleat-review
+// found and falsified live that secretsRing.Reload (sighup_reload.go) runs
+// *inside* RegisterUnderKeyGate's check callback, before that call's own
+// commit -- so an unrelated, late infrastructure failure in that narrow
+// window leaves the secrets ring already moved while RegisterUnderKeyGate
+// still reports an error. Before the fix this was read identically to a
+// refused check: "keeping the live ring" logged (false), and only the
+// payload ring reverted -- the secrets ring stayed on the candidate with
+// nothing in the logs or the failure metric saying so. This reproduces that
+// exact window via afterSecretsRingMovedForTest and asserts the ring is
+// reverted and the correct (distinguishing) log line is used.
+func TestReloadKeyRingsOnSIGHUP_LateRegistrationFailureRevertsAnAlreadyMovedSecretsRing(t *testing.T) {
+	v1 := engine.VersionedKey{Version: 1, Key: sighupKey(0x11)}
+	v2 := engine.VersionedKey{Version: 2, Key: sighupKey(0x22)}
+	e := newSighupEnv(t, sighupRing(t, v1))
+	ctx := context.Background()
+
+	const secretName = "cleat-2298-sighup-late-failure.key"
+	if err := e.w.deploymentSecrets.PutDeploymentSecret(ctx, secretName, "value"); err != nil {
+		t.Fatalf("seed a deployment secret under v1: %v", err)
+	}
+	t.Cleanup(func() { _, _ = e.db.Exec(`DELETE FROM deployment_secrets WHERE name = $1`, secretName) })
+	if err := e.reg.Register(ctx, engine.WorkerRegistration{WorkerID: e.id, Hostname: "h", PID: 1, SecretKeyVersions: []int{1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// v2 current, v1 kept as previous -- a candidate M4 accepts, so the check
+	// succeeds and secretsRing.Reload actually swaps. This HAS to be a
+	// genuine success up to that point, or the window this test targets
+	// (a failure strictly AFTER the swap) is never reached.
+	t.Setenv("CLEAT_SECRET_MASTER_KEY", mustB64(v2.Key))
+	t.Setenv("CLEAT_SECRET_MASTER_KEY_VERSION", "2")
+	t.Setenv("CLEAT_SECRET_MASTER_KEY_PREVIOUS", mustB64(v1.Key))
+	t.Setenv("CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION", "1")
+
+	// keyGatePGKey is engine/secret_key_gate.go:90's advisory-lock key,
+	// unexported there. By the time afterSecretsRingMovedForTest runs,
+	// acquireKeyGate has already taken this lock in SHARED mode on the gate
+	// transaction's own backend (it runs before the check callback, which
+	// is before this hook) -- so finding and killing that backend here is
+	// deterministic, not a race against RegisterUnderKeyGate's own timing.
+	const keyGatePGKey int64 = 7215842093104563
+	e.w.afterSecretsRingMovedForTest = func() {
+		var pid int
+		if err := e.db.QueryRow(
+			`SELECT pid FROM pg_locks WHERE locktype = 'advisory' `+
+				`AND ((classid::bigint << 32) | objid::bigint) = $1 AND granted = true`,
+			keyGatePGKey,
+		).Scan(&pid); err != nil {
+			t.Fatalf("find the gate transaction's backend pid: %v", err)
+		}
+		var terminated bool
+		if err := e.db.QueryRow(`SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil {
+			t.Fatalf("terminate the gate transaction's backend: %v", err)
+		}
+		if !terminated {
+			t.Fatalf("pg_terminate_backend(%d) reported false -- the gate's backend was not found or already gone", pid)
+		}
+	}
+
+	e.w.reloadKeyRingsOnSIGHUP(ctx)
+
+	if got := e.w.secretsRing.Load().Current().Version; got != 1 {
+		t.Errorf("secretsRing.Load().Current().Version = %d, want 1 -- a registration that failed AFTER "+
+			"the ring already moved must revert the ring, not leave it on the candidate", got)
+	}
+	if got, ok := e.publishedKeys(t); !ok || got != "1" {
+		t.Errorf("published secret_key_versions = %q (present=%v), want %q (unchanged -- the registration "+
+			"that would have advertised the candidate's versions never committed)", got, ok, "1")
+	}
+	if !strings.Contains(e.log.String(), "the ring already moved, but registering it failed afterward") {
+		t.Errorf("expected the log line distinguishing a late infrastructure failure from a refused check; got:\n%s", e.log.String())
+	}
+	if !strings.Contains(e.log.String(), "reverted the secrets ring after its own registration failed to commit") {
+		t.Errorf("expected the revert-succeeded log line; got:\n%s", e.log.String())
+	}
+	if strings.Contains(e.log.String(), "keeping the live ring and the previously published key versions") {
+		t.Error("the refusal line (accurate only when the check itself failed, before any swap) must not " +
+			"appear when the ring had already moved before the failure")
+	}
+}
+
 func mustB64(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
 }

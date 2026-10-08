@@ -2047,6 +2047,15 @@ type Worker struct {
 	payloadKeyFile         string
 	payloadKeyFilePrevious string
 
+	// afterSecretsRingMovedForTest, when set, runs inside
+	// reloadKeyRingsOnSIGHUP's RegisterUnderKeyGate callback immediately
+	// after secretsRing.Reload succeeds, before the callback returns nil.
+	// It exists so a test can land a failure in RegisterUnderKeyGate's own
+	// post-callback work (its commit on postgres/mssql, its lock release on
+	// mysql) in the one window that matters: after the in-memory swap has
+	// already happened. Nil in production.
+	afterSecretsRingMovedForTest func()
+
 	// Worker membership, and this worker's slice of the cluster connection
 	// budget. cleat#1487.
 	//

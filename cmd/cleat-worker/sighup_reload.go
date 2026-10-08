@@ -27,16 +27,31 @@ import (
 //     work (ReloadableKeyRing.Reload's own M3 check), nothing external reads
 //     "has the payload ring moved yet" as a signal to act on, and a prior
 //     ring is trivially available to swap back to if the next step fails.
+//
 //  2. The SECRETS ring is validated and swapped second, under the shared
 //     gate, which runs M4 (every stored tenant AND deployment secret must
 //     open under the candidate) before the swap and republishes
 //     admin.workers.secret_key_versions as part of the same call.
+//
 //  3. If step 2 fails for any reason, step 1's swap is REVERTED -- back to
 //     the exact ring that was live before this call, which Reload's own M3
 //     check can never refuse (reverting introduces no version/byte
 //     conflict with itself). This closes the window to one failed gate
 //     call's worth of time, during which nothing outside this process
 //     could have observed or acted on the payload ring having moved.
+//
+//  4. Step 2 itself has the same shape one level in: secretsRing.Reload
+//     runs INSIDE RegisterUnderKeyGate's check callback, before that call's
+//     own commit (postgres/mssql) or lock release (mysql). A late
+//     infrastructure failure in that narrow window -- after the check
+//     callback returns nil, before RegisterUnderKeyGate itself returns --
+//     makes the overall call fail with the ring already moved. Found and
+//     falsified live by cleat-review (killing the gate transaction's
+//     connection right after the callback's Reload succeeds); the fix is
+//     the same move as step 3, one level in: track whether the swap
+//     actually happened, and if RegisterUnderKeyGate still errors, revert
+//     the secrets ring too -- so it ends up matching whatever registration
+//     actually survived, exactly as a refused check would have left it.
 //
 // Logged, not returned: this runs off a signal with nothing to report an
 // error to except the log and w.Metrics.
@@ -133,21 +148,52 @@ func (w *Worker) reloadKeyRingsOnSIGHUP(ctx context.Context) {
 		ConnectionBudget:  w.clusterConnectionBudget,
 		SecretKeyVersions: candidateSecrets.Versions(),
 	}
+	// revertSecretsTo/secretsMoved cover a gap cleat-review found and
+	// falsified live: RegisterUnderKeyGate runs this callback, including the
+	// secretsRing.Reload below, BEFORE its own commit (postgres/mssql) or
+	// lock-release (mysql) -- so a late infrastructure failure in that
+	// narrow window (the backend connection dying between check-success and
+	// commit, say) makes RegisterUnderKeyGate return an error AFTER the ring
+	// has already moved. Without tracking that, this code read "checkErr !=
+	// nil" as "nothing moved" and reverted only the payload ring, leaving
+	// the secrets ring on the candidate while logging "keeping the live
+	// ring" -- a real both-or-neither violation, not a hypothetical one.
+	var revertSecretsTo *engine.KeyRing
+	secretsMoved := false
 	var droppedSecrets []int
 	checkErr := w.workerRegistry.RegisterUnderKeyGate(ctx, reg, func(cctx context.Context) error {
 		if err := checkCandidateOpensEverySecret(cctx, w.secrets, w.deploymentSecrets, candidateSecrets); err != nil {
 			return err
 		}
+		revertSecretsTo = w.secretsRing.Load()
 		result, err := w.secretsRing.Reload(candidateSecrets)
 		if err != nil {
 			return err
 		}
+		secretsMoved = true
 		droppedSecrets = result.Dropped
+		if w.afterSecretsRingMovedForTest != nil {
+			w.afterSecretsRingMovedForTest()
+		}
 		return nil
 	})
 	if checkErr != nil {
-		logger.ErrorContext(ctx, "SIGHUP: secret key reload refused, keeping the live ring and the previously published key versions",
-			"worker_id", workerID, "error", checkErr)
+		if secretsMoved {
+			// The check succeeded and the ring swapped; RegisterUnderKeyGate
+			// still failed afterward, which on postgres/mssql can only be the
+			// commit and on mysql only the lock release -- the registration
+			// that would have advertised the candidate's versions did NOT
+			// land, so the ring must go back to match what the registry
+			// actually still says, exactly as a refused check would have left it.
+			logger.ErrorContext(ctx, "SIGHUP: the secret key reload's check succeeded and the ring already moved, but registering it failed afterward (a late infrastructure failure, not a refused check) -- reverting the ring to match the registration that did not commit",
+				"worker_id", workerID, "error", checkErr)
+			if revertRing(ctx, logger, workerID, "secrets", w.secretsRing, revertSecretsTo) {
+				logger.InfoContext(ctx, "SIGHUP: reverted the secrets ring after its own registration failed to commit", "worker_id", workerID)
+			}
+		} else {
+			logger.ErrorContext(ctx, "SIGHUP: secret key reload refused, keeping the live ring and the previously published key versions",
+				"worker_id", workerID, "error", checkErr)
+		}
 		revertPayloadRing(ctx, logger, workerID, w.payloadRing, revertPayloadTo, payloadMoved)
 		record(false)
 		return
@@ -168,19 +214,30 @@ func revertPayloadRing(ctx context.Context, logger *slog.Logger, workerID string
 	if !moved {
 		return
 	}
-	if _, err := payloadRing.Reload(revertTo); err != nil {
+	if revertRing(ctx, logger, workerID, "payload", payloadRing, revertTo) {
+		logger.InfoContext(ctx, "SIGHUP: reverted the payload ring after the secrets half refused, so neither moved", "worker_id", workerID)
+	}
+}
+
+// revertRing swaps ring back to revertTo and reports whether that succeeded.
+// Shared by revertPayloadRing above and the secrets-side revert in
+// reloadKeyRingsOnSIGHUP, both of which only ever call it with a ring that
+// was genuinely live a moment ago -- so Reload's own M3 check can never
+// refuse the revert itself.
+func revertRing(ctx context.Context, logger *slog.Logger, workerID, label string, ring *engine.ReloadableKeyRing, revertTo *engine.KeyRing) bool {
+	if _, err := ring.Reload(revertTo); err != nil {
 		// Should never happen: revertTo was live a moment ago, so reverting to
 		// it introduces no version/byte conflict with itself. If this somehow
-		// fires, the payload ring is left on the candidate while the secrets
-		// ring stayed on the old one -- a genuine "both or neither" violation
-		// worth paging on, which is why this is its own loud error rather than
-		// folded into the refusal log line above.
-		logger.ErrorContext(ctx, "SIGHUP: reverting the payload ring after a secrets-side refusal itself failed -- "+
-			"the payload ring may now disagree with the secrets ring about which key reload this was",
+		// fires, this ring is left on the candidate while its counterpart
+		// did not move (or already reverted) -- a genuine "both or neither"
+		// violation worth paging on, which is why this is its own loud error
+		// rather than folded into the caller's own log line.
+		logger.ErrorContext(ctx, "SIGHUP: reverting the "+label+" ring failed -- "+
+			"it may now disagree with its counterpart about which key reload this was",
 			"worker_id", workerID, "error", err)
-		return
+		return false
 	}
-	logger.InfoContext(ctx, "SIGHUP: reverted the payload ring after the secrets half refused, so neither moved", "worker_id", workerID)
+	return true
 }
 
 // checkCandidateOpensEverySecret is cleat#2298's M4: both the tenant-secrets
