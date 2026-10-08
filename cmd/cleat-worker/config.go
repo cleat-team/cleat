@@ -122,6 +122,13 @@ var (
 	compactionThreshold = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
 	compactionInterval  = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
 	retentionInterval   = flag.Duration("retention-interval", 24*time.Hour, "Interval between retention sweeps")
+	// cleat#2264: a database restored from an older backup, or rolled back, while
+	// workers are already running leaves /readyz answering 200 against a schema the
+	// binary does not expect -- the startup check (cleat#2117) only runs once, at
+	// boot. 5 minutes matches compactionInterval's scale: cheap enough to run
+	// unconditionally, frequent enough that a bad restore is noticed well before an
+	// operator would otherwise find out from a query failing on a missing column.
+	schemaCheckInterval = flag.Duration("schema-check-interval", 5*time.Minute, "Interval between runtime schema-version checks feeding /readyz's schema_behind reason (cleat#2264)")
 	// SEPARATE FROM THE REAPER'S STALE TIMEOUT ON PURPOSE, though they start
 	// from the same idea. The reaper asks "has this run missed enough
 	// heartbeats that I should take it back", and answers in seconds because
