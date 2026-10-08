@@ -767,6 +767,24 @@ jobs:
           sudo mv /tmp/wasm-tools-*/wasm-tools /usr/local/bin/wasm-tools
           wasm-tools --version
 
+      # cleat#2978: tests/crash's Rust agent client (TestCrashMidAgentLoopResumesWithoutReaskingTheModel/rust)
+      # runs in this shard and needs wasm32-unknown-unknown, which the
+      # ubuntu-latest image's preinstalled rustup does NOT carry by default
+      # -- unlike Node and a JDK, which the image does ship, so the Java and
+      # AssemblyScript subtests needed no equivalent step here. Without
+      # this, `cargo build` fails with "can't find crate for `core`" /
+      # "the wasm32-unknown-unknown target may not be installed", which
+      # tier-gate.sh reports as a genuine test failure -- there is no skip
+      # to fall back to, and there should not be one: this is ci.yml's
+      # "Setup Rust + wasm32-unknown-unknown for the crash agent client"
+      # step's exact counterpart for this gate, which runs tests/crash
+      # through a completely separate job from ci.yml's own matrix.
+      - name: Setup Rust + wasm32-unknown-unknown for the crash agent client
+        if: github.event_name != 'merge_group'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
       - name: Create the cleat database on SQL Server
         if: github.event_name != 'merge_group'
         run: |
