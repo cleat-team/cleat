@@ -263,14 +263,20 @@ func setTenantOnTx(ctx context.Context, tx *sql.Tx, dialect plugin.Dialect, tid 
 // options are a second pool under a privileged login (a second credential in
 // every deployment's config) or a session-context key, and this takes the key.
 //
-// WHY THAT IS NOT THE SENTINEL migrations/mssql/012_admin_role.sql REFUSES.
-// 012 rejects a magic tenant_id VALUE, because anything that can call
-// sp_set_session_context could then assume a particular tenant's identity. A
-// separate key is not an identity: it grants no tenant, and the shipped engine
-// predicate dbo.fn_tenant_filter reads `tenant_id` and nothing else, so setting
-// this key cannot widen access to any of the thirteen engine tables. What it
-// will admit, once the policies of cleat#1552 exist, is exactly the plugin
-// tables that opt in.
+// WHY THAT IS NOT THE SENTINEL dbo.cleat_admin REFUSES. A magic tenant_id
+// would be assumable by anything that can call sp_set_session_context --
+// which is the application itself, on every connection it opens, so a single
+// bad code path or an injected value would turn tenant isolation off. Role
+// membership cannot be assumed by a connection at runtime the same way, which
+// is why dbo.cleat_admin (created empty by migrations/mssql/001_schema.sql)
+// is the admission path, not a value. But since cleat#1541 the SHIPPED
+// fn_tenant_filter has no role check at all -- granting that role now takes
+// applying migrations/mssql/optional/cross_tenant_claim.sql, which is not
+// auto-applied. Either way, a separate key is not an identity: it grants no
+// tenant, and the shipped predicate reads `tenant_id` and nothing else, so
+// setting this key cannot widen access to any of the thirteen engine tables.
+// What it will admit, once the policies of cleat#1552 exist, is exactly the
+// plugin tables that opt in.
 //
 // It is also the trust level PostgreSQL already grants these same tables:
 // migration 063's cleat.cross_tenant is set by the application with no DBA

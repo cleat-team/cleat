@@ -125,7 +125,6 @@ engine/mssql_plugin_deps_check_test.go	migration 036
 engine/mssql_plugin_deps_check_test.go	migration 103
 engine/mssql_rls_enforcement_test.go	migration 103
 engine/mssql_schedule_tenant_id_test.go	migration 103
-engine/mssql_signals_promises.go	012_admin_role.sql
 engine/mssql_store_integration_test.go	034_event_history_request_widen.sql
 engine/mssql_store_integration_test.go	migration 034
 engine/mssql_tenant_settings_test.go	042_tenant_settings.sql
@@ -136,7 +135,6 @@ engine/mysql_ops.go	migrations/mssql/036
 engine/mysql_tenant_settings.go	038_single_tenant_guard.sql
 engine/mysql_tenant_settings_test.go	038_single_tenant_guard.sql
 engine/plugin_secrets_test.go	migration 038
-engine/plugindb_tenant.go	012_admin_role.sql
 engine/plugindb_tenant.go	migration 034
 engine/plugindb_tenant.go	migration 063
 engine/plugindb_tenant.go	migration 077
