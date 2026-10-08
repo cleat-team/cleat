@@ -27,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`check-go-toolchain-pins.py`, `check-go-work-floor.sh`, `check-onboarding-go-version.sh`) all
   pass.
 
+- **`cleatctl reseal-payloads` now re-seals the six tables cleat#2312 added encryption to, not
+  just `event_history`.** Closes cleat#3241. A key rotation could move `event_history`'s own
+  encrypted columns off a retired key, but rows already written to `workflow_instances`,
+  `workflow_signals`, `workflow_promises`, `workflow_update_requests`, `workflow_schedules` and
+  `idempotency_keys` stayed readable (the previous-key path still opens them) without ever being
+  rewritten onto the current key -- so a rotation meant to retire a key fleet-wide could not
+  complete for those tables. Generalized over each table's own primary key (a single bigint, a
+  single text column, two-column text pairs, a uuid+text pair that doubles as the tenant column,
+  and a bytea+uuid pair) by casting every key column to `::text` for both the read and the write,
+  since `resealValue`'s existing form-detection logic is already shape-driven rather than
+  type-driven and needed no changes. Reported as its own section per table in the command's
+  output, folded into the same combined exit-status rule as `event_history`. Verified with new
+  live-Postgres tests covering all six tables' legacy-ciphertext conversion, idempotency and
+  `--dry-run` behavior, plus a falsification (disabling the write step reproduces the exact
+  unconverted symptom on every table).
 - **`--encrypt-sensitive-payloads` now covers the columns it was documented, and believed, to
   cover.** Closes cleat#2312. Measured by cleat-review during review of #2308: the flag's docs
   said "workflow input, output and error [are] encrypted at rest", but only 11 `event_history`

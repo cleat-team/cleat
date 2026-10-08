@@ -255,6 +255,8 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
   refused outright under encryption, rather than silently searching
   ciphertext and reporting a false "no match" -- see
   `worker-config.md`'s "Encryption at Rest" section for the flag reference.
+  `cleatctl reseal-payloads` re-seals all of the above during a key
+  rotation, including the six tables beyond `event_history` (cleat#3241).
 - **No built-in secrets manager**: There is no integration with external secrets
   managers (HashiCorp Vault, AWS Secrets Manager, etc.).
 - **Plugin-level secrets**: Plugins can read secrets from the environment or
@@ -275,9 +277,6 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
 
 - Secrets API (`h.Secret(key string) string`) on the `HostCalls` interface
   that reads from a configurable secrets backend.
-- Extend `cleatctl reseal-payloads` (currently scoped to `event_history`)
-  to re-seal the six tables cleat#2312 added, for key-rotation completeness
-  (cleat#3241).
 
 ## Input Validation
 
@@ -330,6 +329,6 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
 | PostgreSQL / SQL Server RLS | Database-enforced, FORCEd/FILTER PREDICATE on 8 tables, fail-closed | Per-tenant connection pooling / sharding |
 | MySQL tenancy | Single-tenant only (no RLS feature; documented product boundary, not a gap) | — |
 | API auth | Bearer token / header-based, SHA-256 hashed | Scoped keys, rotation, rate limiting |
-| Secrets | Plaintext in DB, no built-in secrets manager; sensitive `event_history`, `workflow_instances`, signal/promise/update-request/schedule payload and error columns optionally encrypted (PG only, cleat#2312) | Secrets API on HostCalls, `reseal-payloads` coverage of the same columns |
+| Secrets | Plaintext in DB, no built-in secrets manager; sensitive `event_history`, `workflow_instances`, signal/promise/update-request/schedule payload and error columns optionally encrypted and key-rotatable (PG only, cleat#2312, cleat#3241) | Secrets API on HostCalls |
 | Input validation | Minimal (length, JSON parseability) | JSON Schema, stricter enforcement |
 | Worker network | Optional API listener, DB connection only | Managed worker fleet with mTLS |
