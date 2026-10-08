@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **`--encrypt-sensitive-payloads` now covers the columns it was documented, and believed, to
+  cover.** Closes cleat#2312. Measured by cleat-review during review of #2308: the flag's docs
+  said "workflow input, output and error [are] encrypted at rest", but only 11 `event_history`
+  columns were actually sealed. Per the owner's ruling on the issue ("3A"), this adds real
+  per-tenant AES-256-GCM encryption, on every write and read path, for
+  `workflow_instances` (`input`, `result`, `error_msg`, `error_code`, `error_op`,
+  `cancellation_reason`, `query_state`), `workflow_signals.payload`,
+  `workflow_promises.result`/`.error_msg`, `workflow_update_requests.payload`/`.result`/
+  `.error_msg`, `workflow_schedules.input`, and `idempotency_keys.error_msg`.
+  Found and fixed along the way: several read sites used PostgreSQL's `#>>'{}'` text-extraction
+  operator, which strips a JSON string's surrounding quotes at the SQL level — decrypting that
+  value with the jsonb-wire-format decoder silently judged it "never sealed" and returned
+  ciphertext as the decrypted value, with no error. `GetQueryState`'s `query_state ->> $2` SQL
+  lookup cannot index into an encrypted JSON-string-scalar column either, so it now routes
+  through `ListQueryState` and decrypts first. `ListWorkflows`'s `InputContains`/`ErrorContains`
+  filters are refused outright under encryption (`ErrSearchUnavailableUnderEncryption`) rather
+  than silently searching ciphertext and reporting a false "no results". `cleatctl
+  reseal-payloads` still rewrites only `event_history`; extending it to the six tables above is
+  tracked as a follow-up, cleat#3241.
 - **A Python workflow with more than one `@cleat_entry` function could not run at all.**
   Closes cleat#2937. A Python guest compiles to a single Component Model export literally named
   `run` (`python-sdk/wit/cleat.wit`), whatever its workflow's own logical entry-point names are —

@@ -552,26 +552,38 @@ for the previous-key slot.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | Encrypt select `event_history` payload columns with AES-256-GCM |
+| bool | `false` | Encrypt sensitive payload and error columns with AES-256-GCM |
 
 PostgreSQL only -- refused at startup on any other `--driver`. When enabled, the
-worker encrypts these `event_history` columns before writing them: `request`,
-`response`, `error`, `signal_payload`, `child_input`, `new_input`,
-`plugin_input`, `plugin_output`, `promise_result`, `promise_error`, and
-`payload`. Encryption is per-tenant (AES-256-GCM, HKDF-derived key, tenant ID
-as AAD), using the key from `--encryption-key-file`, which must also be set.
+worker encrypts these columns before writing them:
 
-One event type is an exception: `child_workflow` events are written by a
-separate code path that does not encrypt `child_input` or `payload`, so a
-child workflow's input is plaintext in the parent's `event_history` regardless
-of this flag (cleat#2312).
+- `event_history`: `request`, `response`, `error`, `signal_payload`,
+  `child_input`, `new_input`, `plugin_input`, `plugin_output`,
+  `promise_result`, `promise_error`, and `payload` (including a
+  `child_workflow` event's `child_input`/`payload` -- a separate write path
+  that did not encrypt until cleat#2328).
+- `workflow_instances`: `input`, `result`, `error_msg`, `error_code`,
+  `error_op`, `cancellation_reason`, `query_state`.
+- `workflow_signals.payload`.
+- `workflow_promises.result`, `.error_msg`.
+- `workflow_update_requests.payload`, `.result`, `.error_msg`.
+- `workflow_schedules.input`.
+- `idempotency_keys.error_msg`.
 
-This flag does **not** cover most other places workflow data is stored --
-`workflow_instances.input`, `.result`, `.error_msg`, and `.query_state`;
-`workflow_signals.payload`; `workflow_promises.result`;
-`workflow_update_requests.payload` and `.result`; `workflow_schedules.input`;
-and `idempotency_keys.error_msg` are all plaintext whether or not this flag is
-set. See cleat#2312 for the full per-column measurement.
+Encryption is per-tenant (AES-256-GCM, HKDF-derived key, tenant ID as AAD),
+using the key from `--encryption-key-file`, which must also be set
+(cleat#2312; the owner's ruling on the issue is tracked there as "3A").
+
+`ListWorkflows`'s `InputContains` and `ErrorContains` filters are refused
+outright under this flag (`ErrSearchUnavailableUnderEncryption`), rather than
+silently running a substring search against ciphertext and reporting a false
+"no results" -- there is no supported way to search these columns while
+encryption is on.
+
+`cleatctl reseal-payloads` (key rotation) currently re-seals only
+`event_history`; it does not yet cover the six tables cleat#2312 added (see
+cleat#3241). A rotation that needs those re-sealed must be done by hand until
+that tool is extended.
 
 **A worker started without this flag refuses to start if this database has
 ever had it enabled (cleat#2324).** A sealed column carries no envelope or

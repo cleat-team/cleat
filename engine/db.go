@@ -553,6 +553,23 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 
 // CompleteWorkflow marks a workflow as done.
 func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
+	// cleat#2312: `->>` indexes INTO a jsonb OBJECT, and an encrypted
+	// query_state column no longer holds one -- it holds EncryptJSON's
+	// output, a JSON STRING literal wrapping base64 ciphertext. `->>` on a
+	// scalar string returns SQL NULL rather than an error, so this would
+	// silently answer "" for every key, for every workflow, the moment
+	// --encrypt-sensitive-payloads is on. ListQueryState already reads the
+	// whole column and decrypts it; routing through that and picking the one
+	// key out of its map costs one extra round trip through Go, only when
+	// encryption is actually enabled.
+	if s.encryption != nil && s.encryptSensitivePayloads {
+		all, err := s.ListQueryState(ctx, workflowID)
+		if err != nil {
+			return "", err
+		}
+		return all[key], nil
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get query state: begin: %w", err)
@@ -596,6 +613,16 @@ func (s *PostgresStore) ListQueryState(ctx context.Context, workflowID string) (
 	if err != nil {
 		return nil, fmt.Errorf("list query state: %w", err)
 	}
+	// cleat#2312: decrypt before decodeQueryState, which is shared across all
+	// four stores and expects an already-plaintext JSON object -- MySQL and
+	// SQL Server never encrypt this column at all.
+	if raw.Valid {
+		decrypted, derr := s.decryptPayloadJSON(raw.String)
+		if derr != nil {
+			return nil, fmt.Errorf("list query state: %w", derr)
+		}
+		raw.String = decrypted
+	}
 	out, derr := decodeQueryState(raw)
 	if derr != nil {
 		return nil, derr
@@ -607,6 +634,12 @@ func (s *PostgresStore) ListQueryState(ctx context.Context, workflowID string) (
 // ordered by creation time DESC. Supports search by input content, error message,
 // and combined full-text search, as well as pagination via Offset/Limit.
 func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	// cleat#2312: see ErrSearchUnavailableUnderEncryption's own doc comment.
+	if (filter.InputContains != "" || filter.ErrorContains != "") &&
+		s.encryption != nil && s.encryptSensitivePayloads {
+		return nil, ErrSearchUnavailableUnderEncryption
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: begin: %w", err)
@@ -645,9 +678,33 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 			wf.CreatedAt = createdAt.Time
 		}
 		wf.AssignedTo = assignedTo.String
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
-		wf.Error = errorMsg.String
+		// cleat#2312: decrypt what this listing reads. The guard above
+		// already refuses InputContains/ErrorContains under encryption, so
+		// this is purely for display -- there is no search result whose
+		// correctness depends on these values.
+		if decryptedInput, derr := s.decryptPayloadJSON(string(wf.Input)); derr == nil {
+			wf.Input = json.RawMessage(decryptedInput)
+		} else {
+			s.log().WarnContext(ctx, "decrypt listed workflow input failed", "workflow_id", wf.ID, "error", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(errorCode.String, "error_code"); derr == nil {
+			wf.ErrorCode = decrypted
+		} else {
+			wf.ErrorCode = errorCode.String
+			s.log().WarnContext(ctx, "decrypt listed workflow error_code failed", "workflow_id", wf.ID, "error", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(errorOp.String, "error_op"); derr == nil {
+			wf.ErrorOp = decrypted
+		} else {
+			wf.ErrorOp = errorOp.String
+			s.log().WarnContext(ctx, "decrypt listed workflow error_op failed", "workflow_id", wf.ID, "error", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(errorMsg.String, "error_msg"); derr == nil {
+			wf.Error = decrypted
+		} else {
+			wf.Error = errorMsg.String
+			s.log().WarnContext(ctx, "decrypt listed workflow error_msg failed", "workflow_id", wf.ID, "error", derr)
+		}
 		workflows = append(workflows, wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -720,6 +777,44 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	if err != nil {
 		return nil, fmt.Errorf("get workflow: %w", err)
 	}
+
+	// cleat#2312: decrypt every sensitive-at-rest column this query reads.
+	// The first failure is returned (matching decryptAndRedactEventRecord's
+	// own "report the first, keep going so the rest of the record is still
+	// populated" contract), but every field is still processed so a caller
+	// that ignores the error still gets a fully-attempted record.
+	var firstDecryptErr error
+	keepJSON := func(v string, err error) string {
+		if err != nil && firstDecryptErr == nil {
+			firstDecryptErr = err
+		}
+		return v
+	}
+	keepText := func(v string, err error) string {
+		if err != nil && firstDecryptErr == nil {
+			firstDecryptErr = err
+		}
+		return v
+	}
+	inputRaw = json.RawMessage(keepJSON(s.decryptPayloadJSON(string(inputRaw))))
+	if result.Valid {
+		// result #>> '{}' above TEXT-EXTRACTS the jsonb value, which for a
+		// JSON STRING scalar strips the surrounding quotes -- so a sealed
+		// result (EncryptJSON's "<base64>" JSON-string-literal wire format)
+		// arrives here as the BARE base64, not the quoted form
+		// decryptPayloadJSON expects. decryptTextColumnFromStorage is the
+		// one that reads bare base64 -- the same shape '#>>' leaves any
+		// other sealed jsonb column in. Measured by this package's own
+		// live test after the wrong call here returned ciphertext unchanged
+		// with no error (sealedShape saw a quoted form that was never
+		// there and judged it "never sealed").
+		result.String = keepText(s.decryptTextColumnFromStorage(result.String, "result"))
+	}
+	errorMsg.String = keepText(s.decryptTextColumnFromStorage(errorMsg.String, "error_msg"))
+	errorCode.String = keepText(s.decryptTextColumnFromStorage(errorCode.String, "error_code"))
+	errorOp.String = keepText(s.decryptTextColumnFromStorage(errorOp.String, "error_op"))
+	wf.CancellationReason = keepText(s.decryptTextColumnFromStorage(wf.CancellationReason, "cancellation_reason"))
+
 	wf.Input = inputRaw
 	wf.AssignedTo = assignedTo.String
 	if result.Valid {
@@ -744,6 +839,9 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	}
 	if parentWorkflowID.Valid {
 		wf.ParentWorkflowID = &parentWorkflowID.String
+	}
+	if firstDecryptErr != nil {
+		return &wf, fmt.Errorf("get workflow: %w", firstDecryptErr)
 	}
 	return &wf, tx.Commit()
 }
@@ -786,10 +884,24 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 		return fmt.Errorf("create schedule: savepoint: %w", err)
 	}
 
+	// cleat#2312: input is sensitive-at-rest. Sealed into a separate
+	// variable, after digest (above) was already computed from the
+	// plaintext sch.Input -- the digest must stay comparable to a future
+	// retry's own plaintext digest, which scheduleRequestDigest computes the
+	// same way every time.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("create schedule: derive tenant key: %w", err)
+	}
+	sealedInput, err := encryptJSONColumnForStorage(string(scheduleInputOrDefault(sch.Input)), tc)
+	if err != nil {
+		return fmt.Errorf("create schedule: encrypt input: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputOrDefault(sch.Input), sch.DisabledAt, sch.NextRunAt, s.tenantID,
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sealedInput, sch.DisabledAt, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
 		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy),
 		key, digest)
@@ -859,6 +971,12 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		}
 		if lastRunAt.Valid {
 			sch.LastRunAt = &lastRunAt.Time
+		}
+		// cleat#2312.
+		if decrypted, derr := s.decryptPayloadJSON(string(sch.Input)); derr == nil {
+			sch.Input = json.RawMessage(decrypted)
+		} else {
+			s.log().WarnContext(ctx, "decrypt listed schedule input failed", "schedule", sch.Name, "error", derr)
 		}
 		schedules = append(schedules, sch)
 	}
@@ -951,6 +1069,15 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	schedules, err := scanDueSchedules(rows)
 	if err != nil {
 		return nil, err
+	}
+	// cleat#2312: decrypt before anything downstream uses Input -- this
+	// feeds the cron dispatcher's own start-new-run call, not only display.
+	for i := range schedules {
+		decrypted, derr := s.decryptPayloadJSON(string(schedules[i].Input))
+		if derr != nil {
+			return nil, fmt.Errorf("get due schedules: decrypt input: %w", derr)
+		}
+		schedules[i].Input = json.RawMessage(decrypted)
 	}
 	return schedules, tx.Commit()
 }

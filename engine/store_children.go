@@ -19,6 +19,18 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	}
 	defer tx.Rollback()
 
+	// cleat#2312: the child's own workflow_instances.input is sensitive-at-
+	// rest, distinct from event.ChildInput in the parent's event_history
+	// (already covered by encodeEventForStorage/cleat#2328).
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return "", fmt.Errorf("start child workflow: derive tenant key: %w", err)
+	}
+	sealedInput, err := encryptJSONColumnForStorage(inputJSON, tc)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow: encrypt input: %w", err)
+	}
+
 	var runID string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
@@ -29,7 +41,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
 			$6, $7)
 		RETURNING id
-	`, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID)
+	`, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
@@ -65,6 +77,21 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	s.log().DebugContext(ctx, "StartChildWorkflowAtomic",
 		"def_name", defName, "def_version", defVersion, "resolved_version", resolvedVersion, "tenant_id", s.tenantID, "parent_id", parentID)
 
+	// cleat#2312: see the identical comment in StartChildWorkflow. tc is
+	// re-derived below for the event's own encodeEventForStorage call too --
+	// that is a second derivation (not shared with this one), which is fine
+	// at the rate this function runs (once per child start, not once per
+	// field): see tenantCipher's own doc comment for the measurement behind
+	// "one derivation per event" rather than per field.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: derive tenant key: %w", err)
+	}
+	sealedInput, err := encryptJSONColumnForStorage(inputJSON, tc)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: encrypt input: %w", err)
+	}
+
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
@@ -74,7 +101,7 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		        COALESCE(NULLIF($6, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),
 			$7, $8)
-	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID, priority)
+	`, childID, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}
@@ -170,6 +197,23 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (Child
 	}
 	if err != nil {
 		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
+	}
+
+	// cleat#2312: decrypt before anything below inspects these values -- this
+	// feeds AwaitChild's host call, not only display, so a plaintext parent
+	// workflow must see the real result/error, not ciphertext or the COALESCE
+	// default.
+	if decrypted, derr := s.decryptPayloadJSON(result); derr == nil {
+		result = decrypted
+	} else {
+		return ChildOutcome{}, fmt.Errorf("get child result: %w", derr)
+	}
+	if errMsg.Valid {
+		decrypted, derr := s.decryptTextColumnFromStorage(errMsg.String, "error_msg")
+		if derr != nil {
+			return ChildOutcome{}, fmt.Errorf("get child result: %w", derr)
+		}
+		errMsg.String = decrypted
 	}
 	// Terminal in this function means settled -- see
 	// childOutcomeForSettledStatus. Two definitions of terminal used to live
