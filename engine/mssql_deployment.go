@@ -15,8 +15,17 @@ import (
 
 // LoadWASM returns the compiled WASM bytes for a workflow definition.
 func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy
+	// must run under its own tenant's SESSION_CONTEXT, not whatever the
+	// pool's original connection happened to carry.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load wasm: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var wasmBytes []byte
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, defName, defVersion, s.tenantID).Scan(&wasmBytes)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -30,11 +39,18 @@ func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 
 // GetWASMLength returns the byte length of the stored WASM binary.
 func (s *MSSQLStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get wasm length: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var length int64
 	// Scoped by tenant: definition names are user-chosen, so one tenant asking
 	// for another's name is ordinary rather than adversarial, and the size of
 	// their compiled WASM is not the caller's to read. IMPROVEMENT-PLAN 3.11.
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT len(wasm_bytes) FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
 		defName, defVersion, s.tenantID).Scan(&length)
 	return length, err
@@ -81,8 +97,15 @@ func (s *MSSQLStore) ListVersions(ctx context.Context, defName string) ([]int, e
 
 // LoadWorkflowConfig returns the max_history_length for a workflow definition.
 func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("load workflow config: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var maxHistoryLength int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT max_history_length FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -96,8 +119,15 @@ func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 
 // LoadDAGSpec returns the dag_spec JSON for a workflow definition, or nil if none.
 func (s *MSSQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load dag_spec: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var raw *[]byte
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -161,6 +191,13 @@ func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte
 // Supported filters: Status, InputContains, ErrorContains, Search.
 // Supports pagination via Offset and Limit (default 100, max 1000).
 func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	d := s.dialect
 	qb := NewQueryBuilder(d,
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE tenant_id = @p1",
@@ -171,7 +208,7 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	applyWorkflowListPaging(qb, d, filter)
 
 	query, args := qb.SQL()
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: %w", err)
 	}
@@ -381,15 +418,21 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 
 // ListWorkflowDefs returns all versions of a workflow, ordered by version DESC.
 func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list workflow defs: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var rows *sql.Rows
-	var err error
 	if name == "" {
-		rows, err = s.db.QueryContext(ctx, `
+		rows, err = tx.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 			FROM workflow_defs WHERE tenant_id = @p1 ORDER BY name, version DESC
 		`, s.tenantID)
 	} else {
-		rows, err = s.db.QueryContext(ctx, `
+		rows, err = tx.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 			FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
 		`, name, s.tenantID)
@@ -424,12 +467,19 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 
 // GetWorkflowDef returns a single workflow definition by name and version.
 func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get workflow def: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var def WorkflowDef
 	var pluginDepsRaw []byte
 	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
 	var createdAt time.Time
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 		FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
@@ -458,33 +508,52 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 // a partial write here would leave a version live and collectable, a state
 // neither column can express alone (cleat#1702).
 func (s *MSSQLStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
-	_, err := s.db.ExecContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("mark version deprecated: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_defs
 		   SET disabled_at = CASE WHEN @p3 = 1 THEN COALESCE(disabled_at, SYSUTCDATETIME()) ELSE NULL END,
 		       gc_eligible = @p3
 		 WHERE name = @p1 AND version = @p2 AND tenant_id = @p4
-	`, name, version, deprecated, s.tenantID)
-	if err != nil {
+	`, name, version, deprecated, s.tenantID); err != nil {
 		return fmt.Errorf("mark version deprecated: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // PurgeWorkflowDef permanently deletes a workflow definition.
 func (s *MSSQLStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
-	`, name, version, s.tenantID)
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
+		return fmt.Errorf("purge workflow def: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, name, version, s.tenantID); err != nil {
 		return fmt.Errorf("purge workflow def: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // CountActiveInstances returns the number of ready or running instances for a version.
 func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count active instances: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
 		WHERE def_name = @p1 AND def_version = @p2 AND tenant_id = @p3
 		  AND status IN ('ready', 'running')
@@ -497,8 +566,15 @@ func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, vers
 
 // ResolveLatestVersion resolves the latest version for a named definition.
 func (s *MSSQLStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("resolve latest version: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var version int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT ISNULL(MAX(version), 0) FROM workflow_defs
 		WHERE name = @p1 AND disabled_at IS NULL AND tenant_id = @p2
 	`, defName, s.tenantID).Scan(&version)
@@ -513,8 +589,15 @@ func (s *MSSQLStore) ResolveLatestVersion(ctx context.Context, defName string) (
 
 // ValidateVersion checks whether the given version is valid.
 func (s *MSSQLStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return false, fmt.Errorf("validate version: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var exists bool
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT CASE WHEN EXISTS (
 			SELECT 1 FROM workflow_defs
 			WHERE name = @p1 AND version = @p2 AND tenant_id = @p3 AND disabled_at IS NULL
@@ -613,7 +696,14 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 // clause), and the fix is to match the existing form rather than to weaken a
 // guard that exists because two real bugs got past review.
 func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
-	_, err := s.db.ExecContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("set workflow tag: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
 		MERGE workflow_tags WITH (HOLDLOCK) AS target
 		USING (VALUES (@p1, @p2)) AS source(workflow_name, tag)
 		ON target.tenant_id = @p4
@@ -624,28 +714,40 @@ func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, ve
 			created_at = SYSUTCDATETIME()
 		WHEN NOT MATCHED THEN INSERT (workflow_name, version, tag, tenant_id)
 			VALUES (@p1, @p3, @p2, @p4);
-	`, workflowName, tag, version, s.tenantID)
-	if err != nil {
+	`, workflowName, tag, version, s.tenantID); err != nil {
 		return fmt.Errorf("set workflow tag: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // RemoveWorkflowTag deletes a tag assignment.
 func (s *MSSQLStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
-	`, workflowName, tag, s.tenantID)
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
+		return fmt.Errorf("remove workflow tag: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
+	`, workflowName, tag, s.tenantID); err != nil {
 		return fmt.Errorf("remove workflow tag: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // GetWorkflowTag returns the version for a given tag.
 func (s *MSSQLStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get workflow tag: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var version int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
 	`, workflowName, tag, s.tenantID).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -659,7 +761,14 @@ func (s *MSSQLStore) GetWorkflowTag(ctx context.Context, workflowName string, ta
 
 // GetWorkflowTags returns all tag -> version mappings for a workflow.
 func (s *MSSQLStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get workflow tags: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT tag, version FROM workflow_tags WHERE workflow_name = @p1 AND tenant_id = @p2
 	`, workflowName, s.tenantID)
 	if err != nil {
@@ -685,15 +794,21 @@ func (s *MSSQLStore) GetWorkflowTags(ctx context.Context, workflowName string) (
 
 // SetRoutingRule creates a routing rule for a workflow version.
 func (s *MSSQLStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("set routing rule: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	id := uuid.New()
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_routing (id, workflow_name, target_version, weight, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, @p5)
-	`, id, workflowName, targetVersion, weight, s.tenantID)
-	if err != nil {
+	`, id, workflowName, targetVersion, weight, s.tenantID); err != nil {
 		return fmt.Errorf("set routing rule: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // RemoveRoutingRule deletes a routing rule by ID, scoped to workflowName --
@@ -704,7 +819,14 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID
 	if err != nil {
 		return fmt.Errorf("remove routing rule: invalid rule id %q: %w", ruleID, err)
 	}
-	res, err := s.db.ExecContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("remove routing rule: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 		DELETE FROM workflow_routing WHERE id = @p1 AND workflow_name = @p2 AND tenant_id = @p3
 	`, id, workflowName, s.tenantID)
 	if err != nil {
@@ -714,12 +836,19 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, workflowName, ruleID
 	if n, rErr := res.RowsAffected(); rErr == nil && n == 0 {
 		return ErrRoutingRuleNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // GetRoutingRules returns all routing rules for a workflow.
 func (s *MSSQLStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get routing rules: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT LOWER(CONVERT(NVARCHAR(36), id)), workflow_name, target_version, weight
 		FROM workflow_routing WHERE workflow_name = @p1 AND tenant_id = @p2
 	`, workflowName, s.tenantID)
@@ -791,8 +920,15 @@ func (s *MSSQLStore) ResolveVersionByTag(ctx context.Context, workflowName strin
 	if tag == "latest" {
 		return s.ResolveLatestVersion(ctx, workflowName)
 	}
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("resolve version by tag: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var version int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
 	`, workflowName, tag, s.tenantID).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
