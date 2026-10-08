@@ -181,6 +181,43 @@ func agentClients() []agentClient {
 			input: `{"config": ` + agentConfigJSON + `, "__entry_point": "run"}`,
 			build: buildPythonClientWASM,
 		},
+		{
+			// Rust's #[cleat_entry] requires exactly one user parameter -- a
+			// WASM export receives one JSON payload -- so, like Go, the
+			// whole input JSON is deserialized directly into the client's
+			// own AgentInput struct. No __entry_point wrapper: this is not a
+			// Component Model binary (that is a Python-specific path), and
+			// Rust emits one export named after the entry function, same as
+			// Go.
+			name:    "rust",
+			defName: "agentclientrust",
+			input:   agentConfigJSON,
+			build:   buildRustClientWASM,
+		},
+		{
+			// Java's @CleatEntry has the identical one-parameter constraint,
+			// and testdata/agentclientjava/.../AgentClient.java takes the
+			// same shape as the Go client: a single String parameter bound
+			// to the whole input payload, parsed by hand (cleat.JsonHelper
+			// cannot deserialize a custom POJO -- see Agent.java's own doc
+			// comment, and cleat#3204).
+			name:    "java",
+			defName: "agentclientjava",
+			input:   agentConfigJSON,
+			build:   buildJavaClientWASM,
+		},
+		{
+			// AssemblyScript's @cleat/transform supports only primitive
+			// parameter types; a single defaultless STRING parameter is the
+			// one shape that receives the whole payload verbatim rather than
+			// a value looked up by name (examples/as-workflow's own
+			// place_order(h, input: string) is the precedent). Same shape as
+			// Go and Java: parsed by hand in testdata/agentclientas.
+			name:    "assemblyscript",
+			defName: "agentclientas",
+			input:   agentConfigJSON,
+			build:   buildAssemblyScriptClientWASM,
+		},
 	}
 }
 
@@ -412,10 +449,17 @@ func buildWorkflowWASM(t *testing.T, relDir string) []byte {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building %s: %v\n%s", relDir, err, out)
 	}
+	return readWASMOutput(t, outDir, relDir)
+}
 
+// readWASMOutput reads the one .wasm file `cleat build -o outDir` wrote,
+// shared by every build*WASM helper in this file so the "find the .wasm"
+// loop and its failure message exist once rather than once per language.
+func readWASMOutput(t *testing.T, outDir, context string) []byte {
+	t.Helper()
 	entries, err := os.ReadDir(outDir)
 	if err != nil {
-		t.Fatalf("reading build output for %s: %v", relDir, err)
+		t.Fatalf("reading build output for %s: %v", context, err)
 	}
 	for _, e := range entries {
 		if filepath.Ext(e.Name()) == ".wasm" {
@@ -426,7 +470,7 @@ func buildWorkflowWASM(t *testing.T, relDir string) []byte {
 			return b
 		}
 	}
-	t.Fatalf("no .wasm in the build output for %s", relDir)
+	t.Fatalf("no .wasm in the build output for %s", context)
 	return nil
 }
 
@@ -517,22 +561,138 @@ func buildPythonClientWASM(t *testing.T) []byte {
 		// IS present and the build broke.
 		t.Fatalf("building the Python agent client: %v\n%s", err, out)
 	}
+	return readWASMOutput(t, outDir, "the Python agent client")
+}
 
-	entries, err := os.ReadDir(outDir)
-	if err != nil {
-		t.Fatalf("reading the Python build output: %v", err)
+// missingRustToolchain, missingJavaToolchain and missingAssemblyScriptToolchain
+// are missingPythonToolchain's shape for the other three languages cleat#2978
+// added: a toolchain absent LOCALLY is an environmental precondition
+// (narrow skip), and absent in CI is a broken job (fatal), because
+// ci.yml installs each one for this job by name -- see the "Setup Rust",
+// "Setup Node" and "Setup Java" steps gated on matrix.package.name == 'crash'.
+// A skip collapsing the two cases would let this test stop running while the
+// suite stayed green, which is this repository's name for the hazard the
+// Python half already guards against.
+func missingRustToolchain(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("the Rust agent client cannot be built, and this job installs the "+
+			"wasm32-unknown-unknown target it needs (ci.yml, 'Setup Rust + "+
+			"wasm32-unknown-unknown', gated on matrix.package.name == 'crash'). Missing "+
+			"here means the job is broken, not that a precondition is absent -- do not "+
+			"turn this into a skip.\n\n%s", reason)
 	}
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".wasm" {
-			b, err := os.ReadFile(filepath.Join(outDir, e.Name()))
-			if err != nil {
-				t.Fatalf("reading %s: %v", e.Name(), err)
-			}
-			return b
-		}
+	t.Skipf("cargo, or the wasm32-unknown-unknown target, is unavailable, so the Rust "+
+		"agent client cannot be built. CI installs both, where this test always runs. "+
+		"To run it locally: `rustup target add wasm32-unknown-unknown`.\n\n%s", reason)
+}
+
+func missingJavaToolchain(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("the Java agent client cannot be built, and this job installs the "+
+			"toolchain it needs (ci.yml, 'Setup Java'/'Setup Gradle', gated on "+
+			"matrix.package.name == 'crash'). Missing here means the job is broken, not "+
+			"that a precondition is absent -- do not turn this into a skip.\n\n%s", reason)
 	}
-	t.Fatalf("no .wasm in the Python build output at %s", outDir)
-	return nil
+	t.Skipf("java or gradle is unavailable, so the Java agent client cannot be built. "+
+		"CI installs both, where this test always runs. To run it locally: install a "+
+		"JDK (17+) and Gradle.\n\n%s", reason)
+}
+
+func missingAssemblyScriptToolchain(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("the AssemblyScript agent client cannot be built, and this job installs "+
+			"the toolchain it needs (ci.yml, 'Setup Node', gated on "+
+			"matrix.package.name == 'crash'). Missing here means the job is broken, not "+
+			"that a precondition is absent -- do not turn this into a skip.\n\n%s", reason)
+	}
+	t.Skipf("node or npm is unavailable, so the AssemblyScript agent client cannot be "+
+		"built. CI installs both, where this test always runs. To run it locally: "+
+		"install Node 20+.\n\n%s", reason)
+}
+
+// buildRustClientWASM compiles the Rust client to a plain WASM module --
+// unlike Python's, no Component Model wrapping: `cleat build --target rust`
+// (cmd/cleat/build_rust.go) targets wasm32-unknown-unknown directly, the
+// same shape the Go client's module is, so this reuses readWASMOutput rather
+// than Python's own scan.
+func buildRustClientWASM(t *testing.T) []byte {
+	t.Helper()
+	if _, err := exec.LookPath("cargo"); err != nil {
+		missingRustToolchain(t, "cargo is not on PATH")
+	}
+	// No separate `rustup target list --installed` probe for the WASM
+	// target: a first version had one, and it fatal'd in CI with
+	// "wasm32-unknown-unknown is not an installed rustup target" even
+	// though ci.yml's "Setup Rust + wasm32-unknown-unknown" step had just
+	// installed it and the real build below works. `rustup target list`
+	// with no toolchain named queries whatever rustup considers the
+	// DEFAULT toolchain, which is not necessarily the one dtolnay/rust-toolchain
+	// just set up and the one `cargo`/`cleat build --target rust` actually
+	// resolve to -- so the probe was answering a different question than
+	// the one that matters. Match Python/Java/AssemblyScript's shape
+	// instead: only `cargo` itself needs to be on PATH, and the real build
+	// below is the sole arbiter of whether the target is actually usable.
+	root := repoRoot(t)
+	outDir := t.TempDir()
+	cmd := exec.Command("go", "run", filepath.Join(root, "cmd", "cleat"),
+		"build", "--target", "rust", "-o", outDir, filepath.Join(root, "testdata", "agentclientrust"))
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// Fatal, not Skip: the toolchain probes above already decided that
+		// question. Reaching here means the toolchain IS present and the
+		// build broke.
+		t.Fatalf("building the Rust agent client: %v\n%s", err, out)
+	}
+	return readWASMOutput(t, outDir, "the Rust agent client")
+}
+
+// buildJavaClientWASM compiles the Java client to WASM via Gradle + TeaVM
+// (cmd/cleat/build_java.go).
+func buildJavaClientWASM(t *testing.T) []byte {
+	t.Helper()
+	if _, err := exec.LookPath("java"); err != nil {
+		missingJavaToolchain(t, "java is not on PATH")
+	}
+	if _, err := exec.LookPath("gradle"); err != nil {
+		missingJavaToolchain(t, "gradle is not on PATH")
+	}
+
+	root := repoRoot(t)
+	outDir := t.TempDir()
+	cmd := exec.Command("go", "run", filepath.Join(root, "cmd", "cleat"),
+		"build", "--target", "java", "-o", outDir, filepath.Join(root, "testdata", "agentclientjava"))
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building the Java agent client: %v\n%s", err, out)
+	}
+	return readWASMOutput(t, outDir, "the Java agent client")
+}
+
+// buildAssemblyScriptClientWASM compiles the AssemblyScript client to WASM
+// via asc (cmd/cleat/build_as.go), which installs the client's own
+// node_modules on demand if missing -- no separate install step needed here.
+func buildAssemblyScriptClientWASM(t *testing.T) []byte {
+	t.Helper()
+	if _, err := exec.LookPath("node"); err != nil {
+		missingAssemblyScriptToolchain(t, "node is not on PATH")
+	}
+	if _, err := exec.LookPath("npm"); err != nil {
+		missingAssemblyScriptToolchain(t, "npm is not on PATH")
+	}
+
+	root := repoRoot(t)
+	outDir := t.TempDir()
+	cmd := exec.Command("go", "run", filepath.Join(root, "cmd", "cleat"),
+		"build", "--target", "assemblyscript", "-o", outDir,
+		filepath.Join(root, "testdata", "agentclientas"))
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building the AssemblyScript agent client: %v\n%s", err, out)
+	}
+	return readWASMOutput(t, outDir, "the AssemblyScript agent client")
 }
 
 // deployOneDef registers one definition the way deployFixture registers

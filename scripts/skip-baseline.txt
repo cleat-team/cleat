@@ -347,7 +347,10 @@ tests/cluster	replayStoreDB	3
 tests/cluster	requireDB	3
 tests/cluster	scaleStore	3
 tests/cluster	testStore	3
+tests/crash	missingAssemblyScriptToolchain	1
+tests/crash	missingJavaToolchain	1
 tests/crash	missingPythonToolchain	1
+tests/crash	missingRustToolchain	1
 tests/crash	mssqlTarget	1
 tests/crash	mysqlTarget	1
 tests/cross-language	buildRustWasm	1

@@ -989,7 +989,26 @@ and two of those copies -- one per template -- were never tested.
 |---|---|---|
 | Go | ✅ `agentworkflow.RunAsChild(h, cfg, msg)` | [`cleat/agentworkflow`](../../cleat/agentworkflow) |
 | Python | ✅ `cleat_sdk.agent.run_agent(h, cfg, msg)` | [`python-sdk/cleat_sdk/agent.py`](../../python-sdk/cleat_sdk/agent.py) |
-| Rust, Java, AssemblyScript | **not yet** | a named follow-up, not an unasserted gap |
+| Rust | ✅ `cleat_sdk::agent::run_agent(h, cfg, msg)` | [`crates/cleat-sdk/src/agent.rs`](../../crates/cleat-sdk/src/agent.rs) |
+| Java | ✅ `cleat.Agent.runAgent(host, cfg, msg)` | [`crates/cleat-java/src/main/java/cleat/Agent.java`](../../crates/cleat-java/src/main/java/cleat/Agent.java) |
+| AssemblyScript | ✅ `runAgent(h, cfg, msg)` from `@cleat/sdk` | [`packages/cleat-as/assembly/agent.ts`](../../packages/cleat-as/assembly/agent.ts) |
+
+**Each of the five converges on the same shape for a different reason.** Go and
+Python bind a config argument by name or position; Rust's `#[cleat_entry]` and
+Java's `@CleatEntry` both require exactly one user parameter and so would
+*permit* a typed struct there in principle, but Rust takes the whole input as
+one deserialized value and Java's `JsonHelper` cannot deserialize an arbitrary
+POJO (see [`Agent.java`](../../crates/cleat-java/src/main/java/cleat/Agent.java)'s
+class doc comment, and cleat#3204) -- so both parse the payload by hand, same
+as Go. AssemblyScript's `@cleat/transform` enforces primitive-only parameters
+at compile time, so a single defaultless `string` is the one shape left; it
+too parses by hand. All five end up handed one JSON payload and parsing it
+themselves, for three different reasons.
+
+Rust's `AgentResult`/`ToolCallRecord` need `Serialize` as well as
+`Deserialize`: a workflow that forwards the agent's result as its *own*
+output has to re-encode it (`testdata/agentclientrust` does exactly this),
+where Go, Python, Java and AssemblyScript only ever decode one.
 
 **Why a workflow.** Each LLM turn and each tool call is a durable step inside
 the agent, so a run that dies mid-conversation resumes from its recorded history
