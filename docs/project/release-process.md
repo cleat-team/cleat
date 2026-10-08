@@ -940,15 +940,26 @@ gh api repos/cleat-team/homebrew-tap/contents/Formula/cleat.rb \
 
 # The chart.
 helm pull oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z -d /tmp/chart-check
+
+# The container image. No docker login needed -- the package is public
+# (cleat#2317), so this is a reliable check on its own: `manifest unknown`
+# now has exactly one cause, this tag was never pushed.
+docker manifest inspect ghcr.io/cleat-team/cleat-worker:vX.Y.Z
 ```
 
-The **container image cannot be checked from a normal checkout**, and it fails
-quietly rather than loudly: an anonymous `docker manifest inspect
-ghcr.io/cleat-team/cleat-worker:vX.Y.Z` returns `denied` for a package that is
-private *and* for one that does not exist. Verified 2026-09-27 against a
-deliberately impossible package name, which returned the identical `denied` —
-so that output is not evidence either way. Check it with an authenticated
-`docker login ghcr.io`, or ask an owner.
+**The image check used to need an owner, and does not any more.** The package
+was made public 2026-10-08 (cleat#2317) — a one-way flip, since GitHub cannot
+make a package private again. Before that, an anonymous `denied` meant
+"private" and "does not exist" identically — verified 2026-09-27 against a
+deliberately impossible package name, which returned the same `denied` as a
+genuinely private one — so resolving it needed an authenticated
+`docker login ghcr.io` or an owner. That ambiguity is gone, not merely harder
+to hit: the command above now fails with `manifest unknown` for a missing
+tag -- `denied` is reserved for a whole package that does not exist at all,
+which `cleat-worker` itself never is. Verified directly: a never-pushed tag
+on this real, public package returns `manifest unknown`, not `denied`.
+Either way the cause is the same -- a typo'd version, or a release whose
+image-push step failed -- only the error text differs.
 
 ### 10. Announce
 
