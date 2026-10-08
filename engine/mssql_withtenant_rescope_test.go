@@ -84,6 +84,11 @@ func TestMSSQLStore_WithTenantRescopedStoreReadsTheNewTenantsData(t *testing.T) 
 		wfID, promiseID, tenantB); err != nil {
 		t.Fatalf("seed promise: %v", err)
 	}
+	if err := mssqlExecAsTenant(ctx, t, adminDB, tenantB, `
+		UPDATE workflow_instances SET query_state = '{"progress":"42"}' WHERE id = @p1`,
+		wfID); err != nil {
+		t.Fatalf("seed query_state: %v", err)
+	}
 
 	enableMSSQLTenantPolicies(t, adminDB)
 
@@ -131,6 +136,47 @@ func TestMSSQLStore_WithTenantRescopedStoreReadsTheNewTenantsData(t *testing.T) 
 				"(sql.ErrNoRows) and GetPromise's own no-rows branch reports a resolved promise "+
 				"as merely \"pending\", silent data loss rather than an error",
 				tenantA, tenantB, status, result, wantResult)
+		}
+	})
+
+	// mssql_operations.go's three methods, converted alongside this test's
+	// extension (cleat#2210's "now unblocked by #2751" batch).
+	t.Run("GetQueryState", func(t *testing.T) {
+		got, err := rescoped.GetQueryState(ctx, wfID, "progress")
+		if err != nil {
+			t.Fatalf("GetQueryState: %v", err)
+		}
+		if got != "42" {
+			t.Fatalf("GetQueryState on a store WithTenant-rescoped from %s to %s = %q, want %q -- "+
+				"cleat#2210: under the bug this misses the row (sql.ErrNoRows) and GetQueryState's "+
+				"own no-rows branch returns \"\", indistinguishable from a key that was never published",
+				tenantA, tenantB, got, "42")
+		}
+	})
+
+	t.Run("ListQueryState", func(t *testing.T) {
+		got, err := rescoped.ListQueryState(ctx, wfID)
+		if err != nil {
+			t.Fatalf("ListQueryState: %v", err)
+		}
+		if got["progress"] != "42" {
+			t.Fatalf("ListQueryState on a store WithTenant-rescoped from %s to %s = %v, want "+
+				"progress=%q -- cleat#2210: under the bug this misses the row (sql.ErrNoRows) and "+
+				"ListQueryState's own no-rows branch returns an empty map, indistinguishable from a "+
+				"run that published nothing", tenantA, tenantB, got, "42")
+		}
+	})
+
+	t.Run("QueueDepth", func(t *testing.T) {
+		got, err := rescoped.QueueDepth(ctx)
+		if err != nil {
+			t.Fatalf("QueueDepth: %v", err)
+		}
+		if got < 1 {
+			t.Fatalf("QueueDepth on a store WithTenant-rescoped from %s to %s = %d, want >= 1 "+
+				"(wfID %q is status='ready', task_queue='default', tenant B's own row) -- cleat#2210: "+
+				"under the bug this counts under tenant A's SESSION_CONTEXT, which has none of B's rows",
+				tenantA, tenantB, got, wfID)
 		}
 	})
 }

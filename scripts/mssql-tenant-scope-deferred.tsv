@@ -27,9 +27,6 @@ engine/mssql_events.go	StreamEventHistory	deferred: real candidate from cleat#22
 engine/mssql_lifecycle.go	CountRunnableWorkflows	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/mssql_lifecycle.go	RetryWorkflow	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/mssql_lifecycle.go	childrenClosedByTerminate	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/mssql_operations.go	GetQueryState	deferred: sequenced behind WS-3's cleat#2751 (open PR touching this file); convert after it merges. cleat#2210.
-engine/mssql_operations.go	ListQueryState	deferred: sequenced behind WS-3's cleat#2751 (open PR touching this file); convert after it merges. cleat#2210.
-engine/mssql_operations.go	QueueDepth	deferred: sequenced behind WS-3's cleat#2751 (open PR touching this file); convert after it merges. cleat#2210.
 engine/mssql_tenant_settings.go	GetTenantSettings	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/run_limits.go	GetRunLimits	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/stream_chunk_tail.go	LoadStreamChunksAfter	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
