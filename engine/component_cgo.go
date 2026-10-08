@@ -332,6 +332,7 @@ package engine
 import "C"
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"unsafe"
@@ -995,6 +996,51 @@ func goComponentCallback(
 // ---------------------------------------------------------------------------
 // durable-call interface
 // ---------------------------------------------------------------------------
+// withCleatEntryKey returns input with a top-level "__cleat_entry__" field
+// set to entryPoint, for the component world's single "run" export
+// (componentRunExport) to hand to Python's own _dispatcher_run/_select
+// (entry.py), which is the only reader of that key. cleat#2937.
+//
+// map[string]json.RawMessage, not a generic map[string]any: every OTHER field
+// stays exactly the bytes it arrived as -- re-marshaling a decoded any would
+// reformat a number or reorder keys in a payload this function never needed
+// to touch except to add one.
+//
+// Empty/blank input is treated as `{}`, matching entry.py's own
+// `json.loads(args_str) if args_str else {}` -- an empty workflow start has
+// no parameters to carry, not no JSON object at all.
+//
+// INPUT THAT IS NOT A JSON OBJECT IS RETURNED UNCHANGED, not an error. Every
+// real Python workflow start sends an object -- that is entry.py's own
+// calling convention, not a Component Model requirement -- but this function
+// runs on EVERY component execution, including this package's own synthetic
+// WAT probes that lift a bare string through the ABI with no JSON inside it
+// at all (component_no_decomposition_test.go's componentWithNoImports, whose
+// `$lifted` function takes `(param "input" string)` directly). Those are
+// legitimate exercises of the SAME backend path for reasons that have
+// nothing to do with Python's dispatch convention, and forcing them into an
+// object would fail a `json: cannot unmarshal string into Go value of type
+// map[string]json.RawMessage` that is this function's own addition, not a
+// defect in what it is testing.
+func withCleatEntryKey(input []byte, entryPoint string) ([]byte, error) {
+	fields := map[string]json.RawMessage{}
+	if len(input) > 0 {
+		if err := json.Unmarshal(input, &fields); err != nil {
+			return input, nil
+		}
+	}
+	encodedEntry, err := json.Marshal(entryPoint)
+	if err != nil {
+		return nil, fmt.Errorf("encode entry point %q: %w", entryPoint, err)
+	}
+	fields["__cleat_entry__"] = encodedEntry
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("re-encode workflow input: %w", err)
+	}
+	return out, nil
+}
+
 // ExecuteComponentCGo runs a Component Model guest on wasmtime's own component
 // runtime.
 //
@@ -1085,12 +1131,17 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	cbRegistry.Unlock()
 	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), instance.store_id)
 
-	fn, err := componentGetFunc(instance, store, entryPoint)
+	fn, err := componentGetFunc(instance, store, componentRunExport)
 	if err != nil {
 		return nil, fmt.Errorf("component get func: %w", err)
 	}
 
-	outcome, resultStr, callErr := componentCallRun(fn, store, string(input))
+	dispatchInput, err := withCleatEntryKey(input, entryPoint)
+	if err != nil {
+		return nil, fmt.Errorf("component %s: %w", componentRunExport, err)
+	}
+
+	outcome, resultStr, callErr := componentCallRun(fn, store, string(dispatchInput))
 	if callErr != nil {
 		// Name the limit that stopped it, the same way the core-module and
 		// decomposition paths do. Without this an exhausted budget arrived as

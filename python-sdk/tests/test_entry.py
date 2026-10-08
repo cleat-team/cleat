@@ -9,6 +9,8 @@ bytearray before each test.
 """
 
 import json
+import sys
+import types
 from dataclasses import InitVar, dataclass, field
 
 import pytest
@@ -718,3 +720,116 @@ class TestFromDictDataclassConversion:
         built = _from_dict({"a": 1, "other": 2}, Mixed)
         assert built.a == 1
         assert built.received == {"other": 2}
+
+
+class TestMultiEntryDispatch:
+    """cleat#2937: ``WitWorld.run``'s dispatch across more than one
+    ``@cleat_entry`` function, keyed by ``__cleat_entry__`` in the input
+    JSON -- the mechanism engine/component_cgo.go's ``withCleatEntryKey``
+    now feeds. This half of cleat#2937 was never wrong; it was untested,
+    which is why the engine-side defect (feeding the LOGICAL name to
+    wasmtime's component export lookup instead of to this key) went
+    unnoticed until a workflow with more than one entry point reached it.
+
+    EACH TEST GETS ITS OWN FRESH MODULE, not this file's own module.
+    ``_cleat_entry_wrappers`` is a module-level dict ``@cleat_entry``
+    writes into permanently (see ``_make_entry``'s ``module_name =
+    getattr(func, "__module__", ...)``), and every other test above
+    decorates a function whose ``__module__`` is THIS file -- by the time
+    this class runs, that dict already holds one entry per test that ran
+    before it, accumulated for the whole pytest session. Asserting
+    "exactly two entries, named X and Y" against that population would be
+    an assertion about the wrong thing entirely, and it is cleat#2937's own
+    pattern one level up: a census of a growing population is the wrong
+    thing to assert against.
+    """
+
+    def _fresh_module(self, name: str) -> types.ModuleType:
+        mod = types.ModuleType(name)
+        sys.modules[name] = mod
+        self._cleanup.append(name)
+        return mod
+
+    @pytest.fixture(autouse=True)
+    def _cleanup_modules(self):
+        self._cleanup: list[str] = []
+        yield
+        for name in self._cleanup:
+            sys.modules.pop(name, None)
+
+    def _register(self, mod: types.ModuleType, func):
+        func.__module__ = mod.__name__
+        cleat_entry(func)
+
+    def test_a_single_registered_entry_ignores_cleat_entry_key(self):
+        """The common case -- one @cleat_entry function -- dispatches without
+        needing the key at all, exactly as it did before cleat#2937: a
+        single-entry Python workflow's logical name never has to equal
+        the component's literal "run" export for this to work."""
+        mod = self._fresh_module("_cleat2937_single")
+
+        def place_order(h: HostCalls, item: str):
+            return {"item": item}
+
+        self._register(mod, place_order)
+
+        outcome = mod.WitWorld.run(json.dumps({"item": "widget"}))
+        assert json.loads(outcome.value) == {"item": "widget"}
+
+    def test_multiple_entries_dispatch_on_the_cleat_entry_key(self):
+        """Two @cleat_entry functions, dispatched by name -- the case
+        cleat#2937's own report measured failing end-to-end
+        ('component export "PlaceOrder" not found') because the engine
+        was handing the component's export lookup the logical name instead
+        of this key."""
+        mod = self._fresh_module("_cleat2937_multi")
+
+        def place_order(h: HostCalls, item: str):
+            return {"handler": "place_order", "item": item}
+
+        def cancel_order(h: HostCalls, order_id: str):
+            return {"handler": "cancel_order", "order_id": order_id}
+
+        self._register(mod, place_order)
+        self._register(mod, cancel_order)
+
+        out1 = mod.WitWorld.run(json.dumps({"__cleat_entry__": "cancel_order", "order_id": "abc"}))
+        assert json.loads(out1.value) == {"handler": "cancel_order", "order_id": "abc"}
+
+        out2 = mod.WitWorld.run(json.dumps({"__cleat_entry__": "place_order", "item": "widget"}))
+        assert json.loads(out2.value) == {"handler": "place_order", "item": "widget"}
+
+    def test_multiple_entries_without_the_key_raises(self):
+        """A multi-entry module genuinely needs the key -- there is no
+        fallback that guesses, because guessing wrong would silently run
+        the wrong workflow body."""
+        mod = self._fresh_module("_cleat2937_missingkey")
+
+        def first_entry(h: HostCalls):
+            return {}
+
+        def second_entry(h: HostCalls):
+            return {}
+
+        self._register(mod, first_entry)
+        self._register(mod, second_entry)
+
+        with pytest.raises(ValueError, match="__cleat_entry__"):
+            mod.WitWorld.run(json.dumps({}))
+
+    def test_an_unrecognised_cleat_entry_key_raises(self):
+        """A key naming no registered entry is refused by name, not
+        silently dropped to the first registered wrapper."""
+        mod = self._fresh_module("_cleat2937_badname")
+
+        def a(h: HostCalls):
+            return {}
+
+        def b(h: HostCalls):
+            return {}
+
+        self._register(mod, a)
+        self._register(mod, b)
+
+        with pytest.raises(ValueError, match="No cleat_entry named"):
+            mod.WitWorld.run(json.dumps({"__cleat_entry__": "no_such_entry"}))
