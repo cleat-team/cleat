@@ -337,8 +337,47 @@ case "$pair" in
     # removed, so nothing is counted in two rows.
     remove_blocks "$cleat_scenario" "$scratch/cleat-harness-machinery.sh" \
       "$cleat_behaviour1" "$cleat_behaviour2" "$cleat_behaviour3"
+
+    # cleat#3041: isolated-wedge.test.ts's "unit tests" row used to include
+    # its hand-rolled test DRIVER -- cleat's equivalent (hub_test.go) gets
+    # that for free from Go's `testing` package, so a per-file comparison
+    # summed driver code on one side and not the other. The driver is
+    # main() minus its stuck-loop/SIGKILL branch (that branch asserts a
+    # BEHAVIOUR -- a genuinely wedged isolate cannot be terminated -- and
+    # cleat's side carries an analogous assertion of its own, so it stays in
+    # the row) plus the top-level `main().catch(...)` crash handler.
+    #
+    # The driver is NOT one contiguous block: the stuck-loop branch sits
+    # INSIDE main(), so the driver is genuinely two disjoint pieces -- the
+    # text before that branch and the text after it -- and splitting
+    # dbos-main.ts's text around the branch (rather than trying to
+    # remove_blocks an artificial "main() minus the branch" string, which
+    # does not occur verbatim in the original file at all) is what keeps
+    # each piece a real substring of it.
+    extract ts-if-block "$isolated_wedge_test" 'if \(stuckLoopStillRunning\)' dbos-stuck-loop-branch.ts
+    dbos_stuck_loop_branch="$scratch/dbos-stuck-loop-branch.ts"
+    extract ts-func "$isolated_wedge_test" main dbos-main.ts
+    python3 - "$scratch/dbos-main.ts" "$dbos_stuck_loop_branch" \
+      "$scratch/dbos-driver-before.ts" "$scratch/dbos-driver-after.ts" <<'EOF'
+import sys
+main_path, branch_path, before_path, after_path = sys.argv[1:5]
+whole = open(main_path).read()
+block = open(branch_path).read()
+if block not in whole:
+    print(f"UNMEASURED: the stuck-loop branch was not found verbatim in {main_path}", file=sys.stderr)
+    sys.exit(2)
+before, after = whole.split(block, 1)
+open(before_path, 'w').write(before)
+open(after_path, 'w').write(after)
+EOF
+    dbos_driver_before="$scratch/dbos-driver-before.ts"
+    dbos_driver_after="$scratch/dbos-driver-after.ts"
+    extract ts-trailing-call "$isolated_wedge_test" '^main\(\)\.catch' dbos-driver-crash-handler.ts
+    dbos_driver_crash_handler="$scratch/dbos-driver-crash-handler.ts"
+
     remove_blocks "$isolated_wedge_test" "$scratch/dbos-unit-machinery.ts" \
-      "$dbos_behaviour1" "$dbos_behaviour2" "$dbos_behaviour3"
+      "$dbos_behaviour1" "$dbos_behaviour2" "$dbos_behaviour3" \
+      "$dbos_driver_before" "$dbos_driver_after" "$dbos_driver_crash_handler"
 
     # isolated-workflow.ts's "host runner" is everything in the file EXCEPT
     # the three tenant-code template literals just extracted above -- computed
@@ -372,7 +411,7 @@ EOF
     print_group "cleat: unit tests (extracted from hub_test.go)" "$cleat_test1" "$cleat_test2"
     print_group "DBOS-isolated: tenant code (extracted template literals)" "$dbos_tenant1" "$dbos_tenant2" "$dbos_tenant3"
     print_group "DBOS-isolated: host runner (isolated-workflow.ts minus tenant code)" "$scratch/dbos-host-runner.ts"
-    print_group "DBOS-isolated: unit tests (isolated-wedge.test.ts -- its three behaviour functions are counted in the behaviour row below)" \
+    print_group "DBOS-isolated: unit tests (isolated-wedge.test.ts, minus its three behaviour functions AND its hand-rolled test driver -- cleat#3041)" \
       "$scratch/dbos-unit-machinery.ts"
 
     echo "== BEHAVIOUR ASSERTIONS, both sides -- SUMMED INTO BOTH APP TOTALS (cleat#2642) =="
@@ -386,6 +425,16 @@ EOF
       "$scratch/cleat-harness-machinery.sh"
     print_group "DBOS-isolated: e2e harness (npm install/build/test wrapper -- the assertions live in the unit test above; no runtime code intake to exercise)" \
       "$repo_root/scripts/run-integration-hub-dbos-scenario.sh"
+
+    # cleat#3041: the hand-rolled test driver that isolated-wedge.test.ts's
+    # "unit tests" row used to include -- DBOS.setConfig/launch/shutdown, the
+    # positive-control gate, the two process.exit codes, and the top-level
+    # crash-to-UNMEASURED handler. Shown here rather than vanishing, in the
+    # same shape as the e2e harness rows above: cleat's side never pays this
+    # cost because Go's `testing` package supplies it, so there is no cleat
+    # counterpart to show beside it.
+    print_group "DBOS-isolated: unit test driver (excluded, analogous to e2e harness machinery -- cleat#3041)" \
+      "$dbos_driver_before" "$dbos_driver_after" "$dbos_driver_crash_handler"
 
     print_group "cleat: platform (own line -- never summed into the app total)" \
       "$repo_root/engine/wasi_policy.go" \
