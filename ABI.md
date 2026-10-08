@@ -139,8 +139,8 @@ Make a recorded API call to an external service.
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
-| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation"), 8 = output write failed (§ "Output write failure") |
+| 8-39 | `callErrorCode` — 0 when errCode is 0 or 1; otherwise classifies the failure (§§ "Output truncation", "Retry refusal", "Output write failure" below document which values are in use) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
 If `errCode == 0`, the response buffer contains valid JSON. If `errCode == 1`, the response buffer contains an error message string.
@@ -290,6 +290,45 @@ caller.
 propagate the code behaves exactly as it did before, so introducing the signal could not itself
 change what any guest received.
 
+##### Output write failure — `errCode` 8, on every call that writes a value
+
+**Added 2026-10-08, cleat#3207.**
+
+Truncation above assumes the host could write *something*. When it cannot write anything at
+all — the wasmtime raw-buffer path's bounds check rejects a `ptr`/length past the end of the
+guest's own linear memory, or the wazero path's `mem.Write` itself reports out-of-bounds — the
+host returns an error result classified distinctly from truncation:
+
+| field | value |
+|---|---|
+| `errCode` (0-7) | `8` — `OutputWriteFailed`; the call **failed** |
+| `callErrorCode` (8-15), durable-call layouts only | `8` — `OutputWriteFailed` |
+| the output buffer | holds **nothing usable** — unlike truncation, there is no prefix |
+
+**Before this the failure was invisible, and worse than truncation's was.** `writeOut` mapped
+every write error that was not a recognised truncation onto `errCode` 0 — success — because the
+code only checked for the one error shape it knew. The call itself may have genuinely run on the
+host side: for a call like `cleat_child_workflow`, the child's run ID was correctly created and
+recorded in `event_history`, and the guest still decoded an empty string with a SUCCESS code.
+Found building the Java agent client (cleat#2978), where TeaVM's own linear memory had not yet
+grown past the ABI's fixed output region at the moment of the host's first call.
+
+**Why `8` in both fields, for the same reason `7` is.** Free in both the simple-result `errCode`
+byte and `cleat.CallErrorCode`'s enum — a guest recognising this failure needs no prior knowledge
+of which result layout it is decoding.
+
+**`OutputWriteFailed` must be non-retryable, and for a different reason than `OutputTruncated`
+is.** Re-issuing the identical call does not fail identically here — the underlying call may have
+already happened and recorded a real effect, so retrying risks a duplicate side effect rather than
+a second harmless attempt. The guest's obligation is the same posture as a cancelled or
+presumed-lost run: treat the outcome as unknown and fail the step, not as a transient miss to
+retry.
+
+**Nothing is written, deliberately, unlike truncation's prefix.** `writeResult` already forces its
+returned byte count to 0 on every path that produces this error; `writeOut` forces it again
+regardless, because the point of this code is that there is nothing in the output buffer worth a
+guest trusting.
+
 ##### Retry refusal — `cleat_call_retry` only, and NOT a sentinel bit
 
 **Decided 2026-09-03, IMPROVEMENT-PLAN §3.94 step 1; implemented 2026-09-03 in step 4.**
@@ -382,8 +421,8 @@ Server-side retry variant of `cleat_call`. Retries happen inside the host; one e
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
-| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation"), 8 = output write failed (§ "Output write failure") |
+| 8-39 | `callErrorCode` — 0 when errCode is 0 or 1; otherwise classifies the failure (§§ "Output truncation", "Retry refusal", "Output write failure" below document which values are in use) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
 #### 2.3 `cleat_call_heartbeat`
@@ -414,8 +453,8 @@ There is no progress channel here and there never has been. The Go and Python SD
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
-| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation"), 8 = output write failed (§ "Output write failure") |
+| 8-39 | `callErrorCode` — 0 when errCode is 0 or 1; otherwise classifies the failure (§§ "Output truncation", "Retry refusal", "Output write failure" below document which values are in use) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
 ### Timing and randomness
@@ -1517,7 +1556,7 @@ Host-only extension for plugin function calls. Not included in the Go SDK genera
 | Bits | Meaning |
 |---|---|
 | 0-7 | `errCode` |
-| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 8-39 | `callErrorCode` — 0 when errCode is 0 or 1; otherwise classifies the failure (§§ "Output truncation", "Retry refusal", "Output write failure" below document which values are in use) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
 #### 2.50 `plugin_call_streaming`
@@ -1546,7 +1585,7 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 | Bits | Meaning |
 |---|---|
 | 0-7 | `errCode` |
-| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 8-39 | `callErrorCode` — 0 when errCode is 0 or 1; otherwise classifies the failure (§§ "Output truncation", "Retry refusal", "Output write failure" below document which values are in use) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
 ### Previously undocumented functions
