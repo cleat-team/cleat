@@ -646,18 +646,20 @@ func (c *sbConn) execUpdateConfig(args []driver.NamedValue) (driver.Result, erro
 func (c *sbConn) execUpdateHistory(q string, args []driver.NamedValue) (driver.Result, error) {
 	n := len(args)
 
-	// Handle no-arg bulk UPDATE: cleanup orphaned history.
-	// Query contains "'running'" and "started_at <" when called from
-	// cleanupOrphanedHistory.
-	if n == 0 && strings.Contains(q, "'running'") && strings.Contains(q, "started_at <") {
+	// Handle the bulk UPDATE: cleanup orphaned history. Query contains
+	// "'running'" and "started_at <" when called from cleanupOrphanedHistory,
+	// with error_message bound as its one arg (cleat#2292 item 5 -- a stable
+	// code, backupErrOrphanedTimeout, rather than the literal text this fake
+	// driver used to supply itself).
+	if n == 1 && strings.Contains(q, "'running'") && strings.Contains(q, "started_at <") {
+		errCode, _ := sbArgS(args, 1)
 		now := time.Now()
 		cutoff := now.Add(-1 * time.Hour)
 		var affected int64
 		for _, row := range c.db.history {
 			if row.status == "running" && row.startedAt.Before(cutoff) {
 				row.status = "failed"
-				errMsg := "worker crashed or timed out"
-				row.errorMessage = &errMsg
+				row.errorMessage = &errCode
 				row.completedAt = &now
 				affected++
 			}
@@ -1288,6 +1290,48 @@ func TestSB_RunDueBackups_QueryError(t *testing.T) {
 	// runDueBackups should log the error but not panic.
 	p.runDueBackups(context.Background())
 	// No panic = success.
+}
+
+// =========================================================================
+// cleanupOrphanedHistory
+// =========================================================================
+
+// TestSB_CleanupOrphanedHistory_UsesAStableErrorCode is cleat#2292 item 5's
+// regression test. cleanupOrphanedHistory used to write the free-text
+// "worker crashed or timed out" straight into error_message, the one failure
+// path in this file that did not follow the stable-code convention every
+// other one does (backupErrDSNUnavailable, backupErrUnsafePath,
+// backupErrPgDumpFailed) -- nothing asserted on its value at all, so the
+// prose could say anything and this would still pass.
+func TestSB_CleanupOrphanedHistory_UsesAStableErrorCode(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	historyID := "00000000-0000-0000-0000-000000000554"
+	started := time.Now().Add(-2 * time.Hour)
+	fdb.mu.Lock()
+	fdb.history[historyID] = &sbHistoryRow{
+		id: historyID, status: "running",
+		startedAt: started, createdAt: started,
+	}
+	fdb.mu.Unlock()
+
+	p.cleanupOrphanedHistory(context.Background())
+
+	fdb.mu.RLock()
+	row := fdb.history[historyID]
+	fdb.mu.RUnlock()
+
+	if row.status != "failed" {
+		t.Fatalf("status = %q after the orphan sweep, want %q", row.status, "failed")
+	}
+	if row.errorMessage == nil {
+		t.Fatal("error_message is nil after the orphan sweep")
+	}
+	if *row.errorMessage != backupErrOrphanedTimeout {
+		t.Errorf("error_message = %q, want the stable code %q, not free text",
+			*row.errorMessage, backupErrOrphanedTimeout)
+	}
 }
 
 // =========================================================================
