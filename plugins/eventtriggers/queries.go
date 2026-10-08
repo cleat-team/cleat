@@ -113,18 +113,25 @@ VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 3), 1, $8)`,
 // #2820, which asked the question): a deleted source's events are inert on
 // both the awaiter and dispatch paths, matching what webhook_events already
 // does for its own cancellation.
+// ORDER BY seq, not received_at -- cleat#2652. received_at is NOW() at
+// transaction-START, not commit, so it is not reliably monotonic under
+// concurrent inserts; seq (migrations.go Version 9) is assigned once, at
+// INSERT, in the order INSERT statements are issued. The age filter below
+// stays on received_at deliberately -- it is a genuine wall-clock "how old
+// is this row" check, not an ordering concern, and the column it reads does
+// not need to be monotonic for that purpose.
 var queryUnprocessedEvents = plugin.Query{
 	Default: `SELECT id, tenant_id, event_type, event_data, retry_count
 FROM ingested_events
 WHERE NOT dispatch_processed
   AND received_at < NOW() - INTERVAL '10 seconds'
-ORDER BY received_at
+ORDER BY seq
 LIMIT 100`,
 	MySQL: `SELECT id, tenant_id, event_type, event_data, retry_count
 FROM ingested_events
 WHERE NOT dispatch_processed
   AND received_at < DATE_SUB(NOW(), INTERVAL 10 SECOND)
-ORDER BY received_at
+ORDER BY seq
 LIMIT 100`,
 	// `dispatch_processed = 0`, not `NOT dispatch_processed`: T-SQL has no
 	// boolean type, so a BIT column is a value and not a condition.
@@ -142,7 +149,7 @@ LIMIT 100`,
 FROM ingested_events
 WHERE dispatch_processed = 0
   AND received_at < DATEADD(second, -10, SYSUTCDATETIME())
-ORDER BY received_at
+ORDER BY seq
 OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 }
 
@@ -154,8 +161,13 @@ OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 // unconsumed event of the same type, the same property queryUnprocessedEvents
 // (the plural one, below) already avoids for the background dispatcher. The
 // two names differing by one word is what let the bug hide -- a grep for
-// "ORDER BY received_at" finds the plural query's ascending order and reads as
-// "the fix landed" without checking which query, or which caller.
+// "ORDER BY received_at" used to find the plural query's ascending order and
+// read as "the fix landed" without checking which query, or which caller.
+// Both have since moved to "ORDER BY seq" (cleat#2652, migrations.go Version
+// 9), for an unrelated reason -- received_at is NOW() at transaction-START,
+// not commit, so it was never reliably monotonic under concurrent inserts --
+// and a grep for either ORDER BY column today finds both queries agreeing,
+// which this paragraph's own lesson says to re-derive rather than trust.
 //
 // FOR UPDATE SKIP LOCKED / WITH (UPDLOCK, READPAST, ROWLOCK) -- the same
 // per-dialect claim idiom plugins/scheduler/background.go already uses for
@@ -219,7 +231,7 @@ WHERE tenant_id = $1
   AND key2 = $4
   AND key3 = $5
   AND NOT processed
-ORDER BY received_at
+ORDER BY seq
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,
 	// FORCE INDEX (idx_ingested_events_correlate), NOT idx_ingested_events_unprocessed
@@ -306,7 +318,7 @@ WHERE tenant_id = $1
   AND key2 = $4
   AND key3 = $5
   AND processed = FALSE
-ORDER BY received_at
+ORDER BY seq
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,
 	// No MSSQL arm any more -- cleat#2821/#2866. This had been
@@ -371,7 +383,7 @@ WHERE tenant_id = $1
   AND key2 = $4
   AND key3 = $5
   AND processed = 0
-ORDER BY received_at`, candidateBatchSizeMSSQL)
+ORDER BY seq`, candidateBatchSizeMSSQL)
 
 // queryClaimEventByIDMSSQL targets exactly one row by its primary key, so it
 // cannot need to prove anything about any other row to execute -- the

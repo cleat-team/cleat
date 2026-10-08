@@ -151,10 +151,19 @@ func TestAwaitEventMarshalFailureLeavesEventUnconsumed(t *testing.T) {
 }
 
 // TestAwaitEventClaimsOldestAcrossDialects is cleat-review's GAP 1, fix half
-// one: it seeds the NEWER event first (so a pick-by-insertion-order
-// implementation would also get it wrong) and asserts the OLDER one is
-// claimed, against a real server of each dialect -- not the fake driver's own
-// independent oldest-picking logic.
+// one, UPDATED for cleat#2652: it used to seed the NEWER event first (so a
+// pick-by-insertion-order implementation would also get it wrong) and assert
+// the OLDER one was claimed. That inverted the moment #2652 moved the claim
+// query's ORDER BY from received_at to seq -- the whole point of that
+// change is that received_at (NOW()/SYSUTCDATETIME() at transaction-START)
+// is not reliably monotonic under concurrent commits, so ordering now
+// follows seq (assigned once, at INSERT, in the order INSERT statements are
+// issued), not the wall clock. This seeds the two events with received_at
+// values deliberately out of step with insertion order -- the row inserted
+// FIRST carries the LATER received_at -- and asserts the FIRST-INSERTED one
+// is claimed, against a real server of each dialect, not the fake driver's
+// own independent oldest-picking logic (which still keys off received_at;
+// see the file header above).
 func TestAwaitEventClaimsOldestAcrossDialects(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -177,16 +186,17 @@ func TestAwaitEventClaimsOldestAcrossDialects(t *testing.T) {
 			p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
 
 			tenantID := uuid.New()
-			newerID := uuid.New()
-			olderID := uuid.New()
+			insertedFirst := uuid.New()
+			insertedSecond := uuid.New()
 			now := time.Now()
 
 			seedCtx := plugin.ForTenant(context.Background(), tenantID)
-			// The NEWER row is inserted FIRST, so an implementation that picked
-			// by insertion order (or by the pre-#2641 DESC ordering) would also
-			// return the wrong one here.
-			mustInsertIngestedEventAt(t, seedCtx, p, newerID, tenantID, "order.created", now)
-			mustInsertIngestedEventAt(t, seedCtx, p, olderID, tenantID, "order.created", now.Add(-time.Hour))
+			// insertedFirst carries the LATER received_at and insertedSecond
+			// the EARLIER one -- out of step with insertion order on purpose.
+			// An implementation that still ordered by received_at would
+			// return insertedSecond here; seq ordering returns insertedFirst.
+			mustInsertIngestedEventAt(t, seedCtx, p, insertedFirst, tenantID, "order.created", now)
+			mustInsertIngestedEventAt(t, seedCtx, p, insertedSecond, tenantID, "order.created", now.Add(-time.Hour))
 
 			ctx := plugin.WithCallContext(seedCtx, &plugin.CallContext{
 				TenantID:   tenantID.String(),
@@ -204,10 +214,11 @@ func TestAwaitEventClaimsOldestAcrossDialects(t *testing.T) {
 			if !result.Found {
 				t.Fatal("expected Found=true")
 			}
-			if result.EventID != olderID.String() {
-				t.Errorf("claimed event %s, want the OLDER event %s (newer was %s) -- "+
-					"on %s, queryOldestUnprocessedEventForClaim's ORDER BY is not ascending",
-					result.EventID, olderID, newerID, tc.name)
+			if result.EventID != insertedFirst.String() {
+				t.Errorf("claimed event %s, want the FIRST-INSERTED event %s (second-inserted, "+
+					"with the earlier received_at, was %s) -- on %s, "+
+					"queryOldestUnprocessedEventForClaim's ORDER BY is not seq ascending",
+					result.EventID, insertedFirst, insertedSecond, tc.name)
 			}
 		})
 	}

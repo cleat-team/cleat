@@ -113,10 +113,11 @@ func PublishEvent(
 	// equivalent (migrations.go has never added an ISJSON check there,
 	// unlike event_subscriptions.input_template's JSON_VALID CHECK). Without
 	// this, a row that reaches storage on SQL Server only is unmarshalable by
-	// every reader downstream -- and because the claim query orders by
-	// received_at with no way to skip a row it cannot process, that row
-	// becomes the permanent head of its (tenant, event_type), and no later
-	// event of that type is ever delivered (cleat#2666). Checking in Go once,
+	// every reader downstream -- and because the claim query orders by seq
+	// (formerly received_at; cleat#2652) with no way to skip a row it cannot
+	// process, that row becomes the permanent head of its (tenant,
+	// event_type), and no later event of that type is ever delivered
+	// (cleat#2666). Checking in Go once,
 	// before the dialect-specific INSERT, makes the guarantee the same on all
 	// three dialects instead of resting on a per-column accident.
 	if !json.Valid(eventData) {

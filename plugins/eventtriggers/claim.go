@@ -243,8 +243,8 @@ func claimOldestUnprocessedEventLocking(
 }
 
 // claimOldestUnprocessedEventMSSQL is cleat#2821/#2866's fix. It reads a
-// small, UNLOCKED, received_at-ordered candidate id list
-// (queryCandidateUnprocessedEventIDsMSSQL), then attempts to claim
+// small, UNLOCKED, seq-ordered (formerly received_at-ordered; cleat#2652)
+// candidate id list (queryCandidateUnprocessedEventIDsMSSQL), then attempts to claim
 // candidates one at a time, oldest first, via an equality UPDATE on the
 // primary key (queryClaimEventByIDMSSQL). A point UPDATE on `id` cannot need
 // to prove anything about any other row to execute, so it cannot lock more
