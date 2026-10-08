@@ -1037,6 +1037,25 @@ tier2:
         fail-when-configured-but-unreachable split as engine/testutil.TestDB, instead of
         hardcoding a DSN and hard-failing when the stack was absent.
 
+    - id: formal-specs
+      why: |
+        6 of 8 specs under specs/ are SANY+TLC-checked in CI: CleatClaim,
+        CleatDurableCallIntent, CleatKeyRotation, CleatParentAwait,
+        CleatQueueAdmission and CleatRunLifecycle each have a .cfg, and
+        .github/workflows/tla.yml's "SANY + TLC (make tla)" step runs them on every
+        PR touching specs/** (plus a listed set of implementing files) and on every
+        push to main/develop. specs/README.md documents and links a per-spec status
+        file for each of the 6, with issue references and a generated index. Moved
+        out of tier 3 by owner
+        decision, cleat#2708 (2026-10-08) — see D15: a component this continuously
+        checked was in real tension with tier 3's "not built, not shipped, not
+        claimed ... may not appear in docs as supported" contract.
+      open_items:
+        - "CleatSignals.tla and CleatStateMachine.tla have no .cfg and are documented
+           unmaintained/superseded in specs/README.md. The Makefile's tla target
+           iterates specs/*.cfg only, so these two are never SANY/TLC-checked, in CI
+           or otherwise — this entry's tier-2 status does not cover them."
+
   # What the gate runs. Read by scripts/tier2-gate.sh; the components above are prose and
   # nothing could execute them, which is why tier 2 spent its whole life as a claim.
   #
@@ -1691,35 +1710,15 @@ tier3:
     # python-sdk/wit/cleat.wit, whose world exports `run` at the top level, so nothing
     # builds a component the nil parent index cannot resolve.
 
-    - id: formal-specs
-      why: |
-        STALE 2026-09-29 (cleat#2420): this entry said no `.cfg` file existed under
-        `specs/` and that nothing invoked `tlc2.TLC` — "TLC never runs, in CI or
-        otherwise". Both halves are now false. `find specs -iname '*.cfg'` returns
-        5 files, and `.github/workflows/tla.yml`'s "SANY + TLC (make tla)" step runs
-        `make tla`, whose `Makefile` target invokes `tlc2.TLC -config "$$cfg"
-        "$$spec"` per `.cfg`/`.tla` pair on every PR touching `specs/**` (plus a
-        listed set of implementing files) and on every push to `main`/`develop`.
-        `specs/README.md`'s own generated index already gets this right --
-        `CleatClaim.tla`, `CleatDurableCallIntent.tla`, `CleatKeyRotation.tla`,
-        `CleatQueueAdmission.tla` and `CleatRunLifecycle.tla` are listed "checked by
-        TLC: Yes" -- so the drift was in this file alone, exactly the pattern
-        CLAUDE.md's "a count of a growing population is guaranteed to be wrong"
-        section describes: re-derive rather than trusting either table.
-
-        What is NOT re-derived here, on purpose, is the tier itself. Five specs
-        being model-checked in CI is in tension with this component's own
-        tier3 contract (`not built, not shipped, not claimed ... may not appear in
-        docs as supported`) when `specs/README.md` already documents and links
-        per-spec status files -- but reclassifying a component is a product-status
-        decision, not a wording fix, and it belongs to whoever owns this file's
-        tier assignments rather than to the session that noticed the comment was
-        wrong. Filed as cleat#2708 rather than decided here.
-
-        The two remaining specs, `CleatSignals.tla` and `CleatStateMachine.tla`,
-        have no `.cfg` and are explicitly documented as unmaintained/superseded in
-        `specs/README.md` -- that part of the original claim (something here is
-        genuinely unchecked) still holds, just not for the whole directory.
+    # formal-specs was here. Moved to tier 2 on 2026-10-08 (cleat#2708, D15): 6 of 8
+    # specs under specs/ are SANY+TLC-checked on every PR touching specs/** and on
+    # every push to main/develop, which was in real tension with this tier's own
+    # contract ("not built, not shipped, not claimed"). See tier2.components for the
+    # current entry; the 2 unmaintained specs travel with it as an open_item rather
+    # than as a reason to keep the whole component parked. This entry itself had
+    # drifted once already (cleat#2420, STALE 2026-09-29) before the reclassification
+    # -- re-derive specs/*.cfg and .github/workflows/tla.yml directly rather than
+    # trusting this comment's counts as they age.
 
     - id: comparative-benchmarks
       why: |
@@ -2002,7 +2001,17 @@ tier3:
 #       A status of 'terminating' straight after a force-complete is expected, not a
 #       failure: the row carries the outcome that will be applied.
 #
-# D1-D4 were settled together on 2026-08-06; D5-D14 have been added since, and this
+#   D15 DECIDED 2026-10-08 (repository owner). FORMAL-SPECS MOVES FROM TIER 3 TO
+#       TIER 2. cleat#2708, following cleat#2420's stale-entry fix. 6 of 8 specs
+#       under specs/ are SANY+TLC-checked on every PR touching specs/** and on every
+#       push to main/develop, with a documented per-spec status index -- in real
+#       tension with tier 3's "not built, not shipped, not claimed" contract. The
+#       2 unmaintained specs (CleatSignals.tla, CleatStateMachine.tla) travel with
+#       the component into tier 2 as an open_item rather than forcing a split; the
+#       Makefile's tla target already only ever checked the 6, so nothing about
+#       their own (non-)enforcement changes. See tier2.components.
+#
+# D1-D4 were settled together on 2026-08-06; D5-D15 have been added since, and this
 # register was still saying "all four" until D7 was recorded. New ones go here with
 # the same shape: what was decided, on what date, and what it changes about what the
 # gate enforces.
