@@ -24,26 +24,37 @@ const (
 	backupErrDSNUnavailable = "dsn_unavailable"
 	backupErrUnsafePath     = "unsafe_path"
 	backupErrPgDumpFailed   = "pg_dump_failed"
+	// backupErrOrphanedTimeout: cleat#2292 item 5. cleanupOrphanedHistory used
+	// to write the free-text "worker crashed or timed out" directly into
+	// error_message, the one failure in this file that did not follow the
+	// stable-code convention above it -- an operator (or a future dashboard)
+	// matching on error_message had three fixed strings to compare against
+	// and one sentence. There is no per-attempt detail to lose by making it a
+	// code: the sweep has no stderr or error object, only "this row has been
+	// 'running' for over an hour".
+	backupErrOrphanedTimeout = "orphaned_timeout"
 )
 
 // cleanupOrphanedHistoryQuery marks running backup_history rows as failed when
 // their started_at is more than 1 hour ago (worker crashed or timed out).
+// error_message is bound as $1 rather than written into the dialect arms
+// below, so backupErrOrphanedTimeout is the only place its text is spelled.
 var cleanupOrphanedHistoryQuery = plugin.Query{
 	Default: `
 		UPDATE backup_history
-		SET status = 'failed', error_message = 'worker crashed or timed out',
+		SET status = 'failed', error_message = $1,
 		    completed_at = now()
 		WHERE status = 'running'
 		  AND started_at < now() - INTERVAL '1 hour'`,
 	MySQL: `
 		UPDATE backup_history
-		SET status = 'failed', error_message = 'worker crashed or timed out',
+		SET status = 'failed', error_message = $1,
 		    completed_at = NOW()
 		WHERE status = 'running'
 		  AND started_at < NOW() - INTERVAL 1 HOUR`,
 	MSSQL: `
 		UPDATE backup_history
-		SET status = 'failed', error_message = 'worker crashed or timed out',
+		SET status = 'failed', error_message = $1,
 		    completed_at = SYSUTCDATETIME()
 		WHERE status = 'running'
 		  AND started_at < DATEADD(hour, -1, SYSUTCDATETIME())`,
@@ -141,7 +152,7 @@ type dueBackup struct {
 // older than 1 hour as failed, under the assumption that the worker crashed or
 // timed out.
 func (p *Plugin) cleanupOrphanedHistory(ctx context.Context) {
-	result, err := p.db.Exec(ctx, cleanupOrphanedHistoryQuery.For(p.dialect))
+	result, err := p.db.Exec(ctx, cleanupOrphanedHistoryQuery.For(p.dialect), backupErrOrphanedTimeout)
 	if err != nil {
 		p.logger.Error("scheduledbackup: cleanup orphaned history", "error", err)
 		return
