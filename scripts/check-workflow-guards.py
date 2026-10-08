@@ -217,6 +217,64 @@ def collect_jobs(errors: list[str]) -> dict[str, tuple[str, str, dict]]:
     return jobs
 
 
+# cleat#2696. A required context matching `context=` in a `run:` step that
+# also hits the classic Statuses API (`/statuses/`) -- anchored on BOTH,
+# not on `context=` alone, because a bare `context=` can appear in
+# unrelated shell text and the API path is what ties it to a status this
+# repo's branch protection can actually see.
+#
+# THREE ALTERNATIVES, not one bare token pattern: a context name is a
+# human-readable string and can carry spaces ("Closing References"), which
+# a `[^"'\s]+` token class silently truncates at the first one -- caught
+# writing this guard, against its own fixture, before it shipped truncating
+# "Closing References" down to "Closing" and reporting a context that was
+# never required as the one that failed to resolve.
+STATUS_CONTEXT_RE = re.compile(r'''context=(?:"([^"]+)"|'([^']+)'|(\S+))''')
+
+
+def collect_status_contexts(errors: list[str]) -> dict[str, tuple[str, str, dict]]:
+    """display name -> (workflow path, job id, job body), for a required
+    context posted as a classic commit STATUS rather than produced as a
+    check-run under a job's own display name.
+
+    cleat#2696: `Closing References` stopped being a job name on purpose --
+    a required CHECK-RUN does not supersede an earlier one of the same name
+    on one SHA (GitHub's aggregate rollup does not dedupe by name before
+    computing `state`), so a body-fix `edited` re-run left a stale FAILURE
+    standing beside a later SUCCESS. A classic status has no such
+    aggregate: each POST to one `context` on one SHA simply *is* that
+    context's status. `guard_required_contexts_resolve` needs to accept
+    this as a second, equally legitimate way a required context resolves,
+    or it reports a bug that no longer exists as if it still did.
+
+    Returned in `collect_jobs`'s own shape, keyed by the JOB that posts the
+    status rather than by the context string's workflow location, so
+    `guard_no_continue_on_error` can still check the right job's
+    `continue-on-error` -- the posting job, not a context with no job of
+    its own to inspect.
+    """
+    contexts: dict[str, tuple[str, str, dict]] = {}
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError) as exc:
+            errors.append(f"{path}: {exc}")
+            continue
+        for job_id, job in (doc.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            for step in job.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                run = step.get("run")
+                if not isinstance(run, str) or "/statuses/" not in run:
+                    continue
+                for match in STATUS_CONTEXT_RE.finditer(run):
+                    name = match.group(1) or match.group(2) or match.group(3)
+                    contexts[name] = (path, job_id, job)
+    return contexts
+
+
 def read_required() -> list[str]:
     contexts = []
     with open(REQUIRED_CHECKS_FILE) as handle:
@@ -1536,13 +1594,19 @@ def main() -> int:
 
     errors: list[str] = []
     jobs = collect_jobs(errors)
+    status_contexts = collect_status_contexts(errors)
     required = read_required()
     if not required:
         print(f"::error::{REQUIRED_CHECKS_FILE} lists no contexts -- guards 1 and 2 would pass vacuously")
         return 1
 
-    guard_required_contexts_resolve(jobs, required, errors)
-    guard_no_continue_on_error(jobs, required, errors)
+    # A required context resolves either way: a job's own display name
+    # (the ordinary case), or a classic status a job posts explicitly
+    # (cleat#2696). Kept separate from `jobs` up to here so the summary
+    # line below still counts actual job names, not a mix of the two.
+    resolvable = {**jobs, **status_contexts}
+    guard_required_contexts_resolve(resolvable, required, errors)
+    guard_no_continue_on_error(resolvable, required, errors)
     guard_no_floating_service_images(errors)
     guard_ancestor_filters_match_images(errors)
     guard_mssql_services_have_memory_cap(errors)
