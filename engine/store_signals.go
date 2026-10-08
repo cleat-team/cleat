@@ -19,11 +19,21 @@ func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, rea
 	}
 	defer tx.Rollback()
 
+	// cleat#2312: cancellation_reason is sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("request cancellation: derive tenant key: %w", err)
+	}
+	sealedReason, err := encryptTextColumnForStorage(reason, tc)
+	if err != nil {
+		return fmt.Errorf("request cancellation: encrypt reason: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET cancellation_requested = true, cancellation_reason = $2
 		WHERE id = $1
-	`, workflowID, reason)
+	`, workflowID, sealedReason)
 	if err != nil {
 		return err
 	}
@@ -49,7 +59,12 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 	if err != nil {
 		return false, "", err
 	}
-	return cancelled, reason.String, tx.Commit()
+	// cleat#2312.
+	decrypted, decErr := s.decryptTextColumnFromStorage(reason.String, "cancellation_reason")
+	if decErr != nil {
+		return cancelled, decrypted, fmt.Errorf("check cancellation: %w", decErr)
+	}
+	return cancelled, decrypted, tx.Commit()
 }
 
 // ConsumeSignal satisfies the SignalStore interface.
@@ -209,7 +224,12 @@ func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID,
 		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
 	}
 
-	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
+	// cleat#2312: signal payload is sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: derive tenant key: %w", err)
+	}
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
 		return false, err
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
@@ -247,7 +267,12 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 		return fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
-	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
+	// cleat#2312: signal payload is sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("deliver signal: derive tenant key: %w", err)
+	}
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
 		return err
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
@@ -260,8 +285,16 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 // copy of these two writes is exactly the shape this repo keeps paying for --
 // GetChildResult and GetChildCount held two definitions of "terminal" forty
 // lines apart, and only one of them decided anything (cleat#1213).
-func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, signalName, payload string) error {
+func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, signalName, payload string, tc *tenantCipher) error {
 	payload = encodeJSONPayload(payload)
+	// cleat#2312. encodeJSONPayload above guarantees non-empty valid JSON,
+	// so encryptJSONColumnForStorage's one empty-string special case never
+	// applies here.
+	sealedPayload, err := encryptJSONColumnForStorage(payload, tc)
+	if err != nil {
+		return fmt.Errorf("deliver signal: encrypt payload: %w", err)
+	}
+	payload = sealedPayload
 	// It carried ON CONFLICT (workflow_id, signal_name) DO UPDATE until 3.215,
 	// which discarded the earlier payload with no error -- so a workflow
 	// collecting one approval per reviewer saw only the last. The conflict is
@@ -411,9 +444,15 @@ func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName s
 	if err != nil {
 		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
+	// cleat#2312: decrypt before decodeJSONPayload -- this feeds the guest's
+	// PollSignal host call, not only display.
+	decrypted, derr := s.decryptPayloadJSON(payload)
+	if derr != nil {
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", derr)
+	}
 	return SignalDelivery{
 		ID:            id,
-		Payload:       decodeJSONPayload(payload),
+		Payload:       decodeJSONPayload(decrypted),
 		DeliveredAtMs: deliveredAt.UnixMilli(),
 	}, true, tx.Commit()
 }

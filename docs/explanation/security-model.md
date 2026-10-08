@@ -243,14 +243,17 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
 - **Secrets in workflow state**: Workflow input and event history are stored as
   `JSONB` columns in PostgreSQL. If secrets are passed as workflow input, they
   are stored in plaintext in the database.
-- **Partial event-history encryption (PostgreSQL only)**: `--encrypt-sensitive-payloads`
-  (with `--encryption-key-file`) encrypts 11 `event_history` columns with
-  per-tenant AES-256-GCM. It does not cover `workflow_instances` (`input`,
-  `result`, `error_msg`, `query_state`), `workflow_signals.payload`,
-  `workflow_promises.result`, `workflow_update_requests.payload`/`result`,
-  `workflow_schedules.input`, `idempotency_keys.error_msg`, or a
-  `child_workflow` event's `child_input`/`payload` (a separate write path that
-  does not encrypt). See cleat#2312 for the full per-column measurement and
+- **Sensitive-payload encryption (PostgreSQL only)**: `--encrypt-sensitive-payloads`
+  (with `--encryption-key-file`) encrypts, with per-tenant AES-256-GCM: 11
+  `event_history` columns (including a `child_workflow` event's `child_input`/
+  `payload`, cleat#2328); `workflow_instances` (`input`, `result`, `error_msg`,
+  `error_code`, `error_op`, `cancellation_reason`, `query_state`);
+  `workflow_signals.payload`; `workflow_promises.result`/`error_msg`;
+  `workflow_update_requests.payload`/`result`/`error_msg`;
+  `workflow_schedules.input`; and `idempotency_keys.error_msg` (cleat#2312).
+  `ListWorkflows`'s `InputContains`/`ErrorContains` substring search is
+  refused outright under encryption, rather than silently searching
+  ciphertext and reporting a false "no match" -- see
   `worker-config.md`'s "Encryption at Rest" section for the flag reference.
 - **No built-in secrets manager**: There is no integration with external secrets
   managers (HashiCorp Vault, AWS Secrets Manager, etc.).
@@ -272,9 +275,9 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
 
 - Secrets API (`h.Secret(key string) string`) on the `HostCalls` interface
   that reads from a configurable secrets backend.
-- Encryption covering the columns `--encrypt-sensitive-payloads` currently
-  misses (owner decision pending on cleat#2312, at minimum for
-  `workflow_instances.result`).
+- Extend `cleatctl reseal-payloads` (currently scoped to `event_history`)
+  to re-seal the six tables cleat#2312 added, for key-rotation completeness
+  (cleat#3241).
 
 ## Input Validation
 
@@ -327,6 +330,6 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
 | PostgreSQL / SQL Server RLS | Database-enforced, FORCEd/FILTER PREDICATE on 8 tables, fail-closed | Per-tenant connection pooling / sharding |
 | MySQL tenancy | Single-tenant only (no RLS feature; documented product boundary, not a gap) | — |
 | API auth | Bearer token / header-based, SHA-256 hashed | Scoped keys, rotation, rate limiting |
-| Secrets | Plaintext in DB, no built-in secrets manager; 11 `event_history` columns optionally encrypted (PG only, cleat#2312 lists the gaps) | Secrets API on HostCalls, encryption of the remaining columns |
+| Secrets | Plaintext in DB, no built-in secrets manager; sensitive `event_history`, `workflow_instances`, signal/promise/update-request/schedule payload and error columns optionally encrypted (PG only, cleat#2312) | Secrets API on HostCalls, `reseal-payloads` coverage of the same columns |
 | Input validation | Minimal (length, JSON parseability) | JSON Schema, stricter enforcement |
 | Worker network | Optional API listener, DB connection only | Managed worker fleet with mTLS |

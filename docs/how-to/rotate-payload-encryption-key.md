@@ -1,14 +1,17 @@
 # Rotate the payload encryption key
 
-`--encryption-key-file` (with `--encrypt-sensitive-payloads`) encrypts
-`event_history`'s sensitive columns (`engine.EncryptedEventColumns` --
-`request`, `response`, `error`, `signal_payload`, `child_input`,
-`new_input`, `plugin_input`, `plugin_output`, `promise_result`,
-`promise_error`, `payload`) at rest, per tenant, on PostgreSQL. **It does
-not cover `workflow_instances.result`**, the workflow's final result,
-which is a different table this mechanism never touches -- see cleat#2312,
-open at this writing, on the doc's own former overstatement of this
-("workflow input, output and error" read as covering it, and did not).
+`--encryption-key-file` (with `--encrypt-sensitive-payloads`) encrypts, at
+rest, per tenant, on PostgreSQL: `event_history`'s sensitive columns
+(`engine.EncryptedEventColumns` -- `request`, `response`, `error`,
+`signal_payload`, `child_input`, `new_input`, `plugin_input`,
+`plugin_output`, `promise_result`, `promise_error`, `payload`), plus
+`workflow_instances` (`input`, `result`, `error_msg`, `error_code`,
+`error_op`, `cancellation_reason`, `query_state`), `workflow_signals.payload`,
+`workflow_promises.result`/`.error_msg`,
+`workflow_update_requests.payload`/`.result`/`.error_msg`,
+`workflow_schedules.input`, and `idempotency_keys.error_msg` (cleat#2312,
+closing the doc's own former overstatement of this -- "workflow input, output
+and error" read as covering all of these, and until cleat#2312 did not).
 This is a **different key from the
 per-tenant secrets master key** ([`use-secrets.md`](use-secrets.md),
 `CLEAT_SECRET_MASTER_KEY`) -- different table, different threat model
@@ -234,9 +237,14 @@ defaults is still safely refused, not silently rotated; see
   responsible for its own storage.
 - **PostgreSQL only.** `--encrypt-sensitive-payloads` is refused unless
   `--driver=postgres`; the encrypting write path is Postgres-specific SQL.
-- **`workflow_instances.result`.** See the intro above and cleat#2312: it is
-  plaintext today regardless of any flag here, on every path (sharded or
-  not), rotated or not.
+- **The six tables cleat#2312 added.** `cleatctl reseal-payloads` still
+  rewrites only `event_history`. `workflow_instances`, `workflow_signals`,
+  `workflow_promises`, `workflow_update_requests`, `workflow_schedules`, and
+  `idempotency_keys` are encrypted on write and decrypted on read, but a key
+  rotation does not yet re-seal rows already written under the old key in
+  those tables -- they stay readable (the previous-key path still opens them)
+  but are not rewritten by the tool. Extending the tool is tracked as
+  cleat#3241.
 
 ## See also
 

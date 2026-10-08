@@ -647,6 +647,18 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		return "", fmt.Errorf("continue as new: append events: %w", err)
 	}
 
+	// cleat#2312: the new run's own input is sensitive-at-rest, same as the
+	// old run's result and query_state below -- one derivation covers all
+	// three, since they belong to the same tenant and the same call.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return "", fmt.Errorf("continue as new: derive tenant key: %w", err)
+	}
+	sealedNewInput, err := encryptJSONColumnForStorage(string(newInput), tc)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: encrypt input: %w", err)
+	}
+
 	// Create the new workflow run.
 	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID string
@@ -666,13 +678,21 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $6),
 			(SELECT parent_close_policy FROM workflow_instances WHERE id = $6))
 		RETURNING id
-		`, defName, defVersion, newInput, s.tenantID, priority, currentRunID).Scan(&newRunID)
+		`, defName, defVersion, sealedNewInput, s.tenantID, priority, currentRunID).Scan(&newRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
 
 	// Complete the current run.
 	qsJSON := marshalQueryState(queryState)
+	sealedResult, err := encryptJSONColumnForStorage(resultJSON, tc)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: encrypt result: %w", err)
+	}
+	sealedQS, err := encryptJSONColumnForStorage(string(qsJSON), tc)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: encrypt query_state: %w", err)
+	}
 	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
 	//
 	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
@@ -695,7 +715,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, currentRunID, workerID, resultJSON, qsJSON, generation)
+	`, currentRunID, workerID, sealedResult, sealedQS, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
@@ -762,10 +782,29 @@ func (s *PostgresStore) finalizeWorkflowSegmentInner(ctx context.Context, runID,
 	qsJSON := marshalQueryState(queryState)
 	resultJSON := coerceResultJSON(ctx, s.log(), runID, result)
 
+	// cleat#2312: result and query_state are the only two of this
+	// procedure's arguments it actually persists (finalize_workflow_status
+	// writes p_result and p_query_state; p_error_code/p_error_op are passed
+	// but unused for 'done'/'ready' -- a real failure never reaches this
+	// procedure at all, see this function's own doc comment), so those are
+	// the only two sealed here.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("finalize workflow: derive tenant key: %w", err)
+	}
+	sealedResult, err := encryptJSONColumnForStorage(resultJSON, tc)
+	if err != nil {
+		return fmt.Errorf("finalize workflow: encrypt result: %w", err)
+	}
+	sealedQS, err := encryptJSONColumnForStorage(string(qsJSON), tc)
+	if err != nil {
+		return fmt.Errorf("finalize workflow: encrypt query_state: %w", err)
+	}
+
 	var fenceHeld bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT finalize_workflow_status($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
+	`, runID, workerID, generation, finalStatus, sealedResult, errorCode, errorOp, sealedQS, nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
 		return fmt.Errorf("finalize workflow: %w", err)
 	}
 
@@ -827,6 +866,21 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	defer tx.Rollback()
 
 	qsJSON := marshalQueryState(queryState)
+
+	// cleat#2312: result and query_state are both sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("complete workflow: derive tenant key: %w", err)
+	}
+	sealedResult, err := encryptJSONColumnForStorage(resultJSON, tc)
+	if err != nil {
+		return fmt.Errorf("complete workflow: encrypt result: %w", err)
+	}
+	sealedQS, err := encryptJSONColumnForStorage(string(qsJSON), tc)
+	if err != nil {
+		return fmt.Errorf("complete workflow: encrypt query_state: %w", err)
+	}
+
 	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
 	//
 	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
@@ -849,7 +903,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, workflowID, workerID, resultJSON, qsJSON, generation)
+	`, workflowID, workerID, sealedResult, sealedQS, generation)
 	if err != nil {
 		return err
 	}
@@ -893,6 +947,35 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	defer tx.Rollback()
 
 	qsParam := queryStateUpdateParam(queryState)
+
+	// cleat#2312: error_msg, error_code, error_op and query_state are all
+	// sensitive-at-rest; one tenant cipher derivation covers all four (and
+	// the idempotency_keys.error_msg write below, which reuses the same
+	// ciphertext rather than sealing the message a second time).
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("fail workflow: derive tenant key: %w", err)
+	}
+	sealedErrorMsg, err := encryptTextColumnForStorage(errorMsg, tc)
+	if err != nil {
+		return fmt.Errorf("fail workflow: encrypt error_msg: %w", err)
+	}
+	sealedErrorCode, err := encryptTextColumnForStorage(errorCode, tc)
+	if err != nil {
+		return fmt.Errorf("fail workflow: encrypt error_code: %w", err)
+	}
+	sealedErrorOp, err := encryptTextColumnForStorage(errorOp, tc)
+	if err != nil {
+		return fmt.Errorf("fail workflow: encrypt error_op: %w", err)
+	}
+	if qs, ok := qsParam.(string); ok {
+		sealedQS, err := encryptJSONColumnForStorage(qs, tc)
+		if err != nil {
+			return fmt.Errorf("fail workflow: encrypt query_state: %w", err)
+		}
+		qsParam = sealedQS
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -903,7 +986,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		    completed_by = assigned_to, assigned_to = NULL,
 		    query_state = COALESCE($6::jsonb, query_state)
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsParam, generation)
+	`, workflowID, workerID, sealedErrorMsg, sealedErrorCode, sealedErrorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}
@@ -918,14 +1001,17 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		return ErrFenceLost
 	}
 
-	// Record idempotency error within the transaction (best-effort).
+	// Record idempotency error within the transaction (best-effort). Reuses
+	// sealedErrorMsg rather than sealing errorMsg a second time -- both
+	// columns hold the same plaintext, and AES-GCM's random nonce means a
+	// second seal would produce different-looking ciphertext for no benefit.
 	//
 	// AND tenant_id = $3: see the identical comment on the sibling UPDATE in
 	// CompleteWorkflow. s.tenantID is already set on this tx by
 	// beginTxWithRLS.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
-		workflowID, errorMsg, s.tenantID); err != nil {
+		workflowID, sealedErrorMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -1195,13 +1281,39 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	defer tx.Rollback()
 
 	qsParam := queryStateUpdateParam(queryState)
+
+	// cleat#2312: see the identical derivation in FailWorkflow.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: derive tenant key: %w", err)
+	}
+	sealedErrMsg, err := encryptTextColumnForStorage(errMsg, tc)
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: encrypt error_msg: %w", err)
+	}
+	sealedErrorCode, err := encryptTextColumnForStorage(errorCode, tc)
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: encrypt error_code: %w", err)
+	}
+	sealedErrorOp, err := encryptTextColumnForStorage(errorOp, tc)
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: encrypt error_op: %w", err)
+	}
+	if qs, ok := qsParam.(string); ok {
+		sealedQS, err := encryptJSONColumnForStorage(qs, tc)
+		if err != nil {
+			return fmt.Errorf("move to dead letter queue: encrypt query_state: %w", err)
+		}
+		qsParam = sealedQS
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
 		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL,
 		    query_state = COALESCE($6::jsonb, query_state)
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errMsg, errorCode, errorOp, qsParam, generation)
+	`, workflowID, workerID, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}
@@ -1215,14 +1327,16 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 		// are not safe to run on the new owner's behalf.
 		return ErrFenceLost
 	}
-	// Record idempotency error within the transaction (best-effort).
+	// Record idempotency error within the transaction (best-effort). Reuses
+	// sealedErrMsg -- see the identical comment on FailWorkflow's sibling
+	// write.
 	//
 	// AND tenant_id = $3: see the identical comment on the sibling UPDATE in
 	// CompleteWorkflow. s.tenantID is already set on this tx by
 	// beginTxWithRLS.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
-		workflowID, errMsg, s.tenantID); err != nil {
+		workflowID, sealedErrMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -1362,6 +1476,20 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	if runID == "" {
 		runID = uuid.New().String()
 	}
+
+	// cleat#2312: input is sensitive-at-rest. Sealed into a separate variable
+	// -- never input itself -- so IdempotencyInputDigest above and the
+	// ON CONFLICT re-read path below keep working against the plaintext;
+	// only the two INSERTs further down bind the sealed copy.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return "", false, fmt.Errorf("start new run: derive tenant key: %w", err)
+	}
+	sealedInput, err := encryptJSONColumnForStorage(string(input), tc)
+	if err != nil {
+		return "", false, fmt.Errorf("start new run: encrypt input: %w", err)
+	}
+
 	if idempotencyKey != "" {
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
 		inputDigest := IdempotencyInputDigest(input)
@@ -1525,7 +1653,7 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond',
 			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
-		`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+		`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1547,7 +1675,7 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond',
 			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
-	`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+	`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -1762,6 +1890,36 @@ func (s *PostgresStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID st
 				"worker_id", workerID, "workflow_id", wf.ID, "error", err)
 		}
 	}
+
+	// cleat#2312: input and error_code/error_op are sensitive-at-rest. This
+	// is the one chokepoint both ClaimWorkflows and ClaimStickyWorkflows
+	// funnel through, so decrypting here -- rather than in each scan loop --
+	// covers both. A decrypt failure is logged and the ciphertext is left in
+	// place rather than aborting the claim: the workflow has already been
+	// claimed in the database by this point, and handing back a claim this
+	// worker cannot read is better than silently losing the claim.
+	for _, wf := range keep {
+		decryptedInput, err := s.decryptPayloadJSON(string(wf.Input))
+		if err != nil {
+			s.log().WarnContext(ctx, "decrypt claimed workflow input failed",
+				"workflow_id", wf.ID, "error", err)
+		} else {
+			wf.Input = json.RawMessage(decryptedInput)
+		}
+		if decryptedCode, err := s.decryptTextColumnFromStorage(wf.ErrorCode, "error_code"); err != nil {
+			s.log().WarnContext(ctx, "decrypt claimed workflow error_code failed",
+				"workflow_id", wf.ID, "error", err)
+		} else {
+			wf.ErrorCode = decryptedCode
+		}
+		if decryptedOp, err := s.decryptTextColumnFromStorage(wf.ErrorOp, "error_op"); err != nil {
+			s.log().WarnContext(ctx, "decrypt claimed workflow error_op failed",
+				"workflow_id", wf.ID, "error", err)
+		} else {
+			wf.ErrorOp = decryptedOp
+		}
+	}
+
 	return keep, nil
 }
 
