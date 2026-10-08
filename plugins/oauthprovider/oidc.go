@@ -37,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -172,6 +173,7 @@ func (p *Plugin) getJSON(ctx context.Context, target string, into any) error {
 		return fmt.Errorf("build request for %s: %w", target, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	plugin.SetTraceparentFromContext(ctx, req)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {

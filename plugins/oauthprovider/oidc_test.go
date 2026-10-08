@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -26,6 +27,12 @@ type fakeIDP struct {
 	kid        string
 	issuerOver string // when set, the discovery document lies about its issuer
 	jwksCalls  int
+
+	// lastDiscoveryTraceparent is the traceparent header the most recent
+	// discovery request carried, or "" if it carried none. cleat#1611:
+	// discover() calls getJSON, and this is how a test observes what getJSON
+	// actually put on the wire rather than only that it was called.
+	lastDiscoveryTraceparent string
 }
 
 func newFakeIDP(t *testing.T) *fakeIDP {
@@ -37,7 +44,8 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 	f := &fakeIDP{t: t, key: key, kid: "test-key-1"}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		f.lastDiscoveryTraceparent = r.Header.Get("traceparent")
 		iss := f.srv.URL
 		if f.issuerOver != "" {
 			iss = f.issuerOver
@@ -110,6 +118,36 @@ type io_Discard struct{}
 func (io_Discard) Write(p []byte) (int, error) { return len(p), nil }
 
 // ---- discovery ----
+
+// TestDiscoveryPropagatesTheCallersTraceparent is the end-to-end half of
+// cleat#1611's getJSON entry. plugin/every_outbound_call_joins_the_trace_test.go
+// only proves SetTraceparentFromContext is CALLED inside getJSON; it cannot
+// tell a real propagation from one that calls the function with a context
+// carrying no trace at all, which is exactly the no-op the stale debt entry
+// warned a naive fix would be. This drives discover() -- getJSON's own
+// caller -- with a context built the way handleCallback now builds one, from
+// an inbound traceparent header, and reads back what actually went out on
+// the wire.
+func TestDiscoveryPropagatesTheCallersTraceparent(t *testing.T) {
+	f := newFakeIDP(t)
+	p := pluginFor(t, f)
+
+	const inboundTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	ctx := plugin.WithInboundTraceparent(context.Background(),
+		"00-"+inboundTraceID+"-00f067aa0ba902b7-01")
+
+	if _, _, err := p.discover(ctx, f.srv.URL); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+
+	if f.lastDiscoveryTraceparent == "" {
+		t.Fatal("the discovery request carries no traceparent at all")
+	}
+	if !strings.Contains(f.lastDiscoveryTraceparent, inboundTraceID) {
+		t.Fatalf("the discovery request's traceparent does not carry the inbound trace-id: got %q, want trace-id %q",
+			f.lastDiscoveryTraceparent, inboundTraceID)
+	}
+}
 
 func TestDiscoveryRejectsADocumentThatClaimsADifferentIssuer(t *testing.T) {
 	f := newFakeIDP(t)
