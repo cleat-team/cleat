@@ -54,7 +54,12 @@ code resumes where it stopped.
 
 **Stays rope:**
 
-- Stripe, Adyen, your PSP. Cleat calls them; it does not replace them.
+- Stripe, Adyen, your PSP — reached through a plugin's host function, a
+  `DurableCall` that resolves by name to a plugin you write (`engine/app.go`).
+  **Not** through cleat's generic outbound-HTTP call
+  (`DurableCall("http", "fetch", …)`), which is embedder-only and cannot serve
+  a stock `cleat-worker` (ABI.md 2.48, cleat#2517). Cleat orchestrates the
+  call; it does not replace the PSP.
 - Your inventory, shipping and tax systems
 - Your storefront and your customer portal front-end
 - Your ledger and your accounting system
