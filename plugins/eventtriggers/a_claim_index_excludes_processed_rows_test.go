@@ -239,10 +239,11 @@ func TestClaimQueryPlanExcludesProcessedRowsOnPostgres(t *testing.T) {
 // It does not: EXPLAIN's own "ref" column names SIX const-bound parts --
 // tenant_id, event_type, key1, key2, key3, AND processed -- proving
 // `processed` is consumed as part of the index SEEK, not a filter applied
-// after it. "Extra" carries no "Using filesort": the received_at ordering
-// this migration relies on (idx_ingested_events_claim: ..., key3, received_at)
-// falls out of the index for free once processed is bound by equality,
-// exactly as it did for the key columns alone before this migration existed.
+// after it. "Extra" carries no "Using filesort": the ordering this query
+// relies on (idx_ingested_events_claim: ..., key3, seq as of cleat#2652 --
+// formerly received_at) falls out of the index for free once processed is
+// bound by equality, exactly as it did for the key columns alone before
+// this migration existed.
 func TestClaimQueryIsSargableOnProcessedOnMySQL(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectMySQL)
 	dialect := plugin.DialectMySQL
@@ -319,7 +320,7 @@ func TestClaimQueryIsSargableOnProcessedOnMySQL(t *testing.T) {
 			"Full row: %+v", len(refParts), row["ref"], row)
 	}
 	if strings.Contains(row["Extra"], "Using filesort") {
-		t.Errorf("on mysql, EXPLAIN's Extra contains %q -- the received_at ordering is not falling out of "+
+		t.Errorf("on mysql, EXPLAIN's Extra contains %q -- the seq ordering is not falling out of "+
 			"the index for free, which means MySQL is materialising and sorting a candidate set rather than "+
 			"seeking directly to the row wanted. Full row: %+v", row["Extra"], row)
 	}
