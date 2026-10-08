@@ -108,6 +108,16 @@ func TestComponentOnTheBackendTakesTheNativePathOnly(t *testing.T) {
 	}
 }
 
+// componentWithNoRunExport is the smallest valid Component Model binary that
+// exports nothing at all -- so a lookup for componentRunExport ("run")
+// genuinely fails, the way componentWithNoImports (which DOES export "run")
+// no longer can for this purpose. cleat#2937: ExecuteComponentCGo always
+// looks up "run" now, regardless of what entryPoint string the caller
+// passes (that value is carried into the payload as "__cleat_entry__"
+// instead), so a missing-export probe has to withhold "run" itself rather
+// than pass an arbitrary wrong name.
+const componentWithNoRunExport = `(component)`
+
 // TestComponentFailureIsNotFollowedByASecondWorseError pins what the deletion
 // changed for a caller.
 //
@@ -121,9 +131,16 @@ func TestComponentOnTheBackendTakesTheNativePathOnly(t *testing.T) {
 //
 // The assertion is that the error names the entry point that was actually
 // looked for, and does not mention the vocabulary decomposition failed in.
+//
+// cleat#2937 changed what "actually looked for" means: the component path now
+// always asks for componentRunExport ("run"), never for the caller's own
+// entryPoint argument, so this uses componentWithNoRunExport (no "run" at
+// all) rather than componentWithNoImports with an arbitrary wrong name --
+// the latter would now find "run" on componentWithNoImports and succeed,
+// proving nothing.
 func TestComponentFailureIsNotFollowedByASecondWorseError(t *testing.T) {
 	ctx := context.Background()
-	wasmBytes, err := wasmtime.Wat2Wasm(componentWithNoImports)
+	wasmBytes, err := wasmtime.Wat2Wasm(componentWithNoRunExport)
 	if err != nil {
 		t.Fatalf("Wat2Wasm: %v", err)
 	}
@@ -134,12 +151,12 @@ func TestComponentFailureIsNotFollowedByASecondWorseError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.Close(ctx) })
 
-	_, err = b.PerExecution(0).Execute(ctx, wasmBytes, "no-such-export", json.RawMessage(`"x"`), &mockHostHandler{})
+	_, err = b.PerExecution(0).Execute(ctx, wasmBytes, "PlaceOrder", json.RawMessage(`"x"`), &mockHostHandler{})
 	if err == nil {
-		t.Fatal("Execute succeeded for an entry point the component does not export")
+		t.Fatal("Execute succeeded for a component that exports nothing")
 	}
-	if !strings.Contains(err.Error(), "no-such-export") {
-		t.Errorf("the error does not name the entry point that was looked for: %v", err)
+	if !strings.Contains(err.Error(), componentRunExport) {
+		t.Errorf("the error does not name %q, the export that was actually looked for: %v", componentRunExport, err)
 	}
 	// "instance" and "import type" are decomposition's vocabulary: it failed at
 	// "instantiate instance 81 ... incompatible import type for env::cleat_call".

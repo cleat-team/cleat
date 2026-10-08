@@ -36,3 +36,24 @@ const deferRunnerExport = "__cleat_run_deferred"
 // instance.GetFunc against wasmtime_component_instance_get_export_index -- so
 // there is no call site that could take either.
 const componentDeferRunnerExport = "run-deferred"
+
+// componentRunExport is the `run` export every cleat-workflow world component
+// has, whatever the workflow's own logical entry point is named
+// (python-sdk/wit/cleat.wit: "export run: func(args: string) -> run-outcome;").
+//
+// cleat#2937. A core-module guest (Go, Rust, Java, AssemblyScript) exports a
+// function NAMED AFTER the logical entry point, so determineEntryPoint's
+// result is a real export name there and ExecuteComponentCGo's sibling path
+// can call it directly. A Component Model guest cannot: the WIT world
+// declares exactly one entry export, always named "run", for every workflow
+// regardless of how many @cleat_entry functions it registers or what they
+// are called. Calling componentGetFunc with the LOGICAL name instead of this
+// constant is exactly cleat#2937's defect -- "component export \"PlaceOrder\"
+// not found" against a component that exports "run" and nothing else by that
+// name.
+//
+// The logical name is not discarded; the caller folds it into the input JSON
+// as `__cleat_entry__` before this export is called, which is how Python's
+// own _dispatcher_run (entry.py) knows which @cleat_entry wrapper to invoke
+// when a module registers more than one.
+const componentRunExport = "run"

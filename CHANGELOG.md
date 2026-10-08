@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Python workflow with more than one `@cleat_entry` function could not run at all.**
+  Closes cleat#2937. A Python guest compiles to a single Component Model export literally named
+  `run` (`python-sdk/wit/cleat.wit`), whatever its workflow's own logical entry-point names are —
+  unlike a core-module guest (Go, Rust, Java, AssemblyScript), which exports a function named
+  after the entry point itself. `ExecuteComponentCGo` was looking up the *logical* name as a
+  component export, so any start failed with `component export "PlaceOrder" not found` against a
+  component that exports `run` and nothing else by that name. It now always calls the `run`
+  export and carries the logical name into the input JSON as `__cleat_entry__` instead, which is
+  the key `entry.py`'s own dispatcher already reads to pick a wrapper when a module registers
+  more than one — that half of the mechanism was already correct and simply never fed.
 - **`plugin.Rebind` is deprecated.** (cleat#2270, finishing cleat#2259's split.) `plugin.RebindArgs`
   now translates SQL Server itself rather than delegating to `Rebind`, so every dialect is
   translated in exactly one place. The ~190 call sites across `plugins/**` that paired a redundant
