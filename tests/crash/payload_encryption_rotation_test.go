@@ -293,6 +293,16 @@ func TestPayloadEncryptionWiringKnownPositive(t *testing.T) {
 	db := ownerDBFor(t, payloadEncryptionKnownPositiveDatabase)
 	defer db.Close()
 
+	// cleat#3210: defensive, matching TestEnablingEncryptionMidRunDoesNotStrandTheRun's
+	// identical reset. This test itself never enables encryption against its
+	// own database, so nothing in its own normal operation trips the ratchet
+	// -- but resetting unconditionally costs nothing (ownerDBFor has already
+	// applied migrations, so the table exists) and removes any dependence on
+	// that staying true.
+	if _, err := db.Exec(`DELETE FROM payload_encryption_ever_enabled`); err != nil {
+		t.Fatalf("resetting payload_encryption_ever_enabled: %v", err)
+	}
+
 	suffix := uniqueSuffix()
 	taskQueue := "queue-payload-rotation-control-" + suffix
 	wfID := "payload-rotation-control-wf-" + suffix

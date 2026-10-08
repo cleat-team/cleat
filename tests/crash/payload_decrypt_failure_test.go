@@ -325,6 +325,20 @@ func TestEnablingEncryptionMidRunDoesNotStrandTheRun(t *testing.T) {
 	db := ownerDBFor(t, payloadEncryptionMidRunDatabase)
 	defer db.Close()
 
+	// cleat#3210: payloadEncryptionMidRunDatabase is created once and never
+	// dropped, so without this, a SECOND local invocation of this exact test
+	// against the same long-lived Postgres container fails its own
+	// precondition below -- this test's own second worker, further down,
+	// already tripped payload_encryption_ever_enabled's one-way ratchet on a
+	// prior run, and nothing un-trips it. ownerDBFor has already applied
+	// migrations by this point, so the table is guaranteed to exist whether
+	// this database is brand new or reused. Safe to reset unconditionally:
+	// this database is this test's own, never shared (see
+	// harness_test.go's comment on the three dedicated databases).
+	if _, err := db.Exec(`DELETE FROM payload_encryption_ever_enabled`); err != nil {
+		t.Fatalf("resetting payload_encryption_ever_enabled: %v", err)
+	}
+
 	suffix := uniqueSuffix()
 	taskQueue := "queue-encrypt-midrun-" + suffix
 	wfID := "encrypt-midrun-wf-" + suffix
