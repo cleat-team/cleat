@@ -119,7 +119,15 @@ echo "== classes catalogdiff catches =="
 # exactly that.
 expect "drop a column" CATCH CATCH \
     "ALTER TABLE dbo.deployment_secrets DROP COLUMN disabled_at"
-expect "drop an index" CATCH CATCH \
+# supp changed from CATCH to pass as a SECOND-ORDER effect of cleat#2882's
+# removal of the "index attributes" supplementary check (see
+# supplementary.go): an index drop was never that check's own subject, it
+# was caught only because the dropped index's row also vanished from that
+# check's result set as a side effect. With that check removed, nothing in
+# supplementaryChecks reads sys.indexes at all any more, so this is now the
+# same "deliberately not duplicated" shape as "drop a check constraint"
+# below, not a weaker instrument.
+expect "drop an index" CATCH pass \
     "DROP INDEX idx_event_history_pending ON dbo.event_history"
 # supp=pass is correct here, not a gap: check constraints ARE a class
 # catalogdiff reads (by name and definition), so the supplementary checks
@@ -138,25 +146,44 @@ expect "DROP A SECURITY POLICY" CATCH pass \
     "DROP SECURITY POLICY dbo.TenantFilter_Defs"
 expect "drop the cleat_admin role" CATCH pass \
     "DROP ROLE cleat_admin"
-
-echo
-echo "== classes ONLY the supplementary checks can see =="
+# Moved here from "classes ONLY the supplementary checks can see" by
+# cleat#2882 -- catalogdiff now folds max_length/precision/scale/is_identity
+# into Column.DataType (migration/catalogdiff/mssql.go). supp=CATCH is
+# correct too, not a gap: supplementary.go's "column shape" check was not
+# narrowed in this change (it still also covers is_computed, which
+# catalogdiff does not read), so this case is now genuinely caught by both
+# instruments rather than exclusively by one.
+#
 # task_queue, not name: workflow_defs.name is part of the primary key, so
 # ALTER COLUMN on it fails with "The index 'pk_workflow_defs' is dependent on
 # column 'name'" and the case would report UNMEASURED rather than exercising
 # anything.
-expect "widen a column (nvarchar 255 -> 300)" clean CATCH \
+expect "widen a column (nvarchar 255 -> 300)" CATCH CATCH \
     "ALTER TABLE dbo.workflow_defs ALTER COLUMN task_queue nvarchar(300) NOT NULL"
+# Moved here from "classes ONLY the supplementary checks can see" by
+# cleat#2882 -- catalogdiff's index query now reads i.has_filter and
+# i.filter_definition (migration/catalogdiff/mssql.go). supp=pass, not
+# supp=CATCH: unlike "widen a column" above, the WHOLE "index attributes"
+# supplementary check was removed (not narrowed) when this landed, because
+# every field it read is now in catalogdiff's Index.Definition -- so this is
+# the "deliberately not duplicated" shape ("drop a check constraint" above),
+# not the "both instruments genuinely catch it" shape. Same reasoning covers
+# "drop an index" above, which used to show supp=CATCH only as that removed
+# check's side effect.
+#
 # SET QUOTED_IDENTIFIER ON is required and is not incidental: without it the
 # CREATE fails with "the following SET options have incorrect settings:
 # 'QUOTED_IDENTIFIER'", because sqlcmd's default differs from the setting the
 # migration runner uses. The filter is changed from `[checksum] IS NULL` to
 # `IS NOT NULL` -- a bare `AND 1=1` is rejected as an "incorrect WHERE clause
 # for filtered index", since a clause that is always true cannot be a filter.
-expect "change a filtered index's filter" clean CATCH \
+expect "change a filtered index's filter" CATCH pass \
     "SET QUOTED_IDENTIFIER ON;
      DROP INDEX idx_event_history_pending ON dbo.event_history;
      CREATE NONCLUSTERED INDEX idx_event_history_pending ON dbo.event_history ([workflow_id],[step]) WHERE [intent_at] IS NOT NULL AND [checksum] IS NOT NULL"
+
+echo
+echo "== classes ONLY the supplementary checks can see =="
 expect "insert a seed row" clean CATCH \
     "INSERT INTO admin.orgs (org_id, name) VALUES ('11111111-1111-1111-1111-111111111111', N'intruder')"
 # Proves G1's fix: catalogdiff compares a trigger's name/body/schema, not its
