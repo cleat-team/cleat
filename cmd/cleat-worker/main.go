@@ -849,6 +849,15 @@ func main() {
 
 	var factory engine.StoreFactory
 	var payloadEncryption *engine.PayloadEncryption
+	// payloadRing is the SAME *engine.ReloadableKeyRing payloadEncryption is
+	// built around, in whichever of the three branches below actually runs
+	// (cleat#2298, PR 2). Kept as its own variable, rather than reached
+	// through payloadEncryption, because the SIGHUP handler (main.go, later
+	// in this function) needs to call Reload on it directly even when
+	// --encryption-key-file is unset and payloadEncryption is nil -- a
+	// worker that boots with no payload key configured must still be able
+	// to pick one up on reload without a restart.
+	var payloadRing *engine.ReloadableKeyRing
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
@@ -881,12 +890,13 @@ func main() {
 		// gating the call on *encryptionKeyFile != "" meant that refusal
 		// never fired -- the previous-only flag was silently ignored
 		// (cleat-review, #2308).
-		pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+		pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 		if perr != nil {
 			logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 			os.Exit(1)
 		}
 		payloadEncryption = pe
+		payloadRing = pring
 		if payloadEncryption != nil {
 			if *encryptionKeyFilePrevious != "" {
 				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
@@ -1288,7 +1298,12 @@ func main() {
 		// never fired -- the previous-only flag was silently ignored
 		// (cleat-review, #2308).
 		{
-			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+			// The ring return value is discarded here: this block's result is
+			// unconditionally overwritten by the duplicate block below before
+			// payloadRing is ever read, same as payloadEncryption would be if
+			// its own nil-check below did not read it first. Keeping both
+			// assignments made this one ineffectual (ineffassign/SA4006).
+			pe, _, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 			if perr != nil {
 				logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 				os.Exit(1)
@@ -1325,11 +1340,12 @@ func main() {
 		// reason as the block above: gating on *encryptionKeyFile != ""
 		// silently ignored a previous-only flag (cleat-review, #2308).
 		{
-			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+			pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 			if perr != nil {
 				log.Fatalf("[worker %s] failed to load encryption key: %v", workerID, perr)
 			}
 			payloadEncryption = pe
+			payloadRing = pring
 			if payloadEncryption != nil {
 				if *encryptionKeyFilePrevious != "" {
 					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
@@ -1403,11 +1419,23 @@ func main() {
 			"worker_id", workerID, "current_key_version", secretRing.Current().Version,
 			"key_versions", secretRing.Versions())
 	}
-	secretStore := engine.NewSecretStoreWithRing(db, string(factory.Dialect()), secretRing)
+	// secretsRing is SHARED by secretStore and deploymentSecretStore
+	// (cleat#2298, PR 2) -- one Reload call on SIGHUP updates both stores at
+	// once, with no window in which they disagree about which key is
+	// current. Unlike payloadRing above, this is unconditionally non-nil:
+	// NewReloadableKeyRing(nil) is a legal "no master key configured" state
+	// a reload can still move out of later (an operator setting
+	// CLEAT_SECRET_MASTER_KEY_FILE for the first time), which is why this
+	// does not mirror payloadEncryption's == nil convention the way
+	// payloadRing does -- secretStore and deploymentSecretStore are already
+	// never nil themselves (see their own doc comments), only their master
+	// key is optional.
+	secretsRing := engine.NewReloadableKeyRing(secretRing)
+	secretStore := engine.NewSecretStoreWithReloadableRing(db, string(factory.Dialect()), secretsRing)
 	// deployment_secrets shares tenant secrets' ring (cleat#1992 part 1) --
 	// domain separation is carried by engine.DeploymentSecretStore's own HKDF
 	// info string and AAD, not a second master key.
-	deploymentSecretStore := engine.NewDeploymentSecretStore(db, string(factory.Dialect()), secretRing)
+	deploymentSecretStore := engine.NewDeploymentSecretStoreWithReloadableRing(db, string(factory.Dialect()), secretsRing)
 	// checkSecretsUsable runs AFTER the migrations below, not here: it reads
 	// tenant_secrets, which does not exist until migration 080 has applied, and a
 	// check that has to tolerate a missing table is a check that tolerates every
@@ -2295,6 +2323,11 @@ func main() {
 		idempotencyKeyRetention:          *idempotencyKeyRetention,
 		egressAllow:                      egressAllow,
 		secrets:                          secretStore,
+		deploymentSecrets:                deploymentSecretStore,
+		secretsRing:                      secretsRing,
+		payloadRing:                      payloadRing,
+		payloadKeyFile:                   *encryptionKeyFile,
+		payloadKeyFilePrevious:           *encryptionKeyFilePrevious,
 		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
 		internalAuthSecret:               os.Getenv("CLEAT_INTERNAL_AUTH_KEY"),
@@ -2794,20 +2827,21 @@ func main() {
 		}
 	}()
 
-	// SIGHUP is reserved for a future config/key reload (cleat#1992 part 2,
-	// the ReloadableKeyRing work, tracked separately as cleat#2298) -- not
-	// implemented yet. Log and ignore rather than leaving Go's default
-	// action in place, which for SIGHUP is TERMINATE: an operator sending
-	// `kill -HUP` to roll a worker onto a new key, before that reload
-	// exists, would kill the worker instead of doing nothing. A SEPARATE
-	// channel from sigCh above: SIGHUP must never enter the drain-then-
-	// cancel shutdown path SIGINT/SIGTERM do.
+	// SIGHUP reloads the secret and payload key rings, with no restart
+	// (cleat#2298, PR 2; the ReloadableKeyRing mechanism itself is PR 1,
+	// #3198). Go's default action for SIGHUP is TERMINATE, so this handler
+	// still has to exist even where a reload ends up being a no-op (neither
+	// ring configured) -- an operator sending `kill -HUP` must never find
+	// out the hard way that nothing was listening. A SEPARATE channel from
+	// sigCh above: SIGHUP must never enter the drain-then-cancel shutdown
+	// path SIGINT/SIGTERM do.
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 	go func() {
 		defer recoverBackgroundGoroutine(logger, workerID, "sighup-handler")
 		for range sighupCh {
-			logger.InfoContext(context.Background(), "received SIGHUP: config/key hot-reload is not implemented yet (cleat#1992), ignoring", "worker_id", workerID)
+			logger.InfoContext(context.Background(), "received SIGHUP: reloading secret and payload key rings", "worker_id", workerID)
+			w.reloadKeyRingsOnSIGHUP(context.Background())
 		}
 	}()
 

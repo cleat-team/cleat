@@ -26,18 +26,21 @@ func writeKeyFile(t *testing.T) string {
 }
 
 func TestLoadPayloadEncryption_NoCurrentKeyMeansEncryptionOff(t *testing.T) {
-	pe, err := loadPayloadEncryption("", "")
+	pe, ring, err := loadPayloadEncryption("", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if pe != nil {
 		t.Fatal("want nil PayloadEncryption when no key file is configured")
 	}
+	if ring != nil {
+		t.Fatal("want nil *ReloadableKeyRing when no key file is configured -- cleat#2298: nil exactly when pe is nil")
+	}
 }
 
 func TestLoadPayloadEncryption_PreviousWithoutCurrentIsRefused(t *testing.T) {
 	prev := writeKeyFile(t)
-	_, err := loadPayloadEncryption("", prev)
+	_, _, err := loadPayloadEncryption("", prev)
 	if err == nil {
 		t.Fatal("want an error: --encryption-key-file-previous with no --encryption-key-file")
 	}
@@ -48,12 +51,15 @@ func TestLoadPayloadEncryption_PreviousWithoutCurrentIsRefused(t *testing.T) {
 
 func TestLoadPayloadEncryption_CurrentOnlySealsAndOpens(t *testing.T) {
 	cur := writeKeyFile(t)
-	pe, err := loadPayloadEncryption(cur, "")
+	pe, ring, err := loadPayloadEncryption(cur, "")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if pe == nil {
 		t.Fatal("want a non-nil PayloadEncryption")
+	}
+	if ring == nil {
+		t.Fatal("want a non-nil *ReloadableKeyRing alongside a non-nil PayloadEncryption -- cleat#2298")
 	}
 	const tenant = "11111111-1111-1111-1111-111111111111"
 	sealed, err := pe.Encrypt(tenant, []byte("plaintext"))
@@ -77,7 +83,7 @@ func TestLoadPayloadEncryption_CurrentOnlySealsAndOpens(t *testing.T) {
 // still-on-A-only worker wrote, via the previous-key fallback -- and the reverse fails closed.
 func TestLoadPayloadEncryption_PreviousKeyOpensOldRowsAsPreviousKeyForm(t *testing.T) {
 	oldKeyPath := writeKeyFile(t)
-	oldOnly, err := loadPayloadEncryption(oldKeyPath, "")
+	oldOnly, _, err := loadPayloadEncryption(oldKeyPath, "")
 	if err != nil {
 		t.Fatalf("build the old-key-only worker: %v", err)
 	}
@@ -88,7 +94,7 @@ func TestLoadPayloadEncryption_PreviousKeyOpensOldRowsAsPreviousKeyForm(t *testi
 	}
 
 	newKeyPath := writeKeyFile(t)
-	rolled, err := loadPayloadEncryption(newKeyPath, oldKeyPath)
+	rolled, _, err := loadPayloadEncryption(newKeyPath, oldKeyPath)
 	if err != nil {
 		t.Fatalf("build the rolled worker (new current, old previous): %v", err)
 	}
@@ -117,7 +123,7 @@ func TestLoadPayloadEncryption_PreviousKeyOpensOldRowsAsPreviousKeyForm(t *testi
 }
 
 func TestLoadPayloadEncryption_MissingKeyFileIsAnError(t *testing.T) {
-	_, err := loadPayloadEncryption(filepath.Join(t.TempDir(), "does-not-exist"), "")
+	_, _, err := loadPayloadEncryption(filepath.Join(t.TempDir(), "does-not-exist"), "")
 	if err == nil {
 		t.Fatal("want an error for a nonexistent --encryption-key-file")
 	}
@@ -125,7 +131,7 @@ func TestLoadPayloadEncryption_MissingKeyFileIsAnError(t *testing.T) {
 
 func TestLoadPayloadEncryption_MissingPreviousKeyFileIsAnError(t *testing.T) {
 	cur := writeKeyFile(t)
-	_, err := loadPayloadEncryption(cur, filepath.Join(t.TempDir(), "does-not-exist"))
+	_, _, err := loadPayloadEncryption(cur, filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {
 		t.Fatal("want an error for a nonexistent --encryption-key-file-previous")
 	}

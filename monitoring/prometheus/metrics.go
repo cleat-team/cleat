@@ -93,6 +93,7 @@ type Metrics struct {
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
 	pluginEventsLost        metric.Int64Counter
+	secretKeyReloads        metric.Int64Counter
 
 	// Database reachability (cleat#2007), fed by the worker's deadline-bounded probes.
 	dbReachable            metric.Int64Gauge
@@ -440,6 +441,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_plugin_events_lost_total: %w", err)
+	}
+
+	m.secretKeyReloads, err = meter.Int64Counter(
+		"cleat_secret_key_reloads_total",
+		metric.WithDescription("Total number of SIGHUP-triggered secret/payload key ring reloads, by status (success, failure). cleat#2298: a sustained rate of failure means an operator is rewriting the mounted key file(s) with something this worker refuses -- a bad file, or a key version reused with different bytes"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_secret_key_reloads_total: %w", err)
 	}
 
 	m.dbReachable, err = meter.Int64Gauge(
@@ -1196,6 +1205,24 @@ func (m *Metrics) RecordPluginEventsLost(ctx context.Context, pluginName, reason
 		attribute.String("reason", reason),
 	}, extraAttrs...)...)
 	m.pluginEventsLost.Add(ctx, count, metric.WithAttributes(attrs...))
+}
+
+// RecordSecretKeyReload increments the SIGHUP key-reload counter, labelled by
+// whether the attempt succeeded (cleat#2298's S1: "a success/failure metric,
+// not just a log line"). success is a bool rather than a free-form status
+// string because there are exactly two outcomes here -- the reload either
+// swapped both rings or touched neither (see reloadKeyRingsOnSIGHUP,
+// cmd/cleat-worker) -- and a string label would let a caller introduce a
+// third value this metric was never designed to distinguish.
+func (m *Metrics) RecordSecretKeyReload(ctx context.Context, success bool, extraAttrs ...attribute.KeyValue) {
+	status := "failure"
+	if success {
+		status = "success"
+	}
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("status", status),
+	}, extraAttrs...)...)
+	m.secretKeyReloads.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordDBProbe records one deadline-bounded database call: how long it took and whether it counts
