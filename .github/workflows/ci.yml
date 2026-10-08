@@ -25,7 +25,10 @@
 #   test-java         — gradle test (TeaVM + JUnit 5)
 #   test-assemblyscript — npm test (as-pect)
 #   fuzz              — fuzz tests on wasm/... (60s per fuzz func)
-#   benchmarks        — push to main only; stores result + trend artifact
+#   benchmarks        — push to main only; uploads a 90-day artifact, no
+#                       trend/comparison store (cleat#2487: the step that did
+#                       that, benchmark-action's trend tracking, was removed
+#                       for good — see the job's own comment)
 #   cluster-tests     — docker-compose cluster, integration tests, tear-down
 #   build             — Go bin, Python SDK, Java, AssemblyScript, examples
 # ---------------------------------------------------------------------------
