@@ -1039,13 +1039,14 @@ tier2:
 
     - id: formal-specs
       why: |
-        5 of 7 specs under specs/ are SANY+TLC-checked in CI: CleatClaim,
-        CleatDurableCallIntent, CleatKeyRotation, CleatQueueAdmission and
-        CleatRunLifecycle each have a .cfg, and .github/workflows/tla.yml's
-        "SANY + TLC (make tla)" step runs them on every PR touching specs/** (plus a
-        listed set of implementing files) and on every push to main/develop.
-        specs/README.md documents and links a per-spec status file for each of the 5,
-        with issue references and a generated index. Moved out of tier 3 by owner
+        6 of 8 specs under specs/ are SANY+TLC-checked in CI: CleatClaim,
+        CleatDurableCallIntent, CleatKeyRotation, CleatParentAwait,
+        CleatQueueAdmission and CleatRunLifecycle each have a .cfg, and
+        .github/workflows/tla.yml's "SANY + TLC (make tla)" step runs them on every
+        PR touching specs/** (plus a listed set of implementing files) and on every
+        push to main/develop. specs/README.md documents and links a per-spec status
+        file for each of the 6, with issue references and a generated index. Moved
+        out of tier 3 by owner
         decision, cleat#2708 (2026-10-08) — see D15: a component this continuously
         checked was in real tension with tier 3's "not built, not shipped, not
         claimed ... may not appear in docs as supported" contract.
@@ -1709,7 +1710,7 @@ tier3:
     # python-sdk/wit/cleat.wit, whose world exports `run` at the top level, so nothing
     # builds a component the nil parent index cannot resolve.
 
-    # formal-specs was here. Moved to tier 2 on 2026-10-08 (cleat#2708, D15): 5 of 7
+    # formal-specs was here. Moved to tier 2 on 2026-10-08 (cleat#2708, D15): 6 of 8
     # specs under specs/ are SANY+TLC-checked on every PR touching specs/** and on
     # every push to main/develop, which was in real tension with this tier's own
     # contract ("not built, not shipped, not claimed"). See tier2.components for the
@@ -2001,13 +2002,13 @@ tier3:
 #       failure: the row carries the outcome that will be applied.
 #
 #   D15 DECIDED 2026-10-08 (repository owner). FORMAL-SPECS MOVES FROM TIER 3 TO
-#       TIER 2. cleat#2708, following cleat#2420's stale-entry fix. 5 of 7 specs
+#       TIER 2. cleat#2708, following cleat#2420's stale-entry fix. 6 of 8 specs
 #       under specs/ are SANY+TLC-checked on every PR touching specs/** and on every
 #       push to main/develop, with a documented per-spec status index -- in real
 #       tension with tier 3's "not built, not shipped, not claimed" contract. The
 #       2 unmaintained specs (CleatSignals.tla, CleatStateMachine.tla) travel with
 #       the component into tier 2 as an open_item rather than forcing a split; the
-#       Makefile's tla target already only ever checked the 5, so nothing about
+#       Makefile's tla target already only ever checked the 6, so nothing about
 #       their own (non-)enforcement changes. See tier2.components.
 #
 # D1-D4 were settled together on 2026-08-06; D5-D15 have been added since, and this
