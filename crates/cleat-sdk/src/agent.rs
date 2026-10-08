@@ -249,10 +249,13 @@ mod tests {
 
     #[test]
     fn a_default_config_sends_only_the_message() {
-        // run_agent is the only thing that sets `message`; this test sets it
-        // directly, since `message` is a private field by construction.
-        let mut config = AgentConfig::default();
-        config.message = "hello".into();
+        // run_agent is the only thing that sets `message` in practice; this
+        // test sets it directly to exercise the same field a caller never
+        // touches.
+        let config = AgentConfig {
+            message: "hello".into(),
+            ..Default::default()
+        };
         let v = serde_json::to_value(&config).unwrap();
         assert_eq!(v, serde_json::json!({"message": "hello"}));
     }
