@@ -423,25 +423,55 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	}
 	rtRows.Close()
 
+	// cleat#2446's census. This query used to read dp.class = 1 (OBJECT_OR_COLUMN)
+	// and dp.state = 'G' (GRANT) only -- and migrations/mssql/008_app_login.sql's
+	// entire cleat_app_role security model is neither: its four GRANTs are
+	// SCHEMA-scoped (class = 3, major_id is a schema_id, not an object_id, so
+	// the old query's JOIN to sys.objects matched nothing for them), and its
+	// one DENY -- the statement that stops cleat_app_role writing
+	// dbo.deployment_secrets, overriding the schema GRANT above it, "DENY
+	// always overrides a GRANT ... regardless of which level granted it", per
+	// that migration's own comment -- is state = 'D', which the old filter
+	// excluded outright. Measured on a database built from the current chain:
+	// cat.Grants was 0 for a role carrying thirteen live GRANT/DENY rows, and
+	// -mode=diff reported 0 differences between that database and a second
+	// one with every one of those thirteen permissions explicitly revoked.
+	// Exactly the is_not_trusted shape this file already names: an attribute
+	// outside the compared set, found by widening the comparison rather than
+	// by suspicion.
+	//
+	// state IN ('G','D') only, not 'W' (GRANT_WITH_GRANT_OPTION): nothing in
+	// this chain uses WITH GRANT OPTION (grep -ni "WITH GRANT OPTION"
+	// migrations/mssql/*.sql returns nothing), so adding it would compare a
+	// class of statement nobody issues -- the same "nothing to lose" reasoning
+	// cleat#2882 applies to MySQL roles.
 	grantRows, err := db.QueryContext(ctx, `
-		SELECT grantee_principal.name, s.name, o.name, dp.permission_name
+		SELECT grantee_principal.name, 'OBJECT ' + s.name + '.' + o.name,
+		       dp.permission_name, dp.state_desc
 		FROM sys.database_permissions dp
 		JOIN sys.objects o ON o.object_id = dp.major_id
 		JOIN sys.schemas s ON s.schema_id = o.schema_id
 		JOIN sys.database_principals grantee_principal ON grantee_principal.principal_id = dp.grantee_principal_id
-		WHERE dp.class = 1 AND dp.state = 'G'
+		WHERE dp.class = 1 AND dp.state IN ('G', 'D')
+		UNION ALL
+		SELECT grantee_principal.name, 'SCHEMA ' + sch.name,
+		       dp.permission_name, dp.state_desc
+		FROM sys.database_permissions dp
+		JOIN sys.schemas sch ON sch.schema_id = dp.major_id
+		JOIN sys.database_principals grantee_principal ON grantee_principal.principal_id = dp.grantee_principal_id
+		WHERE dp.class = 3 AND dp.state IN ('G', 'D')
 		ORDER BY 1, 2, 3, 4
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("catalogdiff: listing grants: %w", err)
 	}
 	for grantRows.Next() {
-		var grantee, schema, obj, perm string
-		if err := grantRows.Scan(&grantee, &schema, &obj, &perm); err != nil {
+		var grantee, target, perm, stateDesc string
+		if err := grantRows.Scan(&grantee, &target, &perm, &stateDesc); err != nil {
 			grantRows.Close()
 			return nil, fmt.Errorf("catalogdiff: scanning grant: %w", err)
 		}
-		cat.Grants = append(cat.Grants, fmt.Sprintf("%s ON %s.%s TO %s", perm, schema, obj, grantee))
+		cat.Grants = append(cat.Grants, fmt.Sprintf("%s %s ON %s TO %s", stateDesc, perm, target, grantee))
 	}
 	if err := grantRows.Err(); err != nil {
 		return nil, fmt.Errorf("catalogdiff: listing grants: %w", err)
