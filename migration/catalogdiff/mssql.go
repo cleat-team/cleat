@@ -433,9 +433,9 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	// always overrides a GRANT ... regardless of which level granted it", per
 	// that migration's own comment -- is state = 'D', which the old filter
 	// excluded outright. Measured on a database built from the current chain:
-	// cat.Grants was 0 for a role carrying eleven live GRANT/DENY rows, and
+	// cat.Grants was 0 for a role carrying thirteen live GRANT/DENY rows, and
 	// -mode=diff reported 0 differences between that database and a second
-	// one with every one of those eleven permissions explicitly revoked.
+	// one with every one of those thirteen permissions explicitly revoked.
 	// Exactly the is_not_trusted shape this file already names: an attribute
 	// outside the compared set, found by widening the comparison rather than
 	// by suspicion.

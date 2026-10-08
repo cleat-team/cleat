@@ -10,9 +10,9 @@ package catalogdiff
 // state = 'D', which the old filter excluded outright.
 //
 // Measured on a database built from the current chain before this fix:
-// Snapshot's Grants was empty for a role carrying eleven live GRANT/DENY
+// Snapshot's Grants was empty for a role carrying thirteen live GRANT/DENY
 // rows, and -mode=diff reported 0 differences between that database and a
-// second one with every one of those eleven permissions explicitly revoked.
+// second one with every one of those thirteen permissions explicitly revoked.
 // Same method as the_mssql_snapshot_sees_the_attributes_it_selects_test.go
 // (cleat#2447) and the_mysql_snapshot_sees_a_trigger_test.go: establish the
 // difference independently of Snapshot, then require Diff to report it.

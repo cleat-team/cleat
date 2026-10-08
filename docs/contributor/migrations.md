@@ -163,7 +163,7 @@ else:
   not assert who is in it.
 - **SQL Server's object grants used to be entirely the server's, and that stopped being true at
   `migrations/mssql/008_app_login.sql` (cleat#2203).** A `sys.database_permissions` read returns
-  **over 2,000 rows even in a brand-new empty database** (a handful database-level, the rest
+  **229 rows even in a brand-new empty database** (a handful database-level, the rest
   object-level), all on server-supplied objects like `sys.dm_pdw_nodes_os_tasks` — this part still
   holds, and is why `migration/catalogdiff/mssql.go`'s own grant query joins against `sys.objects`
   and `sys.schemas` rather than dumping the view raw: both views exclude `is_ms_shipped` objects by
@@ -175,12 +175,12 @@ else:
   schema-level (`GRANT ... ON SCHEMA::dbo`, `class = 3`) and the one object-level statement is a
   `DENY` (`state = 'D'`), not a `GRANT` (`state = 'G'`) — and the query used to filter to
   `class = 1 AND state = 'G'` only. Measured before the fix: `Snapshot`'s `Grants` was empty for a
-  role carrying eleven live `GRANT`/`DENY` rows, and `-mode=diff` reported 0 differences between a
+  role carrying thirteen live `GRANT`/`DENY` rows, and `-mode=diff` reported 0 differences between a
   database with the full `cleat_app_role` security model and a second one with every one of those
-  eleven permissions explicitly revoked. **Fixed by widening the filter to `class IN (1, 3)` and
+  thirteen permissions explicitly revoked. **Fixed by widening the filter to `class IN (1, 3)` and
   `state IN ('G', 'D')`, not by dumping the view raw** — the `sys.objects`/`sys.schemas` join still
   does the real filtering, so the widened query reports 0 grants on a brand-new empty database (the
-  same negative control this note describes) and exactly the eleven real ones on a chain-built
+  same negative control this note describes) and exactly the thirteen real ones on a chain-built
   database. `state IN ('G','D')` only, not `'W'` (`GRANT ... WITH GRANT OPTION`): nothing in this
   chain uses it, so adding it would compare a class of statement nobody issues.
 - **MySQL's grants are real and the per-database diff can see them, but the obvious query embeds
