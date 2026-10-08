@@ -56,39 +56,39 @@ import (
 // Logged, not returned: this runs off a signal with nothing to report an
 // error to except the log and w.Metrics.
 //
-// A LIMITATION, MEASURED RATHER THAN ASSUMED: under the current
-// --encryption-key-file[-previous] design, this can NEVER actually change
-// the payload key's BYTES, only confirm them unchanged. loadPayloadKeyRing
-// assigns version 2 to whatever --encryption-key-file holds and 1 to
-// --encryption-key-file-previous, UNCONDITIONALLY, on every call -- so a
-// SIGHUP that re-reads an operator-edited current-key file produces a
-// candidate ring whose version 2 carries DIFFERENT bytes than the ring's
-// own version 2 a moment ago, which is exactly refuseReusedVersion's job to
-// refuse (reloadable_key_ring.go). Verified directly: reloading
-// {2: A}-shaped ring with a {2: B}-shaped candidate, no previous key
-// present either way, is refused every time.
+// A LIMITATION THAT USED TO BE PERMANENT, UNTIL CLEAT#3203: before that
+// issue, loadPayloadKeyRing assigned version 2 to whatever
+// --encryption-key-file held and 1 to --encryption-key-file-previous,
+// UNCONDITIONALLY, on every call -- so a SIGHUP that re-read an
+// operator-edited current-key file produced a candidate ring whose version
+// 2 carried DIFFERENT bytes than the ring's own version 2 a moment ago,
+// which is exactly refuseReusedVersion's job to refuse
+// (reloadable_key_ring.go). The contrast with the secrets side was the
+// reason: SecretKeyRingFromEnv's M1 rereads the VERSION NUMBER from a file
+// too (CLEAT_SECRET_MASTER_KEY_VERSION_FILE and its _PREVIOUS sibling), so
+// an operator rotating secrets introduces a version NUMBER the live ring
+// never held before -- a clean add, not a reuse. The payload side had no
+// equivalent.
 //
-// The contrast with the secrets side is the reason: SecretKeyRingFromEnv's
-// M1 rereads the VERSION NUMBER from a file too (CLEAT_SECRET_MASTER_KEY_VERSION_FILE
-// and its _PREVIOUS sibling), so an operator rotating secrets introduces a
-// version NUMBER the live ring never held before -- a clean add, not a
-// reuse. The payload side has no equivalent: --encryption-key-file-version
-// does not exist, so every SIGHUP sees the SAME two labels (2 and 1) no
-// matter what an operator changes on disk, and content changes under a
-// fixed label are exactly what M3 exists to catch.
+// cleat#3203 gave it one: --encryption-key-file-version[-file] and
+// --encryption-key-file-previous-version[-file] (payloadKeyVersions,
+// setup.go), read fresh on every loadPayloadKeyRing call exactly the way
+// the key files themselves already were. An operator can now introduce a
+// new key under a version number the ring never held, which M3 lets
+// through, and genuinely rotate via SIGHUP -- see
+// TestReloadKeyRingsOnSIGHUP_PayloadRotationViaNewVersionNumbersSucceeds
+// for the worked two-step sequence.
 //
-// So, for now: a SIGHUP with the payload key file(s) UNCHANGED is a clean,
-// harmless no-op (this is the common case -- an operator rotating secrets
-// sends one SIGHUP to every worker, and workers with no payload key change
-// pending should not be disrupted by it). A SIGHUP after rewriting the
-// CURRENT key's bytes is SAFELY REFUSED -- logged, failure metric
-// incremented, old key kept, nothing corrupted -- rather than either
-// silently rotating (which would orphan every row sealed under the old
-// bytes without converting them first) or crashing. Genuine payload key
-// rotation still requires the restart-based two-phase procedure
-// (docs/how-to/rotate-payload-encryption-key.md) until a follow-up gives
-// the payload ring the same file-sourced version numbers the secrets ring
-// already has (tracked separately as cleat#3203).
+// What did NOT change, and is worth keeping separate from the above: a
+// SIGHUP that reuses a version number under DIFFERENT bytes (the old
+// mistake, or an operator who never adopted the new flags and so is still
+// on the hardcoded 2/1 labels) is still SAFELY REFUSED -- logged, failure
+// metric incremented, old key kept, nothing corrupted. That refusal is
+// what cleat#3203 built the escape hatch NEXT TO, not a replacement for
+// it: see TestReloadKeyRingsOnSIGHUP_PayloadChangedCurrentKeyIsSafelyRefused,
+// which still pins exactly this path. The restart-based two-phase
+// procedure (docs/how-to/rotate-payload-encryption-key.md) remains valid
+// for a worker that has not adopted the version flags.
 func (w *Worker) reloadKeyRingsOnSIGHUP(ctx context.Context) {
 	logger := w.logger
 	workerID := w.id
@@ -110,7 +110,7 @@ func (w *Worker) reloadKeyRingsOnSIGHUP(ctx context.Context) {
 	if w.payloadRing == nil {
 		logger.InfoContext(ctx, "SIGHUP: payload encryption is not configured on this worker, nothing to reload for it", "worker_id", workerID)
 	} else {
-		candidatePayload, err := loadPayloadKeyRing(w.payloadKeyFile, w.payloadKeyFilePrevious)
+		candidatePayload, err := loadPayloadKeyRing(w.payloadKeyFile, w.payloadKeyFilePrevious, w.payloadKeyVersions)
 		if err != nil {
 			logger.ErrorContext(ctx, "SIGHUP: failed to read the payload encryption key, keeping the live one", "worker_id", workerID, "error", err)
 			record(false)

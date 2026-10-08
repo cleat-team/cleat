@@ -363,6 +363,25 @@ var (
 	dbCredentialPath              = flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	encryptionKeyFile             = flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode). Every new payload seal uses this key.")
 	encryptionKeyFilePrevious     = flag.String("encryption-key-file-previous", "", "Path to a PREVIOUS base64-encoded AES-256-GCM encryption key file, for a rolling key rotation (cleat#1992). Read-only: a payload sealed under this key still opens, but nothing new is ever sealed with it. Requires --encryption-key-file. There is no admin.workers-style gate for this the way tenant-secret rotation has -- a worker still on the old key alone cannot read a row a worker already on the new key wrote, until it restarts with this flag. See docs/how-to/rotate-payload-encryption-key.md.")
+	// encryptionKeyFileVersion[Previous][File]: cleat#3203. Give the payload
+	// ring the same file-sourced version-number mechanism
+	// CLEAT_SECRET_MASTER_KEY_VERSION[_FILE] already gives the secrets ring
+	// (engine.SecretKeyRingFromEnv) -- a SIGHUP can only ever ADD a version
+	// number the live ring never held, never reuse one under new bytes, and
+	// without this the payload side has no version to add: --encryption-key-
+	// file-version does not exist today, so every reload sees the same
+	// labels (2 and 1) no matter what the key FILES' bytes become (see
+	// sighup_reload.go's doc comment). Unset on both sides, these default to
+	// today's hardcoded 2/1 -- purely additive, no migration required.
+	//
+	// The "-file" sibling of each exists for the same reason the KEY path is
+	// a file and not an inline flag value: a CLI flag is fixed for the
+	// process's lifetime, so a version an operator wants a SIGHUP to pick up
+	// has to live somewhere editable, same as the key bytes it labels.
+	encryptionKeyFileVersion             = flag.String("encryption-key-file-version", "", "Version number for the key in --encryption-key-file (default 2, matching this flag's long-standing hardcoded value). Set directly or via --encryption-key-file-version-file; not both.")
+	encryptionKeyFileVersionFile         = flag.String("encryption-key-file-version-file", "", "Path to a file containing --encryption-key-file-version's value, re-read on every SIGHUP-triggered reload (cleat#3203). Mutually exclusive with --encryption-key-file-version.")
+	encryptionKeyFilePreviousVersion     = flag.String("encryption-key-file-previous-version", "", "Version number for the key in --encryption-key-file-previous (default 1, matching this flag's long-standing hardcoded value). Set directly or via --encryption-key-file-previous-version-file; not both.")
+	encryptionKeyFilePreviousVersionFile = flag.String("encryption-key-file-previous-version-file", "", "Path to a file containing --encryption-key-file-previous-version's value, re-read on every SIGHUP-triggered reload (cleat#3203). Mutually exclusive with --encryption-key-file-previous-version.")
 
 	// ROLE-PER-TENANT ISOLATION. cleat#1307.
 	//
