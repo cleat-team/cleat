@@ -57,13 +57,18 @@ func normalizeMSSQLName(name, kind string) string {
 //
 // The queries below are the same ones scripts/gen-mssql-baseline's
 // -mode=supplementary check already runs and has validated independently
-// (security policies/predicates, schemas, roles) -- ported here rather than
-// re-derived, because cleat#2434's own comment named this file as "the better
-// repair" for exactly this gap. Column/index/identity GRANULARITY (width,
-// precision, scale, collation, INCLUDE columns, filtered-index predicates,
-// sort order) and triggers' own settings (QUOTED_IDENTIFIER, ANSI_NULLS,
-// is_disabled) remain supplementary-only -- cleat#2432 scoped this change to
-// the load-bearing subset and left those as a follow-up.
+// (security policies/predicates, schemas, roles, and -- cleat#2882 -- column
+// width/precision/scale/identity and index INCLUDE/filter/sort-order) --
+// ported here rather than re-derived, because cleat#2434's own comment named
+// this file as "the better repair" for exactly this gap.
+//
+// Still supplementary-only, and genuinely so rather than merely unclaimed:
+// a column's is_computed flag, and triggers' own settings (QUOTED_IDENTIFIER,
+// ANSI_NULLS, is_disabled) -- cleat#2882 scoped its port to the classes named
+// in its own three-item list and did not take these on. Collation is NOT in
+// that list: it was already read here (c.collation_name, below) before
+// cleat#2882 -- this comment previously claimed otherwise, which was already
+// false by the time it was written, not a fact that decayed.
 func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	cat := &Catalog{
 		Dialect:  migration.DialectMSSQL,
@@ -105,8 +110,22 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		qname := tr.schema + "." + tr.name
 		t := &Table{Name: qname}
 
+		// max_length, precision, scale and is_identity -- cleat#2882's
+		// remaining MSSQL granularity gap. sys.types.name alone is a bare
+		// type name with no length (unlike MySQL's COLUMN_TYPE, which
+		// already spells "varchar(255)"), so a column silently narrowed
+		// from varchar(255) to varchar(50) presented identical rows to
+		// every query this function made before this change -- the exact
+		// class scripts/gen-mssql-baseline/supplementary.go's "column
+		// shape" check exists to catch, ported rather than re-derived.
+		// Folded into DataType (not a new Column field) for the same
+		// reason mysql.go folds auto_increment into DataType: canonicalize
+		// already renders DataType, so there is nothing new to forget to
+		// render -- the exact #2446 trap this file's header comment warns
+		// about one line up.
 		colRows, err := db.QueryContext(ctx, `
-			SELECT c.name, ty.name, c.is_nullable,
+			SELECT c.name, ty.name, c.max_length, c.precision, c.scale, c.is_identity,
+			       c.is_nullable,
 			       COALESCE(OBJECT_DEFINITION(c.default_object_id), ''),
 			       COALESCE(c.collation_name, '')
 			FROM sys.columns c
@@ -119,11 +138,17 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		}
 		for colRows.Next() {
 			var name, dtype string
-			var nullable bool
+			var maxLength int
+			var precision, scale int
+			var identity, nullable bool
 			var def, collation string
-			if err := colRows.Scan(&name, &dtype, &nullable, &def, &collation); err != nil {
+			if err := colRows.Scan(&name, &dtype, &maxLength, &precision, &scale, &identity, &nullable, &def, &collation); err != nil {
 				colRows.Close()
 				return nil, fmt.Errorf("catalogdiff: scanning column for %s: %w", qname, err)
+			}
+			dtype = fmt.Sprintf("%s(len=%d,precision=%d,scale=%d)", dtype, maxLength, precision, scale)
+			if identity {
+				dtype += " IDENTITY"
 			}
 			t.Columns = append(t.Columns, Column{Name: name, DataType: dtype, Nullable: nullable, Default: def, Collation: collation})
 		}
@@ -132,39 +157,87 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		}
 		colRows.Close()
 
+		// has_filter/filter_definition and, per column, is_included_column
+		// and is_descending_key -- cleat#2882's remaining MSSQL granularity
+		// gap. The PRIOR version of this query aggregated every
+		// index_columns row (key AND included) into one STRING_AGG ordered
+		// by key_ordinal alone -- included columns all carry key_ordinal=0,
+		// so they sorted first, mixed in with key columns indistinguishably
+		// and with no defined order among themselves. That is a second,
+		// unrelated bug this same query carried: fixed here by querying
+		// per-row (matching mysql.go's idxByName accumulator pattern) and
+		// building the key-column and included-column lists separately in
+		// Go, rather than trying to express "two differently-ordered lists
+		// from one column" in a single STRING_AGG.
 		idxRows, err := db.QueryContext(ctx, `
-			SELECT i.name, i.is_unique, i.type_desc,
-			       STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal)
+			SELECT i.name, i.is_unique, i.type_desc, i.has_filter, COALESCE(i.filter_definition, ''),
+			       ic.is_included_column, ic.is_descending_key, ic.key_ordinal, c.name
 			FROM sys.indexes i
 			JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
 			JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
 			WHERE i.object_id = @p1 AND i.name IS NOT NULL
-			GROUP BY i.name, i.is_unique, i.type_desc
-			ORDER BY i.name
+			ORDER BY i.name, ic.is_included_column, ic.key_ordinal, c.name
 		`, tr.objectID)
 		if err != nil {
 			return nil, fmt.Errorf("catalogdiff: indexes for %s: %w", qname, err)
 		}
+		type idxAcc struct {
+			unique               bool
+			typeDesc             string
+			hasFilter            bool
+			filterDef            string
+			keyCols, includeCols []string
+		}
+		idxByName := map[string]*idxAcc{}
+		var idxOrder []string
 		for idxRows.Next() {
-			var name, typeDesc, cols string
-			var unique bool
-			if err := idxRows.Scan(&name, &unique, &typeDesc, &cols); err != nil {
+			var name, typeDesc, filterDef, colName string
+			var unique, hasFilter, included, descending bool
+			var keyOrdinal int
+			if err := idxRows.Scan(&name, &unique, &typeDesc, &hasFilter, &filterDef,
+				&included, &descending, &keyOrdinal, &colName); err != nil {
 				idxRows.Close()
 				return nil, fmt.Errorf("catalogdiff: scanning index for %s: %w", qname, err)
 			}
-			// columns is part of the Definition (not just the name) precisely
-			// so that normalizeMSSQLName can collapse two auto-generated names
-			// for DIFFERENT indexes without losing the ability to tell them
-			// apart -- see the comment on that function.
-			t.Indexes = append(t.Indexes, Index{
-				Name:       normalizeMSSQLName(name, "IDX"),
-				Definition: fmt.Sprintf("unique=%t type=%s columns=%s", unique, typeDesc, cols),
-			})
+			acc, ok := idxByName[name]
+			if !ok {
+				acc = &idxAcc{unique: unique, typeDesc: typeDesc, hasFilter: hasFilter, filterDef: filterDef}
+				idxByName[name] = acc
+				idxOrder = append(idxOrder, name)
+			}
+			// Folded into the column token, matching mysql.go's DESC fold
+			// for the same attribute -- see that file's comment on why: it
+			// reaches the line canonicalize already renders without a
+			// separate field nothing would print.
+			if descending {
+				colName += " DESC"
+			}
+			if included {
+				acc.includeCols = append(acc.includeCols, colName)
+			} else {
+				acc.keyCols = append(acc.keyCols, colName)
+			}
 		}
 		if err := idxRows.Err(); err != nil {
+			idxRows.Close()
 			return nil, fmt.Errorf("catalogdiff: indexes for %s: %w", qname, err)
 		}
 		idxRows.Close()
+		for _, name := range idxOrder {
+			acc := idxByName[name]
+			// columns is part of the Definition (not just the name) precisely
+			// so that normalizeMSSQLName can collapse two auto-generated names
+			// for DIFFERENT indexes without losing the ability to tell them
+			// apart -- see the comment on that function. include and filter
+			// are appended the same way, so a filtered or covering index
+			// that loses either reaches this line too.
+			t.Indexes = append(t.Indexes, Index{
+				Name: normalizeMSSQLName(name, "IDX"),
+				Definition: fmt.Sprintf("unique=%t type=%s columns=%s include=%s filter(%t)=%s",
+					acc.unique, acc.typeDesc, strings.Join(acc.keyCols, ","),
+					strings.Join(acc.includeCols, ","), acc.hasFilter, acc.filterDef),
+			})
+		}
 
 		// Every branch's Definition carries the COLUMN(S) it applies to, not
 		// just its kind -- required so that normalizeMSSQLName (applied

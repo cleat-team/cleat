@@ -37,11 +37,17 @@
 //	-migrations <chain>          onto A
 //	-migrations migrations       onto B
 //	-mode=diff         -dsn A -bdsn B     -> must report 0 differences
-//	-mode=supplementary -dsn A -bdsn B    -> must report 6 of 6 PASS (cleat#2432
-//	                                         moved security policies, triggers,
+//	-mode=supplementary -dsn A -bdsn B    -> must report 5 of 5 PASS. Started at
+//	                                         11 checks; cleat#2432 moved
+//	                                         security policies, triggers,
 //	                                         schemas and roles into -mode=diff
-//	                                         itself, which is why this count is
-//	                                         6 rather than the 11 it used to be)
+//	                                         itself (11 -> 6), cleat#2882 moved
+//	                                         "index attributes" the same way,
+//	                                         fully subsumed and removed rather
+//	                                         than left duplicated (6 -> 5).
+//	                                         "column shape" stayed, only
+//	                                         partially subsumed -- see its own
+//	                                         comment in supplementary.go.
 //	scripts/mssql-baseline-known-positive.sh <A-dsn> <B-dsn>
 //
 // The differential needs the pre-compaction chain as its A side, which after
