@@ -32,9 +32,13 @@ type Catalog struct {
 	// Schemas and Roles are populated on SQL Server only, where migrations can
 	// create both as first-class objects (CREATE SCHEMA, CREATE ROLE) with no
 	// equivalent "which table owns this" home to attach them to the way a
-	// column or index attaches to a table. Empty on every other dialect -- not
-	// because the concept does not exist there, but because nothing in this
-	// package has yet needed it compared on Postgres or MySQL. cleat#2432.
+	// column or index attaches to a table. Empty on MySQL for both, each for
+	// its own resolved reason (see mysql.go, cleat#2882): a schema IS the
+	// database there, and no migration creates a MySQL role, nor could one
+	// be reliably distinguished from a locked ordinary user account if it
+	// did. Empty on Postgres because nothing in this package has yet needed
+	// it compared there -- not yet investigated the way MySQL now has been.
+	// cleat#2432.
 	Schemas []string // schema names, excluding SQL Server's own built-ins
 	Roles   []string // database role NAMES only -- membership is a deployment fact, not a schema fact
 }

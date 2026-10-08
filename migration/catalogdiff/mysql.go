@@ -27,10 +27,35 @@ import (
 // immutability), and a database missing that trigger presented identical
 // rows to every query this function made.
 //
-// Roles are deliberately NOT captured here, unlike mssql.go's Catalog.Roles.
-// Whether any MySQL CREATE ROLE object exists in this tree was not resolved
-// when this change was made -- see cleat#2882's remaining scope rather than
-// treating this silence as "checked, none exist".
+// Roles are deliberately NOT captured here, unlike mssql.go's Catalog.Roles
+// -- resolved, not merely left silent, cleat#2882. Two independent reasons:
+//
+//  1. No migration in migrations/mysql/*.sql ever issues CREATE ROLE --
+//     confirmed by a whole-tree search, not assumed from deploy/mysql/
+//     900-app-role.sh alone (that script's cleat_app is a CREATE USER, and
+//     measured unlocked: account_locked='N'). So on the tree as it exists
+//     today, no baseline compaction can lose a role that was never created,
+//     and Catalog.Roles would compare an empty list against an empty list
+//     on every pair of databases -- the same "manufactures no difference,
+//     so there is nothing to check" shape as Schemas above, not merely an
+//     untested feature.
+//  2. Even if a future migration did CREATE ROLE, MySQL has no catalog-level
+//     marker that distinguishes a role from an ordinary locked user account
+//     -- measured against mysql:8.4.11 (the version this repo pins): both
+//     `CREATE ROLE r` and `CREATE USER u IDENTIFIED BY 'x' ACCOUNT LOCK`
+//     produce an identical mysql.user row, account_locked='Y', with no
+//     other column distinguishing them. mssql.go's role query instead has
+//     an unambiguous discriminator (sys.database_principals.type='R'), which
+//     is why that capture works and a MySQL equivalent, as a mechanical
+//     port, would not: an account_locked='Y' scan would also match every
+//     locked service account (mysql.infoschema, mysql.session, mysql.sys
+//     are locked by default) and any ordinary account an operator locks for
+//     unrelated reasons, with no way to tell those apart from a real role.
+//
+// If a future migration introduces a genuine MySQL role, capturing it needs
+// a real discriminator (e.g. a naming convention this tree commits to) --
+// not a mechanical port of mssql.go's query, which assumes a distinction
+// MySQL's catalog does not make.
 func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	cat := &Catalog{
 		Dialect:  migration.DialectMySQL,
