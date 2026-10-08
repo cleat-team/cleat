@@ -333,20 +333,20 @@ Wrote workflow.wasm/my-workflow.wasm ...
 > commands produce `workflow.wasm/hello.wasm`. Step 6, which names
 > `my-workflow.wasm`, then fails with `no such file or directory` -- the *same*
 > error the note above records the guard catching, reached from the other side.
+> At the time, step 1's Homebrew install was v0.3.2 (`cleat-team/homebrew-tap`'s
+> `Formula/cleat.rb`, last bumped 2026-09-27), so this was the reader's path
+> rather than an edge case.
 >
-> This is the reader's path rather than an edge case: **step 1's Homebrew
-> install is v0.3.2** (`cleat-team/homebrew-tap`'s `Formula/cleat.rb` pins that
-> tag; last bumped 2026-09-27), so the install this guide recommends is the one
-> whose artifact carries the other name. Nothing in step 1's `cleat build
-> --help` check can tell the two apart, and a Homebrew source build reports its
-> version as `(devel)`. It self-corrects at the next release that carries
-> cleat#2692; until then, `grep '^name:' my-workflow/cleat.yaml` is silent on
-> the older form, and the build's own `Wrote <path>` line names the artifact
-> either way. Use what that line printed in step 6.
->
-> Filed as **cleat#3065** -- that is where to check whether this still applies
-> to what you installed, since the durable fix is a release and this note is
-> what a reader has until one carries it.
+> **RESOLVED 2026-10-07 (cleat#3065): 0.4.0 shipped, carrying cleat#2692, and
+> the tap's `homebrew-bump` release job pushed a fresh render the same day**
+> (`cleat-team/homebrew-tap`'s `Formula/cleat.rb` now pins `v0.4.0.tar.gz`,
+> commit `dbfe08f29`, 2026-10-07T03:13Z). A `brew install cleat-team/tap/cleat`
+> today builds the v0.4.0 tag, which writes `name:` and produces
+> `my-workflow.wasm` exactly as this guide describes -- re-verified by building
+> that tag directly and running steps 4-6 against it. No reader-facing
+> divergence remains; this note stays as the record of what to check if a
+> future release ever regresses `cleat#2692` (`cleat.yaml`'s `name:` key) or
+> the tap falls behind again.
 
 You should now see a `workflow.wasm` directory containing a `my-workflow.wasm`
 file:
@@ -377,9 +377,9 @@ Expected output includes a line like:
 If you see `connection refused`, make sure Postgres is running (step 2). If
 you see `relation "workflow_defs" does not exist`, go back to step 3. If you see
 `Error reading WASM file ...: no such file or directory`, the artifact is named
-something other than `my-workflow.wasm` -- which is a version difference rather
-than a mistake on your part; see step 5's 2026-10-04 note (a CLI from before
-cleat#2692, including the current Homebrew release, writes `hello.wasm`).
+something other than `my-workflow.wasm` -- a CLI from before cleat#2692 writes
+`hello.wasm` instead; see step 5's note (cleat#3065, resolved 2026-10-07) for
+how to tell which one you have.
 
 ## 7. Start the worker
 
