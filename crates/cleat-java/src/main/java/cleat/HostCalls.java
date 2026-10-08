@@ -1593,15 +1593,30 @@ public class HostCalls {
 
     /**
      * Typed variant of {@link #pluginCall(String, String, String)}.
-     * Deserialises the JSON response into the given type using the
-     * configured JSON mapper.
+     * {@code input} is serialised with {@link JsonHelper#toJson(Object)}
+     * and the response deserialised with
+     * {@link JsonHelper#fromJson(String, Class)} -- both aliases of
+     * {@link JsonHelper#stringify(Object)}/{@link JsonHelper#parse(String, Class)},
+     * which support only {@code String}, {@code Map}, {@code List}, boxed
+     * primitives, {@code Boolean} and {@code Number}, NOT an arbitrary POJO.
+     * An unsupported {@code input} throws {@link IllegalArgumentException}
+     * from this method directly, before the host is ever called; an
+     * unsupported {@code resultType} is caught and returned as
+     * {@link CleatResult#err} instead. For a real custom type, build the
+     * request with {@link JsonBuilder} and call
+     * {@link #pluginCall(String, String, String)} directly, parsing the
+     * response by hand with {@link JsonHelper#parseObject(String)} -- see
+     * {@link Agent} for a worked example of exactly this substitution.
      *
      * @param pluginName   name of the plugin
      * @param functionName name of the function within the plugin
-     * @param input        input object (serialised to JSON)
-     * @param resultType   class of the response type
+     * @param input        input object -- see the type limitation above
+     * @param resultType   class of the response type -- see the type
+     *                     limitation above
      * @param <T>          response type
      * @return a result containing the deserialised response on success
+     * @throws IllegalArgumentException if {@code input} is not one of the
+     *         types {@link JsonHelper#stringify(Object)} supports
      */
     public <T> CleatResult<T> pluginCallTyped(String pluginName, String functionName,
                                                Object input, Class<T> resultType) {
@@ -2601,15 +2616,25 @@ public class HostCalls {
     /**
      * Start a child workflow with a typed input.
      * <p>
-     * The input is serialized to JSON using {@link JsonHelper#stringify(Object)}.
-     * This method otherwise behaves identically to
+     * The input is serialized to JSON using {@link JsonHelper#stringify(Object)},
+     * which supports only {@code String}, {@code Map}, {@code List}, boxed
+     * primitives, {@code Boolean} and {@code Number} -- NOT an arbitrary
+     * POJO. An unsupported {@code input} throws {@link IllegalArgumentException}
+     * from this method directly (uncaught, not wrapped in the returned
+     * {@link CleatResult}), since serialization happens before the host is
+     * ever called. For a real custom type, build the request with
+     * {@link JsonBuilder} and call {@link #childWorkflow(String, String)}
+     * directly -- see {@link Agent} for a worked example of exactly this
+     * substitution. This method otherwise behaves identically to
      * {@link #childWorkflow(String, String)}.
      *
      * @param name  the child workflow type/name
-     * @param input the input object (serialized to JSON)
+     * @param input the input object -- see the type limitation above
      * @param <T>   the input type
      * @return a result containing the child's run ID on success, or an error
      *         description on failure
+     * @throws IllegalArgumentException if {@code input} is not one of the
+     *         types {@link JsonHelper#stringify(Object)} supports
      */
     public <T> CleatResult<String> childWorkflowTyped(String name, T input) {
         String inputJson = JsonHelper.stringify(input);
@@ -2621,13 +2646,24 @@ public class HostCalls {
      * <p>
      * This is a typed wrapper around {@link #awaitChild(String)} that
      * deserializes the result JSON into the requested type using
-     * {@link JsonHelper#parse(String, Class)}.
+     * {@link JsonHelper#parse(String, Class)}, which supports only
+     * {@code String}, {@code Map}, {@code List} and boxed primitives --
+     * NOT an arbitrary POJO. Unlike {@link #childWorkflowTyped}, an
+     * unsupported {@code clazz} does not throw here: the parse failure is
+     * caught and returned as {@link CleatResult#err}, since
+     * {@link #awaitChild(String)} has already succeeded by the time this
+     * runs. For a real custom type, call {@link #awaitChild(String)}
+     * directly and parse the JSON by hand with
+     * {@link JsonHelper#parseObject(String)} -- see {@link Agent} for a
+     * worked example of exactly this substitution.
      *
      * @param runID the child workflow run ID
-     * @param clazz the expected result type class
+     * @param clazz the expected result type class -- see the type
+     *              limitation above
      * @param <T>   the result type
      * @return a result containing the deserialized child output on success,
-     *         or an error description on failure
+     *         or an error description -- including for an unsupported
+     *         {@code clazz} -- on failure
      */
     public <T> CleatResult<T> awaitChildTyped(String runID, Class<T> clazz) {
         CleatResult<String> result = awaitChild(runID);
@@ -2693,17 +2729,31 @@ public class HostCalls {
     /**
      * Make a typed durable call to an external service.
      * <p>
-     * The request object is serialized to JSON and the response is
-     * deserialized to the requested type.
+     * The request is serialized with {@link JsonHelper#stringify(Object)}
+     * and the response is deserialized with
+     * {@link JsonHelper#parse(String, Class)} -- both support only
+     * {@code String}, {@code Map}, {@code List}, boxed primitives,
+     * {@code Boolean} and {@code Number}, NOT an arbitrary POJO. An
+     * unsupported {@code request} throws {@link IllegalArgumentException}
+     * from this method directly, before the host is ever called; an
+     * unsupported {@code responseClass} is caught and returned as
+     * {@link CleatResult#err} instead. For a real custom type, build the
+     * request with {@link JsonBuilder} and call
+     * {@link #cleatCall(String, String, String)} directly, parsing the
+     * response by hand with {@link JsonHelper#parseObject(String)} -- see
+     * {@link Agent} for a worked example of exactly this substitution.
      *
      * @param service       the service name
      * @param operation     the operation name
-     * @param request       the request object (serialized to JSON)
-     * @param responseClass the expected response type class
+     * @param request       the request object -- see the type limitation above
+     * @param responseClass the expected response type class -- see the type
+     *                      limitation above
      * @param <T>           the request type
      * @param <R>           the response type
      * @return a result containing the deserialized response on success, or an
      *         error description on failure
+     * @throws IllegalArgumentException if {@code request} is not one of the
+     *         types {@link JsonHelper#stringify(Object)} supports
      */
     public <T, R> CleatResult<R> cleatCallTyped(
             String service, String operation, T request, Class<R> responseClass) {
@@ -2728,18 +2778,32 @@ public class HostCalls {
      * Make a typed durable call with a retry policy.
      * <p>
      * The retry policy is serialized and passed to the host runtime, which
-     * handles retries automatically.  The request and response are
-     * automatically serialized/deserialized.
+     * handles retries automatically. The request and response are
+     * serialized/deserialized the same way {@link #cleatCallTyped} does --
+     * with {@link JsonHelper#stringify(Object)}/
+     * {@link JsonHelper#parse(String, Class)}, which support only
+     * {@code String}, {@code Map}, {@code List}, boxed primitives,
+     * {@code Boolean} and {@code Number}, NOT an arbitrary POJO. An
+     * unsupported {@code request} throws {@link IllegalArgumentException}
+     * from this method directly, before the host is ever called; an
+     * unsupported {@code responseClass} is caught and returned as
+     * {@link CleatResult#err} instead. For a real custom type, build the
+     * request with {@link JsonBuilder} and parse the response by hand with
+     * {@link JsonHelper#parseObject(String)} -- see {@link Agent} for a
+     * worked example of exactly this substitution.
      *
      * @param service       the service name
      * @param operation     the operation name
-     * @param request       the request object (serialized to JSON)
-     * @param responseClass the expected response type class
+     * @param request       the request object -- see the type limitation above
+     * @param responseClass the expected response type class -- see the type
+     *                      limitation above
      * @param retryPolicy   the retry policy configuration
      * @param <T>           the request type
      * @param <R>           the response type
      * @return a result containing the deserialized response on success, or an
      *         error description on failure
+     * @throws IllegalArgumentException if {@code request} is not one of the
+     *         types {@link JsonHelper#stringify(Object)} supports
      */
     public <T, R> CleatResult<R> cleatCallWithRetry(
             String service, String operation, T request,
