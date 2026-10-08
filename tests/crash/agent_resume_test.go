@@ -62,7 +62,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -624,17 +623,18 @@ func buildRustClientWASM(t *testing.T) []byte {
 	if _, err := exec.LookPath("cargo"); err != nil {
 		missingRustToolchain(t, "cargo is not on PATH")
 	}
-	// Best-effort: if rustup itself is unavailable (a toolchain installed
-	// some other way), fall through and let the real build be the judge --
-	// matching Python's "the probe is what legitimately skips, the build
-	// failing after is fatal" split.
-	if _, err := exec.LookPath("rustup"); err == nil {
-		out, err := exec.Command("rustup", "target", "list", "--installed").CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "wasm32-unknown-unknown") {
-			missingRustToolchain(t, "wasm32-unknown-unknown is not an installed rustup target")
-		}
-	}
-
+	// No separate `rustup target list --installed` probe for the WASM
+	// target: a first version had one, and it fatal'd in CI with
+	// "wasm32-unknown-unknown is not an installed rustup target" even
+	// though ci.yml's "Setup Rust + wasm32-unknown-unknown" step had just
+	// installed it and the real build below works. `rustup target list`
+	// with no toolchain named queries whatever rustup considers the
+	// DEFAULT toolchain, which is not necessarily the one dtolnay/rust-toolchain
+	// just set up and the one `cargo`/`cleat build --target rust` actually
+	// resolve to -- so the probe was answering a different question than
+	// the one that matters. Match Python/Java/AssemblyScript's shape
+	// instead: only `cargo` itself needs to be on PATH, and the real build
+	// below is the sole arbiter of whether the target is actually usable.
 	root := repoRoot(t)
 	outDir := t.TempDir()
 	cmd := exec.Command("go", "run", filepath.Join(root, "cmd", "cleat"),
