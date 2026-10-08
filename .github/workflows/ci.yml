@@ -2660,6 +2660,10 @@ jobs:
       # is not a pass wearing a different colour -- see the Python comment
       # below, which applies identically to these three.
       #
+      # NOTE (WS-1 -> WS-3): .github/workflows/ is WS-3's under WORKSTREAM.md's
+      # shared-files table. Added here rather than left unwired, for the same
+      # reason the Python steps below give. Move or restructure it freely.
+      #
       # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
       # compiles for the former (cmd/cleat/build_rust.go), same as the
       # 'commands' leg's identically-targeted step above.
