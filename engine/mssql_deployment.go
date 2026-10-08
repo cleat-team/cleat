@@ -208,6 +208,21 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	applyWorkflowListPaging(qb, d, filter)
 
 	query, args := qb.SQL()
+	//nolint:gosec // G701: query is built by applyWorkflowFilters/applyWorkflowListPaging
+	// (workflow_list_query.go) via QueryBuilder. Checked every filter field's path there:
+	// Status/DefName/ErrorCode/ConcurrencyKey/the two dates go through AddCondition, which
+	// writes only d.placeholder(pos) (a position index -- "$N"/"?"/"@pN", never a value) into
+	// the text and the value into qb.args; ExcludeDefNames builds one placeholder per name via
+	// d.placeholder(n+i), joined with strings.Join, with the names bound through AddArgs;
+	// IDPrefix/InputContains/ErrorContains/ResultContains go through AddLikeCondition, whose
+	// pattern argument is bound, never interpolated into the text; Search's one Sprintf
+	// interpolates d.likeExpr's own placeholder-index arguments (n, n+1), not the search
+	// string, which is bound via AddArgs. Dialect.placeholder/likeExpr (query_builder.go) take
+	// only an int position and a column name, never a value. So no filter value is ever
+	// concatenated into query -- only placeholder syntax is. gosec's taint tracker cannot see
+	// that distinction and flags this line intermittently: cleat#3246 measured the finding
+	// non-deterministic across identical, unmodified builds (CI's own two runs on one SHA
+	// disagreed), not a real injection path.
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: %w", err)
