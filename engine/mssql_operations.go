@@ -273,8 +273,18 @@ func (s *MSSQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeo
 // This one is a read, so the consequence is disclosure rather than damage --
 // query state is whatever the workflow chose to publish about itself.
 func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210: the same id-from-URL
+	// handler shape as TerminateWorkflow, so a WithTenant copy must run
+	// under its own tenant's SESSION_CONTEXT, not whatever the connection's
+	// pool happened to bake in at connect time.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get query state: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var value sql.NullString
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT JSON_VALUE(query_state, '$.' + @p2)
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p3
 	`, workflowID, key, s.tenantID).Scan(&value)
@@ -291,8 +301,16 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 // implementation for why this reads the whole column rather than using SQL
 // Server's JSON functions.
 func (s *MSSQLStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// GetQueryState above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list query state: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var raw sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT query_state FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -336,6 +354,18 @@ func (s *MSSQLStore) getEventCountOnce(ctx context.Context, workflowID string) (
 }
 
 func (s *MSSQLStore) QueueDepth(ctx context.Context) (int64, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210: the explicit
+	// tenant_id predicate below (IMPROVEMENT-PLAN 3.11) is not defence in
+	// depth on every deployment the way the comment originally framed it --
+	// a WithTenant copy still needs the correct SESSION_CONTEXT for
+	// anything that reads s.tenantID through a connection the policy itself
+	// (where one exists) was never set up to re-check per call.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("queue depth: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var count int64
 	tqParam := s.buildTaskQueueParam()
 	// Scoped by tenant. SQL Server's security policies do this in production,
@@ -343,7 +373,7 @@ func (s *MSSQLStore) QueueDepth(ctx context.Context) (int64, error) {
 	// lands on -- and the test schema defines no policies at all (2.71
 	// residual), so nothing was checking it either way. The predicate makes
 	// the three dialects agree. IMPROVEMENT-PLAN 3.11.
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM workflow_instances WHERE status = 'ready' AND task_queue IN (SELECT value FROM STRING_SPLIT(@p1, ',')) AND tenant_id = @p2`,
 		tqParam, s.tenantID).Scan(&count)
 	if err != nil {
