@@ -186,6 +186,16 @@ export class ToolCallRecord {
     r.error = parser.getString(v, "error");
     return r;
   }
+
+  writeTo(b: JsonBuilder): void {
+    b.startObject();
+    b.addNumber("step", this.step);
+    b.addString("name", this.name);
+    if (this.args.length > 0) b.addString("arguments", this.args);
+    if (this.result.length > 0) b.addString("result", this.result);
+    if (this.error.length > 0) b.addString("error", this.error);
+    b.endObject();
+  }
 }
 
 /** The agent workflow's result. */
@@ -226,6 +236,34 @@ export class AgentResult {
     r.tenantId = parser.getString(val, "tenant_id");
     r.artifactKey = parser.getString(val, "artifact_key");
     return r;
+  }
+
+  /**
+   * Re-encodes this result as JSON. Not used by `runAgent` itself -- only by
+   * a caller (such as `testdata/agentclientas`) that forwards the result as
+   * its OWN workflow output and so needs to re-encode what `fromJSON`
+   * decoded.
+   */
+  toJSON(): string {
+    let b = new JsonBuilder();
+    b.startObject();
+    b.addString("status", this.status);
+    if (this.answer.length > 0) b.addString("answer", this.answer);
+    if (this.steps != 0) b.addNumber("steps", this.steps);
+    if (this.toolCalls.length > 0) {
+      b.startArray("tool_calls");
+      for (let i = 0; i < this.toolCalls.length; i++) {
+        this.toolCalls[i].writeTo(b);
+      }
+      b.endArray();
+    }
+    if (this.model.length > 0) b.addString("model", this.model);
+    if (this.totalTokens != 0) b.addNumber("total_tokens", this.totalTokens);
+    if (this.cost != 0.0) b.addNumber("cost", this.cost);
+    if (this.tenantId.length > 0) b.addString("tenant_id", this.tenantId);
+    if (this.artifactKey.length > 0) b.addString("artifact_key", this.artifactKey);
+    b.endObject();
+    return b.build();
   }
 }
 

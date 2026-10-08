@@ -2650,6 +2650,42 @@ jobs:
         if: matrix.package.name == 'commands'
         uses: gradle/actions/setup-gradle@v6
 
+      # The Rust, Java and AssemblyScript agent clients, for cleat#2978's
+      # extension of cleat#1983's acceptance to those three SDKs (it already
+      # ran Go and Python). Same reasoning as the Python toolchain below, and
+      # the same reason the 'commands' steps above cannot be reused: those
+      # are scoped to cleat#2146/#2145's entry-point-resolution tests under
+      # ./cmd/..., a different matrix leg, and widening their condition would
+      # conflate two independent reasons a toolchain is needed. A skip here
+      # is not a pass wearing a different colour -- see the Python comment
+      # below, which applies identically to these three.
+      #
+      # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
+      # compiles for the former (cmd/cleat/build_rust.go), same as the
+      # 'commands' leg's identically-targeted step above.
+      - name: Setup Rust + wasm32-unknown-unknown for the crash agent client
+        if: matrix.package.name == 'crash'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node for the crash agent client (AssemblyScript build path)
+        if: matrix.package.name == 'crash'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Setup Java for the crash agent client
+        if: matrix.package.name == 'crash'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle for the crash agent client
+        if: matrix.package.name == 'crash'
+        uses: gradle/actions/setup-gradle@v6
+
       # The Python agent client, for cleat#1983's acceptance. That test runs the
       # shipped agent workflow from BOTH SDKs, and a Python workflow is a
       # Component Model binary, which only `componentize-py` produces -- so

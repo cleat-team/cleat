@@ -125,6 +125,20 @@ describe("AgentConfig.toJSON", (): void => {
       expectStr(parser.getString(tools[0], "operation"), "get");
     }
   });
+
+  it("writes an integer field with no decimal point", (): void => {
+    // Not a round trip through JsonParser.getNumber: that returns an f64
+    // regardless of whether the text was "10" or "10.0", so it cannot see
+    // this seam. The host's own structs decode max_steps as a Go/Rust/Java
+    // int, and "10.0" fails THAT unmarshal (cleat#2978) -- a case this test
+    // asserts against the literal text for exactly that reason.
+    let config = new AgentConfig();
+    config.maxSteps = 10;
+    let json = config.toJSON("hi");
+    let hasDecimal: bool = json.includes("10.0");
+    expect<bool>(hasDecimal).toBe(false);
+    expectStr(json, '{"message":"hi","max_steps":10}');
+  });
 });
 
 describe("AgentResult.fromJSON", (): void => {

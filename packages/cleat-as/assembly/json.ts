@@ -246,7 +246,7 @@ const TYPE_NULL: i32 = 0;
 export const TYPE_BOOL: i32 = 1;
 export const TYPE_NUMBER: i32 = 2;
 export const TYPE_STRING: i32 = 3;
-const TYPE_ARRAY: i32 = 4;
+export const TYPE_ARRAY: i32 = 4;
 // Exported so signal-envelope.ts can check a parsed value's shape rather
 // than trusting a key lookup: getString() returns "" for both "absent" and
 // "present but not a string", and the envelope has to tell those apart.
@@ -740,9 +740,19 @@ export class JsonBuilder {
   }
 
   private emitNumberValue(val: f64): void {
-    // handle integer values without decimal point
-    if (val == Math.floor(val) && isFinite(val)) {
-      this.emit(val.toString());
+    // Integer-valued fields -- every caller that means an integer (max_steps,
+    // poll_interval_seconds, ...) only HAS an f64 to pass because this
+    // builder has one numeric type. Emitting "10.0" for those is not a
+    // formatting style; the host's own structs decode counts as Go/Rust/Java
+    // int fields, and a decimal point there is a type error, not a style
+    // difference -- cleat#2978 found this from `max_steps` failing to
+    // unmarshal into a Go int. f64.toString() always keeps a fraction (it
+    // mirrors JS Number.prototype.toString less closely than it looks), so
+    // the two branches here used to call the exact same thing; the WHOLE
+    // POINT of having one is this cast.
+    if (val == Math.floor(val) && isFinite(val) &&
+        val >= <f64>i64.MIN_VALUE && val <= <f64>i64.MAX_VALUE) {
+      this.emit(i64(val).toString());
     } else {
       this.emit(val.toString());
     }
@@ -1021,7 +1031,7 @@ import { HostCalls } from "./host-calls";
  * Serialize a JsonVal tree into a JsonBuilder using the public builder API.
  * Used as a fallback when host JSON imports are unavailable (e.g., as-pect).
  */
-function serializeVal(val: JsonVal): string {
+export function serializeVal(val: JsonVal): string {
   if (val == null) return "null";
   if (val.type == TYPE_NULL) return "null";
   if (val.type == TYPE_BOOL) return val.boolVal ? "true" : "false";

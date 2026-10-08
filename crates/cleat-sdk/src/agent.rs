@@ -81,10 +81,16 @@ pub struct Tool {
 /// The agent's configuration. Mirrors `python-sdk/cleat_sdk/agent.py`'s
 /// `AgentConfig`, which itself mirrors `cleat/agentworkflow`'s `Input`.
 ///
-/// `message` is deliberately not a public field here, matching
-/// `agentworkflow.RunAsChild`/`run_agent`'s own shape: the message is
-/// [`run_agent`]'s own argument, not part of the config a caller builds, so
-/// there is exactly one place to look for it.
+/// `message` is set by [`run_agent`], not by the caller: a caller populates
+/// every OTHER field and leaves this one at its default, matching
+/// `agentworkflow.RunAsChild`/`run_agent`'s own shape, where the message is
+/// a separate argument rather than a config field to populate. It is `pub`
+/// (not hidden, as a first attempt made it) because Rust's
+/// `S { ..Default::default() }` struct-update syntax requires every field
+/// to be visible at the call site, even ones the caller never names --
+/// a private field here would make `AgentConfig { tools, ..Default::default() }`
+/// refuse to compile from outside this crate, which is the shape every
+/// caller actually uses.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentConfig {
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -125,12 +131,17 @@ pub struct AgentConfig {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tool_error_mode: String,
 
+    /// Set by [`run_agent`]; a caller leaves this at its default. See the
+    /// struct's own doc comment for why it is `pub` rather than hidden.
     #[serde(skip_serializing_if = "String::is_empty")]
-    message: String,
+    pub message: String,
 }
 
 /// One tool call the agent made, as reported back in [`AgentResult`].
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// Carries [`Serialize`] as well as [`Deserialize`]: [`AgentResult`] needs
+/// both for the same reason it does -- see its own doc comment.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ToolCallRecord {
     pub step: i64,
     pub name: String,
@@ -143,7 +154,13 @@ pub struct ToolCallRecord {
 }
 
 /// The agent workflow's result.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// Carries [`Serialize`] as well as [`Deserialize`]: [`run_agent`] only
+/// decodes one of these (from the child's output), but a workflow that
+/// calls [`run_agent`] and forwards the result as its OWN output needs to
+/// re-encode it, exactly as `testdata/agentclientrust` does for
+/// `tests/crash/agent_resume_test.go`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AgentResult {
     /// `"done"` when the model answered, or `"budget_exceeded"` when the
     /// spend ceiling stopped it first -- see the workflow's own

@@ -155,6 +155,11 @@ tests/plugin-harness/testdata/javaworkflow/build/
 # §3.305 and §3.308 both started.
 tests/plugin-harness/testdata/hostcallsjava/build/
 
+# Same shape again for cleat#2978's Java agent client: rebuilt by
+# tests/crash/agent_resume_test.go's buildJavaClientWASM on every run, read
+# out of the -o directory, no prebuilt/ counterpart.
+testdata/agentclientjava/build/
+
 # CI test-report artifacts (go test -json | tee ...), written into the repo
 # root by the workflow steps that check skip budgets.
 *-report.json
@@ -252,6 +257,12 @@ tests/plugin-harness/testdata/asworkflow/dist/
 # build step. Added 2026-10-04, after exactly that: four files from a local
 # `asc` run landed in a commit and review caught them.
 tests/plugin-harness/testdata/hostcallsas/dist/
+
+# Same for cleat#2978's AssemblyScript agent client: `cleat build --target
+# assemblyscript` writes into the fixture's own dist/ regardless of -o, and
+# TestCrashMidAgentLoopResumesWithoutReaskingTheModel/assemblyscript rebuilds
+# it on every run.
+testdata/agentclientas/dist/
 
 # goreleaser output. Produced by `goreleaser build --snapshot`, which the
 # Release Dry Run CI job runs and which is the documented way to reproduce a
