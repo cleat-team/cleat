@@ -665,19 +665,6 @@ type Migration struct {
 	Irreversible string
 }
 
-// HasCommands: plugin adds CLI subcommands.
-type HasCommands interface {
-	Plugin
-	RegisterCommands() []Command
-}
-
-// Command describes a CLI subcommand exposed by a plugin.
-type Command struct {
-	Name        string
-	Description string
-	Run         func(args []string) error
-}
-
 // HasBackground: plugin runs a background goroutine.
 type HasBackground interface {
 	Plugin

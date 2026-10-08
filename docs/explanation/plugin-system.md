@@ -70,7 +70,6 @@ Plugins can implement additional interfaces for extended functionality:
 | `HasMigrations` | `Migrations()` | Plugin-specific database tables |
 | `HasRoutes` | `RegisterRoutes(mux)` | HTTP endpoints under plugin namespace |
 | `HasMiddleware` | `Middleware(next)` | Wrap the HTTP handler chain |
-| `HasCommands` | `RegisterCommands()` | CLI subcommands |
 | `HasBackground` | `Run(ctx)` | Long-running background goroutine |
 | `HasHostFunctions` | `RegisterHostFunctions(registry)` | Functions callable from workflows |
 | `HasHealth` | `Health()` | Health check endpoint |
