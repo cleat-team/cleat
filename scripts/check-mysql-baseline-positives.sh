@@ -89,8 +89,10 @@ judge() {
 echo "MySQL baseline supplementary known-positives ($TEST)"
 echo
 
-# 1. The trigger. catalogdiff reads no MySQL triggers, so this is the only
-#    report -- and the generator's first version dropped it silently.
+# 1. The trigger. catalogdiff reads MySQL triggers too as of cleat#2882, but
+#    this script is independent of whether that differential is ever re-run --
+#    the generator's first version dropped the trigger silently, and this is
+#    a check on the generator itself, not on catalogdiff's output.
 python3 - "$MIG/003_procedures.sql" <<'PY'
 import re
 import sys

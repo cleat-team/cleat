@@ -8,11 +8,15 @@ package migration_test
 // migration/catalogdiff. That comparison is the strongest evidence available
 // and it is STRUCTURALLY BLIND to three of the four things below:
 //
-//   * catalogdiff reads no MySQL triggers (acceptance 2026-09-26, section 0),
-//     so the baseline applying "cleanly" with the trigger absent -- which is
-//     exactly what the generator's first version did, because mysqldump wraps
-//     it in /*!50003 ... */ and the runner's splitSQL discards that whole
-//     statement -- produced an EMPTY diff. No signal existed.
+//   * catalogdiff read no MySQL triggers until cleat#2882 closed that gap
+//     (originally found: acceptance 2026-09-26, section 0). Until then, the
+//     baseline applying "cleanly" with the trigger absent -- which is exactly
+//     what the generator's first version did, because mysqldump wraps it in
+//     /*!50003 ... */ and the runner's splitSQL discards that whole statement
+//     -- produced an EMPTY diff. No signal existed at the time this test was
+//     written, which is why it asserts the shipped artifact directly rather
+//     than depending on the differential ever being re-run: that is a second,
+//     independent line of defense now, not the only one.
 //   * catalogdiff reads no rows, so a missing seed is invisible. Both seeds
 //     were missing on the first pass: the default org because its INSERT lived
 //     in a migration the compaction deleted, and the default tenant because
@@ -93,7 +97,10 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 	}
 
 	// ---------------------------------------------------------------------
-	// 1. The trigger, which catalogdiff does not read.
+	// 1. The trigger. catalogdiff reads it too as of cleat#2882, but this
+	//    test is independent of whether that differential is ever actually
+	//    re-run against this baseline -- it asserts the shipped artifact
+	//    directly.
 	// ---------------------------------------------------------------------
 	t.Run("the trigger survives", func(t *testing.T) {
 		var n int
@@ -113,9 +120,10 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 		}
 		if n != 1 || name != "tenants_org_id_immutable" {
 			t.Fatalf("the baseline installed %d trigger(s), newest named %q; want exactly "+
-				"tenants_org_id_immutable.\n\ncatalogdiff reads no MySQL triggers, so this "+
-				"is the only thing that reports it -- and a baseline missing it applies "+
-				"cleanly and diffs EMPTY, which is how the first generator shipped it.",
+				"tenants_org_id_immutable.\n\nThis is a check on the SHIPPED artifact, "+
+				"independent of catalogdiff -- a baseline missing the trigger applied "+
+				"cleanly and diffed EMPTY before cleat#2882 taught catalogdiff to read "+
+				"MySQL triggers, which is how the first generator shipped it.",
 				n, name)
 		}
 	})
