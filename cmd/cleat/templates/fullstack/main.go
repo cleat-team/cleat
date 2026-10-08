@@ -25,7 +25,8 @@ type order struct {
 // This runs to `done` on a fresh checkout with nothing else installed, so the
 // first run you start proves the path works. The one step that would call your
 // payment provider is a durable sleep standing in for it: see "Replace the
-// placeholder" in README.md for the DurableCall that replaces it.
+// placeholder" in README.md for what actually reaches one from this template
+// (not a plain DurableCall -- cleat#2517).
 //
 // @cleatEntry(name="submit_order")
 func SubmitOrder(h cleat.HostCalls, input string) (string, error) {
@@ -49,9 +50,12 @@ func SubmitOrder(h cleat.HostCalls, input string) (string, error) {
 	// other step: if the worker dies during it, another resumes AFTER it rather
 	// than starting the order over. It also leaves `charging` visible to the
 	// browser for a few seconds, which is what the polling in web/index.html is
-	// for. Replace it with a DurableCall (README.md shows one), and pass your
-	// own idempotency key downstream -- cleat's Idempotency-Key protects the
-	// START of this workflow, not your provider's charge endpoint.
+	// for. Replace it with a call to your provider -- README.md's "Next steps"
+	// explains what that takes on this template (a plugin or an embedded
+	// deployment, not DurableCall("http", "fetch", ...), which this template's
+	// stock worker cannot serve -- cleat#2517) -- and pass your own idempotency
+	// key downstream: cleat's Idempotency-Key protects the START of this
+	// workflow, not your provider's charge endpoint.
 	h.DurableSleepMs(3000)
 
 	h.SetQueryState("status", "complete")

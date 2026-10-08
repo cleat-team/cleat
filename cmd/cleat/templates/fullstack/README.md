@@ -151,22 +151,33 @@ plugin that wants a key of the same name.
 ## Next steps
 
 - Replace the placeholder in `main.go`. The `DurableSleepMs(3000)` after
-  `charging` stands in for your payment provider; swap it for a durable call, which
-  is recorded once and not repeated if the worker dies after it:
+  `charging` stands in for your payment provider, and reaching a real one from
+  here takes more than swapping the line for a durable call.
 
-  ```go
-  resp, err := h.DurableCall("http", "fetch",
-      `{"url":"https://payments.example.com/charge","method":"POST","body":"..."}`)
-  if err != nil {
-      h.SetQueryState("status", "rejected")
-      return "", err // ends the run `failed`; a call that exhausts its retries dead-letters
-  }
-  ```
+  **`h.DurableCall("http", "fetch", …)` will not work on the worker this
+  template deploys.** `cleat_fetch` is embedder-only (ABI.md 2.48, cleat#2517):
+  it needs an engine built with `engine.WithFetcher(...)`, and the
+  `docker-compose.yml` above deploys the stock `ghcr.io/cleat-team/cleat-worker`
+  image, which sets none. The call compiles, passes every `cleattest` stub (it
+  stubs by name, not by what the real worker can serve), and fails at runtime
+  with `cleat_fetch is unavailable: this engine has no Fetcher` — an error that
+  names the call rather than the reason.
 
-  Outbound requests must pass cleat's egress policy, which refuses loopback,
-  private (RFC 1918) and cloud-metadata addresses, so call a publicly reachable
-  endpoint, and stub the call in
-  `main_test.go` with `env.OnCall("http", "fetch", nil).Return(...)`.
+  Two ways to actually reach your provider from this template:
+
+  - **Write a plugin.** A bundled plugin's host function is how a workflow
+    reaches an external system on a stock worker — `DurableCall` resolving by
+    name to a plugin you write. See `plugins/slacknotify` for the shape and
+    `plugin/plugin.go` for the interface. This is the supported path for a
+    provider this template does not already integrate.
+  - **Switch to an embedded deployment.** `cleat/embedded` lets your own binary
+    build the engine and supply `engine.WithFetcher(...)` directly, trading
+    this template's stock-worker deploy shape for your process owning the
+    engine.
+
+  Whichever path you take, record the charge's own idempotency key downstream:
+  cleat's `Idempotency-Key` protects the START of this workflow, not your
+  provider's charge endpoint.
 - Add a compensation path — `cleat.NewSaga` declares forward and undo steps and
   unwinds them for you.
 - Put `oauth-provider` in front for per-user login.
