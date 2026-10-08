@@ -202,7 +202,7 @@ func TestReloadKeyRingsOnSIGHUP_PayloadUnchangedFileIsACleanNoOp(t *testing.T) {
 	if err := os.WriteFile(curPath, []byte(mustB64(key)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ring, err := loadPayloadKeyRing(curPath, "")
+	ring, err := loadPayloadKeyRing(curPath, "", payloadKeyVersions{})
 	if err != nil {
 		t.Fatalf("load initial payload ring: %v", err)
 	}
@@ -228,11 +228,15 @@ func TestReloadKeyRingsOnSIGHUP_PayloadUnchangedFileIsACleanNoOp(t *testing.T) {
 	}
 }
 
-// The payload half's other safety property: rewriting the CURRENT key's
-// bytes (with no previous-key slot to receive the old ones -- the only
-// shape loadPayloadKeyRing's hardcoded version scheme can ever present, see
-// reloadKeyRingsOnSIGHUP's doc comment) is SAFELY REFUSED, not silently
-// applied and not a crash. The old key keeps serving.
+// The payload half's other safety property, UNCHANGED by cleat#3203:
+// rewriting the CURRENT key's bytes under the SAME version label (here, the
+// default -- no --encryption-key-file-version flags set at all) is SAFELY
+// REFUSED, not silently applied and not a crash. The old key keeps serving.
+// This is exactly the shape loadPayloadKeyRing's hardcoded version scheme
+// used to ALWAYS present, before cleat#3203 gave it a way out -- see
+// TestReloadKeyRingsOnSIGHUP_PayloadRotationViaNewVersionNumbersSucceeds
+// below for the now-possible escape via a version an operator actually
+// changes.
 func TestReloadKeyRingsOnSIGHUP_PayloadChangedCurrentKeyIsSafelyRefused(t *testing.T) {
 	e := newSighupEnv(t, nil)
 	ctx := context.Background()
@@ -246,7 +250,7 @@ func TestReloadKeyRingsOnSIGHUP_PayloadChangedCurrentKeyIsSafelyRefused(t *testi
 	if err := os.WriteFile(curPath, []byte(mustB64(oldKey)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ring, err := loadPayloadKeyRing(curPath, "")
+	ring, err := loadPayloadKeyRing(curPath, "", payloadKeyVersions{})
 	if err != nil {
 		t.Fatalf("load initial payload ring: %v", err)
 	}
@@ -272,6 +276,131 @@ func TestReloadKeyRingsOnSIGHUP_PayloadChangedCurrentKeyIsSafelyRefused(t *testi
 	// assertion above, for the opposite outcome.
 	if !strings.Contains(e.log.String(), "SIGHUP: payload encryption key reload refused") {
 		t.Errorf("expected the specific refusal log line; got:\n%s", e.log.String())
+	}
+}
+
+// cleat#3203's whole point, proven rather than argued: SIGHUP-driven
+// payload key rotation, genuinely impossible before this issue (every
+// content change under the hardcoded version labels hit M3,
+// unconditionally -- the test above still pins that baseline), now
+// succeeds when the operator gives the new key an unused version number.
+//
+// Two SIGHUPs, each only ever ADDING a version the live ring never held:
+//
+//  1. Introduce the new key B as PREVIOUS under a brand-new version (11).
+//     Current stays A at its existing version (10), unchanged -- so M3
+//     sees no conflict on either label, and the candidate ring now holds
+//     both keys. Nothing new is sealed under B yet.
+//  2. Swap roles: B (already at 11, unchanged bytes) becomes current, A
+//     (already at 10, unchanged bytes) becomes previous. THIS STEP NEEDS
+//     NO NEW VERSION NUMBER, which is worth confirming rather than
+//     assuming: engine.ReloadableKeyRing.Reload's M3 check
+//     (refuseReusedVersion) compares version-to-bytes pairs only, and
+//     never looks at which slot (current vs. previous) a version occupies
+//     -- so moving an already-held, unchanged version between slots can
+//     never trip it. cleat#3203's own issue text describes this step as
+//     needing "another new version number"; measured here, it does not.
+//
+// After step 2, a freshly-sealed payload uses B -- the rotation that was
+// categorically impossible (TestReloadKeyRingsOnSIGHUP_PayloadChangedCurrentKeyIsSafelyRefused,
+// above) has now genuinely happened, with no restart.
+func TestReloadKeyRingsOnSIGHUP_PayloadRotationViaNewVersionNumbersSucceeds(t *testing.T) {
+	e := newSighupEnv(t, nil)
+	ctx := context.Background()
+	if err := e.reg.Register(ctx, engine.WorkerRegistration{WorkerID: e.id, Hostname: "h", PID: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	curPath := filepath.Join(dir, "current.b64")
+	prevPath := filepath.Join(dir, "previous.b64")
+	keyA := sighupKey(0x55)
+	keyB := sighupKey(0x66)
+
+	// Boot: current = A @ version 10, no previous.
+	if err := os.WriteFile(curPath, []byte(mustB64(keyA)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.w.payloadKeyVersions = payloadKeyVersions{current: "10"}
+	ring, err := loadPayloadKeyRing(curPath, "", e.w.payloadKeyVersions)
+	if err != nil {
+		t.Fatalf("load initial payload ring: %v", err)
+	}
+	if got := ring.Current().Version; got != 10 {
+		t.Fatalf("initial ring's current version = %d, want 10 -- the version flag did not take", got)
+	}
+	e.w.payloadRing = engine.NewReloadableKeyRing(ring)
+	e.w.payloadKeyFile = curPath
+
+	// Step 1: introduce B as previous @ version 11 (new). Current (A @ 10)
+	// is untouched.
+	if err := os.WriteFile(prevPath, []byte(mustB64(keyB)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.w.payloadKeyFilePrevious = prevPath
+	e.w.payloadKeyVersions.previous = "11"
+
+	e.w.reloadKeyRingsOnSIGHUP(ctx)
+
+	afterStep1 := e.w.payloadRing.Load()
+	if got := afterStep1.Current().Version; got != 10 {
+		t.Fatalf("after step 1, current version = %d, want 10 (unchanged -- B is only previous so far)", got)
+	}
+	if string(afterStep1.Current().Key) != string(keyA) {
+		t.Fatal("after step 1, the current key's bytes changed -- step 1 should only ADD B as previous")
+	}
+	if bKey, ok := afterStep1.Key(11); !ok || string(bKey.Key) != string(keyB) {
+		t.Fatalf("after step 1, version 11 should resolve to B's bytes (ok=%v)", ok)
+	}
+	if !strings.Contains(e.log.String(), "SIGHUP: key reload complete") {
+		t.Fatalf("step 1 should have succeeded; log:\n%s", e.log.String())
+	}
+
+	// Step 2: swap roles. Current := B's file @ 11 (same version, same
+	// bytes, now current). Previous := A's file @ 10 (same version, same
+	// bytes, now previous). No file content changes -- only which file is
+	// "current" and which version label each flag now names.
+	e.w.payloadKeyFile = prevPath        // B's file
+	e.w.payloadKeyFilePrevious = curPath // A's file
+	e.w.payloadKeyVersions = payloadKeyVersions{current: "11", previous: "10"}
+
+	e.w.reloadKeyRingsOnSIGHUP(ctx)
+
+	afterStep2 := e.w.payloadRing.Load()
+	if got := afterStep2.Current().Version; got != 11 {
+		t.Fatalf("after step 2, current version = %d, want 11 -- the promotion (role swap) should have succeeded with no new version needed", got)
+	}
+	if string(afterStep2.Current().Key) != string(keyB) {
+		t.Fatal("after step 2, the current key should be B's bytes -- the rotation this issue exists to make possible")
+	}
+	if aKey, ok := afterStep2.Key(10); !ok || string(aKey.Key) != string(keyA) {
+		t.Fatalf("after step 2, version 10 should still resolve to A's bytes, now as previous (ok=%v)", ok)
+	}
+
+	// The functional proof, not just the ring's bookkeeping: a freshly
+	// sealed payload must actually use B now.
+	candidatePE, err := engine.NewPayloadEncryptionWithReloadableRing(e.w.payloadRing)
+	if err != nil {
+		t.Fatalf("build a PayloadEncryption around the rotated ring: %v", err)
+	}
+	const tenant = "33333333-3333-3333-3333-333333333333"
+	sealed, err := candidatePE.Encrypt(tenant, []byte("sealed-after-rotation"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	got, form, err := candidatePE.OpenAndClassify(tenant, sealed)
+	if err != nil {
+		t.Fatalf("OpenAndClassify: %v", err)
+	}
+	if string(got) != "sealed-after-rotation" {
+		t.Errorf("opened %q, want %q", got, "sealed-after-rotation")
+	}
+	if form != engine.PayloadFormDerived {
+		t.Errorf("form = %v, want PayloadFormDerived -- a fresh seal should use the CURRENT key (B), not fall back to the previous one", form)
+	}
+
+	if strings.Contains(e.log.String(), "SIGHUP: payload encryption key reload refused") {
+		t.Error("step 2 (the promotion) must not have been refused -- it reuses only already-held, unchanged version/byte pairs")
 	}
 }
 
@@ -305,7 +434,7 @@ func TestReloadKeyRingsOnSIGHUP_SecretsFailureRevertsAnAlreadyMovedPayloadRing(t
 	if err := os.WriteFile(curPath, []byte(mustB64(payloadKey)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	payloadRing, err := loadPayloadKeyRing(curPath, "")
+	payloadRing, err := loadPayloadKeyRing(curPath, "", payloadKeyVersions{})
 	if err != nil {
 		t.Fatalf("load initial payload ring: %v", err)
 	}

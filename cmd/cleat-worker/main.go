@@ -395,6 +395,22 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 	return nil
 }
 
+// payloadKeyVersionsFromFlags reads cleat#3203's four --encryption-key-
+// file-version flags once into a payloadKeyVersions, so every
+// loadPayloadEncryption/loadPayloadKeyRing call site below builds the same
+// bundle from the same flags rather than repeating four field names at
+// each one -- a mismatch between two call sites here is exactly the
+// current/previous mix-up payloadKeyVersions' own doc comment exists to
+// rule out.
+func payloadKeyVersionsFromFlags() payloadKeyVersions {
+	return payloadKeyVersions{
+		current:      *encryptionKeyFileVersion,
+		currentFile:  *encryptionKeyFileVersionFile,
+		previous:     *encryptionKeyFilePreviousVersion,
+		previousFile: *encryptionKeyFilePreviousVersionFile,
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -890,7 +906,7 @@ func main() {
 		// gating the call on *encryptionKeyFile != "" meant that refusal
 		// never fired -- the previous-only flag was silently ignored
 		// (cleat-review, #2308).
-		pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+		pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious, payloadKeyVersionsFromFlags())
 		if perr != nil {
 			logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 			os.Exit(1)
@@ -1303,7 +1319,7 @@ func main() {
 			// payloadRing is ever read, same as payloadEncryption would be if
 			// its own nil-check below did not read it first. Keeping both
 			// assignments made this one ineffectual (ineffassign/SA4006).
-			pe, _, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+			pe, _, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious, payloadKeyVersionsFromFlags())
 			if perr != nil {
 				logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 				os.Exit(1)
@@ -1340,7 +1356,7 @@ func main() {
 		// reason as the block above: gating on *encryptionKeyFile != ""
 		// silently ignored a previous-only flag (cleat-review, #2308).
 		{
-			pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+			pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious, payloadKeyVersionsFromFlags())
 			if perr != nil {
 				log.Fatalf("[worker %s] failed to load encryption key: %v", workerID, perr)
 			}
@@ -2328,6 +2344,7 @@ func main() {
 		payloadRing:                      payloadRing,
 		payloadKeyFile:                   *encryptionKeyFile,
 		payloadKeyFilePrevious:           *encryptionKeyFilePrevious,
+		payloadKeyVersions:               payloadKeyVersionsFromFlags(),
 		operatorEgress:                   operatorEgress,
 		workerRegistry:                   workerRegistry,
 		internalAuthSecret:               os.Getenv("CLEAT_INTERNAL_AUTH_KEY"),

@@ -500,6 +500,54 @@ for the rollout sequence a rolling rotation needs to stay safe.
 
 ---
 
+### --encryption-key-file-version
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Version number for the key in `--encryption-key-file` (default 2) |
+
+cleat#3203. Set directly, or leave unset and use
+`--encryption-key-file-version-file` instead — not both. Unset, this keeps
+the historical hardcoded default (2), so an existing deployment needs no
+change to keep its current behavior.
+
+---
+
+### --encryption-key-file-version-file
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Path to a file holding `--encryption-key-file-version`'s value |
+
+cleat#3203. Re-read fresh on every `SIGHUP`-triggered reload (see
+[`docs/how-to/rotate-payload-encryption-key.md`](../how-to/rotate-payload-encryption-key.md)'s
+SIGHUP section), the same way `--encryption-key-file` itself already is.
+Mutually exclusive with `--encryption-key-file-version`.
+
+---
+
+### --encryption-key-file-previous-version
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Version number for the key in `--encryption-key-file-previous` (default 1) |
+
+cleat#3203. Same contract as `--encryption-key-file-version` above, for the
+previous-key slot.
+
+---
+
+### --encryption-key-file-previous-version-file
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Path to a file holding `--encryption-key-file-previous-version`'s value |
+
+cleat#3203. Same contract as `--encryption-key-file-version-file` above,
+for the previous-key slot.
+
+---
+
 ### --encrypt-sensitive-payloads
 
 | Type | Default | Description |

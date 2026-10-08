@@ -1523,7 +1523,8 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 // every new write and the previous key is read-only -- a value already
 // sealed under it still opens (via engine.PayloadFormPreviousKey), letting a
 // worker roll onto a new key while a sibling still on the old one keeps
-// writing readable rows. The version numbers (current=2, previous=1) match
+// writing readable rows. The version numbers (current=2, previous=1 by
+// default -- see payloadKeyVersions and cleat#3203) match
 // cmd/cleatctl/resealpayloads.go's ring, which is the only other place a
 // PayloadEncryption ring is built -- a previous key's version is never
 // persisted anywhere (see engine.PayloadEncryption's doc comment), so this
@@ -1537,8 +1538,8 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 // later (the SIGHUP handler, main.go) holds onto this return value
 // directly rather than reaching inside pe, which has no exported accessor
 // for it.
-func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.PayloadEncryption, *engine.ReloadableKeyRing, error) {
-	ring, err := loadPayloadKeyRing(currentKeyFile, previousKeyFile)
+func loadPayloadEncryption(currentKeyFile, previousKeyFile string, versions payloadKeyVersions) (*engine.PayloadEncryption, *engine.ReloadableKeyRing, error) {
+	ring, err := loadPayloadKeyRing(currentKeyFile, previousKeyFile, versions)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1553,9 +1554,29 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 	return pe, reloadable, nil
 }
 
+// payloadKeyVersions bundles cleat#3203's four --encryption-key-file-version
+// flags, so loadPayloadKeyRing's signature does not grow to six bare
+// strings where the current/previous and direct/file pairs are easy to
+// transpose by position. Each pair is resolved fresh on every call by
+// resolvePayloadKeyVersion, the same contract
+// engine.SecretKeyRingFromEnv's resolveSecretKeyInput uses for
+// CLEAT_SECRET_MASTER_KEY_VERSION[_FILE] -- direct and file are mutually
+// exclusive, and both empty means "use the default", which is today's
+// long-standing hardcoded 2 (current) / 1 (previous).
+//
+// A ZERO VALUE IS THE PRE-CLEAT#3203 BEHAVIOUR: every field empty resolves
+// to the defaults exactly as if these flags had never been added, which is
+// why existing callers (tests, cleatctl) can leave this unset rather than
+// needing to learn about it.
+type payloadKeyVersions struct {
+	current, currentFile   string
+	previous, previousFile string
+}
+
 // loadPayloadKeyRing reads --encryption-key-file and, optionally,
-// --encryption-key-file-previous, and builds the *engine.KeyRing
-// loadPayloadEncryption wraps in a *engine.PayloadEncryption.
+// --encryption-key-file-previous plus the version flags versions bundles
+// (cleat#3203), and builds the *engine.KeyRing loadPayloadEncryption wraps
+// in a *engine.PayloadEncryption.
 //
 // EXTRACTED FROM loadPayloadEncryption (cleat#2298's PR 2), rather than
 // loadPayloadEncryption calling engine.NewPayloadEncryptionWithRing twice,
@@ -1563,16 +1584,19 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 // constructing (and discarding) a *engine.PayloadEncryption it has no use
 // for -- the reload swaps the live PayloadEncryption's *engine.ReloadableKeyRing
 // directly, via its Reload method, not by replacing the PayloadEncryption
-// value itself. Both callers read the files fresh every time: a boot call
-// and a SIGHUP call are the same operation at two different moments, which
-// is the property that makes reload meaningful at all (see
-// engine.SecretKeyRingFromEnv's doc comment for the file-vs-environment
-// reasoning; the payload side has always read from files, never env vars).
+// value itself. Both callers read the files fresh every time, INCLUDING
+// THE VERSION FILES: a boot call and a SIGHUP call are the same operation
+// at two different moments, which is the property that makes reload
+// meaningful at all (see engine.SecretKeyRingFromEnv's doc comment for the
+// file-vs-environment reasoning; the payload side has always read from
+// files, never env vars) -- and is exactly what makes a genuine rotation
+// possible now: each reload can introduce a version number the live ring
+// never held, the same way a secrets-side rotation always could.
 //
 // Returns (nil, nil) when currentKeyFile is empty: encryption is off. This
 // is the same "no master key configured" state engine.NewReloadableKeyRing
 // already treats as legal.
-func loadPayloadKeyRing(currentKeyFile, previousKeyFile string) (*engine.KeyRing, error) {
+func loadPayloadKeyRing(currentKeyFile, previousKeyFile string, versions payloadKeyVersions) (*engine.KeyRing, error) {
 	if currentKeyFile == "" {
 		if previousKeyFile != "" {
 			return nil, fmt.Errorf("--encryption-key-file-previous requires --encryption-key-file")
@@ -1587,8 +1611,12 @@ func loadPayloadKeyRing(currentKeyFile, previousKeyFile string) (*engine.KeyRing
 	if err != nil {
 		return nil, fmt.Errorf("decode encryption key: %w", err)
 	}
+	currentVersion, err := resolvePayloadKeyVersion(versions.current, versions.currentFile, "encryption-key-file-version", 2)
+	if err != nil {
+		return nil, err
+	}
 	if previousKeyFile == "" {
-		ring, err := engine.NewKeyRing(engine.VersionedKey{Version: 2, Key: currentKey})
+		ring, err := engine.NewKeyRing(engine.VersionedKey{Version: currentVersion, Key: currentKey})
 		if err != nil {
 			return nil, fmt.Errorf("invalid encryption key — expected a base64-encoded 256-bit AES key: %w", err)
 		}
@@ -1602,14 +1630,46 @@ func loadPayloadKeyRing(currentKeyFile, previousKeyFile string) (*engine.KeyRing
 	if err != nil {
 		return nil, fmt.Errorf("decode previous encryption key: %w", err)
 	}
+	previousVersion, err := resolvePayloadKeyVersion(versions.previous, versions.previousFile, "encryption-key-file-previous-version", 1)
+	if err != nil {
+		return nil, err
+	}
 	ring, err := engine.NewKeyRing(
-		engine.VersionedKey{Version: 2, Key: currentKey},
-		engine.VersionedKey{Version: 1, Key: previousKey},
+		engine.VersionedKey{Version: currentVersion, Key: currentKey},
+		engine.VersionedKey{Version: previousVersion, Key: previousKey},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build encryption key ring: %w", err)
 	}
 	return ring, nil
+}
+
+// resolvePayloadKeyVersion resolves one of payloadKeyVersions' two pairs:
+// direct is the flag's own value, file is its "-file" sibling, flagName is
+// used only in error messages (without the leading "--"), and def is what
+// an operator who sets neither still gets -- today's long-standing
+// hardcoded version for that slot (2 current, 1 previous).
+//
+// BOTH SET IS REFUSED, not resolved by precedence -- the same contract
+// engine.SecretKeyRingFromEnv's resolveSecretKeyInput uses for
+// CLEAT_SECRET_MASTER_KEY_VERSION[_FILE], and the same reasoning: an
+// operator who set both is most likely mid-migration from one form to the
+// other, and silently preferring one would hide exactly that ambiguity.
+func resolvePayloadKeyVersion(direct, file, flagName string, def int) (int, error) {
+	direct = strings.TrimSpace(direct)
+	file = strings.TrimSpace(file)
+	if direct != "" && file != "" {
+		return 0, fmt.Errorf("both --%s and --%s-file are set; set exactly one", flagName, flagName)
+	}
+	val := direct
+	if file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return 0, fmt.Errorf("read --%s-file: %w", flagName, err)
+		}
+		val = strings.TrimSpace(string(data))
+	}
+	return engine.KeyVersionFromEnv(val, def, "--"+flagName)
 }
 
 // checkPayloadEncryptionState is cleat#2324's startup guard.
@@ -2046,6 +2106,15 @@ type Worker struct {
 	// whatever paths it wants, with no global flag to mutate and restore.
 	payloadKeyFile         string
 	payloadKeyFilePrevious string
+
+	// payloadKeyVersions is the same kind of boot-time copy as the two
+	// fields above, bundling cleat#3203's four --encryption-key-file-version
+	// flags so reloadKeyRingsOnSIGHUP can pass them to loadPayloadKeyRing
+	// unchanged on every call. Its zero value resolves to today's
+	// hardcoded 2/1 defaults (payloadKeyVersions' own doc comment), so a
+	// Worker built without setting this field -- every existing test --
+	// behaves exactly as before cleat#3203.
+	payloadKeyVersions payloadKeyVersions
 
 	// afterSecretsRingMovedForTest, when set, runs inside
 	// reloadKeyRingsOnSIGHUP's RegisterUnderKeyGate callback immediately

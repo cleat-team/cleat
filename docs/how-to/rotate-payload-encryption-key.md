@@ -166,31 +166,62 @@ any worker starts writing it:
    `cmd/cleatctl/reseal_payloads_two_workers_test.go`,
    `TestPayloadKeyRotationAcrossTwoWorkers`.
 
-## SIGHUP does not replace either procedure above, yet
+## SIGHUP can now execute the rolling rotation above, with the version flags
 
 Since cleat#2298 (PR 2), every worker that catches `SIGHUP` re-reads
 `--encryption-key-file`/`--encryption-key-file-previous` and tries to apply
-them, alongside the tenant-secrets reload `use-secrets.md` documents. For
-this key specifically, **that reload can never actually change which bytes
-"current" and "previous" mean, by construction:** `loadPayloadKeyRing`
-assigns the fixed labels "version 2" to whatever `--encryption-key-file`
-holds and "version 1" to `--encryption-key-file-previous`'s, on every call,
-regardless of content -- there is no `--encryption-key-file-version` flag
-the way `CLEAT_SECRET_MASTER_KEY_VERSION` exists on the secrets side. So a
-SIGHUP that finds either file's content changed is refused outright (the
-engine's reuse-safety check, `engine.ReloadableKeyRing.Reload`, sees the
-same label carrying different bytes and treats it as the operator mistake
-that check exists to catch) -- logged, a failure metric incremented, old key
-kept, nothing corrupted, but also **nothing rotated**.
+them, alongside the tenant-secrets reload `use-secrets.md` documents. Until
+cleat#3203, that reload could **never** actually change which bytes
+"current" and "previous" mean: `loadPayloadKeyRing` assigned the fixed
+labels "version 2" to whatever `--encryption-key-file` held and "version 1"
+to `--encryption-key-file-previous`'s, on every call, regardless of
+content -- so a SIGHUP that found either file's content changed was refused
+outright (`engine.ReloadableKeyRing.Reload` saw the same label carrying
+different bytes and treated it as the operator mistake that check exists to
+catch).
 
-**So a SIGHUP sent fleet-wide for a tenant-secrets rotation is harmless to
-a worker's payload key** (its files are presumably untouched, and an
-untouched file reloads as a clean no-op) **but SIGHUP is not yet a way to
-execute either procedure above.** Both still require a restart at the step
-that changes which bytes a worker's `--encryption-key-file[-previous]`
-flags point at. Extending the payload ring to read its version numbers
-from a file too, the way the secrets ring already does, would close this
-gap; tracked separately as cleat#3203 rather than folded into cleat#2298.
+**cleat#3203 added `--encryption-key-file-version[-file]` and
+`--encryption-key-file-previous-version[-file]`**, read fresh on every
+reload exactly the way the key files themselves already were -- the same
+file-sourced mechanism `CLEAT_SECRET_MASTER_KEY_VERSION_FILE` already gave
+the secrets side. An operator who sets these can now run **both phases of
+the Rolling rotation procedure above via SIGHUP instead of a restart**, by
+giving each phase's key an unused version number:
+
+1. **Phase 1 -- read-only rollout, via SIGHUP.** Write B to the path
+   `--encryption-key-file-previous` names, and give it a version number the
+   ring has never held (anything other than 1 and 2, if this worker has
+   never set these flags before). Set `--encryption-key-file-previous-version`
+   (or its `-file` form) to that number, leave `--encryption-key-file` and
+   `--encryption-key-file-version` pointing at A unchanged, and send
+   `SIGHUP`. Current stays A; B is now loaded as previous, with no restart.
+2. **Confirm phase 1 is complete fleet-wide**, exactly as the restart-based
+   procedure requires -- this sequencing requirement is unchanged by
+   cleat#3203, only the mechanism for applying each phase is new.
+3. **Phase 2 -- flip to current, via SIGHUP.** Swap which file
+   `--encryption-key-file` and `--encryption-key-file-previous` name (B
+   becomes current, A becomes previous), and swap `--encryption-key-file-
+   version`/`--encryption-key-file-previous-version` to match. **This step
+   needs no version number the ring has not already seen**: B is already
+   at its version from phase 1 and A is already at its own, and
+   `engine.ReloadableKeyRing.Reload`'s safety check compares version-to-bytes
+   pairs only, never which slot (current/previous) a version occupies -- so
+   moving two already-held, unchanged versions between slots can never be
+   refused. Measured directly in
+   `TestReloadKeyRingsOnSIGHUP_PayloadRotationViaNewVersionNumbersSucceeds`.
+4. Steps 5 and 6 of the Rolling rotation procedure (the `reseal-payloads`
+   sweep and dropping the previous-key flag) are unchanged -- they are
+   about ciphertext on disk and a worker's own flags, neither of which this
+   issue touches.
+
+**A SIGHUP sent fleet-wide for a tenant-secrets rotation remains harmless to
+a worker's payload key** that is not part of the change: its files and
+version flags are untouched, and an untouched configuration reloads as a
+clean no-op. **A worker that never adopts the new version flags keeps
+today's behavior exactly** -- the zero value of every new flag resolves to
+the historical hardcoded 2/1 labels, so a content change under those
+defaults is still safely refused, not silently rotated; see
+`TestReloadKeyRingsOnSIGHUP_PayloadChangedCurrentKeyIsSafelyRefused`.
 
 ## What is not covered, either way
 
