@@ -21,8 +21,11 @@ package migration_test
 //     were missing on the first pass: the default org because its INSERT lived
 //     in a migration the compaction deleted, and the default tenant because
 //     INSERT IGNORE downgraded a foreign-key failure to a warning.
-//   * catalogdiff compares no collation on any dialect -- zero references --
-//     so nothing anywhere checks what decides case-sensitivity here.
+//   * catalogdiff compared no collation on any dialect until cleat#3121
+//     (cleat#2882) added exactly that comparison. This test stays independent
+//     of it regardless: catalogdiff only detects DRIFT between two catalogs,
+//     so two builds sharing the same wrong collation would still match each
+//     other. This test asserts a specific EXPECTED value instead (below).
 //
 // Every one of those was found by a person looking, not by a check. This is
 // the check.
@@ -201,13 +204,12 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 	})
 
 	// ---------------------------------------------------------------------
-	// 4. Collation, which is compared NOWHERE in this project.
-	//
-	// cleat-review's GAP 1 on cleat#2435: catalogdiff has zero references to
-	// collation on any dialect, and its MySQL columns query has no
-	// COLLATION_NAME -- so the generator's stated reason for keeping the dump's
-	// COLLATE clause ("the differential would name it") was false, and the
-	// decision was unverified. This is the check that was missing.
+	// 4. Collation. cleat#3121 (cleat#2882) has since given catalogdiff its own
+	//    collation comparison, closing cleat-review's GAP 1 on cleat#2435 --
+	//    but that is DRIFT between two catalogs, not an assertion of a
+	//    specific value, so it cannot tell a shared wrong collation from a
+	//    correct one. This check stays independent for that reason: it
+	//    asserts against the EXPECTED value below, not against another build.
 	//
 	// It asserts against the CONSTANT above rather than against the baseline,
 	// because comparing the database to the file it came from would compare
@@ -269,8 +271,9 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 		}
 		if len(wrong) > 0 {
 			t.Fatalf("%d of %d collated column(s) do not carry their intended collation:\n  %s\n\n"+
-				"Collation decides case-sensitivity on this dialect and catalogdiff compares "+
-				"it on NO dialect -- zero references -- so nothing else reports this.\n\n"+
+				"Collation decides case-sensitivity on this dialect. catalogdiff compares it "+
+				"too (cleat#3121), but only as drift between two catalogs -- it would not "+
+				"catch this alone if both sides shared the wrong value.\n\n"+
 				"If the SERVER default moved, the baseline is version-pinned and the fix is "+
 				"to regenerate on the pinned server. If a column is genuinely binary, add it "+
 				"to mysqlBaselineCollationExceptions WITH its reason, because an exception "+

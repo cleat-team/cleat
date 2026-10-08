@@ -93,7 +93,7 @@ and `COLUMN_TYPE` does not embed it, so the property is not in the comparison at
 all. A decision justified by a check that cannot see it reads as verified and is
 not, which is worse than no justification.
 
-	grep -rn -i collat migration/catalogdiff/     # no output
+	grep -rn -i collat migration/catalogdiff/     # no output, measured before cleat#3121
 	git show origin/develop:migrations/mysql/*.sql | grep -ci collate   # 1
 
 **Note the measurement trap this paragraph walked into first**, because it is
@@ -102,10 +102,15 @@ in a checkout that has already been compacted and it counts the GENERATED file,
 not the chain -- it reported 30, of which 29 were this generator's own output.
 Measure the chain against `origin/develop`, and print what each side is.
 
-Where this belongs is the supplementary checks (cleat-review's GAP 1 on
-cleat#2435): comparing `information_schema.columns.COLLATION_NAME` between A and
-B would settle it, and collation is what decides case-sensitivity here. Until
-that exists, do not read this file as claiming the collation was checked.
+**SUPERSEDED 2026-10-08 by cleat#3121** (cleat#2882), which added exactly the
+comparison this paragraph said was missing: catalogdiff's column snapshot now
+carries `Collation` on every dialect, and `Diff` reports a change in it --
+`migration/catalogdiff/a_collation_change_is_reported_test.go` is the
+known-positive. The grep above is history, not a live claim: re-run it today
+and it returns matches, where it returned none when this paragraph was
+written. This baseline's collation choice IS now checked by the differential;
+everything above this line records the investigation that found it was not,
+before that fix landed.
 """
 
 import os
