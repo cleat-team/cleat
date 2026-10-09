@@ -259,12 +259,13 @@ CREATE INDEX CONCURRENTLY idx_instances_terminal_completed
     ON workflow_instances (tenant_id, status, completed_at)
     WHERE status IN ('done', 'failed', 'terminated');
 
--- Heartbeat lookup (workflow_instances). Name matches; the column list did
--- not -- heartbeat_at (the column that makes this the heartbeat index) was
--- missing and "status" was listed as an indexed column when it is only the
--- predicate:
+-- Heartbeat lookup (workflow_instances). As of migration 015
+-- (cleat#3245/#3272/#3274), heartbeat_at is NOT in this index -- it was
+-- confirmed unused by this index's only consumer (HeartbeatBatchFenced's
+-- SELECT, engine/db.go) and dropping it is half of what makes a heartbeat
+-- UPDATE eligible to be HOT:
 CREATE INDEX CONCURRENTLY idx_instances_heartbeat
-    ON workflow_instances (assigned_to, heartbeat_at)
+    ON workflow_instances (assigned_to)
     WHERE status = 'running';
 ```
 

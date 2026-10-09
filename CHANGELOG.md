@@ -48,6 +48,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The 413 now names the flag only when the flag is what bound, and this route's own declared
   limit otherwise.
 
+### Changed
+
+- **`workflow_instances`' two heartbeat indexes (`idx_instances_heartbeat`, `idx_instances_stale`)
+  no longer index `heartbeat_at`, and the table's `fillfactor` is now 70.** PostgreSQL only.
+  Closes cleat#3272 and cleat#3274 (cleat#3245 Phase 2, one combined PR per owner decision).
+  Measured before being built: landing either change alone produced **zero** observable
+  HOT-update or WAL benefit; only together did they, on a synthetic population (~44% HOT ratio
+  and ~37% WAL reduction on a fresh batch of heartbeats). `idx_instances_heartbeat`'s
+  `heartbeat_at` column was confirmed unused by its only consumer (`HeartbeatBatchFenced`'s
+  SELECT) and dropping it cost nothing. `idx_instances_stale`'s was genuinely load-bearing for
+  the reaper's stale-heartbeat sweep (`ReapStaleInstances`/`ListStaleHolders`); dropping it too
+  trades a bounded, periodic cost that scales with the concurrently-running population (tens of
+  milliseconds, measured up to 100,000 concurrently-running workflows) for the continuous
+  per-heartbeat win. `fillfactor` is not retroactive: an already-packed table sees no HOT
+  improvement until ordinary churn rewrites its pages, or an operator runs `VACUUM FULL`
+  during a maintenance window. MySQL and SQL Server are untouched (Phase 1's H5 finding was
+  inconclusive, and the owner scoped Phase 2 to PostgreSQL).
+
 - **Go toolchain bumped to go1.27.2; `golang.org/x/net` bumped to v0.60.0.** Closes cleat#3251.
   `govulncheck` reported 12 real, reachable findings against this repo's code on every head whose
   code reaches them: 7 stdlib (`net/http`, `html/template`, `crypto/tls`, `mime/multipart`,
