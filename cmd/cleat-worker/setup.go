@@ -4790,15 +4790,36 @@ func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
 // "fix the formula" meant. Fixed, not scaled with heartbeat: a real
 // infrastructure stall's length does not depend on an operator's
 // --heartbeat choice.
-const maxTolerableStall = 30 * time.Second
+//
+// A PACKAGE-LEVEL VAR, NOT A CONST, for the same reason dbCallDeadlineFloor
+// (above) is: ROUND 6 added this and mssqlDrainSlack below as FIXED
+// additions to minimumReclaimAfter, so every millisecond-scale timing test
+// in reaper_recovery_grace_period_test.go that used to discriminate between
+// small invariant values (700ms vs 1700ms, checked at a 600-800ms
+// real-wall-clock checkpoint) now computes a live reclaimTimeout around
+// 36.6s instead -- the checkpoint is never reached, so `age >= reclaimTimeout`
+// can never go true and the test passes unconditionally regardless of
+// whether the formula is correct. cleat-review caught this on cleat#3258
+// (gaps #2 and, independently re-derived here, a third uncaught instance:
+// TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack
+// stays green even with reclaimSlack removed from minimumReclaimAfter
+// entirely -- confirmed by falsifying it directly). Tests that need the
+// pre-ROUND-6 magnitude call withMaxTolerableStallAndMssqlDrainSlack to
+// substitute smaller values for their own duration, restored via
+// t.Cleanup -- never overridden by a test that is actually testing
+// maxTolerableStall or mssqlDrainSlack themselves (that is what
+// reaper_recovery_gate_multi_attempt_sweep_test.go's pinned constants are
+// for).
+var maxTolerableStall = 30 * time.Second
 
 // mssqlDrainSlack mirrors reaper_recovery_gate_multi_attempt_sweep_test.go's
 // own local constant of the same name and value -- go-mssqldb's
 // cancel-drain path (see minimumReclaimAfter's doc, round 5, for the
 // citation), promoted from test-only to production here because ROUND 6
 // needs it in the live formula, not only in the simulation that
-// characterizes it.
-const mssqlDrainSlack = 5 * time.Second
+// characterizes it. A package-level var, not a const -- see
+// maxTolerableStall's doc immediately above for why.
+var mssqlDrainSlack = 5 * time.Second
 
 // reclaimSlack is fixed headroom on top of minimumReclaimAfter's modeled
 // worst case, added in round 5 on cleat#2005 because that model has ZERO
@@ -4812,7 +4833,19 @@ const mssqlDrainSlack = 5 * time.Second
 // (cleat#3258) reuses this exact constant, unchanged, as the same budget
 // for the overshoot round's reconnect cost in the generalised D-bound --
 // see minimumReclaimAfter's doc.
-const reclaimSlack = 1 * time.Second
+//
+// A package-level var, not a const, for the same reason maxTolerableStall
+// and mssqlDrainSlack are (see that doc). Round 5 (cleat#2005) landed this
+// as a FIXED 1s addition, which already dwarfs
+// TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne's
+// own 600ms real-wall-clock checkpoint -- independently re-derived while
+// fixing cleat#3258's round-6 vacuity: that test has been silently
+// vacuous since ROUND 5 added this constant, a full round before ROUND 6's
+// own (separate) vacuity. Zeroed only by that one test, which predates
+// this constant and is not testing it; left real everywhere else,
+// including TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack,
+// which exists specifically to test that this constant is present.
+var reclaimSlack = 1 * time.Second
 
 // ---------------------------------------------------------------------------
 // Suspected database stall detection (cleat#2006)
