@@ -70,7 +70,7 @@ func TestEveryPluginTablesRegistrationMatchesTheLiveSchema(t *testing.T) {
 
 	type registryRow struct {
 		plugin, schema, table string
-		tenantScoped           bool
+		tenantScoped          bool
 	}
 	var regRows []registryRow
 	for rows.Next() {
