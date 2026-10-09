@@ -2,9 +2,11 @@
 // coverage for cleat#2189: ReapStaleInstances truncated its reclaim timeout
 // to whole seconds on all three dialects (PG: "%d seconds" over
 // int(timeout.Seconds()); MySQL: INTERVAL ? SECOND over int(...); MSSQL:
-// DATEADD(SECOND, ...) over int(...)), which halves #2166's 1s
-// reclaimSlack at the default 14.5s reclaim-after and leaves 0.1s of slack
-// at --heartbeat 2.9s. #2180 fixed the same truncation in StaleSetShape
+// DATEADD(SECOND, ...) over int(...)), which halved #2166's 1s
+// reclaimSlack at that era's 14.5s default reclaim-after (cleat#3258 ROUND 6
+// later raised the default to ~47s; this test's own fixed 14.9s/14.1s/15.9s
+// values are independent of that default and are unaffected either way) and
+// left 0.1s of slack at --heartbeat 2.9s. #2180 fixed the same truncation in StaleSetShape
 // only, so the stall detector's Stale count (ms-precise) and the reap
 // statement (second-truncated) disagreed about which rows were
 // reclaimable.

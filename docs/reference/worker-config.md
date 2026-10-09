@@ -179,9 +179,11 @@ configured.
 | int | `200` | Maximum stale instances the reaper reclaims per tick (`0` = unbounded) |
 
 The reaper reclaims any instance whose heartbeat predates the **reclaim
-window** — derived from `--heartbeat` as
-`--heartbeat + 3 × the database-call deadline + the retry interval + 1s`, about
-**14.5s** at the default 5s heartbeat, or exactly `--reclaim-timeout` when that
+window** — derived from `--heartbeat` as `--heartbeat + a 30s tolerated-stall
+margin + 2 × the database-call deadline + a fixed SQL Server reconnect
+allowance + the retry interval + 1s`, about **47s** at the default 5s
+heartbeat (raised from ~14.5s, cleat#3258, to actually cover a real
+multi-second database-network stall), or exactly `--reclaim-timeout` when that
 is set. (This is *not* the membership lease, `max(2 × --heartbeat, 10s)`, which
 answers a different question and is swept separately.) **Any stall that outlasts
 that window ages every running instance past it at once**, because they all
@@ -254,7 +256,7 @@ without noticing.
 |------|---------|-------------|
 | duration | `0` | How long a run may go without a heartbeat before another worker may claim it (`0` = derive from `--heartbeat`) |
 
-`0` derives it as the window `--max-reclaim-per-tick` documents (about 14.5s at
+`0` derives it as the window `--max-reclaim-per-tick` documents (about 47s at
 the default heartbeat), which is the historical behaviour and changes nothing.
 Set it to decouple the two: the heartbeat is how often a **live** worker checks
 in, while this is how long a **dead** one's work stays stranded — and a database

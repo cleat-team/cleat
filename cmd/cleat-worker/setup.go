@@ -4693,13 +4693,112 @@ func dbCallDeadlineFor(heartbeat time.Duration) time.Duration {
 // dbCallDeadline or retryInterval where a future reader would have to
 // re-derive why it is there.
 //
-// Changes the default --reclaim-timeout from ~13.5s (round 4) to ~14.5s at
-// the default --heartbeat (5s: 5 + 3*2.5 + min(5, 1) + 1). Worth noting in
-// the changelog: it is a wider window before a genuinely dead worker's run
-// is reclaimed, not a behaviour change anyone has to opt into.
+// Changed the default --reclaim-timeout from ~13.5s (round 4) to ~14.5s at
+// the default --heartbeat (5s: 5 + 3*2.5 + min(5, 1) + 1) -- was a wider
+// window before a genuinely dead worker's run is reclaimed, not a behaviour
+// change anyone had to opt into. ROUND 6 below changes this again,
+// substantially.
+//
+// ROUND 6 (cleat#3258): EVERYTHING ABOVE MODELS A STALL D NO LONGER THAN
+// heartbeat, AND SAYS SO NOWHERE. Round 5's own "zero slack" finding was
+// about margin AT that implicit D=heartbeat boundary; it did not ask
+// whether a real stall can exceed it. cleat#3254's multi-attempt sweep
+// (reaper_recovery_gate_multi_attempt_sweep_test.go) found it can: for
+// postgres, where lib/pq ignores ctx cancellation under a genuine stall so
+// a caught call always blocks for exactly the stall's own length D,
+// recovery(D) = heartbeat + D + retryInterval + deadline is EXACTLY the
+// model above plus (D - heartbeat) -- strictly increasing, no ceiling, safe
+// only up to D <= heartbeat + reclaimSlack and unsafe for every larger D
+// with no return to safety. Two real docker-pause reproductions already in
+// this file's own history exceed that boundary at the default heartbeat:
+// 25s (probeBoundedCall's doc, cleat#2007) and 11.7s (this function's own
+// round-4 doc above). Owner decision on cleat#3258, verbatim "3a": treat
+// this as live and fix the formula, not just document the limitation.
+//
+// WHAT "FIX" CAN MEAN, AND WHAT IT CANNOT. No finite reclaimAfter can be
+// safe for an unboundedly long D -- a worker stalled for an hour is, at
+// some point, indistinguishable from a dead one, and something has to
+// reclaim it eventually. "Fix the formula" means widen the stall length
+// this invariant is DELIBERATELY SIZED to tolerate, from the old implicit
+// (and un-stated) D<=heartbeat to an explicit, named, chosen target --
+// not make it infinite, which is impossible by construction.
+//
+// maxTolerableStall (below) is that target: 30s, chosen with margin over
+// the larger of the two real measured stalls (25s) -- a real network
+// partition or DB failover has its own duration, set by infrastructure,
+// not by --heartbeat (cleat#3258's own framing), so this is a fixed
+// constant, not scaled with heartbeat the way the old D<=heartbeat
+// assumption implicitly was.
+//
+// THE GENERALISED DERIVATION, covering all three driver shapes at once, not
+// just postgres's closed form. simulateRecovery's own loop (the sweep
+// test) tracks two running totals in the SAME clock: `offset` (wall-clock
+// elapsed since the stall began) and `remaining := D - offset` (how much of
+// the stall is still left). The loop exits the first tick `remaining` drops
+// to zero or below, i.e. the first tick `offset` reaches D. Each round's
+// `offset` increment is bounded above by one round's own worst-case
+// wall-clock cost -- for mssql, the worst of the three driver shapes,
+// that's `deadline + mssqlDrainSlack` (the capped, cancel-drain-bound call
+// duration) + `reconnect` (every failed attempt after the first pays a
+// fresh dial, not just the first retry) + `retryInterval` -- so `offset`
+// can OVERSHOOT D by at most that one round's cost, regardless of how many
+// rounds the stall spans. (This is also why the bound does not get worse
+// as D grows: the overshoot is capped by a single round's cost, not
+// multiplied by the round count, because `remaining` and `offset` are
+// measured on the SAME clock throughout.) Bounding that worst single-round
+// overshoot by reclaimSlack (its existing, documented role: the budget for
+// "a reconnect, the retry's own initial round trip, and ordinary
+// Timer/scheduler lateness" -- round 5's own words, unchanged here) gives,
+// for recovery(D) across all three modes:
+//
+//	recovery(D) <= heartbeat + D + 2*dbCallDeadlineFor(heartbeat) + mssqlDrainSlack + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
+//
+// (`2*deadline` is two SEPARATE terms folded into one coefficient: one
+// `deadline` from the overshoot round's own capped call duration, the
+// other from the final, ordinary, post-stall call's worst-case latency --
+// round 4's T4 term, unchanged in role, now summed with the first rather
+// than written as its own line). Substituting D = maxTolerableStall
+// gives this function's new return value -- safe for EVERY D in
+// [0, maxTolerableStall], not merely a swept grid, because the overshoot
+// argument above holds for any D, not just discrete sample points.
+//
+// WHERE THIS STOPS COVERING, AND WHY THAT IS A DELIBERATE, STATED LIMIT
+// RATHER THAN A SILENT ONE: maxTolerableStall is fixed at 30s regardless of
+// heartbeat, so at a heartbeat large enough that 2*heartbeat alone exceeds
+// 30s (30s and above, i.e. the sweep test's own "large" scale), a stall
+// longer than maxTolerableStall but still within [heartbeat, 2*heartbeat]
+// remains unsafe under this fix -- expected, and the reason
+// reaper_recovery_gate_multi_attempt_sweep_test.go's pinned unsafe counts
+// drop substantially rather than to zero. Re-derive both pinned counts with
+// that file's own command before trusting either literal.
+//
+// Changes the default --reclaim-timeout from ~14.5s to ~47s at the default
+// --heartbeat (5s: 5 + 30 + 2*2.5 + 5 + min(5,1) + 1). Every doc comment
+// elsewhere in this file, worker_membership.go and config.go that cites the
+// old ~14.5s figure or a value derived from it was re-derived and updated
+// in the same change that introduced this comment (cleat#3258) -- if you
+// find one that still says 14.5s, it was missed, not deliberately left.
 func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
-	return heartbeat + 3*dbCallDeadlineFor(heartbeat) + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
+	deadline := dbCallDeadlineFor(heartbeat)
+	return heartbeat + maxTolerableStall + 2*deadline + mssqlDrainSlack + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
 }
+
+// maxTolerableStall is the longest single database/network stall
+// minimumReclaimAfter is deliberately sized to let a worker recover from
+// before being reclaimed as dead -- see that function's ROUND 6 doc for the
+// full derivation and why this number, not a formula, is what cleat#3258's
+// "fix the formula" meant. Fixed, not scaled with heartbeat: a real
+// infrastructure stall's length does not depend on an operator's
+// --heartbeat choice.
+const maxTolerableStall = 30 * time.Second
+
+// mssqlDrainSlack mirrors reaper_recovery_gate_multi_attempt_sweep_test.go's
+// own local constant of the same name and value -- go-mssqldb's
+// cancel-drain path (see minimumReclaimAfter's doc, round 5, for the
+// citation), promoted from test-only to production here because ROUND 6
+// needs it in the live formula, not only in the simulation that
+// characterizes it.
+const mssqlDrainSlack = 5 * time.Second
 
 // reclaimSlack is fixed headroom on top of minimumReclaimAfter's modeled
 // worst case, added in round 5 on cleat#2005 because that model has ZERO
@@ -4709,7 +4808,10 @@ func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
 // connection bad, so the retry pays a fresh dial, TLS handshake and login
 // that dbCallDeadlineFor was never meant to cover. Deliberately a constant,
 // not a function of heartbeat: it is not modeling a heartbeat-scaled
-// quantity, it is covering everything the model leaves out.
+// quantity, it is covering everything the model leaves out. ROUND 6
+// (cleat#3258) reuses this exact constant, unchanged, as the same budget
+// for the overshoot round's reconnect cost in the generalised D-bound --
+// see minimumReclaimAfter's doc.
 const reclaimSlack = 1 * time.Second
 
 // ---------------------------------------------------------------------------
@@ -4828,13 +4930,16 @@ type stallSuppressionDecision struct {
 // Lower bound: missedBeatThreshold (detection latency -- how long a stall
 // has to run before NoRecentHeartbeat can even become true) plus
 // reclaimAfter (the suppression window itself, evaluate's `reclaimAfter`
-// argument). At the 5s heartbeat default, 8.5s + 14.5s = 23s.
+// argument). At the 5s heartbeat default, 8.5s + 47s = 55.5s (cleat#3258
+// ROUND 6 raised reclaimAfter's own default from 14.5s; re-derive with
+// `missedBeatThreshold(5*time.Second) + minimumReclaimAfter(5*time.Second)`
+// before trusting this number again).
 //
 // Upper bound: the lower bound plus one full reaper tick interval
 // (max(heartbeat, 10s)) -- reapOnce only samples StaleSetShape once per
 // tick, so a stall that begins just after a tick fires is not observed,
 // and therefore not detected, until nearly a full interval later. At the
-// default, 23s + 10s = 33s.
+// default, 55.5s + 10s = 65.5s.
 //
 // A stall shorter than the lower bound is always protected; a stall
 // longer than the upper bound is never protected (BoundHit fires and
@@ -4862,7 +4967,8 @@ func stallProtectionUpper(heartbeat, reclaimAfter time.Duration) time.Duration {
 // full R because the row's own individual staleness only just crossed the
 // gate as the bound was reached, then one more reaper tick (interval,
 // floored at 10s) before the next reapOnce actually reclaims it. At the
-// heartbeat default this is 2*14.5s + 10s = 39s -- worse than the pre-#2006
+// heartbeat default this is 2*47s + 10s = 104s (cleat#3258 ROUND 6; was
+// 2*14.5s + 10s = 39s) -- worse than the pre-#2006
 // R alone, and deliberately so: the alternative is reclaiming a run that is
 // still alive, which #2166 exists to prevent.
 //
@@ -4987,6 +5093,16 @@ func (w *Worker) stallEpisodeFor(unitName string) *stallSuppressionEpisode {
 // invariant: a sane minimum wait even at a very low --heartbeat, where the
 // invariant itself might compute something smaller. It only ever raises the
 // value minimumReclaimAfter already guarantees is safe.
+//
+// ROUND 6 (cleat#3258): under today's constants this floor cannot bind at
+// all. maxTolerableStall (30s) plus mssqlDrainSlack (5s) alone already
+// exceed it, so minimumReclaimAfter(heartbeat) is bounded below by roughly
+// 40s for every heartbeat, not only large ones -- TestTheRegistryOutlivesTheWindowAReaperCanAskIn
+// found this directly (a_holder_that_answers_keeps_its_run_for_one_more_window_test.go)
+// when the lease/reclaim-window equality it used to assert at low
+// heartbeats stopped holding. Kept rather than removed: it is a backstop
+// for a smaller maxTolerableStall or mssqlDrainSlack than today's, not
+// dead code to delete just because today's constants never reach it.
 func reclaimWindow(reclaimTimeout, heartbeat time.Duration) time.Duration {
 	if reclaimTimeout > 0 {
 		return reclaimTimeout
