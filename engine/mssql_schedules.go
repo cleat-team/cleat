@@ -1339,15 +1339,23 @@ func scheduleInputJSON(input json.RawMessage) string {
 // holds expectedNextRun. See the interface doc for why this is a CAS.
 //
 // `AND tenant_id` on this and the four statements above it is load-bearing
-// rather than defensive, and the reason is specific to SQL Server.
-// dbo.fn_tenant_filter admits any connection whose login is a member of
-// dbo.cleat_admin, regardless of SESSION_CONTEXT (012_admin_role.sql) -- and a
-// multi-tenant deployment must grant that role, because
-// GetDueSchedulesAcrossTenants and ClaimReadyAcrossTenants require it and
-// without them a non-default tenant's workflows never fire at all. WithTenant
-// copies the store and shares s.db, so on such a deployment every
-// tenant-scoped store is running unfiltered and a name-only predicate reaches
-// every tenant's rows.
+// rather than defensive, and the reason is specific to SQL Server. The
+// shipped dbo.fn_tenant_filter has carried no role-based exemption since
+// cleat#1541 -- a dbo.cleat_admin login is filtered by SESSION_CONTEXT like
+// any other connection unless a deployment has applied the optional,
+// not-auto-applied migrations/mssql/optional/cross_tenant_claim.sql. Nothing
+// in this engine's own dispatch loop needs that grant any more either: #1926
+// removed GetDueSchedulesAcrossTenants, ClaimReadyAcrossTenants and
+// requireCleatAdminMembership in favor of unconditional per-tenant rotation,
+// so a working multi-tenant worker runs with no admin membership at all.
+//
+// What still holds a dbo.cleat_admin login open is cleatctl and cross-tenant
+// test teardown (engine/testutil/mssql_admin.go). WithTenant copies the store
+// and shares s.db, so a tenant-scoped store built over one of those pools has
+// no app-level predicate standing between it and every tenant's rows -- these
+// five statements carrying their own `AND tenant_id` are what closes that,
+// and they are the whole of the closing, not a second layer behind an admin
+// exemption.
 //
 // PostgreSQL does not have this problem because its exemption is a separate
 // role owning a SECURITY DEFINER function; the application role keeps
@@ -1355,8 +1363,9 @@ func scheduleInputJSON(input json.RawMessage) string {
 // which statement is asking, so each statement has to say so itself.
 //
 // Measured in engine/mssql_admin_login_schedule_tenant_test.go: without these
-// predicates one tenant deletes, disables and reschedules another tenant's
-// cron schedules through the ordinary HTTP API.
+// predicates, a store built over a dbo.cleat_admin pool can delete, disable
+// and reschedule another tenant's cron schedules through the ordinary HTTP
+// API.
 func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
