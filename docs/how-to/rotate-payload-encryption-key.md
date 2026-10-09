@@ -230,21 +230,15 @@ defaults is still safely refused, not silently rotated; see
 
 - **An external KMS.** The key is supplied directly, from a file.
 - **A plugin's own `Payloads`-sealed value, once one exists.**
-  `cleatctl reseal-payloads` only rewrites `event_history`'s own encrypted
-  columns (`engine.EncryptedEventColumns`) -- see `plugin.Payloads`'s own
-  doc comment. A plugin storing a long-lived sealed value elsewhere is
-  responsible for its own re-seal on rotation, the same way it is
-  responsible for its own storage.
+  `cleatctl reseal-payloads` rewrites `event_history`'s own encrypted columns
+  (`engine.EncryptedEventColumns`) and, since cleat#3241, the six tables
+  cleat#2312 added encryption to (`workflow_instances`, `workflow_signals`,
+  `workflow_promises`, `workflow_update_requests`, `workflow_schedules`,
+  `idempotency_keys`) -- see `plugin.Payloads`'s own doc comment. A plugin
+  storing a long-lived sealed value elsewhere is responsible for its own
+  re-seal on rotation, the same way it is responsible for its own storage.
 - **PostgreSQL only.** `--encrypt-sensitive-payloads` is refused unless
   `--driver=postgres`; the encrypting write path is Postgres-specific SQL.
-- **The six tables cleat#2312 added.** `cleatctl reseal-payloads` still
-  rewrites only `event_history`. `workflow_instances`, `workflow_signals`,
-  `workflow_promises`, `workflow_update_requests`, `workflow_schedules`, and
-  `idempotency_keys` are encrypted on write and decrypted on read, but a key
-  rotation does not yet re-seal rows already written under the old key in
-  those tables -- they stay readable (the previous-key path still opens them)
-  but are not rewritten by the tool. Extending the tool is tracked as
-  cleat#3241.
 
 ## See also
 

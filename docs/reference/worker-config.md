@@ -580,10 +580,11 @@ silently running a substring search against ciphertext and reporting a false
 "no results" -- there is no supported way to search these columns while
 encryption is on.
 
-`cleatctl reseal-payloads` (key rotation) currently re-seals only
-`event_history`; it does not yet cover the six tables cleat#2312 added (see
-cleat#3241). A rotation that needs those re-sealed must be done by hand until
-that tool is extended.
+`cleatctl reseal-payloads` (key rotation) re-seals `event_history` and,
+since cleat#3241, the six tables above -- `workflow_instances`,
+`workflow_signals`, `workflow_promises`, `workflow_update_requests`,
+`workflow_schedules`, `idempotency_keys` -- reported as their own sections
+in the command's output.
 
 **A worker started without this flag refuses to start if this database has
 ever had it enabled (cleat#2324).** A sealed column carries no envelope or
