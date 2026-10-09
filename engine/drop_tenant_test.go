@@ -371,6 +371,22 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 		tenant, "q-"+tag, wfID); err != nil {
 		t.Fatalf("seed queue_holders(%s): %v", tag, err)
 	}
+	// cleat#3245 Phase 3 step 1 (migration 016). Same shape as concurrency_keys
+	// and queue_holders above: reaches the tenant by ON DELETE CASCADE from
+	// workflow_instances, not by a DELETE admin.drop_tenant names, and nothing
+	// outside this test's own fixture writes to either table yet -- dual-write
+	// code lands in step 2. Seeded here anyway, because the property under
+	// test is that the row went away, not which mechanism removed it.
+	if _, err := adminDB.ExecContext(ctx,
+		`INSERT INTO workflow_leases (id, tenant_id) VALUES ($1, $2)`,
+		wfID, tenant); err != nil {
+		t.Fatalf("seed workflow_leases(%s): %v", tag, err)
+	}
+	if _, err := adminDB.ExecContext(ctx,
+		`INSERT INTO workflow_payloads (id, tenant_id) VALUES ($1, $2)`,
+		wfID, tenant); err != nil {
+		t.Fatalf("seed workflow_payloads(%s): %v", tag, err)
+	}
 	if _, err := adminDB.ExecContext(ctx,
 		// request_id is NOT NULL as of cleat#1416; the tag makes it unique per
 		// row, which is all this seed needs.
