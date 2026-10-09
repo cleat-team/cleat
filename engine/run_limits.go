@@ -77,8 +77,17 @@ func (s *MySQLStore) GetRunLimits(ctx context.Context, workflowID string) (Tenan
 // GetRunLimits reads one run's own limit overrides. See the PostgreSQL
 // implementation for the contract.
 func (s *MSSQLStore) GetRunLimits(ctx context.Context, workflowID string) (TenantSettings, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return TenantSettings{}, fmt.Errorf("run limits: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs)

@@ -209,6 +209,15 @@ func (s *MySQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) 
 
 // CountWorkflows: SQL Server.
 func (s *MSSQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	d := s.dialect
 	qb := NewQueryBuilder(d, "SELECT COUNT(*) FROM workflow_instances WHERE tenant_id = @p1")
 	qb.AddArgs(s.tenantID)
@@ -216,7 +225,11 @@ func (s *MSSQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) 
 
 	query, args := qb.SQL()
 	var n int
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+	//nolint:gosec // G701: same false positive as ListWorkflows (mssql_deployment.go,
+	// cleat#3246) -- query is built by applyWorkflowFilters via QueryBuilder, which only ever
+	// writes placeholder syntax into the text; every filter value is bound through
+	// qb.args/AddArgs. See that line's comment for the full per-field audit.
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count workflows: %w", err)
 	}
 	return n, nil

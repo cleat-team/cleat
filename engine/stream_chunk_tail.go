@@ -200,7 +200,16 @@ func (s *MySQLStore) redactStreamChunk(rec *EventRecord, _ string) {
 // OFFSET 0 ROWS FETCH NEXT ... rather than LIMIT, which SQL Server does not
 // have, and it requires the ORDER BY that is already there.
 func (s *MSSQLStore) LoadStreamChunksAfter(ctx context.Context, workflowID string, afterStep, limit int) ([]EventRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load stream chunks: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT step, plugin_name, plugin_func, plugin_output, payload
 		FROM event_history
 		WHERE workflow_id = @p1 AND tenant_id = @p2

@@ -1,7 +1,1 @@
-engine/concurrency_key_holder.go	GetConcurrencyKeyHolder	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/mssql_tenant_settings.go	GetTenantSettings	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/run_limits.go	GetRunLimits	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/stream_chunk_tail.go	LoadStreamChunksAfter	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/terminal_run.go	successorOfRun	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
-engine/workflow_list_query.go	CountWorkflows	deferred: real candidate from cleat#2210's re-derived 60; not converted in this PR, tracked as remaining work.
 engine/mssql_schedules.go	deleteWorkflowsBatchOnce	deferred: its own comment documents a deliberate no-transaction design (RCSI non-blocking read) tied to cleat#2060/#2139's carefully-tuned lock-escalation-avoidance work; converting to beginTxWithContext needs dedicated empirical verification against TestMSSQLRetentionSweepsCauseNoLockEscalation before landing, not a mechanical conversion alongside 23 unrelated CRUD methods. cleat#2210.

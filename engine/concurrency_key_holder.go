@@ -104,9 +104,24 @@ func (s *MySQLStore) GetConcurrencyKeyHolder(ctx context.Context, key string) (C
 // GetConcurrencyKeyHolder answers "what is holding this key, and for how long".
 // See the PostgreSQL implementation for why this is not on the interface.
 func (s *MSSQLStore) GetConcurrencyKeyHolder(ctx context.Context, key string) (ConcurrencyKeyHolder, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210. Unlike most of that
+	// cleanup, this one is precautionary rather than a confirmed fix:
+	// concurrency_keys carries no RLS policy (none of the 14
+	// `CREATE SECURITY POLICY` statements in migrations/mssql/ name it), so
+	// the WHERE tenant_id = @p2 below was already correctly scoped by
+	// s.tenantID regardless of which tenant's SESSION_CONTEXT the pool's
+	// connection carried. Converted anyway for consistency with every other
+	// method in this batch and as a no-cost precaution if RLS is ever added
+	// to this table.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return ConcurrencyKeyHolder{}, fmt.Errorf("concurrency key holder: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	keyHash := sha256.Sum256([]byte(key))
 	var h ConcurrencyKeyHolder
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT workflow_id, expires_at FROM concurrency_keys
 		WHERE key_hash = @p1 AND tenant_id = @p2 AND expires_at > SYSUTCDATETIME()
 	`, keyHash[:], s.tenantID).Scan(&h.WorkflowID, &h.ExpiresAt)
