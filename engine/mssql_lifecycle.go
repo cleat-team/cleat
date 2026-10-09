@@ -151,10 +151,14 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 // claimWorkflowsOnce claims for THIS STORE'S TENANT ONLY.
 //
 // `AND tenant_id` in the candidate SELECT is the whole of that on SQL Server,
-// and it was missing (3.91). dbo.fn_tenant_filter is off for any dbo.cleat_admin
-// login (012_admin_role.sql), so nothing else on this connection would have
-// caught the omission -- this predicate is the only thing standing between a
-// dbo.cleat_admin pool and every tenant's ready work.
+// and it was missing (3.91). The shipped dbo.fn_tenant_filter has carried no
+// role-based exemption since cleat#1541 (dbo.cleat_admin is created in
+// 001_schema.sql; the predicate itself is in 003_procedures.sql) -- a
+// dbo.cleat_admin login is filtered by SESSION_CONTEXT like any other
+// connection unless a deployment has applied the optional, not-auto-applied
+// migrations/mssql/optional/cross_tenant_claim.sql. So this predicate is not
+// a backstop behind an admin exemption; on the shipped default it is the
+// whole of tenant isolation on this connection, admin or not.
 //
 // #1926 retired the mechanism this comment used to contrast against: a
 // separate cross-tenant claim query (claimWorkflowsAcrossTenantsOnce), gated
