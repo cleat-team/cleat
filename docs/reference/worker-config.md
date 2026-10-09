@@ -98,6 +98,43 @@ served at the root path.
 
 ---
 
+### --cors-allowed-origins
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Comma-separated list of exact origins (e.g. `https://app.example.com`) allowed to make cross-origin requests to this worker's HTTP API |
+
+**Off by default.** An empty value disables CORS entirely: no preflight
+handling, no `Access-Control-*` response headers, byte-identical behavior to
+a worker built without this flag. There is no implicit default-allow
+fallback.
+
+When set, each listed origin gets exact-match CORS support: preflight
+(`OPTIONS`) requests get the allowed methods and headers back, and ordinary
+requests get `Access-Control-Allow-Origin` set to the matched origin.
+Origins are matched by **exact string equality** — there is no wildcard
+matching, and `*` is never written to a response header, so the unsafe
+combination of a wildcard origin with a credentialed request has no code
+path that can produce it. A disallowed origin's preflight is refused (403);
+a disallowed origin's ordinary request reaches the worker normally (so a
+non-browser caller with an unrecognised `Origin` header is never
+server-side blocked) but gets no CORS headers, which is what makes the
+browser itself withhold the response from that origin's own JavaScript.
+
+**A browser holding a tenant API key is a deployment choice with real
+risk.** This worker's auth is a bearer token in the `Authorization`
+header — exactly the kind of credential a CORS allowlist exists to let a
+browser attach to a cross-origin request. If that token lives in
+JavaScript running in a browser, any script able to run on an allowed
+origin (a dependency, an XSS, a compromised build step) can read and
+exfiltrate it. **The recommended default is the same-origin proxy pattern
+(see `#2344`/the fullstack template)**, where the frontend never holds a
+cleat API key at all and the proxy injects it server-side. Reach for this
+flag only when a same-origin proxy genuinely isn't an option for your
+deployment, and treat the origins you list as holders of a real credential.
+
+---
+
 ### --health-check-interval
 
 | Type | Default | Description |

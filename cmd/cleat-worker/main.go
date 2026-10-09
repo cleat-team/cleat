@@ -2685,6 +2685,23 @@ func main() {
 			handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
 		}
 
+		// CORS allowlist -- cleat#2345. OUTERMOST: wraps every middleware
+		// above, including auth and rate limiting, not merely runs before
+		// them. See newCORSMiddleware's own doc comment (cors.go) for why --
+		// in short, a browser preflight must never reach auth, and an
+		// ordinary request's CORS response header must be set whether every
+		// inner layer succeeds or fails. Empty *corsAllowedOrigins (the
+		// default) makes this the identity middleware, so a deployment that
+		// never sets the flag gets byte-identical behavior to before this
+		// existed.
+		var corsOrigins []string
+		for _, o := range strings.Split(*corsAllowedOrigins, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				corsOrigins = append(corsOrigins, o)
+			}
+		}
+		handler = newCORSMiddleware(corsOrigins)(handler)
+
 		// No Addr field: this server is bound by the explicit net.Listen
 		// below, not by srv.ListenAndServe, so an Addr here would be read by
 		// nothing and would put *apiAddr in two places with only one of them
