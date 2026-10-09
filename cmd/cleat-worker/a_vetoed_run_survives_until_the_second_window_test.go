@@ -48,9 +48,15 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
 
-	// A 1s heartbeat puts reclaimAfter (the window a row must be stale by to be
-	// reclaimable at all) at its 10s floor, so the ask window is [10s, 20s): a
-	// row 15s stale is asked about, and one 25s stale is not.
+	// A 1s heartbeat no longer puts reclaimAfter at its 10s floor: ROUND 6
+	// (cleat#3258) widened minimumReclaimAfter to include maxTolerableStall
+	// (a fixed 30s) and a second deadline term, so at hb=1s it derives to 42s
+	// (1s heartbeat + 30s maxTolerableStall + 2*2s deadline-floor + 5s
+	// mssqlDrainSlack + 1s retryInterval + 1s reclaimSlack), well above the
+	// 10s floor -- re-derive with minimumReclaimAfter(time.Second) rather
+	// than trusting this comment, which is exactly the kind of number
+	// CLAUDE.md warns rots. The ask window is therefore [42s, 84s): a row 47s
+	// stale is asked about, and one 89s stale is not.
 	const heartbeat = time.Second
 	const secret = "acceptance-test-shared-secret"
 
@@ -128,12 +134,12 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	// addresses from).
 	w := newRealBackgroundLoopWorker(t, db, store, "veto-reaper")
 	w.heartbeatInterval = heartbeat
-	w.reclaimTimeout = 0 // derive: reclaimAfter = 10s at a 1s heartbeat
+	w.reclaimTimeout = 0 // derive: reclaimAfter = 42s at a 1s heartbeat (cleat#3258 ROUND 6; was 10s)
 	w.internalAuthSecret = secret
 	w.workerRegistry = reg
 	seedRecentlyConfirmedHealthy(w)
 
-	seedRun("15 seconds")
+	seedRun("47 seconds")
 	w.reapOnce()
 	if got := statusOf(); got != "running" {
 		t.Fatalf("the holder answered that it still holds run %s, but the reaper reclaimed it anyway: status = %q, want running", runID, got)
@@ -142,7 +148,7 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	// Past TWO windows, so it is no longer asked about at all -- this is the
 	// bound: an honest holder cannot hold its own run past one extra window,
 	// and neither can a lying one.
-	ageRun("25 seconds")
+	ageRun("89 seconds")
 	w.reapOnce()
 	if got := statusOf(); got == "running" {
 		t.Fatalf("run %s is two windows stale, so the veto must no longer cover it, but it was left running", runID)
@@ -169,7 +175,7 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running', assigned_to = $2, generation = $3,
-		    heartbeat_at = now() - interval '15 seconds'
+		    heartbeat_at = now() - interval '47 seconds'
 		WHERE id = $1`, runID, holderID, generation); err != nil {
 		t.Fatalf("re-seeding the run as running for the killed-holder phase: %v", err)
 	}
