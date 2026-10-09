@@ -40,7 +40,7 @@ import (
 // after the claim. It is "prove what a caller loses by choosing it here",
 // so the choice is visible in a running test rather than only in a comment.
 //
-// MSSQL-only, matching TestAwaitEventMarshalFailureLeavesEventUnconsumed's
+// MSSQL-only, matching TestAwaitEventMarshalFailureDeadLettersTheEventInstead's
 // own reasoning exactly: Postgres and MySQL validate JSON syntax at INSERT
 // and refuse this test's malformed literal before ClaimOrRegisterAwaiter
 // ever sees it; MSSQL's event_data is NVARCHAR(MAX), a plain text column
