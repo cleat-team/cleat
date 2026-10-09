@@ -195,6 +195,13 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 				t.Fatalf("after config-update --disabled, got cron=%q enabled=%v, want %q false", cron, enabled, "0 12 * * *")
 			}
 
+			// Re-enable: the disable above was only to exercise
+			// config-update --disabled, and `run` below (cleat#2292 item 3)
+			// refuses a disabled config -- this test's `run` section is
+			// about next_run_at advancing, not about that refusal, which
+			// has its own test (TestBackupRunRefusesADisabledConfig).
+			runBackupConfigUpdate(ctx, db, tc.d, []string{"--id", id.String(), "--enabled"})
+
 			// backup run is request-only: it must advance next_run_at to
 			// approximately now, and must not touch backup_history or invoke
 			// pg_dump (there is no DSN configured in this test at all).
@@ -370,6 +377,80 @@ func TestBackupHistoryDisplaysADeletedConfigsNullIDAsADashNotAZeroUUID(t *testin
 			}
 			if strings.Contains(stdout, "00000000-0000-0000-0000-000000000000") {
 				t.Errorf("a NULL config_id printed as the zero UUID instead of '-':\n%s", stdout)
+			}
+		})
+	}
+}
+
+// TestBackupRunRefusesADisabledConfig is cleat#2292 item 3's regression
+// test. Before this, `backup run` on a disabled config advanced
+// next_run_at and printed "picked up by the background loop within 60s" --
+// a promise that was never kept, because background.go's dueBackupsQuery
+// claims only `enabled = true` rows. The run request silently vanished with
+// nothing telling the operator why their backup never happened.
+func TestBackupRunRefusesADisabledConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		td   testutil.Dialect
+		d    dialect
+	}{
+		{"postgres", testutil.DialectPostgres, dialectPostgres},
+		{"mysql", testutil.DialectMySQL, dialectMySQL},
+		{"mssql", testutil.DialectMSSQL, dialectMSSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.td)
+			ctx := context.Background()
+
+			loaded := []*plugin.LoadedPlugin{{Plugin: scheduledbackup.New(), Healthy: true}}
+			if err := plugin.RunMigrations(ctx, db, tc.d.query, nil, loaded); err != nil {
+				t.Fatalf("apply scheduledbackup migrations on %s: %v", tc.name, err)
+			}
+
+			name := "wsdt-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
+			runBackupConfigCreate(ctx, db, tc.d, []string{
+				"--name", name, "--cron", "0 0 * * *", "--disabled",
+			})
+			id, err := resolveConfigID(ctx, db, tc.d, "", name)
+			if err != nil {
+				t.Fatalf("resolveConfigID after create: %v", err)
+			}
+
+			// Premise: the config really is disabled, so a refusal below is
+			// about this check and not some other failure.
+			var enabled bool
+			stmt, stmtArgs := mustRebindArgs(t, tc.d, `SELECT enabled FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&enabled); err != nil {
+				t.Fatalf("checking enabled premise: %v", err)
+			}
+			if enabled {
+				t.Fatal("premise failed: config-create --disabled left the config enabled")
+			}
+
+			var nextRunAtBefore time.Time
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT next_run_at FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&nextRunAtBefore); err != nil {
+				t.Fatalf("reading next_run_at before run: %v", err)
+			}
+
+			stdout, stderr := withExitPanicOutput(t, func() {
+				runBackupRun(ctx, db, tc.d, []string{"--id", id.String()})
+			})
+			if !strings.Contains(stderr, "disabled") {
+				t.Errorf("backup run on a disabled config did not mention it in stderr:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+			if strings.Contains(stdout, "picked up by the background loop") {
+				t.Errorf("backup run on a disabled config still printed the success message:\n%s", stdout)
+			}
+
+			var nextRunAtAfter time.Time
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT next_run_at FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&nextRunAtAfter); err != nil {
+				t.Fatalf("reading next_run_at after refused run: %v", err)
+			}
+			if !nextRunAtAfter.Equal(nextRunAtBefore) {
+				t.Errorf("next_run_at changed from %s to %s -- a refused run must not advance it",
+					nextRunAtBefore, nextRunAtAfter)
 			}
 		})
 	}
