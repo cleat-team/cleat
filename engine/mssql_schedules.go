@@ -280,9 +280,23 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		      AND d.tenant_id = w.tenant_id
 		WHERE w.tenant_id = @p3
 		  AND w.status IN ('ready', 'running')
-		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id)
+		  -- e.tenant_id = @p3 DIRECTLY, not via w.tenant_id -- cleat#2059,
+		  -- same reasoning as d.tenant_id above but for a seek path rather
+		  -- than correctness: event_history's clustered key realigned to
+		  -- (tenant_id, workflow_id, step), so a predicate naming only
+		  -- workflow_id lost its seek path, and a column-to-column
+		  -- comparison to w.tenant_id would read as a correlation rather
+		  -- than a restriction to the caller under the distinction
+		  -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate's doc
+		  -- comment draws (the same one the appendEventsInTxOpts MERGE fix
+		  -- is held to). That guard does NOT actually reach either
+		  -- correlated subquery below, though -- confirmed by cleat-review:
+		  -- removing either predicate does not fail it (cleat#3289, filed to
+		  -- widen the scan to nested subqueries like these). The seek-path
+		  -- reasoning above is why the predicate is here regardless.
+		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id AND e.tenant_id = @p3)
 		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
-		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id))
+		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id AND e2.tenant_id = @p3))
 		ORDER BY w.created_at
 		OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY
 	`, threshold, limit, s.tenantID)
@@ -615,7 +629,20 @@ const (
 var mssqlDeleteExpiredEventsQuery = fmt.Sprintf(`
 			DELETE TOP (%d) FROM event_history
 			OUTPUT deleted.workflow_id
-			WHERE workflow_id IN (
+			-- tenant_id = @p2 added directly, not only inside the subquery --
+			-- cleat#2059. The subquery already restricts the candidate
+			-- workflow ids to this tenant, so this is defense in depth
+			-- rather than a fix for a measured regression -- this
+			-- statement held at 0 lock escalations
+			-- (TestMSSQLRetentionSweepsCauseNoLockEscalation's
+			-- DeleteExpiredEvents arm) both before and after it was added.
+			-- NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
+			-- if removed, despite the intent above: that guard's static
+			-- scan does not trace SQL assembled into a package-level var
+			-- via fmt.Sprintf the way it traces a literal string passed
+			-- directly to a Context call (confirmed by cleat-review;
+			-- cleat#3289 tracks widening it to recognize this shape).
+			WHERE tenant_id = @p2 AND workflow_id IN (
 				SELECT id`+msExpiredEventsWorkflows+`
 				  AND tenant_id = @p2
 				ORDER BY id
@@ -906,8 +933,30 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 // (Incorrect syntax near the keyword 'DELETE'), caught the first time this
 // path ran against a real database rather than in gofmt/go vet, which have
 // no way to know either string is SQL.
+//
+// AND tenant_id = @tenant -- cleat#2059/#2060. event_history's clustered key
+// realigned to (tenant_id, workflow_id, step), so a predicate naming only
+// workflow_id lost its seek path: SQL Server could no longer narrow to the
+// candidate rows by index seek, and TestMSSQLRetentionSweepsCauseNoLockEscalation
+// caught the regression directly -- DeleteCompletedWorkflows and
+// DeleteDeadLetteredWorkflows (both routed through this statement) started
+// escalating to a table lock sweeping the same 6000 rows that held at 0
+// promotions before the realignment; DeleteExpiredEvents, whose own
+// event_history delete already compared tenant_id to a parameter
+// (mssqlDeleteExpiredEventsQuery), was unaffected. @tenant is bound once per
+// chunk by deleteEventHistoryRowBoundedCommitting below, from s.tenantID.
+//
+// NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate if
+// this predicate is removed, despite comparing directly to a parameter the
+// way that guard's doc comment describes: its static scan does not trace
+// SQL assembled into a package-level var via fmt.Sprintf the way it traces
+// a literal string passed directly to a Context call (confirmed by
+// cleat-review; cleat#3289 tracks widening it to recognize this shape). The
+// predicate is here because it is what restores the seek path
+// TestMSSQLRetentionSweepsCauseNoLockEscalation measures, not because any
+// guard enforces it.
 var mssqlDeleteEventHistoryTopPrefix = fmt.Sprintf(
-	"DELETE TOP (%d) FROM event_history WHERE workflow_id IN (", mssqlEventRowChunk)
+	"DELETE TOP (%d) FROM event_history WHERE tenant_id = @tenant AND workflow_id IN (", mssqlEventRowChunk)
 
 // deleteCompletedWorkflowsBatch deletes one batch, retrying the whole
 // transaction on a rollback-guaranteed failure.
@@ -1209,7 +1258,8 @@ func (s *MSSQLStore) deleteEventHistoryRowBoundedCommitting(ctx context.Context,
 		}
 		part := ids[start:end]
 		placeholders := make([]string, len(part))
-		args := make([]any, 0, len(part))
+		args := make([]any, 0, len(part)+1)
+		args = append(args, sql.Named("tenant", s.tenantID))
 		for i, id := range part {
 			name := fmt.Sprintf("id%d", i)
 			placeholders[i] = "@" + name
@@ -1255,9 +1305,10 @@ func (s *MSSQLStore) deleteEventHistoryChunkOnce(ctx context.Context, stmt strin
 // split exists (TestEveryMSSQLTransactionBoundaryIsRetried).
 func (s *MSSQLStore) deleteEventHistoryChunkOnceOnce(ctx context.Context, stmt string, args []any) (int64, error) {
 	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
-	// deleteWorkflowsChunkOnceOnce: stmt carries no tenant_id predicate of
-	// its own, relying entirely on the RLS filter predicate's session
-	// context.
+	// deleteWorkflowsChunkOnceOnce: the RLS session context is the only
+	// thing that keeps the @tenant comparison in stmt (cleat#2059, cleat#2060)
+	// aligned with the caller's own tenant rather than one that merely looks
+	// bound -- s.beginTxWithContext is where that context gets set.
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin: %w", err)

@@ -618,9 +618,22 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		prevChecksum = checksum
 
 		_, err = tx.ExecContext(ctx, `
+			-- target.tenant_id = @p32 DIRECTLY, not via source.tenant_id --
+			-- cleat#2059. event_history's clustered key realigns to
+			-- (tenant_id, workflow_id, step), and this MERGE is the hottest
+			-- path this store has (every event write), so matching on
+			-- workflow_id/step alone would lose its seek path on every
+			-- single call. A column-to-column comparison through a USING
+			-- subquery (target.tenant_id = source.tenant_id) would restore
+			-- the seek path but reads, to TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate,
+			-- as a correlation rather than a restriction to the caller --
+			-- the same "d.tenant_id = w.tenant_id" shape that guard's own
+			-- doc comment warns about -- so the comparison is against the
+			-- parameter directly instead.
 			MERGE event_history WITH (HOLDLOCK) AS target
 			USING (SELECT @p1 AS workflow_id, @p2 AS step) AS source
 			ON target.workflow_id = source.workflow_id AND target.step = source.step
+			   AND target.tenant_id = @p32
 			WHEN NOT MATCHED THEN INSERT (
 				workflow_id, step, event_type, service, operation, request, response, error,
 				duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
