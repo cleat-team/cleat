@@ -688,12 +688,22 @@ func (s *MSSQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		return fmt.Errorf("verify events: load: %w", err)
 	}
 
+	// beginTxWithContext, not bare s.db -- cleat#2210/cleat#3281: a WithTenant
+	// copy must run under its own tenant's SESSION_CONTEXT, not whatever the
+	// pool's original connection happened to carry. Same pattern as
+	// LoadEventHistory above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("verify events: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Load stored checksums from the DB.
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		SELECT step, checksum FROM event_history
-		WHERE workflow_id = @p1
+		WHERE workflow_id = @p1 AND tenant_id = @p2
 		ORDER BY step
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		// Column does not exist yet — skip verification (pre-migration).
 		return nil

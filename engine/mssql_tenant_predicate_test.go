@@ -153,10 +153,6 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	// used to grant it an exception on that basis (digest #2f9f711af184,
 	// previously #0b59a5d77eeb) no longer applies and has been removed
 	// rather than left to grant an exception nothing is using.
-	"mssql_events.go:VerifyWorkflowEvents#63b72d6f4db8": {
-		SQL:    "select step, checksum from event_history where workflow_id = @p1 order by step",
-		Reason: scopedByCaller,
-	},
 	// cleat#2038: the swept ids come from deleteExpiredEventsOnce's own
 	// OUTPUT-clause read, which is itself restricted by
 	// msExpiredEventsWorkflows AND tenant_id = @p2 -- so an id in this list
