@@ -446,6 +446,14 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 			-- realigns to (tenant_id, workflow_id, step), so a predicate
 			-- naming only workflow_id/step would lose its seek path. @p9
 			-- is s.tenantID, already bound below.
+			--
+			-- NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
+			-- if removed, despite comparing directly to a parameter -- that
+			-- guard's static scan does not descend into a nested subquery
+			-- (this WHERE NOT EXISTS) the way it does a MERGE's own ON
+			-- clause (confirmed by cleat-review; cleat#3289 tracks widening
+			-- it to recognize this shape). The predicate is here for the
+			-- seek-path reason above, not because any guard enforces it.
 			SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2 AND tenant_id = @p9
 		)
 	`, parentID, event.Step, string(event.EventType),
@@ -540,19 +548,8 @@ func (s *MSSQLStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID s
 	// deployment has separately applied the optional
 	// migrations/mssql/optional/cross_tenant_claim.sql. So on this dialect the
 	// WHERE clause is the whole of the isolation, not defence in depth behind
-	// it.
-	//
-	// NOT CAUGHT BY TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
-	// if removed -- confirmed by cleat-review on cleat#2059's PR, by
-	// falsifying this exact predicate and re-running the guard with it gone.
-	// That guard's static scan only recognizes a tenant_id comparison when
-	// the tenant-scoped table is the statement's own top-level anchor; it
-	// does not descend into a nested subquery (this WHERE NOT EXISTS) the
-	// way it does a MERGE's own ON clause. The fix is correct on its own
-	// reasoning -- the seek-path and isolation argument above -- it is just
-	// not mechanically enforced the way a sibling comment in this same PR
-	// (appendEventsInTxOpts's MERGE) claims for a statement the guard does
-	// reach. See cleat#3289 for widening the guard to close this.
+	// it. Written without the predicate first and caught by
+	// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate.
 	//
 	// The transaction still matters for the single-tenant deployments where the
 	// policy IS on: a filter predicate exempts nobody, so a read with no
