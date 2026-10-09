@@ -940,6 +940,16 @@ var mssqlWorkflowChildTables = []string{
 // candidate is spelled out here, so the only text ever appended is the generated
 // placeholder list (@id0, @id1, ...) -- which also keeps gosec's G201 satisfied
 // without a #nosec, since there is no SQL string formatting left to audit.
+//
+// NOTED 2026-10-09 (cleat#3294), not yet investigated: none of these seven
+// entries carry a tenant_id predicate of their own, and -- being
+// double-quoted rather than backtick strings -- none is currently visible to
+// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate either, so there
+// is no allowlist entry asserting a reason. Whether that is fine (the ids
+// deleteByWorkflowIDs is called with are themselves already tenant-scoped,
+// the way several backtick-literal entries elsewhere in this file are
+// documented as scopedByCaller) is exactly the kind of claim that needs
+// checking at each call site rather than assumed here. See cleat#3294.
 var mssqlDeleteByWorkflowPrefix = map[string]string{
 	"event_history":            "DELETE FROM event_history WHERE workflow_id IN (",
 	"idempotency_keys":         "DELETE FROM idempotency_keys WHERE workflow_id IN (",
@@ -975,7 +985,7 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 // this predicate is removed, despite comparing directly to a parameter the
 // way that guard's doc comment describes.
 //
-// CORRECTED 2026-10-09 (cleat#3289): this used to attribute that to the scan
+// CORRECTED 2026-10-09 (cleat#3294): this used to attribute that to the scan
 // not tracing SQL assembled into a package-level var via fmt.Sprintf.
 // Falsified directly rather than taken on claim, and that is not the
 // mechanism: switching this literal from double quotes to backticks, with
@@ -983,12 +993,16 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 // makes the guard see it immediately. The scan's sqlLiteralRe only matches
 // backtick-delimited spans (`+"`([^`]*)`"+`); a plain Go string literal in
 // double quotes is invisible to it regardless of what builds or holds it.
-// This is the only statement in this file written with double quotes
-// rather than backticks, which is why it alone has this gap. cleat#3289
-// tracks widening the scan to also recognize a double-quoted literal that
-// looks like SQL. The predicate is here because it is what restores the
-// seek path TestMSSQLRetentionSweepsCauseNoLockEscalation measures, not
-// because any guard enforces it.
+// Measuring the blast radius of that fact turned up mssqlDeleteByWorkflowPrefix
+// below as a sibling case of the same gap -- its four entries are also
+// double-quoted and also currently invisible, so "this is the only one"
+// would have been a second, narrower wrong claim; cleat#3294 (not cleat#3289,
+// which is about a different mechanism -- see its own comment at
+// GetCompactionCandidates and StartChildWorkflowAtomic) tracks widening the
+// scan to double-quoted SQL-shaped literals across the whole file, and
+// auditing what it then finds. The predicate here is what restores the seek
+// path TestMSSQLRetentionSweepsCauseNoLockEscalation measures, not because
+// any guard enforces it.
 var mssqlDeleteEventHistoryTopPrefix = fmt.Sprintf(
 	"DELETE TOP (%d) FROM event_history WHERE tenant_id = @tenant AND workflow_id IN (", mssqlEventRowChunk)
 
