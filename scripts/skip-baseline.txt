@@ -117,6 +117,7 @@ cmd/cleatctl	TestAPythonFixtureWorkflowDeploysWithASchema	2
 cmd/cleatctl	TestAuditVerifyExitStatusesAreDistinct	1
 cmd/cleatctl	TestBackupConfigCreateWarnsWhenDSNSecretIsUnresolvable	1
 cmd/cleatctl	TestBackupConfigUpdateOnlyWarnsWhenEnabling	1
+cmd/cleatctl	TestBackupRefusesWithoutMigrationsAndNamesTheFix	1
 cmd/cleatctl	TestBackupRunWarnsWhenDSNSecretIsUnresolvable	1
 cmd/cleatctl	TestTheSidecarCleatBuildWritesIsTheOneDeployReads	1
 engine	MSSQLBackend.Setup	1
