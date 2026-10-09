@@ -55,6 +55,23 @@
 -- resume/heartbeat path as the other lease columns rather than being "what
 -- this run's definition says", so they are grouped with leases.
 --
+-- completed_by (added after cleat-review's GAP on this PR, who found it
+-- correctly unclassified and asked for a decision): this census first
+-- missed it because its own "zero index coupling" test is necessary but not
+-- sufficient, the same lesson the correction comment on the issue already
+-- drew for the live signal/promise counters. Grepping every call site
+-- (not just the four completion-path ones that also write result/
+-- query_state) finds it ALSO written by RetryWorkflow (resetting a
+-- dead_lettered run back to 'ready', no payload column in sight) and by
+-- every admin force-action in store_admin.go -- and in EVERY one of those
+-- sites, without exception, it is set in the same statement as
+-- assigned_to being cleared. assigned_to is unambiguously a lease column;
+-- completed_by is the record of who last held the lease before giving it
+-- up, which is the same fact family, not a payload. Grouped with leases on
+-- that uniform coupling rather than with payloads on the weaker "also rides
+-- along with result/query_state" observation, which holds for only some of
+-- its write sites.
+--
 -- workflow_payloads: input, result, query_state, compaction_state (plus
 -- compacted_at/compaction_step, written in the same statements), plugin_vers,
 -- allowed_signals, error_msg/error_code/error_op. Every one of these is
@@ -123,7 +140,8 @@ CREATE TABLE IF NOT EXISTS workflow_leases (
     promise_seq bigint DEFAULT 0 NOT NULL,
     promise_seq_at_claim bigint DEFAULT 0 NOT NULL,
     cancellation_requested boolean DEFAULT false NOT NULL,
-    cancellation_reason text
+    cancellation_reason text,
+    completed_by text
 );
 
 ALTER TABLE workflow_leases ENABLE ROW LEVEL SECURITY;
