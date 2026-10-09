@@ -400,6 +400,58 @@ linters:
       - path: '_test\.go'
         linters: [gosec]
 
+      # A THIRD, SEPARATE gosec taint hazard (cleat#3247, follow-up to cleat#3246):
+      # a G701/G706 finding can flip between present and absent across otherwise-
+      # identical runs of golangci-lint, on byte-identical source, with no code
+      # change and no config change. This is not a flaky TEST; it is gosec's own
+      # analysis producing a different verdict on the same input.
+      #
+      # ROOT CAUSE (confirmed by direct source reading of gosec v2.29.0, the
+      # version golangci-lint v2.14.0 currently embeds, plus an in-process
+      # reproduction that holds the built *ssa.Program fixed and only re-runs
+      # call-graph construction -- see scripts/gosec-taint-cha-nondeterminism-repro.go):
+      # gosec's taint/taint.go caps how many of a function's CALLERS it will
+      # examine for taint (`maxCallerEdges = 32`, to bound CHA's interface-call
+      # over-approximation), and the order it examines them in comes from
+      # golang.org/x/tools/go/callgraph/cha.CallGraph, which iterates a Go MAP
+      # (`ssautil.AllFunctions(prog)`) to decide which edges to record first.
+      # Go randomizes map iteration order per process, so on any function with
+      # more than 32 callers -- measured on this repo's engine/ package
+      # (including _test.go files, since gosec analyzes those too, per the
+      # exclusion block above): 6597 of 69040 call-graph nodes qualify -- WHICH
+      # 32 callers gosec actually looks at changes from run to run, even though
+      # the full caller set never does.
+      #
+      # This is already a known, upstream, FIXED-BUT-UNRELEASED gosec defect:
+      # securego/gosec#1711 / #1712, fixed on gosec's `master` by PR #1733
+      # (merged 2026-09-04: sorts callers deterministically and raises the cap
+      # to 1024). v2.29.0 (2026-08-26, what golangci-lint v2.14.0 embeds)
+      # predates that fix by nine days, and as of 2026-10-09 gosec has cut no
+      # new tag since -- `master` is 31 commits ahead of v2.29.0 with the fix
+      # unreleased. There is nothing to upgrade to yet.
+      #
+      # THE COST: any dynamically-built query/command/path reached through a
+      # widely-called helper (QueryBuilder is exactly this shape) can trigger
+      # this on an otherwise-correct PR, costing a merge-queue cycle, or get
+      # "fixed" by a change that did nothing (the finding was never about that
+      # commit). cleat#3246/PR #3248 hit this on MSSQLStore.ListWorkflows and
+      # suppressed that ONE instance with a reasoned //nolint:gosec; it will
+      # recur on a different line, not because the new line is unsafe, but
+      # because its underlying helper also has a wide caller set.
+      #
+      # WHAT TO DO ABOUT A NEW INSTANCE: do not add a blanket gosec exclusion
+      # for this -- it would hide real G701 findings too. Do what cleat#3246
+      # did: read every call site of the dynamically-built value by hand (not
+      # by rerunning the linter, which cannot distinguish a real finding from
+      # this hazard), confirm no caller-supplied value is concatenated, and
+      # suppress that one line with a //nolint:gosec documenting the read,
+      # same as engine/mssql_deployment.go's ListWorkflows.
+      #
+      # CHECK THIS WHEN gosec'S VERSION NEXT BUMPS: re-run
+      # scripts/gosec-taint-cha-nondeterminism-repro.go's logic (or just watch
+      # whether this class of finding stops flipping) once golangci-lint
+      # embeds a gosec release that includes PR #1733.
+
       # ---- gosec rules v1's gosec did not have (cleat#2216) --------------------------------------------
       # Each is scoped to the files it was read in. A NEW finding of the same rule anywhere else is reported.
       #
