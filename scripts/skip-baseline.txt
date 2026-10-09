@@ -67,6 +67,7 @@ cmd/cleat-mcp	TestAModernMCPClientListsCallsAndCancelsARealWorkflow	2
 cmd/cleat-worker	TestABlockedStartIsAcceptedAndWaits	1
 cmd/cleat-worker	TestABootedWorkerBindsLoginToTheHost	2
 cmd/cleat-worker	TestABootedWorkerDisablesAnExpiredOAuthMintedKey	2
+cmd/cleat-worker	TestABootedWorkerMintsAnOAuthAPIKeyOnARealLogin	2
 cmd/cleat-worker	TestABootedWorkerSuspendsAnExpiredTrial	2
 cmd/cleat-worker	TestABootedWorkerSweepsAnAbandonedLogin	2
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
