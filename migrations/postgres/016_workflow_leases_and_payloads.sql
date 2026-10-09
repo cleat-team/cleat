@@ -56,21 +56,25 @@
 -- this run's definition says", so they are grouped with leases.
 --
 -- completed_by (added after cleat-review's GAP on this PR, who found it
--- correctly unclassified and asked for a decision): this census first
--- missed it because its own "zero index coupling" test is necessary but not
--- sufficient, the same lesson the correction comment on the issue already
--- drew for the live signal/promise counters. Grepping every call site
--- (not just the four completion-path ones that also write result/
--- query_state) finds it ALSO written by RetryWorkflow (resetting a
--- dead_lettered run back to 'ready', no payload column in sight) and by
--- every admin force-action in store_admin.go -- and in EVERY one of those
--- sites, without exception, it is set in the same statement as
--- assigned_to being cleared. assigned_to is unambiguously a lease column;
--- completed_by is the record of who last held the lease before giving it
--- up, which is the same fact family, not a payload. Grouped with leases on
--- that uniform coupling rather than with payloads on the weaker "also rides
--- along with result/query_state" observation, which holds for only some of
--- its write sites.
+-- correctly unclassified and asked for a decision) is ANOTHER judgment
+-- call, not a settled asymmetry -- the first version of this paragraph
+-- claimed one and a second GAP caught it wrong. Every write site
+-- (CompleteWorkflow, FailWorkflow, MoveToDeadLetterQueue, the TERMINATE/
+-- defer-phase paths, every admin force-action, AND RetryWorkflow, which
+-- the first version of this paragraph cited as the exception) sets
+-- completed_by in the SAME statement as BOTH assigned_to = NULL AND at
+-- least one payload column (result, query_state, or error_msg/error_code/
+-- error_op) -- RetryWorkflow included: it clears error_msg/error_code/
+-- error_op right beside completed_by, which the first version of this
+-- paragraph read past while quoting that exact statement. So the
+-- statement-co-occurrence test this migration otherwise relies on is
+-- uninformative here -- it does not favour either table, because
+-- completed_by is coupled to both equally at every site. Placed in
+-- workflow_leases anyway, on the same semantic basis as cancellation_
+-- requested/reason above: docs/explanation/postgresql-schema.md:218
+-- describes it as "the worker that performed the terminal write, recorded
+-- at the moment the lease is surrendered" -- about who held the lease, not
+-- about the run's outcome payload. Judgment, not derivation.
 --
 -- workflow_payloads: input, result, query_state, compaction_state (plus
 -- compacted_at/compaction_step, written in the same statements), plugin_vers,
