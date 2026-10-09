@@ -7,8 +7,11 @@ Plugins are Go packages compiled into the worker binary, registered via
 ## Design Principle
 
 Plugins receive raw access to infrastructure, not abstractions over it. The
-`Environment` struct uses standard library types (`*sql.DB`, `*http.ServeMux`,
-`*slog.Logger`) so plugin authors don't need to learn a new API.
+`Environment` struct uses standard library types where it can (`*slog.Logger`)
+and purpose-built interfaces where raw access would be unsafe (`PluginDB`
+instead of `*sql.DB`; `Dispatcher`, not `*http.ServeMux`, for `Mux` -- see
+below) so plugin authors don't need to learn a new API for the parts that are
+safe to hand over directly.
 
 ## Plugin Interface
 
@@ -40,19 +43,16 @@ plugins topologically using Kahn's algorithm before initialization.
 
 ### Environment
 
-```go
-type Environment struct {
-    DB       *sql.DB
-    Mux      *http.ServeMux
-    Config   []byte
-    Logger   *slog.Logger
-    TenantID uuid.UUID
-    Done     <-chan struct{}
-
-    StartWorkflow func(ctx context.Context, defName string, input json.RawMessage) (runID string, err error)
-    SignalWorkflow func(ctx context.Context, workflowID, signalName, payload string) error
-}
-```
+This section is illustrative, not the current struct -- see
+[`plugin.Environment`](../../plugin/plugin.go) for the real, current field
+list (`DB` is `PluginDB`, not `*sql.DB`; `TenantID` is `string`; there is no
+`StartWorkflow`/`SignalWorkflow` closure pair on it today), and
+[plugin-developer-guide.md](../contributor/plugins/plugin-developer-guide.md)
+for a maintained, guarded example. `Mux` in particular is `Dispatcher`
+(`ServeHTTP` only), not `*http.ServeMux` -- a plugin registers routes through
+`HasRoutes.RegisterRoutes(Router)`, never by calling `Handle`/`HandleFunc` on
+`env.Mux` directly, which would bypass the host's request-body-size limit
+(cleat#2279 item 3).
 
 - `StartWorkflow` -- starts a new workflow instance using the latest deployed
   version.

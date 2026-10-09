@@ -525,11 +525,11 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 		return raw, nil
 	}
 
-	if err := p.RegisterRoutes(p.mux); err != nil {
+	if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	return p, p.mux
+	return p, p.mux.(*http.ServeMux)
 }
 
 // authedRequest creates a request with a Bearer token in the Authorization
