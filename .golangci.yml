@@ -357,6 +357,41 @@ linters:
       # else catches it. That is a gap worth closing separately; it is not a
       # reason to keep 140 findings that are all the test suite being a test
       # suite.
+      #
+      # A SECOND, DIFFERENT COST FROM THE OTHER DIRECTION (cleat#3239, cleat#3236):
+      # this filters the REPORT for test files, but gosec's taint rules
+      # (G701-G706) are evaluated PACKAGE-WIDE, before this exclusion ever
+      # applies -- so a taint SOURCE in a _test.go file still participates in
+      # the package's analysis, and the finding gosec reports can land on an
+      # unrelated PRODUCTION line that is not excluded. Measured on cleat#3236:
+      # a test file's `fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s", ...)`
+      # (textbook G701 taint) produced a G701 report on
+      # engine/mssql_deployment.go:174, in code the test file never touched,
+      # which read as a real injection in production until isolated. If you
+      # see a surprise gosec finding on a line that looks clean, check whether
+      # a _test.go file in the SAME PACKAGE has dynamic SQL/exec/path
+      # construction before trusting the reported line -- it may be yours, or
+      # it may belong to this exclusion's blind spot.
+      #
+      # THE DIAGNOSTIC THAT FOUND IT, kept here because it generalises past
+      # this one instance: isolate file-at-a-time in a throwaway worktree at
+      # the branch's base commit, adding files back one at a time, and re-run
+      # the exact command `lint-go` runs until the finding appears --
+      # whichever file's addition makes it appear is the one actually
+      # generating it, regardless of which line the report names.
+      #
+      #   git worktree add /tmp/gosec-iso <base-sha>
+      #   cd /tmp/gosec-iso && git checkout <branch> -- <file1>
+      #   GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=20m -c .golangci.yml \
+      #     --enable-only gosec ./<pkg>/...
+      #   # repeat, adding one more file per run, until the finding appears
+      #
+      # NOT YET WORTH BUILDING: a future gosec release may report the taint
+      # SOURCE's location rather than (or in addition to) the sink's -- if it
+      # ever does, this exclusion would then correctly hide a test-only
+      # finding instead of letting it misattribute to production, and the
+      # cost above would need re-reading. Check this when gosec's own version
+      # next bumps rather than guessing now.
       - path: '_test\.go'
         linters: [gosec]
 
