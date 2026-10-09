@@ -218,22 +218,31 @@ func TestSIGTERM_h_AGenuineFailureDuringTheDrainIsStillRecorded(t *testing.T) {
 }
 
 // The draining worker must keep heartbeating, or another worker reclaims its run after the reclaim window
-// (max(2x heartbeat, 10s)) and re-executes the step while the first is still running it: the duplicate a
-// graceful shutdown exists to avoid. The service holds the call for longer than that window.
+// (reclaimAfter() = max(minimumReclaimAfter(heartbeat), 10s), cmd/cleat-worker/setup.go) and re-executes
+// the step while the first is still running it: the duplicate a graceful shutdown exists to avoid. The
+// service holds the call for longer than that window.
 //
-// NOT YET RE-CALIBRATED TO cleat#3258 ROUND 6. minimumReclaimAfter(heartbeat) rose from ~14.5s to ~47s at
-// the default heartbeat (cmd/cleat-worker/setup.go), plus up to one reaper tick (max(heartbeat, 10s)) --
-// ~57s worst case, past this file's 25s sleep. That makes the 25s sleep below a silent vacuity (it no
-// longer exceeds the real window, so this test would pass whether or not the draining worker's heartbeat
-// actually survives the drain), but simply raising it is not a safe fix: the held call's own HTTP client
-// has a hardcoded 30s timeout (cmd/cleat-worker/setup.go's forwardToBenchSvc client), which is now SHORTER
-// than the new ~57s window. Measured directly: raising this sleep to 65s does not exercise the reclaim
-// path at all -- the held call's client gives up at 30s with "context deadline exceeded" and the run ends
-// FAILED outright, before reclaim ever becomes relevant. Fixing this needs either a production-code
-// decision (the 30s client timeout, or whether maxTolerableStall's own 30s is meant to coexist with it) or
-// a harness redesign that keeps the run busy across multiple sub-30s holds rather than one long one --
-// reported rather than patched here (cleat#3258 PR #3276). Left at its original value, which is honestly
-// short of the current invariant rather than silently wrong about having been fixed.
+// PARTIALLY RE-CALIBRATED TO cleat#3258/#3279, NOT FULLY -- READ BEFORE RAISING THE SLEEP AGAIN.
+// minimumReclaimAfter(heartbeat) rose from ~14.5s to ~47s at the default heartbeat (cleat#3258 ROUND 6),
+// plus up to one reaper tick (max(heartbeat, 10s)) -- ~57s worst case, which is the window this test
+// actually needs to span to have discriminating power (see below). cleat#3279 derived the held call's own
+// HTTP client timeout from minimumReclaimAfter instead of a hardcoded 30s, which is necessary but, for
+// THIS test specifically, not sufficient: the derived timeout is EQUAL TO minimumReclaimAfter (47s) by
+// design -- that is the system's own definition of "how long a stall this size is tolerated," and padding
+// a client beyond it would not be principled, see durableCallClientTimeout's doc in setup.go -- so the
+// client's own ceiling (47s) sits BELOW the ~57s window this test needs, not above it. Measured directly
+// at this head: sleep=45s passes (comfortably under 47s); sleep=50s fails with the exact same
+// "context deadline exceeded" the pre-#3279 30s ceiling produced, just at the higher threshold. The gap
+// narrowed (57-30=27s before #3279, 57-47=10s after) but did not close, and by construction it CANNOT
+// close this way: any single held call that must survive minimumReclaimAfter+tick will always be bounded
+// below that by the correctly-derived client timeout, because that timeout's own correct value IS
+// minimumReclaimAfter. Closing the remaining 10s needs a harness redesign (several sub-window holds
+// rather than one long one) -- still out of scope here, same as before.
+//
+// 40s is chosen with real margin below the measured 47s ceiling (CI runs slower than this measurement),
+// and is a genuine improvement over the old 25s -- it now exceeds reclaimAfter()'s OLD ~24.5s value with
+// margin, so a regression in that range is caught again, which 25s (now far short of today's ~47s/57s)
+// could not. It does not reach the full ~57s worst case; that gap is disclosed, not silently closed.
 func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.T) {
 	db := ownerDB(t)
 	defer db.Close()
@@ -254,7 +263,7 @@ func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.
 	second := startWorker(t, bin, taskQueue, svc.srv.URL)
 
 	exited := first.term()
-	time.Sleep(25 * time.Second) // beyond the OLD reclaim window only -- see the file doc above
+	time.Sleep(40 * time.Second) // beyond the OLD reclaim window with margin; NOT the full current one -- see the file doc above
 	release()
 	awaitExit(t, exited, 30*time.Second, first)
 
