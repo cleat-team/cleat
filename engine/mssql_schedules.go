@@ -327,7 +327,21 @@ func (s *MSSQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 }
 
 func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// beginTxWithContext, not bare s.db -- cleat#2210. Every statement below
+	// carries no tenant_id predicate of its own (the generation read is
+	// "optimistic locking", keyed only on id); they relied entirely on the
+	// RLS filter predicate's session context. A WithTenant copy sharing the
+	// pool's original connection without this would run every statement
+	// under the wrong tenant's context: the SELECT would find no row
+	// (ErrNoRows, read as "workflow no longer exists" and committed as
+	// success), or -- if the pool happened to hand back a connection some
+	// other call had stamped correctly -- the UPDATE/DELETE could silently
+	// affect 0 rows while still returning nil. Either way, compaction
+	// silently never happens, with no error surfaced anywhere. Found by the
+	// same audit that found deleteWorkflowsChunkOnceOnce/
+	// deleteEventHistoryChunkOnceOnce's identical bare-s.db.BeginTx shape;
+	// this is the one other method with it.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("compact history: begin tx: %w", err)
 	}
@@ -335,7 +349,8 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 
 	// Read current generation for optimistic locking.
 	var gen int64
-	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&gen)
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
+		workflowID, s.tenantID).Scan(&gen)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return tx.Commit() // Workflow no longer exists.
@@ -346,8 +361,8 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 	// Delete events older than keepStep.
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history
-		WHERE workflow_id = @p1 AND step < @p2
-	`, workflowID, keepStep)
+		WHERE workflow_id = @p1 AND step < @p2 AND tenant_id = @p3
+	`, workflowID, keepStep, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("compact history: delete events: %w", err)
 	}
@@ -356,8 +371,8 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = @p2, compaction_step = @p3, compacted_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND generation = @p4
-	`, workflowID, string(compactionState), compactionStep, gen)
+		WHERE id = @p1 AND generation = @p4 AND tenant_id = @p5
+	`, workflowID, string(compactionState), compactionStep, gen, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("compact history: update state: %w", err)
 	}
@@ -950,13 +965,29 @@ const mssqlSelectDeadLetteredBatch = `
 		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY`
 
 func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, label string, olderThan time.Time) (int64, error) {
-	// Plain read, no transaction: RCSI (required in production, asserted by
-	// TestMSSQLRetentionSweepsCauseNoLockEscalation in test) gives this a
-	// versioned, non-blocking read, and nothing below depends on the
-	// candidate set being read inside the same transaction that deletes it.
-	rows, err := s.db.QueryContext(ctx, selectSQL,
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	//
+	// Scoped to the SELECT alone, committed immediately below, and nothing
+	// after it: the chunked deletes that follow open their OWN transactions
+	// (deleteEventHistoryRowBoundedCommitting and the rest of this function),
+	// unchanged. This still gives the read the same short lifetime a plain
+	// autocommit QueryContext had -- RCSI (required in production, asserted
+	// by TestMSSQLRetentionSweepsCauseNoLockEscalation) still versions it
+	// rather than blocking, and nothing below depends on the candidate set
+	// being read inside the same transaction that deletes it. Verified
+	// empirically, not just by this reasoning -- see cleat#2210's PR for the
+	// trial count and result: this function's lock-escalation behavior has
+	// twice been wrong on inspection alone.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("%s: begin: %w", label, err)
+	}
+	rows, err := tx.QueryContext(ctx, selectSQL,
 		sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
 	if err != nil {
+		tx.Rollback()
 		return 0, fmt.Errorf("%s: select batch: %w", label, err)
 	}
 	var ids []string
@@ -964,15 +995,20 @@ func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, la
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
+			tx.Rollback()
 			return 0, fmt.Errorf("%s: scan: %w", label, err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
+		tx.Rollback()
 		return 0, fmt.Errorf("%s: rows: %w", label, err)
 	}
 	rows.Close()
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("%s: commit select: %w", label, err)
+	}
 
 	if len(ids) == 0 {
 		return 0, nil
@@ -1071,7 +1107,20 @@ func (s *MSSQLStore) deleteWorkflowsChunkOnce(ctx context.Context, chunk []strin
 // the caller as an ordinary error the retry wrapper needs to see, not one
 // this function should ever swallow unretried.
 func (s *MSSQLStore) deleteWorkflowsChunkOnceOnce(ctx context.Context, chunk []string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// beginTxWithContext, not bare s.db -- cleat#2210. Every delete below
+	// (deleteByWorkflowIDs) carries no tenant_id predicate of its own; it
+	// relies entirely on the RLS filter predicate evaluating the SESSION's
+	// tenant context. A WithTenant copy sharing the pool's original
+	// connection without this would run under the wrong tenant's context,
+	// so the DELETE would silently affect 0 rows -- and because
+	// deleteWorkflowsBatchOnce's outer loop counts a chunk as "deleted" by
+	// its length rather than by rows actually affected, the SELECT (already
+	// correctly scoped) would keep finding the same never-deleted row
+	// forever: an infinite loop, not merely a missed delete. Found exactly
+	// this way -- converting the SELECT alone and empirically re-testing
+	// caught it as a hang, which is the entire argument this function
+	// needed its own dedicated verification rather than a mechanical batch.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
@@ -1205,7 +1254,11 @@ func (s *MSSQLStore) deleteEventHistoryChunkOnce(ctx context.Context, stmt strin
 // deleteWorkflowsChunkOnceOnce is; see that function's comment for why the
 // split exists (TestEveryMSSQLTransactionBoundaryIsRetried).
 func (s *MSSQLStore) deleteEventHistoryChunkOnceOnce(ctx context.Context, stmt string, args []any) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// deleteWorkflowsChunkOnceOnce: stmt carries no tenant_id predicate of
+	// its own, relying entirely on the RLS filter predicate's session
+	// context.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin: %w", err)
 	}

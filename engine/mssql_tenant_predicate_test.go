@@ -15,9 +15,9 @@ package engine
 // GetDueSchedulesAcrossTenants both called requireCleatAdminMembership. #1926
 // retired that mechanism in favor of unconditional per-tenant rotation, so no
 // entry in this allowlist names a Go-level gate today -- see
-// adminToolAcrossTenants and scopedByCompactionSweep below for what replaced
-// it. An allowlist whose reasons are not true is worse than no allowlist,
-// because it reads like it was checked.
+// adminToolAcrossTenants below for what replaced it. An allowlist whose
+// reasons are not true is worse than no allowlist, because it reads like
+// it was checked.
 //
 // WHY IT IS NOT A SUBSTRING CHECK, which is the lesson that produced it.
 // scripts/mssql-tenant-predicate-audit.py -- this guard's ancestor, deleted in
@@ -83,26 +83,10 @@ const (
 	// here only so the ratchet holds while it is fixed, and it must name where
 	// it is tracked.
 	openFinding = "OPEN FINDING, not a grant: IMPROVEMENT-PLAN 3.92"
-	// The compaction sweep, and NOT scopedByCaller -- whose second clause names
-	// storeFor, which nothing on this path calls.
-	//
-	// cmd/cleat-worker/setup.go:compactionLoop reads candidates with
-	// GetCompactionCandidates, which restricts on `WHERE w.tenant_id = @p3`
-	// from s.tenantID, then passes each id to CompactWorkflowHistory on THE
-	// SAME store -- w.store, whose tenant is w.storeTenantID. One store, one
-	// tenantID, so an id from the read cannot name another tenant's row on the
-	// write. Verified as the only production caller of CompactWorkflowHistory.
-	//
-	// Written as its own reason because the conclusion being right does not
-	// make the mechanism right, and the mechanism is what the next reader
-	// checks. Under a function-granularity key this could not be said at all:
-	// one string covered three statements and described none of them.
 	// cleatctl, and not by a cleat_admin membership check in Go -- that
 	// mechanism was the WORKER's gate, never something cleatctl ran, and #1926
 	// retired it entirely. Getting that distinction wrong would attach a
-	// true-sounding reason to a mechanism that does not exist on this path,
-	// which is the failure mode scopedByCompactionSweep below was written to
-	// avoid.
+	// true-sounding reason to a mechanism that does not exist on this path.
 	//
 	// cleatctl's gate is the CONNECTION. cmd/cleatctl/main.go requires a DSN
 	// naming a role that row-level security does not apply to -- a superuser or
@@ -117,9 +101,6 @@ const (
 	// belongs to, and is the post-incident tool for finding out (cleat#1316).
 	adminToolAcrossTenants = "deliberately cross-tenant: an operator-supplied id in cleatctl, " +
 		"whose DSN must name a BYPASSRLS role (cleat#1184)"
-
-	scopedByCompactionSweep = "scoped by the sweep that produced the id: GetCompactionCandidates " +
-		"restricts on s.tenantID and compactionLoop compacts on the same store"
 
 	// engine/testutil, not production code, and reached only at test-failure
 	// time (cleat#982's angle 4). statsDB there is the sa connection
@@ -289,18 +270,6 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	"mssql_schedules.go:LoadCompactionState#a8f6b0ea440d": {
 		SQL:    "select cast(compaction_state as nvarchar(max)) from workflow_instances where i",
 		Reason: scopedByCaller,
-	},
-	"mssql_schedules.go:compactHistoryOnce#8f47157eee66": {
-		SQL:    "select generation from workflow_instances where id = @p1",
-		Reason: scopedByCompactionSweep,
-	},
-	"mssql_schedules.go:compactHistoryOnce#cae7f5825d20": {
-		SQL:    "delete from event_history where workflow_id = @p1 and step < @p2",
-		Reason: scopedByCompactionSweep,
-	},
-	"mssql_schedules.go:compactHistoryOnce#a78ab9d633bc": {
-		SQL:    "update workflow_instances set compaction_state = @p2, compaction_step = @p3, c",
-		Reason: scopedByCompactionSweep,
 	},
 	"mssql_signals_promises.go:GetChildResult#18eaf4c5f15d": {
 		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",
