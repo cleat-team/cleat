@@ -14,7 +14,13 @@
 
 services:
   postgres:
-    image: postgres:16
+    # mirror.gcr.io, not docker.io: this file is exercised directly by CI's
+    # scenario job (ci.yml's "AI agent platform scenario"), which hit Docker
+    # Hub's anonymous pull-rate limit tonight (cleat#3290). mirror.gcr.io
+    # pulls through the same content -- re-derive with
+    # `docker pull mirror.gcr.io/library/postgres:16` and compare its digest
+    # against a plain `docker pull postgres:16`.
+    image: mirror.gcr.io/library/postgres:16
     environment:
       POSTGRES_USER: cleat
       POSTGRES_PASSWORD: cleat
@@ -45,7 +51,8 @@ services:
   # a credential does not belong in a file that migrations replay
   # (migrations/postgres/001_schema.sql).
   app-role:
-    image: postgres:16
+    # mirror.gcr.io -- see the first postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/postgres:16
     environment:
       PGPASSWORD: cleat
     command:
@@ -84,7 +91,8 @@ services:
   # of -- a provider that always answered immediately would finish before the
   # kill could land.
   model-stub:
-    image: python:3-alpine
+    # mirror.gcr.io -- see the postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/python:3-alpine
     command:
       - python3
       - -c
@@ -188,7 +196,8 @@ services:
   # there is no way to get a tracked file into the container without the bind
   # mount this service exists to avoid -- one copy, in the place that uses it.
   plugin-config:
-    image: alpine
+    # mirror.gcr.io -- see the postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/alpine
     volumes:
       - plugin-config:/etc/cleat
     command:

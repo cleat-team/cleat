@@ -15,7 +15,7 @@
 # calls into the host, so a workflow with a 2-second budget ran for 2m35s and
 # was reported as a success. See IMPROVEMENT-PLAN.md 2.28.
 #
-FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
+FROM mirror.gcr.io/library/golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates gcc libc6-dev \
@@ -43,7 +43,7 @@ RUN /cleat-worker --verify-backend
 # =============================================================================
 # Stage 2: Runtime image
 # =============================================================================
-FROM debian:bookworm-slim
+FROM mirror.gcr.io/library/debian:bookworm-slim
 
 # ca-certificates: HTTPS outbound from durable HTTP calls
 # wget:            used by docker-compose healthcheck

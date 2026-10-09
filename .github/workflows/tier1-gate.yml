@@ -310,7 +310,7 @@ jobs:
         # three), and the four compose files at the repo root and in
         # .devcontainer/. cmd/cleat/templates/workflow/docker-compose.yml is
         # deliberately NOT pinned -- see the comment there.
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -324,7 +324,7 @@ jobs:
           --health-retries 5
 
       mysql:
-        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
@@ -622,7 +622,7 @@ jobs:
     services:
       postgres:
         # See tier1-engine's postgres service for the full pin rationale.
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -644,7 +644,7 @@ jobs:
       # anyway because the pre-sharding job already did and nothing here
       # should regress that on a PR whose scope is sharding, not coverage.
       postgres-crash:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -658,7 +658,7 @@ jobs:
           --health-retries 5
 
       mysql:
-        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat

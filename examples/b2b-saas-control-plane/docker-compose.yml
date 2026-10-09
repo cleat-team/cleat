@@ -20,7 +20,13 @@ x-dsn:
 
 services:
   postgres:
-    image: postgres:16
+    # mirror.gcr.io, not docker.io: this file is exercised directly by CI's
+    # scenario jobs (ci.yml's "B2B SaaS control plane" family), which hit
+    # Docker Hub's anonymous pull-rate limit tonight (cleat#3290).
+    # mirror.gcr.io pulls through the same content -- re-derive with
+    # `docker pull mirror.gcr.io/library/postgres:16` and compare its digest
+    # against a plain `docker pull postgres:16`.
+    image: mirror.gcr.io/library/postgres:16
     environment:
       POSTGRES_USER: cleat
       POSTGRES_PASSWORD: cleat
@@ -55,7 +61,8 @@ services:
   # row-level security FORCEd, and PostgreSQL never applies RLS to a
   # superuser -- see the worker's command below.
   app-role:
-    image: postgres:16
+    # mirror.gcr.io -- see the first postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/postgres:16
     environment:
       PGPASSWORD: cleat
     command:
