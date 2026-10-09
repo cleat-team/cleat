@@ -159,7 +159,8 @@ if [ "${1:-}" != "--update" ] && [ ! -f "$BASELINE" ]; then
 fi
 
 # is_code_use decides whether a matching line REFERENCES the name in code, as
-# opposed to merely spelling it in a comment or inside a string literal.
+# opposed to merely spelling it in a comment, inside a string literal, or in
+# ANOTHER declaration of the same bare name.
 #
 # WHY THIS EXISTS, and it is the defect cleat#1743 was filed to look for. The
 # same-file branch below has excluded comment lines since the script was
@@ -184,22 +185,54 @@ fi
 # finding a human reads. Stripping too LITTLE counts prose as a call and marks a
 # dead function used -- which is silent, and is the bug being fixed. When this
 # heuristic is wrong it should be wrong in the loud direction.
+#
+# exclude_file (cleat#3284) names a file containing every file:line that
+# DECLARES this bare name -- not just the one declaration under test. A
+# one-interface/N-implementations method spells its name N+1 times beyond
+# the one being checked (each sibling implementation, plus the interface's
+# own signature line), and every one of those lines is a Go declaration, not
+# a call, exactly as much as the single excluded line the script already
+# trusted. finddeadexports.go emits the interface signature lines (recv
+# "interface") precisely so this set can be built from the AST rather than
+# guessed at with a regex over call syntax -- see that file's own doc
+# comment. Before this, checking ANY ONE of N sibling implementations found
+# the OTHER N-1 declarations (plus the interface signature) and read every
+# one of them as a caller.
+#
+# A PATH, not the exclusion list itself, and that is load-bearing: BWK awk
+# (macOS's /usr/bin/awk, 20200816) refuses a -v assignment whose value spans
+# more than one line -- "newline in string ... at source line 1" -- and this
+# guard's multi-implementation case routinely needs more than one excluded
+# file:line per name. Measured directly: passing the list via -v produced
+# that error on every multi-entry case, and the self-test still reported
+# "passed" regardless, because the resulting awk failure made
+# code_use_filter print nothing -- which happened to match "not used" for
+# every fixture case tried, for the wrong reason. A file read with getline
+# has no such limit, and is the same mechanism this function used for its
+# one, single-line exclusion before cleat#3284 widened it to several.
+#
 # A fourth argument, skip_tests, makes the filter ignore callers in _test.go
 # files. That is the only difference between this guard's two questions -- "does
 # anything call it" and "does anything OUTSIDE A TEST call it" -- so they share
 # one grep and one filter rather than being two scans that can drift.
 code_use_filter() {
-  awk -v name="$1" -v decl_file="$2" -v decl_line="$3" -v skip_tests="${4:-0}" '
+  awk -v name="$1" -v exclude_file="$2" -v skip_tests="${3:-0}" '
+    BEGIN {
+      while ((getline exline < exclude_file) > 0) {
+        if (exline != "") excluded[exline] = 1
+      }
+      close(exclude_file)
+    }
     {
       # split "file:line:content" on the FIRST two colons only; content keeps
       # any colons of its own.
       i = index($0, ":");            f = substr($0, 1, i-1); rest = substr($0, i+1)
       j = index(rest, ":");          ln = substr(rest, 1, j-1); c = substr(rest, j+1)
-      if (f == decl_file && ln == decl_line) next    # the declaration itself
-      if (skip_tests == 1 && f ~ /_test\.go$/) next  # a test is not a caller
-      gsub(/"[^"]*"/, "", c)                         # strings first...
+      if ((f ":" ln) in excluded) next                # a declaration of this name, not a call
+      if (skip_tests == 1 && f ~ /_test\.go$/) next    # a test is not a caller
+      gsub(/"[^"]*"/, "", c)                           # strings first...
       gsub(/`[^`]*`/, "", c)
-      sub(/\/\/.*/, "", c)                           # ...then comments
+      sub(/\/\/.*/, "", c)                             # ...then comments
       if (c ~ ("(^|[^A-Za-z0-9_])" name "([^A-Za-z0-9_]|$)")) { print "USED"; exit }
     }'
 }
@@ -246,18 +279,60 @@ scan() {
     return 2
   fi
 
-  local out="" file line recv name matches label
+  # by_name maps every declared bare name (any receiver, including
+  # "interface") to every file:line that declares it, one "<name>\t<file:line>"
+  # row per declaration, sorted by name so grep -- re-run per decl below --
+  # can anchor on a line-start prefix instead of scanning unordered text.
+  # Built once per scan() call, not reconstructed per decl: $decls does not
+  # change while this runs.
+  local by_name
+  by_name="$(mktemp)"
+  awk -F'\t' '{print $4"\t"$1":"$2}' "$decls" | LC_ALL=C sort > "$by_name"
+
+  local out="" file line recv name matches label exclude_f=""
   while IFS=$'\t' read -r file line recv name; do
+    # The PREVIOUS iteration's exclusion file, removed here rather than at
+    # every exit point below (three continues and one fall-through) -- one
+    # cleanup site instead of four that all have to remember it.
+    rm -f "$exclude_f"
+
     if [[ "$name" =~ $COMMON_INTERFACE_METHODS ]]; then
       continue
     fi
+
+    # An interface's own method signature (recv "interface",
+    # finddeadexports.go, cleat#3284) is not a reportable finding: there is
+    # no function body to wire up, call, or delete independently of its
+    # implementations. It exists in $decls only to contribute its file:line
+    # to the exclusion set below, for every implementation that shares its
+    # name.
+    if [ "$recv" = "interface" ]; then
+      continue
+    fi
+
+    # exclude_f lists every file:line that DECLARES this bare name, across
+    # every receiver (including "interface") -- not just this one decl's own
+    # line. See code_use_filter's doc comment for why a sibling
+    # implementation's declaration, or the interface's own signature line,
+    # must be excluded exactly as this decl's own line already was
+    # (cleat#3284). One temp file per decl rather than one for the whole
+    # scan: code_use_filter's getline needs an actual path, and decls in
+    # this loop are processed one at a time regardless.
+    # Anchored at line-start, not -F: an unanchored fixed-string match on
+    # "name<TAB>" would also hit a row whose name merely ENDS in name (e.g.
+    # name="Do" matching a "FooDo\t..." row). Go identifiers are
+    # [A-Za-z0-9_] only, none of them a BRE metacharacter, so the bare name
+    # needs no escaping to be used as a regex here.
+    exclude_f="$(mktemp)"
+    grep "^${name}$(printf '\t')" "$by_name" | cut -f2- > "$exclude_f"
 
     # THE INDEX, NOT THE WORKING DIRECTORY (cleat#1783). This used to be
     # `grep -rnw --include='*.go' . `, which walks whatever is on disk -- and
     # this repo routinely holds whole additional copies of itself under
     # .claude/worktrees/. A copy of a declaration in another session's scratch
-    # checkout has a different path, so code_use_filter's one exclusion (the
-    # declaration's own file:line) does not cover it; the copy's `func Name(`
+    # checkout has a different path, so code_use_filter's exclusion set (built
+    # from this tree's own tracked declarations) does not cover it; the copy's
+    # `func Name(`
     # is neither comment nor string, so it survives both gsubs and matches the
     # identifier regex. The symbol reads as used.
     #
@@ -298,8 +373,8 @@ scan() {
     # never appears in the test-only list -- otherwise every entry in
     # deadexports-baseline.txt would also need an entry in the other file, and
     # two files asserting the same thing drift apart.
-    if [ -n "$(printf '%s\n' "$matches" | code_use_filter "$name" "$file" "$line" 0)" ]; then
-      if [ -n "$(printf '%s\n' "$matches" | code_use_filter "$name" "$file" "$line" 1)" ]; then
+    if [ -n "$(printf '%s\n' "$matches" | code_use_filter "$name" "$exclude_f" 0)" ]; then
+      if [ -n "$(printf '%s\n' "$matches" | code_use_filter "$name" "$exclude_f" 1)" ]; then
         continue                                  # a real, non-test caller
       fi
       out="${out}${file}	func ${label}	testonly"$'\n'
@@ -308,7 +383,7 @@ scan() {
     out="${out}${file}	func ${label}	dead"$'\n'
   done < "$decls"
 
-  rm -f "$decls" "$stderr_f" "$tracked"
+  rm -f "$decls" "$stderr_f" "$tracked" "$by_name" "$exclude_f"
   printf '%s' "$out" | grep -v '^$' | LC_ALL=C sort -u || true
 }
 
@@ -394,8 +469,45 @@ var notACall = map[string]string{
 
 func otherFileCaller() { LiveFromOtherFile(); LiveFromTestAndCode() }
 
+// implB is Doer's SECOND implementation, declared in a different file from
+// implA (c.go) and from Doer itself (c.go) -- see c.go's doc comment. Neither
+// implementation is ever called.
+type implB struct{}
+
+func (b *implB) DeadSiblingMethod() {}
+
 var _ = notACall
 FIXTURE_B
+
+  # cleat#3284's own fixture: a one-interface/N-implementations method, and a
+  # one-interface/ONE-implementation method, neither ever called anywhere.
+  # Before cleat#3284, checking implA.DeadSiblingMethod found implB's
+  # declaration (b.go, a different file) and Doer's own signature line
+  # (right below, in THIS file) and read either as a caller; checking
+  # SoleImplementer.DeadOnlyDeclaredOnInterface -- which has no sibling at
+  # all -- found only OnlyInterface's signature line and read THAT as the
+  # caller. Different implementation counts (two vs one) isolate the two
+  # mechanisms this fix closes: sibling declarations, and the interface's
+  # own signature line, standing alone.
+  cat > "$tmp/pkg/c.go" <<'FIXTURE_C'
+package pkg
+
+type Doer interface {
+	DeadSiblingMethod()
+}
+
+type implA struct{}
+
+func (a *implA) DeadSiblingMethod() {}
+
+type OnlyInterface interface {
+	DeadOnlyDeclaredOnInterface()
+}
+
+type SoleImplementer struct{}
+
+func (s *SoleImplementer) DeadOnlyDeclaredOnInterface() {}
+FIXTURE_C
 
   # A _test.go file is not a source of DECLARATIONS (finddeadexports.go skips
   # them) but it is a source of REFERENCES, which is the whole point of the
@@ -426,6 +538,7 @@ FIXTURE_TEST
   mkdir -p "$tmp/.claude/worktrees/scratch/pkg"
   cp "$tmp/pkg/a.go" "$tmp/.claude/worktrees/scratch/pkg/a.go"
   cp "$tmp/pkg/b.go" "$tmp/.claude/worktrees/scratch/pkg/b.go"
+  cp "$tmp/pkg/c.go" "$tmp/.claude/worktrees/scratch/pkg/c.go"
 
   # The scan reads the index, so the fixture has to have one. git init rather
   # than a repo/non-repo branch in scan(): one code path, and the self-test
@@ -440,7 +553,10 @@ FIXTURE_TEST
     'pkg/a.go	func DeadOnlyInCommentElsewhere	dead' \
     'pkg/a.go	func DeadOnlyInOwnDocComment	dead' \
     'pkg/a.go	func DeadOnlyInStringElsewhere	dead' \
-    'pkg/a.go	func TestOnlyCaller	testonly' | LC_ALL=C sort)"
+    'pkg/a.go	func TestOnlyCaller	testonly' \
+    'pkg/b.go	func implB.DeadSiblingMethod	dead' \
+    'pkg/c.go	func implA.DeadSiblingMethod	dead' \
+    'pkg/c.go	func SoleImplementer.DeadOnlyDeclaredOnInterface	dead' | LC_ALL=C sort)"
 
   # scan() greps "." from the CWD, so running it from the fixture points both
   # halves -- declarations and references -- at the fixture and nothing else.
