@@ -1521,8 +1521,13 @@ func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason,
 	var hasDefers, compacted bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT w.status,
+		       -- e.tenant_id = w.tenant_id added -- cleat#2059: event_history's
+		       -- primary key realigns to (tenant_id, workflow_id, step), so a
+		       -- predicate naming only workflow_id would lose its seek path.
+		       -- w.tenant_id is already bound by this query's own WHERE below.
 		       EXISTS(SELECT 1 FROM event_history e
-		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		              WHERE e.workflow_id = w.id AND e.tenant_id = w.tenant_id
+		                AND e.event_type = 'defer'),
 		       w.compaction_state IS NOT NULL
 		FROM workflow_instances w
 		WHERE w.id = ? AND w.tenant_id = ?

@@ -519,8 +519,19 @@ func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, rea
 	var hasDefers, compacted int
 	err = tx.QueryRowContext(ctx, `
 		SELECT w.status,
+		       -- e.tenant_id = @p2 DIRECTLY, not via w.tenant_id -- cleat#2059.
+		       -- event_history's clustered key realigns to (tenant_id,
+		       -- workflow_id, step), so a predicate naming only workflow_id
+		       -- would lose its seek path. @p2 is the same tenant value
+		       -- w.tenant_id is compared against below; comparing e.tenant_id
+		       -- to it directly (rather than to w.tenant_id, a column-to-column
+		       -- correlation) is what
+		       -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
+		       -- recognizes as a restriction to the caller rather than a join
+		       -- condition between two tables.
 		       CASE WHEN EXISTS(SELECT 1 FROM event_history e
-		                        WHERE e.workflow_id = w.id AND e.event_type = 'defer')
+		                        WHERE e.workflow_id = w.id AND e.tenant_id = @p2
+		                          AND e.event_type = 'defer')
 		            THEN 1 ELSE 0 END,
 		       CASE WHEN w.compaction_state IS NOT NULL THEN 1 ELSE 0 END
 		FROM workflow_instances w WITH (UPDLOCK, ROWLOCK)
