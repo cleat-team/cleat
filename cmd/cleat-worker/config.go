@@ -85,7 +85,16 @@ var (
 	pollInterval      = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
 	notifyChannel     = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
 	apiAddr           = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
-	pprofAddr         = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
+	// Off by default (empty) -- cleat#2345. A browser-based caller holding a
+	// tenant API key is a deployment choice with real risk (the key is
+	// readable by any script on that origin); the recommended default is
+	// the same-origin proxy pattern (#2344), not a CORS allowlist. See
+	// docs/reference/worker-config.md's note on this flag before enabling
+	// it. Comma-separated, exact origins only -- never "*" -- see
+	// newCORSMiddleware's own doc comment (cors.go) for why that is
+	// enforced by construction rather than validated here.
+	corsAllowedOrigins = flag.String("cors-allowed-origins", "", "Comma-separated list of exact origins (e.g. https://app.example.com) allowed to make cross-origin requests to this worker's HTTP API. Empty (default) disables CORS entirely -- no preflight handling, no Access-Control-* response headers. Never \"*\"; origins are matched by exact string equality. See docs/reference/worker-config.md before enabling this on a deployment that is not behind the recommended same-origin proxy (#2344)")
+	pprofAddr          = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
 	// workerServiceName names a headless Kubernetes Service (clusterIP: None)
 	// that selects this worker's pods, matching the pod spec's own
 	// spec.subdomain (see charts/cleat/templates/{service,deployment}.yaml).
