@@ -86,12 +86,17 @@ import (
 // that is a separate, different piece of work, not inherited here by
 // extending D.
 func TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt(t *testing.T) {
-	// mssqlDrainSlack: same source and same value as the sibling file's own
-	// constant of this name -- go-mssqldb's cancel-drain path, cited there
-	// as "~5s" in minimumReclaimAfter's own doc comment in setup.go. Not
-	// shared via an exported symbol because the sibling file's own copy is
-	// a local const inside its test function, not a package-level one.
-	const mssqlDrainSlack = 5 * time.Second
+	// mssqlDrainSlack: same source and same value as setup.go's own
+	// package-level constant of this name -- go-mssqldb's cancel-drain
+	// path, cited there as "~5s" in minimumReclaimAfter's own doc comment.
+	// ROUND 6 (cleat#3258) promoted setup.go's copy from test-local to
+	// package-level production, so this file now shadows it deliberately
+	// under a "pinned" name, same reasoning as pinnedReclaimSlack below:
+	// a frozen snapshot, not a live read, so a future change to the
+	// production constant makes this file's assertions start failing
+	// rather than silently tracking it. Re-derive with
+	// `grep -n 'const mssqlDrainSlack' cmd/cleat-worker/setup.go`.
+	const pinnedMssqlDrainSlack = 5 * time.Second
 
 	// pinnedReclaimSlack freezes reclaimSlack's value as measured when this
 	// file was written (cleat#3254/cleat#3258), deliberately NOT read live
@@ -104,67 +109,15 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt(t *testing.T
 	// setup.go (`grep -n 'const reclaimSlack' cmd/cleat-worker/setup.go`).
 	const pinnedReclaimSlack = 1 * time.Second
 
-	type mode struct {
-		name string
-		// callDuration: how long a call caught by `remaining` (the stall
-		// time still left when this call starts touching the network)
-		// takes to return, given ordinary round-trip latency dL. Identical
-		// shape to the sibling file's mode.callDuration -- see its doc for
-		// why raw duration is max(remaining, dL), not a sum.
-		callDuration func(remaining, dL, deadline time.Duration) time.Duration
-		// retryPaysReconnect: every attempt after a failed one pays a fresh
-		// reconnect before it can start (not just the first retry -- see
-		// the file doc comment above).
-		retryPaysReconnect bool
-		// exactSafeBoundary, when non-nil, is a closed-form (not derived
-		// from simulateRecovery) upper bound on D for which this mode is
-		// safe -- see the file doc comment on why only postgres gets one.
-		exactSafeBoundary func(deadline time.Duration) time.Duration
-	}
-	rawDuration := func(remaining, dL time.Duration) time.Duration { return max(remaining, dL) }
-	modes := []mode{
-		{
-			name: "mysql (respects ctx, cut off at deadline)",
-			callDuration: func(remaining, dL, deadline time.Duration) time.Duration {
-				return min(rawDuration(remaining, dL), deadline)
-			},
-		},
-		{
-			name: "postgres (ignores ctx, returns when the stall clears)",
-			callDuration: func(remaining, dL, _ time.Duration) time.Duration {
-				return rawDuration(remaining, dL)
-			},
-			// postgres never returns early (no ceiling), so a caught call
-			// always blocks for exactly `remaining` -- there is never a
-			// second failed attempt, by construction, regardless of D's
-			// size. recovery(D) = heartbeat + D + retryInterval + deadline
-			// (dL never binds: D >= heartbeat always on this file's own
-			// grid, and dL <= deadline always by construction (dL is
-			// swept over [0, deadline]), so max(D, dL) = D). This does
-			// NOT need heartbeat > deadline -- an earlier version of this
-			// comment claimed that too, which is false at the "low" scale
-			// (dbCallDeadlineFor(1s) = 2s, the floor binds, so deadline >
-			// heartbeat there). Caught by cleat-review during #3259's
-			// FINAL verification (cleat#3262): the assertion below was
-			// never affected, since it only ever needed dL <= deadline.
-			// Solving
-			// recovery(D) <= minimumReclaimAfter(heartbeat) for D gives
-			// exactly 2*deadline + pinnedReclaimSlack -- pure algebra on
-			// minimumReclaimAfter's own stated formula
-			// (heartbeat + 3*deadline + retryInterval + reclaimSlack),
-			// not a value read off the simulation.
-			exactSafeBoundary: func(deadline time.Duration) time.Duration {
-				return 2*deadline + pinnedReclaimSlack
-			},
-		},
-		{
-			name: "mssql (cancel-drain bound, then a reconnect on every retry)",
-			callDuration: func(remaining, dL, deadline time.Duration) time.Duration {
-				return min(rawDuration(remaining, dL), deadline+mssqlDrainSlack)
-			},
-			retryPaysReconnect: true,
-		},
-	}
+	// pinnedMaxTolerableStall: same pinning discipline as the two constants
+	// above, for ROUND 6's new maxTolerableStall constant (setup.go). This
+	// is the one most likely to change in the future -- it is a chosen
+	// design target, not a measured driver property -- so pinning it here
+	// is exactly the tripwire that should fire if it does. Re-derive with
+	// `grep -n 'const maxTolerableStall' cmd/cleat-worker/setup.go`.
+	const pinnedMaxTolerableStall = 30 * time.Second
+
+	modes := recoveryModes(pinnedMaxTolerableStall, pinnedMssqlDrainSlack, pinnedReclaimSlack)
 
 	type hbScale struct {
 		name string
@@ -189,37 +142,6 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt(t *testing.T
 	// left open -- rather than [0, heartbeat).
 	const stallSteps = 20
 	const roundTripSteps = 5
-
-	// simulateRecovery walks heartbeatLoop's own re-arm rule attempt by
-	// attempt and returns the wall-clock time, measured from the last
-	// successful heartbeat write, at which the next successful write
-	// lands. offset tracks elapsed time since the stall itself started,
-	// which (worst case, same framing as the sibling file) is the same
-	// instant the first post-interval attempt starts touching the network
-	// -- so heartbeat (T1) is added back in only once, at the end.
-	simulateRecovery := func(m mode, heartbeat, deadline, retryInterval, D, dL, reconnect time.Duration) (recovery time.Duration, attempts int) {
-		const maxAttempts = 100000 // generous: D <= 2*heartbeat <= 60s here, and each iteration advances offset by at least retryInterval (>0); see the file doc's "GENUINELY NEW" note for why this terminates
-		var offset time.Duration
-		payReconnect := false
-		for attempts = 1; attempts <= maxAttempts; attempts++ {
-			if payReconnect {
-				offset += reconnect
-			}
-			remaining := D - offset
-			if remaining <= 0 {
-				// The stall is already over by the time this attempt starts
-				// touching the network: an ordinary call. Modeled at its
-				// own worst-case latency (`deadline`), not the swept dL --
-				// see the file doc comment on why T4 is deadline, not dL,
-				// even once the stall has genuinely cleared.
-				return heartbeat + offset + deadline, attempts
-			}
-			dur := m.callDuration(remaining, dL, deadline)
-			offset += dur + retryInterval
-			payReconnect = m.retryPaysReconnect
-		}
-		return heartbeat + offset, attempts // unreachable in any swept case; see the panic-free cap note
-	}
 
 	// unsafeMySQL/unsafeMSSQL: running counts of grid points this file
 	// measures as unsafe today (cleat#3258) for the two modes with no
@@ -298,18 +220,29 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt(t *testing.T
 	t.Logf("swept %d grid points over D in [heartbeat, 2*heartbeat] (3 modes x %d heartbeat scales x reconnect x %d stall steps x %d round-trip steps)",
 		cases, len(hbScales), stallSteps+1, roundTripSteps+1)
 
-	// Pinned counts of known-unsafe grid points (cleat#3258), measured
-	// 2026-10-09. NOT a census of a growing population -- this grid is
-	// fixed by the constants above, so these numbers do not drift with
-	// unrelated repo growth the way CLAUDE.md warns a table/skip/export
-	// count does. They DO move if minimumReclaimAfter, reclaimSlack, or
-	// this file's own grid constants change -- that is the point: either
+	// Pinned counts of known-unsafe grid points (cleat#3258), re-measured
+	// 2026-10-09 against ROUND 6's fix (the same day as the original
+	// measurement, which found 186/685). NOT a census of a growing
+	// population -- this grid is fixed by the constants above, so these
+	// numbers do not drift with unrelated repo growth the way CLAUDE.md
+	// warns a table/skip/export count does. They DO move if
+	// minimumReclaimAfter, reclaimSlack, maxTolerableStall, mssqlDrainSlack,
+	// or this file's own grid constants change -- that is the point: either
 	// mismatch means cleat#3258 (or this file) needs a fresh look, not a
 	// quiet update of the literal below. Re-derive by temporarily changing
 	// the t.Logf lines above to t.Fatalf and reading `go test -v`'s own
 	// FAIL count, or by instrumenting unsafeMySQL/unsafeMSSQL directly.
-	const wantUnsafeMySQL = 186
-	const wantUnsafeMSSQL = 685
+	//
+	// THE DROP ITSELF (186->44 mysql, 685->159 mssql) is the signal this
+	// file's own doc comment said to expect once a fix landed -- "some of
+	// today's known gap points newly safe" -- and it is a drop, not a
+	// zeroing, because maxTolerableStall (30s, fixed) does not scale with
+	// heartbeat the way this grid's own D range does (up to 2*heartbeat,
+	// 60s at the "large" hb=30s scale): every remaining unsafe point here
+	// is at hb=large with D past 30s, not at hb=default or hb=low, where
+	// the fix now covers the grid's entire [heartbeat, 2*heartbeat] band.
+	const wantUnsafeMySQL = 44
+	const wantUnsafeMSSQL = 159
 	if unsafeMySQL != wantUnsafeMySQL {
 		t.Fatalf("mysql known-gap count changed: got %d unsafe grid points, pinned at %d (cleat#3258) -- "+
 			"minimumReclaimAfter, reclaimSlack, or this file's own grid has changed; re-derive before updating "+
@@ -319,6 +252,173 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt(t *testing.T
 		t.Fatalf("mssql known-gap count changed: got %d unsafe grid points, pinned at %d (cleat#3258) -- "+
 			"minimumReclaimAfter, reclaimSlack, or this file's own grid has changed; re-derive before updating "+
 			"the pinned literal", unsafeMSSQL, wantUnsafeMSSQL)
+	}
+}
+
+// Hoisted to package level (cleat#3258 ROUND 6) so
+// TestReaperRecoveryGateCoversTheTwoRealMeasuredStalls, below, can share it
+// with the main sweep rather than keeping a second, drift-prone copy.
+type recoveryMode struct {
+	name string
+	// callDuration: how long a call caught by `remaining` (the stall
+	// time still left when this call starts touching the network)
+	// takes to return, given ordinary round-trip latency dL. Identical
+	// shape to the sibling file's mode.callDuration -- see its doc for
+	// why raw duration is max(remaining, dL), not a sum.
+	callDuration func(remaining, dL, deadline time.Duration) time.Duration
+	// retryPaysReconnect: every attempt after a failed one pays a fresh
+	// reconnect before it can start (not just the first retry -- see
+	// the file doc comment above).
+	retryPaysReconnect bool
+	// exactSafeBoundary, when non-nil, is a closed-form (not derived
+	// from simulateRecovery) upper bound on D for which this mode is
+	// safe -- see the file doc comment on why only postgres gets one.
+	exactSafeBoundary func(deadline time.Duration) time.Duration
+}
+
+func recoveryRawDuration(remaining, dL time.Duration) time.Duration { return max(remaining, dL) }
+
+// recoveryModes builds the three driver failure shapes this file
+// characterizes, parameterized on the three pinned constants both
+// TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt and
+// TestReaperRecoveryGateCoversTheTwoRealMeasuredStalls freeze independently
+// (see pinnedReclaimSlack's own doc for why pinning rather than reading
+// setup.go's constants live matters here).
+func recoveryModes(pinnedMaxTolerableStall, pinnedMssqlDrainSlack, pinnedReclaimSlack time.Duration) []recoveryMode {
+	return []recoveryMode{
+		{
+			name: "mysql (respects ctx, cut off at deadline)",
+			callDuration: func(remaining, dL, deadline time.Duration) time.Duration {
+				return min(recoveryRawDuration(remaining, dL), deadline)
+			},
+		},
+		{
+			name: "postgres (ignores ctx, returns when the stall clears)",
+			callDuration: func(remaining, dL, _ time.Duration) time.Duration {
+				return recoveryRawDuration(remaining, dL)
+			},
+			// postgres never returns early (no ceiling), so a caught call
+			// always blocks for exactly `remaining` -- there is never a
+			// second failed attempt, by construction, regardless of D's
+			// size. recovery(D) = heartbeat + D + retryInterval + deadline
+			// (dL never binds: D >= heartbeat always on this file's own
+			// grid, and dL <= deadline always by construction (dL is
+			// swept over [0, deadline]), so max(D, dL) = D). This does
+			// NOT need heartbeat > deadline -- an earlier version of this
+			// comment claimed that too, which is false at the "low" scale
+			// (dbCallDeadlineFor(1s) = 2s, the floor binds, so deadline >
+			// heartbeat there). Caught by cleat-review during #3259's
+			// FINAL verification (cleat#3262): the assertion below was
+			// never affected, since it only ever needed dL <= deadline.
+			// ROUND 6 (cleat#3258) widened minimumReclaimAfter to
+			// `heartbeat + maxTolerableStall + 2*deadline + mssqlDrainSlack
+			// + retryInterval + reclaimSlack` -- see that function's own doc
+			// for the generalised derivation across all three modes.
+			// Solving recovery(D) <= minimumReclaimAfter(heartbeat) for D
+			// with THIS formula gives exactly `maxTolerableStall + deadline
+			// + mssqlDrainSlack + pinnedReclaimSlack` -- pure algebra, not a
+			// value read off the simulation. (Previously
+			// `2*deadline + pinnedReclaimSlack`, before this round.)
+			exactSafeBoundary: func(deadline time.Duration) time.Duration {
+				return pinnedMaxTolerableStall + deadline + pinnedMssqlDrainSlack + pinnedReclaimSlack
+			},
+		},
+		{
+			name: "mssql (cancel-drain bound, then a reconnect on every retry)",
+			callDuration: func(remaining, dL, deadline time.Duration) time.Duration {
+				return min(recoveryRawDuration(remaining, dL), deadline+pinnedMssqlDrainSlack)
+			},
+			retryPaysReconnect: true,
+		},
+	}
+}
+
+// simulateRecovery walks heartbeatLoop's own re-arm rule attempt by
+// attempt and returns the wall-clock time, measured from the last
+// successful heartbeat write, at which the next successful write
+// lands. offset tracks elapsed time since the stall itself started,
+// which (worst case, same framing as the sibling file) is the same
+// instant the first post-interval attempt starts touching the network
+// -- so heartbeat (T1) is added back in only once, at the end.
+//
+// maxAttempts is generous enough for either test in this file: the main
+// sweep's D <= 2*heartbeat <= 60s, and TestReaperRecoveryGateCoversThe
+// TwoRealMeasuredStalls's D <= 25s -- and each iteration advances offset
+// by at least retryInterval (>0), so termination is guaranteed well before
+// the cap; see the file doc's "GENUINELY NEW" note.
+func simulateRecovery(m recoveryMode, heartbeat, deadline, retryInterval, D, dL, reconnect time.Duration) (recovery time.Duration, attempts int) {
+	const maxAttempts = 100000
+	var offset time.Duration
+	payReconnect := false
+	for attempts = 1; attempts <= maxAttempts; attempts++ {
+		if payReconnect {
+			offset += reconnect
+		}
+		remaining := D - offset
+		if remaining <= 0 {
+			// The stall is already over by the time this attempt starts
+			// touching the network: an ordinary call. Modeled at its
+			// own worst-case latency (`deadline`), not the swept dL --
+			// see the file doc comment on why T4 is deadline, not dL,
+			// even once the stall has genuinely cleared.
+			return heartbeat + offset + deadline, attempts
+		}
+		dur := m.callDuration(remaining, dL, deadline)
+		offset += dur + retryInterval
+		payReconnect = m.retryPaysReconnect
+	}
+	return heartbeat + offset, attempts // unreachable in any swept case; see the panic-free cap note
+}
+
+// TestReaperRecoveryGateCoversTheTwoRealMeasuredStalls is cleat#3258's own
+// closing check: the issue's whole severity argument rested on two REAL
+// docker-pause reproductions already in this file's history --
+// probeBoundedCall's doc (setup.go, cleat#2007: 25s) and
+// minimumReclaimAfter's own round-4 doc (setup.go: 11.7s) -- both of which
+// exceed not just heartbeat but 2*heartbeat at the default 5s heartbeat,
+// so neither is a point the main sweep above (bounded at 2*heartbeat) ever
+// characterizes. This asserts directly, for all three driver shapes, that
+// ROUND 6's fix makes both of those SPECIFIC real durations safe -- the
+// concrete claim "this fix would have prevented reclaiming a worker during
+// either of those two real outages," not just an improved grid-point count.
+func TestReaperRecoveryGateCoversTheTwoRealMeasuredStalls(t *testing.T) {
+	const heartbeat = 5 * time.Second
+	const pinnedMaxTolerableStall = 30 * time.Second
+	const pinnedMssqlDrainSlack = 5 * time.Second
+	const pinnedReclaimSlack = 1 * time.Second
+
+	deadline := dbCallDeadlineFor(heartbeat)
+	retryInterval := heartbeatRetryIntervalFor(heartbeat)
+	reclaimTimeout := minimumReclaimAfter(heartbeat)
+	modes := recoveryModes(pinnedMaxTolerableStall, pinnedMssqlDrainSlack, pinnedReclaimSlack)
+
+	realStalls := []struct {
+		name string
+		D    time.Duration
+	}{
+		// minimumReclaimAfter's own round-4 doc comment, setup.go: a real
+		// Postgres container, docker-pause'd mid-call, on a 2s context
+		// deadline -- did not return until the pause lifted, 11.7s later.
+		{"round-4 docker-pause reproduction (minimumReclaimAfter's own doc)", 11700 * time.Millisecond},
+		// probeBoundedCall's doc comment, setup.go, cleat#2007: a real
+		// docker-pause held cleat_db_reachable at 1 for a full 25s.
+		{"cleat#2007 docker-pause reproduction (probeBoundedCall's own doc)", 25 * time.Second},
+	}
+
+	for _, stall := range realStalls {
+		for _, m := range modes {
+			t.Run(stall.name+"/"+m.name, func(t *testing.T) {
+				recovery, attempts := simulateRecovery(m, heartbeat, deadline, retryInterval, stall.D, 0, 0)
+				if attempts > 100000 {
+					t.Fatalf("simulateRecovery did not terminate within the attempt cap")
+				}
+				if recovery > reclaimTimeout {
+					t.Errorf("recovery=%v exceeds reclaimTimeout=%v for a REAL measured stall (%v) -- "+
+						"cleat#3258's fix does not cover this real-world case at the default heartbeat",
+						recovery, reclaimTimeout, stall.D)
+				}
+			})
+		}
 	}
 }
 
@@ -338,3 +438,14 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt(t *testing.T
 // both counts (fewer grid points stay unsafe against a wider reclaimTimeout),
 // so the hardcoded literals mismatch and fail loudly rather than silently
 // passing a stale number.
+//
+// ROUND 6 FALSIFICATION (cleat#3258, this round's own change). With
+// minimumReclaimAfter reverted to its pre-round-6 form (heartbeat +
+// 3*deadline + retryInterval + reclaimSlack, no maxTolerableStall or
+// mssqlDrainSlack term), TestReaperRecoveryGateCoversTheTwoRealMeasuredStalls
+// above goes red on every one of its six sub-tests (2 real stalls x 3
+// modes) -- confirming the test can fail, and that it was the old formula,
+// not a tautology, that it is checking. Reverted, re-confirmed green.
+// Re-run with:
+//
+//	go test ./cmd/cleat-worker/ -run TestReaperRecoveryGateCoversTheTwoRealMeasuredStalls -v

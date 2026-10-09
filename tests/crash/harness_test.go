@@ -63,7 +63,19 @@ const (
 
 	// completeBudget is how long a single one-call workflow gets. Generous: the
 	// point of this suite is what happened, not how fast.
-	completeBudget = 90 * time.Second
+	//
+	// Several tests in this package kill a worker and wait for a SECOND worker
+	// to reclaim its run, which cannot happen faster than
+	// minimumReclaimAfter(heartbeat) (cmd/cleat-worker/setup.go) plus up to one
+	// reaper tick interval (max(heartbeat, 10s)) -- about 57s at the default 5s
+	// heartbeat since cleat#3258 ROUND 6 raised minimumReclaimAfter from ~14.5s
+	// to ~47s. 90s left only ~33s of margin over that, which measured green
+	// locally (~57s) but red in CI (two tests failing at ~97s, cleat#3258 PR
+	// #3276) -- CI's shared, loaded host runs slower than a local checkout, and
+	// 33s was not enough slack to absorb that. 240s was chosen the same way the
+	// comment above already asks for: generously, not by shaving the minimum
+	// needed to pass once.
+	completeBudget = 240 * time.Second
 )
 
 // ownerDSN is the migration/owner connection. Deliberately not defaulted to
