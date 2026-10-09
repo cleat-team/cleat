@@ -167,6 +167,8 @@ var seededByDropTenantFixture = []string{
 	"public.queue_holders",
 	"public.workflow_defs",
 	"public.workflow_instances",
+	"public.workflow_leases",
+	"public.workflow_payloads",
 	"public.workflow_promises",
 	"public.workflow_routing",
 	"public.workflow_schedules",

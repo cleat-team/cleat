@@ -37,8 +37,10 @@ var coreTables = []string{
 	"tenant_settings",
 	"workflow_defs",
 	"workflow_instances",
+	"workflow_leases",
 	"workflow_memory_samples",
 	"workflow_memory_stats",
+	"workflow_payloads",
 	"workflow_promises",
 	"workflow_routing",
 	"workflow_schedules",
@@ -69,6 +71,14 @@ var coreTables = []string{
 // MySQL and SQL Server have no equivalent key-ring flag and no migration
 // defining this table -- so a MySQL or SQL Server database lacking it is
 // correct, not incomplete.
+//
+// workflow_leases/workflow_payloads (cleat#3245 Phase 3 step 1,
+// migrations/postgres/016) are PostgreSQL-only by the issue's own scoping
+// decision -- MySQL and SQL Server have no equivalent migration and carry
+// this state on workflow_instances itself, same reasoning as the entry
+// above.
 var postgresOnlyTables = map[string]bool{
 	"payload_encryption_ever_enabled": true,
+	"workflow_leases":                 true,
+	"workflow_payloads":               true,
 }

@@ -58,14 +58,17 @@ the per-query predicate is the whole of the isolation there."
 
 Measured 2026-09-17 against live databases built by running `migrations/` to
 head, read from the catalogs (`pg_class`, `pg_policies`,
-`sys.security_predicates`) rather than from the SQL files. All three dialects
-carry **21 tenant-bearing tables**.
+`sys.security_predicates`) rather than from the SQL files. **Updated
+2026-10-09 for cleat#3245 Phase 3 step 1 (migration 016,
+`workflow_leases`/`workflow_payloads`), which is PostgreSQL only -- SQL
+Server and MySQL are unchanged, so the three dialects no longer carry the
+same tenant-bearing table count.**
 
 | | PostgreSQL | SQL Server | MySQL |
 |---|---|---|---|
-| tenant-bearing tables | 21 | 21 | 21 |
-| RLS / filter predicates | **17** (`ENABLE` + `FORCE`) | **14** | **0** |
-| policies | 18 | 14 | — |
+| tenant-bearing tables | 23 | 21 | 21 |
+| RLS / filter predicates | **19** (`ENABLE` + `FORCE`) | **14** | **0** |
+| policies | 20 | 14 | — |
 | **write-blocking predicates** | n/a (`FORCE` covers writes) | **14** (3 each: `AFTER INSERT`, `AFTER UPDATE`, `BEFORE UPDATE`) | 0 |
 | backstop active for an admin connection | no (`FORCE` applies to the owner) | **no** | — |
 
@@ -95,7 +98,7 @@ does: `dbo.cleat_admin` connections under the optional
 cross_tenant_claim.sql`) bypass BLOCK exactly as they bypass FILTER, since both
 share the one predicate function.
 
-**PostgreSQL's 16 of 20 is deliberate, not partial.** The four without RLS are
+**PostgreSQL's 19 of 23 is deliberate, not partial.** The four without RLS are
 the tenant registry itself — `admin.tenants`, `admin.tenant_api_keys`,
 `admin.tenant_roles`, `admin.tenant_egress_allow` — which live in the `admin`
 schema and describe tenants rather than belonging to one.

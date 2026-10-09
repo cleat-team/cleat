@@ -83,6 +83,17 @@ var dropTenantTables = []struct {
 	query string
 }{
 	{"workflow_instances", `SELECT count(*) FROM workflow_instances WHERE tenant_id = $1`},
+	// ON DELETE CASCADE from workflow_instances.id, via
+	// migrations/postgres/016_workflow_leases_and_payloads.sql (cleat#3245
+	// Phase 3 step 1). Listed for the count, as queue_holders is above: a
+	// dropped tenant's lease and payload rows go with its workflow_instances,
+	// and the operator wants to see that. PostgreSQL-only, like
+	// payload_encryption_ever_enabled elsewhere in this package -- SQL Server
+	// and MySQL have no equivalent migration and carry this state on
+	// workflow_instances itself, so mssqlTenantTables (read from sys.columns)
+	// never needs to know about either name.
+	{"workflow_leases", `SELECT count(*) FROM workflow_leases WHERE tenant_id = $1`},
+	{"workflow_payloads", `SELECT count(*) FROM workflow_payloads WHERE tenant_id = $1`},
 	{"event_history", `SELECT count(*) FROM event_history WHERE tenant_id = $1`},
 	{"workflow_signals", `SELECT count(*) FROM workflow_signals WHERE tenant_id = $1`},
 	{"workflow_promises", `SELECT count(*) FROM workflow_promises WHERE tenant_id = $1`},
@@ -386,11 +397,11 @@ func printDropTenantUsage() {
 	fmt.Fprintf(os.Stderr, `Usage: cleatctl drop-tenant <tenant-id> [--dry-run] [--yes] [--schema=NAME]
 
 Permanently delete a tenant and every row of its data: workflow_instances,
-event_history, workflow_signals, workflow_promises, concurrency_keys,
-workflow_update_requests, workflow_schedules, workflow_tags,
-workflow_routing, idempotency_keys, tenant_settings, workflow_defs,
-admin.tenant_api_keys, admin.tenant_roles, admin.tenants, plus the tenant's
-plugin schema and Postgres role.
+workflow_leases, workflow_payloads, event_history, workflow_signals,
+workflow_promises, concurrency_keys, workflow_update_requests,
+workflow_schedules, workflow_tags, workflow_routing, idempotency_keys,
+tenant_settings, workflow_defs, admin.tenant_api_keys, admin.tenant_roles,
+admin.tenants, plus the tenant's plugin schema and Postgres role.
 
 --schema names the schema holding this deployment's cleat tables; it defaults
 to "public" and must match cleat-worker's --schema. It is passed to
