@@ -138,8 +138,16 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpaceMultiAttempt(t *testing.T
 			// always blocks for exactly `remaining` -- there is never a
 			// second failed attempt, by construction, regardless of D's
 			// size. recovery(D) = heartbeat + D + retryInterval + deadline
-			// (dL never binds: D >= heartbeat > deadline >= dL always on
-			// this file's own grid, so max(D, dL) = D). Solving
+			// (dL never binds: D >= heartbeat always on this file's own
+			// grid, and dL <= deadline always by construction (dL is
+			// swept over [0, deadline]), so max(D, dL) = D). This does
+			// NOT need heartbeat > deadline -- an earlier version of this
+			// comment claimed that too, which is false at the "low" scale
+			// (dbCallDeadlineFor(1s) = 2s, the floor binds, so deadline >
+			// heartbeat there). Caught by cleat-review during #3259's
+			// FINAL verification (cleat#3262): the assertion below was
+			// never affected, since it only ever needed dL <= deadline.
+			// Solving
 			// recovery(D) <= minimumReclaimAfter(heartbeat) for D gives
 			// exactly 2*deadline + pinnedReclaimSlack -- pure algebra on
 			// minimumReclaimAfter's own stated formula
