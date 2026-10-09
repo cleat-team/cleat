@@ -220,6 +220,20 @@ func TestSIGTERM_h_AGenuineFailureDuringTheDrainIsStillRecorded(t *testing.T) {
 // The draining worker must keep heartbeating, or another worker reclaims its run after the reclaim window
 // (max(2x heartbeat, 10s)) and re-executes the step while the first is still running it: the duplicate a
 // graceful shutdown exists to avoid. The service holds the call for longer than that window.
+//
+// NOT YET RE-CALIBRATED TO cleat#3258 ROUND 6. minimumReclaimAfter(heartbeat) rose from ~14.5s to ~47s at
+// the default heartbeat (cmd/cleat-worker/setup.go), plus up to one reaper tick (max(heartbeat, 10s)) --
+// ~57s worst case, past this file's 25s sleep. That makes the 25s sleep below a silent vacuity (it no
+// longer exceeds the real window, so this test would pass whether or not the draining worker's heartbeat
+// actually survives the drain), but simply raising it is not a safe fix: the held call's own HTTP client
+// has a hardcoded 30s timeout (cmd/cleat-worker/setup.go's forwardToBenchSvc client), which is now SHORTER
+// than the new ~57s window. Measured directly: raising this sleep to 65s does not exercise the reclaim
+// path at all -- the held call's client gives up at 30s with "context deadline exceeded" and the run ends
+// FAILED outright, before reclaim ever becomes relevant. Fixing this needs either a production-code
+// decision (the 30s client timeout, or whether maxTolerableStall's own 30s is meant to coexist with it) or
+// a harness redesign that keeps the run busy across multiple sub-30s holds rather than one long one --
+// reported rather than patched here (cleat#3258 PR #3276). Left at its original value, which is honestly
+// short of the current invariant rather than silently wrong about having been fixed.
 func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.T) {
 	db := ownerDB(t)
 	defer db.Close()
@@ -240,7 +254,7 @@ func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.
 	second := startWorker(t, bin, taskQueue, svc.srv.URL)
 
 	exited := first.term()
-	time.Sleep(25 * time.Second) // beyond the reclaim window with margin (measured 9.5-24.5s in review)
+	time.Sleep(25 * time.Second) // beyond the OLD reclaim window only -- see the file doc above
 	release()
 	awaitExit(t, exited, 30*time.Second, first)
 
