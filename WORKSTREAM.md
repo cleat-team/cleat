@@ -1175,15 +1175,26 @@ every writer to remember it every time, and the table above is the evidence that
 
 **On the linter backlog, read `.golangci.yml` and not a count written anywhere else** — including
 here. Restating a number in two files is how the two come to disagree, and the count that used to
-live in the retired file was four measurements stale when it was retired. One caveat worth keeping
-because it produces a *tidy table of zeroes* rather than an error: on this machine the pinned
-`golangci-lint` v1.64.7 cannot read the installed Go 1.27 toolchain's export data
-(`export data version 4 is greater than maximum supported version 2`), so it emits typecheck
-errors instead of findings and every type-aware linter reads `0`. CI is unaffected — `lint-go`
-pins Go 1.25. Locally, pin it too, and confirm a non-zero count for a linter you know has findings
-before believing a zero for one you hope does not:
+live in the retired file was four measurements stale when it was retired.
 
-    GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=20m -c <one-linter.yml> ./... | grep -c '(<linter>)'
+**The `GOTOOLCHAIN=go1.25.11` local workaround this paragraph used to recommend is retired — do
+not run it.** It existed because the then-pinned `golangci-lint` v1.64.7 could not read Go 1.27's
+export data (`export data version 4 is greater than maximum supported version 2`) and silently
+reported a *tidy table of zeroes* instead of an error. `golangci-lint` moved to v2.14.0 (cleat#2216)
+and `go.work`/`go.mod` now require `go >= 1.27.0`, so the v1-era failure mode cannot reproduce and
+the workaround now fails outright rather than merely being unnecessary — confirmed 2026-10-09:
+
+    $ GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=20m -c .golangci.yml ./...
+    level=error msg="Running error: context loading failed: ... go: go.work requires go >= 1.27.0 (running go 1.25.11; GOTOOLCHAIN=go1.25.11)"
+
+A plain run with no override now works and reports real findings — confirmed the same day,
+`--enable-only unused ./engine/...` found 34. Confirm a non-zero count for a linter you know has
+findings before believing a zero for one you hope does not, same as always, just without the
+override:
+
+    golangci-lint run --timeout=20m -c <one-linter.yml> ./... | grep -c '(<linter>)'
+
+(cleat#3266 — this paragraph was itself the stale one.)
 
 ### What did not come across, and where the old citations point
 
