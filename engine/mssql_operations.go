@@ -524,11 +524,17 @@ func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, rea
 		       -- workflow_id, step), so a predicate naming only workflow_id
 		       -- would lose its seek path. @p2 is the same tenant value
 		       -- w.tenant_id is compared against below; comparing e.tenant_id
-		       -- to it directly (rather than to w.tenant_id, a column-to-column
-		       -- correlation) is what
-		       -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
-		       -- recognizes as a restriction to the caller rather than a join
-		       -- condition between two tables.
+		       -- to it directly, rather than to w.tenant_id (a column-to-column
+		       -- correlation), is the same distinction
+		       -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate's
+		       -- doc comment draws between a restriction to the caller and a
+		       -- join condition between two tables -- but that guard's static
+		       -- scan does NOT actually reach this subquery (confirmed by
+		       -- cleat-review: removing this predicate does not fail it; see
+		       -- cleat#3289, filed to widen the scan to nested subqueries like
+		       -- this one). The seek-path reasoning above is why this
+		       -- predicate is here regardless of whether the guard enforces
+		       -- it.
 		       CASE WHEN EXISTS(SELECT 1 FROM event_history e
 		                        WHERE e.workflow_id = w.id AND e.tenant_id = @p2
 		                          AND e.event_type = 'defer')

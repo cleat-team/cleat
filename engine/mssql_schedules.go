@@ -285,11 +285,15 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		  -- than correctness: event_history's clustered key realigned to
 		  -- (tenant_id, workflow_id, step), so a predicate naming only
 		  -- workflow_id lost its seek path, and a column-to-column
-		  -- comparison to w.tenant_id reads as a correlation rather than a
-		  -- restriction to the caller to
-		  -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate (see
-		  -- its doc comment, and the appendEventsInTxOpts MERGE fix this
-		  -- same issue required for the identical reason).
+		  -- comparison to w.tenant_id would read as a correlation rather
+		  -- than a restriction to the caller under the distinction
+		  -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate's doc
+		  -- comment draws (the same one the appendEventsInTxOpts MERGE fix
+		  -- is held to). That guard does NOT actually reach either
+		  -- correlated subquery below, though -- confirmed by cleat-review:
+		  -- removing either predicate does not fail it (cleat#3289, filed to
+		  -- widen the scan to nested subqueries like these). The seek-path
+		  -- reasoning above is why the predicate is here regardless.
 		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id AND e.tenant_id = @p3)
 		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
 		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id AND e2.tenant_id = @p3))
@@ -631,12 +635,13 @@ var mssqlDeleteExpiredEventsQuery = fmt.Sprintf(`
 			-- rather than a fix for a measured regression -- this
 			-- statement held at 0 lock escalations
 			-- (TestMSSQLRetentionSweepsCauseNoLockEscalation's
-			-- DeleteExpiredEvents arm) both before and after it was added --
-			-- but it is also what
-			-- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
-			-- requires to count event_history itself as restricted to the
-			-- caller, rather than only a table it joins against being
-			-- restricted.
+			-- DeleteExpiredEvents arm) both before and after it was added.
+			-- NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
+			-- if removed, despite the intent above: that guard's static
+			-- scan does not trace SQL assembled into a package-level var
+			-- via fmt.Sprintf the way it traces a literal string passed
+			-- directly to a Context call (confirmed by cleat-review;
+			-- cleat#3289 tracks widening it to recognize this shape).
 			WHERE tenant_id = @p2 AND workflow_id IN (
 				SELECT id`+msExpiredEventsWorkflows+`
 				  AND tenant_id = @p2
@@ -939,10 +944,17 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 // promotions before the realignment; DeleteExpiredEvents, whose own
 // event_history delete already compared tenant_id to a parameter
 // (mssqlDeleteExpiredEventsQuery), was unaffected. @tenant is bound once per
-// chunk by deleteEventHistoryRowBoundedCommitting below, from s.tenantID --
-// comparing it directly to the parameter, not to a column on another row,
-// is also what TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
-// requires to count this as a restriction to the caller.
+// chunk by deleteEventHistoryRowBoundedCommitting below, from s.tenantID.
+//
+// NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate if
+// this predicate is removed, despite comparing directly to a parameter the
+// way that guard's doc comment describes: its static scan does not trace
+// SQL assembled into a package-level var via fmt.Sprintf the way it traces
+// a literal string passed directly to a Context call (confirmed by
+// cleat-review; cleat#3289 tracks widening it to recognize this shape). The
+// predicate is here because it is what restores the seek path
+// TestMSSQLRetentionSweepsCauseNoLockEscalation measures, not because any
+// guard enforces it.
 var mssqlDeleteEventHistoryTopPrefix = fmt.Sprintf(
 	"DELETE TOP (%d) FROM event_history WHERE tenant_id = @tenant AND workflow_id IN (", mssqlEventRowChunk)
 
