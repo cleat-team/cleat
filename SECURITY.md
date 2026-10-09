@@ -221,7 +221,7 @@ replay behavior.
   dialect the load-bearing layer is statement-level tenant predicates in cleat's
   own queries, gated at authoring time per dialect. Row-level security is a
   backstop underneath it, and its coverage differs sharply: PostgreSQL forces RLS
-  on 16 of 20 tenant-bearing tables, SQL Server binds read-only FILTER predicates
+  on 19 of 23 tenant-bearing tables, SQL Server binds read-only FILTER predicates
   to 13 and has **no BLOCK predicates at all**, and MySQL has none and is
   single-tenant only by decision (`tiers.yaml` D1). On SQL Server the filter is
   additionally inert for a `cleat_admin` connection. So a write that escaped the

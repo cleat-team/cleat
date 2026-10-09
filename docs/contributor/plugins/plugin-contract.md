@@ -66,7 +66,7 @@ requiring one.
 A bare context carries no tenant, so the statement runs unscoped.
 
 **Note what this layer rests on.** RLS is a *backstop*, not the mechanism —
-PostgreSQL forces it on 16 of 20 tenant-bearing tables, SQL Server filters 13
+PostgreSQL forces it on 19 of 23 tenant-bearing tables, SQL Server filters 13
 with **no BLOCK predicates**, and MySQL has none. See
 `docs/reference/multi-tenancy.md`. C1–C5 are the layer that actually enforces
 the boundary on every dialect.
