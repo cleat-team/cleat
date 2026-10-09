@@ -74,9 +74,58 @@ var backupHistoryListByConfigSQL = plugin.Query{
 		FROM backup_history WHERE config_id = $1 ORDER BY started_at DESC OFFSET 0 ROWS FETCH NEXT $2 ROWS ONLY`,
 }
 
+// backupConfigTableExistsSQL resolves backup_config's presence the way the
+// CONNECTION would resolve the bare name -- to_regclass on PostgreSQL,
+// sys.tables on SQL Server -- rather than checkdb.go's coreTableExistsSQL
+// shape, which matches a fixed admin./dbo schema split scheduledbackup's
+// tables do not have (they carry no schema prefix at all,
+// plugins/scheduledbackup/migrations.go). MySQL still needs DATABASE():
+// information_schema spans every database on the server, not just the one
+// this DSN selected. Same per-dialect shape as
+// migration.Runner.trackingTableExists.
+//
+// A plugin.Query, not a switch on d.name with inline literals: the MySQL and
+// MSSQL arms there would otherwise be PREPAREd against PostgreSQL by
+// TestEveryInlineStatementParsesOnPostgres, which prunes by the MySQL/MSSQL
+// KEY in a composite literal like this one and has no way to recognise a
+// bare string switched on at runtime.
+var backupConfigTableExistsSQL = plugin.Query{
+	Default: `SELECT CASE WHEN to_regclass('backup_config') IS NULL THEN 0 ELSE 1 END`,
+	MySQL:   `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'backup_config'`,
+	MSSQL:   `SELECT COUNT(*) FROM sys.tables WHERE name = 'backup_config'`,
+}
+
+// requireBackupMigrations is cleat#2292 item 2. Every subcommand below hits
+// backup_config or backup_history directly, and a missing table surfaced as
+// the raw driver error (e.g. `pq: relation "backup_config" does not exist`)
+// rather than naming the fix. Checked once, before dispatch, rather than
+// wrapped around each of the six subcommands' own queries.
+//
+// Both of scheduledbackup's tables are created together in migration
+// version 1 (plugins/scheduledbackup/migrations.go), so checking for
+// backup_config alone stands for both.
+func requireBackupMigrations(ctx context.Context, db *sql.DB, d dialect) error {
+	var n int
+	if err := db.QueryRowContext(ctx, backupConfigTableExistsSQL.For(d.query)).Scan(&n); err != nil {
+		return fmt.Errorf("checking whether scheduledbackup's tables exist: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("backup_config does not exist: the scheduledbackup plugin's migrations have " +
+			"not been applied. Run the migrations as a deploy step:\n\n" +
+			"    cleat-worker --migrate-only --db <dsn> [--migrate-db <owner dsn>]\n\n" +
+			"and then retry this command")
+	}
+	return nil
+}
+
 func runBackup(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	if len(args) < 1 {
 		printBackupUsage()
+		osExit(1)
+		return
+	}
+	if err := requireBackupMigrations(ctx, db, d); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		osExit(1)
 		return
 	}
