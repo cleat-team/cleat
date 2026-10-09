@@ -38,11 +38,16 @@ func handlerReadsBody() func(http.ResponseWriter, *http.Request) {
 
 // TestMaxBodyEffectiveLimitIsTheMinimumWithTheFlag is cleat#2273's guard
 // rail 2, for plugin.MaxBody specifically: the adapter must compute
-// min(declared, defaultLimit) in BOTH directions, and the 413 must always
-// name --plugin-max-body-size regardless of which value actually bound --
-// this is also the mutation-coverage case for "MaxBodyLimit ignored" (a
-// mutant that never reads plugin.MaxBodyLimit would pass the
-// flag-below-declared case at the wrong limit).
+// min(declared, defaultLimit) in BOTH directions -- this is also the
+// mutation-coverage case for "MaxBodyLimit ignored" (a mutant that never
+// reads plugin.MaxBodyLimit would pass the flag-below-declared case at the
+// wrong limit).
+//
+// cleat#2279's nit: the 413 names whichever of the two settings actually
+// bound, not --plugin-max-body-size unconditionally -- naming the flag when
+// the route's own (tighter) declared value is what bound left an operator
+// unable to reconcile the byte count the 413 reports against the flag's own
+// configured value, which would not match it.
 func TestMaxBodyEffectiveLimitIsTheMinimumWithTheFlag(t *testing.T) {
 	const pattern = "POST /x"
 	const path = "/x"
@@ -56,9 +61,10 @@ func TestMaxBodyEffectiveLimitIsTheMinimumWithTheFlag(t *testing.T) {
 		name          string
 		defaultLimit  int64
 		wantEffective int64
+		wantFlagNamed bool
 	}{
-		{"flag below declared: flag wins", 40, 40},
-		{"flag above declared: declared wins", 400, declared},
+		{"flag below declared: flag wins, and is named", 40, 40, true},
+		{"flag above declared: declared wins, and the flag is not named", 400, declared, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Control: a body one byte under the effective limit succeeds.
@@ -66,9 +72,8 @@ func TestMaxBodyEffectiveLimitIsTheMinimumWithTheFlag(t *testing.T) {
 				t.Fatalf("control: %d-byte body got %d, want 200 (body: %s)", tc.wantEffective-1, code, body)
 			}
 			// A body one byte over the effective limit is refused, naming
-			// the effective limit and --plugin-max-body-size -- never
-			// "declared" unconditionally, and never a bare default that
-			// ignores the route's own tighter cap.
+			// the effective limit -- never "declared" unconditionally, and
+			// never a bare default that ignores the route's own tighter cap.
 			code, body := probeRouter(t, tc.defaultLimit, pattern, path, register, int(tc.wantEffective)+1)
 			if code != http.StatusRequestEntityTooLarge {
 				t.Fatalf("%d-byte body got %d, want 413 (body: %s)", tc.wantEffective+1, code, body)
@@ -76,8 +81,8 @@ func TestMaxBodyEffectiveLimitIsTheMinimumWithTheFlag(t *testing.T) {
 			if want := fmt.Sprintf("%d bytes", tc.wantEffective); !strings.Contains(body, want) {
 				t.Errorf("413 body %q does not name the effective limit %s", body, want)
 			}
-			if !strings.Contains(body, "--plugin-max-body-size") {
-				t.Errorf("413 body %q does not name --plugin-max-body-size", body)
+			if got := strings.Contains(body, "--plugin-max-body-size"); got != tc.wantFlagNamed {
+				t.Errorf("413 body %q names --plugin-max-body-size=%v, want %v", body, got, tc.wantFlagNamed)
 			}
 		})
 	}

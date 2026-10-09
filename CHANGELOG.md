@@ -10,6 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### UPGRADE NOTES — breaking
+
+- **`plugin.Environment.Mux` is now `plugin.Dispatcher` (`ServeHTTP` only), not `ServeMux`
+  (`*http.ServeMux`).** Closes cleat#2279 item 3. `env.Mux` let a plugin call
+  `Handle`/`HandleFunc` on it directly from `Init`, registering a route on the host's real mux
+  that bypassed the request-body-size limit every route registered through
+  `HasRoutes.RegisterRoutes(Router)` gets (cleat#2232). No in-tree plugin did this — all 11 that
+  stored `env.Mux` only used it afterward to serve an already-registered request, chiefly in
+  their own tests (`p.mux.ServeHTTP(rec, req)`), which `Dispatcher` still supports; their own
+  `mux` field's type changed from `*http.ServeMux` to `plugin.Dispatcher` in the same change, and
+  a handful of tests that also used the field as a `plugin.Router` or passed it somewhere typed
+  `*http.ServeMux` now assert it (`p.mux.(*http.ServeMux)`), which they can do safely because they
+  construct it as one directly. An out-of-tree plugin that called `env.Mux.Handle(...)` itself
+  will not compile until it registers through `RegisterRoutes` instead.
+
+### Fixed
+
+- **A plugin route whose pattern overlapped one of the host's four always-anonymous routes
+  (`POST /ingest/{source_id}`, the two `/oauth/{provider}/...` routes, `POST /slack/interactive`),
+  but was not textually identical to it, was never recognized as auth-exempt, so
+  `plugin.MaxBodyFromConfig` on it was never refused.** Closes cleat#2279 item 1.
+  `isPluginAuthExemptPattern` (`cmd/cleat-worker/plugin_exempt_routes.go`) compared the registering
+  pattern against the hand-maintained exempt list by exact string equality; a differently-named
+  wildcard (`POST /ingest/{sid}`), a method-less pattern (`/ingest/{source_id}`, which matches
+  `POST` along with everything else), a subtree pattern (`POST /ingest/{source_id}/`) or a
+  host-qualified one (`POST example.com/ingest/{source_id}`) all serve the same anonymously-
+  reachable traffic but were missed. It now decides by overlap — could any single request match
+  both patterns, each considered alone — deliberately erring toward over-flagging (forcing
+  `plugin.MaxBody` instead of `MaxBodyFromConfig` on a route that is not actually exempt once
+  every other route is registered too, which costs nothing) rather than under-flagging. The
+  registration-time panic this triggers also now names which plugin's `RegisterRoutes` call
+  triggered it, not only the pattern.
+- **A plugin route's own tighter `plugin.MaxBody(n, h)` cap, when it was what actually bound
+  (`n` under `--plugin-max-body-size`), produced a 413 that named `--plugin-max-body-size` anyway
+  — a byte count that would not match the flag's own configured value.** Closes cleat#2279's nit.
+  The 413 now names the flag only when the flag is what bound, and this route's own declared
+  limit otherwise.
+
 - **Go toolchain bumped to go1.27.2; `golang.org/x/net` bumped to v0.60.0.** Closes cleat#3251.
   `govulncheck` reported 12 real, reachable findings against this repo's code on every head whose
   code reaches them: 7 stdlib (`net/http`, `html/template`, `crypto/tls`, `mime/multipart`,
@@ -1072,6 +1110,8 @@ and everything that changed in them is recorded here.
   `blobstore`'s `PUT /blobs/{key...}` uses
   `MaxBodyFromConfig` against its own `max_blob_size` setting (default 10 MiB);
   `slacknotify`'s `POST /slack/interactive` uses `MaxBody` against its fixed 1 MiB callback size.
+  **Concretely: a blob upload over 10 MiB, which used to be unbounded, now gets a 413 instead of
+  being accepted.** (cleat#2279)
 
 - **`plugin.Rebind` no longer rewrites `$N` placeholders to `?` for MySQL. A caller that pairs
   `Rebind`'s output with a raw `*sql.DB`/`*sql.Tx`/`*sql.Conn` (bypassing `plugin.PluginDB`) must

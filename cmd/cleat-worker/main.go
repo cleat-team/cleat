@@ -1964,6 +1964,7 @@ func main() {
 			continue
 		}
 		if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
+			pluginRouter.currentPlugin = lp.Plugin.Info().Name
 			if rerr := p.RegisterRoutes(pluginRouter); rerr != nil {
 				logger.ErrorContext(context.Background(), "refusing to start: plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
 				os.Exit(1)

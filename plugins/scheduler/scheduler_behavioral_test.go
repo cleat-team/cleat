@@ -1568,7 +1568,7 @@ func TestScheduleList_QueryError(t *testing.T) {
 
 	// Bypass middleware: register routes directly on a fresh mux and inject tenant ID via context.
 	p.mux = http.NewServeMux()
-	if err := p.RegisterRoutes(p.mux); err != nil {
+	if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 	req := httptest.NewRequest("GET", "/schedules", nil).WithContext(ctx)
@@ -1589,7 +1589,7 @@ func TestScheduleGet_QueryError(t *testing.T) {
 
 	// Bypass middleware: register routes directly on a fresh mux and inject tenant ID via context.
 	p.mux = http.NewServeMux()
-	if err := p.RegisterRoutes(p.mux); err != nil {
+	if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 	req := httptest.NewRequest("GET", "/schedules/"+uuid.New().String(), nil).WithContext(ctx)
@@ -1701,7 +1701,7 @@ func TestScheduleTrigger_QueryError(t *testing.T) {
 
 	// Bypass middleware: inject tenant ID and call plugin directly.
 	p.mux = http.NewServeMux()
-	if err := p.RegisterRoutes(p.mux); err != nil {
+	if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 	req := httptest.NewRequest("POST", "/schedules/"+schedID.String()+"/trigger", nil).WithContext(ctx)
@@ -1729,7 +1729,7 @@ func TestScheduleUpdate_FetchError(t *testing.T) {
 	store.mu.Unlock()
 
 	p.mux = http.NewServeMux()
-	if err := p.RegisterRoutes(p.mux); err != nil {
+	if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 	updateBody := `{"name":"updated"}`

@@ -25,6 +25,21 @@ type Router interface {
 	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
 }
 
+// Dispatcher is Environment.Mux's type: the minimal interface for serving an
+// already-registered request, structurally satisfied by *http.ServeMux.
+//
+// A NARROWER interface than *http.ServeMux, and the mirror image of Router's
+// narrowing above -- ServeHTTP is deliberately the ONLY method, and
+// Handle/HandleFunc are deliberately left off. A plugin's own tests use
+// Environment.Mux to simulate serving a request it registered through
+// RegisterRoutes (p.mux.ServeHTTP(rec, req)); nothing needs to register a
+// NEW route directly on it, and a plugin that could would bypass the
+// body-size wrap every route registered through RegisterRoutes(Router) gets
+// (cleat#2232, cleat#2279 item 3).
+type Dispatcher interface {
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
 // HasRoutes: plugin exposes HTTP endpoints.
 //
 // RegisterRoutes took *http.ServeMux until cleat#2232, which found 26 sites

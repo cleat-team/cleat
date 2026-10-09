@@ -12,19 +12,21 @@ import (
 // defaultBodyLimitKnob is the operator-facing name for whatever produced a
 // request's effective body-size ceiling when no more specific knob applies:
 // the bare default (no MaxBody/MaxBodyFromConfig at all), or a MaxBody
-// ceiling, which always sits under this flag regardless of which of the two
-// values (the route's own n, or the flag) ends up binding -- see MaxBody's
-// doc comment.
+// ceiling for which --plugin-max-body-size is itself what bound (n >= the
+// flag) -- see MaxBody's doc comment.
 const defaultBodyLimitKnob = "--plugin-max-body-size"
 
 // MaxBody wraps h so the host's plugin-route adapter applies n (bytes) as a
 // TIGHTER ceiling than the configured default (--plugin-max-body-size) for
 // this route -- never a looser one. The adapter computes
 // min(n, --plugin-max-body-size) as the effective limit, and a 413 from this
-// route always names --plugin-max-body-size, whichever of the two values
-// was actually binding: an operator can always turn the flag down and have
-// it take effect here too, so the message names the knob that is always in
-// play, not whichever value happened to lose the min().
+// route names --plugin-max-body-size when the flag is what actually bound
+// (n >= the flag, so lowering the flag is what would change the outcome) or
+// this route's own declared limit when n < the flag is what bound instead
+// (cleat#2279: naming the flag regardless of which value bound left an
+// operator unable to reconcile the byte count the 413 reports against the
+// flag's own configured value, which would not match it whenever the
+// route's own n is the tighter one).
 //
 // Register it with mux.Handle, not mux.HandleFunc -- the declared limit
 // travels on the http.Handler value itself, which HandleFunc's plain

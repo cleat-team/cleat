@@ -632,11 +632,11 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeKVStore) {
 		config: Config{MaxValueSize: 1_048_576},
 	}
 
-	if err := p.RegisterRoutes(p.mux); err != nil {
+	if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, p.mux)(p.mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, p.mux.(*http.ServeMux))(p.mux.(*http.ServeMux))
 	return p, handler, store
 }
 

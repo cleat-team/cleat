@@ -74,7 +74,7 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			p.logger = slog.Default()
 			p.config = Config{MaxValueSize: 1_048_576}
 
-			if err := p.RegisterRoutes(p.mux); err != nil {
+			if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 				t.Fatalf("RegisterRoutes: %v", err)
 			}
 
@@ -83,33 +83,33 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			// Error paths — no prior data needed.
 			t.Run("GetNonExistent", func(t *testing.T) {
 				cleanupKVStore(t, p)
-				backendGetNonExistent(t, p.mux)
+				backendGetNonExistent(t, p.mux.(*http.ServeMux))
 			})
 			t.Run("DeleteNonExistent", func(t *testing.T) {
 				cleanupKVStore(t, p)
-				backendDeleteNonExistent(t, p.mux)
+				backendDeleteNonExistent(t, p.mux.(*http.ServeMux))
 			})
 
 			// Full lifecycle — PUT / GET / DELETE / GET.
 			t.Run("PutGetDelete", func(t *testing.T) {
 				cleanupKVStore(t, p)
-				backendPutGetDelete(t, p.mux)
+				backendPutGetDelete(t, p.mux.(*http.ServeMux))
 			})
 
 			// Version semantics — two PUTs on the same key.
 			t.Run("VersionIncrement", func(t *testing.T) {
 				cleanupKVStore(t, p)
-				backendVersionIncrement(t, p.mux)
+				backendVersionIncrement(t, p.mux.(*http.ServeMux))
 			})
 
 			// List scenarios — need a known dataset, so clean first.
 			t.Run("ListAll", func(t *testing.T) {
 				cleanupKVStore(t, p)
-				backendListAll(t, p.mux)
+				backendListAll(t, p.mux.(*http.ServeMux))
 			})
 			t.Run("ListWithPrefix", func(t *testing.T) {
 				cleanupKVStore(t, p)
-				backendListWithPrefix(t, p.mux)
+				backendListWithPrefix(t, p.mux.(*http.ServeMux))
 			})
 		})
 	}
