@@ -382,9 +382,14 @@ linters:
       #
       #   git worktree add /tmp/gosec-iso <base-sha>
       #   cd /tmp/gosec-iso && git checkout <branch> -- <file1>
-      #   GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=20m -c .golangci.yml \
-      #     --enable-only gosec ./<pkg>/...
+      #   golangci-lint run --timeout=20m -c .golangci.yml --enable-only gosec ./<pkg>/...
       #   # repeat, adding one more file per run, until the finding appears
+      #
+      # No GOTOOLCHAIN override needed with the repo's current pins
+      # (golangci-lint 2.14.0, go.work's own toolchain directive) -- verified
+      # 2026-10-09 running this literally. See cleat#3266 for why an older,
+      # similar-looking recipe elsewhere in this repo asserts one that is no
+      # longer real.
       #
       # NOT YET WORTH BUILDING: a future gosec release may report the taint
       # SOURCE's location rather than (or in addition to) the sink's -- if it
