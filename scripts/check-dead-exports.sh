@@ -289,8 +289,14 @@ scan() {
   by_name="$(mktemp)"
   awk -F'\t' '{print $4"\t"$1":"$2}' "$decls" | LC_ALL=C sort > "$by_name"
 
-  local out="" file line recv name matches label exclude_f=""
-  while IFS=$'\t' read -r file line recv name; do
+  # The second field ($decls' line number) is read into `_` rather than a
+  # named variable: nothing in this loop body needs a decl's own line number
+  # any more (code_use_filter's exclusion set is now built from by_name,
+  # which already carries file:line for every declaration, this one
+  # included) -- ShellCheck SC2034 correctly flagged it as read-and-unused
+  # when it was still called `line`.
+  local out="" file recv name matches label exclude_f=""
+  while IFS=$'\t' read -r file _ recv name; do
     # The PREVIOUS iteration's exclusion file, removed here rather than at
     # every exit point below (three continues and one fall-through) -- one
     # cleanup site instead of four that all have to remember it.
