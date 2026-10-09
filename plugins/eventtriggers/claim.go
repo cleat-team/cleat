@@ -23,6 +23,68 @@ type ClaimedEvent struct {
 	ReceivedAt time.Time
 }
 
+// poisonEventError marks a beforeCommit failure as permanent -- the
+// claimed row's data will never become processable, as opposed to an
+// ordinary beforeCommit failure, which may be transient and is left to
+// roll back and retry as before. See PoisonEvent and tryClaim.
+type poisonEventError struct {
+	err error
+}
+
+func (e *poisonEventError) Error() string { return e.err.Error() }
+func (e *poisonEventError) Unwrap() error { return e.err }
+
+// PoisonEvent wraps err so tryClaim recognizes a beforeCommit failure as
+// caused by data that cannot become processable no matter how many times
+// the claim is retried -- e.g. json.Marshal/json.Unmarshal failing on
+// corrupted event_data, this package's own awaitEvent and webhookingest's
+// await_webhook both hit exactly this. Wrapping an error with PoisonEvent
+// causes the claimed row to be dead-lettered (processed = true,
+// status = 'dead_letter') instead of rolled back and left to block its
+// (tenant_id, event_type) forever. cleat#2666.
+//
+// Not for a transient beforeCommit failure (a network call, a lock), which
+// should still roll back and retry normally -- PoisonEvent is specifically
+// for "this exact data will fail the exact same way every time", which
+// retrying cannot fix.
+func PoisonEvent(err error) error {
+	return &poisonEventError{err: err}
+}
+
+// deadLetterPoisonEvent marks a claimed row permanently dead, outside the
+// (already rolling back) claim transaction -- a plain, idempotent
+// by-id write, the same non-transactional shape background.go's retryEvent
+// already uses for the dispatch path's own identical failure class. No
+// tenant_id predicate: scoped by construction, matching the "mark event
+// consumed" UPDATE in claimOldestUnprocessedEventLocking a few lines above
+// this file's tryClaim -- the id came from a just-executed, tenant-scoped
+// claim query in the same call.
+//
+// Deliberately does NOT touch dispatch_processed -- that is the dispatch
+// path's own flag, independently handled by retryEvent's identical
+// unmarshal check. Touching it here would re-couple two flags this
+// package already split apart once (cleat#2663) to fix the opposite
+// cross-contamination: an awaiter's claim starving a dispatch retry.
+func deadLetterPoisonEvent(ctx context.Context, db plugin.PluginDB, logger *slog.Logger, eventID uuid.UUID, cause error) {
+	if _, err := db.Exec(ctx, `
+		UPDATE ingested_events
+		SET processed = true, status = 'dead_letter', error_msg = $2
+		WHERE id = $1
+	`, eventID, "poison event: "+cause.Error()); err != nil {
+		// Could not clear the blockage this time -- the row stays
+		// unprocessed, exactly like an ordinary beforeCommit failure, and a
+		// later claim attempt will try the dead-letter write again. The
+		// write is a plain by-id UPDATE, safe to retry.
+		logger.Error("event-triggers: dead-letter poison event: write failed, row remains unprocessed",
+			"event_id", eventID, "cause", cause, "write_error", err)
+		return
+	}
+	logger.Error("event-triggers: dead-lettered a poison event -- its data will never "+
+		"become processable, so the claim queue for its (tenant, event type) is no longer "+
+		"blocked on it",
+		"event_id", eventID, "cause", cause)
+}
+
 // afterFirstMissBeforeRegister is a TEST-ONLY hook, called (if non-nil)
 // after ClaimOrRegisterAwaiter's first claim attempt misses and before it
 // registers an awaiter -- the exact window cleat-review's finding on
@@ -95,7 +157,7 @@ func ClaimOrRegisterAwaiter(
 		return nil, err
 	}
 
-	claimed, err := tryClaim(ctx, db, dialect, tenantID, eventType, key1, key2, key3, beforeCommit)
+	claimed, err := tryClaim(ctx, db, dialect, logger, tenantID, eventType, key1, key2, key3, beforeCommit)
 	if err != nil {
 		return nil, err
 	}
@@ -116,8 +178,13 @@ func ClaimOrRegisterAwaiter(
 	}
 
 	// The re-check. See this function's own doc comment for why one more
-	// attempt, here, closes the window rather than merely narrowing it.
-	claimed, err = tryClaim(ctx, db, dialect, tenantID, eventType, key1, key2, key3, beforeCommit)
+	// attempt, here, closes the window rather than merely narrowing it. It
+	// also closes a SECOND window cleat#2666 added: if the first attempt
+	// above found and dead-lettered a poison row (PoisonEvent, below) rather
+	// than a real match, this attempt is what finds the next real event
+	// already queued behind it, in the same call, rather than waiting for a
+	// separate retry.
+	claimed, err = tryClaim(ctx, db, dialect, logger, tenantID, eventType, key1, key2, key3, beforeCommit)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +217,7 @@ func tryClaim(
 	ctx context.Context,
 	db plugin.PluginDB,
 	dialect plugin.Dialect,
+	logger *slog.Logger,
 	tenantID, eventType, key1, key2, key3 string,
 	beforeCommit func(*ClaimedEvent) error,
 ) (*ClaimedEvent, error) {
@@ -183,6 +251,34 @@ func tryClaim(
 			// unprocessed and the next claim can retry it, rather than
 			// reporting an error for an event that is durably consumed with
 			// no way to ever report it again (cleat#2654).
+			//
+			// UNLESS err wraps PoisonEvent -- cleat#2666. beforeCommit is the
+			// hook that marshals/unmarshals a claimed row's EventData, and a
+			// failure there means the stored bytes themselves are
+			// unprocessable: deterministic, not transient, so "retry it"
+			// above is exactly the wrong remedy -- it retries identically,
+			// forever, which is this issue's whole subject. A poison row
+			// dead-letters instead of rolling back, and this attempt reports
+			// "nothing claimable" rather than propagating a hard error, so
+			// ClaimOrRegisterAwaiter's existing second attempt (after
+			// registering the awaiter) naturally tries the next real event
+			// queued behind it, in the same call.
+			var poison *poisonEventError
+			if errors.As(err, &poison) {
+				// Roll back EXPLICITLY, now, rather than relying on the
+				// deferred Rollback -- that only runs when tryClaim
+				// RETURNS, and deadLetterPoisonEvent's UPDATE below targets
+				// this exact row by id on a SEPARATE connection (db, not
+				// tx). Calling it while tx still holds this row's lock
+				// self-deadlocks: db.Exec blocks waiting for a lock tx is
+				// holding, and tx cannot release it until tryClaim returns,
+				// which cannot happen until db.Exec returns. Reproduced
+				// directly while building this fix -- the test hung past
+				// go test's 10-minute default rather than failing fast.
+				_ = tx.Rollback()
+				deadLetterPoisonEvent(ctx, db, logger, claimed.EventID, poison.err)
+				return nil, nil
+			}
 			return nil, err
 		}
 	}

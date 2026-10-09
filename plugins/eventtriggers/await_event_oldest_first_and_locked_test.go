@@ -2,6 +2,7 @@ package eventtriggers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -65,7 +66,7 @@ func mustInsertIngestedEventAt(t *testing.T, ctx context.Context, p *Plugin, id,
 // mustInsertIngestedEventWithData is mustInsertIngestedEventAt with an
 // explicit event_data, for tests that need to seed a row that cannot
 // round-trip through json.Marshal -- see
-// TestAwaitEventMarshalFailureLeavesEventUnconsumed.
+// TestAwaitEventMarshalFailureDeadLettersTheEventInstead.
 func mustInsertIngestedEventWithData(t *testing.T, ctx context.Context, p *Plugin, id, tenantID uuid.UUID, eventType, eventData string, receivedAt time.Time) {
 	t.Helper()
 	if _, err := p.db.Exec(ctx, `
@@ -76,15 +77,21 @@ func mustInsertIngestedEventWithData(t *testing.T, ctx context.Context, p *Plugi
 	}
 }
 
-// TestAwaitEventMarshalFailureLeavesEventUnconsumed is cleat#2654: a row
-// whose event_data cannot round-trip through json.Marshal (corrupted, e.g.
-// by the VARBINARY->NVARCHAR conversion cleat#2645's own CI run hit) used to
-// be marshaled AFTER the claim transaction committed, so the failure was
+// TestAwaitEventMarshalFailureDeadLettersTheEventInstead is cleat#2654
+// and cleat#2666, in sequence. cleat#2654: a row whose event_data cannot
+// round-trip through json.Marshal (corrupted, e.g. by the
+// VARBINARY->NVARCHAR conversion cleat#2645's own CI run hit) used to be
+// marshaled AFTER the claim transaction committed, so the failure was
 // reported as an error while the event was already durably consumed and
-// gone forever. This crosses the commit boundary deliberately: a test that
-// only checks the returned error cannot see that difference, because both
-// the fixed and unfixed code return an error here -- what distinguishes
-// them is whether the row is still there to claim afterward.
+// gone forever -- fixed by marshaling inside the claim transaction, so a
+// failure rolls back instead. cleat#2666: rolling back left the row the
+// OLDEST unprocessed row for its (tenant, event type) forever, since the
+// claim query always picks the oldest first -- a loud stall instead of a
+// silent loss, but still no exit short of manual SQL. This test is UPDATED
+// for that second fix: the row is no longer left unconsumed. It is
+// dead-lettered -- processed so the claim query advances past it, with
+// status/error_msg recording why, rather than retried forever against data
+// that will never change.
 //
 // MSSQL-ONLY, not table-driven, and not an oversight: event_data is JSONB on
 // Postgres and JSON on MySQL, and both dialects validate JSON syntax at
@@ -95,7 +102,7 @@ func mustInsertIngestedEventWithData(t *testing.T, ctx context.Context, p *Plugi
 // why the ORIGINAL corruption this issue cites (cleat#2645's CI failure) was
 // only ever observed on that dialect -- this test reproduces the same
 // precondition, not a weaker stand-in for it.
-func TestAwaitEventMarshalFailureLeavesEventUnconsumed(t *testing.T) {
+func TestAwaitEventMarshalFailureDeadLettersTheEventInstead(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectMSSQL)
 	dialect := plugin.DialectMSSQL
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -120,33 +127,137 @@ func TestAwaitEventMarshalFailureLeavesEventUnconsumed(t *testing.T) {
 
 	ctx := plugin.WithCallContext(seedCtx, &plugin.CallContext{
 		TenantID:   tenantID.String(),
-		WorkflowID: "wf-marshal-failure-mssql",
+		WorkflowID: "wf-marshal-failure-mssql-" + tenantID.String(),
 	})
-	// Asserted against the specific marshal error, not just "some error":
-	// the property under test is ORDERING (a marshal failure leaves the row
-	// unconsumed), and a bare err != nil passes just as well if awaitEvent
-	// failed for an unrelated reason before ever reaching the claim -- e.g.
-	// a broken claim query or a bad input -- where processed is ALSO false
-	// for a reason that has nothing to do with this fix. That version of
-	// the test cannot tell "the fix works" from "it fell over earlier".
-	if _, err := p.awaitEvent(ctx, `{"event_type":"order.corrupt","timeout_ms":1000}`); err == nil ||
-		!strings.Contains(err.Error(), "marshal await_event output") {
-		t.Fatalf("awaitEvent: expected the marshal error, got: %v", err)
+	// The property under test: NO error reaches the caller any more. The
+	// poison row is handled internally (dead-lettered) and
+	// ClaimOrRegisterAwaiter's second attempt, after registering the
+	// awaiter, finds nothing else matching -- the ordinary "not found yet"
+	// outcome, indistinguishable from there being no event at all, which is
+	// the correct behaviour: nothing the CALLER did was wrong.
+	outJSON, err := p.awaitEvent(ctx, `{"event_type":"order.corrupt","timeout_ms":1000}`)
+	if err != nil {
+		t.Fatalf("awaitEvent: expected no error (the poison row should be handled "+
+			"internally), got: %v", err)
+	}
+	var out awaitEventOutput
+	if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+		t.Fatalf("unmarshal awaitEvent output: %v", err)
+	}
+	if out.Found {
+		t.Fatalf("awaitEvent reported Found:true -- the poison row should never be "+
+			"delivered to a caller, got %+v", out)
 	}
 
-	// The property under test: NOT consumed, so a later claim can still
-	// retry it. Asserted directly against the row rather than by calling
-	// awaitEvent again, since a second call would hit the same marshal
-	// failure and prove nothing beyond the first call.
+	// The property under test: dead-lettered, not left unprocessed --
+	// processed advances the claim query past it, status/error_msg record
+	// why.
 	var processed bool
+	var status, errMsg sql.NullString
 	row := p.db.QueryRow(seedCtx,
-		`SELECT processed FROM ingested_events WHERE id = $1`, eventID)
-	if err := plugin.ScanRow(row, &processed); err != nil {
-		t.Fatalf("query processed flag: %v", err)
+		`SELECT processed, status, error_msg FROM ingested_events WHERE id = $1`, eventID)
+	if err := plugin.ScanRow(row, &processed, &status, &errMsg); err != nil {
+		t.Fatalf("query event row: %v", err)
 	}
-	if processed {
-		t.Fatal("event was marked processed despite the output failing to marshal -- " +
-			"it is now durably consumed and unrecoverable, the exact failure cleat#2654 describes")
+	if !processed {
+		t.Fatal("event was NOT marked processed -- it is still the oldest unprocessed row " +
+			"for its (tenant, event type) and will block every future awaitEvent for that " +
+			"type, the exact stall cleat#2666 describes")
+	}
+	if status.String != "dead_letter" {
+		t.Fatalf("status = %q, want \"dead_letter\"", status.String)
+	}
+	if !strings.Contains(errMsg.String, "marshal await_event output") {
+		t.Fatalf("error_msg = %q, want it to name the marshal failure", errMsg.String)
+	}
+}
+
+// TestAwaitEventSkipsAPoisonRowAndDeliversTheNextRealEventInTheSameCall is
+// cleat#2666's actual acceptance criterion, not just the dead-letter write
+// in isolation: "no newer event of that type is ever delivered" is the
+// issue's stated consequence of the stall, so this seeds a poison row and a
+// VALID newer row of the SAME (tenant, event type) and asserts the valid
+// one is delivered -- in this one awaitEvent call, not a later retry.
+// That falls out of ClaimOrRegisterAwaiter's existing two-attempt structure
+// (see claim.go's own doc comment): the first attempt finds and
+// dead-letters the poison row, reports "nothing claimable", registers an
+// awaiter, then the second attempt -- the one closing cleat#2695's window
+// -- finds the valid row sitting right behind it.
+//
+// MSSQL-only, same reason as the test above: Postgres/MySQL refuse the
+// poison literal at INSERT, so there is no poison row for this scenario on
+// those two dialects.
+func TestAwaitEventSkipsAPoisonRowAndDeliversTheNextRealEventInTheSameCall(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectMSSQL)
+	dialect := plugin.DialectMSSQL
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	p := &Plugin{dialect: dialect, logger: quiet}
+	if err := plugin.RunMigrations(context.Background(), db, dialect, nil,
+		[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+
+	tenantID := uuid.New()
+	poisonID := uuid.New()
+	validID := uuid.New()
+	seedCtx := plugin.ForTenant(context.Background(), tenantID)
+
+	// Insertion ORDER controls seq order (cleat#2652) -- the poison row is
+	// inserted first, so it is the oldest and would be picked first by the
+	// claim query, exactly the precondition cleat#2666 is about. received_at
+	// is set identically old for both so this cannot pass by accident of the
+	// (now-unused for this query) wall clock.
+	past := time.Now().Add(-time.Hour)
+	mustInsertIngestedEventWithData(t, seedCtx, p, poisonID, tenantID,
+		"order.mixed", "not valid json{", past)
+	mustInsertIngestedEventWithData(t, seedCtx, p, validID, tenantID,
+		"order.mixed", `{"order_id":"real-order"}`, past)
+
+	ctx := plugin.WithCallContext(seedCtx, &plugin.CallContext{
+		TenantID:   tenantID.String(),
+		WorkflowID: "wf-skips-poison-mssql-" + tenantID.String(),
+	})
+	outJSON, err := p.awaitEvent(ctx, `{"event_type":"order.mixed","timeout_ms":1000}`)
+	if err != nil {
+		t.Fatalf("awaitEvent: expected the valid row to be delivered with no error, got: %v", err)
+	}
+	var out awaitEventOutput
+	if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+		t.Fatalf("unmarshal awaitEvent output: %v", err)
+	}
+	if !out.Found {
+		t.Fatal("awaitEvent reported Found:false -- the valid row behind the poison one " +
+			"was never delivered, the exact stall cleat#2666 describes")
+	}
+	if out.EventID != validID.String() {
+		t.Fatalf("delivered event %s, want the valid row %s (got the poison row, or "+
+			"something else entirely)", out.EventID, validID)
+	}
+
+	// Both rows should now be processed: the valid one claimed ordinarily,
+	// the poison one dead-lettered.
+	for _, tc := range []struct {
+		id         uuid.UUID
+		wantStatus string
+	}{
+		{poisonID, "dead_letter"},
+		{validID, "consumed"},
+	} {
+		var processed bool
+		var status sql.NullString
+		row := p.db.QueryRow(seedCtx,
+			`SELECT processed, status FROM ingested_events WHERE id = $1`, tc.id)
+		if err := plugin.ScanRow(row, &processed, &status); err != nil {
+			t.Fatalf("query event %s: %v", tc.id, err)
+		}
+		if !processed {
+			t.Fatalf("event %s: not processed, want processed", tc.id)
+		}
+		if status.String != tc.wantStatus {
+			t.Fatalf("event %s: status = %q, want %q", tc.id, status.String, tc.wantStatus)
+		}
 	}
 }
 
@@ -415,7 +526,7 @@ func TestAwaitEventOldestClaimDoesNotStarveASecondOldestEventAtScale(t *testing.
 			doneA := make(chan claimResult, 1)
 
 			go func() {
-				claimed, err := tryClaim(seedCtx, p.db, dialect, tenantID.String(), "order.created", "", "", "",
+				claimed, err := tryClaim(seedCtx, p.db, dialect, quiet, tenantID.String(), "order.created", "", "", "",
 					func(c *ClaimedEvent) error {
 						close(holding)
 						<-release
@@ -426,7 +537,7 @@ func TestAwaitEventOldestClaimDoesNotStarveASecondOldestEventAtScale(t *testing.
 
 			<-holding // A has claimed and is holding its transaction open, uncommitted
 
-			claimedB, errB := tryClaim(seedCtx, p.db, dialect, tenantID.String(), "order.created", "", "", "", nil)
+			claimedB, errB := tryClaim(seedCtx, p.db, dialect, quiet, tenantID.String(), "order.created", "", "", "", nil)
 
 			close(release)
 			resA := <-doneA

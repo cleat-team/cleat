@@ -93,8 +93,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 			// run -- reports an error while the event stays durably
 			// consumed with no way to ever report it again: a lost event
 			// dressed up as a failure. A failure here instead rolls the
-			// claim back, so the row stays unprocessed and the next claim
-			// can retry it (cleat#2654).
+			// claim back (cleat#2654).
 			out := awaitEventOutput{
 				Found:      true,
 				EventID:    c.EventID.String(),
@@ -105,7 +104,15 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 			var marshalErr error
 			outJSON, marshalErr = json.Marshal(out)
 			if marshalErr != nil {
-				return fmt.Errorf("event-triggers: marshal await_event output: %w", marshalErr)
+				// PoisonEvent, not a bare error -- cleat#2666. The only way
+				// this marshal can fail is c.EventData itself being invalid
+				// JSON (every other field is a plain string), which will
+				// fail identically on every future claim of this same row:
+				// deterministic, not transient. Rolling back and leaving it
+				// to retry (cleat#2654's fix, above) is what used to make
+				// this row block its (tenant, event type) forever instead
+				// of just this one call.
+				return PoisonEvent(fmt.Errorf("event-triggers: marshal await_event output: %w", marshalErr))
 			}
 			return nil
 		})

@@ -234,7 +234,12 @@ func (p *Plugin) awaitWebhook(ctx context.Context, input AwaitWebhookInput) (Awa
 				Payload json.RawMessage `json:"payload"`
 			}
 			if err := json.Unmarshal(c.EventData, &envelope); err != nil {
-				return fmt.Errorf("webhook-ingest: unwrap event payload: %w", err)
+				// PoisonEvent, not a bare error -- cleat#2666. c.EventData is
+				// the only thing this unmarshal can fail on, and a
+				// corrupted row will fail identically on every future
+				// claim: deterministic, not transient. See
+				// eventtriggers.PoisonEvent's doc comment.
+				return eventtriggers.PoisonEvent(fmt.Errorf("webhook-ingest: unwrap event payload: %w", err))
 			}
 			out = AwaitWebhookOutput{
 				Found:      true,
