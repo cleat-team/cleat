@@ -55,6 +55,41 @@ BASELINE="scripts/deadcode-baseline.txt"
 # with it.
 STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2026.2.1"
 
+# cleat#3251/#3256: the repo's toolchain moved to go1.27.2 (a security fix --
+# 12 reachable govulncheck findings), and go1.27.2's compiler advanced the
+# export data format to version 5. 2026.2.1 -- the latest staticcheck release,
+# confirmed via the module proxy, and confirmed again against @master, which
+# is no newer -- only understands up to version 4, so every scan under the
+# ambient toolchain dies exactly like the comment above describes for the
+# go1.26 move:
+#
+#   internal error in importing "cmp" (cannot decode "cmp", export data
+#   version 5 is greater than maximum supported version 4)
+#
+# Tracked upstream: dominikh/go-tools#1832 (opened the day go1.27.2 shipped),
+# with a tracking issue for the whole v5 move at #1711 and a precedent at
+# #1734 (the identical class for go1.27.0/v4, opened and fixed within two
+# days). There is nothing to pin forward to yet.
+#
+# The fix that does not require waiting: go.mod's `go` directive (the
+# language-version FLOOR) did not move, only its `toolchain` line (the
+# preferred exact build) -- go.mod still says `go 1.27.0`, which go1.27.1
+# satisfies. So this analysis alone can run under the OLDER toolchain,
+# pinned by exact version so GOTOOLCHAIN does not float back up to whatever
+# `toolchain` line a go.mod carries: every package this scans still gets
+# analysed, just compiled by go1.27.1 for export-data purposes only, while
+# the rest of the repo (build, test, lint, vulncheck) runs on go1.27.2 as
+# normal. Confirmed non-vacuous by seeding a genuine unused function and
+# watching this scan catch it under this exact override, before relying on
+# the clean result.
+#
+# This line must move the day a `go` directive anywhere in the repo exceeds
+# what this exact toolchain satisfies -- at that point `go` itself refuses to
+# run ("go: go.mod requires go >= 1.28 (running go 1.27.1)") rather than
+# silently analysing the wrong thing, which is why it is safe to leave that
+# failure mode undetected by this script itself.
+export GOTOOLCHAIN=go1.27.1
+
 # Key on "<package dir><TAB><symbol>" rather than the raw staticcheck line,
 # so that moving a function within its file does not churn the baseline.
 # Input:  engine/flush.go:186:18: func (*Engine).flushCallIntent is unused (U1000)

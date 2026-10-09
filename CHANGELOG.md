@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Go toolchain bumped to go1.27.2; `golang.org/x/net` bumped to v0.60.0.** Closes cleat#3251.
+  `govulncheck` reported 12 real, reachable findings against this repo's code on every head whose
+  code reaches them: 7 stdlib (`net/http`, `html/template`, `crypto/tls`, `mime/multipart`,
+  `net/textproto`), fixed in go1.27.2, and 5 in `golang.org/x/net` (including an HTTP/2 HPACK
+  encoder race, `GO-2026-6617`), fixed in `x/net@v0.60.0`. Bumped the `toolchain` line in all 8
+  `go.mod` files plus `go.work`, `golang.org/x/net` in the 5 modules that declare it directly (the
+  other 3 picked up the same bump transitively via `go mod tidy`, through `go.sum` entries that
+  carry no reachable code), and the two `FROM golang:` Dockerfile pins to match. No CI workflow
+  edits: every `setup-go` step already reads `go-version-file`, so the version follows `go.mod`
+  automatically. Verified: `go build`/`go vet`/`go test -run='^$'` clean across all 8 modules,
+  `golangci-lint run ./...` 0 issues, `govulncheck ./...` reports 0 vulnerabilities your code calls
+  in every module (one pre-existing, unrelated, unfixable finding remains --
+  `golang.org/x/crypto/openpgp`'s `GO-2026-5932`, `Fixed in: N/A`, not reachable from this repo's
+  code and not part of this issue's scope), and the three toolchain-consistency guards
+  (`check-go-toolchain-pins.py`, `check-go-work-floor.sh`, `check-onboarding-go-version.sh`) all
+  pass.
+
 - **`--encrypt-sensitive-payloads` now covers the columns it was documented, and believed, to
   cover.** Closes cleat#2312. Measured by cleat-review during review of #2308: the flag's docs
   said "workflow input, output and error [are] encrypted at rest", but only 11 `event_history`
