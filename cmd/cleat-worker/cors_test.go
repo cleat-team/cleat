@@ -168,6 +168,61 @@ func TestCORSMiddlewareNeverEchoesWildcard(t *testing.T) {
 	}
 }
 
+// TestCORSMiddlewareVaryOriginIsUnconditional guards cleat-review's finding
+// on #3282: the response varies by Origin on every path through this
+// middleware, including the two that set no Access-Control-* header at all
+// (a refused preflight's 403, and an ordinary request from a disallowed or
+// absent origin) -- so Vary: Origin must be set there too, or an
+// intermediary cache sitting in front of the worker's API could serve one
+// origin's cached response to a later request from a different origin for
+// the same URL. Covers the disallowed-preflight and disallowed-ordinary
+// branches; the two allowed branches are already covered by
+// TestCORSMiddlewareAllowedOrigin and TestCORSMiddlewarePreflightAllowedOrigin,
+// which assert the same header.
+func TestCORSMiddlewareVaryOriginIsUnconditional(t *testing.T) {
+	mw := newCORSMiddleware([]string{"https://app.example.com"})
+	h := mw(echoHandler)
+
+	t.Run("ordinary disallowed origin", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
+		req.Header.Set("Origin", "https://evil.example.com")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Vary"); got != "Origin" {
+			t.Fatalf("Vary = %q, want %q -- an intermediary cache must not treat this "+
+				"disallowed-origin response as Origin-independent", got, "Origin")
+		}
+	})
+
+	t.Run("ordinary absent origin", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Vary"); got != "Origin" {
+			t.Fatalf("Vary = %q, want %q -- a request with no Origin header still varies "+
+				"by Origin (an absent header is a distinct case from a disallowed one)", got, "Origin")
+		}
+	})
+
+	t.Run("refused preflight", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/api/workflows", nil)
+		req.Header.Set("Origin", "https://evil.example.com")
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 -- precondition for this subtest", rec.Code)
+		}
+		if got := rec.Header().Get("Vary"); got != "Origin" {
+			t.Fatalf("Vary = %q, want %q -- a cached 403 for one origin must not be served "+
+				"to a later preflight from a different origin for the same URL", got, "Origin")
+		}
+	})
+}
+
 // containsToken reports whether value, read as a comma-separated header
 // list, contains token exactly (case-sensitive, matching this file's own
 // equality-only matching elsewhere) -- not merely as a substring, so

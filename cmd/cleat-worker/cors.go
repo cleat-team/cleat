@@ -75,6 +75,18 @@ func newCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 
+			// Unconditional, on every path through this middleware -- cleat-review's
+			// finding on #3282. The response varies by Origin on EVERY branch below,
+			// including the two that set no Access-Control-* header at all (a refused
+			// preflight's 403, and an ordinary request from a disallowed or absent
+			// origin): the same URL gets a different response depending on Origin.
+			// Setting Vary only on the allowed branches left the other two cacheable
+			// by an intermediary (CDN/ingress cache -- nothing in cmd/cleat-worker sets
+			// Cache-Control: no-store on these routes) as if Origin did not matter,
+			// which could serve one origin's cached response to another's request for
+			// the same URL -- the standard CORS cache-poisoning class.
+			w.Header().Set("Vary", "Origin")
+
 			// A preflight, not an ordinary OPTIONS request someone's own
 			// route happens to register: Access-Control-Request-Method is
 			// the signal a browser sends only when it is asking permission
@@ -93,7 +105,6 @@ func newCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 				}
 
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Methods", corsAllowMethods)
 
 				// Authorization reaches Access-Control-Allow-Headers ONLY
@@ -133,7 +144,6 @@ func newCORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler 
 			// Origin header this allowlist does not recognise.
 			if origin != "" && allowed[origin] {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
 			}
 			next.ServeHTTP(w, r)
 		})
