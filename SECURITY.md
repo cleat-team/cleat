@@ -222,10 +222,12 @@ replay behavior.
   own queries, gated at authoring time per dialect. Row-level security is a
   backstop underneath it, and its coverage differs sharply: PostgreSQL forces RLS
   on 19 of 23 tenant-bearing tables, SQL Server binds read-only FILTER predicates
-  to 13 and has **no BLOCK predicates at all**, and MySQL has none and is
-  single-tenant only by decision (`tiers.yaml` D1). On SQL Server the filter is
-  additionally inert for a `cleat_admin` connection. So a write that escaped the
-  statement-level gate would not be caught by the database on any dialect.
+  to 14 and, since cleat#2205, write-blocking BLOCK predicates to the same 14,
+  and MySQL has none and is single-tenant only by decision (`tiers.yaml` D1).
+  Both SQL Server predicates are additionally inert for a `cleat_admin`
+  connection. So a write from that connection, or from MySQL's own application
+  code, that escaped the statement-level gate would not be caught by the
+  database.
   `docs/reference/multi-tenancy.md` carries the measured table, checked on every
   run by `engine/the_documented_tenant_coverage_is_measured_test.go`.
 
