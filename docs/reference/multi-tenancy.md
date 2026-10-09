@@ -98,7 +98,7 @@ does: `dbo.cleat_admin` connections under the optional
 cross_tenant_claim.sql`) bypass BLOCK exactly as they bypass FILTER, since both
 share the one predicate function.
 
-**PostgreSQL's 16 of 20 is deliberate, not partial.** The four without RLS are
+**PostgreSQL's 19 of 23 is deliberate, not partial.** The four without RLS are
 the tenant registry itself — `admin.tenants`, `admin.tenant_api_keys`,
 `admin.tenant_roles`, `admin.tenant_egress_allow` — which live in the `admin`
 schema and describe tenants rather than belonging to one.
