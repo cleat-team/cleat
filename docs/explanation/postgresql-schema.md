@@ -226,10 +226,20 @@ that prose yet — not that the column does not exist.
   040: the claim now also picks up workflows running their defer phase
   (`docs/reference/workflow-lifecycle.md`), and a partial index is only usable
   when the query's predicate implies its filter.
-- `idx_instances_heartbeat` on `(assigned_to, heartbeat_at)` WHERE
-  `status = 'running'` -- enables monitoring and stale-assignment detection.
-- `idx_instances_stale` on `(status, heartbeat_at)` WHERE `status = 'running'` --
-  used by the reaper to reclaim instances with stale heartbeats.
+- `idx_instances_heartbeat` on `(assigned_to)` WHERE `status = 'running'` --
+  serves `HeartbeatBatchFenced`'s per-worker lookup. Carried `heartbeat_at`
+  too until migration 015; that column was never read by any query this
+  index serves, and dropping it is one half of what makes a heartbeat
+  UPDATE eligible to be HOT (see `idx_instances_stale` below, and
+  cleat#3245/#3272/#3274 -- dropping only this one does nothing by itself).
+- `idx_instances_stale` on `(status)` WHERE `status = 'running'` -- the
+  reaper's `WHERE status='running' AND heartbeat_at < ...` predicate is a
+  heap scan plus an in-memory sort as of migration 015, not an index range
+  scan: `heartbeat_at` was deliberately dropped from this index too, as the
+  other half of the same HOT-eligibility fix, trading a bounded,
+  periodic reaper-sweep cost (tens of milliseconds, scales with the
+  concurrently-running population, measured on cleat#3272) for every
+  heartbeat avoiding two B-tree updates and a full-tuple WAL record.
 - `idx_instances_sticky` on `(sticky_worker_id)` WHERE `sticky_worker_id IS NOT
   NULL` -- sticky worker fast path.
 
