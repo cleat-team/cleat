@@ -70,10 +70,13 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -584,6 +587,268 @@ func TestABootedWorkerBindsLoginToTheHost(t *testing.T) {
 	var key string
 	var probeErr error
 	ok, out := hostMatchServes(t, bin, args, &key, func(b, _ string) { probeErr = observe(b) })
+	if !ok {
+		t.Fatalf("the worker did not boot:\n%s", out)
+	}
+	if probeErr != nil {
+		t.Fatalf("%v\n\nWorker output:\n%s", probeErr, out)
+	}
+}
+
+// TestABootedWorkerMintsAnOAuthAPIKeyOnARealLogin pins the
+// MintOAuthAPIKey assignment into plugin.Environment -- cleat#2408, the
+// sibling gap TestABootedWorkerDisablesAnExpiredOAuthMintedKey's own doc
+// comment names and does not cover: that test pins RevokeExpiredOAuthAPIKeys
+// by seeding an already-expired key row directly in SQL and watching the
+// sweep act on it, which never calls MintOAuthAPIKey at all. Deleting the
+// mint assignment from cmd/cleat-worker/main.go left the whole package green
+// before this test existed (cleat#2412's review measured it), because the
+// plugin's own suite wires its OWN recording minter
+// (plugins/oauthprovider/a_real_dialect_login_stores_no_tokens_test.go:125)
+// rather than going through pluginEnv, and because a mint only happens on a
+// SUCCESSFUL login, which no boot test in this file drove all the way
+// through -- TestABootedWorkerBindsLoginToTheHost stops at the redirect
+// (CheckRedirect returns http.ErrUseLastResponse) specifically to avoid a
+// real network call.
+//
+// THE OBSTACLE THIS TEST HAD TO CLEAR, recorded on the issue before this was
+// written (design v2 Sec(9), cleat#2340): a real /login -> /callback round
+// trip needs an IdP the spawned worker can reach, and oidc.go's discoveryURL
+// refuses a non-https issuer -- so the mock has to be httptest.NewTLSServer,
+// and the SEPARATELY SPAWNED worker process has to trust its self-signed
+// certificate, which the in-process tests' package-var swap
+// (plugins/oauthprovider's `endpoints` map) cannot reach from outside at
+// all. SSL_CERT_FILE, pointed at the mock's certificate, is what bridges
+// that -- MEASURED here, not assumed: a standalone probe (spawn a child
+// process, GET the TLS mock from inside it) failed with "certificate signed
+// by unknown authority" with SSL_CERT_FILE unset, and succeeded with it set,
+// on this machine (darwin, go1.27.1) -- so the single end-to-end test design
+// the issue hoped for turned out not to need the documented macOS/split
+// fallback at all, at least here. If this test ever needs that fallback on
+// some other platform, gate it on GOOS rather than deleting this.
+//
+// THE SECOND OBSTACLE: the mock IdP binds loopback, which EgressGuard's floor
+// refuses unconditionally regardless of any allowlist -- AllowLoopback (the
+// production code already has a test-only seam for exactly this shape) is
+// enforced test-only by TestNoProductionCodeAllowsLoopbackEgress, so a real
+// spawned worker cannot use it. The production mechanism for the same thing
+// is --plugin-egress-allow-private, PLUS a tenant_egress_allow row -- both
+// are needed because the floor and the tenant-allowlist layer are separate
+// gates in engine/egress_policy.go's DialContext, checked one after the
+// other.
+//
+// WHY THE EXISTING MOCK TECHNIQUE (swapping the package-level `endpoints`
+// map, used by the google/github hardcoded-provider tests) COULD NOT BE
+// REUSED HERE: that map lives in the oauthprovider package's memory, and a
+// spawned cmd/cleat-worker process has its own, separate copy that this test
+// binary cannot reach. The generic `oidc` provider is the only one whose
+// endpoint (the issuer) is externally configurable, via a DB row
+// (oauth_config.issuer) the spawned worker reads for itself -- which is why
+// this test is provider=oidc rather than provider=google.
+//
+// WHAT IS ASSERTED: a NEW row in admin.tenant_api_keys, carrying
+// oauth_identity = OAuthIdentityTag("oidc", "email", <the mock's email>) --
+// not merely "the callback returned 200", which a mint that silently no-ops
+// would also satisfy.
+func TestABootedWorkerMintsAnOAuthAPIKeyOnARealLogin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the worker binary")
+	}
+	c := deployDialect{"postgres", "CLEAT_TEST_POSTGRES", "postgres"}
+	if c.admin() == "" {
+		t.Skip("CLEAT_TEST_POSTGRES/CLEAT_TEST_DB not set, skipping")
+	}
+	bin, ownerDSN, owner := buildWorker(t, c)
+	ring := masterKey(t)
+	appDSN := pgAppRoleDSN(t, owner, ownerDSN)
+
+	ctx := context.Background()
+	tenantID := engine.DefaultTenantUUID
+	const provider = "oidc"
+	const testEmail = "cleat-2408-user@example.test"
+
+	// The mock IdP. mockURL is filled in once the server starts; the
+	// discovery handler closes over the pointer rather than needing the URL
+	// before NewTLSServer returns it.
+	var mockURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"issuer":%q,"authorization_endpoint":%q,"token_endpoint":%q,"userinfo_endpoint":%q}`,
+			mockURL, mockURL+"/authorize", mockURL+"/token", mockURL+"/userinfo")
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		// No id_token: oidc.go validates one IN ADDITION whenever the IdP
+		// returns one, and userinfo alone is sufficient identity -- this
+		// avoids needing to mint and sign a JWT for a mock that exists only
+		// to prove the wiring.
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"cleat-2408-access-token","refresh_token":"cleat-2408-refresh-token","expires_in":3600}`))
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"email":%q,"email_verified":true}`, testEmail)
+	})
+	mockSrv := httptest.NewTLSServer(mux)
+	defer mockSrv.Close()
+	mockURL = mockSrv.URL
+	parsedMockURL, err := url.Parse(mockURL)
+	if err != nil {
+		t.Fatalf("parse mock IdP URL %q: %v", mockURL, err)
+	}
+	mockHostOnly := parsedMockURL.Hostname()
+
+	// SSL_CERT_FILE: the measured bridge (see doc comment). Written to
+	// t.TempDir() rather than a fixed path -- this file's siblings all use
+	// it for the same reason (parallel runs, automatic cleanup).
+	var certPEM []byte
+	for _, c := range mockSrv.TLS.Certificates {
+		for _, der := range c.Certificate {
+			certPEM = append(certPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+		}
+	}
+	certFile := filepath.Join(t.TempDir(), "cleat-2408-mock-idp-cert.pem")
+	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
+		t.Fatalf("write mock IdP cert: %v", err)
+	}
+
+	// Egress, both layers (see doc comment): the tenant allowlist row for
+	// the host, and the operator's private-address exemption for the same
+	// host, since the mock binds loopback and the floor refuses that
+	// regardless of the tenant's own list.
+	if _, err := owner.ExecContext(ctx,
+		`INSERT INTO admin.tenant_egress_allow (tenant_id, host) VALUES ($1, $2)`,
+		tenantID, mockHostOnly); err != nil {
+		t.Fatalf("seed tenant_egress_allow: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = owner.ExecContext(context.Background(),
+			`DELETE FROM admin.tenant_egress_allow WHERE tenant_id = $1 AND host = $2`,
+			tenantID, mockHostOnly)
+	})
+
+	// oauth_config, client secret, allowlist -- the same three fixtures
+	// TestABootedWorkerBindsLoginToTheHost seeds, plus `issuer` (the oidc
+	// provider's own column, unused by the hardcoded-endpoint providers that
+	// test configures) and an oauth_allowed_identities row (neither existing
+	// boot test needs one: this is the first to complete a login all the
+	// way to the allowlist check).
+	secrets := engine.NewPluginSecrets(engine.NewSecretStoreWithRing(owner, "postgres", ring))
+	const clientSecret = "cleat-2408-client-secret"
+	if err := secrets.ForTenant(tenantID).Put(ctx,
+		oauthprovider.OAuthClientSecretName(provider), clientSecret); err != nil {
+		t.Fatalf("seed client secret: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = owner.ExecContext(context.Background(),
+			`DELETE FROM tenant_secrets WHERE tenant_id = $1 AND name = $2`,
+			tenantID, oauthprovider.OAuthClientSecretName(provider))
+	})
+
+	if _, err := owner.ExecContext(ctx, `
+		INSERT INTO oauth_config (tenant_id, provider, client_id, redirect_url, issuer, enabled)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		tenantID, provider, "cleat-2408-client-id", "http://localhost/oauth/oidc/callback",
+		mockURL, true); err != nil {
+		t.Fatalf("seed oauth_config: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = owner.ExecContext(context.Background(),
+			`DELETE FROM oauth_config WHERE tenant_id = $1 AND provider = $2`, tenantID, provider)
+	})
+
+	if _, err := owner.ExecContext(ctx, `
+		INSERT INTO oauth_allowed_identities (tenant_id, provider, identity_type, identity_value)
+		VALUES ($1, $2, $3, $4)`,
+		tenantID, provider, "email", testEmail); err != nil {
+		t.Fatalf("seed oauth_allowed_identities: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = owner.ExecContext(context.Background(),
+			`DELETE FROM oauth_allowed_identities WHERE tenant_id = $1 AND provider = $2 AND identity_value = $3`,
+			tenantID, provider, testEmail)
+	})
+
+	wantIdentityTag := oauthprovider.OAuthIdentityTag(provider, "email", testEmail)
+	t.Cleanup(func() {
+		_, _ = owner.ExecContext(context.Background(),
+			`DELETE FROM admin.tenant_api_keys WHERE tenant_id = $1 AND oauth_identity = $2`,
+			tenantID, wantIdentityTag)
+	})
+
+	observe := func(base string) error {
+		client := &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+
+		loginResp, err := client.Get(base + "/oauth/" + provider + "/login?tenant_id=" + tenantID)
+		if err != nil {
+			return fmt.Errorf("GET /login: %w", err)
+		}
+		defer loginResp.Body.Close()
+		loginBody, _ := io.ReadAll(loginResp.Body)
+		if loginResp.StatusCode != http.StatusFound {
+			return fmt.Errorf("GET /login: want 302, got %d: %s", loginResp.StatusCode, loginBody)
+		}
+		loc, err := url.Parse(loginResp.Header.Get("Location"))
+		if err != nil {
+			return fmt.Errorf("parse Location: %w", err)
+		}
+		state := loc.Query().Get("state")
+		if state == "" {
+			return fmt.Errorf("Location carries no state: %s", loc)
+		}
+
+		callbackResp, err := client.Get(base + "/oauth/" + provider + "/callback?code=cleat-2408-mock-code&state=" + state)
+		if err != nil {
+			return fmt.Errorf("GET /callback: %w", err)
+		}
+		defer callbackResp.Body.Close()
+		callbackBody, _ := io.ReadAll(callbackResp.Body)
+		if callbackResp.StatusCode != http.StatusOK {
+			return fmt.Errorf("GET /callback: want 200, got %d: %s", callbackResp.StatusCode, callbackBody)
+		}
+
+		// A diagnostic deadline, not a timing assertion: finishLogin mints
+		// synchronously on this same request, so the row should already be
+		// there -- polling only absorbs any scheduling slack between the
+		// response and this SELECT, the same shape the sibling boot tests
+		// use for their own post-response checks.
+		deadline := time.Now().Add(10 * time.Second)
+		var count int
+		for {
+			if err := owner.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM admin.tenant_api_keys WHERE tenant_id = $1 AND oauth_identity = $2`,
+				tenantID, wantIdentityTag).Scan(&count); err != nil {
+				return fmt.Errorf("counting minted keys: %w", err)
+			}
+			if count > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("the callback returned 200 (body: %s) but no admin.tenant_api_keys row "+
+					"carries oauth_identity = %q within 10s. Either pluginEnv's MintOAuthAPIKey assignment "+
+					"is gone -- a nil mint function would make finishLogin itself fail, which this request "+
+					"would also have shown as a non-200 -- or it is assigned but the real minter main.go "+
+					"builds is returning success without writing a row", callbackBody, wantIdentityTag)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if count != 1 {
+			return fmt.Errorf("%d admin.tenant_api_keys rows carry oauth_identity = %q, want exactly 1 "+
+				"-- a stale row from an earlier run that this test's cleanup did not reach, or a double mint",
+				count, wantIdentityTag)
+		}
+		return nil
+	}
+
+	args := []string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN,
+		"--plugin-egress-allow-private=" + mockHostOnly}
+	var key string
+	var probeErr error
+	ok, out := hostMatchServes(t, bin, args, &key, func(b, _ string) { probeErr = observe(b) },
+		"SSL_CERT_FILE="+certFile)
 	if !ok {
 		t.Fatalf("the worker did not boot:\n%s", out)
 	}
