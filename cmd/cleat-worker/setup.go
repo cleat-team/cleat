@@ -154,6 +154,22 @@ type dbServiceCaller struct {
 	workerID    string
 	benchSvcURL string
 
+	// serviceCallTimeout is the HTTP client Timeout every per-call client this
+	// caller builds for a workflow-blocking request must use -- see
+	// durableCallClientTimeout's doc comment (cleat#3279). Set once at
+	// construction from the worker's own configured heartbeat
+	// (durableCallClientTimeout(w.heartbeatInterval)), not read live: a
+	// dbServiceCaller is built per workflow execution
+	// (executeWorkflow), so there is no live value to track and no benefit to
+	// re-deriving it per call.
+	//
+	// Zero in every test that constructs a bare &dbServiceCaller{} directly
+	// (most of this package's tests), which makes http.Client{Timeout: 0}
+	// -- unbounded, not zero-and-instant. That is correct for a test against
+	// an httptest.Server that always responds promptly; nothing in this
+	// package's test suite relies on these clients' Timeout value firing.
+	serviceCallTimeout time.Duration
+
 	// traceID is this run's W3C trace-id, propagated on guest-initiated
 	// fetches so the callee joins the caller's trace. cleat#1596.
 	//
@@ -369,7 +385,7 @@ func (c *dbServiceCaller) forwardToService(ctx context.Context, baseURL, service
 	// written as though it will -- this becomes a hot path and the answer is a
 	// pool PER TENANT, not a shared one.
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: c.serviceCallTimeout,
 		// THE ENDPOINT IN HAND, not c.benchSvcURL. This forwarder now serves
 		// every registered service, so exempting the bench URL would grant a
 		// host this call is not dialling and refuse the one it is: every
@@ -445,9 +461,11 @@ func (c *dbServiceCaller) ResolveCall(ctx context.Context, service, operation, i
 		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	// Same per-call, egress-guarded client as forwardToService -- see that
-	// method's comment for why this is not pooled.
+	// method's comment for why this is not pooled, and
+	// durableCallClientTimeout's doc for why the timeout is derived rather
+	// than its own literal.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   c.serviceCallTimeout,
 		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
 	}
 	resp, err := client.Do(req)
@@ -538,9 +556,10 @@ func (c *dbServiceCaller) ReplayUnderOriginalKey(ctx context.Context, service, o
 	}
 	// Same per-call, egress-guarded client as forwardToService and
 	// ResolveCall -- see forwardToService's comment for why this is not
-	// pooled.
+	// pooled, and durableCallClientTimeout's doc for why the timeout is
+	// derived rather than its own literal.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   c.serviceCallTimeout,
 		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
 	}
 	resp, err := client.Do(req)
@@ -718,8 +737,13 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON, idem
 	// whole point: a stock client follows up to ten redirects and re-resolves
 	// each hop, so a check on the guest's URL says nothing about where the
 	// request finally goes. See engine.EgressGuard.
+	//
+	// Timeout derived, not a literal -- see durableCallClientTimeout's doc:
+	// http.fetch is a workflow step blocking on an arbitrary external call,
+	// the same category as forwardToService, just without a registered
+	// service name.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   c.serviceCallTimeout,
 		Transport: &http.Transport{DialContext: c.egressGuard(ctx).DialContext},
 	}
 	resp, err := client.Do(httpReq)
@@ -3599,18 +3623,19 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// egressAllow is what makes http.fetch usable at all: without it the guard
 	// has no allowlist and refuses every destination. cleat#1565.
 	caller := &dbServiceCaller{
-		store:             execStore,
-		workerID:          w.id,
-		benchSvcURL:       *benchSvcURL,
-		serviceEndpoints:  w.serviceEndpoints,
-		ambiguityLookup:   w.ambiguityLookup,
-		idempotencyKeyOps: w.idempotencyKeyOps,
-		egressAllow:       w.egressAllow,
-		operatorEgress:    w.operatorEgress,
-		privateHosts:      w.privateHosts,
-		egress:            w.egress,
-		traceID:           traceID,
-		secrets:           w.secrets,
+		store:              execStore,
+		workerID:           w.id,
+		benchSvcURL:        *benchSvcURL,
+		serviceEndpoints:   w.serviceEndpoints,
+		ambiguityLookup:    w.ambiguityLookup,
+		idempotencyKeyOps:  w.idempotencyKeyOps,
+		egressAllow:        w.egressAllow,
+		operatorEgress:     w.operatorEgress,
+		privateHosts:       w.privateHosts,
+		egress:             w.egress,
+		traceID:            traceID,
+		secrets:            w.secrets,
+		serviceCallTimeout: durableCallClientTimeout(w.heartbeatInterval),
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
@@ -4783,6 +4808,36 @@ func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
 	return heartbeat + maxTolerableStall + 2*deadline + mssqlDrainSlack + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
 }
 
+// durableCallClientTimeout is the floor every HTTP client on the durable-call
+// path must use (cleat#3279). Four call sites in this file build a per-call
+// client for a request a workflow step is blocked on -- forwardToService,
+// ResolveCall, ReplayUnderOriginalKey, handleHTTPFetch -- and each one used to
+// hardcode `Timeout: 30 * time.Second`, independently of minimumReclaimAfter.
+// ROUND 6 (cleat#3258) widened minimumReclaimAfter well past 30s (47s at the
+// default heartbeat, and every heartbeat above 1s today, since
+// maxTolerableStall alone is 30s), so a legitimately slow call now fails at
+// the CLIENT, before the system's own reclaim logic -- the thing that
+// actually governs this window -- is ever consulted. The failure is silent
+// about which layer killed it: a transient-error, not a clean "reclaimed."
+//
+// EQUAL TO minimumReclaimAfter, NOT LARGER. minimumReclaimAfter already IS
+// this system's own definition of "how long a stall of this shape is
+// tolerated before the holder is considered dead" -- padding the client
+// beyond it would not make a call more likely to legitimately succeed, only
+// delay the point at which a resource (a goroutine, a connection) is finally
+// released on a workflow that is going to fail or be reclaimed either way.
+// A client bound below this value silently reopens the exact gap ROUND 6
+// widened past; TestDurableCallClientsDeriveTheirTimeoutFromTheReclaimWindow
+// (service_caller_errors_test.go) is the guard against that regression.
+//
+// NOT EVERY 30s SITE IN THIS FILE NEEDS THIS. askHolder (the reaper's own
+// veto call, cleat#2196) is part of the reclaim window's MECHANISM, not a
+// client that must survive it -- see its own doc comment for why a longer
+// timeout there would be the wrong direction entirely.
+func durableCallClientTimeout(heartbeat time.Duration) time.Duration {
+	return minimumReclaimAfter(heartbeat)
+}
+
 // maxTolerableStall is the longest single database/network stall
 // minimumReclaimAfter is deliberately sized to let a worker recover from
 // before being reclaimed as dead -- see that function's ROUND 6 doc for the
@@ -5440,9 +5495,27 @@ func (w *Worker) askHolders(ctx context.Context, questions []holderQuestion, ask
 // reason, as forwardToService's client. See service_egress.go.
 func (w *Worker) askHolder(ctx context.Context, address, runID string, generation int64) bool {
 	client := &http.Client{
-		// A backstop only. The ask phase's own context (askHolders) is the real
-		// bound, at one dbCallDeadline for every holder together.
-		Timeout:   30 * time.Second,
+		// A backstop only, NOT derived from minimumReclaimAfter -- see
+		// durableCallClientTimeout's doc comment on why this site is the
+		// opposite direction from the other four: a longer timeout here would
+		// make the reaper wait longer before concluding a holder is gone,
+		// which is backwards for the window's own mechanism. The ask phase's
+		// own context (askHolders) is the real bound, at one dbCallDeadline
+		// for every holder together -- askHolders wraps ctx in exactly that
+		// (context.WithTimeout(ctx, w.dbCallDeadline())), so this backstop
+		// only has to outlast THAT, not minimumReclaimAfter.
+		//
+		// cleat#3279: a bare 30s literal here was WRONG, independent of
+		// ROUND 6's window widening -- dbCallDeadlineFor(heartbeat) is
+		// heartbeat/2 with a 2s floor, and the largest --heartbeat
+		// validateHeartbeat allows (150s, exclusive) makes it ~75s, past this
+		// backstop's old 30s. At any --heartbeat above ~60s the "backstop
+		// only" claim above was already false: THIS Timeout, not askCtx's,
+		// would have fired first. 2x keeps the backstop strictly above
+		// askCtx's own deadline at every valid heartbeat, by construction,
+		// rather than by a literal nobody will remember to re-check against
+		// validateHeartbeat's ceiling.
+		Timeout:   2 * w.dbCallDeadline(),
 		Transport: &http.Transport{DialContext: w.serviceEgressGuard(ctx, "http://"+address).DialContext},
 	}
 	held, _ := askInternalHolds(ctx, client, address, w.internalAuthSecret, runID, generation)
