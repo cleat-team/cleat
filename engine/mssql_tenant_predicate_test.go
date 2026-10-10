@@ -97,11 +97,13 @@ import (
 	"encoding/hex"
 	"go/ast"
 	"go/parser"
+	goscanner "go/scanner"
 	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -533,17 +535,98 @@ func mssqlTenantStatements(src, path string, tables map[string]bool) []tenantSta
 	return tenantStatementsFor(src, path, tables, looksLikeMSSQL)
 }
 
+// sqlShapedLiteral is one Go string literal token found by goStringLiterals:
+// its decoded content (escapes resolved for a double-quoted literal, raw text
+// for a backtick one), the source byte offset of its opening delimiter -- for
+// line/function attribution, exactly as sqlLiteralRe's match offsets were --
+// and whether it was backtick-delimited.
+type sqlShapedLiteral struct {
+	text   string
+	offset int
+	raw    bool
+}
+
+// goStringLiterals returns every Go string literal token in src, both
+// backtick (raw) and double-quoted (interpreted). cleat#3294: the scan used
+// to find only backtick literals via sqlLiteralRe, a regex pairing backtick
+// characters textually -- blind to a double-quoted Go string regardless of
+// what builds or holds it (a literal passed directly to a Context call,
+// built with fmt.Sprintf, or held in a package-level var/const/map). See the
+// file header and mssql_schedules.go's mssqlDeleteEventHistoryTopPrefix
+// comment for the measured blast radius.
+//
+// A SECOND regex for double-quoted spans, run directly over the raw source
+// text, was tried and rejected: a backtick SQL literal in this file
+// routinely contains a literal `"` of its own -- mssql_events.go's MERGE
+// comment quotes `"d.tenant_id = w.tenant_id"` INSIDE a backtick-delimited
+// SQL string, as a worked example of exactly the column-to-column-vs-
+// parameter distinction this guard exists to enforce -- and a
+// non-tokenizing regex cannot tell that embedded quote from the opening
+// delimiter of an unrelated double-quoted literal elsewhere in the file.
+// That is the same "bounded read fabricates a literal" failure CLAUDE.md
+// records for backtick-pairing under a length bound (cmd/cleatctl/replay.go,
+// where a rejected-for-length literal's closing backtick paired with an
+// unrelated SELECT's opening one and the regex returned Go source as if it
+// were a SQL string): here the bound is the absence of nesting-awareness
+// rather than a length cap, and the fabrication risk is the same shape.
+// go/scanner tokenizes the way the Go compiler does, so a quote character
+// embedded in one literal's content can never be misread as the start or end
+// of another.
+func goStringLiterals(src []byte) []sqlShapedLiteral {
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(src))
+	var sc goscanner.Scanner
+	sc.Init(file, src, nil, 0)
+	var out []sqlShapedLiteral
+	for {
+		pos, tok, lit := sc.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok != token.STRING || len(lit) < 2 {
+			continue
+		}
+		if lit[0] == '`' {
+			out = append(out, sqlShapedLiteral{text: lit[1 : len(lit)-1], offset: file.Offset(pos), raw: true})
+			continue
+		}
+		// An interpreted literal the scanner itself already lexed correctly;
+		// strconv.Unquote resolves its escapes to the string Go would hold at
+		// run time, rather than analysing the escaped source text. A literal
+		// the scanner emitted but Unquote rejects would mean the two stdlib
+		// packages disagree about what is valid Go -- say nothing rather than
+		// guess, the same failure mode enclosingFunc's own doc comment chose
+		// for unparseable input.
+		if u, err := strconv.Unquote(lit); err == nil {
+			out = append(out, sqlShapedLiteral{text: u, offset: file.Offset(pos), raw: false})
+		}
+	}
+	return out
+}
+
 func tenantStatementsFor(src, path string, tables map[string]bool, isDialect func(string, string) bool) []tenantStatement {
 	var out []tenantStatement
-	for _, lit := range sqlLiteralRe.FindAllStringSubmatchIndex(src, -1) {
+	for _, lit := range goStringLiterals([]byte(src)) {
 		// Comments first, and not as tidiness: the claim queries carry a long
 		// -- comment about UUID conversion that mentions tenant_id, which would
 		// otherwise satisfy this guard for a statement that has no predicate at
 		// all. The UUID guard next door records the mirror-image version of
 		// this same mistake.
-		sql := stripSQLComments(src[lit[2]:lit[3]])
+		sql := stripSQLComments(lit.text)
 		flat := strings.ToLower(strings.Join(strings.Fields(sql), " "))
 		if !regexp.MustCompile(`\b(select|insert|update|delete|merge)\b`).MatchString(flat) {
+			continue
+		}
+		// A double-quoted literal is SQL-shaped far less reliably than a
+		// backtick one: this codebase has orders of magnitude more
+		// double-quoted Go strings than backtick SQL, and a DML verb alone
+		// ("...select the correct tenant before retrying...") is prose, not a
+		// statement. Requiring a FROM/INTO/SET too (cleat#3294's own suggested
+		// filter) costs nothing on the backtick side -- every real
+		// SELECT/INSERT/UPDATE/DELETE/MERGE in this codebase already has one
+		// of the three -- so it is applied uniformly rather than only to the
+		// literals that need it.
+		if !regexp.MustCompile(`\b(from|into|set)\b`).MatchString(flat) {
 			continue
 		}
 		if !isDialect(path, sql) {
@@ -579,8 +662,8 @@ func tenantStatementsFor(src, path string, tables map[string]bool, isDialect fun
 			continue
 		}
 		out = append(out, tenantStatement{
-			fn:       enclosingFunc(src, lit[2]),
-			line:     strings.Count(src[:lit[2]], "\n") + 1,
+			fn:       enclosingFunc(src, lit.offset),
+			line:     strings.Count(src[:lit.offset], "\n") + 1,
 			isInsert: isInsert,
 			excerpt:  excerpt(flat),
 			norm:     flat,
@@ -614,9 +697,21 @@ func tenantStatementsFor(src, path string, tables map[string]bool, isDialect fun
 // So the requirement is a comparison against a PARAMETER -- @pN, ?, or $N --
 // which is the only form that can carry "the tenant the caller is asking as".
 // A column-to-column comparison cannot, whatever it is named.
+//
+// @tenant IS ALSO A PARAMETER, and was invisible to this regex before
+// cleat#3294 widened the extraction to see it at all:
+// mssqlDeleteEventHistoryTopPrefix's own `tenant_id = @tenant` binds via
+// sql.Named("tenant", s.tenantID) in deleteEventHistoryRowBoundedCommitting,
+// a genuine bound parameter, just named rather than positional. Checked
+// across the whole engine package (`grep -oP 'sql\.Named\("\w+"' engine/*.go`)
+// for every OTHER name sql.Named produces before adding it: @tenant is the
+// only one that is not @p<N>, so this stays the narrow, checked list the
+// file's own looksLikeMySQL comment asks for ("the marker set stays narrow
+// rather than greedy") rather than a blanket @\w+ that would also accept an
+// interpolated identifier never bound as anything.
 var tenantComparedToAParameter = regexp.MustCompile(
-	`(?i)tenant_id\s*(?:=|<>|!=|\bin\b)\s*\(?\s*(?:@p\d+|\$\d+|\?)` +
-		`|(?:@p\d+|\$\d+|\?)\s*(?:=|<>|!=)\s*[\w.]*tenant_id`)
+	`(?i)tenant_id\s*(?:=|<>|!=|\bin\b)\s*\(?\s*(?:@p\d+|@tenant\b|\$\d+|\?)` +
+		`|(?:@p\d+|@tenant\b|\$\d+|\?)\s*(?:=|<>|!=)\s*[\w.]*tenant_id`)
 
 // filterWindows returns the text of each WHERE, ON and HAVING clause.
 func filterWindows(flat string) []string {
