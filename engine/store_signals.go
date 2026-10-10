@@ -38,6 +38,13 @@ func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, rea
 		return err
 	}
 
+	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_leases, on the
+	// same tx. sealedReason is reused rather than re-sealed, so the two
+	// tables carry identical ciphertext.
+	if err := setLeaseCancellation(ctx, tx, workflowID, sealedReason); err != nil {
+		return err
+	}
+
 	return tx.Commit()
 }
 
@@ -108,6 +115,11 @@ func (s *PostgresStore) ConsumeSignal(ctx context.Context, workflowID string, id
 		WHERE id = $1
 	`, workflowID); err != nil {
 		return fmt.Errorf("consume signal: bump consumed counter: %w", err)
+	}
+	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_leases, on the
+	// same tx.
+	if err := bumpLeaseSignalConsumedSeq(ctx, tx, workflowID); err != nil {
+		return fmt.Errorf("consume signal: %w", err)
 	}
 	return tx.Commit()
 }
@@ -402,6 +414,13 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	`, workflowID); err != nil {
 		return err
 	}
+	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_leases, on the
+	// same tx. deliverSignalTx has no store receiver (shared by DeliverSignal
+	// and DeliverSignalIdempotent), so this mirror is a free function too --
+	// it needs nothing from the store beyond the transaction.
+	if err := bumpLeaseSignalSeqAndWake(ctx, tx, workflowID); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -618,6 +637,15 @@ func (s *PostgresStore) SetAllowedSignalCallers(ctx context.Context, workflowID 
 		// with "tenant B ... was told it succeeded".
 		return ErrWorkflowNotFound
 	}
+	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_payloads, on
+	// the same tx -- a scope addition found and disclosed on the issue before
+	// this code was written (allowed_signals is a workflow_payloads column
+	// per migration 016, not a workflow_leases one like this file's other
+	// mirrors). Runs only after the n==0 check above has confirmed the row
+	// exists under this tenant, same as the UPDATE it mirrors.
+	if err := setPayloadAllowedSignals(ctx, tx, workflowID, encoded); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -635,6 +663,65 @@ func encodeAllowedSignals(callers []string) (sql.NullString, error) {
 		return sql.NullString{}, fmt.Errorf("encode allowed signals: %w", err)
 	}
 	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+// bumpLeaseSignalSeqAndWake mirrors deliverSignalTx's signal_seq bump and
+// conditional wake onto workflow_leases, on the same tx -- cleat#3245 Phase 3
+// step 2, piece 5a. Free function, not a *PostgresStore method: deliverSignalTx
+// itself has no store receiver (shared by DeliverSignal and
+// DeliverSignalIdempotent), and this mirror needs nothing from the store
+// beyond the transaction.
+func bumpLeaseSignalSeqAndWake(ctx context.Context, tx *sql.Tx, workflowID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET signal_seq = signal_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// bumpLeaseSignalConsumedSeq mirrors ConsumeSignal's signal_consumed_seq bump
+// onto workflow_leases, on the same tx -- cleat#3245 Phase 3 step 2, piece 5a.
+func bumpLeaseSignalConsumedSeq(ctx context.Context, tx *sql.Tx, workflowID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases SET signal_consumed_seq = signal_consumed_seq + 1
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// setLeaseCancellation mirrors RequestCancellation's write onto
+// workflow_leases, on the same tx -- cleat#3245 Phase 3 step 2, piece 5a.
+// sealedReason is whatever RequestCancellation already encrypted (cleat#2312),
+// reused rather than re-sealed, so the two tables carry identical ciphertext.
+func setLeaseCancellation(ctx context.Context, tx *sql.Tx, workflowID string, sealedReason any) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET cancellation_requested = true, cancellation_reason = $2
+		WHERE id = $1
+	`, workflowID, sealedReason); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// setPayloadAllowedSignals mirrors SetAllowedSignalCallers' write onto
+// workflow_payloads, on the same tx -- cleat#3245 Phase 3 step 2, piece 5a (a
+// scope addition: allowed_signals is a workflow_payloads column per migration
+// 016, found and disclosed on the issue before this was written, since it
+// wasn't named in step 2's original sequencing plan).
+func setPayloadAllowedSignals(ctx context.Context, tx *sql.Tx, workflowID string, encoded any) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET allowed_signals = $1 WHERE id = $2
+	`, encoded, workflowID); err != nil {
+		return fmt.Errorf("mirror payload row: %w", err)
+	}
+	return nil
 }
 
 // GetQueryState returns the value for a key in the workflow's query_state JSONB.
