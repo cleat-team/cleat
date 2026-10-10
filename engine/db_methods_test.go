@@ -3213,7 +3213,7 @@ func TestPostgresStore_StreamEventHistory_SuccessWithPageSizeZero(t *testing.T) 
 func TestPostgresStore_ContinueAsNew_SuccessMock(t *testing.T) {
 	newRunID := "new-run-uuid"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{newRunID}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{newRunID, "default"}}},
 	}, []mockExecResult{
 		{match: "INSERT INTO event_history", affected: 1},
 		{match: "SET status = 'done'", affected: 1},

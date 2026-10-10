@@ -118,19 +118,34 @@ func (c *fenceFakeConn) ExecContext(_ context.Context, query string, _ []driver.
 	return fenceFakeResult{rowsAffected: rows}, nil
 }
 
-// QueryContext handles the one QueryRowContext call these four methods (and
-// their nested calls) issue: ContinueAsNew's "INSERT ... RETURNING id" for
-// the new run. database/sql uses this directly (bypassing Prepare/Stmt)
-// because fenceFakeConn implements driver.QueryerContext.
+// QueryContext handles every QueryRowContext/QueryContext call these four
+// methods (and their nested calls, including the post-commit
+// enforceParentClosePolicy step that lists TERMINATE children) issue.
+// database/sql uses this directly (bypassing Prepare/Stmt) because
+// fenceFakeConn implements driver.QueryerContext.
+//
+// ContinueAsNew's "INSERT ... RETURNING id, task_queue" for the new run is
+// matched by substring and given two columns -- cleat#3245 Phase 3 step 2
+// piece 4d added the second column, captured so insertLeaseAndPayloadRows
+// (piece 1) does not re-evaluate the task_queue subquery. Every other
+// QueryContext call (e.g. childrenClosedByTerminate's single-column
+// workflow_id list) gets the original one-column shape: widening every
+// query to two columns broke that unrelated caller's Scan with "expected 2
+// destination arguments ... not 1", surfaced only as a best-effort WARN log
+// rather than a test failure, which is why it needs its own branch rather
+// than a single hardcoded shape.
 func (c *fenceFakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.state.record(query)
-	return &fenceFakeRows{cols: []string{"id"}, val: "fake-new-run-id"}, nil
+	if strings.Contains(query, "INSERT INTO workflow_instances") {
+		return &fenceFakeRows{cols: []string{"id", "task_queue"}, vals: []driver.Value{"fake-new-run-id", "default"}}, nil
+	}
+	return &fenceFakeRows{cols: []string{"id"}, vals: []driver.Value{"fake-child-id"}}, nil
 }
 
-// fenceFakeRows is a single-row, single-column driver.Rows.
+// fenceFakeRows is a single-row driver.Rows, as many columns as vals.
 type fenceFakeRows struct {
 	cols []string
-	val  driver.Value
+	vals []driver.Value
 	done bool
 }
 
@@ -141,7 +156,7 @@ func (r *fenceFakeRows) Next(dest []driver.Value) error {
 		return io.EOF
 	}
 	r.done = true
-	dest[0] = r.val
+	copy(dest, r.vals)
 	return nil
 }
 
