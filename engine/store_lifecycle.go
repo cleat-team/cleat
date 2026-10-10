@@ -1970,7 +1970,7 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	// why it is bounded at all. ORDER BY heartbeat_at reclaims the
 	// longest-stale first, so a bound that binds delays the freshest rather
 	// than picking arbitrarily.
-	result, err := tx.ExecContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
@@ -1983,12 +1983,48 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 		    ORDER BY heartbeat_at
 		    LIMIT $2
 		)
+		RETURNING id
 	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	return int(n), tx.Commit()
+	reapedIDs, err := scanWorkflowIDs(rows)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances: scan: %w", err)
+	}
+	// cleat#3245 Phase 3 step 2 piece 6b: mirror onto workflow_leases, on the
+	// same tx -- the exact set of ids the UPDATE above just reclaimed,
+	// captured via RETURNING rather than re-run against workflow_leases'
+	// own heartbeat_at/status columns. Piece 3 keeps those in sync, so the
+	// two subqueries SHOULD already agree, but capturing avoids depending on
+	// that agreement holding -- the same reasoning pieces 1/4b/4d use for
+	// RETURNING over re-deriving.
+	if err := reapLeaseRows(ctx, tx, reapedIDs); err != nil {
+		return 0, fmt.Errorf("reap stale instances: %w", err)
+	}
+	return len(reapedIDs), tx.Commit()
+}
+
+// reapLeaseRows mirrors ReapStaleInstances/ReapStaleInstancesExcept's bulk
+// reclaim onto workflow_leases, on the caller's tx, for exactly the ids named
+// -- cleat#3245 Phase 3 step 2, piece 6b. A no-op on an empty slice: pq.Array
+// of an empty slice still issues a statement matching nothing, but skipping
+// it entirely avoids a wasted round trip on the common case (nothing stale).
+func reapLeaseRows(ctx context.Context, tx *sql.Tx, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id = ANY($1)
+	`, pq.Array(ids)); err != nil {
+		return fmt.Errorf("mirror lease rows: %w", err)
+	}
+	return nil
 }
 
 // ListStaleHolders satisfies StaleHolderReaper. Same RLS scoping and same
@@ -2049,7 +2085,7 @@ func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout ti
 		excludeGenerations[i] = k.Generation
 	}
 
-	result, err := tx.ExecContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
@@ -2066,12 +2102,21 @@ func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout ti
 		    ORDER BY heartbeat_at
 		    LIMIT $2
 		)
+		RETURNING id
 	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), excludeIDs, excludeGenerations)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances except: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	return int(n), tx.Commit()
+	reapedIDs, err := scanWorkflowIDs(rows)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: scan: %w", err)
+	}
+	// cleat#3245 Phase 3 step 2 piece 6b: mirror onto workflow_leases, on the
+	// same tx -- see ReapStaleInstances' identical comment above.
+	if err := reapLeaseRows(ctx, tx, reapedIDs); err != nil {
+		return 0, fmt.Errorf("reap stale instances except: %w", err)
+	}
+	return len(reapedIDs), tx.Commit()
 }
 
 // PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
