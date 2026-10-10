@@ -57,6 +57,37 @@ package engine
 // built by concatenation, and it reasons about text rather than about what the
 // server does with it.
 //
+// THE GUARD DOES NOT RECURSE INTO SUBQUERIES, AND THAT IS A DOCUMENTED LIMIT,
+// NOT AN OVERSIGHT (cleat#3289). filterWindows' own window runs from one
+// WHERE/ON/HAVING to the next ORDER BY/GROUP BY/OPTION/WHEN with no notion of
+// a subquery boundary in between, so a tenant_id comparison anywhere in that
+// shared window -- the outer clause's own, or a nested subquery's -- reads as
+// scoping everything inside it, including a tenant-scoped table the subquery
+// touches and the outer clause does not. StartChildWorkflowAtomic's own
+// `WHERE NOT EXISTS (SELECT 1 FROM event_history WHERE ... AND tenant_id =
+// @p9)` and GetCompactionCandidates's two correlated subqueries against
+// event_history are both missed this way on MSSQL.
+//
+// cleat#3289 built and measured a fix -- splitting each statement into its
+// outer shell plus every nested subquery, checking each piece's own window
+// independently -- and reverted it rather than ship it. Run for real against
+// this package (the scan is shared between dialects via tenantStatementsFor),
+// it surfaced 18 new failures on the MySQL guard alone, and spot-checking two
+// showed why: a subquery that CORRELATES to an already-scoped outer alias
+// (`ck.tenant_id = w.tenant_id` in CountRunnableWorkflows) or JOINS on a key
+// that ties its rows back to one (GetCompactionCandidates' MySQL derived-table
+// JOIN, which has no tenant_id at all) is exactly as safe as a direct
+// parameter comparison, but only because the alias it reaches back to is
+// itself already scoped -- and nothing about the text of the subquery alone
+// can tell that apart from a genuine leak like StartChildWorkflow's
+// ISNULL(...) above, which reaches back to nothing. Telling the two apart
+// needs to track which aliases are transitively tenant-scoped through however
+// many joins and parens separate them from the subquery in question -- real
+// SQL semantics, not a text pattern, and this guard is text-based by design
+// (the line above this one is why). The owner's ruling, cleat#3289: leave the
+// limit as a known, written-down gap rather than build the hand-maintained
+// per-subquery allowlist that closing it properly would need.
+//
 // A stale entry fails the test too. An allowlisted function that no longer has
 // an unscoped statement means somebody fixed it, and the entry must go rather
 // than sit there granting permission nobody is using.
