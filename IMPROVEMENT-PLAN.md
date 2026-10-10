@@ -10735,3 +10735,80 @@ bumped together from here rather than drifting apart.
 **Files**: `examples/b2b-saas-control-plane-dbos-port/{package.json,package-lock.json,tsconfig.json,README.md,ISSUES.md,src/{workflow.ts,server.ts,provision.test.ts}}`,
 `scripts/run-b2b-saas-control-plane-dbos-scenario.sh`, `scripts/dbos-pair-loc.sh`,
 `scripts/check-dbos-pair-loc.py`, `.github/workflows/ci.yml`.
+
+---
+
+### 3.500 Both tenant-predicate guards were blind to a double-quoted Go string literal — ✅ **FIXED 2026-10-10** (cleat#3294)
+
+`TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate` and its MySQL sibling share one
+extraction, `sqlLiteralRe = `+"`"+`regexp.MustCompile("(?s)`([^`]*)`")`+"`"+`, which only matches
+**backtick**-delimited Go string literals. A SQL fragment written as a plain double-quoted Go
+string was invisible regardless of whether it was passed directly to a `Context` call, built with
+`fmt.Sprintf`, or held in a package-level var/const/map — only the quote character mattered.
+Found re-verifying cleat-review's #3286 finding about `mssqlDeleteEventHistoryTopPrefix` directly
+(per house discipline) rather than taken on claim: switching that one literal from double quotes to
+backticks, with `fmt.Sprintf` and the package-level var both left exactly as they are, made the
+guard see it immediately. The real mechanism was the quote character, not `fmt.Sprintf` or the var.
+
+**The replacement tokenizes with `go/scanner` rather than adding a second regex.** A second
+`"(...)"` regex run directly over raw source text was tried and rejected: a backtick SQL literal in
+this file routinely contains a literal `"` of its own — `mssql_events.go`'s MERGE comment quotes
+`"d.tenant_id = w.tenant_id"` *inside* a backtick-delimited SQL string, as a worked example of the
+exact column-to-column-vs-parameter distinction this guard exists to enforce — and a non-tokenizing
+regex cannot tell that embedded quote from the opening delimiter of an unrelated double-quoted
+literal elsewhere in the file. Same "bounded read fabricates a literal" shape CLAUDE.md records for
+backtick-pairing under a length bound (`cmd/cleatctl/replay.go`), one level down: there the bound was
+a length cap, here it would have been the absence of nesting-awareness. `go/scanner` tokenizes the
+way the Go compiler does, so a quote character inside one literal's content can never be misread as
+another literal's delimiter. The double-quoted branch also requires a FROM/INTO/SET in addition to
+the existing DML-verb check, since this codebase has orders of magnitude more double-quoted Go
+strings than backtick SQL and a verb alone is prose as often as not — applied uniformly rather than
+conditionally, since every real statement already has one of the three.
+
+**Measured blast radius, once wired into both guards**: zero new findings on the MySQL side (double-
+quoted literals are genuinely scanned there too — probed directly with a throwaway test counting
+24/147/99 double-quoted spans across three mysql_*.go files pre-filter (`mysql_events.go`,
+`mysql_lifecycle.go`, `mysql_store.go`) — there simply is no
+unscoped one reaching an unscoped tenant table). On MSSQL, `mssqlDeleteByWorkflowPrefix`'s map
+(`engine/mssql_schedules.go`) — four of its seven entries touch a table this guard's
+`mssqlTenantScopedTables()` can see (`event_history`, `workflow_signals`, `workflow_promises`,
+`workflow_instances`) and none carried a `tenant_id` predicate.
+
+**Investigated rather than allowlisted.** The guard refuses to allowlist a package-level statement
+at all ("there is no function to allowlist... move it into the function that issues it, or scope
+it" — a deliberate design choice from #1032's history, so an invented function name can never be
+offered as an allowlist key again). Tracing `deleteByWorkflowIDs`'s caller
+(`deleteWorkflowsBatchOnce`) showed its id list is already filtered `tenant_id = @p2` before the
+chunked deletes run, so every id belongs to one tenant and the statements were safe by construction
+(scopedByCaller) regardless. Fixed anyway, as defence in depth matching the sibling statement's
+existing `tenant_id = @tenant` pattern — and necessarily so for three of the seven table entries
+(`idempotency_keys`, `concurrency_keys`, `workflow_update_requests`), which have no SQL Server
+security-policy filter at all (see cleat#3313) and for which a Go-level predicate is not a second
+layer, it is the only one.
+
+**`tenantComparedToAParameter` needed its own narrow fix.** `mssqlDeleteEventHistoryTopPrefix`'s own
+`tenant_id = @tenant` is a genuine bound parameter (`sql.Named("tenant", s.tenantID)`), just named
+rather than positional, and the regex only recognised `@p\d+`. Checked against every name
+`sql.Named` produces anywhere in `engine/` before widening it: `@tenant` is the only non-`@p<N>`
+one, so the fix adds exactly that literal alternative rather than a blanket `@\w+` that would also
+accept an interpolated identifier never bound as anything.
+
+**Falsified per-mechanism, not just once**: reverting the extraction to backtick-only (with the
+`mssql_schedules.go` predicates also stripped) reproduced the original blind spot — a false green.
+Reverting only the `@tenant` regex addition (predicates left in place) failed the guard on all five
+statements that use it, including the one already-fixed sibling. Reverting only the
+`mssql_schedules.go` predicates (extraction and regex fix left in place) failed the guard on exactly
+the four newly-visible statements, by name. Each was restored and reconfirmed green before moving
+on.
+
+**Two follow-ups filed rather than folded in**, each a different mechanism from this one:
+cleat#3313 (the guard's table-derivation misses `tenant_id`-bearing tables with no SQL Server
+security policy — a structural gap, not a literal-extraction one) and cleat#3314 (`cmd/cleat`'s
+`runVersions`/`runRollback`/`runRollbackClear` never call `set_config('cleat.tenant_id', ...)` the
+way `runDeploy` does post-cleat#2065 — PostgreSQL-only, out of reach of either dialect guard, and
+left unresolved pending a decision on `cmd/cleat`'s intended connection role).
+
+**Files**: `engine/mssql_tenant_predicate_test.go` (`goStringLiterals`, `sqlShapedLiteral`,
+`tenantStatementsFor`, `tenantComparedToAParameter`), `engine/mssql_schedules.go`
+(`mssqlDeleteByWorkflowPrefix`, `deleteByWorkflowIDs`, `deleteWorkflowsChunkOnceOnce`,
+`mssqlDeleteEventHistoryTopPrefix`'s comment).
