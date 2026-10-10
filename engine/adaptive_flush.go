@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // batchEntry holds a pre-computed event to be persisted.
@@ -358,6 +360,26 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 	if cerr := rows.Close(); cerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check close: %w", cerr)
 	}
+
+	// cleat#3245 Phase 3 step 2, gap found scoping step 3 piece A: mirror the
+	// same renewal onto workflow_leases, same tx, for exactly the ids the
+	// statement above just renewed (fencedOK's keys) -- Heartbeat (db.go) got
+	// this mirror under piece 3; this batch-mode counterpart did not, so
+	// workflow_leases.heartbeat_at could go stale for a workflow kept alive
+	// only through this path, invisibly until something reads heartbeat_at
+	// from workflow_leases instead of workflow_instances.
+	if len(fencedOK) > 0 {
+		ids := make([]string, 0, len(fencedOK))
+		for id := range fencedOK {
+			ids = append(ids, id)
+		}
+		if _, merr := tx.ExecContext(ctx, `
+			UPDATE workflow_leases SET heartbeat_at = now() WHERE id = ANY($1)
+		`, pq.Array(ids)); merr != nil {
+			return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: mirror lease: %w", merr)
+		}
+	}
+
 	if cerr := tx.Commit(); cerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check commit: %w", cerr)
 	}
