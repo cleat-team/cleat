@@ -274,9 +274,12 @@ func TestPostgresStore_Heartbeat_Owned(t *testing.T) {
 }
 
 func TestPostgresStore_ReapStaleInstances(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 3},
-	})
+	// UPDATE workflow_instances ... RETURNING id, not an Exec with
+	// RowsAffected -- cleat#3245 Phase 3 step 2 piece 6b needs the reclaimed
+	// ids to mirror the same set onto workflow_leases.
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "UPDATE workflow_instances", data: [][]driver.Value{{"wf-1"}, {"wf-2"}, {"wf-3"}}},
+	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
