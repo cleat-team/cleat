@@ -127,6 +127,7 @@ engine/mssql_rls_enforcement_test.go	migration 103
 engine/mssql_schedule_tenant_id_test.go	migration 103
 engine/mssql_store_integration_test.go	034_event_history_request_widen.sql
 engine/mssql_store_integration_test.go	migration 034
+engine/mssql_tenant_predicate_test.go	migration 083
 engine/mssql_tenant_settings_test.go	042_tenant_settings.sql
 engine/mssql_tenant_settings_test.go	migration 103
 engine/mysql_lifecycle.go	010_idempotency_keys_tenant_id.sql

@@ -336,13 +336,49 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	//    as scopedByCaller after checking all four call sites, not assumed --
 	//    the first draft of this entry said openFinding.
 
+	// cleat#3313: idempotency_keys became visible to mssqlSchemaTenantIDTables
+	// (it has a tenant_id column but no security policy), surfacing this
+	// statement for the first time. cmd/cleat-worker/setup.go's own doc comment
+	// on expiredIdempotencyKeysSQL explains why it deliberately carries no
+	// predicate: it deletes by expires_at, a column with no tenant-dependent
+	// meaning, and runs on the raw *sql.DB pool rather than a tenant-scoped
+	// connection -- a single server-wide sweep, by design. Its MySQL sibling
+	// (same function, same file, `DELETE FROM idempotency_keys WHERE
+	// expires_at < NOW(6)`) has the identical shape and is NOT currently
+	// allowlisted on that dialect -- not because it is considered safe by a
+	// matching entry, but because the MySQL guard's own file walk
+	// (`filepath.Glob("*.go")` in engine/mysql_tenant_predicate_test.go) never
+	// reaches cmd/cleat-worker/setup.go at all, unlike this guard's broader
+	// goFilesCarryingSQL. A real, separate gap, filed rather than fixed here
+	// (cleat#3318) -- this entry is about THIS statement being correct, not
+	// about the MySQL guard's blind spot being acceptable. Adding
+	// tenant_id = @pN here would require restructuring this into a per-tenant
+	// loop the way PostgreSQL's sweepExpiredIdempotencyKeys had to, once
+	// migration 083 put a policy on that dialect's table -- the comment above
+	// says exactly that happened there and did not happen here.
+	"setup.go:expiredIdempotencyKeysSQL#d58fbbe9d58e": {
+		SQL:    "delete from idempotency_keys where expires_at < sysutcdatetime()",
+		Reason: mustNotScope,
+	},
 }
 
 func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
-	tables := mssqlTenantScopedTables(t)
-	if len(tables) == 0 {
+	policyTables := mssqlTenantScopedTables(t)
+	if len(policyTables) == 0 {
 		t.Fatal("no tables bound to dbo.fn_tenant_filter found in migrations/mssql -- the " +
 			"parse is broken and this guard would pass no matter what the store did")
+	}
+	schemaTables := mssqlSchemaTenantIDTables(t)
+	if len(schemaTables) == 0 {
+		t.Fatal("no tenant_id column declarations found in migrations/mssql -- the parse is " +
+			"broken and this guard would pass no matter what the store did")
+	}
+	tables := map[string]bool{}
+	for tbl := range policyTables {
+		tables[tbl] = true
+	}
+	for tbl := range schemaTables {
+		tables[tbl] = true
 	}
 	// Sanity anchors. If the parse silently stops finding these, everything
 	// below becomes vacuous.
@@ -350,6 +386,21 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 		if !tables[want] {
 			t.Fatalf("%s is not among the parsed tenant-scoped tables %v -- the migration "+
 				"parse is broken", want, sortedSet(tables))
+		}
+	}
+	// cleat#3313's own anchors: these three have a tenant_id column but no
+	// security policy, so they are present ONLY via mssqlSchemaTenantIDTables.
+	// If this regresses silently, the union collapsed back to the
+	// policy-only set and these three statements go uncovered again.
+	for _, want := range []string{"idempotency_keys", "concurrency_keys", "workflow_update_requests"} {
+		if !tables[want] {
+			t.Fatalf("%s is not among the parsed tenant-scoped tables %v -- "+
+				"mssqlSchemaTenantIDTables (cleat#3313) regressed", want, sortedSet(tables))
+		}
+		if policyTables[want] {
+			t.Fatalf("%s is now bound to a security policy -- if migrations/mssql/ added one, "+
+				"this anchor (and cleat#3313's premise) is stale and should be updated or removed, "+
+				"not left asserting a gap that has closed", want)
 		}
 	}
 
@@ -440,6 +491,16 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 // mssqlTenantScopedTables reads the shipped migrations for the tables actually
 // bound to the security policy, rather than hardcoding a list that would go
 // stale the next time one is added.
+//
+// THIS IS NOT THE WHOLE TENANT-SCOPED SET (cleat#3313). It is every table
+// `dbo.fn_tenant_filter` covers, and three tables that carry a genuine
+// tenant_id column have no such policy at all: idempotency_keys,
+// concurrency_keys, workflow_update_requests (confirmed by grep against
+// every CREATE SECURITY POLICY in migrations/mssql/003_procedures.sql). For
+// those three a Go-level predicate is not defence in depth, it is the only
+// layer -- and this function alone cannot see that they need one. See
+// mssqlSchemaTenantIDTables, and the union of both at this function's call
+// site.
 func mssqlTenantScopedTables(t *testing.T) map[string]bool {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join("..", "migrations", "mssql", "*.sql"))
@@ -455,6 +516,85 @@ func mssqlTenantScopedTables(t *testing.T) map[string]bool {
 		}
 		for _, m := range bind.FindAllStringSubmatch(string(src), -1) {
 			out[strings.ToLower(m[1])] = true
+		}
+	}
+	return out
+}
+
+// mssqlSchemaTenantIDTables reads the shipped migrations for every table that
+// DECLARES a tenant_id column, independent of whether a security policy also
+// covers it -- the schema-presence definition mysqlTenantScopedTables already
+// uses for MySQL, which has no security-policy mechanism to derive from at
+// all. Deriving from the schema rather than from a security mechanism is the
+// weaker, more inclusive definition on purpose: a table that ought to carry
+// tenant_id and does not is invisible to this guard exactly as it is to the
+// database, but a table that DOES carry tenant_id and has no policy is
+// exactly the gap cleat#3313 is about, and mssqlTenantScopedTables's own
+// derivation cannot see it by construction (it reads policy bindings, and
+// there is no binding to read).
+//
+// A CREATE TABLE body can nest parens (CONSTRAINT ... CHECK (...), DEFAULT
+// (...)), so capturing "the whole body" with a regex risks matching the
+// wrong closing paren -- the same "bounded read fabricates a literal" shape
+// recorded elsewhere in this codebase. Avoided the way
+// mssqlUUIDColumns (engine/mssql_uuid_projection_test.go) already avoids it
+// for UNIQUEIDENTIFIER: find every CREATE/ALTER TABLE marker and every
+// tenant_id column declaration independently, then attribute each
+// declaration to the NEAREST PRECEDING marker by file position. No ALTER
+// TABLE ... ADD tenant_id form exists in migrations/mssql today (checked:
+// `grep -rn "ADD.*tenant_id" migrations/mssql/*.sql` finds only ADD
+// CONSTRAINT and the security-policy ADD FILTER/BLOCK PREDICATE forms, never
+// a column add) -- unlike MySQL's addCol case, every tenant_id column here
+// is declared directly in its CREATE TABLE.
+func mssqlSchemaTenantIDTables(t *testing.T) map[string]bool {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join("..", "migrations", "mssql", "*.sql"))
+	if err != nil {
+		t.Fatalf("glob migrations: %v", err)
+	}
+	// dbo. ONLY, matching mssqlTenantScopedTables's own schema scope exactly
+	// (its bind regex is anchored ON\s+dbo\.). admin.* tables -- confirmed by
+	// reading every CREATE TABLE in migrations/mssql/001_schema.sql, every
+	// one explicitly schema-qualified -- are a different category: they
+	// identify or administer tenants (admin.tenant_api_keys resolves a
+	// caller's tenant FROM an API key, admin.tenants is the tenant registry
+	// itself), so a statement against one is deliberately cross-tenant by
+	// construction, not a gap of the kind cleat#3313 is about. Widening
+	// this past dbo. surfaced exactly three such admin.tenant_api_keys call
+	// sites (resolveAPIKeyStmt, liveAPIKeyCountQuery, ResolveTenantFromAPIKey)
+	// -- a real, different finding, filed separately rather than adjudicated
+	// here (cleat#3317): see "ask whether the answer is a sweep or a
+	// mechanism" and "one PR, one thing" in CLAUDE.md.
+	tableRe := regexp.MustCompile(`(?i)\b(?:CREATE\s+TABLE|ALTER\s+TABLE)\s+dbo\.\[?(\w+)\]?`)
+	decl := regexp.MustCompile(`(?im)^\s*\[?tenant_id\]?\s+\w`)
+	out := map[string]bool{}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		src := string(b)
+		type mark struct {
+			pos   int
+			table string
+		}
+		var marks []mark
+		for _, m := range tableRe.FindAllStringSubmatchIndex(src, -1) {
+			marks = append(marks, mark{pos: m[0], table: strings.ToLower(src[m[2]:m[3]])})
+		}
+		for _, m := range decl.FindAllStringIndex(src, -1) {
+			table := ""
+			for _, mk := range marks {
+				if mk.pos < m[0] {
+					table = mk.table
+				} else {
+					break
+				}
+			}
+			if table == "" {
+				continue
+			}
+			out[table] = true
 		}
 	}
 	return out
