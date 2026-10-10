@@ -55,9 +55,9 @@ jobs:
   engine-race:
     name: Engine Race Detector
     runs-on: ubuntu-latest
-    # 30m, matching the -timeout this suite ran under inside ci.yml's test-go
-    # job. That job's whole timeout was per-step; this is the job's own cap.
-    timeout-minutes: 40
+    # 55m: the go test -timeout below (45m) plus margin for checkout, Go
+    # setup, and the upload/report steps.
+    timeout-minutes: 55
 
     services:
       postgres:
@@ -103,7 +103,23 @@ jobs:
           # every tier-1 table including workflow_instances -- so in
           # parallel they delete each other's fixtures mid-test. Carried
           # over unchanged from the entry this workflow replaces in ci.yml.
-          go test -race -count=1 -timeout 30m -p 1 -json ./engine/... 2>&1 | tee test-report.json
+          #
+          # -timeout 45m, raised from 30m after cleat#3326: the first failure
+          # in at least 14 runs (2026-10-08 through 2026-10-10) was not a
+          # data race or a hang -- "panic: test timed out after 30m0s" while
+          # TestNoWasiFunctionARealGuestImportsIsRefused had been running for
+          # all of 7s, which only means the suite as a whole had already used
+          # the other 29m53s. The seven prior runs checked
+          # (`gh run view <id> --json jobs`, startedAt/completedAt) finished
+          # in 21m27s-29m01s, most within 1-2 minutes of the old 30m ceiling
+          # already -- this is the suite's own duration growing into its
+          # timeout under -race's overhead (-p 1, serial, so nothing here
+          # masks it), the exact class the file header already names for the
+          # job it replaced ("the number that matters is the one the suite
+          # grows into"). 45m is headroom, not a permanent fix: re-measure
+          # (`gh run list --workflow engine-race.yml --json createdAt,conclusion`)
+          # if this starts tripping again.
+          go test -race -count=1 -timeout 45m -p 1 -json ./engine/... 2>&1 | tee test-report.json
 
       # Same job-key ('test-go/engine') the removed ci.yml matrix entry used,
       # deliberately: scripts/skip-ledger.d/'s existing test-go/engine lines
