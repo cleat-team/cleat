@@ -706,7 +706,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 
 	// Create the new workflow run.
 	// Use the store's tenant scope to preserve tenant isolation.
-	var newRunID string
+	var newRunID, resolvedTaskQueue string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
 		-- parent_workflow_id and parent_close_policy are INHERITED from the run
@@ -722,10 +722,18 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 			$4, $5, now() - INTERVAL '1 millisecond', $6,
 			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $6),
 			(SELECT parent_close_policy FROM workflow_instances WHERE id = $6))
-		RETURNING id
-		`, defName, defVersion, sealedNewInput, s.tenantID, priority, currentRunID).Scan(&newRunID)
+		RETURNING id, task_queue
+		`, defName, defVersion, sealedNewInput, s.tenantID, priority, currentRunID).Scan(&newRunID, &resolvedTaskQueue)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
+	}
+
+	// cleat#3245 Phase 3 step 2 piece 4d: create the new run's
+	// workflow_leases/workflow_payloads rows, same as startNewRun (piece
+	// 1) -- resolvedTaskQueue is captured via RETURNING rather than
+	// re-evaluated, for the identical reason startNewRun's own call does.
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, newRunID, s.tenantID, resolvedTaskQueue, priority, sealedNewInput); err != nil {
+		return "", fmt.Errorf("continue as new: %w", err)
 	}
 
 	// Complete the current run.
@@ -774,6 +782,16 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		// a lost fence leaves no orphaned, unreachable continuation run
 		// behind.
 		return "", ErrFenceLost
+	}
+
+	// cleat#3245 Phase 3 step 2 piece 4d: mirror the old run's completion
+	// onto workflow_leases/workflow_payloads, same shape as CompleteWorkflow
+	// (piece 4a) -- the same two helpers, same fence.
+	if err := s.completeLeaseRow(ctx, tx, currentRunID, workerID, "done", generation); err != nil {
+		return "", fmt.Errorf("continue as new: %w", err)
+	}
+	if err := s.writeResultPayload(ctx, tx, currentRunID, sealedResult, sealedQS); err != nil {
+		return "", fmt.Errorf("continue as new: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -16,7 +16,7 @@ func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid"}},
+			data:  [][]driver.Value{{"new-run-uuid", "default"}},
 		},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
@@ -43,7 +43,7 @@ func TestPostgresStore_ContinueAsNew_NoEvents(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid"}},
+			data:  [][]driver.Value{{"new-run-uuid", "default"}},
 		},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
