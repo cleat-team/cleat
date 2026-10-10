@@ -1915,7 +1915,7 @@ jobs:
     # so it needs no container image build.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: sandbox
         ports:
@@ -1985,7 +1985,7 @@ jobs:
     # there is no second dialect on this side to diverge on.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -2071,7 +2071,7 @@ jobs:
     # property under test belongs to the language runtime, not to SQL.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: sandbox
         ports:
@@ -2166,7 +2166,7 @@ jobs:
     # ensureSchema() AFTER launch() rather than before.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -2420,7 +2420,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: cleat
@@ -2762,7 +2762,7 @@ jobs:
         id: locate-pg
         if: matrix.package.name == 'commands'
         run: |
-          id=$(docker ps -q --filter "ancestor=postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
+          id=$(docker ps -q --filter "ancestor=mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
           count=$(echo "$id" | wc -w)
           if [ "$count" -eq 1 ]; then
             echo "container_id=$id" >> "$GITHUB_OUTPUT"
@@ -3673,7 +3673,7 @@ jobs:
     # connections. Same job, opposite conclusions per package.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: cleat
@@ -3846,7 +3846,7 @@ jobs:
             -e POSTGRES_PASSWORD=cleat \
             -e POSTGRES_DB=cleat_tests \
             -p 5433:5432 \
-            postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+            mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
 
       - name: Wait for the dedicated Postgres to be ready
         shell: bash

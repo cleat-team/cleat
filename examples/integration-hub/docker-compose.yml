@@ -34,7 +34,13 @@ services:
     # will copy into a project, and a digest frozen on the day they read it is
     # theirs to carry, not ours to choose. 16 is cleat's minimum.
     profiles: [postgres]
-    image: postgres:16
+    # mirror.gcr.io, not docker.io: this file is exercised directly by CI's
+    # scenario jobs (ci.yml's "Integration hub" family), which hit Docker
+    # Hub's anonymous pull-rate limit tonight (cleat#3290). mirror.gcr.io
+    # pulls through the same content -- re-derive with
+    # `docker pull mirror.gcr.io/library/postgres:16` and compare its digest
+    # against a plain `docker pull postgres:16`.
+    image: mirror.gcr.io/library/postgres:16
     environment:
       POSTGRES_USER: cleat
       POSTGRES_PASSWORD: cleat
@@ -49,7 +55,8 @@ services:
 
   mysql:
     profiles: [mysql]
-    image: mysql:8.4
+    # mirror.gcr.io -- see the postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: cleat
       MYSQL_DATABASE: cleat
@@ -157,7 +164,8 @@ services:
   # skipped by instruction gets run by the next person to paste a command.
   app-role:
     profiles: [postgres]
-    image: postgres:16
+    # mirror.gcr.io -- see the first postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/postgres:16
     environment:
       PGPASSWORD: cleat
     command:
@@ -192,7 +200,8 @@ services:
   #
   # Unprofiled, deliberately: it is not a database and every dialect needs it.
   sink:
-    image: python:3-alpine
+    # mirror.gcr.io -- see the postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/python:3-alpine
     command:
       - python3
       - -c

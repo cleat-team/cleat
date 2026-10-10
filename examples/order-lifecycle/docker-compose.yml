@@ -40,7 +40,12 @@ services:
     # would bring this up even for a MySQL reader, so every database carries one
     # and the README names the one it means.
     profiles: [postgres]
-    image: postgres:16
+    # mirror.gcr.io, not docker.io: this file is exercised directly by CI's
+    # scenario jobs (ci.yml), which hit Docker Hub's anonymous pull-rate
+    # limit tonight (cleat#3290). mirror.gcr.io pulls through the same
+    # content -- re-derive with `docker pull mirror.gcr.io/library/postgres:16`
+    # and compare its digest against a plain `docker pull postgres:16`.
+    image: mirror.gcr.io/library/postgres:16
     environment:
       POSTGRES_USER: cleat
       POSTGRES_PASSWORD: cleat
@@ -59,7 +64,8 @@ services:
     # `ai_ci` here and that is load-bearing for cleat rather than incidental --
     # it is why a case-insensitive comparison over a workflow name is a real
     # dialect difference and not a curiosity. See cleat#2560.
-    image: mysql:8.4
+    # mirror.gcr.io -- see the postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: cleat
       MYSQL_DATABASE: cleat
@@ -240,7 +246,8 @@ services:
   # gets run by the next person to paste a command.
   app-role:
     profiles: [postgres]
-    image: postgres:16
+    # mirror.gcr.io -- see the first postgres service above (cleat#3290).
+    image: mirror.gcr.io/library/postgres:16
     environment:
       PGPASSWORD: cleat
     command:
