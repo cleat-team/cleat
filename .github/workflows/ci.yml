@@ -908,6 +908,40 @@ jobs:
           scripts/check-playbook-claims.py
           LINT_GUARD_EOF
 
+      # cleat#3295: three routing-hygiene misses in one night, all on streams
+      # following the ROUTED-comment convention by hand -- a stale comment
+      # left after a push, a route sent by cross-session message with no
+      # comment ever posted, and a ROUTED comment whose cited sha was
+      # mistyped past its first 8 characters and resolved to no commit at
+      # all. This step is what would have caught all three automatically,
+      # on synchronize/edited, rather than needing a peer to notice.
+      #
+      # Lenient by design, not strict: a PR's FIRST ROUTED comment is posted
+      # by a stream after the PR already exists and CI has already started,
+      # so requiring one to exist (--require-routed) would fail every PR on
+      # `opened`, before anyone has had the chance to post one. Without that
+      # flag, no ROUTED comment at all is a pass (nothing to check yet); an
+      # EXISTING one that is stale or mistyped is the finding.
+      #
+      # pull_request only: there is no PR, and nothing to check, on a push to
+      # develop or a merge-group run.
+      #
+      # This file is WS-3's zone, and this step edits it under the zone's
+      # documented exception -- another stream may add here when leaving the
+      # mechanism unwired would be worse. That is exactly the case: the only
+      # alternative is a checker script with no step running it, which is the
+      # defect class CLAUDE.md names -- "a mechanism that exists and is wired
+      # to nothing reads as done".
+      - name: ROUTED comment names the current head
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "ROUTED comment names the current head" >> "$LINT_FAILURES_FILE"
+          scripts/check-pr-routed-sha.py --self-test
+          scripts/check-pr-routed-sha.py "$GITHUB_REPOSITORY" "${{ github.event.pull_request.number }}"
+          LINT_GUARD_EOF
+
       # cleat#3111: a workflow that runs a repo file BY PATH needs the execute
       # bit in the tree, and nothing else in the toolchain checks it. Measured
       # 2026-10-04 on cleat#2603: a commit dropped
