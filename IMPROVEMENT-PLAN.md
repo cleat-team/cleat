@@ -10812,3 +10812,79 @@ left unresolved pending a decision on `cmd/cleat`'s intended connection role).
 `tenantStatementsFor`, `tenantComparedToAParameter`), `engine/mssql_schedules.go`
 (`mssqlDeleteByWorkflowPrefix`, `deleteByWorkflowIDs`, `deleteWorkflowsChunkOnceOnce`,
 `mssqlDeleteEventHistoryTopPrefix`'s comment).
+
+---
+
+### 3.501 The MSSQL tenant-predicate guard's table set was derived from the wrong thing — ✅ **FIXED 2026-10-10** (cleat#3313)
+
+`mssqlTenantScopedTables()` derived its table set exclusively from `ADD FILTER PREDICATE
+dbo.fn_tenant_filter(tenant_id) ON dbo.<table>` bindings in `migrations/mssql/003_procedures.sql` —
+i.e. from which tables SQL Server's native Row-Level Security covers, not from which tables
+actually carry a `tenant_id` column. Three tables declare one and have no such policy:
+`idempotency_keys`, `concurrency_keys`, `workflow_update_requests` — confirmed directly against
+`migrations/mssql/001_schema.sql`. For these three a Go-level predicate is not defence in depth; it
+is the only layer, and the guard's own derivation could not see that they needed one.
+
+**The fix mirrors what MySQL's guard already does, because MySQL never had a choice.** MySQL has no
+security-policy mechanism at all, so `mysqlTenantScopedTables()` was always schema-derived (reads
+`CREATE TABLE`/`ALTER TABLE ... ADD COLUMN` for `tenant_id`). Added `mssqlSchemaTenantIDTables`,
+the same schema-presence read for SQL Server, and union it with the existing policy-derived set at
+the test's one call site — not instead of it, since the policy-derived set is still the right
+*additional* signal for the 14 tables it does cover (a reader auditing one of those wants to know
+both "does this have a Go-level predicate" and "is there a policy layer behind it", and the union
+answers the first question for all 17 while losing nothing about the second for the original 14).
+
+**Walking CREATE TABLE markers and column declarations separately, attributing each declaration to
+its nearest preceding marker by file position — not capturing "the whole CREATE TABLE body" with
+one regex — because a body can nest parens** (`CONSTRAINT ... CHECK (...)`, `DEFAULT (...)`), and a
+regex trying to capture between the opening and matching closing paren risks taking the wrong one,
+the same "bounded read fabricates a literal" shape CLAUDE.md records for backtick-pairing under a
+length bound. This is not a new technique — `mssqlUUIDColumns` (`engine/mssql_uuid_projection_test.go`)
+already uses it for `UNIQUEIDENTIFIER` declarations — reused rather than reinvented.
+
+**Scoped to `dbo.` only, deliberately, after measuring what NOT scoping it would surface.** A first
+draft matched any schema, and immediately found three new statements against
+`admin.tenant_api_keys` (`auth/tenant_store.go:resolveAPIKeyStmt`,
+`cmd/cleat-worker/apikeycount.go:liveAPIKeyCountQuery`, `engine/mssql_deployment.go:ResolveTenantFromAPIKey`)
+— a table with a `tenant_id` column and, like every `admin.*` table, no security policy either.
+These are architecturally a different question: each resolves a CALLER's tenant FROM an API key
+hash, so the statement's whole job is finding the tenant, not already knowing it — plausibly
+`mustNotScope` the way `cleatctl`'s cross-tenant tools already are, but that needs its own
+call-site-by-call-site check this PR did not do. Filed separately (cleat#3317) rather than
+adjudicated here, matching cleat#3294's own restraint about not rushing a wider blast radius
+through as a side effect. Scoping the new function's table-marker regex to `dbo\.` only —
+matching `mssqlTenantScopedTables`'s own existing schema scope exactly — excludes exactly these
+three admin-schema statements while keeping all three target tables (all `dbo.`), confirmed by
+re-running before and after the scope change: 4 findings unscoped, 1 after.
+
+**The one real, in-scope finding: `cmd/cleat-worker/setup.go`'s `expiredIdempotencyKeysSQL`
+(MSSQL arm) — `DELETE FROM idempotency_keys WHERE expires_at < SYSUTCDATETIME()`, no predicate.**
+Its own extensive doc comment already explains why: it deletes by `expires_at`, a column with no
+tenant-dependent meaning, on the raw `*sql.DB` pool rather than a tenant-scoped connection — a
+single server-wide sweep, by design. Allowlisted `mustNotScope`.
+
+**Its MySQL sibling statement is NOT allowlisted on that dialect, and investigating why found a
+third, separate gap.** Same shape, same file, same function: `DELETE FROM idempotency_keys WHERE
+expires_at < NOW(6)`. Expected a matching `mysqlTenantPredicateAllowlist` entry and found none —
+not because the MySQL guard considers it safe without saying why, but because
+`TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate` globs only `*.go` in `engine/`
+(`engine/mysql_tenant_predicate_test.go:157`), never reaching `cmd/cleat-worker/setup.go` at all.
+The MSSQL guard's own file walk (`goFilesCarryingSQL`, covering `engine/`, `auth/`, `plugin/`,
+`cmd/`, `tests/`) is exactly the fix an earlier incident (3.92) already motivated for THIS guard;
+MySQL's narrower glob is the identical shape of gap, just not yet caught. Filed separately
+(cleat#3318) — widening MySQL's file walk is a different guard's mechanism change and needs its
+own audit of whatever else it then finds, not a two-line fix folded into this PR.
+
+**Falsified twice, each restored and reconfirmed**: dropping the schema-derived union back to
+policy-only reproduced the exact blind spot — caught immediately and loudly by this PR's own new
+sanity anchor (`idempotency_keys is not among the parsed tenant-scoped tables ... regressed`),
+not silently. Removing the new allowlist entry alone failed the guard on exactly
+`expiredIdempotencyKeysSQL`, by name.
+
+**Two follow-ups filed rather than folded in**: cleat#3317 (`admin.tenant_api_keys`'s three
+deliberately-cross-tenant-shaped statements, unverified) and cleat#3318 (MySQL guard's file walk
+never reaches `cmd/`, `auth/`, or `plugin/` at all).
+
+**Files**: `engine/mssql_tenant_predicate_test.go` (`mssqlSchemaTenantIDTables`,
+`TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate`'s table union and new sanity anchors,
+`tenantPredicateAllowlist`'s new entry).
