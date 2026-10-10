@@ -84,7 +84,7 @@ package engine
 // needs to track which aliases are transitively tenant-scoped through however
 // many joins and parens separate them from the subquery in question -- real
 // SQL semantics, not a text pattern, and this guard is text-based by design
-// (the line above this one is why). The owner's ruling, cleat#3289: leave the
+// (the line above this one is why). Owner-approved on cleat#3289: leave the
 // limit as a known, written-down gap rather than build the hand-maintained
 // per-subquery allowlist that closing it properly would need.
 //
