@@ -8,6 +8,7 @@ engine/app.go	func NewApp
 engine/callerrors.go	func GuestCallErrorCodes
 engine/child_version.go	func ResolveChildVersion
 engine/cron.go	func NextCronTime
+engine/db.go	func PostgresStore.WithReadRedactionDisabled
 engine/encryption.go	func NewPayloadEncryption
 engine/engine.go	func Engine.ExecuteCompiled
 engine/engine.go	func RunsOnWasmtime
@@ -34,7 +35,13 @@ engine/fault_injector.go	func NewFaultInjector
 engine/helpers.go	func DeferralsFromHistory
 engine/idempotency.go	func Engine.CallerHonoursIdempotencyKeys
 engine/mssql_errors.go	func MSSQLConnectionString
+engine/mssql_lifecycle.go	func MSSQLStore.StartNewRunWithConcurrencyKey
+engine/mssql_store.go	func MSSQLStore.WithReadRedactionDisabled
+engine/mssql_store.go	func MSSQLStoreFactory.TenantPoolCount
+engine/mysql_lifecycle.go	func MySQLStore.StartNewRunWithConcurrencyKey
+engine/mysql_store.go	func MySQLStore.WithReadRedactionDisabled
 engine/mysql_store.go	func MySQLStoreFactory.DropTenantDatabase
+engine/mysql_store.go	func MySQLStoreFactory.TenantPoolCount
 engine/plugin_call_guard.go	func NewPluginCallGuard
 engine/plugin_loader.go	func PluginLoader.DeployPluginWithCapabilities
 engine/plugin_loader.go	func PluginLoader.ListPluginVersions
@@ -42,7 +49,13 @@ engine/plugin_loader.go	func PluginLoader.LoadPlugin
 engine/plugin_loader.go	func PluginLoader.ResolvePlugin
 engine/plugin_loader.go	func PluginLoader.SetLimits
 engine/plugin_resolver.go	func ResolvePlugins
+engine/plugins.go	func PluginRegistry.IsPluginHealthy
+engine/plugins.go	func PluginRegistry.MarkPluginUnhealthy
+engine/plugins.go	func PluginRegistry.PluginHealthStatus
 engine/plugins.go	func PluginRegistry.RegisterIdempotent
+engine/plugins.go	func PluginStreamRegistry.IsPluginHealthy
+engine/plugins.go	func PluginStreamRegistry.MarkPluginUnhealthy
+engine/plugins.go	func PluginStreamRegistry.PluginHealthStatus
 engine/redact.go	func RedactMap
 engine/redact.go	func ResetPatterns
 engine/replayer.go	func Engine.ReplayCompiled
@@ -50,6 +63,8 @@ engine/runtime.go	func Runtime.InstantiateAndInit
 engine/runtime.go	func fuelMeter.Abort
 engine/runtime.go	func fuelMeter.NewFunctionListener
 engine/sharded_store.go	func ShardedStore.LoadEventHistoryBatch
+engine/sharded_store.go	func ShardedStore.StartNewRunWithConcurrencyKey
+engine/store_lifecycle.go	func PostgresStore.StartNewRunWithConcurrencyKey
 engine/store_types.go	func RetiredAt
 engine/testutil/mssql_admin.go	func AdminDB
 engine/testutil/mssql_row_disappearance.go	func ClearMSSQLRowDisappearanceAudit
@@ -69,6 +84,8 @@ engine/version_gc.go	func PurgeVersions
 engine/version_handler.go	func StaticVersionStore
 engine/version_metrics.go	func LogStaleAlerts
 engine/versioned_loader.go	func NewWorkflowLoader
+engine/versioned_loader.go	func WorkflowLoader.Deploy
+engine/versioned_loader.go	func WorkflowLoader.Deprecate
 engine/wasm_cache.go	func NewWASMCache
 engine/wasm_disk_cache.go	func WasmDiskCache.LookupBytes
 internal/telemetry/tracing.go	func InitTracing
