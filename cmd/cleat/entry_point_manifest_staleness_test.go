@@ -66,6 +66,28 @@ func TestAssemblyScriptBuildRefusesAStaleManifest(t *testing.T) {
 		t.Fatalf("computed AS example dir %s has no package.json: %v", srcDir, statErr)
 	}
 
+	// node_modules is gitignored, so on a checkout that has never built this
+	// example it does not exist, and this test's rsync below would then copy
+	// nothing into it: not just the @cleat symlinks, but also the
+	// AssemblyScript compiler itself (asc) from srcDir's devDependencies, so
+	// the later `cleat build` would fail with "npm error could not determine
+	// executable to run" -- a real defect found on cleat#3301's shard split,
+	// where this had been silently relying on
+	// TestAssemblyScriptExampleEntryPointResolutionLive (a different test,
+	// now possibly a different process entirely) having already triggered
+	// this exact install as a side effect of building srcDir for real. Run
+	// the same install build_as.go itself runs lazily (see its "Run npm
+	// install if node_modules doesn't exist" comment) so this test is
+	// self-sufficient regardless of ordering, sharding, or which other tests
+	// ran first.
+	if _, statErr := os.Stat(filepath.Join(srcDir, "node_modules")); os.IsNotExist(statErr) {
+		cmd := exec.Command("npm", "install", "--no-audit", "--no-fund")
+		cmd.Dir = srcDir
+		if out, installErr := cmd.CombinedOutput(); installErr != nil {
+			t.Fatalf("npm install in %s: %v\n%s", srcDir, installErr, out)
+		}
+	}
+
 	asDir := filepath.Join(t.TempDir(), "as-workflow")
 	if out, cpErr := exec.Command("rsync", "-a", srcDir+"/", asDir+"/").CombinedOutput(); cpErr != nil {
 		t.Fatalf("copying %s to %s: %v\n%s", srcDir, asDir, cpErr, out)
@@ -78,25 +100,20 @@ func TestAssemblyScriptBuildRefusesAStaleManifest(t *testing.T) {
 	// the real repo source. Replace both with independent, real copies
 	// before patching either.
 	//
-	// That assumes examples/as-workflow/node_modules already exists on disk,
-	// which is only true if something already ran `npm install` there --
-	// node_modules is gitignored, and this test never installs it itself.
-	// Historically that was always true by the time this test ran, because
-	// TestAssemblyScriptExampleEntryPointResolutionLive (same package) builds
-	// the real example first and build_as.go lazily npm-installs it -- but
-	// that is an accident of Go's file-order test execution within one
-	// process, not a guarantee. cleat#3301's shard split proved it: it puts
-	// the two tests in different processes (different VMs, no shared
-	// filesystem), and the hash-based shard that drew this test did not draw
-	// that one. Without a pre-existing node_modules, the rsync below has to
-	// create node_modules/@cleat/transform from nothing -- two missing
-	// levels -- which real rsync (3.2.7, the GitHub runner's) refuses with
-	// "mkdir ... failed: No such file or directory", exactly the failure
+	// The install above guarantees node_modules itself exists by this point,
+	// but not that node_modules/@cleat does too -- @cleat's two entries are
+	// npm `file:` dependencies, materialized as symlinks only as a side
+	// effect of that install, and an empty node_modules (e.g. the first time
+	// this ever ran, before anything populated npm's local cache) has
+	// neither. The rsync below then has to create
+	// node_modules/@cleat/transform from nothing -- two missing levels --
+	// which real rsync (3.2.7, the GitHub runner's) refuses with "mkdir ...
+	// failed: No such file or directory", exactly the failure
 	// TestJavaBuildRefusesAStaleManifest already documents above for the
 	// same reason. macOS's bundled rsync (openrsync) creates the whole
 	// chain, which is why this was invisible locally. mkdir the destination
 	// first so the later rsync lands on an existing (empty) directory
-	// regardless of whether node_modules pre-existed or which rsync runs it.
+	// regardless of whether @cleat pre-existed or which rsync runs it.
 	nodeModulesCleat := filepath.Join(asDir, "node_modules", "@cleat")
 	if mkErr := os.MkdirAll(nodeModulesCleat, 0o755); mkErr != nil {
 		t.Fatalf("mkdir %s: %v", nodeModulesCleat, mkErr)
