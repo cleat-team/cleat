@@ -370,6 +370,43 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
 	}
 
+	// cleat#3245 Phase 3 step 2 piece 4c: mirror the same one-phase
+	// transition onto workflow_leases/workflow_payloads, same tx, same
+	// (id, generation) fence (tenant_id omitted -- RLS already enforces it
+	// on workflow_leases via tenant_isolation_leases, migration 016).
+	// adminForceMark, the DEFER-OWED arm below this one, is deliberately
+	// NOT mirrored -- it writes pending_terminal_status with a real value,
+	// which is piece 6's column to dual-write, not this piece's.
+	if a.action == adminActionForceComplete {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_leases
+			SET status = 'done', completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
+			WHERE id = $1 AND generation = $2
+		`, workflowID, generation); err != nil {
+			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+		`, workflowID, a.result); err != nil {
+			return fmt.Errorf("admin %s: mirror payload: %w", a.action, err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_leases
+			SET status = 'failed', completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
+			WHERE id = $1 AND generation = $2
+		`, workflowID, generation); err != nil {
+			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = $2, error_code = $3, error_op = 'admin_force_fail' WHERE id = $1
+		`, workflowID, a.errorMsg, a.errorCode); err != nil {
+			return fmt.Errorf("admin %s: mirror payload: %w", a.action, err)
+		}
+	}
+
 	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
 		return err
 	}

@@ -94,6 +94,25 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 		return adminReReplayMiss(status, stored, generation, workflowID, true)
 	}
 
+	// cleat#3245 Phase 3 step 2 piece 4c: mirror onto
+	// workflow_leases/workflow_payloads, same tx, same predicate (minus
+	// tenant_id, which RLS already enforces on workflow_leases via the
+	// identical tenant_isolation_leases policy, migration 016) as the
+	// workflow_instances UPDATE above, which has already confirmed the
+	// fence held (n > 0, checked above).
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, next_wake_at = now(), generation = generation + 1
+		WHERE id = $1 AND generation = $2 AND status = ANY($3)
+	`, workflowID, generation, pq.Array(reReplayableStatuses)); err != nil {
+		return fmt.Errorf("admin %s: mirror lease: %w", adminActionReReplay, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("admin %s: mirror payload: %w", adminActionReReplay, err)
+	}
+
 	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator, replaced)); err != nil {
 		return err
 	}
