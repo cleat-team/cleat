@@ -360,6 +360,42 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "delete from idempotency_keys where expires_at < sysutcdatetime()",
 		Reason: mustNotScope,
 	},
+
+	// cleat#3317. admin.tenant_api_keys is unlike every other table this
+	// guard already scopes: those resolve a tenant's OWN data (which
+	// workflow, which schedule) and a missing predicate leaks one tenant's
+	// rows to another. This table is looked up FROM an API key hash to
+	// DISCOVER which tenant is asking, before any tenant is known -- adding
+	// tenant_id to the WHERE clause would require already holding the
+	// answer the statement exists to produce. See each function's own doc
+	// comment, which is the claim that must stay in sync with the code, not
+	// this table.
+	//
+	// tenant_store.go:resolveAPIKeyStmt and mssql_deployment.go's
+	// ResolveTenantFromAPIKey share one digest (7d4bb9b58ba1) because they
+	// are the same statement, written independently: auth/tenant_store.go's
+	// own comment on ResolveTenantFromAPIKey says "mirrors
+	// auth.TenantStore.ResolveTenantFromAPIKey's expiry clause" -- the
+	// MySQL side of this same pair (mysql_store.go:ResolveTenantFromAPIKey
+	// / tenant_store.go's MySQL branch) was verified and allowlisted the
+	// same way in cleat#3318/#3320.
+	"tenant_store.go:resolveAPIKeyStmt#7d4bb9b58ba1": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+		Reason: mustNotScope,
+	},
+	"mssql_deployment.go:ResolveTenantFromAPIKey#7d4bb9b58ba1": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+		Reason: mustNotScope,
+	},
+	// apikeycount.go:liveAPIKeyCountQuery runs at worker startup, before any
+	// request and therefore before any tenant is in scope, to decide
+	// whether to auto-generate a startup API key (cleat#2352) -- see that
+	// function's own doc comment. The count is read by nothing else and
+	// exposes no tenant's row to another.
+	"apikeycount.go:liveAPIKeyCountQuery#8235eadecc2f": {
+		SQL:    "select count(*) from admin.tenant_api_keys where disabled_at is null and (expi",
+		Reason: mustNotScope,
+	},
 }
 
 func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
@@ -403,6 +439,18 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 				"not left asserting a gap that has closed", want)
 		}
 	}
+
+	// cleat#3317: admin.tenant_api_keys, and ONLY that one admin-schema table.
+	// mssqlSchemaTenantIDTables anchors its own scan at dbo. deliberately
+	// (see its doc comment), because admin.tenants, admin.tenant_egress_allow
+	// and admin.tenant_roles also carry a tenant_id column and widening the
+	// anchor to admin.\* broadly would sweep all three into this guard
+	// unaudited -- "ask whether the answer is a sweep or a mechanism" in
+	// CLAUDE.md. Only tenant_api_keys has had its statements individually
+	// verified (the three allowlist entries below), so only its name is
+	// added, by hand, here -- not via a widened regex that would silently
+	// admit the other three the next time this file is read.
+	tables["tenant_api_keys"] = true
 
 	used := map[string]bool{}
 	var scanned int
