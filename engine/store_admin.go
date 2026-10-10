@@ -374,9 +374,10 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	// transition onto workflow_leases/workflow_payloads, same tx, same
 	// (id, generation) fence (tenant_id omitted -- RLS already enforces it
 	// on workflow_leases via tenant_isolation_leases, migration 016).
-	// adminForceMark, the DEFER-OWED arm below this one, is deliberately
-	// NOT mirrored -- it writes pending_terminal_status with a real value,
-	// which is piece 6's column to dual-write, not this piece's.
+	// adminForceMark, the DEFER-OWED arm below this one, has its own mirror
+	// (piece 6c) -- it was deliberately left unmirrored here because it
+	// writes pending_terminal_status with a real value, which nothing
+	// dual-wrote until piece 6c landed.
 	if a.action == adminActionForceComplete {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_leases
@@ -480,6 +481,49 @@ func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflow
 	if n == 0 {
 		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
 	}
+
+	// cleat#3245 Phase 3 step 2 piece 6c: mirror the same mark-defer-phase
+	// transition onto workflow_leases/workflow_payloads, same tx, same
+	// (id, generation) fence as the workflow_instances UPDATE above
+	// (tenant_id omitted -- RLS already enforces it on workflow_leases via
+	// tenant_isolation_leases, migration 016). This is the piece-4c-deferred
+	// half: piece 4c mirrored adminForceMark's ONE-PHASE sibling only,
+	// because this arm writes pending_terminal_status/defer_phase_deadline
+	// with a real value, and nothing dual-wrote either column until now.
+	if a.action == adminActionForceComplete {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_leases
+			SET status = $2, pending_terminal_status = 'done',
+			    defer_phase_deadline = now() + ($3 * interval '1 second'),
+			    next_wake_at = now(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1 AND generation = $4
+		`, workflowID, statusTerminating, deadline, generation); err != nil {
+			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+		`, workflowID, a.result); err != nil {
+			return fmt.Errorf("admin %s: mirror payload: %w", a.action, err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_leases
+			SET status = $2, pending_terminal_status = 'failed',
+			    defer_phase_deadline = now() + ($3 * interval '1 second'),
+			    next_wake_at = now(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1 AND generation = $4
+		`, workflowID, statusTerminating, deadline, generation); err != nil {
+			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = $2, error_code = $3, error_op = 'admin_force_fail' WHERE id = $1
+		`, workflowID, a.errorMsg, a.errorCode); err != nil {
+			return fmt.Errorf("admin %s: mirror payload: %w", a.action, err)
+		}
+	}
+
 	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
 		return err
 	}

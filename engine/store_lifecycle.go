@@ -1550,27 +1550,19 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	// the fence held, so the two tables cannot disagree about WHETHER the
 	// release happened.
 	//
-	// They can still disagree about the resulting STATUS, and this is
-	// known rather than fixed: unconditional 'ready', NOT the CASE WHEN
-	// pending_terminal_status IS NOT NULL ... the workflow_instances
-	// UPDATE above uses. workflow_leases carries a pending_terminal_status
-	// column too (migration 016), but nothing dual-writes it yet -- that's
-	// piece 6 (TerminateWorkflow and friends, per the sequencing plan).
-	// Until piece 6 lands, workflow_leases.pending_terminal_status is NULL
-	// on every row, so copying that CASE here would not mirror
-	// workflow_instances' logic -- it would always take the ELSE branch,
-	// which is unconditional 'ready' with extra text that makes it look
-	// conditional. Caught by cleat-review on this PR, verified directly:
-	// release a workflow with pending_terminal_status set on
-	// workflow_instances only (what every current write site does), and
-	// workflow_instances ends up 'terminating' while workflow_leases ends
-	// up 'ready' either way. Harmless today -- nothing reads
-	// workflow_leases yet -- but piece 6 MUST revisit this exact statement
-	// when it starts writing pending_terminal_status here, or the
-	// divergence becomes real once step 3 cuts reads over.
+	// Upgraded from an unconditional 'ready' to the real CASE WHEN
+	// pending_terminal_status IS NOT NULL ... expression by piece 6c, which
+	// is the piece that starts dual-writing pending_terminal_status
+	// (TerminateWorkflow/CancelWorkflow's two-phase arm, adminForceMark's
+	// defer-owed arm). Before piece 6c, workflow_leases.pending_terminal_status
+	// was NULL on every row, so this CASE would always have taken the ELSE
+	// branch -- unconditional 'ready' with extra text that made it look
+	// conditional, which is why it was written as unconditional 'ready'
+	// until now rather than as a CASE that could not yet be correct.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases
-		SET status = 'ready',
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
 		    assigned_to = NULL, next_wake_at = $3
 		WHERE id = $1 AND assigned_to = $2 AND generation = $4
 	`, workflowID, workerID, nextWakeAt, generation); err != nil {
