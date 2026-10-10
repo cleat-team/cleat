@@ -27,23 +27,37 @@
 # separately. The split:
 #
 #   tier1-coverage   no DB, no toolchain: confirms the two engine buckets
-#                    below union to exactly the full ./engine/... test list,
-#                    via `go test -list` (never runs a test). Gates the three
-#                    expensive jobs so a broken partition fails in seconds,
-#                    not after burning DB-service minutes on bad shards.
+#                    AND (cleat#3301) the two rest buckets each union to
+#                    exactly their own full test list, via `go test -list`
+#                    (never runs a test). Gates the four expensive jobs so a
+#                    broken partition fails in seconds, not after burning
+#                    DB-service minutes on bad shards.
 #   tier1-engine     matrix of 2: ./engine/..., split by a stable hash of
-#                    test name (scripts/tier-gate.sh --shard I/3). Each leg
-#                    gets the full dialect + Python precondition set, because
+#                    test name (scripts/tier-gate.sh --shard I/4
+#                    --engine-buckets 2). Each leg gets the full dialect +
+#                    Python precondition set, because
 #                    engine/python_wasm_e2e_test.go lives here.
-#   tier1-rest       every other tier-1 package plus the cleat module,
-#                    unsharded (--shard 3/3). Deliberately still the buggy
-#                    8-of-12 package extraction (cleat#2085): this PR shards
-#                    what tier-gate already runs, and does not change what
-#                    that is. tests/crash's own instance (postgres-crash,
-#                    5433) is provisioned here exactly as the old single job
-#                    provisioned it -- unused today for the same reason (D2085),
-#                    kept so nothing regresses and so it is already wired for
-#                    whenever that extraction is fixed.
+#   tier1-rest       matrix of 2 (cleat#3301; was one unsharded job): every
+#                    other tier-1 package plus the cleat module, split by the
+#                    SAME stable-hash-of-test-name mechanism as tier1-engine,
+#                    over the union of all 11 packages' top-level tests
+#                    (scripts/tier-gate.sh --shard I/4 --engine-buckets 2,
+#                    I in {3, 4}). This shard alone measured ~47-48 minutes
+#                    unsharded -- the slowest job on three PRs' queue
+#                    batches at once the night this was split; see cleat#3301
+#                    for the measurement. Deliberately still the buggy
+#                    8-of-12 package extraction (cleat#2085): this change
+#                    shards what tier-gate already runs, and does not change
+#                    what that is. tests/crash's own instance (postgres-crash,
+#                    5433) is provisioned in EVERY leg exactly as the old
+#                    single job provisioned it once -- unused today for the
+#                    same reason (D2085), kept so nothing regresses and so it
+#                    is already wired for whenever that extraction is fixed.
+#                    Provisioning it per-leg rather than on one leg only is a
+#                    deliberate, small duplication of unused setup cost in
+#                    favour of never having to reason about which leg owns
+#                    it -- see cleat#3301's PR description if that trade
+#                    needs revisiting once real timings are in.
 #   tier1            the aggregator. Named exactly "Tier 1 Gate" -- the
 #                    required status context -- so branches/develop/protection
 #                    needs no edit. `if: always()` and an explicit check of
@@ -96,14 +110,19 @@
 # jobs -- two of them DB-backed, ~10-11 minute -- used to be STARTED on
 # every merge_group event just to run a single report-only `echo` step and
 # report success, so the test content never re-ran but each still queued
-# for, and held, its own runner. Five runner assignments (tier1-coverage,
-# the 2-way tier1-engine matrix, tier1-rest, the tier1 aggregator) for
-# ~3.5 minutes of real work, on the critical path of every merge, in a
-# queue depth where a runner assignment is the scarce thing, not job time.
+# for, and held, its own runner. Five runner assignments at the time this
+# paragraph was written (tier1-coverage, the 2-way tier1-engine matrix,
+# tier1-rest as one job, the tier1 aggregator) for ~3.5 minutes of real
+# work, on the critical path of every merge, in a queue depth where a
+# runner assignment is the scarce thing, not job time. Six now that
+# tier1-rest is also a 2-way matrix (cleat#3301) -- re-derive with
+# `grep -c 'matrix:$' .github/workflows/tier1-gate.yml` (2, each expanding
+# to 2 legs) plus tier1-coverage and the aggregator, rather than trusting
+# either number in this paragraph as the two shards grow or shrink again.
 #
 # All three now carry `if: github.event_name != 'merge_group'` at the JOB
 # level, so on merge_group they are not started at all -- zero runner
-# assignments instead of three (four counting tier1-engine's matrix). The
+# assignments instead of the count above. The
 # tier1 aggregator's `needs.*.result` check, below, now reads "skipped" as
 # a pass on merge_group specifically, and nothing else -- see its own
 # comment for why that distinction is load-bearing rather than cosmetic.
@@ -254,11 +273,11 @@ jobs:
           go-version-file: go.mod
       - name: Sharding self-test (offline)
         run: scripts/tier-gate.sh --self-test
-      - name: Verify the 2 engine shards union to the full test list
-        run: scripts/tier-gate.sh --verify-shard-coverage 3
+      - name: Verify the engine AND rest shards each union to their full test list
+        run: scripts/tier-gate.sh --verify-shard-coverage 4 --engine-buckets 2
 
   tier1-engine:
-    name: Tier 1 Engine Shard ${{ matrix.shard }}/3
+    name: Tier 1 Engine Shard ${{ matrix.shard }}/4
     needs: [tier1-coverage]
     # On merge_group every step below already reduces to one report-only
     # echo (see the per-step `if:` guards further down) -- this skips the
@@ -537,7 +556,7 @@ jobs:
       # No `|| true`, no continue-on-error, and no attempt to summarise the
       # result here. The gate's own exit status is this job's exit status; its
       # stdout already names what it excluded, what it ran, and what failed.
-      - name: Tier 1 gate -- engine shard ${{ matrix.shard }}/3
+      - name: Tier 1 gate -- engine shard ${{ matrix.shard }}/4
         if: github.event_name != 'merge_group'
         env:
           # A distinct local filename per shard, not just a distinct artifact
@@ -547,7 +566,7 @@ jobs:
           # writing "tier-gate.log" collided there, so only one shard's
           # failures ever reached the notifier (cleat#2877).
           TIER_GATE_LOG: tier-gate-engine-${{ matrix.shard }}.log
-        run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/3
+        run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/4 --engine-buckets 2
 
       # The log on failure, because the gate deliberately keeps it rather than
       # deleting its evidence -- re-running the whole shard to find out what
@@ -578,12 +597,21 @@ jobs:
           retention-days: 30
 
   tier1-rest:
-    name: Tier 1 Gate -- rest
+    name: Tier 1 Gate -- rest shard ${{ matrix.shard }}/4
     needs: [tier1-coverage]
     # Same reasoning as tier1-engine's job-level `if:` above: on merge_group
     # every step below already reduces to one report-only echo, so skip the
     # job entirely rather than spend a runner assignment on it.
     if: github.event_name != 'merge_group'
+    # cleat#3301: matrix of 2, same shape as tier1-engine's. The matrix
+    # value IS the overall --shard numerator (3 and 4 here, not a separate
+    # 0-based bucket index) -- tier-gate.sh itself derives the rest-bucket
+    # index from I, N and --engine-buckets, the same way it already derives
+    # the engine-bucket index from I and N for tier1-engine's matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [3, 4]
     runs-on: ubuntu-latest
     # Raised from 45 to 60, cleat#2876. Measured directly (full job logs via
     # the jobs/<id>/logs API, locating the checkout-start/tier-gate.sh-start/
@@ -617,6 +645,12 @@ jobs:
     # then hanging would be killed by this 60m job cap before its own 30m
     # Go-level timeout could fire, with no goroutine dump. Flagged rather
     # than resolved, same as coverage's.
+    # cleat#3301: left at 60 (the unsharded job's measured ceiling) rather
+    # than halved, because there is no real measurement yet of either leg's
+    # own runtime post-split -- the paragraph above describes the UNSHARDED
+    # job. Conservative on purpose for this first split; lower it once two
+    # or three real runs establish each leg's actual ceiling, the same way
+    # 45 was raised to 60 above only after direct measurement, not a guess.
     timeout-minutes: 60
 
     services:
@@ -792,26 +826,27 @@ jobs:
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
             -Q "IF DB_ID('cleat') IS NULL CREATE DATABASE cleat"
 
-      - name: Tier 1 gate -- rest shard 3/3
+      - name: Tier 1 gate -- rest shard ${{ matrix.shard }}/4
         if: github.event_name != 'merge_group'
         env:
           # See the engine shard's identical comment (cleat#2877): a distinct
           # local filename per job, not just a distinct artifact name, is what
           # survives tier1-push-failure-notifier.yml's merge-multiple download.
-          TIER_GATE_LOG: tier-gate-rest.log
-        run: scripts/tier-gate.sh --shard 3/3
+          # Per-leg now (cleat#3301), matching tier1-engine's own matrix.
+          TIER_GATE_LOG: tier-gate-rest-${{ matrix.shard }}.log
+        run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/4 --engine-buckets 2
 
       # continue-on-error, for the same reason as tier1-engine's identical
       # step above (cleat#2834): this is debugging evidence, not the gate --
-      # the "Tier 1 gate -- rest shard 3/3" step's own exit status is what
-      # this job's result already is.
+      # the "Tier 1 gate -- rest shard ${{ matrix.shard }}/4" step's own exit
+      # status is what this job's result already is.
       - name: Upload the tier-1 log
         if: always() && github.event_name != 'merge_group'
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: tier-gate-log-rest-${{ github.sha }}-${{ github.run_attempt }}
-          path: tier-gate-rest.log
+          name: tier-gate-log-rest-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: tier-gate-rest-${{ matrix.shard }}.log
           retention-days: 30
 
   # The required status context. Named exactly "Tier 1 Gate" so
