@@ -1440,6 +1440,13 @@ func (s *PostgresStore) UpdateStickyWorker(ctx context.Context, workflowID, work
 	if err != nil {
 		return fmt.Errorf("update sticky worker: %w", err)
 	}
+	// cleat#3245 Phase 3 step 2 piece 6a: mirror onto workflow_leases, on the
+	// same tx.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases SET sticky_worker_id = $2 WHERE id = $1
+	`, workflowID, workerID); err != nil {
+		return fmt.Errorf("update sticky worker: mirror lease row: %w", err)
+	}
 	return tx.Commit()
 }
 
@@ -1458,6 +1465,13 @@ func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string
 	`, workflowID)
 	if err != nil {
 		return fmt.Errorf("clear sticky worker: %w", err)
+	}
+	// cleat#3245 Phase 3 step 2 piece 6a: mirror onto workflow_leases, on the
+	// same tx.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases SET sticky_worker_id = NULL WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("clear sticky worker: mirror lease row: %w", err)
 	}
 	return tx.Commit()
 }
