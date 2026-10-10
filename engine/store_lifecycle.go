@@ -316,7 +316,40 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		_ = tx.Rollback()
 		return nil, nil
 	}
+	if err := s.claimLeaseRows(ctx, tx, workerID, ids); err != nil {
+		return nil, fmt.Errorf("claim workflows: %w", err)
+	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
+}
+
+// claimLeaseRows mirrors the claim UPDATE's SET clause onto workflow_leases
+// -- cleat#3245 Phase 3 step 2, piece 2 (dual-write). Called from both
+// ClaimWorkflows and ClaimStickyWorkflows, on the SAME tx, BEFORE
+// finishClaim: finishClaim commits that tx as its first action, so this
+// cannot run inside it or after it -- only before.
+//
+// ids is the already-decided set of winning workflow ids -- ClaimWorkflows
+// passes the same ids slice its own UPDATE used; ClaimStickyWorkflows
+// collects them from its claimed wfs after scanning. Re-deriving a second
+// "who won" computation here would risk disagreeing with the UPDATE that
+// already ran against workflow_instances, which is exactly the kind of
+// drift this dual-write exists to not introduce.
+func (s *PostgresStore) claimLeaseRows(ctx context.Context, tx *sql.Tx, workerID string, ids []string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
+		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
+		    assigned_to = $1,
+		    heartbeat_at = now(),
+		    started_at = COALESCE(started_at, now()),
+		    generation = generation + 1
+		WHERE id = ANY($2)
+	`, workerID, pq.Array(ids)); err != nil {
+		return fmt.Errorf("update lease rows: %w", err)
+	}
+	return nil
 }
 
 // lockRegisteredQueueLimits locks, in sorted (name) order, the rows of the
@@ -617,6 +650,18 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	if len(wfs) == 0 {
 		_ = tx.Rollback()
 		return nil, nil
+	}
+	// No separate "winning ids" slice exists here the way ClaimWorkflows has
+	// one -- the CTE decided membership and RETURNING already reported it,
+	// so wfs IS the winning set. Collecting ids from it rather than
+	// re-querying candidates keeps this agreeing with the UPDATE that just
+	// ran, by construction.
+	ids := make([]string, len(wfs))
+	for i, wf := range wfs {
+		ids[i] = wf.ID
+	}
+	if err := s.claimLeaseRows(ctx, tx, workerID, ids); err != nil {
+		return nil, fmt.Errorf("claim sticky workflows: %w", err)
 	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
@@ -1429,6 +1474,21 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	}
 	if rows == 0 {
 		return ErrFenceLost
+	}
+
+	// cleat#3245 Phase 3 step 2, piece 2 (dual-write). Same fence
+	// (assigned_to, generation) as the workflow_instances UPDATE above, on
+	// the same tx -- this only runs once that UPDATE has already confirmed
+	// the fence held, so there is no case where the two tables could
+	// disagree about whether the release happened.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, next_wake_at = $3
+		WHERE id = $1 AND assigned_to = $2 AND generation = $4
+	`, workflowID, workerID, nextWakeAt, generation); err != nil {
+		return fmt.Errorf("release workflow: update lease: %w", err)
 	}
 
 	pgNotify(ctx, tx, s.notifyChannel)
