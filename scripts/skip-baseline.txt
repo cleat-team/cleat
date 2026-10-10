@@ -52,6 +52,8 @@ cmd/cleat	TestTheJavaScanSkipsTestSources	1
 cmd/cleat	TestThePythonVetSaysWhetherItRan	3
 cmd/cleat	TestTheRollbackPinIsWhatVersionResolutionReads	1
 cmd/cleat	TestTutorialQuickStartReachesADoneWorkflow	2
+cmd/cleat	TestVersionsDoesNotLeakAcrossTenants	1
+cmd/cleat	TestVersionsRollbackAndRollbackClearWorkUnderCleatApp	1
 cmd/cleat	TestVetAS	2
 cmd/cleat	TestVetExitCode	1
 cmd/cleat	TestVetPython	3
