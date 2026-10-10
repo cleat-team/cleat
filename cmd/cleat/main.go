@@ -448,13 +448,25 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 	// Run go mod tidy in the build directory to generate go.sum entries
 	// before compilation. The replace directive points directly to the
-	// project root.
+	// project root, so this module never needs the network or the checksum
+	// database -- but GONOSUMCHECK/GONOSUMDB/GOPRIVATE were a wildcard ("*")
+	// rather than scoped to that module, which does the same thing for it
+	// and ALSO, as a side effect nobody intended, forces every ordinary
+	// public dependency (e.g. gopkg.in/check.v1, pulled in transitively as a
+	// test dependency of gopkg.in/yaml.v3) to bypass the module proxy and
+	// resolve direct from its own vanity-import redirect instead -- a far
+	// less reliable path that produced a real, intermittent CI failure
+	// (cleat#3307: "go: ... gopkg.in/check.v1: unrecognized import path
+	// ...: reading https://gopkg.in/check.v1?go-get=1: 502 Proxy Error").
+	// Scoping to the actual local module path keeps the original intent
+	// (this module's own replace target never hits the network or sumdb
+	// regardless) while letting every other dependency use the proxy.
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = outDir
 	tidyCmd.Env = append(os.Environ(),
-		"GONOSUMCHECK=*",
-		"GONOSUMDB=*",
-		"GOPRIVATE=*",
+		"GONOSUMCHECK="+wasm.SDKModulePath,
+		"GONOSUMDB="+wasm.SDKModulePath,
+		"GOPRIVATE="+wasm.SDKModulePath,
 	)
 	if out, err := tidyCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running go mod tidy in build directory: %v\n%s\n", err, out)
