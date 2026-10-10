@@ -480,6 +480,18 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 		return false, fmt.Errorf("heartbeat: %w", err)
 	}
 	n, _ := result.RowsAffected()
+
+	// cleat#3245 Phase 3 step 2 piece 3: mirror onto workflow_leases, same
+	// predicate, same tx -- now() is transaction-local so the two rows agree
+	// on the exact timestamp with no value to pass explicitly.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET heartbeat_at = now()
+		WHERE id = $1 AND assigned_to = $2 AND generation = $3
+	`, workflowID, workerID, generation); err != nil {
+		return false, fmt.Errorf("heartbeat: lease: %w", err)
+	}
+
 	return n > 0, tx.Commit()
 }
 
@@ -546,6 +558,16 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 			UPDATE workflow_instances SET heartbeat_at = now() WHERE id = ANY($1)
 		`, pq.Array(eligible)); err != nil {
 			return nil, fmt.Errorf("heartbeat batch fenced: update: %w", err)
+		}
+
+		// cleat#3245 Phase 3 step 2 piece 3: mirror onto workflow_leases for
+		// the same ids, same tx, same now() -- "eligible" was already fenced
+		// against workflow_instances' live (id, generation) above, so no
+		// separate fence check is needed here.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_leases SET heartbeat_at = now() WHERE id = ANY($1)
+		`, pq.Array(eligible)); err != nil {
+			return nil, fmt.Errorf("heartbeat batch fenced: lease update: %w", err)
 		}
 	}
 	return lost, tx.Commit()
