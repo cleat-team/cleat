@@ -316,7 +316,40 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		_ = tx.Rollback()
 		return nil, nil
 	}
+	if err := s.claimLeaseRows(ctx, tx, workerID, ids); err != nil {
+		return nil, fmt.Errorf("claim workflows: %w", err)
+	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
+}
+
+// claimLeaseRows mirrors the claim UPDATE's SET clause onto workflow_leases
+// -- cleat#3245 Phase 3 step 2, piece 2 (dual-write). Called from both
+// ClaimWorkflows and ClaimStickyWorkflows, on the SAME tx, BEFORE
+// finishClaim: finishClaim commits that tx as its first action, so this
+// cannot run inside it or after it -- only before.
+//
+// ids is the already-decided set of winning workflow ids -- ClaimWorkflows
+// passes the same ids slice its own UPDATE used; ClaimStickyWorkflows
+// collects them from its claimed wfs after scanning. Re-deriving a second
+// "who won" computation here would risk disagreeing with the UPDATE that
+// already ran against workflow_instances, which is exactly the kind of
+// drift this dual-write exists to not introduce.
+func (s *PostgresStore) claimLeaseRows(ctx context.Context, tx *sql.Tx, workerID string, ids []string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
+		    signal_consumed_at_claim = signal_consumed_seq,
+		    promise_seq_at_claim = promise_seq,
+		    assigned_to = $1,
+		    heartbeat_at = now(),
+		    started_at = COALESCE(started_at, now()),
+		    generation = generation + 1
+		WHERE id = ANY($2)
+	`, workerID, pq.Array(ids)); err != nil {
+		return fmt.Errorf("update lease rows: %w", err)
+	}
+	return nil
 }
 
 // lockRegisteredQueueLimits locks, in sorted (name) order, the rows of the
@@ -617,6 +650,18 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	if len(wfs) == 0 {
 		_ = tx.Rollback()
 		return nil, nil
+	}
+	// No separate "winning ids" slice exists here the way ClaimWorkflows has
+	// one -- the CTE decided membership and RETURNING already reported it,
+	// so wfs IS the winning set. Collecting ids from it rather than
+	// re-querying candidates keeps this agreeing with the UPDATE that just
+	// ran, by construction.
+	ids := make([]string, len(wfs))
+	for i, wf := range wfs {
+		ids[i] = wf.ID
+	}
+	if err := s.claimLeaseRows(ctx, tx, workerID, ids); err != nil {
+		return nil, fmt.Errorf("claim sticky workflows: %w", err)
 	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
@@ -1429,6 +1474,39 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	}
 	if rows == 0 {
 		return ErrFenceLost
+	}
+
+	// cleat#3245 Phase 3 step 2, piece 2 (dual-write). Same fence
+	// (assigned_to, generation) as the workflow_instances UPDATE above, on
+	// the same tx -- this only runs once that UPDATE has already confirmed
+	// the fence held, so the two tables cannot disagree about WHETHER the
+	// release happened.
+	//
+	// They can still disagree about the resulting STATUS, and this is
+	// known rather than fixed: unconditional 'ready', NOT the CASE WHEN
+	// pending_terminal_status IS NOT NULL ... the workflow_instances
+	// UPDATE above uses. workflow_leases carries a pending_terminal_status
+	// column too (migration 016), but nothing dual-writes it yet -- that's
+	// piece 6 (TerminateWorkflow and friends, per the sequencing plan).
+	// Until piece 6 lands, workflow_leases.pending_terminal_status is NULL
+	// on every row, so copying that CASE here would not mirror
+	// workflow_instances' logic -- it would always take the ELSE branch,
+	// which is unconditional 'ready' with extra text that makes it look
+	// conditional. Caught by cleat-review on this PR, verified directly:
+	// release a workflow with pending_terminal_status set on
+	// workflow_instances only (what every current write site does), and
+	// workflow_instances ends up 'terminating' while workflow_leases ends
+	// up 'ready' either way. Harmless today -- nothing reads
+	// workflow_leases yet -- but piece 6 MUST revisit this exact statement
+	// when it starts writing pending_terminal_status here, or the
+	// divergence becomes real once step 3 cuts reads over.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = 'ready',
+		    assigned_to = NULL, next_wake_at = $3
+		WHERE id = $1 AND assigned_to = $2 AND generation = $4
+	`, workflowID, workerID, nextWakeAt, generation); err != nil {
+		return fmt.Errorf("release workflow: update lease: %w", err)
 	}
 
 	pgNotify(ctx, tx, s.notifyChannel)
