@@ -77,7 +77,30 @@ func TestAssemblyScriptBuildRefusesAStaleManifest(t *testing.T) {
 	// patching what looks like this test's own copy would actually mutate
 	// the real repo source. Replace both with independent, real copies
 	// before patching either.
+	//
+	// That assumes examples/as-workflow/node_modules already exists on disk,
+	// which is only true if something already ran `npm install` there --
+	// node_modules is gitignored, and this test never installs it itself.
+	// Historically that was always true by the time this test ran, because
+	// TestAssemblyScriptExampleEntryPointResolutionLive (same package) builds
+	// the real example first and build_as.go lazily npm-installs it -- but
+	// that is an accident of Go's file-order test execution within one
+	// process, not a guarantee. cleat#3301's shard split proved it: it puts
+	// the two tests in different processes (different VMs, no shared
+	// filesystem), and the hash-based shard that drew this test did not draw
+	// that one. Without a pre-existing node_modules, the rsync below has to
+	// create node_modules/@cleat/transform from nothing -- two missing
+	// levels -- which real rsync (3.2.7, the GitHub runner's) refuses with
+	// "mkdir ... failed: No such file or directory", exactly the failure
+	// TestJavaBuildRefusesAStaleManifest already documents above for the
+	// same reason. macOS's bundled rsync (openrsync) creates the whole
+	// chain, which is why this was invisible locally. mkdir the destination
+	// first so the later rsync lands on an existing (empty) directory
+	// regardless of whether node_modules pre-existed or which rsync runs it.
 	nodeModulesCleat := filepath.Join(asDir, "node_modules", "@cleat")
+	if mkErr := os.MkdirAll(nodeModulesCleat, 0o755); mkErr != nil {
+		t.Fatalf("mkdir %s: %v", nodeModulesCleat, mkErr)
+	}
 	if rmErr := os.RemoveAll(filepath.Join(nodeModulesCleat, "transform")); rmErr != nil {
 		t.Fatalf("removing symlinked transform: %v", rmErr)
 	}
