@@ -1647,14 +1647,20 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		// ordering is the whole of cleat#1534.
 
 		// Insert the workflow instance.
-		_, err = tx.ExecContext(ctx, `
+		var resolvedTaskQueue string
+		err = tx.QueryRowContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 			VALUES ($1, $2, $3, 'ready', $4,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond',
 			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
-		`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+			RETURNING task_queue
+		`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
 		if err != nil {
+			return "", false, fmt.Errorf("start new run: %w", err)
+		}
+
+		if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
 
@@ -1669,18 +1675,68 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	var resolvedTaskQueue string
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 		VALUES ($1, $2, $3, 'ready', $4,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond',
 			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
-	`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+		RETURNING task_queue
+	`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
 	if err != nil {
+		return "", false, fmt.Errorf("start new run: %w", err)
+	}
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return runID, false, tx.Commit()
+}
+
+// insertLeaseAndPayloadRows creates the workflow_leases and workflow_payloads
+// rows that go with a freshly inserted workflow_instances row, on the SAME
+// tx -- cleat#3245 Phase 3 step 2 (dual-write), piece 1. There is no backfill
+// (owner decision: a fresh database is required for 0.5.0, so no supported
+// upgrade path has a pre-existing workflow_instances row to catch up), which
+// is what makes "create both rows together, from here on, every time" the
+// whole of this step's job for new runs.
+//
+// next_wake_at is set explicitly to the same `now() - 1ms` the
+// workflow_instances INSERT uses, rather than relying on this table's own
+// `DEFAULT now()` -- the two would otherwise disagree by whatever the gap
+// between the two statements happens to be, and this column feeds claim
+// ordering. created_at is NOT passed explicitly: both tables default it to
+// `now()`, and `now()` is the TRANSACTION timestamp in PostgreSQL (constant
+// across every statement in one tx), so the two columns agree without having
+// to say so.
+//
+// taskQueue is the value workflow_instances' own INSERT just resolved via
+// its COALESCE-against-workflow_defs subquery, captured with RETURNING
+// rather than re-evaluated here -- a second subquery risks reading a
+// workflow_defs row that changed between the two statements, however
+// unlikely, and silently duplicating a drifted value is worse than reusing
+// the one already decided.
+//
+// sealedPayloadInput is whatever startNewRun already bound to
+// workflow_instances.input (ciphertext when encryption is on, per
+// cleat#2312) -- reused rather than re-sealed, so the two tables carry
+// identical bytes rather than two independent encryptions of the same
+// plaintext.
+func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.Tx, id, tenantID, taskQueue string, priority int, sealedPayloadInput string) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_leases (id, tenant_id, task_queue, priority, next_wake_at)
+		VALUES ($1, $2, $3, $4, now() - INTERVAL '1 millisecond')
+	`, id, tenantID, taskQueue, priority); err != nil {
+		return fmt.Errorf("insert lease row: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_payloads (id, tenant_id, input)
+		VALUES ($1, $2, $3)
+	`, id, tenantID, sealedPayloadInput); err != nil {
+		return fmt.Errorf("insert payload row: %w", err)
+	}
+	return nil
 }
 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
