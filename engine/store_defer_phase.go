@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/lib/pq"
 )
 
 // FinalizeDeferPhase applies the outcome recorded at mark time, after the defer
@@ -67,6 +69,26 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 	if err != nil {
 		return fmt.Errorf("finalize defer phase: %w", err)
 	}
+
+	// cleat#3245 Phase 3 step 2 piece 6d: mirror the same apply-defer-phase
+	// transition onto workflow_leases, same tx, same fence as the
+	// workflow_instances write above. completed_at stays workflow_instances-
+	// only (no piece mirrors it). No workflow_payloads write: result/
+	// error_msg/error_code/error_op were already written at mark time
+	// (pieces 4c/6c), and this call only flips status -- the same reason
+	// adminForceMark's one-phase sibling (piece 4c) needed no payload write
+	// here either.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = pending_terminal_status,
+		    pending_terminal_status = NULL,
+		    defer_phase_deadline = NULL,
+		    assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2 AND generation = $3 AND pending_terminal_status IS NOT NULL
+	`, runID, workerID, generation); err != nil {
+		return fmt.Errorf("finalize defer phase: mirror lease: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("finalize defer phase commit: %w", err)
 	}
@@ -136,6 +158,20 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: scan: %w", err)
 	}
+
+	// cleat#3245 Phase 3 step 2 piece 6d: mirror the same sweep onto
+	// workflow_leases, same tx. Captures the ids the instances UPDATE just
+	// returned rather than re-deriving the WHERE clause against the lease
+	// table -- the GAP-avoidance pattern pieces 4d/6b already use for a bulk
+	// write, since nothing else can have changed these rows mid-tx but
+	// re-deriving would still have to agree with what was actually touched.
+	// generation bumps here, matching the instances UPDATE above: unlike
+	// FinalizeDeferPhase (a single claimed row with a live holder to fence
+	// out), this sweep is exactly the case that bump exists for.
+	if err := mirrorExpiredDeferPhaseLeases(ctx, tx, expired); err != nil {
+		return 0, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("expire defer phases commit: %w", err)
 	}
@@ -147,4 +183,30 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 		s.enforceParentClosePolicy(context.Background(), wf.id, parentOutcomeMessage(wf.status))
 	}
 	return len(expired), nil
+}
+
+// mirrorExpiredDeferPhaseLeases mirrors ExpireDeferPhases' sweep onto
+// workflow_leases for exactly the rows the workflow_instances UPDATE just
+// touched. No workflow_payloads write, for the same reason FinalizeDeferPhase
+// needs none: result/error_msg/error_code/error_op were written at mark time.
+func mirrorExpiredDeferPhaseLeases(ctx context.Context, tx *sql.Tx, expired []expiredDeferPhase) error {
+	if len(expired) == 0 {
+		return nil
+	}
+	ids := make([]string, len(expired))
+	for i, wf := range expired {
+		ids[i] = wf.id
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = pending_terminal_status,
+		    pending_terminal_status = NULL,
+		    defer_phase_deadline = NULL,
+		    assigned_to = NULL,
+		    generation = generation + 1
+		WHERE id = ANY($1)
+	`, pq.Array(ids)); err != nil {
+		return fmt.Errorf("expire defer phases: mirror lease: %w", err)
+	}
+	return nil
 }
