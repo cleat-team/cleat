@@ -2010,6 +2010,33 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 		`, workflowID, reason, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
 			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
 		}
+
+		// cleat#3245 Phase 3 step 2 piece 6c: mirror this mark-defer-phase
+		// transition onto workflow_leases/workflow_payloads, same tx, no
+		// fence (matching the UPDATE above -- this path is protected by the
+		// FOR UPDATE row lock and the isSettledStatus check already done,
+		// not by a generation match). This is the piece-4c-deferred half:
+		// piece 4c mirrored this function's ONE-PHASE arm only, because this
+		// arm writes pending_terminal_status/defer_phase_deadline with a
+		// real value, and nothing dual-wrote either column until now.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_leases
+			SET status = $2,
+			    pending_terminal_status = $4,
+			    defer_phase_deadline = now() + ($3 * interval '1 second'),
+			    next_wake_at = now(),
+			    assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1
+		`, workflowID, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
+			return fmt.Errorf("%s workflow: mirror lease: %w", finalStatus, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = $2 WHERE id = $1
+		`, workflowID, reason); err != nil {
+			return fmt.Errorf("%s workflow: mirror payload: %w", finalStatus, err)
+		}
+
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 		}
@@ -2046,8 +2073,10 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 
 	// cleat#3245 Phase 3 step 2 piece 4c: mirror this one-phase transition
 	// onto workflow_leases/workflow_payloads, same tx. The TWO-phase
-	// (defer-owed) arm above is deliberately NOT mirrored -- it writes
-	// pending_terminal_status with a real value, piece 6's column.
+	// (defer-owed) arm above has its own mirror (piece 6c) -- it was
+	// deliberately left unmirrored here because it writes
+	// pending_terminal_status with a real value, which nothing dual-wrote
+	// until piece 6c landed.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases
 		SET status = $2, completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
