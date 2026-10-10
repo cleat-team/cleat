@@ -112,11 +112,13 @@ func TestAdminForceFailWithADeferOwedMarksTheLeaseAndPayloadRows(t *testing.T) {
 		t.Errorf("workflow_leases.pending_terminal_status = %q, want %q", leasePending, "failed")
 	}
 
-	// adminForceMark leaves error_msg/error_code/error_op NULL on
-	// workflow_payloads until FinalizeDeferPhase applies the recorded
-	// outcome -- unlike the one-phase arm (piece 4c), which writes them
-	// directly. Nothing to assert on the payload row yet; the lease row's
-	// pending_terminal_status is what carries the operator's intent.
+	payload := readPayloadResultFields(t, db, id)
+	if !payload.errorMsg.Valid || payload.errorMsg.String != "boom" {
+		t.Errorf("workflow_payloads.error_msg = %v, want %q", payload.errorMsg, "boom")
+	}
+	if !payload.errorCode.Valid || payload.errorCode.String != "E_BOOM" {
+		t.Errorf("workflow_payloads.error_code = %v, want %q", payload.errorCode, "E_BOOM")
+	}
 }
 
 func TestTerminateWorkflowWithADeferOwedMarksTheLeaseAndPayloadRows(t *testing.T) {
