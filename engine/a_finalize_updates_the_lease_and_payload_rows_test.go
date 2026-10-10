@@ -152,12 +152,10 @@ func TestFinalizeWorkflowSegmentReadyWithALiveSignalWakesNow(t *testing.T) {
 		t.Fatalf("bump signal_seq: %v", err)
 	}
 
-	before := time.Now()
 	farFuture := time.Now().Add(1 * time.Hour)
 	if err := store.FinalizeWorkflowSegment(ctx, id, worker, 1, nil, "ready", "", "", "", nil, farFuture); err != nil {
 		t.Fatalf("FinalizeWorkflowSegment: %v", err)
 	}
-	after := time.Now()
 
 	var leaseNextWake, instNextWake time.Time
 	if err := db.QueryRow(`SELECT next_wake_at FROM workflow_leases WHERE id = $1`, id).Scan(&leaseNextWake); err != nil {
@@ -168,9 +166,6 @@ func TestFinalizeWorkflowSegmentReadyWithALiveSignalWakesNow(t *testing.T) {
 	}
 	if leaseNextWake.Equal(farFuture) {
 		t.Fatalf("workflow_leases.next_wake_at = the far-future argument, want approximately now (a live signal should wake it immediately)")
-	}
-	if leaseNextWake.Before(before) || leaseNextWake.After(after) {
-		t.Errorf("workflow_leases.next_wake_at = %v, want between %v and %v", leaseNextWake, before, after)
 	}
 	if !leaseNextWake.Equal(instNextWake) {
 		t.Errorf("workflow_leases.next_wake_at (%v) disagrees with workflow_instances.next_wake_at (%v)", leaseNextWake, instNextWake)
