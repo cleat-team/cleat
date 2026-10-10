@@ -59,6 +59,7 @@ import (
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
 	"014_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
+	"017_finalize_workflow_status_dual_writes_leases_and_payloads.sql",
 }
 
 // Same shape as the Postgres list above, for the same reason: MySQL was
