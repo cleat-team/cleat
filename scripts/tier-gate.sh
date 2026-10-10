@@ -21,10 +21,19 @@
 #   scripts/tier-gate.sh                    enforce (exit non-zero on failure or skip)
 #   scripts/tier-gate.sh --measure          report only, never fail the build
 #   scripts/tier-gate.sh --shard I/N        run only shard I of N (1-based; see below)
+#   scripts/tier-gate.sh --engine-buckets E with --shard/--list-shard/--verify-shard-coverage:
+#                                            of the N total shards, E are ./engine/...
+#                                            buckets and the remaining N-E are REST
+#                                            buckets (cleat#3301). Default E = N-1 (today's
+#                                            shape: every shard but the last is engine, the
+#                                            last is the single, unsharded rest shard) --
+#                                            omit it and nothing here changes.
 #   scripts/tier-gate.sh --verify-shard-coverage N
-#                                            no DB needed: confirm the N-1 engine
-#                                            buckets union to exactly the full
-#                                            ./engine/... test list, no gaps or dupes
+#                                            no DB needed: confirm the engine buckets union
+#                                            to exactly the full ./engine/... test list, and
+#                                            (cleat#3301) the rest buckets union to exactly
+#                                            the full test list of every OTHER tier1 package
+#                                            -- no gaps or dupes on either side
 #   scripts/tier-gate.sh --list-shard I/N   print what shard I/N would run, then exit
 #   scripts/tier-gate.sh --self-test        offline check of the sharding logic itself
 #
@@ -59,12 +68,14 @@ SHARD_SPEC=""
 VERIFY_N=""
 LIST_SHARD_SPEC=""
 SELF_TEST=0
+ENGINE_BUCKETS_OVERRIDE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --measure) MEASURE=1; shift ;;
     --shard) SHARD_SPEC="${2:?--shard wants I/N}"; shift 2 ;;
     --verify-shard-coverage) VERIFY_N="${2:?--verify-shard-coverage wants N}"; shift 2 ;;
     --list-shard) LIST_SHARD_SPEC="${2:?--list-shard wants I/N}"; shift 2 ;;
+    --engine-buckets) ENGINE_BUCKETS_OVERRIDE="${2:?--engine-buckets wants E}"; shift 2 ;;
     --self-test) SELF_TEST=1; shift ;;
     *) echo "tier-gate: unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -73,6 +84,24 @@ done
 fail() { echo "tier-gate: FAIL: $*" >&2; FAILED=1; }
 note() { echo "tier-gate: $*"; }
 FAILED=0
+
+# compute_ebuckets N: how many of the N total shards are ./engine/... buckets.
+# ENGINE_BUCKETS_OVERRIDE unset -> N-1 (today's shape: a single, unsharded rest
+# shard). Set -> exactly that many, leaving N-E rest buckets (cleat#3301).
+compute_ebuckets() {
+  if [ -n "$ENGINE_BUCKETS_OVERRIDE" ]; then
+    echo "$ENGINE_BUCKETS_OVERRIDE"
+  else
+    echo "$(($1 - 1))"
+  fi
+}
+
+if [ -n "$ENGINE_BUCKETS_OVERRIDE" ]; then
+  case "$ENGINE_BUCKETS_OVERRIDE" in
+    ''|*[!0-9]*) echo "tier-gate: --engine-buckets wants a positive integer, got '$ENGINE_BUCKETS_OVERRIDE'" >&2; exit 2 ;;
+  esac
+  [ "$ENGINE_BUCKETS_OVERRIDE" -ge 1 ] || { echo "tier-gate: --engine-buckets must be >= 1, got $ENGINE_BUCKETS_OVERRIDE" >&2; exit 2; }
+fi
 
 # --- sharding helpers ----------------------------------------------------------
 # Top-level Test funcs only. -list does not expand subtests (a dialect subtest
@@ -91,6 +120,39 @@ FAILED=0
 # caller.
 engine_all_tests() {
   (cd "$REPO_ROOT" && go test ./engine/... -list '.*' 2>/dev/null) | grep -E '^Test' | LC_ALL=C sort -u
+}
+
+# REST_PACKAGES (cleat#3301): tiers.yaml's tier1.packages minus ./engine/..., today.
+# A LITERAL list, not read from tiers.yaml here, for the same reason engine_all_tests
+# hardcodes ./engine/... rather than reading it: --self-test and --verify-shard-coverage
+# both run in the tier1-coverage job, which has "No DB, no Python, no wasm-tools" by
+# design (see the header), and the real tiers.yaml parse a few hundred lines down needs
+# PyYAML. The REAL run path (--shard I/N, which does have Python) does not use this list
+# -- it derives ACTIVE_PKGS from tiers.yaml's own parse, as it always has -- and asserts
+# there, every real run, that this literal agrees with that parse exactly (search for
+# "REST_PACKAGES disagrees"). A literal that drifts fails loud on the very next real run,
+# not silently on the next person who trusts --verify-shard-coverage's green.
+REST_PACKAGES=(
+  ./wasm/...
+  ./wasmrw/...
+  ./plugin/...
+  ./auth/...
+  ./internal/...
+  ./cmd/...
+  ./pluginapi/...
+  ./monitoring/...
+  ./tests/integrity/...
+  ./tests/upgrade/...
+  ./tests/crash/...
+)
+
+# rest_all_tests: the same top-level-Test-funcs-only, deduped-by-name list
+# engine_all_tests returns, over the union of REST_PACKAGES instead of
+# ./engine/... (cleat#3301). One `go test -list` invocation across all of them,
+# not one per package: a name shared between two of these packages hashes to the
+# same bucket regardless (same reasoning as engine_all_tests' own sort -u).
+rest_all_tests() {
+  (cd "$REPO_ROOT" && go test "${REST_PACKAGES[@]}" -list '.*' 2>/dev/null) | grep -E '^Test' | LC_ALL=C sort -u
 }
 
 # engine_shard_names BUCKET NBUCKETS: reads test names on stdin (one per line),
@@ -121,6 +183,56 @@ names_to_run_pattern() {
   else
     echo "^($(printf '%s\n' "$names" | paste -sd '|' -))\$"
   fi
+}
+
+# verify_bucket_coverage LABEL NBUCKETS: reads the full, deduped test-name list
+# on stdin, partitions it into NBUCKETS via engine_shard_names (the same
+# function both ./engine/... and the rest packages use -- it is name-hashing,
+# not package-specific), and fails -- printing exactly what's wrong -- if the
+# union of the buckets is not precisely that full list. One mechanism, two
+# callers (cleat#3301: engine_all_tests | ... and rest_all_tests | ...),
+# because engine's own version of this logic already exists inline below the
+# first time this is called and this is that logic, made reusable rather than
+# duplicated a second time with its own chance to drift from the first.
+# Returns 0 OK, 1 a real coverage finding, 2 could not measure (empty list).
+verify_bucket_coverage() {
+  local label="$1" nbuckets="$2"
+  local all nall union total b part n uniq_count missing extra
+  all=$(cat)
+  nall=$(printf '%s\n' "$all" | grep -c . || true)
+  if [ "$nall" = "0" ]; then
+    echo "tier-gate --verify-shard-coverage: $label: -list produced no top-level tests -- could not measure, not a coverage finding" >&2
+    return 2
+  fi
+  note "  $label: full unsharded list: $nall top-level tests"
+
+  union=""
+  total=0
+  b=0
+  while [ "$b" -lt "$nbuckets" ]; do
+    part=$(printf '%s\n' "$all" | engine_shard_names "$b" "$nbuckets")
+    n=$(printf '%s\n' "$part" | grep -c . || true)
+    note "  $label bucket $b/$nbuckets: $n tests"
+    total=$((total + n))
+    union="$union
+$part"
+    b=$((b + 1))
+  done
+
+  uniq_count=$(printf '%s\n' "$union" | grep . | sort -u | grep -c . || true)
+  missing=$(comm -23 <(printf '%s\n' "$all" | grep . | sort -u) <(printf '%s\n' "$union" | grep . | sort -u))
+  extra=$(comm -13 <(printf '%s\n' "$all" | grep . | sort -u) <(printf '%s\n' "$union" | grep . | sort -u))
+
+  if [ "$total" != "$nall" ] || [ "$uniq_count" != "$nall" ] || [ -n "$missing" ] || [ -n "$extra" ]; then
+    echo "tier-gate --verify-shard-coverage: FAIL -- $label: union of $nbuckets bucket(s) does not equal the full list" >&2
+    echo "  full=$nall  sum-of-buckets=$total  distinct-in-union=$uniq_count" >&2
+    [ -n "$missing" ] && { echo "  MISSING from every bucket:" >&2; printf '%s\n' "$missing" | sed 's/^/    /' >&2; }
+    [ -n "$extra" ] && { echo "  in a bucket but not in the full list (stale? flaky -list?):" >&2; printf '%s\n' "$extra" | sed 's/^/    /' >&2; }
+    return 1
+  fi
+
+  note "  $label: OK -- $nbuckets bucket(s) partition all $nall tests exactly once"
+  return 0
 }
 
 if [ "$SELF_TEST" = "1" ]; then
@@ -163,6 +275,39 @@ $part"
   PAT2=$(printf 'TestFoo\nTestBar\n' | names_to_run_pattern)
   [ "$PAT2" = '^(TestFoo|TestBar)$' ] || st_fail "names_to_run_pattern on [TestFoo TestBar] produced '$PAT2', expected '^(TestFoo|TestBar)\$'"
 
+  # cleat#3301: compute_ebuckets. Unset override -> N-1 (today's shape,
+  # unchanged). Set override -> exactly that value, whatever N is.
+  ENGINE_BUCKETS_OVERRIDE=""
+  [ "$(compute_ebuckets 3)" = "2" ] || st_fail "compute_ebuckets 3 with no override gave '$(compute_ebuckets 3)', want 2 (today's N-1 shape)"
+  ENGINE_BUCKETS_OVERRIDE="2"
+  [ "$(compute_ebuckets 5)" = "2" ] || st_fail "compute_ebuckets 5 with --engine-buckets 2 gave '$(compute_ebuckets 5)', want 2"
+  ENGINE_BUCKETS_OVERRIDE=""
+
+  # cleat#3301: verify_bucket_coverage is engine's own inline coverage logic,
+  # made reusable so rest can call the identical mechanism. Prove it still
+  # catches the ONE real-world failure this script's own header documents:
+  # a name hashed to the same bucket twice because the caller passed an
+  # UNDEDUPLICATED "all" list (TestDialectConstants, two packages, cleat's
+  # own history -- "sum-of-buckets 3486, full list 3486, but only 3485
+  # DISTINCT names in the union"). A plain modulo partition is complete for
+  # any NBUCKETS by construction, so that is NOT a failure mode to simulate;
+  # a duplicate line in "all" is the one real bug this check exists for.
+  DUPED=$(printf 'TestOne\nTestOne\nTestTwo\nTestThree\n')
+  if printf '%s\n' "$DUPED" | verify_bucket_coverage synthetic-duplicate-name 2 >/tmp/vbc-out.$$ 2>&1; then
+    st_fail "verify_bucket_coverage passed an UNDEDUPLICATED list (TestOne twice) -- it must fail exactly the way cleat's own history did"
+  elif ! grep -q 'distinct-in-union' /tmp/vbc-out.$$; then
+    st_fail "verify_bucket_coverage failed the duplicate case for the wrong reason -- expected a distinct-in-union mismatch in its own output"
+  fi
+  rm -f /tmp/vbc-out.$$
+
+  # Known positive, same names, deduplicated: must pass, proving the failure
+  # above is about the duplicate, not verify_bucket_coverage being broken.
+  DEDUPED=$(printf 'TestOne\nTestTwo\nTestThree\n')
+  if ! printf '%s\n' "$DEDUPED" | verify_bucket_coverage synthetic-deduplicated 2 >/tmp/vbc-out2.$$ 2>&1; then
+    st_fail "verify_bucket_coverage failed a clean, deduplicated 3-name list -- known-positive did not pass"
+  fi
+  rm -f /tmp/vbc-out2.$$
+
   if [ "$ST_FAILED" = "1" ]; then
     echo "tier-gate --self-test: FAILED" >&2
     exit 1
@@ -175,50 +320,26 @@ fi
 
 if [ -n "$VERIFY_N" ]; then
   case "$VERIFY_N" in ''|*[!0-9]*) echo "tier-gate --verify-shard-coverage: N must be a positive integer, got '$VERIFY_N'" >&2; exit 2 ;; esac
-  [ "$VERIFY_N" -ge 2 ] || { echo "tier-gate --verify-shard-coverage: N must be >= 2 (>=1 engine bucket plus the rest shard), got $VERIFY_N" >&2; exit 2; }
-  EBUCKETS=$((VERIFY_N - 1))
+  [ "$VERIFY_N" -ge 2 ] || { echo "tier-gate --verify-shard-coverage: N must be >= 2 (>=1 engine bucket plus >=1 rest bucket), got $VERIFY_N" >&2; exit 2; }
+  EBUCKETS=$(compute_ebuckets "$VERIFY_N")
+  [ "$EBUCKETS" -ge 1 ] || { echo "tier-gate --verify-shard-coverage: --engine-buckets must be >= 1, got $EBUCKETS" >&2; exit 2; }
+  RBUCKETS=$((VERIFY_N - EBUCKETS))
+  [ "$RBUCKETS" -ge 1 ] || { echo "tier-gate --verify-shard-coverage: --engine-buckets ($EBUCKETS) must be < N ($VERIFY_N), leaving at least 1 rest bucket" >&2; exit 2; }
 
-  note "verifying ./engine/... shard coverage across $EBUCKETS bucket(s) (N=$VERIFY_N)"
-  ALL=$(engine_all_tests)
-  NALL=$(printf '%s\n' "$ALL" | grep -c . || true)
-  if [ "$NALL" = "0" ]; then
-    echo "tier-gate --verify-shard-coverage: go test ./engine/... -list produced no top-level tests -- could not measure, not a coverage finding" >&2
-    exit 2
-  fi
-  note "  full unsharded list: $NALL top-level tests"
-
-  UNION=""
-  TOTAL=0
-  b=0
-  while [ "$b" -lt "$EBUCKETS" ]; do
-    part=$(printf '%s\n' "$ALL" | engine_shard_names "$b" "$EBUCKETS")
-    n=$(printf '%s\n' "$part" | grep -c . || true)
-    note "  bucket $b/$EBUCKETS: $n tests"
-    TOTAL=$((TOTAL + n))
-    UNION="$UNION
-$part"
-    b=$((b + 1))
-  done
-
-  UNIQ_COUNT=$(printf '%s\n' "$UNION" | grep . | sort -u | grep -c . || true)
-  MISSING=$(comm -23 <(printf '%s\n' "$ALL" | grep . | sort -u) <(printf '%s\n' "$UNION" | grep . | sort -u))
-  EXTRA=$(comm -13 <(printf '%s\n' "$ALL" | grep . | sort -u) <(printf '%s\n' "$UNION" | grep . | sort -u))
-
-  if [ "$TOTAL" != "$NALL" ] || [ "$UNIQ_COUNT" != "$NALL" ] || [ -n "$MISSING" ] || [ -n "$EXTRA" ]; then
-    echo "tier-gate --verify-shard-coverage: FAIL -- union of $EBUCKETS bucket(s) does not equal the full list" >&2
-    echo "  full=$NALL  sum-of-buckets=$TOTAL  distinct-in-union=$UNIQ_COUNT" >&2
-    [ -n "$MISSING" ] && { echo "  MISSING from every bucket:" >&2; printf '%s\n' "$MISSING" | sed 's/^/    /' >&2; }
-    [ -n "$EXTRA" ] && { echo "  in a bucket but not in the full list (stale? flaky -list?):" >&2; printf '%s\n' "$EXTRA" | sed 's/^/    /' >&2; }
-    exit 1
-  fi
-
-  note "tier-gate --verify-shard-coverage: OK -- $EBUCKETS bucket(s) partition all $NALL tests exactly once"
-  exit 0
+  note "verifying shard coverage: $EBUCKETS engine bucket(s), $RBUCKETS rest bucket(s) (N=$VERIFY_N, cleat#3301)"
+  RC=0
+  engine_all_tests | verify_bucket_coverage "./engine/..." "$EBUCKETS" || RC=$?
+  r=0
+  rest_all_tests | verify_bucket_coverage "rest (${#REST_PACKAGES[@]} non-engine tier1 packages)" "$RBUCKETS" || r=$?
+  [ "$r" -gt "$RC" ] && RC=$r
+  exit "$RC"
 fi
 
 RUN_MODE="full"
 SHARD_I_NUM=""
 SHARD_N_NUM=""
+EBUCKETS=""
+RBUCKETS=""
 SHARD_TO_PARSE="${SHARD_SPEC:-$LIST_SHARD_SPEC}"
 if [ -n "$SHARD_TO_PARSE" ]; then
   case "$SHARD_TO_PARSE" in
@@ -229,9 +350,13 @@ if [ -n "$SHARD_TO_PARSE" ]; then
   SHARD_N_NUM=${SHARD_TO_PARSE##*/}
   case "$SHARD_I_NUM" in ''|*[!0-9]*) echo "tier-gate: --shard I must be a positive integer, got '$SHARD_I_NUM'" >&2; exit 2 ;; esac
   case "$SHARD_N_NUM" in ''|*[!0-9]*) echo "tier-gate: --shard N must be a positive integer, got '$SHARD_N_NUM'" >&2; exit 2 ;; esac
-  [ "$SHARD_N_NUM" -ge 2 ] || { echo "tier-gate: --shard N must be >= 2 (>=1 engine bucket plus the rest shard), got $SHARD_N_NUM" >&2; exit 2; }
+  [ "$SHARD_N_NUM" -ge 2 ] || { echo "tier-gate: --shard N must be >= 2 (>=1 engine bucket plus >=1 rest bucket), got $SHARD_N_NUM" >&2; exit 2; }
   { [ "$SHARD_I_NUM" -ge 1 ] && [ "$SHARD_I_NUM" -le "$SHARD_N_NUM" ]; } || { echo "tier-gate: --shard I must be between 1 and N ($SHARD_N_NUM), got $SHARD_I_NUM" >&2; exit 2; }
-  if [ "$SHARD_I_NUM" -lt "$SHARD_N_NUM" ]; then
+  EBUCKETS=$(compute_ebuckets "$SHARD_N_NUM")
+  [ "$EBUCKETS" -ge 1 ] || { echo "tier-gate: --engine-buckets must be >= 1, got $EBUCKETS" >&2; exit 2; }
+  RBUCKETS=$((SHARD_N_NUM - EBUCKETS))
+  [ "$RBUCKETS" -ge 1 ] || { echo "tier-gate: --engine-buckets ($EBUCKETS) must be < N ($SHARD_N_NUM), leaving at least 1 rest bucket" >&2; exit 2; }
+  if [ "$SHARD_I_NUM" -le "$EBUCKETS" ]; then
     RUN_MODE="engine-shard"
   else
     RUN_MODE="rest-shard"
@@ -240,10 +365,17 @@ fi
 
 if [ -n "$LIST_SHARD_SPEC" ]; then
   if [ "$RUN_MODE" = "engine-shard" ]; then
-    EBUCKETS=$((SHARD_N_NUM - 1))
     BUCKET=$((SHARD_I_NUM - 1))
     engine_all_tests | engine_shard_names "$BUCKET" "$EBUCKETS" | names_to_run_pattern
+  elif [ "$RBUCKETS" -gt 1 ]; then
+    # cleat#3301: more than one rest bucket -- same name-hash mechanism as
+    # engine, over the union of REST_PACKAGES instead of ./engine/....
+    REST_BUCKET=$((SHARD_I_NUM - EBUCKETS - 1))
+    echo "REST shard $SHARD_I_NUM/$SHARD_N_NUM (bucket $REST_BUCKET/$RBUCKETS): every tier1 package except ./engine/..., plus the cleat module"
+    rest_all_tests | engine_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern
   else
+    # Today's default shape (RBUCKETS=1): the single, unsharded rest shard --
+    # unchanged, byte for byte, from before cleat#3301.
     echo "REST shard $SHARD_I_NUM/$SHARD_N_NUM: every tier1 package except ./engine/..., plus the cleat module"
   fi
   exit 0
@@ -557,7 +689,6 @@ case "$RUN_MODE" in
       echo "tier-gate: --shard requested an engine shard but ./engine/... is not in tier1.packages" >&2
       exit 2
     fi
-    EBUCKETS=$((SHARD_N_NUM - 1))
     BUCKET=$((SHARD_I_NUM - 1))
     SHARD_PATTERN=$(engine_all_tests | engine_shard_names "$BUCKET" "$EBUCKETS" | names_to_run_pattern)
     ACTIVE_PKGS="./engine/..."
@@ -566,7 +697,28 @@ case "$RUN_MODE" in
     ;;
   rest-shard)
     ACTIVE_PKGS=$(printf '%s\n' "$PKGS" | grep -Fxv './engine/...')
-    note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM: $(echo "$ACTIVE_PKGS" | tr '\n' ' ')"
+    # REST_PACKAGES is a literal list, kept in sync with tiers.yaml by hand
+    # (see its own comment for why --verify-shard-coverage can't just read
+    # tiers.yaml). Cross-check it against the REAL, just-parsed package list
+    # on every real run, so a drift between the two fails loud here rather
+    # than silently passing --verify-shard-coverage while sharding the wrong
+    # set (cleat#3301).
+    REST_FROM_LITERAL=$(printf '%s\n' "${REST_PACKAGES[@]}" | LC_ALL=C sort)
+    REST_FROM_TIERS=$(printf '%s\n' "$ACTIVE_PKGS" | LC_ALL=C sort)
+    if [ "$REST_FROM_LITERAL" != "$REST_FROM_TIERS" ]; then
+      echo "tier-gate: REST_PACKAGES (hardcoded in this script) disagrees with tiers.yaml's" >&2
+      echo "tier1.packages minus ./engine/.... Update REST_PACKAGES to match:" >&2
+      diff <(echo "$REST_FROM_LITERAL") <(echo "$REST_FROM_TIERS") >&2 || true
+      exit 2
+    fi
+    if [ "$RBUCKETS" -gt 1 ]; then
+      REST_BUCKET=$((SHARD_I_NUM - EBUCKETS - 1))
+      SHARD_PATTERN=$(rest_all_tests | engine_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern)
+      note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM (bucket $REST_BUCKET/$RBUCKETS): $(echo "$ACTIVE_PKGS" | tr '\n' ' ')"
+      note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM: -run '$SHARD_PATTERN'"
+    else
+      note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM: $(echo "$ACTIVE_PKGS" | tr '\n' ' ')"
+    fi
     ;;
   *)
     ACTIVE_PKGS="$PKGS"
