@@ -100,6 +100,11 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, promiseID, result st
 	if err != nil {
 		return err
 	}
+	// cleat#3245 Phase 3 step 2 piece 5b: mirror onto workflow_leases, on the
+	// same tx.
+	if err := bumpLeasePromiseSeqAndWakeByPromiseID(ctx, tx, promiseID); err != nil {
+		return err
+	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }
@@ -143,6 +148,11 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, promiseID, errMsg str
 		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
 	`, promiseID)
 	if err != nil {
+		return err
+	}
+	// cleat#3245 Phase 3 step 2 piece 5b: mirror onto workflow_leases, on the
+	// same tx.
+	if err := bumpLeasePromiseSeqAndWakeByPromiseID(ctx, tx, promiseID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -333,8 +343,49 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 	`, workflowID); err != nil {
 		return err
 	}
+	// cleat#3245 Phase 3 step 2 piece 5b: mirror onto workflow_leases, on the
+	// same tx.
+	if err := bumpLeasePromiseSeqAndWake(ctx, tx, workflowID); err != nil {
+		return err
+	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
+}
+
+// bumpLeasePromiseSeqAndWakeByPromiseID mirrors ResolvePromise/RejectPromise's
+// promise_seq bump and conditional wake onto workflow_leases, on the same tx
+// -- cleat#3245 Phase 3 step 2, piece 5b. Keyed by promiseID via the identical
+// subquery the workflow_instances UPDATE uses, rather than a workflowID the
+// caller does not have (ResolvePromise/RejectPromise take only a promiseID) --
+// a second round trip to resolve one first would be an extra statement this
+// mirror doesn't need.
+func bumpLeasePromiseSeqAndWakeByPromiseID(ctx context.Context, tx *sql.Tx, promiseID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
+	`, promiseID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// bumpLeasePromiseSeqAndWake mirrors CreateUpdateRequest's promise_seq bump
+// and conditional wake onto workflow_leases, on the same tx -- cleat#3245
+// Phase 3 step 2, piece 5b. Keyed directly by workflowID, which
+// CreateUpdateRequest already has as a parameter (unlike ResolvePromise/
+// RejectPromise, which only have a promiseID).
+func bumpLeasePromiseSeqAndWake(ctx context.Context, tx *sql.Tx, workflowID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
 }
 
 // GetPendingUpdateRequests returns all pending (not yet dispatched) update requests.
