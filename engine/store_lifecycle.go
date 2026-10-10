@@ -963,6 +963,15 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 		return ErrFenceLost
 	}
 
+	// cleat#3245 Phase 3 step 2 piece 4a: mirror the same terminal
+	// transition onto workflow_leases/workflow_payloads, same tx.
+	if err := s.completeLeaseRow(ctx, tx, workflowID, workerID, "done", generation); err != nil {
+		return fmt.Errorf("complete workflow: %w", err)
+	}
+	if err := s.writeResultPayload(ctx, tx, workflowID, sealedResult, sealedQS); err != nil {
+		return fmt.Errorf("complete workflow: %w", err)
+	}
+
 	// No idempotency write on the success path. idempotency_keys.result was
 	// written here and read nowhere, so cleat#1049 dropped the column; a
 	// completed run now records nothing on that table. The failure path is
@@ -1044,6 +1053,15 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		// commit: the idempotency-key write and post-commit cleanup below
 		// are not safe to run on the new owner's behalf.
 		return ErrFenceLost
+	}
+
+	// cleat#3245 Phase 3 step 2 piece 4a: mirror the same terminal
+	// transition onto workflow_leases/workflow_payloads, same tx.
+	if err := s.completeLeaseRow(ctx, tx, workflowID, workerID, "failed", generation); err != nil {
+		return fmt.Errorf("fail workflow: %w", err)
+	}
+	if err := s.writeErrorPayload(ctx, tx, workflowID, sealedErrorMsg, sealedErrorCode, sealedErrorOp, qsParam); err != nil {
+		return fmt.Errorf("fail workflow: %w", err)
 	}
 
 	// Record idempotency error within the transaction (best-effort). Reuses
@@ -1372,6 +1390,16 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 		// are not safe to run on the new owner's behalf.
 		return ErrFenceLost
 	}
+
+	// cleat#3245 Phase 3 step 2 piece 4a: mirror the same terminal
+	// transition onto workflow_leases/workflow_payloads, same tx.
+	if err := s.completeLeaseRow(ctx, tx, workflowID, workerID, "dead_lettered", generation); err != nil {
+		return fmt.Errorf("move to dead letter queue: %w", err)
+	}
+	if err := s.writeErrorPayload(ctx, tx, workflowID, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam); err != nil {
+		return fmt.Errorf("move to dead letter queue: %w", err)
+	}
+
 	// Record idempotency error within the transaction (best-effort). Reuses
 	// sealedErrMsg -- see the identical comment on FailWorkflow's sibling
 	// write.
@@ -1813,6 +1841,55 @@ func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.T
 		VALUES ($1, $2, $3)
 	`, id, tenantID, sealedPayloadInput); err != nil {
 		return fmt.Errorf("insert payload row: %w", err)
+	}
+	return nil
+}
+
+// completeLeaseRow mirrors a terminal status transition (CompleteWorkflow,
+// FailWorkflow, MoveToDeadLetterQueue) onto workflow_leases, on the same tx
+// and the same (assigned_to, generation) fence predicate as the
+// workflow_instances UPDATE it follows -- cleat#3245 Phase 3 step 2, piece
+// 4a. `completed_by = assigned_to, assigned_to = NULL` is evaluated against
+// workflow_leases' OWN pre-update assigned_to (SQL SET clauses read the old
+// row, never a value from another statement), so this needs no value passed
+// in beyond the new status -- same as pieces 1/2's mirrors of this exact
+// expression.
+func (s *PostgresStore) completeLeaseRow(ctx context.Context, tx *sql.Tx, workflowID, workerID, status string, generation int64) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = $3, completed_by = assigned_to, assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2 AND generation = $4
+	`, workflowID, workerID, status, generation); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// writeResultPayload mirrors CompleteWorkflow's result/query_state write
+// onto workflow_payloads, on the same tx. Takes already-sealed values (per
+// cleat#2312) so the two tables carry identical ciphertext rather than two
+// independent encryptions of the same plaintext.
+func (s *PostgresStore) writeResultPayload(ctx context.Context, tx *sql.Tx, workflowID string, sealedResult, sealedQS any) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET result = $2, query_state = $3 WHERE id = $1
+	`, workflowID, sealedResult, sealedQS); err != nil {
+		return fmt.Errorf("mirror payload row: %w", err)
+	}
+	return nil
+}
+
+// writeErrorPayload mirrors FailWorkflow/MoveToDeadLetterQueue's
+// error_msg/error_code/error_op/query_state write onto workflow_payloads, on
+// the same tx. qsParam is COALESCEd exactly as the workflow_instances UPDATE
+// does -- a nil qsParam (query state not supplied) leaves the column
+// unchanged rather than nulling it.
+func (s *PostgresStore) writeErrorPayload(ctx context.Context, tx *sql.Tx, workflowID string, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam any) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads
+		SET error_msg = $2, error_code = $3, error_op = $4, query_state = COALESCE($5::jsonb, query_state)
+		WHERE id = $1
+	`, workflowID, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam); err != nil {
+		return fmt.Errorf("mirror payload row: %w", err)
 	}
 	return nil
 }
