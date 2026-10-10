@@ -1434,7 +1434,7 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
@@ -1444,6 +1444,28 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 	if err != nil {
 		return err
 	}
+
+	// cleat#3245 Phase 3 step 2 piece 4c: mirror the same transition onto
+	// workflow_leases/workflow_payloads, same tx, gated on the instances
+	// UPDATE above having actually matched -- RetryWorkflow's original
+	// behaviour (a no-op, nil-returning call on a non-dead_lettered or
+	// absent id) is unchanged either way, so this gate only decides
+	// whether the mirror runs, never the function's own return value.
+	if n, _ := res.RowsAffected(); n > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_leases
+			SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL, next_wake_at = now()
+			WHERE id = $1 AND status = 'dead_lettered'
+		`, workflowID); err != nil {
+			return fmt.Errorf("retry workflow: mirror lease: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+		`, workflowID); err != nil {
+			return fmt.Errorf("retry workflow: mirror payload: %w", err)
+		}
+	}
+
 	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }

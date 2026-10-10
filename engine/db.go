@@ -2043,6 +2043,25 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	if n == 0 {
 		return ErrWorkflowNotFound
 	}
+
+	// cleat#3245 Phase 3 step 2 piece 4c: mirror this one-phase transition
+	// onto workflow_leases/workflow_payloads, same tx. The TWO-phase
+	// (defer-owed) arm above is deliberately NOT mirrored -- it writes
+	// pending_terminal_status with a real value, piece 6's column.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = $2, completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL
+		WHERE id = $1
+	`, workflowID, finalStatus); err != nil {
+		return fmt.Errorf("%s workflow: mirror lease: %w", finalStatus, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET error_msg = $2 WHERE id = $1
+	`, workflowID, reason); err != nil {
+		return fmt.Errorf("%s workflow: mirror payload: %w", finalStatus, err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 	}
