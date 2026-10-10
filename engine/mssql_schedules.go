@@ -289,11 +289,23 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		  -- than a restriction to the caller under the distinction
 		  -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate's doc
 		  -- comment draws (the same one the appendEventsInTxOpts MERGE fix
-		  -- is held to). That guard does NOT actually reach either
-		  -- correlated subquery below, though -- confirmed by cleat-review:
-		  -- removing either predicate does not fail it (cleat#3289, filed to
-		  -- widen the scan to nested subqueries like these). The seek-path
-		  -- reasoning above is why the predicate is here regardless.
+		  -- is held to). That guard does NOT actually enforce either
+		  -- correlated subquery's own predicate below -- confirmed by
+		  -- falsifying each directly: removing either one alone, or both
+		  -- together, still passes. CORRECTED 2026-10-09 (cleat#3289): this
+		  -- used to say the guard "does not reach" the subqueries, which
+		  -- reads as blindness to their text and is not quite it. The
+		  -- guard's filterWindow runs from this WHERE to the next ORDER
+		  -- BY/GROUP BY/OPTION/WHEN with no awareness of a subquery
+		  -- boundary in between, so w.tenant_id = @p3 above and both
+		  -- e.tenant_id/e2.tenant_id comparisons below all land in ONE
+		  -- shared window; any one of the three alone is read as scoping
+		  -- the whole statement, which is why removing the two below
+		  -- changes nothing the guard can see. cleat#3289 tracks widening
+		  -- the scan to check a correlated subquery against its own
+		  -- predicate rather than the statement's as a whole. The
+		  -- seek-path reasoning above is why the predicate is here
+		  -- regardless.
 		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id AND e.tenant_id = @p3)
 		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
 		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id AND e2.tenant_id = @p3))
@@ -636,12 +648,25 @@ var mssqlDeleteExpiredEventsQuery = fmt.Sprintf(`
 			-- statement held at 0 lock escalations
 			-- (TestMSSQLRetentionSweepsCauseNoLockEscalation's
 			-- DeleteExpiredEvents arm) both before and after it was added.
-			-- NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
-			-- if removed, despite the intent above: that guard's static
-			-- scan does not trace SQL assembled into a package-level var
-			-- via fmt.Sprintf the way it traces a literal string passed
-			-- directly to a Context call (confirmed by cleat-review;
-			-- cleat#3289 tracks widening it to recognize this shape).
+			--
+			-- CORRECTED 2026-10-09 (cleat#3289): this used to say the clause
+			-- below was "NOT caught by
+			-- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate if
+			-- removed." Falsified directly rather than taken on claim:
+			-- removing ONLY this outer clause does not make the guard fail --
+			-- it still passes, because the subquery's own "AND tenant_id =
+			-- @p2" two lines
+			-- down is itself a comparison inside the SAME filterWindow (the
+			-- guard's window runs from this WHERE to the next ORDER BY/GROUP
+			-- BY/OPTION/WHEN, with no awareness of the subquery boundary in
+			-- between), so that pre-existing predicate alone keeps the whole
+			-- statement reading as scoped. Removing BOTH clauses together does
+			-- fail the guard, confirming the statement is not simply invisible
+			-- to it. So this clause is unprotected by any guard for the same
+			-- reason given above (seek-path, not correctness) -- just not
+			-- because the scan cannot trace a package-level fmt.Sprintf var;
+			-- it is because one window is shared between an outer clause and a
+			-- subquery nested inside it.
 			WHERE tenant_id = @p2 AND workflow_id IN (
 				SELECT id`+msExpiredEventsWorkflows+`
 				  AND tenant_id = @p2
@@ -915,6 +940,16 @@ var mssqlWorkflowChildTables = []string{
 // candidate is spelled out here, so the only text ever appended is the generated
 // placeholder list (@id0, @id1, ...) -- which also keeps gosec's G201 satisfied
 // without a #nosec, since there is no SQL string formatting left to audit.
+//
+// NOTED 2026-10-09 (cleat#3294), not yet investigated: none of these seven
+// entries carry a tenant_id predicate of their own, and -- being
+// double-quoted rather than backtick strings -- none is currently visible to
+// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate either, so there
+// is no allowlist entry asserting a reason. Whether that is fine (the ids
+// deleteByWorkflowIDs is called with are themselves already tenant-scoped,
+// the way several backtick-literal entries elsewhere in this file are
+// documented as scopedByCaller) is exactly the kind of claim that needs
+// checking at each call site rather than assumed here. See cleat#3294.
 var mssqlDeleteByWorkflowPrefix = map[string]string{
 	"event_history":            "DELETE FROM event_history WHERE workflow_id IN (",
 	"idempotency_keys":         "DELETE FROM idempotency_keys WHERE workflow_id IN (",
@@ -948,13 +983,26 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 //
 // NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate if
 // this predicate is removed, despite comparing directly to a parameter the
-// way that guard's doc comment describes: its static scan does not trace
-// SQL assembled into a package-level var via fmt.Sprintf the way it traces
-// a literal string passed directly to a Context call (confirmed by
-// cleat-review; cleat#3289 tracks widening it to recognize this shape). The
-// predicate is here because it is what restores the seek path
-// TestMSSQLRetentionSweepsCauseNoLockEscalation measures, not because any
-// guard enforces it.
+// way that guard's doc comment describes.
+//
+// CORRECTED 2026-10-09 (cleat#3294): this used to attribute that to the scan
+// not tracing SQL assembled into a package-level var via fmt.Sprintf.
+// Falsified directly rather than taken on claim, and that is not the
+// mechanism: switching this literal from double quotes to backticks, with
+// fmt.Sprintf and the package-level var both left exactly as they are,
+// makes the guard see it immediately. The scan's sqlLiteralRe only matches
+// backtick-delimited spans (`+"`([^`]*)`"+`); a plain Go string literal in
+// double quotes is invisible to it regardless of what builds or holds it.
+// Measuring the blast radius of that fact turned up mssqlDeleteByWorkflowPrefix
+// below as a sibling case of the same gap -- its four entries are also
+// double-quoted and also currently invisible, so "this is the only one"
+// would have been a second, narrower wrong claim; cleat#3294 (not cleat#3289,
+// which is about a different mechanism -- see its own comment at
+// GetCompactionCandidates and StartChildWorkflowAtomic) tracks widening the
+// scan to double-quoted SQL-shaped literals across the whole file, and
+// auditing what it then finds. The predicate here is what restores the seek
+// path TestMSSQLRetentionSweepsCauseNoLockEscalation measures, not because
+// any guard enforces it.
 var mssqlDeleteEventHistoryTopPrefix = fmt.Sprintf(
 	"DELETE TOP (%d) FROM event_history WHERE tenant_id = @tenant AND workflow_id IN (", mssqlEventRowChunk)
 
