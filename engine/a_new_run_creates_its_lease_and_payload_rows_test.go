@@ -38,22 +38,40 @@ func newRunTestStore(t *testing.T) (*PostgresStore, *sql.DB) {
 // restricted to the columns piece 1 actually writes -- generation,
 // assigned_to and the rest come later pieces, and asserting on them here
 // would assert on columns this change does not touch.
+//
+// The six fields below concurrencyKey were added for migration 018
+// (cleat#3245 Phase 3 step 3 piece B's blocker): concurrencyKey/
+// concurrencyKeyHash/parentWorkflowID/continuedFrom/runWasmInstanceTimeoutMs
+// mirror workflow_instances columns of the same shape that existed before
+// this struct did, left out of the original SELECT because piece 1 never
+// wrote them. All nullable here (sql.NullString/sql.NullInt64) because most
+// creation paths leave most of them NULL -- see
+// a_migration_018_columns_test.go for which path sets which.
 type leaseAndPayloadRow struct {
-	tenantID  string
-	taskQueue string
-	priority  int
-	status    string
-	nextWake  sql.NullTime
-	input     string
+	tenantID           string
+	taskQueue          string
+	priority           int
+	status             string
+	nextWake           sql.NullTime
+	input              string
+	concurrencyKey     sql.NullString
+	concurrencyKeyHash []byte
+	parentWorkflowID   sql.NullString
+	continuedFrom      sql.NullString
+	runInstanceMs      sql.NullInt64
 }
 
 func readLeaseRow(t *testing.T, db *sql.DB, id string) leaseAndPayloadRow {
 	t.Helper()
 	var r leaseAndPayloadRow
 	if err := db.QueryRow(`
-		SELECT tenant_id::text, task_queue, priority, status, next_wake_at
+		SELECT tenant_id::text, task_queue, priority, status, next_wake_at,
+		       concurrency_key, concurrency_key_hash, parent_workflow_id, continued_from,
+		       run_wasm_instance_timeout_ms
 		FROM workflow_leases WHERE id = $1
-	`, id).Scan(&r.tenantID, &r.taskQueue, &r.priority, &r.status, &r.nextWake); err != nil {
+	`, id).Scan(&r.tenantID, &r.taskQueue, &r.priority, &r.status, &r.nextWake,
+		&r.concurrencyKey, &r.concurrencyKeyHash, &r.parentWorkflowID, &r.continuedFrom,
+		&r.runInstanceMs); err != nil {
 		t.Fatalf("read workflow_leases for %s: %v", id, err)
 	}
 	return r
@@ -63,12 +81,25 @@ func readInstanceRow(t *testing.T, db *sql.DB, id string) leaseAndPayloadRow {
 	t.Helper()
 	var r leaseAndPayloadRow
 	if err := db.QueryRow(`
-		SELECT tenant_id::text, task_queue, priority, status, next_wake_at
+		SELECT tenant_id::text, task_queue, priority, status, next_wake_at,
+		       concurrency_key, concurrency_key_hash, parent_workflow_id, continued_from,
+		       run_wasm_instance_timeout_ms
 		FROM workflow_instances WHERE id = $1
-	`, id).Scan(&r.tenantID, &r.taskQueue, &r.priority, &r.status, &r.nextWake); err != nil {
+	`, id).Scan(&r.tenantID, &r.taskQueue, &r.priority, &r.status, &r.nextWake,
+		&r.concurrencyKey, &r.concurrencyKeyHash, &r.parentWorkflowID, &r.continuedFrom,
+		&r.runInstanceMs); err != nil {
 		t.Fatalf("read workflow_instances for %s: %v", id, err)
 	}
 	return r
+}
+
+func readPayloadDef(t *testing.T, db *sql.DB, id string) (defName sql.NullString, defVersion sql.NullInt64) {
+	t.Helper()
+	if err := db.QueryRow(`SELECT def_name, def_version FROM workflow_payloads WHERE id = $1`, id).
+		Scan(&defName, &defVersion); err != nil {
+		t.Fatalf("read workflow_payloads.def_name/def_version for %s: %v", id, err)
+	}
+	return defName, defVersion
 }
 
 func readPayloadInput(t *testing.T, db *sql.DB, id string) string {

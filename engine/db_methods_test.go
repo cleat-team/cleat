@@ -788,12 +788,13 @@ func TestPostgresStore_LoadCompactionState_Present(t *testing.T) {
 
 func TestPostgresStore_StartChildWorkflow(t *testing.T) {
 	runID := "child-run-uuid"
-	// Two columns: StartChildWorkflow's INSERT now RETURNs task_queue
-	// alongside id, for the insertLeaseAndPayloadRows mirror it added
-	// (cleat#3245 Phase 3 step 2 gap fix) -- same shape as StartNewRun's own
-	// RETURNING clause.
+	// Three columns: StartChildWorkflow's INSERT now RETURNs task_queue and
+	// def_version alongside id -- task_queue for the insertLeaseAndPayloadRows
+	// mirror it added (cleat#3245 Phase 3 step 2 gap fix), def_version for
+	// migration 018's workflow_payloads.def_version mirror (same resolved-
+	// version-via-RETURNING reasoning as task_queue's own comment there).
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID, "default"}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID, "default", int64(1)}}},
 	}, nil)
 	defer db.Close()
 
@@ -810,7 +811,7 @@ func TestPostgresStore_StartChildWorkflow(t *testing.T) {
 func TestPostgresStore_StartChildWorkflow_ExplicitVersion(t *testing.T) {
 	runID := "child-run-uuid"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID, "default"}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID, "default", int64(3)}}},
 	}, nil)
 	defer db.Close()
 
@@ -3219,8 +3220,11 @@ func TestPostgresStore_StreamEventHistory_SuccessWithPageSizeZero(t *testing.T) 
 
 func TestPostgresStore_ContinueAsNew_SuccessMock(t *testing.T) {
 	newRunID := "new-run-uuid"
+	// Three columns: ContinueAsNew's INSERT now RETURNs parent_workflow_id
+	// (migration 018) alongside id and task_queue -- nil here since this
+	// mock's "current-run" has no parent to inherit from.
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{newRunID, "default"}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{newRunID, "default", nil}}},
 	}, []mockExecResult{
 		{match: "INSERT INTO event_history", affected: 1},
 		{match: "SET status = 'done'", affected: 1},
@@ -3442,12 +3446,14 @@ func TestPostgresStore_ListSchedules_BeginError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_StartChildWorkflowAtomic_Success(t *testing.T) {
-	// The INSERT now RETURNs task_queue, for the insertLeaseAndPayloadRows
-	// mirror it added (cleat#3245 Phase 3 step 2 gap fix) -- childID itself
-	// is already known in Go (passed in or generated above), so this query
-	// does not also RETURN id the way StartChildWorkflow's does.
+	// The INSERT now RETURNs task_queue and def_version -- task_queue for
+	// the insertLeaseAndPayloadRows mirror it added (cleat#3245 Phase 3 step
+	// 2 gap fix), def_version for migration 018's workflow_payloads.def_version
+	// mirror. childID itself is already known in Go (passed in or generated
+	// above), so this query does not also RETURN id the way StartChildWorkflow's
+	// does.
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{"default"}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{"default", int64(1)}}},
 	}, []mockExecResult{
 		{match: "SELECT set_config"}, // from beginTxWithRLS
 		{match: "INSERT INTO event_history", affected: 1},
