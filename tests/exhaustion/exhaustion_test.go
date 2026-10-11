@@ -153,6 +153,7 @@ func start(t *testing.T, db *sql.DB, id string, iterations int64) {
 		VALUES ($1, 'spin', 1, 'ready', $2::jsonb, $3)`, id, input, taskQueue); err != nil {
 		t.Fatalf("starting workflow %s: %v", id, err)
 	}
+	testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: taskQueue})
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 	})

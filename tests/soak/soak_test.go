@@ -393,6 +393,14 @@ func runOne(ctx context.Context, store *engine.PostgresStore, db *sql.DB, worker
 		VALUES ($1, 'test', 1, 'ready', '{}', $2)`, id, soakQueue); err != nil {
 		return fmt.Errorf("insert %s: %w", id, err)
 	}
+	// cleat#3245: mirrors onto workflow_leases, which ClaimWorkflow's own
+	// candidate scan will read once piece B lands -- see
+	// engine/testutil.SeedWorkflowLease's doc. Inlined rather than calling
+	// that helper, which takes a *testing.T this function does not have.
+	if _, err := db.ExecContext(ctx, `INSERT INTO workflow_leases (id, task_queue) VALUES ($1, $2)
+		ON CONFLICT (id) DO NOTHING`, id, soakQueue); err != nil {
+		return fmt.Errorf("insert %s's lease row: %w", id, err)
+	}
 
 	// ClaimWorkflow decides which workflow this worker gets; it need not be
 	// the one just inserted. Everything downstream uses wf.ID and

@@ -161,6 +161,7 @@ func TestRunDropTenant_DryRunDeletesNothing(t *testing.T) {
 		"dryrun-wf", defName, tenant); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, "dryrun-wf", testutil.WorkflowLeaseSeed{TenantID: tenant})
 
 	stdout, stderr := captureOutputs(t, func() {
 		runDropTenant(ctx, db, dialectPostgres, []string{tenant, "--dry-run"})
@@ -232,6 +233,7 @@ func TestRunDropTenant_YesFlagDeletesWithoutPrompt(t *testing.T) {
 		"yes-wf", defName, tenant); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, "yes-wf", testutil.WorkflowLeaseSeed{TenantID: tenant})
 	if _, err := db.ExecContext(ctx, `INSERT INTO event_history (workflow_id, step, tenant_id) VALUES ($1, 0, $2)`, "yes-wf", tenant); err != nil {
 		t.Fatalf("seed event_history: %v", err)
 	}

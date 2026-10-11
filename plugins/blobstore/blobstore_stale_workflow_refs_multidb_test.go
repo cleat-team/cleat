@@ -170,6 +170,20 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 				doneRunID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert done workflow_instances on %s: %v", be.Name, err)
 			}
+			// cleat#3245: workflow_leases is PostgreSQL-only (migration 016),
+			// so this mirror -- needed once piece B cuts ClaimWorkflow's own
+			// reads over -- only applies on that backend. Inlined rather than
+			// testutil.SeedWorkflowLease, which takes a *sql.DB and fixtureDB
+			// here is a *sql.Conn (CrossTenantConn).
+			if be.Dialect == testutil.DialectPostgres {
+				for id, status := range map[string]string{liveRunID: "running", doneRunID: "done"} {
+					if _, err := fixtureDB.ExecContext(ctx,
+						`INSERT INTO workflow_leases (id, tenant_id, status) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
+						id, tenant.String(), status); err != nil {
+						t.Fatalf("insert %s's lease row on %s: %v", id, be.Name, err)
+					}
+				}
+			}
 
 			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`,

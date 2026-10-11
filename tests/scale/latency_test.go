@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestLatencyP50 measures the median (P50) latency for a single event append
@@ -32,6 +33,7 @@ func TestLatencyP50(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 		defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 
@@ -103,6 +105,7 @@ func TestLatencyP99(t *testing.T) {
 				t.Errorf("create workflow %d: %v", idx, err)
 				return
 			}
+			testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 			defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 			defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 
@@ -213,6 +216,7 @@ func TestLatencyUnderConcurrency(t *testing.T) {
 						t.Errorf("create workflow: %v", err)
 						return
 					}
+					testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 					defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 					defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 

@@ -72,6 +72,7 @@ func measureThroughput(t *testing.T, store *engine.PostgresStore, db *sql.DB, ct
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 

@@ -40,6 +40,7 @@ func seedSixTablesFixture(t *testing.T, db *sql.DB, ctx context.Context, tenant,
 		VALUES ($1, 'reseal6-def', 1, 'ready', $2)`, workflowID, tenant); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, workflowID, testutil.WorkflowLeaseSeed{TenantID: tenant})
 }
 
 // assertNowDerivedAndBoundToOwnTenant is the shared post-sweep check every

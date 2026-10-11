@@ -111,6 +111,7 @@ func seedResealRow(t *testing.T, db *sql.DB, ctx context.Context,
 		VALUES ($1, 'reseal-def', 1, 'ready', $2)`, workflowID, tenant); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, workflowID, testutil.WorkflowLeaseSeed{TenantID: tenant})
 
 	names := []string{"workflow_id", "step", "tenant_id"}
 	args := []any{workflowID, 0, tenant}

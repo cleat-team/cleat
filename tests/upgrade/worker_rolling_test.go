@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/lib/pq"
 )
 
@@ -33,6 +34,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 	defer func() {
@@ -194,6 +196,7 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		workflows = append(workflows, wfState{id: id})
 	}
 	defer func() {

@@ -276,6 +276,7 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow instance: %v", err)
 		}
+		testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		t.Cleanup(func() {
 			db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 			db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -347,6 +348,7 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -419,6 +421,7 @@ func TestWalCorruption_DefaultOnReplayFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)

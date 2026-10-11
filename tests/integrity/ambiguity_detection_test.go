@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 	_ "github.com/lib/pq"
 )
 
@@ -119,6 +120,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)

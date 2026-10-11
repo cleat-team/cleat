@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // numConcurrentWorkflows returns the number of workflows to create for
@@ -39,6 +40,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 	defer func() {
@@ -172,6 +174,7 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 	defer func() {

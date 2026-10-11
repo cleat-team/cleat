@@ -276,6 +276,16 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 				runID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 			}
+			// cleat#3245: workflow_leases is PostgreSQL-only (migration 016).
+			// Inlined rather than testutil.SeedWorkflowLease, which takes a
+			// *sql.DB and fixtureDB here is a *sql.Conn (CrossTenantConn).
+			if be.Dialect == testutil.DialectPostgres {
+				if _, err := fixtureDB.ExecContext(ctx,
+					`INSERT INTO workflow_leases (id, tenant_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
+					runID, tenant.String()); err != nil {
+					t.Fatalf("insert %s's lease row on %s: %v", runID, be.Name, err)
+				}
+			}
 			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at, run_id)
 				 VALUES ($1, $2, $3, 'dispatched', now(), $4)`,
