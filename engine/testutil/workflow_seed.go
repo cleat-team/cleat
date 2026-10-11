@@ -2,9 +2,18 @@ package testutil
 
 import (
 	"database/sql"
-	"fmt"
-	"strings"
 	"testing"
+)
+
+// These three match workflow_leases' and workflow_instances' own column
+// defaults (migrations/postgres/001 and 016) exactly -- COALESCE below falls
+// back to these literals rather than the table's DEFAULT clause because a
+// column given an explicit (even empty-string) argument never reaches its
+// DEFAULT. Re-derive if either migration's defaults ever change.
+const (
+	defaultLeaseTenantID  = "00000000-0000-0000-0000-000000000000"
+	defaultLeaseTaskQueue = "default"
+	defaultLeaseStatus    = "ready"
 )
 
 // WorkflowLeaseSeed describes the workflow_leases row to create alongside a
@@ -41,31 +50,20 @@ type WorkflowLeaseSeed struct {
 // pattern. This function does not check the dialect.
 func SeedWorkflowLease(t *testing.T, db *sql.DB, id string, seed WorkflowLeaseSeed) {
 	t.Helper()
-	cols := []string{"id"}
-	args := []any{id}
-	add := func(col, val string) {
-		if val == "" {
-			return
-		}
-		cols = append(cols, col)
-		args = append(args, val)
-	}
-	add("tenant_id", seed.TenantID)
-	add("task_queue", seed.TaskQueue)
-	add("status", seed.Status)
-	add("assigned_to", seed.AssignedTo)
-
-	placeholders := make([]string, len(cols))
-	for i := range cols {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-	}
-	query := fmt.Sprintf(`
-		INSERT INTO workflow_leases (%s)
-		VALUES (%s)
+	if _, err := db.Exec(`
+		INSERT INTO workflow_leases (id, tenant_id, task_queue, status, assigned_to)
+		VALUES (
+			$1,
+			COALESCE(NULLIF($2, ''), $6)::uuid,
+			COALESCE(NULLIF($3, ''), $7),
+			COALESCE(NULLIF($4, ''), $8),
+			NULLIF($5, '')
+		)
 		ON CONFLICT (id) DO NOTHING
-	`, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-
-	if _, err := db.Exec(query, args...); err != nil {
+	`,
+		id, seed.TenantID, seed.TaskQueue, seed.Status, seed.AssignedTo,
+		defaultLeaseTenantID, defaultLeaseTaskQueue, defaultLeaseStatus,
+	); err != nil {
 		t.Fatalf("seeding %s's workflow_leases row: %v", id, err)
 	}
 }
