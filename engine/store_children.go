@@ -31,7 +31,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 		return "", fmt.Errorf("start child workflow: encrypt input: %w", err)
 	}
 
-	var runID string
+	var runID, resolvedTaskQueue string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES (gen_random_uuid(), $1,
@@ -40,11 +40,24 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
 			$6, $7)
-		RETURNING id
-	`, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID)
+		RETURNING id, task_queue
+	`, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID, &resolvedTaskQueue)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
+
+	// cleat#3245 Phase 3 step 2 gap fix (found scoping step 3's piece A):
+	// StartChildWorkflow never got piece 1's workflow_leases/
+	// workflow_payloads INSERT, unlike every top-level StartNewRun* variant
+	// -- see insertLeaseAndPayloadRows' own doc. Every child workflow
+	// started through this method has had no lease/payload row at all until
+	// now, invisible because claimLeaseRows (piece 2) is a plain UPDATE, not
+	// an upsert, so claiming one silently touched zero rows on the lease
+	// side.
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, s.tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
+		return "", fmt.Errorf("start child workflow: %w", err)
+	}
+
 	pgNotify(ctx, tx, s.notifyChannel)
 	return runID, tx.Commit()
 }
@@ -93,7 +106,8 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	}
 
 	// 1. INSERT child workflow instance.
-	_, err = tx.ExecContext(ctx, `
+	var resolvedTaskQueue string
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES ($1, $2,
 		        CASE WHEN $5 > 0 THEN $5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND disabled_at IS NULL AND tenant_id = $7) END,
@@ -101,9 +115,16 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		        COALESCE(NULLIF($6, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),
 			$7, $8)
-	`, childID, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority)
+		RETURNING task_queue
+	`, childID, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&resolvedTaskQueue)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
+	}
+
+	// cleat#3245 Phase 3 step 2 gap fix (found scoping step 3's piece A):
+	// same gap as StartChildWorkflow above, same fix -- see its comment.
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, childID, s.tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
+		return "", fmt.Errorf("start child workflow atomic: %w", err)
 	}
 
 	// 2. INSERT child_workflow event into the parent's event_history.
