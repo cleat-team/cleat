@@ -205,6 +205,19 @@ func seedWorkflow(t *testing.T, adminDB *sql.DB, o seedWorkflowOpts) string {
 		o.nextWakeAt, o.createdAt, o.errorCode, o.errorOp, o.priority, o.generation, o.traceID); err != nil {
 		t.Fatalf("seed workflow: %v", err)
 	}
+	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflows' candidate scan now
+	// reads status/next_wake_at/task_queue/generation from workflow_leases,
+	// not workflow_instances -- mirror the subset this fixture controls, or
+	// a row seeded here is never claimable. error_code/error_op/trace_id
+	// have no workflow_leases column (not needed by the claim predicate),
+	// so they are not mirrored.
+	if _, err := adminDB.Exec(`
+		INSERT INTO workflow_leases
+			(id, status, tenant_id, task_queue, next_wake_at, created_at, priority, generation)
+		VALUES ($1, 'ready', $2, $3, $4, $5, $6, $7)
+	`, id, o.tenantID, o.taskQueue, o.nextWakeAt, o.createdAt, o.priority, o.generation); err != nil {
+		t.Fatalf("seed workflow_leases: %v", err)
+	}
 	return id
 }
 

@@ -143,6 +143,16 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 			if _, err := db.Exec(`UPDATE workflow_instances SET status = 'ready', assigned_to = NULL, next_wake_at = now() WHERE id = $1`, wfID); err != nil {
 				t.Fatalf("returning the run to ready: %v", err)
 			}
+			// cleat#3245 Phase 3 step 3 piece B: mirror onto workflow_leases, the
+			// same way the production ClaimWorkflows cutover needs it. Without
+			// this, worker C's claim below cannot see the row as ready -- it is
+			// only rescued, slowly, by the background stale-lease reclaim sweep
+			// once the row's (unaffected) heartbeat_at ages out, which is a false
+			// green: the test still passes, just ~45s slower than the fast path
+			// it means to exercise.
+			if _, err := db.Exec(`UPDATE workflow_leases SET status = 'ready', assigned_to = NULL, next_wake_at = now() WHERE id = $1`, wfID); err != nil {
+				t.Fatalf("returning the run's lease row to ready: %v", err)
+			}
 
 			// Worker C holds key A and finishes it.
 			right := startWorkerOn(t, payloadEncryptionDatabase, bin, taskQueue, svc.srv.URL,

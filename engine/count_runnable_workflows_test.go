@@ -174,6 +174,19 @@ func TestCountRunnableWorkflowsIsBlindToOtherTaskQueues(t *testing.T) {
 				t.Fatalf("the UPDATE moved 0 rows, so nothing was moved off this worker's queue " +
 					"and the assertion below would pass or fail for reasons unrelated to the count")
 			}
+			// cleat#3245 Phase 3 step 3 piece B: CountRunnableWorkflows now
+			// reads task_queue from workflow_leases on PostgreSQL, not
+			// workflow_instances -- mirror the move above or the row still
+			// reads as being on this worker's queue and the count does not
+			// drop. PostgreSQL-only: workflow_leases does not exist on the
+			// other two dialects.
+			if backend.name == "postgres" {
+				if _, err := exec.ExecContext(ctx, `UPDATE workflow_leases
+					SET task_queue = 'some-other-queue'
+					WHERE status IN ('ready','terminating')`); err != nil {
+					t.Fatalf("mirroring the queue move onto workflow_leases: %v", err)
+				}
+			}
 
 			got, err := counter.CountRunnableWorkflows(ctx)
 			if err != nil {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // The checksum stored on an event chains from the previous event's checksum,
@@ -30,6 +32,11 @@ func appendChainWorkflow(t *testing.T, store *PostgresStore) string {
 		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
 		t.Fatalf("insert test instance: %v", err)
 	}
+	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflow's candidate scan now
+	// reads workflow_leases, not workflow_instances -- without this, every
+	// caller of appendChainWorkflow that goes on to claim the row (e.g.
+	// sensitive_column_encryption_live_test.go) finds nothing.
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)

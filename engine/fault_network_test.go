@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestFaultNetworkPartition simulates a network partition via transaction
@@ -24,6 +26,10 @@ func TestFaultNetworkPartition(t *testing.T) {
 		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
 		t.Fatalf("insert test instance: %v", err)
 	}
+	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflow's candidate scan (and
+	// the FOR UPDATE SKIP LOCKED lock below) now reads workflow_leases, not
+	// workflow_instances.
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -36,8 +42,10 @@ func TestFaultNetworkPartition(t *testing.T) {
 		t.Fatalf("Begin partition tx: %v", err)
 	}
 
-	// Lock the workflow instance row to simulate one side of a partition.
-	_, err = tx.Exec(`SELECT id FROM workflow_instances WHERE id = $1 FOR UPDATE`, runID)
+	// Lock the workflow_leases row, matching where ClaimWorkflow's own
+	// FOR UPDATE SKIP LOCKED now locks -- locking workflow_instances here
+	// would no longer block a concurrent claim at all.
+	_, err = tx.Exec(`SELECT id FROM workflow_leases WHERE id = $1 FOR UPDATE`, runID)
 	if err != nil {
 		tx.Rollback()
 		t.Fatalf("Lock instance: %v", err)
@@ -95,6 +103,7 @@ func TestFaultSlowNetwork(t *testing.T) {
 		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
 		t.Fatalf("insert test instance: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow first.
