@@ -472,6 +472,12 @@ func (tg *crashTarget) startWorker(t *testing.T, bin, taskQueue, svcURL string, 
 }
 
 // startWorkflowEntry queues one crashcall instance.
+//
+// workflow_leases is PostgreSQL-only (migration 016); on that target the
+// reclaim path piece A moved now requires a matching row there, for the same
+// reason harness_test.go's identically-named function does -- see its doc.
+// MySQL and SQL Server still reclaim from workflow_instances directly, so
+// they need no second insert.
 func (tg *crashTarget) startWorkflowEntry(t *testing.T, id, orderID, taskQueue, entry string) {
 	t.Helper()
 	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
@@ -480,6 +486,13 @@ func (tg *crashTarget) startWorkflowEntry(t *testing.T, id, orderID, taskQueue, 
 		tg.placeholder(3) + `, ` + tg.placeholder(4) + `)`
 	if _, err := tg.db.Exec(tg.stmt(q), id, input, taskQueue, defaultTenant); err != nil {
 		t.Fatalf("queueing workflow %s on %s: %v", id, tg.name, err)
+	}
+	if tg.name == "postgres" {
+		lq := `INSERT INTO workflow_leases (id, tenant_id, task_queue) VALUES (` +
+			tg.placeholder(1) + `, ` + tg.placeholder(2) + `, ` + tg.placeholder(3) + `)`
+		if _, err := tg.db.Exec(tg.stmt(lq), id, defaultTenant, taskQueue); err != nil {
+			t.Fatalf("queueing workflow %s's lease row on %s: %v", id, tg.name, err)
+		}
 	}
 	t.Cleanup(func() {
 		_, _ = tg.db.Exec(tg.stmt(`DELETE FROM event_history WHERE workflow_id = `+tg.placeholder(1)), id)

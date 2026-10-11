@@ -1962,6 +1962,20 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	// why it is bounded at all. ORDER BY heartbeat_at reclaims the
 	// longest-stale first, so a bound that binds delays the freshest rather
 	// than picking arbitrarily.
+	//
+	// cleat#3245 Phase 3 step 3 piece A: the candidate scan now reads
+	// workflow_leases, not workflow_instances. Phase 2 (migration 015)
+	// dropped heartbeat_at from every workflow_instances index to make the
+	// heartbeat UPDATE HOT-eligible, so this scan has done a full table scan
+	// plus an in-memory sort of the whole 'running' set since -- the
+	// accepted regression that migration's own comment names (23x slower at
+	// 20k running, measured). workflow_leases carries idx_leases_stale
+	// (migration 016, status/heartbeat_at, never read from until now) for
+	// exactly this query. The outer UPDATE still targets
+	// workflow_instances by id, unaffected by where the candidate ids came
+	// from; piece 6b's dual-write already keeps workflow_leases'
+	// status/heartbeat_at in sync with workflow_instances', and the piece
+	// found scoping this piece (#3329) closed the one gap in that.
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
@@ -1969,7 +1983,7 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
-		    SELECT id FROM workflow_instances
+		    SELECT id FROM workflow_leases
 		    WHERE status = 'running'
 		      AND heartbeat_at < now() - $1::interval
 		    ORDER BY heartbeat_at
@@ -2023,6 +2037,12 @@ func reapLeaseRows(ctx context.Context, tx *sql.Tx, ids []string) error {
 // status='running'/heartbeat_at predicate as ReapStaleInstances, because it
 // has to report the same population -- see that method's doc and
 // StaleHolderReaper's doc for why the two are allowed to race.
+//
+// cleat#3245 Phase 3 step 3 piece A: reads workflow_leases rather than
+// workflow_instances, for the same idx_leases_stale reason as
+// ReapStaleInstances' candidate scan. id, generation and assigned_to all
+// exist on workflow_leases (migration 016), so this is a pure FROM-clause
+// change -- no join, no new columns.
 func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -2031,7 +2051,7 @@ func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Durat
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, generation, assigned_to FROM workflow_instances
+		SELECT id, generation, assigned_to FROM workflow_leases
 		WHERE status = 'running'
 		  AND heartbeat_at < now() - $1::interval
 		ORDER BY heartbeat_at
@@ -2063,6 +2083,11 @@ func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Durat
 // against an empty exclude -- unnest of two empty arrays produces zero
 // rows, so NOT EXISTS is unconditionally true and every row ReapStaleInstances
 // would have reclaimed is still reclaimed.
+//
+// cleat#3245 Phase 3 step 3 piece A: same candidate-scan move as
+// ReapStaleInstances -- the inner SELECT and its NOT EXISTS correlation now
+// read workflow_leases, which carries id and generation same as
+// workflow_instances (both are 1:1 on id). The outer UPDATE is unaffected.
 func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -2084,12 +2109,12 @@ func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout ti
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
-		    SELECT id FROM workflow_instances
+		    SELECT id FROM workflow_leases
 		    WHERE status = 'running'
 		      AND heartbeat_at < now() - $1::interval
 		      AND NOT EXISTS (
 		          SELECT 1 FROM unnest($3::text[], $4::bigint[]) AS ex(id, generation)
-		          WHERE ex.id = workflow_instances.id AND ex.generation = workflow_instances.generation
+		          WHERE ex.id = workflow_leases.id AND ex.generation = workflow_leases.generation
 		      )
 		    ORDER BY heartbeat_at
 		    LIMIT $2

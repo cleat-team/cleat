@@ -777,6 +777,17 @@ func startWorkflow(t *testing.T, db *sql.DB, id, orderID, taskQueue string) {
 }
 
 // startWorkflowEntry queues one crashcall instance running the named entry point.
+//
+// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances/ReapStaleInstancesExcept
+// now read their candidate set from workflow_leases, not workflow_instances,
+// and ClaimWorkflows' own mirror write (claimLeaseRows) is a plain UPDATE --
+// silently a no-op against a row that was never inserted there. A workflow
+// queued only in workflow_instances claims normally (its own UPDATE matches),
+// but after a SIGKILL nothing in workflow_leases is 'running' or stale for
+// this id, so the reaper finds nothing to reclaim and the run is stranded
+// forever, not merely delayed. This is why every SIGKILL-based test in this
+// package hung at its full budget while every SIGTERM-based one (the worker
+// releases its own row on graceful shutdown, no reaper involved) passed.
 func startWorkflowEntry(t *testing.T, db *sql.DB, id, orderID, taskQueue, entry string) {
 	t.Helper()
 	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
@@ -785,6 +796,12 @@ func startWorkflowEntry(t *testing.T, db *sql.DB, id, orderID, taskQueue, entry 
 		VALUES ($1, 'crashcall', 1, 'ready', $2::jsonb, $3, $4)`,
 		id, input, taskQueue, defaultTenant); err != nil {
 		t.Fatalf("queueing workflow %s: %v", id, err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO workflow_leases (id, tenant_id, task_queue)
+		VALUES ($1, $2, $3)`,
+		id, defaultTenant, taskQueue); err != nil {
+		t.Fatalf("queueing workflow %s's lease row: %v", id, err)
 	}
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)

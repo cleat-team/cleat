@@ -733,6 +733,16 @@ func startWorkflowWithInput(t *testing.T, db *sql.DB, id, defName, inputJSON, ta
 		id, defName, inputJSON, taskQueue, defaultTenant); err != nil {
 		t.Fatalf("queueing workflow %s: %v", id, err)
 	}
+	// cleat#3245 Phase 3 step 3 piece A: see harness_test.go's
+	// startWorkflowEntry for why this is needed -- the reclaim path now
+	// reads workflow_leases, and ClaimWorkflows' mirror write is a no-op
+	// against a row that was never inserted there.
+	if _, err := db.Exec(`
+		INSERT INTO workflow_leases (id, tenant_id, task_queue)
+		VALUES ($1, $2, $3)`,
+		id, defaultTenant, taskQueue); err != nil {
+		t.Fatalf("queueing workflow %s's lease row: %v", id, err)
+	}
 	t.Cleanup(func() {
 		// Descendants first, and TWO levels of them. The client's child is the
 		// agent; the agent's child is the workflow tool's summarise. Deleting
