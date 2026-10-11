@@ -110,6 +110,15 @@ func TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnPostgres(t *testing.T)
 			id, age.Seconds(), store.tenantID); err != nil {
 			t.Fatalf("seeding %s: %v", id, err)
 		}
+		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate
+		// scan now reads workflow_leases, not workflow_instances.
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at)
+			VALUES ($1, $3, 'running', 'reap-fractional-worker',
+			        now() - make_interval(secs => $2::float8))`,
+			id, age.Seconds(), store.tenantID); err != nil {
+			t.Fatalf("seeding lease %s: %v", id, err)
+		}
 	}
 	seed(insideID, reapFractionalInsideR)
 	seed(pastID, reapFractionalPastR)

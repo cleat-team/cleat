@@ -48,6 +48,14 @@ func TestTheReaperDoesNotReclaimEverythingAtOnce(t *testing.T) {
 			ids[i], 3600-i, store.tenantID); err != nil {
 			t.Fatalf("seeding instance %d: %v", i, err)
 		}
+		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate
+		// scan now reads workflow_leases, not workflow_instances.
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at)
+			VALUES ($1, $3, 'running', 'dead-worker', now() - make_interval(secs => $2))`,
+			ids[i], 3600-i, store.tenantID); err != nil {
+			t.Fatalf("seeding lease %d: %v", i, err)
+		}
 	}
 	t.Cleanup(func() {
 		for _, id := range ids {
@@ -141,6 +149,14 @@ func TestAZeroReapLimitIsUnbounded(t *testing.T) {
 			        now() - interval '1 hour', $2)`, ids[i], store.tenantID); err != nil {
 			t.Fatalf("seeding instance %d: %v", i, err)
 		}
+		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate
+		// scan now reads workflow_leases, not workflow_instances.
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at)
+			VALUES ($1, $2, 'running', 'dead-worker', now() - interval '1 hour')`,
+			ids[i], store.tenantID); err != nil {
+			t.Fatalf("seeding lease %d: %v", i, err)
+		}
 	}
 	t.Cleanup(func() {
 		for _, id := range ids {
@@ -218,6 +234,17 @@ func TestTheReapBoundBindsOnEveryDialect(t *testing.T) {
 			for i := 0; i < total; i++ {
 				if _, err := admin.Exec(d.insert, prefix+fmt.Sprint(i), DefaultTenantUUID); err != nil {
 					t.Fatalf("seeding instance %d on %s: %v", i, d.dialect, err)
+				}
+				// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances'
+				// candidate scan reads workflow_leases on PostgreSQL only --
+				// the other two dialects have no such table.
+				if d.dialect == testutil.DialectPostgres {
+					if _, err := admin.Exec(`
+						INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at)
+						VALUES ($1, $2, 'running', 'dead', now() - interval '1 hour')`,
+						prefix+fmt.Sprint(i), DefaultTenantUUID); err != nil {
+						t.Fatalf("seeding lease %d on %s: %v", i, d.dialect, err)
+					}
 				}
 			}
 			t.Cleanup(func() {

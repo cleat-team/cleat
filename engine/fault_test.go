@@ -153,6 +153,14 @@ func TestFaultReapStaleInstances(t *testing.T) {
 		t.Fatalf("insert test instance: %v", err)
 	}
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
+	// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate scan
+	// now reads workflow_leases, not workflow_instances, so this fixture
+	// (pre-dating the dual-write entirely) needs the matching row there too.
+	if _, err := db.Exec(`INSERT INTO workflow_leases (id, status, assigned_to, heartbeat_at)
+		VALUES ($1, 'running', 'dead-worker', now() - interval '2 minutes')
+		ON CONFLICT DO NOTHING`, runID); err != nil {
+		t.Fatalf("insert test lease: %v", err)
+	}
 
 	// Reap with a short timeout.
 	reaped, err := store.ReapStaleInstances(ctx, 10*time.Second, 0)
