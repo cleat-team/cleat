@@ -15,8 +15,12 @@ import (
 func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			// Three columns: ContinueAsNew's INSERT now RETURNs
+			// parent_workflow_id (migration 018) alongside id and
+			// task_queue -- nil here since this mock's "old-run" has no
+			// parent to inherit from.
 			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid", "default"}},
+			data:  [][]driver.Value{{"new-run-uuid", "default", nil}},
 		},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
@@ -42,8 +46,12 @@ func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 func TestPostgresStore_ContinueAsNew_NoEvents(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			// Three columns: ContinueAsNew's INSERT now RETURNs
+			// parent_workflow_id (migration 018) alongside id and
+			// task_queue -- nil here since this mock's "old-run" has no
+			// parent to inherit from.
 			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid", "default"}},
+			data:  [][]driver.Value{{"new-run-uuid", "default", nil}},
 		},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
@@ -147,7 +155,7 @@ func TestPostgresStore_FinalizeWorkflowSegment_UnknownStatus(t *testing.T) {
 func TestPostgresStore_StartChildWorkflowAtomic_ExplicitVersion(t *testing.T) {
 	childID := "child-uuuid-123"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "MAX(version)", data: [][]driver.Value{{int64(-1)}}},
+		{match: "MAX(version)", data: [][]driver.Value{{int64(-1), int64(1)}}}, // 2nd value: resolved def_version, now RETURNed alongside task_queue (migration 018)
 	}, nil)
 	defer db.Close()
 
@@ -164,7 +172,7 @@ func TestPostgresStore_StartChildWorkflowAtomic_ExplicitVersion(t *testing.T) {
 
 func TestPostgresStore_StartChildWorkflowAtomic_ResolveVersion(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "MAX(version)", data: [][]driver.Value{{int64(3)}}},
+		{match: "MAX(version)", data: [][]driver.Value{{int64(3), int64(3)}}}, // 2nd value: resolved def_version, now RETURNed alongside task_queue (migration 018)
 	}, nil)
 	defer db.Close()
 
@@ -182,7 +190,7 @@ func TestPostgresStore_StartChildWorkflowAtomic_ResolveVersion(t *testing.T) {
 func TestPostgresStore_StartChildWorkflowAtomic_WithChecksumChain(t *testing.T) {
 	prevCS := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "MAX(version)", data: [][]driver.Value{{int64(2)}}},
+		{match: "MAX(version)", data: [][]driver.Value{{int64(2), int64(2)}}}, // 2nd value: resolved def_version, now RETURNed alongside task_queue (migration 018)
 		{match: "COALESCE(checksum", data: [][]driver.Value{{prevCS}}},
 	}, nil)
 	defer db.Close()

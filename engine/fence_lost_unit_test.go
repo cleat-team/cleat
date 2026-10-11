@@ -124,20 +124,22 @@ func (c *fenceFakeConn) ExecContext(_ context.Context, query string, _ []driver.
 // database/sql uses this directly (bypassing Prepare/Stmt) because
 // fenceFakeConn implements driver.QueryerContext.
 //
-// ContinueAsNew's "INSERT ... RETURNING id, task_queue" for the new run is
-// matched by substring and given two columns -- cleat#3245 Phase 3 step 2
-// piece 4d added the second column, captured so insertLeaseAndPayloadRows
-// (piece 1) does not re-evaluate the task_queue subquery. Every other
-// QueryContext call (e.g. childrenClosedByTerminate's single-column
-// workflow_id list) gets the original one-column shape: widening every
-// query to two columns broke that unrelated caller's Scan with "expected 2
-// destination arguments ... not 1", surfaced only as a best-effort WARN log
-// rather than a test failure, which is why it needs its own branch rather
-// than a single hardcoded shape.
+// ContinueAsNew's "INSERT ... RETURNING id, task_queue, parent_workflow_id"
+// for the new run is matched by substring and given three columns -- id and
+// task_queue from cleat#3245 Phase 3 step 2 piece 4d (task_queue captured so
+// insertLeaseAndPayloadRows, piece 1, does not re-evaluate the task_queue
+// subquery), parent_workflow_id from migration 018 (inherited value,
+// captured the same way, nil here since this fake has no real parent
+// chain). Every other QueryContext call (e.g. childrenClosedByTerminate's
+// single-column workflow_id list) gets the original one-column shape:
+// widening every query to match broke that unrelated caller's Scan with
+// "expected N destination arguments ... not 1", surfaced only as a
+// best-effort WARN log rather than a test failure, which is why it needs
+// its own branch rather than a single hardcoded shape.
 func (c *fenceFakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.state.record(query)
 	if strings.Contains(query, "INSERT INTO workflow_instances") {
-		return &fenceFakeRows{cols: []string{"id", "task_queue"}, vals: []driver.Value{"fake-new-run-id", "default"}}, nil
+		return &fenceFakeRows{cols: []string{"id", "task_queue", "parent_workflow_id"}, vals: []driver.Value{"fake-new-run-id", "default", nil}}, nil
 	}
 	return &fenceFakeRows{cols: []string{"id"}, vals: []driver.Value{"fake-child-id"}}, nil
 }

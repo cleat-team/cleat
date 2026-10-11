@@ -32,6 +32,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	}
 
 	var runID, resolvedTaskQueue string
+	var resolvedDefVersion int
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES (gen_random_uuid(), $1,
@@ -40,8 +41,8 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
 			$6, $7)
-		RETURNING id, task_queue
-	`, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID, &resolvedTaskQueue)
+		RETURNING id, task_queue, def_version
+	`, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID, &resolvedTaskQueue, &resolvedDefVersion)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
@@ -54,7 +55,18 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	// now, invisible because claimLeaseRows (piece 2) is a plain UPDATE, not
 	// an upsert, so claiming one silently touched zero rows on the lease
 	// side.
-	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, s.tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
+	//
+	// resolvedDefVersion (migration 018) is captured via RETURNING rather
+	// than re-evaluated, for the same reason resolvedTaskQueue already was
+	// -- the INSERT above resolves an unspecified version through its own
+	// MAX(version) subquery, and a second subquery here could read a
+	// workflow_defs row that changed between the two statements. A child
+	// workflow has no concurrency_key, run-limit overrides, or
+	// continued_from of its own: this method's workflow_instances INSERT
+	// has never carried those columns, so they are left unset here too.
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, s.tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
+		DefName: defName, DefVersion: resolvedDefVersion, ParentWorkflowID: parentID,
+	}); err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
 
@@ -107,6 +119,7 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 
 	// 1. INSERT child workflow instance.
 	var resolvedTaskQueue string
+	var resolvedDefVersion int
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES ($1, $2,
@@ -115,15 +128,19 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		        COALESCE(NULLIF($6, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),
 			$7, $8)
-		RETURNING task_queue
-	`, childID, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&resolvedTaskQueue)
+		RETURNING task_queue, def_version
+	`, childID, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&resolvedTaskQueue, &resolvedDefVersion)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}
 
 	// cleat#3245 Phase 3 step 2 gap fix (found scoping step 3's piece A):
-	// same gap as StartChildWorkflow above, same fix -- see its comment.
-	if err := s.insertLeaseAndPayloadRows(ctx, tx, childID, s.tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
+	// same gap as StartChildWorkflow above, same fix -- see its comment,
+	// including why resolvedDefVersion (migration 018) is captured via
+	// RETURNING rather than re-evaluated.
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, childID, s.tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
+		DefName: defName, DefVersion: resolvedDefVersion, ParentWorkflowID: parentID,
+	}); err != nil {
 		return "", fmt.Errorf("start child workflow atomic: %w", err)
 	}
 

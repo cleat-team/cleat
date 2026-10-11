@@ -707,6 +707,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// Create the new workflow run.
 	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID, resolvedTaskQueue string
+	var inheritedParentWorkflowID sql.NullString
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
 		-- parent_workflow_id and parent_close_policy are INHERITED from the run
@@ -722,17 +723,26 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 			$4, $5, now() - INTERVAL '1 millisecond', $6,
 			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $6),
 			(SELECT parent_close_policy FROM workflow_instances WHERE id = $6))
-		RETURNING id, task_queue
-		`, defName, defVersion, sealedNewInput, s.tenantID, priority, currentRunID).Scan(&newRunID, &resolvedTaskQueue)
+		RETURNING id, task_queue, parent_workflow_id
+		`, defName, defVersion, sealedNewInput, s.tenantID, priority, currentRunID).Scan(&newRunID, &resolvedTaskQueue, &inheritedParentWorkflowID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
 
-	// cleat#3245 Phase 3 step 2 piece 4d: create the new run's
-	// workflow_leases/workflow_payloads rows, same as startNewRun (piece
-	// 1) -- resolvedTaskQueue is captured via RETURNING rather than
-	// re-evaluated, for the identical reason startNewRun's own call does.
-	if err := s.insertLeaseAndPayloadRows(ctx, tx, newRunID, s.tenantID, resolvedTaskQueue, priority, sealedNewInput); err != nil {
+	// cleat#3245 Phase 3 step 2 piece 4d / migration 018: create the new
+	// run's workflow_leases/workflow_payloads rows, same as startNewRun
+	// (piece 1) -- resolvedTaskQueue and the inherited parent_workflow_id
+	// are both captured via RETURNING rather than re-evaluated, for the
+	// identical reason startNewRun's own call does. continued_from is
+	// currentRunID itself, not a column this INSERT needed to return.
+	// concurrency_key and the run-limit overrides are not inherited by a
+	// continued run on workflow_instances either (this INSERT's own column
+	// list has never carried them), so they are left unset here too --
+	// mirroring only what workflow_instances itself writes.
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, newRunID, s.tenantID, resolvedTaskQueue, priority, sealedNewInput, leaseAndPayloadCols{
+		DefName: defName, DefVersion: defVersion,
+		ParentWorkflowID: inheritedParentWorkflowID.String, ContinuedFrom: currentRunID,
+	}); err != nil {
 		return "", fmt.Errorf("continue as new: %w", err)
 	}
 
@@ -1798,7 +1808,11 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
 
-		if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
+		if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
+			DefName: defName, DefVersion: defVersion, ConcurrencyKey: concurrencyKey,
+			RunWasmInstanceTimeoutMs: runInstanceMs, RunWasmWallClockCeilingMs: runWallClockMs,
+			RunHostRetryBudgetMs: runRetryMs, RunMaxWorkflowDurationMs: runMaxWorkflowMs,
+		}); err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
 
@@ -1825,7 +1839,11 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
-	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput); err != nil {
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
+		DefName: defName, DefVersion: defVersion, ConcurrencyKey: concurrencyKey,
+		RunWasmInstanceTimeoutMs: runInstanceMs, RunWasmWallClockCeilingMs: runWallClockMs,
+		RunHostRetryBudgetMs: runRetryMs, RunMaxWorkflowDurationMs: runMaxWorkflowMs,
+	}); err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
@@ -1861,20 +1879,58 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 // cleat#2312) -- reused rather than re-sealed, so the two tables carry
 // identical bytes rather than two independent encryptions of the same
 // plaintext.
-func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.Tx, id, tenantID, taskQueue string, priority int, sealedPayloadInput string) error {
+//
+// cols carries every field migration 018 added that an individual creation
+// path may or may not set on its own workflow_instances INSERT -- callers
+// that do not set a given workflow_instances column pass its zero value
+// here too, rather than this function guessing a default, so the two tables
+// can never disagree about a column this function did not independently
+// decide.
+func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.Tx, id, tenantID, taskQueue string, priority int, sealedPayloadInput string, cols leaseAndPayloadCols) error {
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO workflow_leases (id, tenant_id, task_queue, priority, next_wake_at)
-		VALUES ($1, $2, $3, $4, now() - INTERVAL '1 millisecond')
-	`, id, tenantID, taskQueue, priority); err != nil {
+		INSERT INTO workflow_leases (
+			id, tenant_id, task_queue, priority, next_wake_at,
+			concurrency_key, concurrency_key_hash, parent_workflow_id, continued_from,
+			run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms,
+			run_host_retry_budget_ms, run_max_workflow_duration_ms
+		)
+		VALUES (
+			$1, $2, $3, $4, now() - INTERVAL '1 millisecond',
+			NULLIF($5, ''), CASE WHEN $5 = '' THEN NULL ELSE digest($5, 'sha256') END,
+			NULLIF($6, ''), NULLIF($7, ''),
+			$8, $9, $10, $11
+		)
+	`, id, tenantID, taskQueue, priority,
+		cols.ConcurrencyKey, cols.ParentWorkflowID, cols.ContinuedFrom,
+		cols.RunWasmInstanceTimeoutMs, cols.RunWasmWallClockCeilingMs,
+		cols.RunHostRetryBudgetMs, cols.RunMaxWorkflowDurationMs); err != nil {
 		return fmt.Errorf("insert lease row: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO workflow_payloads (id, tenant_id, input)
-		VALUES ($1, $2, $3)
-	`, id, tenantID, sealedPayloadInput); err != nil {
+		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
+		VALUES ($1, $2, $3, $4, $5)
+	`, id, tenantID, sealedPayloadInput, cols.DefName, cols.DefVersion); err != nil {
 		return fmt.Errorf("insert payload row: %w", err)
 	}
 	return nil
+}
+
+// leaseAndPayloadCols carries migration 018's columns into
+// insertLeaseAndPayloadRows. def_name/def_version are required on every
+// call (workflow_payloads.def_name mirrors piece F's listing filter, per
+// the owner's split decision on cleat#3245 -- see migration 018's own
+// comment); the rest are each NULL on whichever creation paths do not set
+// the matching workflow_instances column themselves.
+type leaseAndPayloadCols struct {
+	DefName                   string
+	DefVersion                int
+	ConcurrencyKey            string
+	ParentWorkflowID          string
+	ContinuedFrom             string
+	RunWasmInstanceTimeoutMs  *int64
+	RunWasmWallClockCeilingMs *int64
+	RunHostRetryBudgetMs      *int64
+	RunMaxWorkflowDurationMs  *int64
 }
 
 // completeLeaseRow mirrors a terminal status transition (CompleteWorkflow,
