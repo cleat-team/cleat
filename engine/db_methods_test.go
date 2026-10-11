@@ -788,8 +788,12 @@ func TestPostgresStore_LoadCompactionState_Present(t *testing.T) {
 
 func TestPostgresStore_StartChildWorkflow(t *testing.T) {
 	runID := "child-run-uuid"
+	// Two columns: StartChildWorkflow's INSERT now RETURNs task_queue
+	// alongside id, for the insertLeaseAndPayloadRows mirror it added
+	// (cleat#3245 Phase 3 step 2 gap fix) -- same shape as StartNewRun's own
+	// RETURNING clause.
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID, "default"}}},
 	}, nil)
 	defer db.Close()
 
@@ -806,7 +810,7 @@ func TestPostgresStore_StartChildWorkflow(t *testing.T) {
 func TestPostgresStore_StartChildWorkflow_ExplicitVersion(t *testing.T) {
 	runID := "child-run-uuid"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID, "default"}}},
 	}, nil)
 	defer db.Close()
 
@@ -3438,9 +3442,12 @@ func TestPostgresStore_ListSchedules_BeginError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_StartChildWorkflowAtomic_Success(t *testing.T) {
-	childID := "child-uuid"
+	// The INSERT now RETURNs task_queue, for the insertLeaseAndPayloadRows
+	// mirror it added (cleat#3245 Phase 3 step 2 gap fix) -- childID itself
+	// is already known in Go (passed in or generated above), so this query
+	// does not also RETURN id the way StartChildWorkflow's does.
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{childID}}},
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{"default"}}},
 	}, []mockExecResult{
 		{match: "SELECT set_config"}, // from beginTxWithRLS
 		{match: "INSERT INTO event_history", affected: 1},
@@ -3475,9 +3482,15 @@ func TestPostgresStore_StartChildWorkflowAtomic_BeginError(t *testing.T) {
 }
 
 func TestPostgresStore_StartChildWorkflowAtomic_InsertChildError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	// In rowsResults, not execResults: the INSERT now runs as
+	// QueryRowContext (it RETURNs task_queue, cleat#3245 Phase 3 step 2 gap
+	// fix), so the mock driver calls Query, not Exec, for this statement --
+	// an error registered in execResults alone is never consulted, and the
+	// test would pass for the wrong reason (the default empty-rows Query
+	// fallback also produces an error, sql.ErrNoRows, just not this one).
+	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "INSERT INTO workflow_instances", err: errors.New("insert child failed")},
-	})
+	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
