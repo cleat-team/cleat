@@ -12,6 +12,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // scaleStore returns a PostgresStore for scale tests.
@@ -63,6 +64,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Insert workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
 		workflowIDs = append(workflowIDs, id)
 	}
 	defer func() {
@@ -178,6 +180,7 @@ func TestScaleUpWorkers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Insert workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
 		workflowIDs = append(workflowIDs, id)
 	}
 	defer func() {

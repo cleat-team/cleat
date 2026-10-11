@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestReplayProducesIdenticalHistory verifies that loading the same event
@@ -26,6 +27,7 @@ func TestReplayProducesIdenticalHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -95,6 +97,7 @@ func TestReplayDifferentInputsProducesDifferentHistory(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %s: %v", suffix, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		t.Cleanup(func() {
 			db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 			db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
@@ -170,6 +173,7 @@ func TestReplayVersionMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -227,6 +231,7 @@ func TestReplayHashMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)

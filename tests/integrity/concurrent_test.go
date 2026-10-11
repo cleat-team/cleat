@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestConcurrentEventAppends verifies that multiple goroutines appending events
@@ -24,6 +25,7 @@ func TestConcurrentEventAppends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -109,6 +111,7 @@ func TestConcurrentClaimAndHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %s: %v", suffix, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		t.Cleanup(func() {
 			db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 		})
@@ -193,6 +196,7 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, runID)
 	}
 	defer func() {

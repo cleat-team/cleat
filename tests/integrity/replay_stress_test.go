@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -456,6 +457,7 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 			idCopy := runID
 			db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 				VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
+			testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 			defer func() {
 				db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, idCopy)
 				db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, idCopy)

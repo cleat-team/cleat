@@ -111,6 +111,7 @@ func TestMigrationNoDataLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -208,6 +209,7 @@ func TestMigrationRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -290,6 +292,7 @@ func TestMigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)

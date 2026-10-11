@@ -10,6 +10,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // replayStoreDB is a test helper that returns both a *sql.DB and a PostgresStore.
@@ -58,6 +59,7 @@ func TestCrashMidWorkflowReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -131,6 +133,7 @@ func TestReplayProducesSameHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -235,6 +238,7 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert v1 instance: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runIDv1, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
 
 	// Create a version 2 workflow (new version for new workflows).
 	runIDv2 := fmt.Sprintf("replay-test-version2-%d", time.Now().UnixNano())
@@ -246,6 +250,7 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert v2 instance: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runIDv2, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
 
 	defer func() {
 		db.Exec(`DELETE FROM workflow_instances WHERE id IN ($1, $2)`, runIDv1, runIDv2)

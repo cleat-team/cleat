@@ -14,6 +14,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // requireDB is like testStore but skips if CLEAT_TEST_DB is unavailable.
@@ -59,6 +60,7 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Insert workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: q})
 		workflowIDs = append(workflowIDs, id)
 	}
 	defer func() {
@@ -226,6 +228,7 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: TestQueue1})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Kill postgres container.
@@ -299,6 +302,7 @@ func TestFullClusterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: TestQueue1})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow and append some events.

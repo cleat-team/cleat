@@ -9,6 +9,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // testStore returns a *sql.DB and a PostgresStore for tests.
@@ -67,6 +68,7 @@ func TestClusterWorkersRegister(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Insert workflow for queue %s: %v", q, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: q})
 		workflowIDs = append(workflowIDs, id)
 	}
 
@@ -129,6 +131,7 @@ func TestClusterSpreadWorkflows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Insert workflow %d: %v", i, err)
 		}
+		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: q})
 		workflowIDs = append(workflowIDs, id)
 	}
 
@@ -198,6 +201,7 @@ func TestClusterBasicWorkflowExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert workflow: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: TestQueue1})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow.
