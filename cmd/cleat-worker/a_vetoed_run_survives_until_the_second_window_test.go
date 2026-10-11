@@ -98,6 +98,15 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 		t.Fatalf("back-dating the holder's registry row: %v", err)
 	}
 
+	// cleat#3245 Phase 3 step 3 piece A: ListStaleHolders and
+	// ReapStaleInstancesExcept now read their candidate set from
+	// workflow_leases, not workflow_instances. A row that exists only in
+	// workflow_instances -- which is what a raw INSERT here produced before
+	// this fix -- is invisible to the reaper regardless of its
+	// heartbeat_at, so it is never reclaimed and the test hangs at "left
+	// running" no matter how stale it is seeded. Every production writer of
+	// a running row dual-writes both tables (pieces 1-6d); this helper must
+	// match that, not merely match workflow_instances.
 	seedRun := func(staleBy string) {
 		t.Helper()
 		if _, err := db.ExecContext(ctx, `
@@ -107,6 +116,15 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 			runID, defName, holderID, staleBy, generation, engine.DefaultTenantUUID); err != nil {
 			t.Fatalf("seeding the run: %v", err)
 		}
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at, generation)
+			VALUES ($1, $2, 'running', $3, now() - $4::interval, $5)
+			ON CONFLICT (id) DO UPDATE SET
+				status = EXCLUDED.status, assigned_to = EXCLUDED.assigned_to,
+				heartbeat_at = EXCLUDED.heartbeat_at, generation = EXCLUDED.generation`,
+			runID, engine.DefaultTenantUUID, holderID, staleBy, generation); err != nil {
+			t.Fatalf("seeding the run's lease row: %v", err)
+		}
 	}
 	ageRun := func(staleBy string) {
 		t.Helper()
@@ -114,6 +132,11 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 			UPDATE workflow_instances SET heartbeat_at = now() - $2::interval WHERE id = $1`,
 			runID, staleBy); err != nil {
 			t.Fatalf("ageing the run: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `
+			UPDATE workflow_leases SET heartbeat_at = now() - $2::interval WHERE id = $1`,
+			runID, staleBy); err != nil {
+			t.Fatalf("ageing the run's lease row: %v", err)
 		}
 	}
 	statusOf := func() string {
@@ -178,6 +201,13 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 		    heartbeat_at = now() - interval '47 seconds'
 		WHERE id = $1`, runID, holderID, generation); err != nil {
 		t.Fatalf("re-seeding the run as running for the killed-holder phase: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = 'running', assigned_to = $2, generation = $3,
+		    heartbeat_at = now() - interval '47 seconds'
+		WHERE id = $1`, runID, holderID, generation); err != nil {
+		t.Fatalf("re-seeding the run's lease row for the killed-holder phase: %v", err)
 	}
 	if got := statusOf(); got != "running" {
 		t.Fatalf("the killed-holder phase needs a live run to reclaim; the re-seed left it %q", got)
