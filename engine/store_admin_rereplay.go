@@ -80,10 +80,16 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 		return fmt.Errorf("admin %s: rows affected: %w", adminActionReReplay, err)
 	}
 	if n == 0 {
+		// cleat#3245 Phase 3 step 3 piece C: reads workflow_leases rather
+		// than workflow_instances -- same reasoning as adminResolveMiss
+		// (store_admin.go): a diagnostic read on the n==0 branch, no lock,
+		// and the mirror a few lines below (piece 4c) already keeps
+		// workflow_leases' status/generation in sync for every row this
+		// could be reached for.
 		var status string
 		var stored int64
 		err := tx.QueryRowContext(ctx,
-			`SELECT status, generation FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+			`SELECT status, generation FROM workflow_leases WHERE id = $1 AND tenant_id = $2`,
 			workflowID, s.tenantID).Scan(&status, &stored)
 		if errors.Is(err, sql.ErrNoRows) {
 			return adminReReplayMiss("", 0, generation, workflowID, false)

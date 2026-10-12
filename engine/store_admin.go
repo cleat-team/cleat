@@ -306,6 +306,17 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	// it is exactly what a second TerminateWorkflow does, and the alternative
 	// -- restarting the phase clock on every operator action -- is the one
 	// deferPhaseOwed's comment rejects.
+	//
+	// cleat#3245 Phase 3 step 3 piece C: this read stays on workflow_instances
+	// -- explicitly NOT cut over to workflow_leases, unlike adminResolveMiss
+	// just below. Two independent reasons: compaction_state is not a
+	// workflow_leases column (migration 016's split), and this FOR UPDATE's
+	// lock is reused by the workflow_instances UPDATE later in this same
+	// transaction (adminForceMark's or the inline one-phase arm's). Moving
+	// the lock to workflow_leases while that later write stays on
+	// workflow_instances would reintroduce exactly the two-table-lock
+	// deadlock class piece B's ClaimWorkflows cutover had to add
+	// postgres_retry.go for (see that file's doc comment).
 	var curStatus string
 	var hasDefers, compacted bool
 	err = tx.QueryRowContext(ctx, `
@@ -537,10 +548,18 @@ func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflow
 // The lookup is tenant-scoped, so another tenant's workflow reads as absent
 // rather than as a generation mismatch -- the same "no oracle for valid IDs"
 // stance callerOwnsTarget takes at the HTTP layer.
+//
+// cleat#3245 Phase 3 step 3 piece C: reads workflow_leases rather than
+// workflow_instances. This is a pure diagnostic read on the n==0 branch of a
+// fenced UPDATE -- it takes no lock and nothing here depends on one, so
+// moving it carries none of piece B's two-table-lock deadlock risk. Safe
+// because every write path that reaches here (adminForceResolve's one-phase
+// arm, piece 4c; adminForceMark's two-phase arm, piece 6c) already mirrors
+// generation onto workflow_leases before this function can be called.
 func (s *PostgresStore) adminResolveMiss(ctx context.Context, tx *sql.Tx, workflowID string, requested int64, action string) error {
 	var stored int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT generation FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+		`SELECT generation FROM workflow_leases WHERE id = $1 AND tenant_id = $2`,
 		workflowID, s.tenantID).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return adminNotFound(action, workflowID)
