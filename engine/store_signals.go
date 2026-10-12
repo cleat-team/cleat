@@ -59,9 +59,15 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 
 	var cancelled bool
 	var reason sql.NullString
+	// cleat#3245 Phase 3 step 3 piece D: reads workflow_leases rather than
+	// workflow_instances. cancellation_requested/cancellation_reason are
+	// grouped with the other lease columns by migration 016's own design
+	// note (checked on the hot resume/heartbeat path), and every writer
+	// (RequestCancellation, via setLeaseCancellation) already mirrors them
+	// there, step 2 piece 5a.
 	err = tx.QueryRowContext(ctx, `
 		SELECT cancellation_requested, cancellation_reason
-		FROM workflow_instances WHERE id = $1
+		FROM workflow_leases WHERE id = $1
 	`, workflowID).Scan(&cancelled, &reason)
 	if err != nil {
 		return false, "", err
