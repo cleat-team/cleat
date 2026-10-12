@@ -317,6 +317,7 @@ plugins/blobstore	TestV2V3MigrationsAreIdempotentOnMySQL	1
 plugins/datadogexport	TestV4MigrationIsIdempotentOnMySQL	1
 plugins/eventstore	TestMySQLV4BackfillSurvivesARerun	1
 plugins/eventstore	TestV1IndexIsIdempotentOnMySQL	1
+plugins/eventtriggers	TestV10DropsTheUnprocessedIndexIdempotentlyOnMySQL	1
 plugins/eventtriggers	TestV1V3IndexesAreIdempotentOnMySQL	1
 plugins/eventtriggers	freshMSSQLDatabase	1
 plugins/eventtriggers	freshMySQLDatabase	1

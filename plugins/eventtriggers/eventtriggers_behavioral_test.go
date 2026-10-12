@@ -124,7 +124,12 @@ func TestMigrations(t *testing.T) {
 	// which is the argument for cleat#1513's shared helper and also the reason
 	// that helper must not absorb the variants -- doing so would impose one
 	// plugin's rule on twelve others.
-	sqlKeywords := []string{"CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "DROP TABLE"}
+	// DROP INDEX added by cleat#2870: every prior migration whose Up drops
+	// an index also recreates one in the same Up (Version 7's Up is
+	// "DROP INDEX ...; CREATE INDEX ..."), so this list's gap -- no bare
+	// "DROP INDEX" entry -- was invisible until a migration's Up was
+	// *only* a drop. Caught by this exact test failing on Version 10's Up.
+	sqlKeywords := []string{"CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "DROP TABLE", "DROP INDEX"}
 	for i, m := range migs {
 		if len(m.TenantScoped) > 0 {
 			continue
