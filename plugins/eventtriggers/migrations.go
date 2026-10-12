@@ -1304,5 +1304,73 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE ingested_events DROP COLUMN seq;
 			`,
 		},
+		{
+			// cleat#2870: drops idx_ingested_events_unprocessed (Version 1,
+			// `(processed, received_at)`), which Version 8's own comment
+			// already established nothing depends on for correctness or
+			// performance -- see that comment, point 3, for the query-by-
+			// query accounting. This migration does not re-derive that; it
+			// only re-checks it, since the issue's own body asked for a
+			// re-check rather than a re-trust: a NEW query could have
+			// started depending on it between 2026-09-30 and whenever this
+			// runs.
+			//
+			// Re-checked directly against develop's tip rather than
+			// assumed: queryOldestUnprocessedEventForClaim's FORCE INDEX
+			// (queries.go) targets idx_ingested_events_claim, not this one;
+			// queryCandidateUnprocessedEventIDsMSSQL and
+			// queryClaimEventByIDMSSQL (the MSSQL claim path, cleat#2821/
+			// #2866) lead with tenant_id/event_type/key1/key2/key3 or target
+			// by primary key, neither of which this index serves;
+			// queryUnprocessedEvents reads dispatch_processed, served by
+			// idx_ingested_events_dispatch; and webhookingest's source-
+			// deletion cancellation (routes.go, cleat#2649) filters on
+			// tenant_id/key1/processed with no ORDER BY, which gains
+			// nothing from an index ordered by received_at. Still nothing
+			// depends on it.
+			//
+			// Owner ruling history, since this took three passes to settle
+			// (see cleat#2870's own comments for the verbatim record):
+			// 2026-09-30 said droppable but ONLY as a rider on a migration
+			// with its own reason to touch ingested_events, not standalone;
+			// 2026-10-09 reconciled a later "drop it" against that rider
+			// and the owner chose "2b" -- keep the rider; 2026-10-12 the
+			// owner waived the rider for this index specifically and said
+			// "do the standalone drop". This migration is that drop, and it
+			// has no reason of its own to touch this table beyond it --
+			// which is deliberate, per the final ruling, not an oversight
+			// of the earlier one.
+			Version: 10,
+			Up:      `DROP INDEX IF EXISTS idx_ingested_events_unprocessed;`,
+			// Idempotency via information_schema, the same discipline
+			// Version 6/7/8/9 established for this table: MySQL DDL is not
+			// transactional, so a migration that failed partway must be
+			// safe to re-run.
+			UpMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_unprocessed');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_unprocessed ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_unprocessed' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_unprocessed ON ingested_events;
+			`,
+			// Reverses to the Version 1 shape -- the exact per-dialect
+			// CREATE text Version 1 established for this index, unchanged
+			// since no migration between 1 and 9 ever touched it. As with
+			// every other Down in this file, this is for a migration
+			// applied and immediately rolled back in development, not for
+			// undoing a deployment that has run without this index.
+			Down: `CREATE INDEX IF NOT EXISTS idx_ingested_events_unprocessed ON ingested_events(processed, received_at) WHERE NOT processed;`,
+			DownMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_unprocessed');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_unprocessed ON ingested_events(processed, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_unprocessed' AND object_id = OBJECT_ID('ingested_events'))
+				CREATE INDEX idx_ingested_events_unprocessed ON ingested_events(processed, received_at) WHERE processed = 0;
+			`,
+		},
 	}
 }
