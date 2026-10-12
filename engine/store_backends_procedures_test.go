@@ -61,6 +61,7 @@ var postgresProcedureMigrations = []string{
 	"014_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 	"017_finalize_workflow_status_dual_writes_leases_and_payloads.sql",
 	"019_finalize_workflow_status_mirrors_the_parent_wake.sql",
+	"021_finalize_workflow_status_mirrors_completed_at.sql",
 }
 
 // Same shape as the Postgres list above, for the same reason: MySQL was

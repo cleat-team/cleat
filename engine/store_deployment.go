@@ -79,6 +79,15 @@ func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID s
 	if err != nil {
 		return err
 	}
+	// cleat#3245 Phase 3 step 3 piece F, migration 020: mirror onto
+	// workflow_payloads, same tx. trace_id is written exactly once, here,
+	// so unlike every other piece F write site there is no pre-existing
+	// lease/payload mirror call to extend -- this is the only writer.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET trace_id = $2 WHERE id = $1
+	`, workflowID, traceID); err != nil {
+		return fmt.Errorf("trace workflow: mirror payload: %w", err)
+	}
 	return tx.Commit()
 }
 

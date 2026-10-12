@@ -398,8 +398,9 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		`, workflowID, generation); err != nil {
 			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
 		}
+		// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020.
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL, completed_at = now() WHERE id = $1
 		`, workflowID, a.result); err != nil {
 			return fmt.Errorf("admin %s: mirror payload: %w", a.action, err)
 		}
@@ -412,8 +413,9 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		`, workflowID, generation); err != nil {
 			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
 		}
+		// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020.
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_payloads SET error_msg = $2, error_code = $3, error_op = 'admin_force_fail' WHERE id = $1
+			UPDATE workflow_payloads SET error_msg = $2, error_code = $3, error_op = 'admin_force_fail', completed_at = now() WHERE id = $1
 		`, workflowID, a.errorMsg, a.errorCode); err != nil {
 			return fmt.Errorf("admin %s: mirror payload: %w", a.action, err)
 		}

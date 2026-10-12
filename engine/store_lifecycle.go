@@ -1266,6 +1266,18 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		// via RETURNING, same pattern reapLeaseRows/claimLeaseRows use) is
 		// the only way the two statements agree on which rows they mean.
 		leaseQuery string
+		// payloadQuery is the same mirror, onto workflow_payloads, for
+		// whichever of error_msg/error_op/error_code/completed_at this step
+		// writes -- cleat#3245 Phase 3 step 3 piece F. Found the same way
+		// piece B found leaseQuery's gap above: GetWorkflowByID/ListWorkflows
+		// read these columns from workflow_payloads now, and this cascade
+		// never got a payloads mirror when it was still writing
+		// workflow_instances alone, so a TERMINATEd child's reason was
+		// visible nowhere a caller could read it. It takes $1 = the same
+		// ids and, where the step needs it, $2 = outcomeMsg -- see
+		// runParentClosePolicyStep's call below for how those line up with
+		// this step's own args.
+		payloadQuery string
 	}{
 		// Both arms fence the child out. `generation = generation + 1` and
 		// `assigned_to = NULL` are not bookkeeping: without them a child that a
@@ -1364,6 +1376,10 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
 		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE id = ANY($1)
+	`, `
+		UPDATE workflow_payloads
+		SET error_msg = $2, error_op = 'parent_close', error_code = NULL, completed_at = now()
+		WHERE id = ANY($1)
 	`},
 		{"TERMINATE (defer phase)", `
 		UPDATE workflow_instances
@@ -1388,6 +1404,10 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		    assigned_to = NULL,
 		    generation = generation + 1
 		WHERE id = ANY($1)
+	`, `
+		UPDATE workflow_payloads
+		SET error_msg = $2, error_op = 'parent_close', error_code = NULL
+		WHERE id = ANY($1)
 	`},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
@@ -1398,7 +1418,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		RETURNING id
 	`, []any{parentWorkflowID}, `
 		UPDATE workflow_leases SET cancellation_requested = true WHERE id = ANY($1)
-	`},
+	`, ""},
 	}
 
 	// Collected before the UPDATE: see releaseTerminatedChildren for why not
@@ -1410,7 +1430,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 	}
 
 	for _, step := range steps {
-		if err := s.runParentClosePolicyStep(ctx, step.query, step.leaseQuery, step.args...); err != nil {
+		if err := s.runParentClosePolicyStep(ctx, step.query, step.leaseQuery, step.payloadQuery, step.args...); err != nil {
 			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a closed parent are unaffected by its close policy",
 				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
 			if step.policy == "TERMINATE" {
@@ -1467,7 +1487,15 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 // touched, passed as leaseQuery's sole `$1` (= ANY($1)) -- on the same tx.
 // leaseQuery == "" skips the mirror (no step needs that today, but the
 // escape hatch costs nothing to keep).
-func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, leaseQuery string, args ...any) error {
+//
+// payloadQuery is the same mirror onto workflow_payloads (cleat#3245 Phase 3
+// step 3 piece F). It takes $1 = the same ids and, for the TERMINATE arms,
+// $2 = outcomeMsg -- args[1:] (everything after the step's own
+// parentWorkflowID) is passed through unchanged, so a step whose query needed
+// outcomeMsg as its own $2 gives payloadQuery the same value at the same
+// position. payloadQuery == "" skips the mirror, same convention as
+// leaseQuery.
+func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, leaseQuery, payloadQuery string, args ...any) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
@@ -1485,6 +1513,12 @@ func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, lea
 	if leaseQuery != "" && len(ids) > 0 {
 		if _, err := tx.ExecContext(ctx, leaseQuery, pq.Array(ids)); err != nil {
 			return fmt.Errorf("mirror lease rows: %w", err)
+		}
+	}
+	if payloadQuery != "" && len(ids) > 0 {
+		payloadArgs := append([]any{pq.Array(ids)}, args[1:]...)
+		if _, err := tx.ExecContext(ctx, payloadQuery, payloadArgs...); err != nil {
+			return fmt.Errorf("mirror payload rows: %w", err)
 		}
 	}
 	return tx.Commit()
@@ -2086,9 +2120,13 @@ func (s *PostgresStore) completeLeaseRow(ctx context.Context, tx *sql.Tx, workfl
 // onto workflow_payloads, on the same tx. Takes already-sealed values (per
 // cleat#2312) so the two tables carry identical ciphertext rather than two
 // independent encryptions of the same plaintext.
+//
+// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 --
+// covers CompleteWorkflow and ContinueAsNew's old-run completion, both of
+// which call this.
 func (s *PostgresStore) writeResultPayload(ctx context.Context, tx *sql.Tx, workflowID string, sealedResult, sealedQS any) error {
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_payloads SET result = $2, query_state = $3 WHERE id = $1
+		UPDATE workflow_payloads SET result = $2, query_state = $3, completed_at = now() WHERE id = $1
 	`, workflowID, sealedResult, sealedQS); err != nil {
 		return fmt.Errorf("mirror payload row: %w", err)
 	}
@@ -2100,10 +2138,14 @@ func (s *PostgresStore) writeResultPayload(ctx context.Context, tx *sql.Tx, work
 // the same tx. qsParam is COALESCEd exactly as the workflow_instances UPDATE
 // does -- a nil qsParam (query state not supplied) leaves the column
 // unchanged rather than nulling it.
+//
+// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 --
+// covers both of this function's callers (FailWorkflow, MoveToDeadLetterQueue),
+// same as writeResultPayload above for the 'done' side.
 func (s *PostgresStore) writeErrorPayload(ctx context.Context, tx *sql.Tx, workflowID string, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam any) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_payloads
-		SET error_msg = $2, error_code = $3, error_op = $4, query_state = COALESCE($5::jsonb, query_state)
+		SET error_msg = $2, error_code = $3, error_op = $4, query_state = COALESCE($5::jsonb, query_state), completed_at = now()
 		WHERE id = $1
 	`, workflowID, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam); err != nil {
 		return fmt.Errorf("mirror payload row: %w", err)

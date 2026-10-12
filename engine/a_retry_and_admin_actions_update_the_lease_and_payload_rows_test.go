@@ -156,6 +156,13 @@ func TestAdminReReplayUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 
 	const id = "rereplay-lease-wf-1"
 	seedClaimableTriple(t, db, id, defName, "failed")
+	// cleat#3245 Phase 3 step 3 piece F: a failed run carries a completed_at
+	// from whatever terminal write failed it. Set one directly so the reset
+	// assertion below is checking something, not confirming a column that
+	// was already NULL stayed NULL.
+	if _, err := db.Exec(`UPDATE workflow_payloads SET completed_at = now() WHERE id = $1`, id); err != nil {
+		t.Fatalf("seed workflow_payloads.completed_at: %v", err)
+	}
 
 	if err := store.AdminReReplay(ctx, id, 0, "operator-1"); err != nil {
 		t.Fatalf("AdminReReplay: %v", err)
@@ -172,6 +179,14 @@ func TestAdminReReplayUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	if leaseGen != 1 {
 		t.Errorf("workflow_leases.generation = %d, want 1 (incremented from 0)", leaseGen)
 	}
+
+	var payloadCompletedAt sql.NullTime
+	if err := db.QueryRow(`SELECT completed_at FROM workflow_payloads WHERE id = $1`, id).Scan(&payloadCompletedAt); err != nil {
+		t.Fatalf("read workflow_payloads.completed_at: %v", err)
+	}
+	if payloadCompletedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at = %v, want NULL -- a re-replayed run is running again, not completed", payloadCompletedAt)
+	}
 }
 
 func TestAdminReReplayWithWrongGenerationLeavesTheLeaseAndPayloadRowsUntouched(t *testing.T) {
@@ -187,6 +202,9 @@ func TestAdminReReplayWithWrongGenerationLeavesTheLeaseAndPayloadRowsUntouched(t
 
 	const id = "rereplay-fence-lease-wf-1"
 	seedClaimableTriple(t, db, id, defName, "failed")
+	if _, err := db.Exec(`UPDATE workflow_payloads SET completed_at = now() WHERE id = $1`, id); err != nil {
+		t.Fatalf("seed workflow_payloads.completed_at: %v", err)
+	}
 
 	if err := store.AdminReReplay(ctx, id, 99, "operator-1"); err == nil {
 		t.Fatal("AdminReReplay with a stale generation succeeded, want an error")
@@ -195,6 +213,14 @@ func TestAdminReReplayWithWrongGenerationLeavesTheLeaseAndPayloadRowsUntouched(t
 	lease := readLeaseTerminalFields(t, db, id)
 	if lease.status != "failed" {
 		t.Errorf("workflow_leases.status changed after a fenced-out re-replay: got %q, want unchanged %q", lease.status, "failed")
+	}
+
+	var payloadCompletedAt sql.NullTime
+	if err := db.QueryRow(`SELECT completed_at FROM workflow_payloads WHERE id = $1`, id).Scan(&payloadCompletedAt); err != nil {
+		t.Fatalf("read workflow_payloads.completed_at: %v", err)
+	}
+	if !payloadCompletedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at changed after a fenced-out re-replay: got NULL, want unchanged (set)")
 	}
 }
 
@@ -224,6 +250,10 @@ func TestAdminForceCompleteUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	payload := readPayloadResultFields(t, db, id)
 	if !payload.result.Valid || payload.result.String != `{"ok": true}` {
 		t.Errorf("workflow_payloads.result = %v, want %q", payload.result, `{"ok": true}`)
+	}
+	// cleat#3245 Phase 3 step 3 piece F.
+	if !payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
 	}
 }
 
@@ -257,6 +287,10 @@ func TestAdminForceFailUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	if !payload.errorOp.Valid || payload.errorOp.String != "admin_force_fail" {
 		t.Errorf("workflow_payloads.error_op = %v, want %q", payload.errorOp, "admin_force_fail")
 	}
+	// cleat#3245 Phase 3 step 3 piece F.
+	if !payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
+	}
 }
 
 func TestTerminateWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
@@ -286,6 +320,11 @@ func TestTerminateWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	if !payload.errorMsg.Valid || payload.errorMsg.String != "operator said stop" {
 		t.Errorf("workflow_payloads.error_msg = %v, want %q", payload.errorMsg, "operator said stop")
 	}
+	// cleat#3245 Phase 3 step 3 piece F: TerminateWorkflow goes through
+	// preemptivelySettle's one-phase arm, which now mirrors completed_at too.
+	if !payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
+	}
 }
 
 func TestCancelWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
@@ -309,6 +348,13 @@ func TestCancelWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	lease := readLeaseTerminalFields(t, db, id)
 	if lease.status != "cancelled" {
 		t.Errorf("workflow_leases.status = %q, want %q", lease.status, "cancelled")
+	}
+
+	// cleat#3245 Phase 3 step 3 piece F: CancelWorkflow goes through
+	// preemptivelySettle's one-phase arm too.
+	payload := readPayloadResultFields(t, db, id)
+	if !payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
 	}
 }
 

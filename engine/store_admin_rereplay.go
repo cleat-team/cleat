@@ -114,7 +114,7 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 		return fmt.Errorf("admin %s: mirror lease: %w", adminActionReReplay, err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_payloads SET error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+		UPDATE workflow_payloads SET error_msg = NULL, error_code = NULL, error_op = NULL, completed_at = NULL WHERE id = $1
 	`, workflowID); err != nil {
 		return fmt.Errorf("admin %s: mirror payload: %w", adminActionReReplay, err)
 	}

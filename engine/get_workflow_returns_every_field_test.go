@@ -155,6 +155,42 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 	if _, err := db.Exec(stmt, id); err != nil {
 		t.Fatalf("populating every column: %v", err)
 	}
+
+	// cleat#3245 Phase 3 step 3 piece F: PostgresStore.GetWorkflowByID and
+	// ListWorkflows now read workflow_leases/workflow_payloads, not
+	// workflow_instances, so this fixture has to mirror the same values onto
+	// both -- otherwise it is hostile to a read path this store no longer
+	// uses. MySQL and SQL Server are untouched: the split above is
+	// Postgres-only.
+	if _, ok := store.(*PostgresStore); ok {
+		if _, err := db.Exec(`UPDATE workflow_leases SET `+strings.Join([]string{
+			`status = 'done'`,
+			`assigned_to = 'worker-everyfield'`,
+			`priority = 7`,
+			`generation = 3`,
+			`reclaim_count = 5`,
+			`pending_terminal_status = 'failed'`,
+			`continued_from = 'wf-previous'`,
+			`parent_workflow_id = 'wf-parent'`,
+			`cancellation_requested = true`,
+			`cancellation_reason = 'INCIDENT-4242 operator cancelled'`,
+			`completed_by = 'worker-everyfield'`,
+			`started_at = now()`,
+			`next_wake_at = now()`,
+		}, ", ")+` WHERE id = $1`, id); err != nil {
+			t.Fatalf("populating every column (workflow_leases mirror): %v", err)
+		}
+		if _, err := db.Exec(`UPDATE workflow_payloads SET `+strings.Join([]string{
+			`result = '{"r":1}'`,
+			`error_msg = 'an error'`,
+			`error_code = 'E_TEST'`,
+			`error_op = 'an_op'`,
+			`trace_id = 'trace-everyfield'`,
+			`completed_at = now()`,
+		}, ", ")+` WHERE id = $1`, id); err != nil {
+			t.Fatalf("populating every column (workflow_payloads mirror): %v", err)
+		}
+	}
 }
 
 // trueLiteral is the dialect's spelling of boolean true.

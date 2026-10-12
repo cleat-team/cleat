@@ -19,8 +19,8 @@ import (
 func buildFor(t *testing.T, d Dialect, f WorkflowFilter) (string, []any) {
 	t.Helper()
 	qb := NewQueryBuilder(d, "SELECT * FROM workflow_instances WHERE 1=1")
-	applyWorkflowFilters(qb, d, f)
-	applyWorkflowListPaging(qb, d, f)
+	applyWorkflowFilters(qb, d, f, "id")
+	applyWorkflowListPaging(qb, d, f, "id")
 	return qb.SQL()
 }
 
@@ -130,11 +130,11 @@ func TestTheCountAndTheListShareTheirPredicate(t *testing.T) {
 		IDPrefix: "ab", Search: "x", Limit: 25, Offset: 50}
 
 	list := NewQueryBuilder(DialectPostgres, "SELECT * FROM workflow_instances WHERE 1=1")
-	applyWorkflowFilters(list, DialectPostgres, f)
+	applyWorkflowFilters(list, DialectPostgres, f, "id")
 	listWhere, listArgs := list.SQL()
 
 	count := NewQueryBuilder(DialectPostgres, "SELECT COUNT(*) FROM workflow_instances WHERE 1=1")
-	applyWorkflowFilters(count, DialectPostgres, f)
+	applyWorkflowFilters(count, DialectPostgres, f, "id")
 	countWhere, countArgs := count.SQL()
 
 	lw := strings.TrimPrefix(listWhere, "SELECT * FROM workflow_instances WHERE 1=1")

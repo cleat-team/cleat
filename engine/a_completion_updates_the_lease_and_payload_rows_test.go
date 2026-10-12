@@ -77,20 +77,21 @@ func readLeaseTerminalFields(t *testing.T, db *sql.DB, id string) leaseTerminalF
 }
 
 type payloadResultFields struct {
-	result     sql.NullString
-	queryState sql.NullString
-	errorMsg   sql.NullString
-	errorCode  sql.NullString
-	errorOp    sql.NullString
+	result      sql.NullString
+	queryState  sql.NullString
+	errorMsg    sql.NullString
+	errorCode   sql.NullString
+	errorOp     sql.NullString
+	completedAt sql.NullTime
 }
 
 func readPayloadResultFields(t *testing.T, db *sql.DB, id string) payloadResultFields {
 	t.Helper()
 	var f payloadResultFields
 	if err := db.QueryRow(`
-		SELECT result::text, query_state::text, error_msg, error_code, error_op
+		SELECT result::text, query_state::text, error_msg, error_code, error_op, completed_at
 		FROM workflow_payloads WHERE id = $1
-	`, id).Scan(&f.result, &f.queryState, &f.errorMsg, &f.errorCode, &f.errorOp); err != nil {
+	`, id).Scan(&f.result, &f.queryState, &f.errorMsg, &f.errorCode, &f.errorOp, &f.completedAt); err != nil {
 		t.Fatalf("read workflow_payloads result fields for %s: %v", id, err)
 	}
 	return f
@@ -135,6 +136,10 @@ func TestCompleteWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	if !payload.queryState.Valid || payload.queryState.String != `{"k": "v"}` {
 		t.Errorf("workflow_payloads.query_state = %v, want %q", payload.queryState, `{"k": "v"}`)
 	}
+	// cleat#3245 Phase 3 step 3 piece F.
+	if !payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
+	}
 
 	// Matches workflow_instances, which is what the running engine still
 	// reads today (step 3 moves reads over).
@@ -177,6 +182,9 @@ func TestCompleteWorkflowWithWrongGenerationLeavesTheLeaseAndPayloadRowsUntouche
 	if payload.result.Valid {
 		t.Errorf("workflow_payloads.result changed after a fenced-out complete: got %v, want still NULL", payload.result)
 	}
+	if payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at changed after a fenced-out complete: got %v, want still NULL", payload.completedAt)
+	}
 }
 
 func TestFailWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
@@ -216,6 +224,10 @@ func TestFailWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	if !payload.errorOp.Valid || payload.errorOp.String != "op1" {
 		t.Errorf("workflow_payloads.error_op = %v, want %q", payload.errorOp, "op1")
 	}
+	// cleat#3245 Phase 3 step 3 piece F.
+	if !payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
+	}
 }
 
 func TestMoveToDeadLetterQueueUpdatesTheLeaseAndPayloadRows(t *testing.T) {
@@ -245,5 +257,9 @@ func TestMoveToDeadLetterQueueUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	payload := readPayloadResultFields(t, db, id)
 	if !payload.errorMsg.Valid || payload.errorMsg.String != "dead" {
 		t.Errorf("workflow_payloads.error_msg = %v, want %q", payload.errorMsg, "dead")
+	}
+	// cleat#3245 Phase 3 step 3 piece F.
+	if !payload.completedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
 	}
 }

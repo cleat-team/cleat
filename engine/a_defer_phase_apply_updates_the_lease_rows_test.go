@@ -13,11 +13,14 @@ import (
 // is the apply side of the mark/apply pair pieces 4c and 6c mirrored on the
 // mark side.
 //
-// Neither call writes workflow_payloads. result/error_msg/error_code/
-// error_op are written at MARK time (piece 4c's one-phase arm, piece 6c's
-// defer-owed arm) -- FinalizeDeferPhase and ExpireDeferPhases only ever flip
-// status from pending_terminal_status to status, so there is nothing new to
-// write on the payload side.
+// result/error_msg/error_code/error_op are written at MARK time (piece 4c's
+// one-phase arm, piece 6c's defer-owed arm) -- FinalizeDeferPhase and
+// ExpireDeferPhases only ever flip status from pending_terminal_status to
+// status, so there is nothing new to write on the payload side FOR THOSE
+// FOUR COLUMNS. completed_at is the exception: it is a fact about when THIS
+// call ran, not about the recorded outcome, so mark time cannot supply it --
+// piece F (Phase 3 step 3) added it to both calls' workflow_payloads write,
+// below.
 //
 // Seeds workflow_instances/workflow_leases/workflow_payloads directly via SQL
 // in the already-marked, defer-owed state (as if piece 6c's mark side had
@@ -114,6 +117,16 @@ func TestFinalizeDeferPhaseUpdatesTheLeaseRow(t *testing.T) {
 		t.Errorf("workflow_leases (%q/%v) disagrees with workflow_instances (%q/%v)",
 			lease.status, leasePending, instStatus, instPending)
 	}
+
+	// cleat#3245 Phase 3 step 3 piece F: completed_at now lands on
+	// workflow_payloads too, same tx.
+	var payloadCompletedAt sql.NullTime
+	if err := db.QueryRow(`SELECT completed_at FROM workflow_payloads WHERE id = $1`, id).Scan(&payloadCompletedAt); err != nil {
+		t.Fatalf("read workflow_payloads.completed_at: %v", err)
+	}
+	if !payloadCompletedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at is NULL, want set")
+	}
 }
 
 func TestExpireDeferPhasesUpdatesTheLeaseRows(t *testing.T) {
@@ -170,6 +183,16 @@ func TestExpireDeferPhasesUpdatesTheLeaseRows(t *testing.T) {
 		if lease.status != instStatus {
 			t.Errorf("%s: workflow_leases.status (%q) disagrees with workflow_instances (%q)", id, lease.status, instStatus)
 		}
+
+		// cleat#3245 Phase 3 step 3 piece F: completed_at now lands on
+		// workflow_payloads too, same tx, for every row the sweep touched.
+		var payloadCompletedAt sql.NullTime
+		if err := db.QueryRow(`SELECT completed_at FROM workflow_payloads WHERE id = $1`, id).Scan(&payloadCompletedAt); err != nil {
+			t.Fatalf("%s: read workflow_payloads.completed_at: %v", id, err)
+		}
+		if !payloadCompletedAt.Valid {
+			t.Errorf("%s: workflow_payloads.completed_at is NULL, want set", id)
+		}
 	}
 }
 
@@ -212,5 +235,13 @@ func TestExpireDeferPhasesLeavesAFutureDeadlineUntouched(t *testing.T) {
 	}
 	if leaseGen != 1 {
 		t.Errorf("workflow_leases.generation = %d, want 1 (untouched)", leaseGen)
+	}
+
+	var payloadCompletedAt sql.NullTime
+	if err := db.QueryRow(`SELECT completed_at FROM workflow_payloads WHERE id = $1`, id).Scan(&payloadCompletedAt); err != nil {
+		t.Fatalf("read workflow_payloads.completed_at: %v", err)
+	}
+	if payloadCompletedAt.Valid {
+		t.Errorf("workflow_payloads.completed_at = %v, want NULL (untouched)", payloadCompletedAt)
 	}
 }
