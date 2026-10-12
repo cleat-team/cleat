@@ -312,9 +312,15 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 	}
 	defer tx.Rollback()
 
+	// cleat#3245 Phase 3 step 3 piece E: reads workflow_leases rather than
+	// workflow_instances. parent_workflow_id (migration 018) and status
+	// (migration 016) are both mirrored there -- StartChildWorkflow/
+	// StartChildWorkflowAtomic set ParentWorkflowID on their
+	// insertLeaseAndPayloadRows call, and every terminal-status write
+	// mirrors status onto workflow_leases (pieces 4a/4c/4d/6b/6d, B, C, D).
 	var count int
 	err = tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM workflow_instances
+		SELECT COUNT(*) FROM workflow_leases
 		WHERE parent_workflow_id = $1 AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 	`, parentWorkflowID).Scan(&count)
 	if err != nil {
@@ -327,21 +333,25 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 // continued runs are excluded.
 func (s *PostgresStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error) {
 	// A TENANT-SCOPED TRANSACTION, not the bare pool, and not an
-	// `AND tenant_id = $2` predicate either. workflow_instances is under
-	// row-level security: the policy raises on the first candidate row
-	// whatever the WHERE clause says, so a tenant predicate does not
-	// substitute for setting the tenant on the transaction. Written the bare
-	// way first and caught by
-	// TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet, which says
-	// exactly that.
+	// `AND tenant_id = $2` predicate either. workflow_leases carries the
+	// same tenant_isolation_leases row-level security policy workflow_instances
+	// did (migration 016): it raises on the first candidate row whatever the
+	// WHERE clause says, so a tenant predicate does not substitute for
+	// setting the tenant on the transaction. Written the bare way first and
+	// caught by TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet,
+	// which says exactly that.
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("original child run ids for %s: begin: %w", parentWorkflowID, err)
 	}
 	defer tx.Rollback()
 
+	// cleat#3245 Phase 3 step 3 piece E: reads workflow_leases rather than
+	// workflow_instances. parent_workflow_id and continued_from (both
+	// migration 018) are mirrored there -- see GetChildCount's comment
+	// above for the write-side paths.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM workflow_instances
+		SELECT id FROM workflow_leases
 		WHERE parent_workflow_id = $1 AND continued_from IS NULL
 	`, parentWorkflowID)
 	if err != nil {
