@@ -173,13 +173,19 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 
 	// workflow_payloads: PK is "id", the dual-write companion row
 	// cleat#3245 Phase 3 step 2 keeps beside workflow_instances -- cleat#3344.
-	// No DB trigger creates it; only application code
-	// (insertLeaseAndPayloadRows) does, so it is seeded directly here rather
-	// than in seedSixTablesFixture.
+	// ON CONFLICT DO UPDATE, not a plain INSERT: cleat#3245 Phase 3 step 3
+	// piece F (cleat#3343) made seedSixTablesFixture's own
+	// testutil.SeedWorkflowLease call above ALSO insert a workflow_payloads
+	// row for this same id (its own ON CONFLICT (id) DO NOTHING, to satisfy
+	// the INNER JOIN piece F's reads now need), so a bare INSERT here would
+	// collide with that row rather than create it. Same idempotent-insert
+	// shape SeedWorkflowLease itself uses, so which of the two writes this
+	// row first no longer matters.
 	payloadErrPlain := "payload error with 4111111111111111"
 	legacyPayloadErr := sealNilAAD(t, key, payloadErrPlain)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO workflow_payloads (id, tenant_id, error_msg) VALUES ($1, $2, $3)`,
+		`INSERT INTO workflow_payloads (id, tenant_id, error_msg) VALUES ($1, $2, $3)
+		 ON CONFLICT (id) DO UPDATE SET error_msg = $3`,
 		wfID, tenant, legacyPayloadErr); err != nil {
 		t.Fatalf("seed workflow_payloads: %v", err)
 	}
