@@ -185,12 +185,24 @@ func intentFenceOrNotPending(ctx context.Context, hb func(ctx context.Context, w
 //
 // CompleteCallIntent leaves its 0 alone on purpose: it writes rec.Response raw
 // on every dialect, so plaintext stays the truthful answer for that row.
+//
+// cleat#3245 Phase 3 step 3 piece D: the fence subquery below reads
+// workflow_leases rather than workflow_instances. assigned_to/generation are
+// mirrored onto workflow_leases by every writer that touches them (claim,
+// heartbeat, reclaim, terminal transitions, admin force-actions -- see the
+// piece D survey on the issue), and this is a PLAIN (non-locking) EXISTS
+// read, so it is behavior-preserving: a plain read's MVCC visibility is
+// governed by commit boundaries alone, which are identical for both
+// mirrored tables since they commit atomically in the same transaction.
+// flush.go's insertEventSQL has the identical fence shape but a FOR SHARE
+// lock, which is NOT safe to move the same way -- see that file's own
+// comment and the piece D survey for why the two cases differ.
 const writeCallIntentSQLPostgres = `
 	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
 		created_at, intent_at, tenant_id, payload_encoding)
 	SELECT $1, $2, $3, $4, $5, $6, now(), now(), $7, $10
 	WHERE ($8 = '' OR EXISTS (
-		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
+		SELECT 1 FROM workflow_leases WHERE id = $1 AND assigned_to = $8 AND generation = $9
 	))`
 
 func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, rec EventRecord, workerID string, generation int64) error {
@@ -327,13 +339,16 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
 	}
 
+	// cleat#3245 Phase 3 step 3 piece D: fence subquery reads workflow_leases
+	// -- see writeCallIntentSQLPostgres's doc comment above for why this is
+	// safe for a plain (non-locking) EXISTS read.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
 		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL
 		WHERE workflow_id = $1 AND step = $2 AND tenant_id = $7
 		  AND intent_at IS NOT NULL AND checksum IS NULL
 		  AND ($8 = '' OR EXISTS (
-		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
+		      SELECT 1 FROM workflow_leases WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
 	`, workflowID, rec.Step, nullStr(stored.Response), nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
@@ -766,13 +781,16 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
 	}
 
+	// cleat#3245 Phase 3 step 3 piece D: fence subquery reads workflow_leases
+	// -- see writeCallIntentSQLPostgres's doc comment for why this is safe
+	// for a plain (non-locking) EXISTS read.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
 		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL
 		WHERE workflow_id = $1 AND step = $2 AND tenant_id = $7
 		  AND intent_at IS NOT NULL AND checksum IS NULL
 		  AND ($8 = '' OR EXISTS (
-		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
+		      SELECT 1 FROM workflow_leases WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
 	`, workflowID, rec.Step, nullStr(stored.Response), nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
