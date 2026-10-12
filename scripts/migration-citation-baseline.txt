@@ -47,7 +47,6 @@ docs/contributor/migrations.md	004_fix_finalize_workflow_status_fence.sql
 docs/contributor/migrations.md	migrations/mysql/077
 docs/contributor/plugins/plugin-security.md	074_a_dropped_tenants_rows_go_with_it.sql
 docs/contributor/plugins/plugin-security.md	077_every_entity_records_when_it_last_changed.sql
-docs/durable-call-intent-design.md	migration 020
 docs/explanation/postgresql-schema.md	001_initial_schema.sql
 docs/explanation/postgresql-schema.md	077_a_plugin_policy_can_use_its_index.sql
 docs/explanation/postgresql-schema.md	migration 045

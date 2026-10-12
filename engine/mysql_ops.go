@@ -666,8 +666,8 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
-	applyWorkflowFilters(qb, d, filter)
-	applyWorkflowListPaging(qb, d, filter)
+	applyWorkflowFilters(qb, d, filter, "id")
+	applyWorkflowListPaging(qb, d, filter, "id")
 
 	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)

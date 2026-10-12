@@ -657,7 +657,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{{
 				"wf-1",                             // id
 				"test-wf",                          // def_name
@@ -1162,7 +1162,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
@@ -1194,7 +1194,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
@@ -1970,7 +1970,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 	createdAtNull := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{{
 				"wf-1",            // id
 				"test-wf",         // def_name
@@ -5429,7 +5429,7 @@ func TestPostgresStore_DeliverSignal_ValidJSON(t *testing.T) {
 
 func TestPostgresStore_GetWorkflowByID_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT id, def_name, def_version", err: errors.New("query failed")},
+		{match: "SELECT l.id, p.def_name, p.def_version", err: errors.New("query failed")},
 	}, nil)
 	defer db.Close()
 

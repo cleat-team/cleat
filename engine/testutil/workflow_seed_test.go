@@ -109,6 +109,33 @@ func TestSeedWorkflowLeaseIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestSeedWorkflowLeaseAlsoSeedsWorkflowPayloads is the regression test for
+// cleat#3245 Phase 3 step 3 piece F's finding: this helper's own doc comment
+// called it a "dual-write" mirror of StartNewRun before it actually was one.
+// GetWorkflowByID/ListWorkflows/CountWorkflows now INNER JOIN
+// workflow_leases to workflow_payloads, so a caller that only got the lease
+// row from this function would see every seeded workflow report "not
+// found" -- tests/scale's TestMaxConcurrentWorkflows did exactly that
+// before this fix, with all 1000 of its seeded rows.
+func TestSeedWorkflowLeaseAlsoSeedsWorkflowPayloads(t *testing.T) {
+	db := TestDB(t, DialectPostgres)
+	id := uniqueLeaseTestID("payloads")
+	seedInstanceForLeaseTest(t, db, id)
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id) })
+
+	SeedWorkflowLease(t, db, id, WorkflowLeaseSeed{})
+
+	var tenantID string
+	var input string
+	if err := db.QueryRow(`SELECT tenant_id::text, input::text FROM workflow_payloads WHERE id = $1`, id).
+		Scan(&tenantID, &input); err != nil {
+		t.Fatalf("SeedWorkflowLease did not create a matching workflow_payloads row for %s: %v", id, err)
+	}
+	if tenantID != "00000000-0000-0000-0000-000000000000" {
+		t.Errorf("workflow_payloads.tenant_id = %q, want the zero UUID, matching the lease row's own default", tenantID)
+	}
+}
+
 // TestWorkflowLeasesRequiresAMatchingInstanceRow is the negative control for
 // the whole file: it proves workflow_leases' FK onto workflow_instances is
 // real, which is what makes every call to SeedWorkflowLease above meaningful

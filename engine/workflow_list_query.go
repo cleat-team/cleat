@@ -23,7 +23,14 @@ import (
 // A new filter added to two arms out of three is not a visible failure. It is a
 // listing that answers differently depending on which backend a tenant is on,
 // and nothing fails.
-func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter) {
+//
+// idColumn names the "id" column as this call's FROM clause can see it --
+// "id" everywhere except PostgresStore's join form (cleat#3245 Phase 3 step 3
+// piece F), which passes "l.id" because id is the join key and therefore
+// ambiguous between workflow_leases and workflow_payloads. It is the only
+// filtered or ordered column that is: every other column named below exists
+// on exactly one side of that join.
+func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter, idColumn string) {
 	if filter.Status != "" {
 		qb.AddCondition("status = %s", filter.Status)
 	}
@@ -68,7 +75,7 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter) {
 		// `id` is text on all three dialects, so no cast. Case-sensitive: run
 		// ids are lowercase-hex UUIDs, and an ILIKE here would widen the match
 		// for no caller's benefit.
-		qb.AddLikeCondition("id", filter.IDPrefix+"%", false)
+		qb.AddLikeCondition(idColumn, filter.IDPrefix+"%", false)
 	}
 	if !filter.StartedAfter.IsZero() {
 		qb.AddCondition("created_at >= %s", filter.StartedAfter)
@@ -134,7 +141,14 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter) {
 //
 // `id` is the primary key, so appending it makes the order total on every
 // dialect at the cost of one more sort key.
-const workflowListOrder = "ORDER BY created_at DESC, id DESC"
+//
+// workflowListOrder takes idColumn for the same reason applyWorkflowFilters
+// does -- "id" is ambiguous in PostgresStore's leases/payloads join form.
+// created_at needs no such parameter: it exists only on workflow_leases, so
+// it stays unambiguous in that join.
+func workflowListOrder(idColumn string) string {
+	return "ORDER BY created_at DESC, " + idColumn + " DESC"
+}
 
 // clampWorkflowListLimit is the store's own ceiling, applied regardless of what
 // a caller asks for. 0 means "unspecified", not "none".
@@ -149,8 +163,8 @@ func clampWorkflowListLimit(limit int) int {
 }
 
 // applyWorkflowListPaging appends the order and the limit/offset.
-func applyWorkflowListPaging(qb *QueryBuilder, d Dialect, filter WorkflowFilter) {
-	qb.AddRaw(workflowListOrder)
+func applyWorkflowListPaging(qb *QueryBuilder, d Dialect, filter WorkflowFilter, idColumn string) {
+	qb.AddRaw(workflowListOrder(idColumn))
 	limit := clampWorkflowListLimit(filter.Limit)
 	if filter.Offset > 0 {
 		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
@@ -180,8 +194,11 @@ func (s *PostgresStore) CountWorkflows(ctx context.Context, filter WorkflowFilte
 	defer tx.Rollback()
 
 	d := s.dialect
-	qb := NewQueryBuilder(d, "SELECT COUNT(*) FROM workflow_instances WHERE 1=1")
-	applyWorkflowFilters(qb, d, filter)
+	// cleat#3245 Phase 3 step 3 piece F: joined with workflow_payloads, same
+	// FROM clause as ListWorkflows below, so the two cannot disagree about
+	// which rows match -- the whole point of sharing applyWorkflowFilters.
+	qb := NewQueryBuilder(d, "SELECT COUNT(*) FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id WHERE 1=1")
+	applyWorkflowFilters(qb, d, filter, "l.id")
 
 	query, args := qb.SQL()
 	var n int
@@ -197,7 +214,7 @@ func (s *MySQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) 
 	d := s.dialect
 	qb := NewQueryBuilder(d, "SELECT COUNT(*) FROM workflow_instances WHERE tenant_id = ?")
 	qb.AddArgs(s.tenantID)
-	applyWorkflowFilters(qb, d, filter)
+	applyWorkflowFilters(qb, d, filter, "id")
 
 	query, args := qb.SQL()
 	var n int
@@ -221,7 +238,7 @@ func (s *MSSQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) 
 	d := s.dialect
 	qb := NewQueryBuilder(d, "SELECT COUNT(*) FROM workflow_instances WHERE tenant_id = @p1")
 	qb.AddArgs(s.tenantID)
-	applyWorkflowFilters(qb, d, filter)
+	applyWorkflowFilters(qb, d, filter, "id")
 
 	query, args := qb.SQL()
 	var n int

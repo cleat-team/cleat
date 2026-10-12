@@ -72,12 +72,10 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 
 	// cleat#3245 Phase 3 step 2 piece 6d: mirror the same apply-defer-phase
 	// transition onto workflow_leases, same tx, same fence as the
-	// workflow_instances write above. completed_at stays workflow_instances-
-	// only (no piece mirrors it). No workflow_payloads write: result/
-	// error_msg/error_code/error_op were already written at mark time
-	// (pieces 4c/6c), and this call only flips status -- the same reason
-	// adminForceMark's one-phase sibling (piece 4c) needed no payload write
-	// here either.
+	// workflow_instances write above. result/error_msg/error_code/error_op
+	// were already written at mark time (pieces 4c/6c), and this call only
+	// flips status -- the same reason adminForceMark's one-phase sibling
+	// (piece 4c) needed no payload write here either.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases
 		SET status = pending_terminal_status,
@@ -87,6 +85,16 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		WHERE id = $1 AND assigned_to = $2 AND generation = $3 AND pending_terminal_status IS NOT NULL
 	`, runID, workerID, generation); err != nil {
 		return fmt.Errorf("finalize defer phase: mirror lease: %w", err)
+	}
+	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration
+	// 020. This DOES need its own workflow_payloads write, unlike the
+	// status-only lease mirror above: completed_at was never written at
+	// mark time (there is no completed_at concept yet at that point), so
+	// unlike result/error_msg/error_code/error_op, nothing else sets it.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET completed_at = now() WHERE id = $1
+	`, runID); err != nil {
+		return fmt.Errorf("finalize defer phase: mirror payload: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -171,6 +179,9 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	if err := mirrorExpiredDeferPhaseLeases(ctx, tx, expired); err != nil {
 		return 0, err
 	}
+	if err := mirrorExpiredDeferPhasePayloads(ctx, tx, expired); err != nil {
+		return 0, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("expire defer phases commit: %w", err)
@@ -187,8 +198,11 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 
 // mirrorExpiredDeferPhaseLeases mirrors ExpireDeferPhases' sweep onto
 // workflow_leases for exactly the rows the workflow_instances UPDATE just
-// touched. No workflow_payloads write, for the same reason FinalizeDeferPhase
-// needs none: result/error_msg/error_code/error_op were written at mark time.
+// touched. result/error_msg/error_code/error_op need no mirror here, for the
+// same reason FinalizeDeferPhase needs none for them: they were written at
+// mark time. completed_at is the exception -- see
+// mirrorExpiredDeferPhasePayloads below, added with it in cleat#3245 Phase 3
+// step 3 piece F.
 func mirrorExpiredDeferPhaseLeases(ctx context.Context, tx *sql.Tx, expired []expiredDeferPhase) error {
 	if len(expired) == 0 {
 		return nil
@@ -207,6 +221,28 @@ func mirrorExpiredDeferPhaseLeases(ctx context.Context, tx *sql.Tx, expired []ex
 		WHERE id = ANY($1)
 	`, pq.Array(ids)); err != nil {
 		return fmt.Errorf("expire defer phases: mirror lease: %w", err)
+	}
+	return nil
+}
+
+// mirrorExpiredDeferPhasePayloads mirrors ExpireDeferPhases' completed_at
+// write (migration 020, cleat#3245 Phase 3 step 3 piece F) onto
+// workflow_payloads for exactly the rows the workflow_instances UPDATE just
+// touched. Same gap-avoidance shape as mirrorExpiredDeferPhaseLeases: it
+// takes the ids the first UPDATE already returned rather than re-deriving
+// the WHERE clause against workflow_payloads.
+func mirrorExpiredDeferPhasePayloads(ctx context.Context, tx *sql.Tx, expired []expiredDeferPhase) error {
+	if len(expired) == 0 {
+		return nil
+	}
+	ids := make([]string, len(expired))
+	for i, wf := range expired {
+		ids[i] = wf.id
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET completed_at = now() WHERE id = ANY($1)
+	`, pq.Array(ids)); err != nil {
+		return fmt.Errorf("expire defer phases: mirror payload: %w", err)
 	}
 	return nil
 }

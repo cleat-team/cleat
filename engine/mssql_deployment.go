@@ -204,8 +204,8 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
-	applyWorkflowFilters(qb, d, filter)
-	applyWorkflowListPaging(qb, d, filter)
+	applyWorkflowFilters(qb, d, filter, "id")
+	applyWorkflowListPaging(qb, d, filter, "id")
 
 	query, args := qb.SQL()
 	//nolint:gosec // G701: query is built by applyWorkflowFilters/applyWorkflowListPaging

@@ -669,12 +669,15 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	defer tx.Rollback()
 
 	d := s.dialect
+	// cleat#3245 Phase 3 step 3 piece F: workflow_leases JOIN workflow_payloads,
+	// not workflow_instances -- see postgresWorkflowListJoinColumns' doc
+	// comment for which column lives on which side.
 	qb := NewQueryBuilder(d,
-		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
+		"SELECT "+postgresWorkflowListJoinColumns()+" FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id WHERE 1=1",
 	)
 
-	applyWorkflowFilters(qb, d, filter)
-	applyWorkflowListPaging(qb, d, filter)
+	applyWorkflowFilters(qb, d, filter, "l.id")
+	applyWorkflowListPaging(qb, d, filter, "l.id")
 
 	query, args := qb.SQL()
 	rows, err := tx.QueryContext(ctx, query, args...)
@@ -778,15 +781,23 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	var continuedFrom, parentWorkflowID sql.NullString
 	var inputRaw json.RawMessage
 
+	// cleat#3245 Phase 3 step 3 piece F: workflow_leases JOIN workflow_payloads,
+	// not workflow_instances. def_name, def_version, input, result, error_msg,
+	// error_code, error_op, trace_id and completed_at are on l's payloads side
+	// (trace_id and completed_at since migration 020); every other column
+	// below is leases-only. id and tenant_id exist on both and are qualified
+	// to l's copy -- the join predicate makes them equal, RLS makes both
+	// sides' tenant_id the caller's own.
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at, result #>> '{}', error_msg, error_code, error_op,
-		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
-		       created_at, COALESCE(pending_terminal_status, ''),
-		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, ''),
-		       COALESCE(completed_by, '')
-		FROM workflow_instances WHERE id = $1 AND tenant_id = $2
+		SELECT l.id, p.def_name, p.def_version, l.status, p.input,
+		       l.assigned_to, l.heartbeat_at, l.next_wake_at, p.completed_at, l.started_at, p.result #>> '{}', p.error_msg, p.error_code, p.error_op,
+		       l.generation, COALESCE(l.priority, 0) AS priority,
+		       COALESCE(p.trace_id, ''), l.tenant_id, l.continued_from, l.reclaim_count, l.parent_workflow_id,
+		       l.created_at, COALESCE(l.pending_terminal_status, ''),
+		       COALESCE(l.cancellation_requested, false), COALESCE(l.cancellation_reason, ''),
+		       COALESCE(l.completed_by, '')
+		FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id
+		WHERE l.id = $1 AND l.tenant_id = $2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
@@ -2099,8 +2110,9 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	`, workflowID, finalStatus); err != nil {
 		return fmt.Errorf("%s workflow: mirror lease: %w", finalStatus, err)
 	}
+	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020.
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_payloads SET error_msg = $2 WHERE id = $1
+		UPDATE workflow_payloads SET error_msg = $2, completed_at = now() WHERE id = $1
 	`, workflowID, reason); err != nil {
 		return fmt.Errorf("%s workflow: mirror payload: %w", finalStatus, err)
 	}
