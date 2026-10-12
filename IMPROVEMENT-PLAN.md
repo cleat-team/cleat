@@ -10888,3 +10888,63 @@ never reaches `cmd/`, `auth/`, or `plugin/` at all).
 **Files**: `engine/mssql_tenant_predicate_test.go` (`mssqlSchemaTenantIDTables`,
 `TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate`'s table union and new sanity anchors,
 `tenantPredicateAllowlist`'s new entry).
+
+### 3.502 `TestTheSpecsClaimerCannotChoose` flaked on host/database clock skew, not on a `created_at` tie — ✅ **FIXED 2026-10-12** (cleat#2922)
+
+Reopened after a 2026-10-02 closure (0/20 isolated failures) no longer held: WS-2 measured 4/8
+isolated failures on 2026-10-10, and cleat-review's full-suite run of #3340 fired it again on
+2026-10-12. The owner reopened rather than letting a stale negative stand.
+
+**Two candidate mechanisms were on the table, and the task was to find out which, before touching
+the assertion.** (1) a genuine `created_at` tie, which the fixture's own doc comment already names
+as the reason the file's other tests assert against created_at read back rather than insertion
+order; or (2) `SKIP LOCKED` lock contention from a concurrent claimant, which would make the result
+legitimately load-sensitive rather than wrong. Switching the assertion to match the fixture's
+read-back convention would be the right fix for (1) and a bug-masking no-op for (2).
+
+**Both were falsified, directly, not inferred.** A dedicated probe ran the exact seed/sleep/seed
+sequence and read `created_at` back immediately: 0 ties across 40+ trials, gaps a clean 3-15ms
+every time — (1) is not what is happening. `cleat#982`'s own probe, already wired into every
+database-backed test failure, confirmed **zero other client processes attached** at the moment of
+failure, reproduced in complete isolation on a dedicated container — (2), read as cross-connection
+lock contention, is not what is happening either.
+
+**What the EXPLAIN plan at the moment of failure showed instead: zero candidate rows matched the
+claimability filter, not one.** `next_wake_at <= now()` removed BOTH rows — the just-released one
+and the untouched one. That pointed at `next_wake_at`, not `created_at`. `ReleaseWorkflow`'s
+`nextWakeAt` parameter is written verbatim into the row; the fixture's `release()` helper passed
+`time.Now()` -- **the calling process's own clock** -- while `ClaimWorkflows`' filter evaluates
+`next_wake_at <= now()` against **the database server's own clock**. Measuring the two against each
+other directly: skew of +19.3ms on one sample, +3ms a few minutes later, -1.5ms later still --
+ordinary, wandering container/VM clock drift, never assumed to be zero. Whenever the host read
+ahead of the database, a just-released row stayed ineligible for exactly that skew's duration, and
+the untouched sibling (whose `next_wake_at` was set by the database's own `DEFAULT now()`, never
+re-stamped) won the next claim instead.
+
+**Confirmed causally, not just correlated.** A deterministic positive control: inject an identical
+simulated +50ms clock advance into both the original `release()` (bare `time.Now()`) and the fixed
+one (`time.Now().Add(-time.Hour)`), then run 200 full scenarios of each. Buggy: 200/200 anomalies.
+Fixed, same injected skew: 0/200. The 8000-claim/release in-process hunt that first caught it
+(zero other clients, zero `created_at` ties, 100% reproduction at a measured skew) is the same
+shape of evidence, uncontrolled; the injection makes it controlled.
+
+**The fix stays in the test, not the engine.** No production `ReleaseWorkflow` caller re-stamps its
+own wall clock with zero margin the way this fixture did: `cmd/cleat-worker/setup.go`'s
+`releaseForAnotherWorker` adds `defaultUnservableBackoff` (5s, dwarfing any plausible skew), and
+every dialect's own release call site (`store_lifecycle.go:1675`, `mysql_lifecycle.go:1430`,
+`mssql_lifecycle.go:1877`, `setup.go:6591`) re-uses the already-stored `wf.NextWakeAt` unchanged. A
+quick check of every other test-only `ReleaseWorkflow(..., time.Now())` call site
+(`tests/cluster/scale_test.go`, `tests/cluster/failover_test.go`,
+`tests/upgrade/worker_rolling_test.go`, `tests/integrity/concurrent_test.go`) found none of them
+assert which specific candidate among several ready ones gets claimed immediately after release --
+the shared shape without the triggering assertion, not a second instance of the bug.
+
+**Fix:** `claimOrderFixture.release()` now passes `time.Now().Add(-time.Hour)`, a margin no
+plausible host/database clock skew can exceed, with a comment stating the mechanism and the
+measurements rather than just the number. Falsified in both directions: reverting to the bare
+`time.Now()` and re-running the deterministic +50ms-injection harness reproduces 200/200; restoring
+it returns to 0/200, and the three real tests in the file (`TestTheClaimOrderIsPriorityThenAge`,
+`TestTheSpecsClaimerCannotChoose`, `TestSustainedHigherPriorityArrivalsStarveAnOlderRun`) all pass,
+repeated 15x with no flake.
+
+**Files**: `engine/the_claim_order_is_priority_then_age_test.go` (`claimOrderFixture.release`).

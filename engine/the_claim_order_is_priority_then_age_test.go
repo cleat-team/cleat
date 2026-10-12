@@ -105,9 +105,29 @@ func (f *claimOrderFixture) claim(worker string, limit int) []*WorkflowInstance 
 // fails with "fence lost: workflow reassigned to another worker (generation
 // mismatch)" -- a true statement about a fixture that had not actually lost
 // anything.
+//
+// cleat#2922: the nextWakeAt argument is NOT time.Now(). ReleaseWorkflow
+// writes it verbatim into next_wake_at, and ClaimWorkflows' candidate filter
+// compares it against the DATABASE's own now(), not this process's. The two
+// clocks are not the same clock -- this host and the test database normally
+// run in separate containers/VMs -- and measured skew between them was never
+// zero: 19ms on one measurement, 3ms on another, taken minutes apart in the
+// same session. A bare time.Now() here is the caller's clock; whenever it
+// reads even slightly ahead of the database's, the just-released row is
+// genuinely not yet eligible (next_wake_at > the database's now()) for
+// exactly that skew's duration, and a sibling ready row that was never
+// released wins the next claim instead -- reproduced in complete isolation,
+// zero other database clients, 400/400 of 8000 claim/release cycles at one
+// measured skew. No fix belongs in the engine: every production caller
+// either adds a multi-second backoff (defaultUnservableBackoff, 5s, dwarfing
+// any plausible clock skew) or re-uses the already-stored wf.NextWakeAt
+// unchanged (cmd/cleat-worker/setup.go:6591 and the three dialects' own
+// release call sites) -- none re-stamps from its own wall clock with zero
+// margin the way this fixture did. A generous fixed-past margin sidesteps the
+// skew instead of chasing its sign.
 func (f *claimOrderFixture) release(worker string, wf *WorkflowInstance) {
 	f.t.Helper()
-	if err := f.store.ReleaseWorkflow(context.Background(), wf.ID, worker, wf.Generation, time.Now()); err != nil {
+	if err := f.store.ReleaseWorkflow(context.Background(), wf.ID, worker, wf.Generation, time.Now().Add(-time.Hour)); err != nil {
 		f.t.Fatalf("releasing %s as %s: %v", wf.ID, worker, err)
 	}
 }
