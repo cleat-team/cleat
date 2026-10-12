@@ -171,6 +171,19 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 		t.Fatalf("seed idempotency_keys: %v", err)
 	}
 
+	// workflow_payloads: PK is "id", the dual-write companion row
+	// cleat#3245 Phase 3 step 2 keeps beside workflow_instances -- cleat#3344.
+	// No DB trigger creates it; only application code
+	// (insertLeaseAndPayloadRows) does, so it is seeded directly here rather
+	// than in seedSixTablesFixture.
+	payloadErrPlain := "payload error with 4111111111111111"
+	legacyPayloadErr := sealNilAAD(t, key, payloadErrPlain)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO workflow_payloads (id, tenant_id, error_msg) VALUES ($1, $2, $3)`,
+		wfID, tenant, legacyPayloadErr); err != nil {
+		t.Fatalf("seed workflow_payloads: %v", err)
+	}
+
 	// PRECONDITION, once for the whole fixture: every legacy value above
 	// really does open for a FOREIGN tenant before the sweep runs. Without
 	// this, the per-table checks after the sweep prove nothing about what
@@ -186,6 +199,7 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 		{"workflow_update_requests.payload", legacyUpdate},
 		{"workflow_schedules.input", legacySchedule},
 		{"idempotency_keys.error_msg", legacyIdem},
+		{"workflow_payloads.error_msg", legacyPayloadErr},
 	} {
 		body := c.legacy
 		if strings.HasPrefix(body, `"`) {
@@ -206,10 +220,10 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resealSensitiveTables: %v", err)
 	}
-	// Seven legacy values: two on workflow_instances, one each on the other
-	// five.
-	if total.Older != 7 || total.Rewrote != 7 {
-		t.Errorf("total: Older=%d Rewrote=%d, want 7 and 7", total.Older, total.Rewrote)
+	// Eight legacy values: two on workflow_instances, one each on the other
+	// six (including workflow_payloads, cleat#3344).
+	if total.Older != 8 || total.Rewrote != 8 {
+		t.Errorf("total: Older=%d Rewrote=%d, want 8 and 8", total.Older, total.Rewrote)
 	}
 	if total.Unreadable != 0 {
 		t.Errorf("total: Unreadable=%d, want 0", total.Unreadable)
@@ -269,13 +283,64 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 	}
 	assertNowDerivedAndBoundToOwnTenant(t, enc, "idempotency_keys.error_msg", tenant, foreign, gotIdem, idemPlain)
 
-	// Idempotent: a second sweep finds nothing left, across all six tables.
+	var gotPayloadErr string
+	if err := db.QueryRowContext(ctx,
+		`SELECT error_msg FROM workflow_payloads WHERE id = $1`, wfID).Scan(&gotPayloadErr); err != nil {
+		t.Fatalf("read back workflow_payloads: %v", err)
+	}
+	assertNowDerivedAndBoundToOwnTenant(t, enc, "workflow_payloads.error_msg", tenant, foreign, gotPayloadErr, payloadErrPlain)
+
+	// Idempotent: a second sweep finds nothing left, across all seven tables.
 	_, total2, err := resealSensitiveTables(ctx, db, enc, false, io.Discard)
 	if err != nil {
 		t.Fatalf("second resealSensitiveTables: %v", err)
 	}
 	if total2.Older != 0 || total2.Rewrote != 0 {
 		t.Errorf("second sweep still found work: Older=%d Rewrote=%d", total2.Older, total2.Rewrote)
+	}
+}
+
+// TestSensitiveTableSpecsNamesExactlyTheKnownSensitiveTables is cleat#3344's
+// second half: workflow_payloads carried the same sensitive columns as the
+// other six tables for two full steps of cleat#3245 Phase 3 before anything
+// noticed, because nothing checked sensitiveTableSpecs against the set of
+// tables that actually need it -- a table silently absent from the list was
+// reported as a clean sweep. This pins the set by name, so a table dropped
+// (or a new one added to the engine's write paths but never added here)
+// fails here first, rather than resealing six-of-seven and reporting success.
+//
+// Adding an eighth table on purpose means updating `want` here too -- that
+// is the point: the test forces the addition to be a deliberate, reviewed
+// line rather than a silent omission.
+func TestSensitiveTableSpecsNamesExactlyTheKnownSensitiveTables(t *testing.T) {
+	want := map[string]bool{
+		"workflow_instances":       true,
+		"workflow_signals":         true,
+		"workflow_promises":        true,
+		"workflow_update_requests": true,
+		"workflow_schedules":       true,
+		"idempotency_keys":         true,
+		"workflow_payloads":        true,
+	}
+
+	got := make(map[string]bool, len(sensitiveTableSpecs))
+	for _, spec := range sensitiveTableSpecs {
+		if got[spec.name] {
+			t.Fatalf("sensitiveTableSpecs names %q more than once", spec.name)
+		}
+		got[spec.name] = true
+	}
+
+	for name := range want {
+		if !got[name] {
+			t.Errorf("sensitiveTableSpecs is missing %q", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("sensitiveTableSpecs names %q, which is not in this test's "+
+				"known set -- update `want` deliberately if it is a genuine addition", name)
+		}
 	}
 }
 
