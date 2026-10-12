@@ -52,9 +52,20 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 	// the LIMIT -- the same relationship the old count had to the old claim.
 	// A registered queue at capacity is not runnable, exactly as it is not
 	// claimable.
+	// cleat#3245 Phase 3 step 3 piece B: the candidate scan now reads
+	// workflow_leases, not workflow_instances -- migration 018 added
+	// concurrency_key/concurrency_key_hash there for exactly this. Mirrors
+	// ClaimWorkflows' own candidate subquery below; keep the two in sync.
+	//
+	// The two nested "is the holder's run still live" EXISTS checks
+	// deliberately stay on workflow_instances, not workflow_leases: each is
+	// a single indexed point lookup by primary key, not a scan, so there is
+	// no TOAST/heartbeat-churn reason to move it -- and moving it would
+	// break TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite's
+	// dialect parity, since MySQL/MSSQL have no workflow_leases to move to.
 	var n int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT count(*) FROM workflow_instances w
+		SELECT count(*) FROM workflow_leases w
 		LEFT JOIN queues q ON q.tenant_id = w.tenant_id
 		                  AND q.name = w.concurrency_key
 		                  AND q.disabled_at IS NULL
@@ -164,7 +175,24 @@ func logClaimKeyDecision(log *slog.Logger, c claimCandidate, admitted bool) {
 	)
 }
 
+// ClaimWorkflows retries on PostgreSQL's two rollback-guaranteed SQLSTATEs --
+// see withPostgresRollbackGuaranteedRetry's doc comment (postgres_retry.go)
+// for why the claim UPDATE below can now deadlock where it could not before
+// cleat#3245 Phase 3 step 3 piece B's candidate-scan cutover.
 func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	var claimed []*WorkflowInstance
+	err := withPostgresRollbackGuaranteedRetry(ctx, "claim workflows", postgresTxRetries, postgresTxRetryDelay, func() error {
+		var err error
+		claimed, err = s.claimWorkflowsOnce(ctx, workerID, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
+func (s *PostgresStore) claimWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: begin: %w", err)
@@ -195,12 +223,29 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	// mutex; a registered queue re-counts under the lock and inserts a
 	// queue_holders row only if the count admits it. Both arms handle the
 	// re-claim case -- a run re-claiming its own held key after a lost fence.
+	// cleat#3245 Phase 3 step 3 piece B: the candidate scan (and the
+	// FOR UPDATE SKIP LOCKED lock that serialises concurrent claimers
+	// against each other) now reads workflow_leases, not workflow_instances
+	// -- migration 018 added concurrency_key/concurrency_key_hash there for
+	// exactly this. The claim UPDATE below is UNCHANGED: it still targets
+	// workflow_instances by id, and claimLeaseRows (already existing)
+	// mirrors its SET clause onto workflow_leases before commit, so the two
+	// tables agree by the time any other transaction can see this row.
+	//
+	// Moving the lock does not introduce a new race against ReapStaleInstances
+	// (piece A, also reading workflow_leases): a row eligible here has
+	// status IN ('ready','terminating'), and a row eligible for reaping has
+	// status='running' with a stale heartbeat -- disjoint, so the two never
+	// contend for the same row at the same logical moment, on either table.
+	//
+	// The nested "is the holder's run still live" EXISTS check below stays
+	// on workflow_instances -- see CountRunnableWorkflows' identical note.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT c.id, c.tenant_id, c.concurrency_key, c.concurrency_key_hash, c.registered
 		FROM (
 			SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
 			       q.name IS NOT NULL AS registered
-			FROM workflow_instances w
+			FROM workflow_leases w
 			LEFT JOIN queues q ON q.tenant_id = w.tenant_id
 			                  AND q.name = w.concurrency_key
 			                  AND q.disabled_at IS NULL
@@ -475,6 +520,11 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 	// A fresh admission, or a holder about to move to this worker. Either way,
 	// count OTHER holders: `<> $3` excludes this workflow's own row so a move
 	// (which changes no total) is not double-counted against the global cap.
+	// cleat#3245 Phase 3 step 3 piece B considered moving this liveness
+	// check to workflow_leases and did not: it is a single indexed point
+	// lookup, not the hot candidate scan piece B exists to move, and doing
+	// so would break TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite's
+	// dialect parity (MySQL/MSSQL have no workflow_leases).
 	var held int
 	err = tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM queue_holders qh
@@ -569,8 +619,25 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
 // that are sticky to this worker. Filters on sticky_worker_id to use the
 // idx_instances_sticky partial index for low-contention claiming.
-
+//
+// Retries on PostgreSQL's two rollback-guaranteed SQLSTATEs, same reason as
+// ClaimWorkflows above: the single CTE statement's UPDATE still acquires its
+// workflow_instances locks fresh, after the CTE's SKIP LOCKED has already
+// moved onto workflow_leases.
 func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	var claimed []*WorkflowInstance
+	err := withPostgresRollbackGuaranteedRetry(ctx, "claim sticky workflows", postgresTxRetries, postgresTxRetryDelay, func() error {
+		var err error
+		claimed, err = s.claimStickyWorkflowsOnce(ctx, workerID, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
+func (s *PostgresStore) claimStickyWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
@@ -580,18 +647,25 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	// CTE rather than an IN (SELECT ... LIMIT n) sublink, for consistency with
 	// ClaimWorkflows above -- see the note there, including why the
 	// EvalPlanQual explanation this comment used to give is wrong.
+	//
+	// cleat#3245 Phase 3 step 3 piece B: the candidate scan (and its
+	// FOR UPDATE SKIP LOCKED lock) now reads workflow_leases, not
+	// workflow_instances -- same reasoning as ClaimWorkflows above. The
+	// UPDATE below is unchanged: it still targets workflow_instances by id.
+	// The nested "is the holder's run still live" EXISTS check stays on
+	// workflow_instances -- see CountRunnableWorkflows' identical note.
 	rows, err := tx.QueryContext(ctx, `
 		WITH candidates AS (
-			SELECT id FROM workflow_instances
+			SELECT id FROM workflow_leases
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
 			  AND sticky_worker_id = $1
 			  AND task_queue = ANY($2)
-  AND (workflow_instances.concurrency_key_hash IS NULL
+  AND (workflow_leases.concurrency_key_hash IS NULL
        OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE (ck.key_hash = workflow_instances.concurrency_key_hash
-                         AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.workflow_id <> workflow_instances.id)
+                       WHERE (ck.key_hash = workflow_leases.concurrency_key_hash
+                         AND ck.tenant_id = workflow_leases.tenant_id
+                         AND ck.workflow_id <> workflow_leases.id)
                          AND EXISTS (SELECT 1 FROM workflow_instances wi
                                       WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
                                         AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))))
@@ -1172,6 +1246,26 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		policy string
 		query  string
 		args   []any
+		// leaseQuery mirrors this step's write onto workflow_leases, scoped
+		// by `id = ANY($1)` to the ids the query above just touched --
+		// cleat#3245 Phase 3 step 3 piece B (found by its own test suite,
+		// not by name: this bulk cascade never got a piece-4c/6c-style
+		// mirror when those pieces landed, so it was invisible as long as
+		// nothing read workflow_leases for these rows. Once ClaimWorkflows'
+		// candidate scan did, a cascade-terminated child's stale
+		// workflow_leases.status='ready' row read as claimable again, and
+		// the claim's own UPDATE set workflow_instances back to 'running'
+		// over an already-terminated workflow -- silent revival, not a
+		// test failure in the mechanism that caused it).
+		//
+		// Re-selecting by the ORIGINAL predicate here would be wrong: by
+		// the time this runs, the UPDATE above already changed
+		// workflow_instances.status, so a predicate keyed on the old status
+		// would match zero rows (TERMINATE arms) or the wrong set entirely.
+		// Scoping by the ids the first statement actually touched (captured
+		// via RETURNING, same pattern reapLeaseRows/claimLeaseRows use) is
+		// the only way the two statements agree on which rows they mean.
+		leaseQuery string
 	}{
 		// Both arms fence the child out. `generation = generation + 1` and
 		// `assigned_to = NULL` are not bookkeeping: without them a child that a
@@ -1263,7 +1357,14 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND NOT ` + deferPhaseOwedSQL + `
-	`, []any{parentWorkflowID, outcomeMsg}},
+		RETURNING id
+	`, []any{parentWorkflowID, outcomeMsg}, `
+		UPDATE workflow_leases
+		SET status = 'terminated',
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
+		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
+		WHERE id = ANY($1)
+	`},
 		{"TERMINATE (defer phase)", `
 		UPDATE workflow_instances
 		SET status = '` + statusTerminating + `',
@@ -1277,14 +1378,27 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND ` + deferPhaseOwedSQL + `
-	`, []any{parentWorkflowID, outcomeMsg}},
+		RETURNING id
+	`, []any{parentWorkflowID, outcomeMsg}, `
+		UPDATE workflow_leases
+		SET status = '` + statusTerminating + `',
+		    pending_terminal_status = 'terminated',
+		    defer_phase_deadline = ` + deferPhaseDeadlinePostgres + `,
+		    next_wake_at = now(),
+		    assigned_to = NULL,
+		    generation = generation + 1
+		WHERE id = ANY($1)
+	`},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-	`, []any{parentWorkflowID}},
+		RETURNING id
+	`, []any{parentWorkflowID}, `
+		UPDATE workflow_leases SET cancellation_requested = true WHERE id = ANY($1)
+	`},
 	}
 
 	// Collected before the UPDATE: see releaseTerminatedChildren for why not
@@ -1296,7 +1410,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 	}
 
 	for _, step := range steps {
-		if err := s.runParentClosePolicyStep(ctx, step.query, step.args...); err != nil {
+		if err := s.runParentClosePolicyStep(ctx, step.query, step.leaseQuery, step.args...); err != nil {
 			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a closed parent are unaffected by its close policy",
 				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
 			if step.policy == "TERMINATE" {
@@ -1348,15 +1462,30 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 	return scanWorkflowIDs(rows)
 }
 
-func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query string, args ...any) error {
+// runParentClosePolicyStep runs query (which must RETURN id), then mirrors
+// onto workflow_leases via leaseQuery -- scoped to exactly the ids query just
+// touched, passed as leaseQuery's sole `$1` (= ANY($1)) -- on the same tx.
+// leaseQuery == "" skips the mirror (no step needs that today, but the
+// escape hatch costs nothing to keep).
+func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, leaseQuery string, args ...any) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
 		return err
+	}
+	ids, err := scanWorkflowIDs(rows)
+	if err != nil {
+		return fmt.Errorf("scan touched ids: %w", err)
+	}
+	if leaseQuery != "" && len(ids) > 0 {
+		if _, err := tx.ExecContext(ctx, leaseQuery, pq.Array(ids)); err != nil {
+			return fmt.Errorf("mirror lease rows: %w", err)
+		}
 	}
 	return tx.Commit()
 }

@@ -221,6 +221,13 @@ func TestClaimStickyWorkflowsUpdatesTheLeaseRow(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE workflow_instances SET sticky_worker_id = $1 WHERE id = $2`, "worker-sticky-1", id); err != nil {
 		t.Fatalf("set sticky_worker_id: %v", err)
 	}
+	// cleat#3245 Phase 3 step 3 piece B: ClaimStickyWorkflows' candidate
+	// scan now reads sticky_worker_id from workflow_leases, not
+	// workflow_instances -- mirror the UPDATE above or the candidate never
+	// matches and the claim below returns nothing.
+	if _, err := db.ExecContext(ctx, `UPDATE workflow_leases SET sticky_worker_id = $1 WHERE id = $2`, "worker-sticky-1", id); err != nil {
+		t.Fatalf("set sticky_worker_id on workflow_leases: %v", err)
+	}
 
 	wfs, err := store.ClaimStickyWorkflows(ctx, "worker-sticky-1", 10)
 	if err != nil {

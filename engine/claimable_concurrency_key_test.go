@@ -88,9 +88,10 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	space := regexp.MustCompile(`\s+`)
 
 	// The mutex arm names the workflow row `w.` at the count/claim sites (which
-	// LEFT JOIN queues and alias it) and `workflow_instances.` at the
-	// sticky sites (which do not). Normalise both to `w.` so the
-	// copies compare equal.
+	// LEFT JOIN queues and alias it) and `workflow_instances.` (MySQL/MSSQL,
+	// unmoved) or `workflow_leases.` (PostgreSQL, cleat#3245 Phase 3 step 3
+	// piece B) at the sticky sites, which alias neither table. Normalise all
+	// three spellings to `w.` so the copies compare equal.
 	//
 	// Grab from "concurrency_key_hash IS NULL OR NOT EXISTS" to the ")" that
 	// closes the NOT EXISTS arm. Requires the expires_at test, which is what
@@ -141,7 +142,7 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		if err != nil {
 			t.Fatalf("read %s: %v", f.name, err)
 		}
-		src := strings.ReplaceAll(string(raw), "workflow_instances.", "w.")
+		src := strings.ReplaceAll(strings.ReplaceAll(string(raw), "workflow_instances.", "w."), "workflow_leases.", "w.")
 
 		mh := mutex.FindAllString(src, -1)
 		if len(mh) != f.mutexWant {

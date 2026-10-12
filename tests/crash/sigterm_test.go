@@ -518,6 +518,21 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 		WHERE id = $1`, wfID); err != nil {
 		t.Fatal(err)
 	}
+	// cleat#3245 Phase 3 step 3 piece B: mirror the claimability columns onto
+	// workflow_leases -- error_msg stays workflow_payloads-only (migration
+	// 016's split: workflow_leases carries only what claim/heartbeat/reclaim/
+	// fence care about), but status/pending_terminal_status/defer_phase_deadline/
+	// next_wake_at/assigned_to/generation are exactly what ClaimWorkflows'
+	// candidate scan reads now. Without this mirror the defer phase this test
+	// drives is invisible to any claim: confirmed by falsification (reverting
+	// this mirror reproduces "Cleanup was invoked 0 times within 1m0s, want 1").
+	if _, err := db.Exec(`UPDATE workflow_leases
+		SET status = 'terminating', pending_terminal_status = 'terminated',
+		    defer_phase_deadline = now() + interval '300 seconds',
+		    next_wake_at = now(), assigned_to = NULL, generation = generation + 1
+		WHERE id = $1`, wfID); err != nil {
+		t.Fatal(err)
+	}
 
 	// The worker claims the defer phase; the cleanup's first call fails and it is now in the 10s backoff.
 	svc.awaitCount(t, first, "Cleanup", 1, startBudget)

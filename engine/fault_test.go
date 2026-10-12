@@ -66,6 +66,13 @@ func TestFaultConcurrentClaim(t *testing.T) {
 		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
 		t.Fatalf("insert test instance: %v", err)
 	}
+	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflows' candidate scan now
+	// reads workflow_leases, not workflow_instances -- a raw INSERT into
+	// workflow_instances alone leaves no row there, and the claim below
+	// finds nothing to claim (the same "Expected exactly 1 claim, got 0"
+	// symptom this file's own deployFaultTestDef comment already recorded
+	// once, for an unrelated missing-FK reason).
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	var wg sync.WaitGroup
@@ -194,6 +201,7 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
 		t.Fatalf("insert test instance: %v", err)
 	}
+	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Worker A claims the instance.

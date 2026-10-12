@@ -357,6 +357,45 @@ func claimOne(t *testing.T, ctx context.Context, store engine.WorkflowStore, wor
 	return mine
 }
 
+// simulateCrashReclaim puts a workflow's row back the way a second worker's
+// reclaim (PostgresStore.ReapStaleInstances, engine/store_lifecycle.go) would
+// find it after a crash: shared by the three acceptance tests that simulate a
+// crash/reclaim this way (the ambiguity-lookup, idempotency-key-replay, and
+// fenced-execution crash-end-to-end tests).
+//
+// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflows now reads workflow_leases,
+// not workflow_instances, for its candidate scan. Before this helper existed,
+// each site's raw UPDATE touched workflow_instances alone, so workflow_leases
+// stayed in its claimed state -- a claim after the simulated crash could not
+// see the row as claimable, and failed with "was not claimed; got N
+// workflow(s)" (claimOne above), got(9) counting the other ready leases it
+// COULD see rather than this test's own row. Mirrored the same way
+// ReapStaleInstances' own reclaim mirrors onto workflow_leases (store_lifecycle.go's
+// reapLeaseRows), minus that function's pending_terminal_status CASE -- these
+// fixtures never set one, and the workflow_instances UPDATE these tests ran
+// before this helper existed never accounted for it either.
+//
+// Returns an error rather than calling t.Fatalf: the fenced-execution
+// acceptance test calls this from inside an httptest.Server handler's own
+// goroutine, where only t.Errorf (never Fatal) is safe.
+func simulateCrashReclaim(ctx context.Context, db *sql.DB, wfID string) error {
+	if _, err := db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		    generation = generation + 1, reclaim_count = reclaim_count + 1
+		WHERE id = $1`, wfID); err != nil {
+		return fmt.Errorf("workflow_instances: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		    generation = generation + 1, reclaim_count = reclaim_count + 1
+		WHERE id = $1`, wfID); err != nil {
+		return fmt.Errorf("workflow_leases mirror: %w", err)
+	}
+	return nil
+}
+
 func statusOf(t *testing.T, ctx context.Context, store engine.WorkflowStore, wfID string) string {
 	t.Helper()
 	wf, err := store.GetWorkflowByID(ctx, wfID)
