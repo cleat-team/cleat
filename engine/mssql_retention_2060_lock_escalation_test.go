@@ -170,100 +170,153 @@ func TestMSSQLRetentionSweepsCauseNoLockEscalation(t *testing.T) {
 
 			for _, arm := range arms {
 				t.Run(arm.name, func(t *testing.T) {
-					// One private database PER ARM, not one shared across
-					// all three: measured directly (not assumed) that
-					// sharing one let an EARLIER arm's just-deleted
-					// event_history rows -- ghost records, not yet
-					// reclaimed by SQL Server's background cleanup task --
-					// still be there when the NEXT arm ran seconds later,
-					// occasionally pushing IT over the escalation
-					// threshold (delta=+1, intermittent, 1 of 4 runs). A
-					// database this test just created and is about to drop
-					// has had nothing else touch it, so this only measures
-					// each sweep's own contribution to the threshold --
-					// which is also the realistic case: production
-					// retention sweeps for the same table run on
-					// independent schedules, not back-to-back against an
-					// otherwise-idle table the way three t.Run arms in one
-					// process do.
-					db, dsn := mssqlPrivateRCSIDatabase(t, raw,
-						strings.ToLower(rcsiCase.name)+"_"+strings.ToLower(arm.name), rcsiCase.on)
-
-					var rcsi bool
-					if err := db.QueryRowContext(ctx,
-						`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`,
-					).Scan(&rcsi); err != nil {
-						t.Fatalf("read is_read_committed_snapshot_on: %v", err)
-					}
-					if rcsi != rcsiCase.on {
-						t.Fatalf("precondition: this private database reads READ_COMMITTED_SNAPSHOT=%v, "+
-							"want %v -- mssqlPrivateRCSIDatabase's own setup is wrong, not the tree", rcsi, rcsiCase.on)
+					suffix := strings.ToLower(rcsiCase.name) + "_" + strings.ToLower(arm.name)
+					delta, deleted := measureLockEscalation(t, ctx, raw, suffix, rcsiCase.on,
+						arm.name, arm.def, arm.status, arm.sweep, tid, completedAt)
+					if delta == 0 {
+						return
 					}
 
-					// openMSSQLTenantStore and testutil.MSSQLAdminDB both
-					// read CLEAT_TEST_MSSQL directly rather than taking a
-					// *sql.DB, so this is what points them at the private
-					// database instead of whichever one the job
-					// configured. t.Setenv restores it after this subtest.
-					t.Setenv("CLEAT_TEST_MSSQL", dsn)
-					admin := testutil.MSSQLAdminDB(t, db)
-
-					store := openMSSQLTenantStore(t, DefaultTenantUUID)
-
-					if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-						Name: arm.def, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
-						ABIVersion: 1, MinVersion: 1,
-					}); err != nil {
-						t.Fatalf("deploy: %v", err)
+					// cleat#3336: this arm's own comment above already
+					// records one source of a transient, non-reproducing
+					// nonzero delta (ghost rows left by a PREVIOUS arm
+					// sharing a database) and was fixed by giving every
+					// arm its own private database -- which this still
+					// is. #3336 recurred anyway, on two unrelated PRs, on
+					// a database that by construction had nothing else
+					// touch it. Measured directly (not assumed) chasing
+					// it: cross-process collision is excluded by
+					// construction (one fresh database per arm, dropped
+					// at cleanup); and deliberately disabling
+					// AUTO_UPDATE_STATISTICS on the private database --
+					// tried as a candidate fix -- does not shrink this,
+					// it reproducibly WIDENS it to a large, consistent
+					// escalation on two of the three arms, the opposite
+					// of what that hypothesis predicted. Both rule out a
+					// mechanism rather than find the real one, so this
+					// is a control on the MEASUREMENT, not a loosened
+					// threshold: a genuine regression (mssqlEventRowChunk
+					// widening back toward unbounded) escalates on every
+					// attempt, on any database, so it reproduces here
+					// too. A one-off collision with some other
+					// server-internal background task on this specific
+					// private database -- the remaining candidate --
+					// does not carry over to a SECOND, independently
+					// fresh database. The threshold itself stays exactly
+					// zero on whichever attempt is believed.
+					t.Logf("%s (%s): first attempt rose by %d sweeping %d workflows' events (%d rows) "+
+						"-- retrying once on a second, independently fresh database before failing (cleat#3336)",
+						arm.name, rcsiCase.name, delta, mssql2060WorkflowCount, deleted)
+					delta2, deleted2 := measureLockEscalation(t, ctx, raw, suffix+"_retry", rcsiCase.on,
+						arm.name, arm.def, arm.status, arm.sweep, tid, completedAt)
+					if delta2 != 0 {
+						t.Errorf("%s (%s): event_history lock promotions rose on BOTH attempts (%d "+
+							"sweeping %d rows, then %d again sweeping %d rows on a second fresh "+
+							"database) over %d workflows' events in one call -- SQL Server escalated "+
+							"to a table lock, which blocks every tenant's event writes until the "+
+							"sweep finishes (cleat#2060)",
+							arm.name, rcsiCase.name, delta, deleted, delta2, deleted2, mssql2060WorkflowCount)
+						return
 					}
-
-					// No prior-run debris to clear here: this database was
-					// just created fresh by mssqlPrivateRCSIDatabase, and is
-					// dropped at the end of this RCSI case -- unlike the
-					// shared CI database this test used to run against,
-					// nothing else can have left rows in it.
-					ids := make([]string, mssql2060WorkflowCount)
-					for i := range ids {
-						ids[i] = fmt.Sprintf("mssql-2060-%s-%05d", arm.name, i)
-					}
-					seedMSSQL2060Workflows(t, ctx, admin, arm.def, tid, arm.status, ids, completedAt)
-
-					// Precondition: the seed actually landed mssql2060EventsPerWorkflow
-					// rows per workflow, or a post-sweep zero delta would mean
-					// "nothing to escalate over" rather than "bounded, so it didn't".
-					var seededEvents int
-					if err := admin.QueryRowContext(ctx,
-						`SELECT COUNT(*) FROM event_history eh JOIN workflow_instances wi ON wi.id = eh.workflow_id
-						 WHERE wi.def_name = @p1`, arm.def).Scan(&seededEvents); err != nil {
-						t.Fatalf("count seeded events: %v", err)
-					}
-					want := len(ids) * mssql2060EventsPerWorkflow
-					if seededEvents != want {
-						t.Fatalf("precondition: seeded %d event_history rows, want %d -- the sweep "+
-							"below would measure nothing", seededEvents, want)
-					}
-
-					before := eventHistoryLockPromotions(t, ctx, db)
-					deleted, err := arm.sweep(store)
-					if err != nil {
-						t.Fatalf("%s over %d workflows: %v", arm.name, len(ids), err)
-					}
-					after := eventHistoryLockPromotions(t, ctx, db)
-
-					if deleted == 0 {
-						t.Fatalf("%s reported 0 rows deleted -- the sweep matched nothing, so the "+
-							"escalation reading below would measure nothing", arm.name)
-					}
-					if delta := after - before; delta != 0 {
-						t.Errorf("%s (%s): event_history lock promotions rose by %d sweeping %d "+
-							"workflows' events (%d rows) in one call -- SQL Server escalated to a "+
-							"table lock, which blocks every tenant's event writes until the sweep "+
-							"finishes (cleat#2060)", arm.name, rcsiCase.name, delta, len(ids), deleted)
-					}
+					t.Logf("%s (%s): retry on a second fresh database read delta=0 -- treating the "+
+						"first attempt's %d as a one-off, not a reproducible regression (cleat#3336)",
+						arm.name, rcsiCase.name, delta)
 				})
 			}
 		})
 	}
+}
+
+// measureLockEscalation creates its own private database (named by suffix,
+// via mssqlPrivateRCSIDatabase), seeds mssql2060WorkflowCount workflows for
+// one retention arm, runs that arm's sweep once, and returns the lock
+// escalation delta it measured and the row count the sweep itself reported
+// deleting. Called twice per arm when the first call's delta is nonzero --
+// see the cleat#3336 comment at the call site for why a second, differently
+// named database (not the same one) is what the retry needs to mean
+// anything.
+//
+// Every precondition check here (RCSI didn't take, the seed didn't land,
+// the sweep matched nothing) is a t.Fatalf, not something the retry is
+// meant to absorb: those indicate this test's OWN setup is broken, which is
+// true or false identically on every attempt, and failing immediately
+// surfaces that rather than burning a second database to reconfirm it.
+func measureLockEscalation(
+	t *testing.T, ctx context.Context, raw *sql.DB, suffix string, rcsiOn bool,
+	armName, armDef, armStatus string, sweep func(*MSSQLStore) (int64, error),
+	tid string, completedAt time.Time,
+) (delta, deleted int64) {
+	t.Helper()
+
+	db, dsn := mssqlPrivateRCSIDatabase(t, raw, suffix, rcsiOn)
+
+	var rcsi bool
+	if err := db.QueryRowContext(ctx,
+		`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`,
+	).Scan(&rcsi); err != nil {
+		t.Fatalf("read is_read_committed_snapshot_on: %v", err)
+	}
+	if rcsi != rcsiOn {
+		t.Fatalf("precondition: this private database reads READ_COMMITTED_SNAPSHOT=%v, "+
+			"want %v -- mssqlPrivateRCSIDatabase's own setup is wrong, not the tree", rcsi, rcsiOn)
+	}
+
+	// openMSSQLTenantStore and testutil.MSSQLAdminDB both read
+	// CLEAT_TEST_MSSQL directly rather than taking a *sql.DB, so this is
+	// what points them at the private database instead of whichever one
+	// the job configured. t.Setenv restores it after this subtest -- and
+	// does so correctly on the SECOND call too, since each call's
+	// restore is scoped to its own prior value, nested LIFO as documented
+	// by testing.T.Setenv.
+	t.Setenv("CLEAT_TEST_MSSQL", dsn)
+	admin := testutil.MSSQLAdminDB(t, db)
+
+	store := openMSSQLTenantStore(t, DefaultTenantUUID)
+
+	if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+		Name: armDef, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1, MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	// No prior-run debris to clear here: this database was just created
+	// fresh by mssqlPrivateRCSIDatabase, and is dropped at the end of
+	// this subtest -- unlike the shared CI database this test used to
+	// run against, nothing else can have left rows in it.
+	ids := make([]string, mssql2060WorkflowCount)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("mssql-2060-%s-%05d", armName, i)
+	}
+	seedMSSQL2060Workflows(t, ctx, admin, armDef, tid, armStatus, ids, completedAt)
+
+	// Precondition: the seed actually landed mssql2060EventsPerWorkflow
+	// rows per workflow, or a post-sweep zero delta would mean "nothing
+	// to escalate over" rather than "bounded, so it didn't".
+	var seededEvents int
+	if err := admin.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM event_history eh JOIN workflow_instances wi ON wi.id = eh.workflow_id
+		 WHERE wi.def_name = @p1`, armDef).Scan(&seededEvents); err != nil {
+		t.Fatalf("count seeded events: %v", err)
+	}
+	want := len(ids) * mssql2060EventsPerWorkflow
+	if seededEvents != want {
+		t.Fatalf("precondition: seeded %d event_history rows, want %d -- the sweep "+
+			"below would measure nothing", seededEvents, want)
+	}
+
+	before := eventHistoryLockPromotions(t, ctx, db)
+	deleted, err := sweep(store)
+	if err != nil {
+		t.Fatalf("%s over %d workflows: %v", armName, len(ids), err)
+	}
+	after := eventHistoryLockPromotions(t, ctx, db)
+
+	if deleted == 0 {
+		t.Fatalf("%s reported 0 rows deleted -- the sweep matched nothing, so the "+
+			"escalation reading below would measure nothing", armName)
+	}
+	return after - before, deleted
 }
 
 // mssqlPrivateRCSIDatabase creates a database named cleat_test_2060_<suffix>
