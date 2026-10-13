@@ -29,6 +29,7 @@ cmd/cleatctl/droptenant.go	migrations/postgres/097
 cmd/cleatctl/droptenant.go	migrations/postgres/104
 cmd/cleatctl/droptenant_mssql.go	migrations/mssql/074
 cmd/cleatctl/droptenant_test.go	032_drop_tenant_deletes_tenant_data.sql
+cmd/cleatctl/every_subcommand_declares_its_dialects_test.go	008_operator_api_keys.sql
 cmd/cleatctl/every_subcommand_declares_its_dialects_test.go	migration 069
 cmd/cleatctl/ported.go	074_a_dropped_tenants_rows_go_with_it.sql
 cmd/cleatctl/ported.go	migrations/postgres/104
@@ -132,6 +133,7 @@ engine/mssql_tenant_settings_test.go	migration 103
 engine/mysql_lifecycle.go	010_idempotency_keys_tenant_id.sql
 engine/mysql_lifecycle.go	migration 058
 engine/mysql_ops.go	migrations/mssql/036
+engine/mysql_ops.go	migrations/mysql/005
 engine/mysql_tenant_settings.go	038_single_tenant_guard.sql
 engine/mysql_tenant_settings_test.go	038_single_tenant_guard.sql
 engine/plugin_secrets_test.go	migration 038
@@ -145,6 +147,7 @@ engine/rls_check.go	005_app_role.sql
 engine/rls_check_test.go	005_app_role.sql
 engine/rls_gap_concurrency_and_update_requests_test.go	031_rls_gap_concurrency_and_update_requests.sql
 engine/routine_definition_drift_test.go	004_fix_finalize_workflow_status_fence.sql
+engine/routine_definition_drift_test.go	migrations/mysql/004
 engine/schedule_tenant_test.go	005_app_role.sql
 engine/schedules_retire_through_disabled_at_test.go	migration 089
 engine/schema_doc_matches_the_database_test.go	migration 040
@@ -165,6 +168,7 @@ engine/tenant_secrets.go	migration 075
 engine/tenant_secrets.go	migration 081
 engine/testutil/migrations.go	migration 030
 engine/testutil/mssql_admin.go	075_the_admin_bypass_is_opt_in.sql
+engine/testutil/mssql_admin.go	migration 012
 engine/testutil/mssql_admin.go	migration 075
 engine/testutil/mssql_admin.go	migration 102
 engine/testutil/mssql_admin.go	migration 103
@@ -174,6 +178,7 @@ engine/testutil/plugin_backend.go	migration 103
 engine/testutil/schema.go	migration 073
 engine/testutil/schema_source_guard_test.go	migration 030
 engine/the_baseline_creates_the_cluster_scoped_objects_test.go	migration 077
+engine/the_documented_tenant_coverage_is_measured_test.go	008_operator_api_keys.sql
 engine/the_in_flight_query_runs_as_the_bypass_role_test.go	migration 073
 engine/the_plugin_grant_is_scoped_to_the_install_test.go	migration 066
 engine/the_plugin_grants_use_the_schema_the_registry_records_test.go	migration 066
@@ -191,6 +196,7 @@ migration/idempotency_tenant_test.go	010_idempotency_keys_tenant_id.sql
 migration/migrations_do_not_hardcode_the_schema_test.go	005_app_role.sql
 migration/minimum_server_version.go	077_a_plugin_policy_can_use_its_index.sql
 migration/minimum_server_version.go	migration 077
+migration/mssql_admin_role_test.go	migration 012
 migration/mssql_admin_role_test.go	migration 103
 migration/mssql_json_scalar_test.go	migration 103
 migration/mysql_event_columns_test.go	migration 030
@@ -211,12 +217,15 @@ migrations/postgres/004_scope_plugin_grants_to_the_install.sql	migration 066
 migrations/postgres/004_scope_plugin_grants_to_the_install.sql	migration 070
 plugin/crosstenant.go	migrations/postgres/063
 plugin/every_plugin_tenant_table_is_declared_tenant_scoped_test.go	migration 056
+plugin/migration.go	migration 012
 plugin/migration.go	migration 063
 plugin/no_plugin_write_casts_a_value_to_json_test.go	migrations/mysql/071
 plugin/plugin.go	migration 061
 plugin/tenant_role_password.go	migrations/postgres/064
 plugins/auditlog/audit_rows_are_scoped_to_their_tenant_test.go	migrations/postgres/063
+plugins/blobstore/blobstore_stale_refs_race_test.go	migration 012
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	038_single_tenant_guard.sql
+plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 012
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 035
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 075
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 102
@@ -227,6 +236,7 @@ plugins/eventtriggers/migrations.go	migrations/mysql/070
 plugins/featureflags/migrations.go	migrations/mysql/070
 plugins/jobqueue/background.go	migration 073
 plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	038_single_tenant_guard.sql
+plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 012
 plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 073
 plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 102
 plugins/jobqueue/migrations.go	migrations/mysql/070

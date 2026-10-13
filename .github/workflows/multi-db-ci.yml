@@ -316,6 +316,17 @@ jobs:
           set -o pipefail
           go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
 
+      # cleat#3348: found while re-compacting migrations/mysql/ that this
+      # script -- the known-positives for what migration/catalogdiff is
+      # structurally blind to on MySQL (a dropped trigger, a missing seed row,
+      # seed-insert order, column collation, a descending index silently
+      # becoming ascending, a dropped auto_increment) -- had zero callers
+      # anywhere in the tree. A condition with no verdict reads as done; this
+      # gives it one. Needs the real migrations/mysql/*.sql on disk and a live
+      # MySQL, which only this job has.
+      - name: MySQL baseline supplementary known-positives
+        run: scripts/check-mysql-baseline-positives.sh
+
       - name: Skip budget
         if: always()
         run: scripts/check-skip-budget.sh multi-db/mysql test-report.json

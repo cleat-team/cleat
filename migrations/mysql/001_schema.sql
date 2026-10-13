@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS event_history (
   promise_id varchar(255) DEFAULT NULL,
   promise_result text,
   promise_error text,
-  tenant_id char(36) DEFAULT NULL,
+  tenant_id char(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
   payload longtext,
   checksum text,
   thread_id varchar(255) NOT NULL DEFAULT 'main',
@@ -78,9 +78,9 @@ CREATE TABLE IF NOT EXISTS event_history (
   global_seq bigint NOT NULL DEFAULT '0',
   intent_at timestamp(6) NULL DEFAULT NULL,
   payload_encoding tinyint DEFAULT NULL COMMENT 'NULL = unknown (pre-cleat#1319 row), 1 = base64, 0 = plaintext',
-  PRIMARY KEY (workflow_id,step),
-  KEY idx_event_history_tenant_wf (tenant_id,workflow_id,step),
+  PRIMARY KEY (tenant_id,workflow_id,step),
   KEY idx_event_history_pending (intent_at,workflow_id,step),
+  KEY idx_event_history_workflow_fk (workflow_id,step),
   CONSTRAINT event_history_ibfk_1 FOREIGN KEY (workflow_id) REFERENCES workflow_instances (id) ON DELETE CASCADE,
   CONSTRAINT ck_event_history_payload CHECK (((payload is null) or json_valid(payload)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -97,6 +97,18 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   PRIMARY KEY (key_hash,tenant_id),
   KEY idx_idempotency_workflow_id (workflow_id),
   KEY idx_idempotency_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS operator_api_keys (
+  key_id char(36) NOT NULL,
+  key_hash varbinary(32) NOT NULL,
+  description varchar(1024) NOT NULL DEFAULT '',
+  created_at timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  disabled_at timestamp(6) NULL DEFAULT NULL,
+  expires_at timestamp(6) NULL DEFAULT NULL,
+  updated_at timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (key_id),
+  KEY idx_operator_api_keys_hash (key_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS orgs (
@@ -268,6 +280,7 @@ CREATE TABLE IF NOT EXISTS tenants (
   suspended tinyint(1) NOT NULL DEFAULT '0',
   singleton tinyint NOT NULL DEFAULT '1',
   org_id char(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+  allow_public_exposure tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (tenant_id),
   UNIQUE KEY uq_tenants_name (name),
   UNIQUE KEY uq_tenants_mysql_is_single_tenant_only_see_tiers_yaml_d1 (singleton),
@@ -284,6 +297,7 @@ CREATE TABLE IF NOT EXISTS workers (
   started_at timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   last_heartbeat_at timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   secret_key_versions varchar(255) DEFAULT NULL,
+  address varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (worker_id),
   KEY idx_workers_last_heartbeat (last_heartbeat_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -304,9 +318,13 @@ CREATE TABLE IF NOT EXISTS workflow_defs (
   disabled_at timestamp(6) NULL DEFAULT NULL,
   gc_eligible tinyint(1) NOT NULL DEFAULT '0',
   updated_at timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  exposure varchar(16) NOT NULL DEFAULT 'auth',
+  entry_point_schemas json DEFAULT NULL,
+  input_validation_disabled tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (tenant_id,name,version),
   KEY idx_defs_active (name,version),
-  KEY idx_defs_tenant_name_version (tenant_id,name,version)
+  KEY idx_defs_tenant_name_version (tenant_id,name,version),
+  CONSTRAINT ck_workflow_defs_exposure CHECK ((exposure in (_utf8mb4'public',_utf8mb4'auth',_utf8mb4'internal')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS workflow_instances (
@@ -358,6 +376,8 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
   completed_by varchar(255) DEFAULT NULL,
   run_max_workflow_duration_ms bigint DEFAULT NULL,
   history_swept_at timestamp(6) NULL DEFAULT NULL,
+  promise_seq bigint NOT NULL DEFAULT '0',
+  promise_seq_at_claim bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (id),
   KEY def_name (def_name,def_version),
   KEY idx_instances_ready (status,next_wake_at),
