@@ -133,6 +133,27 @@ var sensitiveTableSpecs = []tableSpec{
 		pkCols: []string{"key_hash", "tenant_id"},
 		cols:   []string{"error_msg"},
 	},
+	{
+		// cleat#3344: workflow_payloads carries the same sensitive columns
+		// as workflow_instances (migrations/postgres/016_workflow_leases_and_payloads.sql,
+		// extended by 018) but was missing from this list, so a reseal run
+		// reported success while leaving its ciphertext under the retired
+		// key. Re-derived, not copied from the issue, via the recipe this
+		// var's own doc comment gives: every
+		// encryptJSONColumnForStorage/encryptTextColumnForStorage call site
+		// that writes workflow_payloads (engine/store_lifecycle.go's
+		// writeResultPayload/writeErrorPayload/insertLeaseAndPayloadRows,
+		// engine/store_admin.go, engine/store_admin_rereplay.go) seals
+		// exactly these six columns. allowed_signals is also a
+		// workflow_payloads column (migration 016) but is plain JSON via
+		// encodeAllowedSignals, not one of the encrypt helpers, so it is
+		// deliberately not listed here.
+		name:   "workflow_payloads",
+		pkCols: []string{"id"},
+		cols: []string{
+			"input", "result", "error_msg", "error_code", "error_op", "query_state",
+		},
+	},
 }
 
 // resealTable runs resealPayloads's own algorithm against one table named by
