@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// cleat#3245 Phase 3 step 3 piece B's blocker, migration 018: every creation
+// cleat#3245 Phase 3 step 3 piece B's blocker, migration 018 (folded into migrations/postgres/001_schema.sql by #3358): every creation
 // path that writes one of migration 018's eight new columns onto
 // workflow_instances must now write the SAME value onto its
 // workflow_leases/workflow_payloads mirror, in the same transaction, via
@@ -45,11 +45,15 @@ func TestStartNewRunWithConcurrencyKeyMirrorsItOntoLeases(t *testing.T) {
 	instRow := readInstanceRow(t, db, runID)
 	leaseRow := readLeaseRow(t, db, runID)
 
-	if !instRow.concurrencyKey.Valid || instRow.concurrencyKey.String != "order-123" {
-		t.Fatalf("workflow_instances.concurrency_key = %+v, want valid %q (sanity on the existing write)", instRow.concurrencyKey, "order-123")
-	}
+	// cleat#3360 dropped concurrency_key (the text) from workflow_instances
+	// -- workflow_leases is the only copy left, so there is nothing to
+	// assert on instRow.concurrencyKey any more. concurrency_key_hash stays
+	// on workflow_instances for now (idx_instances_concurrency_key indexes
+	// it, and migrations/postgres/001_schema.sql is frozen -- see
+	// engine/db.go's UpdateStickyWorker), so the byte-identical check below
+	// still holds.
 	if !leaseRow.concurrencyKey.Valid || leaseRow.concurrencyKey.String != "order-123" {
-		t.Errorf("workflow_leases.concurrency_key = %+v, want valid %q", leaseRow.concurrencyKey, "order-123")
+		t.Fatalf("workflow_leases.concurrency_key = %+v, want valid %q", leaseRow.concurrencyKey, "order-123")
 	}
 	if len(instRow.concurrencyKeyHash) == 0 {
 		t.Fatal("workflow_instances.concurrency_key_hash is empty (sanity on the existing write)")

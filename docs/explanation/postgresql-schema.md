@@ -130,6 +130,17 @@ that prose yet — not that the column does not exist.
 Tracks individual workflow execution state. Serves as both state store and
 work queue.
 
+cleat#3360 dropped five columns steps 2-3 of the `workflow_leases`/
+`workflow_payloads` split (cleat#3245 Phase 3) made redundant here --
+`cancellation_requested`, `cancellation_reason`, `compacted_at`,
+`plugin_vers`, `concurrency_key` (the text; `concurrency_key_hash` stays).
+`sticky_worker_id` and `concurrency_key_hash` were considered too and
+deferred: `001_schema.sql` indexes both, and that file is byte-verified
+against a frozen historical baseline, so dropping them now would break
+`TestShippedSchema_IsIdempotent`'s replay check. See
+`migrations/postgres/004_drop_now_redundant_workflow_instances_columns.sql`
+for the full reasoning.
+
 ```sql
 CREATE TABLE workflow_instances (
     id TEXT NOT NULL,
@@ -142,8 +153,6 @@ CREATE TABLE workflow_instances (
     next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
-    cancellation_requested BOOLEAN NOT NULL DEFAULT false,
-    cancellation_reason TEXT,
     result JSONB,
     error_msg TEXT,
     error_code TEXT,
@@ -156,9 +165,7 @@ CREATE TABLE workflow_instances (
     tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     task_queue TEXT NOT NULL DEFAULT 'default',
     compaction_state JSONB,
-    compacted_at TIMESTAMPTZ,
     compaction_step INTEGER,
-    plugin_vers JSONB NOT NULL DEFAULT '{}',
     event_count BIGINT NOT NULL DEFAULT 0,
     allowed_signals JSONB,
     priority INTEGER NOT NULL DEFAULT 0,
@@ -174,7 +181,6 @@ CREATE TABLE workflow_instances (
     promise_seq_at_claim BIGINT NOT NULL DEFAULT 0,
     reclaim_count BIGINT NOT NULL DEFAULT 0,
     started_at TIMESTAMPTZ,
-    concurrency_key TEXT,
     concurrency_key_hash BYTEA,
     run_wasm_instance_timeout_ms BIGINT,
     run_wasm_wall_clock_ceiling_ms BIGINT,
@@ -205,8 +211,6 @@ that prose yet — not that the column does not exist.
 | `next_wake_at` | TIMESTAMPTZ | When to retry (sleep/suspend/resume deadline) |
 | `result` | JSONB | Workflow result (if completed) |
 | `error_msg` | TEXT | Error message (if failed) |
-| `cancellation_requested` | BOOLEAN | Whether cancellation has been requested |
-| `cancellation_reason` | TEXT | Reason for cancellation |
 | `parent_workflow_id` | TEXT | Parent workflow for child workflows |
 | `query_state` | JSONB | Queryable workflow state |
 | `tenant_id` | UUID | The owning tenant. **This is how tenancy is stored** — there is no `namespace` column and never has been; the doc claimed one until cleat#1093. Row-level security policies key off this, and it is part of the foreign key into `workflow_defs`. |
@@ -228,7 +232,8 @@ that prose yet — not that the column does not exist.
   when the query's predicate implies its filter.
 - `idx_instances_heartbeat` on `(assigned_to)` WHERE `status = 'running'` --
   serves `HeartbeatBatchFenced`'s per-worker lookup. Carried `heartbeat_at`
-  too until migration 015; that column was never read by any query this
+  too until migration 015 (folded into migrations/postgres/001_schema.sql by
+  #3358); that column was never read by any query this
   index serves, and dropping it is one half of what makes a heartbeat
   UPDATE eligible to be HOT (see `idx_instances_stale` below, and
   cleat#3245/#3272/#3274 -- dropping only this one does nothing by itself).

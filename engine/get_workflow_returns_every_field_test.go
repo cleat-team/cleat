@@ -123,7 +123,7 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 	// Literals rather than bound parameters: the values are fixed and
 	// test-controlled, and binding twenty of them across three placeholder
 	// dialects buys nothing here.
-	stmt := `UPDATE workflow_instances SET ` + strings.Join([]string{
+	cols := []string{
 		`status = 'done'`,
 		`assigned_to = 'worker-everyfield'`,
 		`result = '{"r":1}'`,
@@ -137,12 +137,6 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 		`pending_terminal_status = 'failed'`,
 		`continued_from = 'wf-previous'`,
 		`parent_workflow_id = 'wf-parent'`,
-		// SQL Server has no boolean: cancellation_requested is a BIT there and
-		// a boolean on the other two, so the literal differs. Everything else
-		// in this list is dialect-neutral, which is why this is the only entry
-		// that needs a helper.
-		`cancellation_requested = ` + trueLiteral(store),
-		`cancellation_reason = 'INCIDENT-4242 operator cancelled'`,
 		// cleat#1118. Set here like any other column: the guard's contract is
 		// that a row with every column non-zero produces a struct with every
 		// field non-zero, and completed_by is a column of this row like the rest.
@@ -150,7 +144,23 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 		`completed_at = ` + nowLiteral(store),
 		`started_at = ` + nowLiteral(store),
 		`next_wake_at = ` + nowLiteral(store),
-	}, ", ") + ` WHERE id = ` + ph
+	}
+	// cleat#3360 dropped cancellation_requested/cancellation_reason from
+	// workflow_instances on Postgres -- the workflow_leases mirror below
+	// already sets both, which is the copy GetWorkflowByID/ListWorkflows
+	// read there. MySQL and SQL Server are untouched, so they still need
+	// both set here, the only copy they have.
+	if _, ok := store.(*PostgresStore); !ok {
+		cols = append(cols,
+			// SQL Server has no boolean: cancellation_requested is a BIT
+			// there and a boolean on the other two, so the literal differs.
+			// Everything else in this list is dialect-neutral, which is why
+			// this is the only entry that needs a helper.
+			`cancellation_requested = `+trueLiteral(store),
+			`cancellation_reason = 'INCIDENT-4242 operator cancelled'`,
+		)
+	}
+	stmt := `UPDATE workflow_instances SET ` + strings.Join(cols, ", ") + ` WHERE id = ` + ph
 
 	if _, err := db.Exec(stmt, id); err != nil {
 		t.Fatalf("populating every column: %v", err)

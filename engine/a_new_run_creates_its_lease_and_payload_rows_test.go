@@ -39,7 +39,7 @@ func newRunTestStore(t *testing.T) (*PostgresStore, *sql.DB) {
 // assigned_to and the rest come later pieces, and asserting on them here
 // would assert on columns this change does not touch.
 //
-// The six fields below concurrencyKey were added for migration 018
+// The six fields below concurrencyKey were added for migration 018 (folded into migrations/postgres/001_schema.sql by #3358)
 // (cleat#3245 Phase 3 step 3 piece B's blocker): concurrencyKey/
 // concurrencyKeyHash/parentWorkflowID/continuedFrom/runWasmInstanceTimeoutMs
 // mirror workflow_instances columns of the same shape that existed before
@@ -77,16 +77,24 @@ func readLeaseRow(t *testing.T, db *sql.DB, id string) leaseAndPayloadRow {
 	return r
 }
 
+// readInstanceRow leaves concurrencyKey zero-valued: cleat#3360 dropped
+// concurrency_key (the text) from workflow_instances -- workflow_leases has
+// been its only reader since piece B. concurrencyKeyHash is still read here:
+// concurrency_key_hash stays on workflow_instances for now, because
+// idx_instances_concurrency_key (migrations/postgres/001_schema.sql) indexes
+// it and 001 is frozen -- see engine/db.go's UpdateStickyWorker for the full
+// reasoning. Callers that need concurrencyKey read readLeaseRow's copy
+// instead.
 func readInstanceRow(t *testing.T, db *sql.DB, id string) leaseAndPayloadRow {
 	t.Helper()
 	var r leaseAndPayloadRow
 	if err := db.QueryRow(`
 		SELECT tenant_id::text, task_queue, priority, status, next_wake_at,
-		       concurrency_key, concurrency_key_hash, parent_workflow_id, continued_from,
+		       concurrency_key_hash, parent_workflow_id, continued_from,
 		       run_wasm_instance_timeout_ms
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&r.tenantID, &r.taskQueue, &r.priority, &r.status, &r.nextWake,
-		&r.concurrencyKey, &r.concurrencyKeyHash, &r.parentWorkflowID, &r.continuedFrom,
+		&r.concurrencyKeyHash, &r.parentWorkflowID, &r.continuedFrom,
 		&r.runInstanceMs); err != nil {
 		t.Fatalf("read workflow_instances for %s: %v", id, err)
 	}

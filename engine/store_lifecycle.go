@@ -53,7 +53,7 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 	// A registered queue at capacity is not runnable, exactly as it is not
 	// claimable.
 	// cleat#3245 Phase 3 step 3 piece B: the candidate scan now reads
-	// workflow_leases, not workflow_instances -- migration 018 added
+	// workflow_leases, not workflow_instances -- migration 018 (folded into migrations/postgres/001_schema.sql by #3358) added
 	// concurrency_key/concurrency_key_hash there for exactly this. Mirrors
 	// ClaimWorkflows' own candidate subquery below; keep the two in sync.
 	//
@@ -1409,13 +1409,20 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		SET error_msg = $2, error_op = 'parent_close', error_code = NULL
 		WHERE id = ANY($1)
 	`},
+		// cancellation_requested/cancellation_reason were dropped from
+		// workflow_instances (cleat#3360): CheckCancellation has read
+		// workflow_leases exclusively since piece D, so workflow_leases is
+		// the only copy left to set. This step's query no longer writes
+		// anything on workflow_instances -- it only needs to find and lock
+		// the matching rows, the same way childrenClosedByTerminate does,
+		// so that a concurrent writer can't change parent_close_policy or
+		// status out from under the mirror write below.
 		{"REQUEST_CANCEL", `
-		UPDATE workflow_instances
-		SET cancellation_requested = true
+		SELECT id FROM workflow_instances
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-		RETURNING id
+		FOR UPDATE
 	`, []any{parentWorkflowID}, `
 		UPDATE workflow_leases SET cancellation_requested = true WHERE id = ANY($1)
 	`, ""},
@@ -1958,13 +1965,21 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		// ordering is the whole of cleat#1534.
 
 		// Insert the workflow instance.
+		// cleat#3360: concurrency_key (the text) dropped from
+		// workflow_instances -- nothing read it there, only
+		// concurrency_key_hash via the candidate scan's own column (and
+		// that scan reads workflow_leases now, not workflow_instances
+		// either). concurrency_key_hash stays for now: it is still
+		// written here, because idx_instances_concurrency_key
+		// (migrations/postgres/001_schema.sql) indexes it, and 001 is
+		// frozen -- see UpdateStickyWorker's identical note in db.go.
 		var resolvedTaskQueue string
 		err = tx.QueryRowContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 			VALUES ($1, $2, $3, 'ready', $4,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond',
-			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
+			CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
 			RETURNING task_queue
 		`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
 		if err != nil {
@@ -1990,13 +2005,16 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	}
 	defer tx.Rollback()
 
+	// cleat#3360: same drop as the idempotency-key branch above -- only
+	// concurrency_key (the text) is gone from workflow_instances;
+	// concurrency_key_hash stays, for idx_instances_concurrency_key's sake.
 	var resolvedTaskQueue string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 		VALUES ($1, $2, $3, 'ready', $4,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
 			$5, $6, now() - INTERVAL '1 millisecond',
-			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
+			CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
 		RETURNING task_queue
 	`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
 	if err != nil {
@@ -2121,7 +2139,7 @@ func (s *PostgresStore) completeLeaseRow(ctx context.Context, tx *sql.Tx, workfl
 // cleat#2312) so the two tables carry identical ciphertext rather than two
 // independent encryptions of the same plaintext.
 //
-// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 --
+// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 (folded into migrations/postgres/001_schema.sql by #3358) --
 // covers CompleteWorkflow and ContinueAsNew's old-run completion, both of
 // which call this.
 func (s *PostgresStore) writeResultPayload(ctx context.Context, tx *sql.Tx, workflowID string, sealedResult, sealedQS any) error {
@@ -2191,7 +2209,7 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	// than picking arbitrarily.
 	//
 	// cleat#3245 Phase 3 step 3 piece A: the candidate scan now reads
-	// workflow_leases, not workflow_instances. Phase 2 (migration 015)
+	// workflow_leases, not workflow_instances. Phase 2 (migration 015 (folded into migrations/postgres/001_schema.sql by #3358))
 	// dropped heartbeat_at from every workflow_instances index to make the
 	// heartbeat UPDATE HOT-eligible, so this scan has done a full table scan
 	// plus an in-memory sort of the whole 'running' set since -- the

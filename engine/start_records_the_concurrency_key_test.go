@@ -13,10 +13,11 @@ import (
 // A run started with a concurrency key carries that key on its own row, written
 // by the INSERT that created it.
 //
-// cleat#1186. The claim predicate added in #1214 reads
-// workflow_instances.concurrency_key_hash; until something writes it the column
-// is NULL on every production row and the predicate defers nothing. This is the
-// write side.
+// cleat#1186. The claim predicate added in #1214 reads concurrency_key_hash
+// (workflow_leases on Postgres since piece B, workflow_instances on MySQL/SQL
+// Server, which have no workflow_leases table); until something writes it the
+// column is NULL on every production row and the predicate defers nothing.
+// This is the write side.
 //
 // # Why the INSERT and not a second statement
 //
@@ -110,11 +111,18 @@ func TestAStartWithAConcurrencyKeyRecordsItOnTheRow(t *testing.T) {
 // test would put them on every JSON response the API serves -- a visible API
 // change made for an invisible reason. The columns are what this test is about,
 // so it reads the columns.
+//
+// Postgres reads workflow_leases: cleat#3360 dropped concurrency_key/
+// concurrency_key_hash from workflow_instances there, since
+// acquireCandidateConcurrencyKey's predicate has read workflow_leases
+// exclusively since piece B and nothing else on workflow_instances ever read
+// them. MySQL and SQL Server have no workflow_leases table, so they keep
+// reading workflow_instances, which still carries the columns.
 func readConcurrencyKeyColumns(t *testing.T, store WorkflowStore, id string) (string, []byte) {
 	t.Helper()
 	db := rawDBOf(t, store)
 	q := map[Dialect]string{
-		DialectPostgres: `SELECT concurrency_key, concurrency_key_hash FROM workflow_instances WHERE id = $1`,
+		DialectPostgres: `SELECT concurrency_key, concurrency_key_hash FROM workflow_leases WHERE id = $1`,
 		DialectMySQL:    `SELECT concurrency_key, concurrency_key_hash FROM workflow_instances WHERE id = ?`,
 		DialectMSSQL:    `SELECT concurrency_key, concurrency_key_hash FROM workflow_instances WHERE id = @p1`,
 	}[dialectOf(t, store)]

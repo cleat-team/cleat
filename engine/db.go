@@ -784,7 +784,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	// cleat#3245 Phase 3 step 3 piece F: workflow_leases JOIN workflow_payloads,
 	// not workflow_instances. def_name, def_version, input, result, error_msg,
 	// error_code, error_op, trace_id and completed_at are on l's payloads side
-	// (trace_id and completed_at since migration 020); every other column
+	// (trace_id and completed_at since migration 020 (folded into migrations/postgres/001_schema.sql by #3358)); every other column
 	// below is leases-only. id and tenant_id exist on both and are qualified
 	// to l's copy -- the join predicate makes them equal, RLS makes both
 	// sides' tenant_id the caller's own.
@@ -1140,9 +1140,12 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 		return fmt.Errorf("compact history: delete: %w", err)
 	}
 
+	// cleat#3360: compacted_at had no reader anywhere -- not even the
+	// payloads mirror this table was never given -- so it was dropped from
+	// workflow_instances rather than kept write-only.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET compaction_state = $1, compacted_at = now(), compaction_step = $2
+		SET compaction_state = $1, compaction_step = $2
 		WHERE id = $3 AND generation = $4
 	`, compactionState, compactionStep, workflowID, gen)
 	if err != nil {
@@ -1445,14 +1448,25 @@ func (s *PostgresStore) UpdateStickyWorker(ctx context.Context, workflowID, work
 	// The asymmetry IS the design. Before filing one of these, check which
 	// layer holds the property up: the answer is in the migration, not in the
 	// Go, and `FOR ALL` is the word that decides it.
+	// cleat#3245 Phase 3 step 2 piece 6a: mirror onto workflow_leases, on the
+	// same tx. cleat#3360 considered dropping workflow_instances'
+	// sticky_worker_id -- claimStickyWorkflowsOnce's candidate scan has read
+	// workflow_leases exclusively since piece B, so nothing READS this copy
+	// any more -- and did NOT: idx_instances_sticky (migrations/postgres/
+	// 001_schema.sql) is a partial index on this exact column, and 001 is
+	// byte-verified against a frozen historical baseline
+	// (scripts/verify-postgres-baseline.py), so it cannot be edited to drop
+	// the index alongside the column. Re-applying 001 after a migration that
+	// dropped the column would then fail re-creating that index on a replay
+	// (column does not exist) -- TestShippedSchema_IsIdempotent catches
+	// this. Deferred to the next baseline regeneration, which will fold the
+	// drop in without that conflict. See migrations/postgres/004_*.sql.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET sticky_worker_id = $2 WHERE id = $1
 	`, workflowID, workerID)
 	if err != nil {
 		return fmt.Errorf("update sticky worker: %w", err)
 	}
-	// cleat#3245 Phase 3 step 2 piece 6a: mirror onto workflow_leases, on the
-	// same tx.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases SET sticky_worker_id = $2 WHERE id = $1
 	`, workflowID, workerID); err != nil {
@@ -1478,7 +1492,8 @@ func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string
 		return fmt.Errorf("clear sticky worker: %w", err)
 	}
 	// cleat#3245 Phase 3 step 2 piece 6a: mirror onto workflow_leases, on the
-	// same tx.
+	// same tx. cleat#3360: NOT dropped from workflow_instances -- see
+	// UpdateStickyWorker's note above.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases SET sticky_worker_id = NULL WHERE id = $1
 	`, workflowID); err != nil {
@@ -1749,8 +1764,9 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 // NOT change what --retention-days deletes -- same predicate, same rows --
 // it adds bookkeeping alongside the delete.
 //
-// The third loop clears compaction_state/compaction_step/compacted_at for the
-// same workflows. Those columns are on workflow_instances, which finalize does
+// The third loop clears compaction_state/compaction_step for the same
+// workflows (compacted_at too, until cleat#3360 dropped it -- see
+// ClearExpiredCompactionState). Those columns are on workflow_instances, which finalize does
 // not touch, so this half is live -- and its RowsAffected is deliberately NOT
 // added to the return value. Summing them would make the metric count two
 // different things in one number: deleted event_history rows and updated
@@ -1844,8 +1860,10 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 	return totalDeleted, nil
 }
 
-// ClearExpiredCompactionState clears compaction bookkeeping -- compaction_state,
-// compaction_step, compacted_at -- on terminal workflows older than the cutoff.
+// ClearExpiredCompactionState clears compaction bookkeeping -- compaction_state
+// and compaction_step -- on terminal workflows older than the cutoff.
+// compacted_at was a third column here until cleat#3360 dropped it from
+// workflow_instances: nothing ever read it, on this table or anywhere else.
 //
 // SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
 // tidiness. It used to be a second loop inside that function whose RowsAffected
@@ -1878,7 +1896,7 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
+			SET compaction_state = NULL, compaction_step = NULL
 			WHERE id IN (
 				SELECT id`+pgExpiredCompactionState+`
 				LIMIT 10000
@@ -2110,7 +2128,7 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	`, workflowID, finalStatus); err != nil {
 		return fmt.Errorf("%s workflow: mirror lease: %w", finalStatus, err)
 	}
-	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020.
+	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 (folded into migrations/postgres/001_schema.sql by #3358).
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_payloads SET error_msg = $2, completed_at = now() WHERE id = $1
 	`, workflowID, reason); err != nil {

@@ -236,11 +236,14 @@ func TestWorkflowInstanceColumnsAreEncrypted(t *testing.T) {
 	if err := store.RequestCancellation(ctx, runID3, reasonMarker); err != nil {
 		t.Fatalf("RequestCancellation: %v", err)
 	}
+	// cleat#3360 dropped cancellation_reason from workflow_instances --
+	// RequestCancellation has written workflow_leases exclusively since,
+	// and CheckCancellation (below) has read it exclusively since piece D.
 	var rawReason string
-	if err := db.QueryRow(`SELECT cancellation_reason FROM workflow_instances WHERE id = $1`, runID3).Scan(&rawReason); err != nil {
+	if err := db.QueryRow(`SELECT cancellation_reason FROM workflow_leases WHERE id = $1`, runID3).Scan(&rawReason); err != nil {
 		t.Fatalf("read raw cancellation_reason: %v", err)
 	}
-	assertSealed(t, "workflow_instances.cancellation_reason", rawReason, reasonMarker, reasonMarker)
+	assertSealed(t, "workflow_leases.cancellation_reason", rawReason, reasonMarker, reasonMarker)
 
 	cancelled, gotReason, err := store.CheckCancellation(ctx, runID3)
 	if err != nil {

@@ -85,9 +85,20 @@ func TestAClaimDefersARunWhoseConcurrencyKeyIsHeld(t *testing.T) {
 			// row from a session with no tenant context, so an unpinned UPDATE
 			// matches zero rows and reports success. The RowsAffected check
 			// below is what turns that into a failure instead of a silent pass.
+			// cleat#3360 dropped concurrency_key (the text) from
+			// workflow_instances on Postgres -- concurrency_key_hash stays
+			// there for now (see migrations/postgres/004_*.sql), but the
+			// text itself is workflow_leases-only, written in the mirror
+			// below. $1 and $2 both carry `key` (the call below passes
+			// `key, key, id`, shared with the mysql/mssql arms that still
+			// use all three) -- $1 is referenced redundantly alongside $2
+			// only because PostgreSQL requires every bound placeholder
+			// number to be used somewhere or it cannot infer that
+			// parameter's type ("could not determine data type of
+			// parameter $1", measured).
 			seed := map[string]string{
-				"postgres": `UPDATE workflow_instances SET concurrency_key = $1,
-				        concurrency_key_hash = (SELECT key_hash FROM concurrency_keys WHERE key_text = $2)
+				"postgres": `UPDATE workflow_instances SET
+				        concurrency_key_hash = (SELECT key_hash FROM concurrency_keys WHERE key_text = $1 AND key_text = $2)
 				  WHERE id = $3`,
 				"mysql": `UPDATE workflow_instances SET concurrency_key = ?,
 				        concurrency_key_hash = (SELECT key_hash FROM (SELECT key_hash FROM concurrency_keys WHERE key_text = ?) k)

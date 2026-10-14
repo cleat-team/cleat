@@ -103,18 +103,11 @@ func TestRequestCancellationUpdatesTheLeaseRow(t *testing.T) {
 	if !lease.cancellationRequested {
 		t.Errorf("workflow_leases.cancellation_requested = false, want true")
 	}
-
-	var instReason sql.NullString
-	if err := db.QueryRow(`SELECT cancellation_reason FROM workflow_instances WHERE id = $1`, id).Scan(&instReason); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	// Byte-identical rather than decrypted-and-compared: whatever
-	// RequestCancellation sealed (cleat#2312) is reused, not re-sealed, so
-	// the two tables carry identical bytes regardless of whether encryption
-	// is configured in this test environment.
-	if lease.cancellationReason.Valid != instReason.Valid || lease.cancellationReason.String != instReason.String {
-		t.Errorf("workflow_leases.cancellation_reason = %v, want byte-identical to workflow_instances' %v",
-			lease.cancellationReason, instReason)
+	// cleat#3360 dropped cancellation_requested/cancellation_reason from
+	// workflow_instances -- RequestCancellation has written workflow_leases
+	// exclusively since, so there is no second copy left to compare against.
+	if !lease.cancellationReason.Valid || lease.cancellationReason.String == "" {
+		t.Errorf("workflow_leases.cancellation_reason = %v, want a sealed value", lease.cancellationReason)
 	}
 }
 

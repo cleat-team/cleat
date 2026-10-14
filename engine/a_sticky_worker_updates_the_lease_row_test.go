@@ -12,6 +12,17 @@ import (
 // ClearStickyWorker now mirror sticky_worker_id onto workflow_leases, on the
 // same tx as the workflow_instances write.
 //
+// cleat#3360 considered dropping sticky_worker_id from workflow_instances --
+// claimStickyWorkflowsOnce's candidate scan has read workflow_leases
+// exclusively since piece B, so nothing reads this column there any more --
+// and did not: idx_instances_sticky (migrations/postgres/001_schema.sql) is
+// a partial index on this exact column, and 001 is byte-verified against a
+// frozen historical baseline (scripts/verify-postgres-baseline.py), so it
+// cannot be edited to drop the index alongside the column. Deferred to the
+// next baseline regeneration -- see engine/db.go's UpdateStickyWorker for
+// the full reasoning. Both tables still carry the column, so this file is
+// unchanged.
+//
 // Seeds workflow_instances/workflow_leases/workflow_payloads directly via SQL
 // -- the same independent-testability pattern pieces 1-5b established --
 // rather than depending on any other piece's code.
