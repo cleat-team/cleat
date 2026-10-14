@@ -178,17 +178,21 @@ type routineDefinition struct {
 // routineEndRe marks where a routine's definition text stops, per dialect, read
 // off the migrations rather than assumed:
 //
-//	postgres  $$ LANGUAGE plpgsql;   (migrations/postgres/004:146)
+//	postgres  $$ LANGUAGE plpgsql;   (migrations/postgres/004_fix_finalize_workflow_status_fence.sql:146)
 //	mysql     END //                 (migrations/mysql/004_fix_finalize_workflow_status_fence.sql:134)
 //	mssql     END;                   (migrations/mssql/004_fix_finalize_workflow_status_fence.sql:153)
 //
-// Both of those were cleat#1986's own finding: 004_fix_finalize_workflow_status_fence.sql
+// All three were cleat#1986's own finding: 004_fix_finalize_workflow_status_fence.sql
 // is long retired (docs/contributor/migrations.md's "compaction" section), and the bare
 // "migrations/mysql/004" / "migrations/mssql/004" form this comment used to cite is a
 // NUMBER, not a file -- so cleat#1986's new, unrelated 004_workflow_defs_exposure_class.sql
 // at that same number silently satisfied scripts/check-postgres-migration-citations.py's
 // is_real() check by coincidence, with this comment still describing a file that does not
-// exist. Naming the retired filename explicitly is what keeps the citation correctly
+// exist. The postgres line above had the identical defect, uncaught until cleat#3360's own
+// 004_drop_now_redundant_workflow_instances_columns.sql repeated the collision -- the bare
+// "migrations/postgres/004" this comment cited was satisfied a SECOND time, by coincidence,
+// by a migration with nothing to do with finalize_workflow_status. Naming the retired
+// filename explicitly, on every dialect's line, is what keeps the citation correctly
 // dangling (and correctly baselined as historical) regardless of what a later migration
 // happens to be numbered.
 //
