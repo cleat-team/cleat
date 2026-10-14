@@ -87,8 +87,7 @@ BEGIN
                   AND generation = p_generation;
 
                 -- cleat#3245 Phase 3 step 3 piece F: completed_at added,
-                -- migration 020 (folded into migrations/postgres/001_schema.sql
-                -- by #3358).
+                -- migration 020.
                 UPDATE workflow_payloads
                 SET result = p_result::jsonb, query_state = p_query_state, completed_at = now()
                 WHERE id = p_workflow_id;
