@@ -87,7 +87,8 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		return fmt.Errorf("finalize defer phase: mirror lease: %w", err)
 	}
 	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration
-	// 020. This DOES need its own workflow_payloads write, unlike the
+	// 020 (folded into migrations/postgres/001_schema.sql by #3358). This
+	// DOES need its own workflow_payloads write, unlike the
 	// status-only lease mirror above: completed_at was never written at
 	// mark time (there is no completed_at concept yet at that point), so
 	// unlike result/error_msg/error_code/error_op, nothing else sets it.
@@ -226,8 +227,7 @@ func mirrorExpiredDeferPhaseLeases(ctx context.Context, tx *sql.Tx, expired []ex
 }
 
 // mirrorExpiredDeferPhasePayloads mirrors ExpireDeferPhases' completed_at
-// write (migration 020 (folded into migrations/postgres/001_schema.sql
-// by #3358), cleat#3245 Phase 3 step 3 piece F) onto
+// write (migration 020, cleat#3245 Phase 3 step 3 piece F) onto
 // workflow_payloads for exactly the rows the workflow_instances UPDATE just
 // touched. Same gap-avoidance shape as mirrorExpiredDeferPhaseLeases: it
 // takes the ids the first UPDATE already returned rather than re-deriving

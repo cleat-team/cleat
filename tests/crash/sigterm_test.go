@@ -520,7 +520,8 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 	}
 	// cleat#3245 Phase 3 step 3 piece B: mirror the claimability columns onto
 	// workflow_leases -- error_msg stays workflow_payloads-only (migration
-	// 016's split: workflow_leases carries only what claim/heartbeat/reclaim/
+	// 016's split (folded into migrations/postgres/001_schema.sql by
+	// #3358): workflow_leases carries only what claim/heartbeat/reclaim/
 	// fence care about), but status/pending_terminal_status/defer_phase_deadline/
 	// next_wake_at/assigned_to/generation are exactly what ClaimWorkflows'
 	// candidate scan reads now. Without this mirror the defer phase this test
