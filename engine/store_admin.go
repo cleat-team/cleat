@@ -310,7 +310,8 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	// cleat#3245 Phase 3 step 3 piece C: this read stays on workflow_instances
 	// -- explicitly NOT cut over to workflow_leases, unlike adminResolveMiss
 	// just below. Two independent reasons: compaction_state is not a
-	// workflow_leases column (migration 016's split), and this FOR UPDATE's
+	// workflow_leases column (migration 016 (folded into
+	// migrations/postgres/001_schema.sql by #3358)'s split), and this FOR UPDATE's
 	// lock is reused by the workflow_instances UPDATE later in this same
 	// transaction (adminForceMark's or the inline one-phase arm's). Moving
 	// the lock to workflow_leases while that later write stays on

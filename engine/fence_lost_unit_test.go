@@ -128,7 +128,8 @@ func (c *fenceFakeConn) ExecContext(_ context.Context, query string, _ []driver.
 // for the new run is matched by substring and given three columns -- id and
 // task_queue from cleat#3245 Phase 3 step 2 piece 4d (task_queue captured so
 // insertLeaseAndPayloadRows, piece 1, does not re-evaluate the task_queue
-// subquery), parent_workflow_id from migration 018 (inherited value,
+// subquery), parent_workflow_id from migration 018 (folded into
+// migrations/postgres/001_schema.sql by #3358) (inherited value,
 // captured the same way, nil here since this fake has no real parent
 // chain). Every other QueryContext call (e.g. childrenClosedByTerminate's
 // single-column workflow_id list) gets the original one-column shape:

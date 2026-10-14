@@ -103,7 +103,8 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 	// cleat#3245 Phase 3 step 2 piece 4c: mirror onto
 	// workflow_leases/workflow_payloads, same tx, same predicate (minus
 	// tenant_id, which RLS already enforces on workflow_leases via the
-	// identical tenant_isolation_leases policy, migration 016) as the
+	// identical tenant_isolation_leases policy, migration 016 (folded into
+	// migrations/postgres/001_schema.sql by #3358)) as the
 	// workflow_instances UPDATE above, which has already confirmed the
 	// fence held (n > 0, checked above).
 	if _, err := tx.ExecContext(ctx, `

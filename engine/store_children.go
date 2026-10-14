@@ -56,7 +56,8 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	// an upsert, so claiming one silently touched zero rows on the lease
 	// side.
 	//
-	// resolvedDefVersion (migration 018) is captured via RETURNING rather
+	// resolvedDefVersion (migration 018 (folded into
+	// migrations/postgres/001_schema.sql by #3358)) is captured via RETURNING rather
 	// than re-evaluated, for the same reason resolvedTaskQueue already was
 	// -- the INSERT above resolves an unspecified version through its own
 	// MAX(version) subquery, and a second subquery here could read a

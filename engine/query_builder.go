@@ -136,7 +136,8 @@ func (d Dialect) batchLimit(limitPos int) string {
 //
 // MySQL and SQL Server are unaffected: they still read workflow_instances
 // whole through workflowInstanceColumns below, because the migration 016
-// split was Postgres-only (see that migration's own comment on why, and
+// (folded into migrations/postgres/001_schema.sql by #3358) split was
+// Postgres-only (see that migration's own comment on why, and
 // ARCHITECTURE.md's note on the three dialects carrying this split
 // unevenly).
 func postgresWorkflowListJoinColumns() string {

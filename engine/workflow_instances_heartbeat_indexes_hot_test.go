@@ -1,7 +1,8 @@
 package engine
 
 // cleat#3245 Phase 2 (combined #3272 + #3274, owner decision 2026-10-09: "one
-// combined PR"). Asserts the schema facts migration 015 is supposed to
+// combined PR"). Asserts the schema facts migration 015 (folded into
+// migrations/postgres/001_schema.sql by #3358) is supposed to
 // produce -- not the HOT ratio or WAL cost themselves, which were measured
 // manually on a synthetic population (see cleat#3272's design-note comment)
 // and are not re-asserted here: a HOT ratio depends on pg_stat_user_tables,

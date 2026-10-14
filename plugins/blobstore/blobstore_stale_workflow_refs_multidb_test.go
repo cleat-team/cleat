@@ -170,7 +170,8 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 				doneRunID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert done workflow_instances on %s: %v", be.Name, err)
 			}
-			// cleat#3245: workflow_leases is PostgreSQL-only (migration 016),
+			// cleat#3245: workflow_leases is PostgreSQL-only (migration 016
+			// (folded into migrations/postgres/001_schema.sql by #3358)),
 			// so this mirror -- needed once piece B cuts ClaimWorkflow's own
 			// reads over -- only applies on that backend. Inlined rather than
 			// testutil.SeedWorkflowLease, which takes a *sql.DB and fixtureDB

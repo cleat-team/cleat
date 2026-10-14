@@ -371,7 +371,8 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 		tenant, "q-"+tag, wfID); err != nil {
 		t.Fatalf("seed queue_holders(%s): %v", tag, err)
 	}
-	// cleat#3245 Phase 3 step 1 (migration 016). Same shape as concurrency_keys
+	// cleat#3245 Phase 3 step 1 (migration 016 (folded into
+	// migrations/postgres/001_schema.sql by #3358)). Same shape as concurrency_keys
 	// and queue_holders above: reaches the tenant by ON DELETE CASCADE from
 	// workflow_instances, not by a DELETE admin.drop_tenant names, and nothing
 	// outside this test's own fixture writes to either table yet -- dual-write

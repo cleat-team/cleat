@@ -226,7 +226,8 @@ func mirrorExpiredDeferPhaseLeases(ctx context.Context, tx *sql.Tx, expired []ex
 }
 
 // mirrorExpiredDeferPhasePayloads mirrors ExpireDeferPhases' completed_at
-// write (migration 020, cleat#3245 Phase 3 step 3 piece F) onto
+// write (migration 020 (folded into migrations/postgres/001_schema.sql
+// by #3358), cleat#3245 Phase 3 step 3 piece F) onto
 // workflow_payloads for exactly the rows the workflow_instances UPDATE just
 // touched. Same gap-avoidance shape as mirrorExpiredDeferPhaseLeases: it
 // takes the ids the first UPDATE already returned rather than re-deriving

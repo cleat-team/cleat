@@ -13,7 +13,8 @@ import (
 // workflow_payloads rows, same tx, same insertLeaseAndPayloadRows helper
 // piece 1's startNewRun already uses -- neither ever did before this. Every
 // child workflow started through either method has had no lease/payload row
-// at all since migration 016 landed; claimLeaseRows (piece 2) is a plain
+// at all since migration 016 (folded into migrations/postgres/001_schema.sql
+// by #3358) landed; claimLeaseRows (piece 2) is a plain
 // UPDATE, not an upsert, so claiming one silently touched zero rows on the
 // lease side with no error to notice by.
 //

@@ -84,7 +84,8 @@ var dropTenantTables = []struct {
 }{
 	{"workflow_instances", `SELECT count(*) FROM workflow_instances WHERE tenant_id = $1`},
 	// ON DELETE CASCADE from workflow_instances.id, via
-	// migrations/postgres/016_workflow_leases_and_payloads.sql (cleat#3245
+	// migrations/postgres/016_workflow_leases_and_payloads.sql (folded into
+	// migrations/postgres/001_schema.sql by #3358) (cleat#3245
 	// Phase 3 step 1). Listed for the count, as queue_holders is above: a
 	// dropped tenant's lease and payload rows go with its workflow_instances,
 	// and the operator wants to see that. PostgreSQL-only, like

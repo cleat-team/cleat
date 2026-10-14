@@ -59,7 +59,8 @@ the per-query predicate is the whole of the isolation there."
 Measured 2026-09-17 against live databases built by running `migrations/` to
 head, read from the catalogs (`pg_class`, `pg_policies`,
 `sys.security_predicates`) rather than from the SQL files. **Updated
-2026-10-09 for cleat#3245 Phase 3 step 1 (migration 016,
+2026-10-09 for cleat#3245 Phase 3 step 1 (migration 016 (folded into
+migrations/postgres/001_schema.sql by #3358),
 `workflow_leases`/`workflow_payloads`), which is PostgreSQL only -- SQL
 Server and MySQL are unchanged, so the three dialects no longer carry the
 same tenant-bearing table count.**

@@ -79,7 +79,8 @@ func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID s
 	if err != nil {
 		return err
 	}
-	// cleat#3245 Phase 3 step 3 piece F, migration 020: mirror onto
+	// cleat#3245 Phase 3 step 3 piece F, migration 020 (folded into
+	// migrations/postgres/001_schema.sql by #3358): mirror onto
 	// workflow_payloads, same tx. trace_id is written exactly once, here,
 	// so unlike every other piece F write site there is no pre-existing
 	// lease/payload mirror call to extend -- this is the only writer.
