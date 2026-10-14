@@ -53,10 +53,6 @@ func TestEveryOperatorStatementCarriesItsDialect(t *testing.T) {
 var (
 	createTableRE = regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.]+)`)
 	targetTableRE = regexp.MustCompile(`(?i)(?:INSERT\s+INTO|FROM|UPDATE)\s+([A-Za-z0-9_.]+)`)
-
-	sqlStringRE       = regexp.MustCompile(`'(?:[^']|'')*'`)
-	sqlBlockCommentRE = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	sqlLineCommentRE  = regexp.MustCompile(`(?m)--.*$`)
 )
 
 // stripLiteralsAndComments removes string literals and SQL comments from a
@@ -72,25 +68,72 @@ var (
 // the table name. It reported four statements targeting the wrong table on a
 // tree where every one of them was right.
 //
-// COMMENTS COME FIRST HERE, and that is a deliberate departure from CLAUDE.md's
-// ordering (strings, then comments), which exists so a `--` inside a string
-// literal cannot truncate a line and hide real code to its left. Applied to
-// these files it does the opposite: SQL migration prose is dense with possessive
-// apostrophes ("MySQL's application identity", "cleat's"), so a string-first
-// pass pairs the apostrophe in a COMMENT with the next one anywhere below it and
-// swallows everything between -- including the CREATE TABLE. Measured: the first
-// version of this function removed the statement and reported the file as having
-// zero of them.
+// USED TO BE three separate regex passes -- block comments, then line
+// comments, then strings -- run in that order deliberately, because SQL
+// migration prose is dense with possessive apostrophes ("MySQL's application
+// identity", "cleat's") and a strings-first pass pairs the apostrophe in a
+// COMMENT with the next one anywhere below it, swallowing everything between.
+// That ordering's own stated residual risk was "a literal containing a
+// comment marker, which would truncate its line... and if it ever did, the
+// count assertion below fails rather than passing quietly" -- which undersold
+// the blast radius. cleat#3347's consolidated 001_schema.sql folds in a
+// RAISE NOTICE message that contains the literal text "--claim-strategy=rotate"
+// (describing a CLI flag, not opening a comment); the line-comment regex ran
+// first, had no way to know it was inside an open string, and deleted
+// everything from there to end of line -- including that string's own closing
+// quote. The count assertion DID fail, loud as designed, but the damage was
+// not contained to that one truncated literal: every string match after it in
+// the file was now off by one quote, and the ones in between paired a real
+// string's closing quote with the NEXT real string's opening quote, reporting
+// the literal CODE between two unrelated strings -- including the CREATE TABLE
+// this guard was looking for -- as if it were string content. A single file
+// with the offending RAISE NOTICE never showed this: the corruption was
+// contained by the file boundary the compaction removed.
 //
-// The residual risk of the other order is a literal containing a comment marker,
-// which would truncate its line. It cannot hide the statement this guard looks
-// for -- a CREATE TABLE does not appear inside a string -- and if it ever did,
-// the count assertion below fails rather than passing quietly. The loud
-// direction, chosen on purpose.
+// A single pass that tracks comment/string context as it goes has no such
+// ordering dilemma -- a "--" seen while inside a string is just two ordinary
+// characters, and an apostrophe seen while inside a comment is too, because
+// each context's own scan does not look for the other's markers at all.
 func stripLiteralsAndComments(s string) string {
-	s = sqlBlockCommentRE.ReplaceAllString(s, " ")
-	s = sqlLineCommentRE.ReplaceAllString(s, "")
-	return sqlStringRE.ReplaceAllString(s, "''")
+	var out strings.Builder
+	i, n := 0, len(s)
+	for i < n {
+		switch {
+		case s[i] == '-' && i+1 < n && s[i+1] == '-':
+			for i < n && s[i] != '\n' {
+				i++
+			}
+		case s[i] == '/' && i+1 < n && s[i+1] == '*':
+			i += 2
+			for i+1 < n && !(s[i] == '*' && s[i+1] == '/') {
+				i++
+			}
+			if i+1 < n {
+				i += 2
+			} else {
+				i = n
+			}
+			out.WriteByte(' ')
+		case s[i] == '\'':
+			i++
+			for i < n {
+				if s[i] == '\'' {
+					if i+1 < n && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			out.WriteString("''")
+		default:
+			out.WriteByte(s[i])
+			i++
+		}
+	}
+	return out.String()
 }
 
 // bareTable drops a schema qualifier, because MySQL cannot express one.

@@ -60,10 +60,11 @@ func TestMigrationsDoNotHardcodeTheSchema(t *testing.T) {
 	// still a failure -- an allowlist keyed on the filename would exempt the
 	// file rather than the line.
 	allowed := map[string]string{
-		`WHERE schemaname = 'public'`:                                "063: rewrites the pre-#1278 kv_store policy, and the databases that have one ran under the plugin search_path pin, so their kv_store is in public by construction",
-		`DROP POLICY kv_store_tenant_isolation ON public.kv_store;`:  "063: same",
-		`CREATE POLICY kv_store_tenant_isolation ON public.kv_store`: "063: same",
-		`CHECK (exposure IN ('public', 'auth', 'internal'));`:        "005 (cleat#1986): 'public' here is one of three exposure-class VALUES in a CHECK constraint, not the schema -- the bare-word regex cannot tell a string literal from a schema name",
+		`WHERE schemaname = 'public'`:                                                                                           "063: rewrites the pre-#1278 kv_store policy, and the databases that have one ran under the plugin search_path pin, so their kv_store is in public by construction",
+		`DROP POLICY kv_store_tenant_isolation ON public.kv_store;`:                                                             "063: same",
+		`CREATE POLICY kv_store_tenant_isolation ON public.kv_store`:                                                            "063: same",
+		`CHECK (exposure IN ('public', 'auth', 'internal'));`:                                                                   "005 (cleat#1986): 'public' here is one of three exposure-class VALUES in a CHECK constraint, not the schema -- the bare-word regex cannot tell a string literal from a schema name",
+		`CONSTRAINT ck_workflow_defs_exposure CHECK ((exposure = ANY (ARRAY['public'::text, 'auth'::text, 'internal'::text])))`: "001 (cleat#3347): same constraint as 005's cleat#1986 entry, re-rendered by pg_dump during the baseline rebaseline -- pg_dump emits CHECK(x IN (...)) as CHECK(x = ANY(ARRAY[...])), with each value cast ('public'::text), so the exact-text allowlist key from the pre-dump source does not match the post-dump one",
 	}
 
 	var findings []string

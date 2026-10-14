@@ -1,7 +1,8 @@
 -- cleat consolidated schema (001)
 --
 -- GENERATED from a pg_dump of the database built by the previous
--- migrations/postgres chain, then wrapped by hand. cleat#2059.
+-- migrations/postgres chain, then wrapped by hand. cleat#2059, re-compacted
+-- cleat#3347.
 --
 -- Every CREATE TABLE carries its FINAL column set -- the dump has already
 -- applied every ALTER TABLE ADD COLUMN, so there is nothing to fold by hand.
@@ -171,6 +172,16 @@ CREATE SEQUENCE IF NOT EXISTS workflow_signals_id_seq
     NO MAXVALUE
     CACHE 1;
 
+CREATE TABLE IF NOT EXISTS admin.operator_api_keys (
+    key_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    key_hash bytea NOT NULL,
+    description text DEFAULT ''::text NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS admin.orgs (
     org_id uuid DEFAULT gen_random_uuid() NOT NULL,
     name text NOT NULL,
@@ -218,7 +229,8 @@ CREATE TABLE IF NOT EXISTS admin.tenants (
     display_name text DEFAULT ''::text NOT NULL,
     created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     suspended boolean DEFAULT false NOT NULL,
-    org_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL
+    org_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
+    allow_public_exposure boolean DEFAULT false NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS admin.workers (
@@ -229,7 +241,8 @@ CREATE TABLE IF NOT EXISTS admin.workers (
     connection_budget integer DEFAULT 0 NOT NULL,
     started_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     last_heartbeat_at TIMESTAMPTZ DEFAULT now() NOT NULL,
-    secret_key_versions text
+    secret_key_versions text,
+    address text DEFAULT ''::text NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS concurrency_keys (
@@ -309,6 +322,12 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 );
 
 ALTER TABLE ONLY idempotency_keys FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS payload_encryption_ever_enabled (
+    singleton boolean DEFAULT true NOT NULL,
+    enabled_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT payload_encryption_ever_enabled_singleton_check CHECK (singleton)
+);
 
 CREATE TABLE IF NOT EXISTS plugin_defs (
     name text NOT NULL,
@@ -422,7 +441,11 @@ CREATE TABLE IF NOT EXISTS workflow_defs (
     plugin_deps jsonb DEFAULT '{}'::jsonb NOT NULL,
     disabled_at TIMESTAMPTZ,
     gc_eligible boolean DEFAULT false NOT NULL,
-    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    exposure text DEFAULT 'auth'::text NOT NULL,
+    entry_point_schemas jsonb,
+    input_validation_disabled boolean DEFAULT false NOT NULL,
+    CONSTRAINT ck_workflow_defs_exposure CHECK ((exposure = ANY (ARRAY['public'::text, 'auth'::text, 'internal'::text])))
 );
 
 ALTER TABLE ONLY workflow_defs FORCE ROW LEVEL SECURITY;
@@ -476,13 +499,53 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     completed_by text,
     run_max_workflow_duration_ms bigint,
     history_swept_at TIMESTAMPTZ,
+    promise_seq bigint DEFAULT 0 NOT NULL,
+    promise_seq_at_claim bigint DEFAULT 0 NOT NULL,
     CONSTRAINT ck_wi_run_instance_timeout_positive CHECK (((run_wasm_instance_timeout_ms IS NULL) OR (run_wasm_instance_timeout_ms > 0))),
     CONSTRAINT ck_wi_run_max_workflow_duration_positive CHECK (((run_max_workflow_duration_ms IS NULL) OR (run_max_workflow_duration_ms > 0))),
     CONSTRAINT ck_wi_run_retry_budget_positive CHECK (((run_host_retry_budget_ms IS NULL) OR (run_host_retry_budget_ms > 0))),
     CONSTRAINT ck_wi_run_wall_clock_positive CHECK (((run_wasm_wall_clock_ceiling_ms IS NULL) OR (run_wasm_wall_clock_ceiling_ms > 0)))
-);
+)
+WITH (fillfactor='70');
 
 ALTER TABLE ONLY workflow_instances FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS workflow_leases (
+    id text NOT NULL,
+    tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
+    task_queue text DEFAULT 'default'::text NOT NULL,
+    priority integer DEFAULT 0 NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    status text DEFAULT 'ready'::text NOT NULL,
+    assigned_to text,
+    heartbeat_at TIMESTAMPTZ,
+    next_wake_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    generation bigint DEFAULT 0 NOT NULL,
+    pending_terminal_status text,
+    defer_phase_deadline TIMESTAMPTZ,
+    sticky_worker_id text,
+    reclaim_count bigint DEFAULT 0 NOT NULL,
+    started_at TIMESTAMPTZ,
+    signal_seq bigint DEFAULT 0 NOT NULL,
+    signal_seq_at_claim bigint DEFAULT 0 NOT NULL,
+    signal_consumed_seq bigint DEFAULT 0 NOT NULL,
+    signal_consumed_at_claim bigint DEFAULT 0 NOT NULL,
+    promise_seq bigint DEFAULT 0 NOT NULL,
+    promise_seq_at_claim bigint DEFAULT 0 NOT NULL,
+    cancellation_requested boolean DEFAULT false NOT NULL,
+    cancellation_reason text,
+    completed_by text,
+    concurrency_key text,
+    concurrency_key_hash bytea,
+    parent_workflow_id text,
+    continued_from text,
+    run_wasm_instance_timeout_ms bigint,
+    run_wasm_wall_clock_ceiling_ms bigint,
+    run_host_retry_budget_ms bigint,
+    run_max_workflow_duration_ms bigint
+);
+
+ALTER TABLE ONLY workflow_leases FORCE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS workflow_memory_samples (
     id bigint NOT NULL,
@@ -504,6 +567,28 @@ CREATE TABLE IF NOT EXISTS workflow_memory_stats (
 );
 
 ALTER TABLE ONLY workflow_memory_stats FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS workflow_payloads (
+    id text NOT NULL,
+    tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
+    input jsonb DEFAULT '{}'::jsonb NOT NULL,
+    result jsonb,
+    query_state jsonb DEFAULT '{}'::jsonb,
+    compaction_state jsonb,
+    compacted_at TIMESTAMPTZ,
+    compaction_step integer,
+    plugin_vers jsonb DEFAULT '{}'::jsonb NOT NULL,
+    allowed_signals jsonb,
+    error_msg text,
+    error_code text,
+    error_op text,
+    def_name text,
+    def_version integer,
+    trace_id text,
+    completed_at TIMESTAMPTZ
+);
+
+ALTER TABLE ONLY workflow_payloads FORCE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS workflow_promises (
     workflow_id text NOT NULL,
@@ -801,6 +886,14 @@ ALTER TABLE ONLY workflow_memory_samples ALTER COLUMN id SET DEFAULT nextval('wo
 ALTER TABLE ONLY workflow_signals ALTER COLUMN id SET DEFAULT nextval('workflow_signals_id_seq'::regclass);
 
 DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'operator_api_keys_pkey'
+                   AND conrelid = 'admin.operator_api_keys'::regclass) THEN
+        ALTER TABLE ONLY admin.operator_api_keys
+            ADD CONSTRAINT operator_api_keys_pkey PRIMARY KEY (key_id);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'orgs_name_key'
                    AND conrelid = 'admin.orgs'::regclass) THEN
         ALTER TABLE ONLY admin.orgs
@@ -905,10 +998,530 @@ DO $do$ BEGIN
 END $do$;
 
 DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p0_pkey'
+                   AND conrelid = 'event_history_p0'::regclass) THEN
+        ALTER TABLE ONLY event_history_p0
+            ADD CONSTRAINT event_history_p0_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p10_pkey'
+                   AND conrelid = 'event_history_p10'::regclass) THEN
+        ALTER TABLE ONLY event_history_p10
+            ADD CONSTRAINT event_history_p10_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p11_pkey'
+                   AND conrelid = 'event_history_p11'::regclass) THEN
+        ALTER TABLE ONLY event_history_p11
+            ADD CONSTRAINT event_history_p11_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p12_pkey'
+                   AND conrelid = 'event_history_p12'::regclass) THEN
+        ALTER TABLE ONLY event_history_p12
+            ADD CONSTRAINT event_history_p12_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p13_pkey'
+                   AND conrelid = 'event_history_p13'::regclass) THEN
+        ALTER TABLE ONLY event_history_p13
+            ADD CONSTRAINT event_history_p13_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p14_pkey'
+                   AND conrelid = 'event_history_p14'::regclass) THEN
+        ALTER TABLE ONLY event_history_p14
+            ADD CONSTRAINT event_history_p14_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p15_pkey'
+                   AND conrelid = 'event_history_p15'::regclass) THEN
+        ALTER TABLE ONLY event_history_p15
+            ADD CONSTRAINT event_history_p15_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p16_pkey'
+                   AND conrelid = 'event_history_p16'::regclass) THEN
+        ALTER TABLE ONLY event_history_p16
+            ADD CONSTRAINT event_history_p16_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p17_pkey'
+                   AND conrelid = 'event_history_p17'::regclass) THEN
+        ALTER TABLE ONLY event_history_p17
+            ADD CONSTRAINT event_history_p17_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p18_pkey'
+                   AND conrelid = 'event_history_p18'::regclass) THEN
+        ALTER TABLE ONLY event_history_p18
+            ADD CONSTRAINT event_history_p18_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p19_pkey'
+                   AND conrelid = 'event_history_p19'::regclass) THEN
+        ALTER TABLE ONLY event_history_p19
+            ADD CONSTRAINT event_history_p19_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p1_pkey'
+                   AND conrelid = 'event_history_p1'::regclass) THEN
+        ALTER TABLE ONLY event_history_p1
+            ADD CONSTRAINT event_history_p1_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p20_pkey'
+                   AND conrelid = 'event_history_p20'::regclass) THEN
+        ALTER TABLE ONLY event_history_p20
+            ADD CONSTRAINT event_history_p20_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p21_pkey'
+                   AND conrelid = 'event_history_p21'::regclass) THEN
+        ALTER TABLE ONLY event_history_p21
+            ADD CONSTRAINT event_history_p21_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p22_pkey'
+                   AND conrelid = 'event_history_p22'::regclass) THEN
+        ALTER TABLE ONLY event_history_p22
+            ADD CONSTRAINT event_history_p22_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p23_pkey'
+                   AND conrelid = 'event_history_p23'::regclass) THEN
+        ALTER TABLE ONLY event_history_p23
+            ADD CONSTRAINT event_history_p23_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p24_pkey'
+                   AND conrelid = 'event_history_p24'::regclass) THEN
+        ALTER TABLE ONLY event_history_p24
+            ADD CONSTRAINT event_history_p24_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p25_pkey'
+                   AND conrelid = 'event_history_p25'::regclass) THEN
+        ALTER TABLE ONLY event_history_p25
+            ADD CONSTRAINT event_history_p25_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p26_pkey'
+                   AND conrelid = 'event_history_p26'::regclass) THEN
+        ALTER TABLE ONLY event_history_p26
+            ADD CONSTRAINT event_history_p26_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p27_pkey'
+                   AND conrelid = 'event_history_p27'::regclass) THEN
+        ALTER TABLE ONLY event_history_p27
+            ADD CONSTRAINT event_history_p27_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p28_pkey'
+                   AND conrelid = 'event_history_p28'::regclass) THEN
+        ALTER TABLE ONLY event_history_p28
+            ADD CONSTRAINT event_history_p28_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p29_pkey'
+                   AND conrelid = 'event_history_p29'::regclass) THEN
+        ALTER TABLE ONLY event_history_p29
+            ADD CONSTRAINT event_history_p29_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p2_pkey'
+                   AND conrelid = 'event_history_p2'::regclass) THEN
+        ALTER TABLE ONLY event_history_p2
+            ADD CONSTRAINT event_history_p2_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p30_pkey'
+                   AND conrelid = 'event_history_p30'::regclass) THEN
+        ALTER TABLE ONLY event_history_p30
+            ADD CONSTRAINT event_history_p30_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p31_pkey'
+                   AND conrelid = 'event_history_p31'::regclass) THEN
+        ALTER TABLE ONLY event_history_p31
+            ADD CONSTRAINT event_history_p31_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p32_pkey'
+                   AND conrelid = 'event_history_p32'::regclass) THEN
+        ALTER TABLE ONLY event_history_p32
+            ADD CONSTRAINT event_history_p32_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p33_pkey'
+                   AND conrelid = 'event_history_p33'::regclass) THEN
+        ALTER TABLE ONLY event_history_p33
+            ADD CONSTRAINT event_history_p33_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p34_pkey'
+                   AND conrelid = 'event_history_p34'::regclass) THEN
+        ALTER TABLE ONLY event_history_p34
+            ADD CONSTRAINT event_history_p34_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p35_pkey'
+                   AND conrelid = 'event_history_p35'::regclass) THEN
+        ALTER TABLE ONLY event_history_p35
+            ADD CONSTRAINT event_history_p35_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p36_pkey'
+                   AND conrelid = 'event_history_p36'::regclass) THEN
+        ALTER TABLE ONLY event_history_p36
+            ADD CONSTRAINT event_history_p36_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p37_pkey'
+                   AND conrelid = 'event_history_p37'::regclass) THEN
+        ALTER TABLE ONLY event_history_p37
+            ADD CONSTRAINT event_history_p37_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p38_pkey'
+                   AND conrelid = 'event_history_p38'::regclass) THEN
+        ALTER TABLE ONLY event_history_p38
+            ADD CONSTRAINT event_history_p38_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p39_pkey'
+                   AND conrelid = 'event_history_p39'::regclass) THEN
+        ALTER TABLE ONLY event_history_p39
+            ADD CONSTRAINT event_history_p39_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p3_pkey'
+                   AND conrelid = 'event_history_p3'::regclass) THEN
+        ALTER TABLE ONLY event_history_p3
+            ADD CONSTRAINT event_history_p3_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p40_pkey'
+                   AND conrelid = 'event_history_p40'::regclass) THEN
+        ALTER TABLE ONLY event_history_p40
+            ADD CONSTRAINT event_history_p40_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p41_pkey'
+                   AND conrelid = 'event_history_p41'::regclass) THEN
+        ALTER TABLE ONLY event_history_p41
+            ADD CONSTRAINT event_history_p41_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p42_pkey'
+                   AND conrelid = 'event_history_p42'::regclass) THEN
+        ALTER TABLE ONLY event_history_p42
+            ADD CONSTRAINT event_history_p42_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p43_pkey'
+                   AND conrelid = 'event_history_p43'::regclass) THEN
+        ALTER TABLE ONLY event_history_p43
+            ADD CONSTRAINT event_history_p43_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p44_pkey'
+                   AND conrelid = 'event_history_p44'::regclass) THEN
+        ALTER TABLE ONLY event_history_p44
+            ADD CONSTRAINT event_history_p44_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p45_pkey'
+                   AND conrelid = 'event_history_p45'::regclass) THEN
+        ALTER TABLE ONLY event_history_p45
+            ADD CONSTRAINT event_history_p45_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p46_pkey'
+                   AND conrelid = 'event_history_p46'::regclass) THEN
+        ALTER TABLE ONLY event_history_p46
+            ADD CONSTRAINT event_history_p46_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p47_pkey'
+                   AND conrelid = 'event_history_p47'::regclass) THEN
+        ALTER TABLE ONLY event_history_p47
+            ADD CONSTRAINT event_history_p47_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p48_pkey'
+                   AND conrelid = 'event_history_p48'::regclass) THEN
+        ALTER TABLE ONLY event_history_p48
+            ADD CONSTRAINT event_history_p48_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p49_pkey'
+                   AND conrelid = 'event_history_p49'::regclass) THEN
+        ALTER TABLE ONLY event_history_p49
+            ADD CONSTRAINT event_history_p49_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p4_pkey'
+                   AND conrelid = 'event_history_p4'::regclass) THEN
+        ALTER TABLE ONLY event_history_p4
+            ADD CONSTRAINT event_history_p4_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p50_pkey'
+                   AND conrelid = 'event_history_p50'::regclass) THEN
+        ALTER TABLE ONLY event_history_p50
+            ADD CONSTRAINT event_history_p50_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p51_pkey'
+                   AND conrelid = 'event_history_p51'::regclass) THEN
+        ALTER TABLE ONLY event_history_p51
+            ADD CONSTRAINT event_history_p51_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p52_pkey'
+                   AND conrelid = 'event_history_p52'::regclass) THEN
+        ALTER TABLE ONLY event_history_p52
+            ADD CONSTRAINT event_history_p52_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p53_pkey'
+                   AND conrelid = 'event_history_p53'::regclass) THEN
+        ALTER TABLE ONLY event_history_p53
+            ADD CONSTRAINT event_history_p53_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p54_pkey'
+                   AND conrelid = 'event_history_p54'::regclass) THEN
+        ALTER TABLE ONLY event_history_p54
+            ADD CONSTRAINT event_history_p54_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p55_pkey'
+                   AND conrelid = 'event_history_p55'::regclass) THEN
+        ALTER TABLE ONLY event_history_p55
+            ADD CONSTRAINT event_history_p55_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p56_pkey'
+                   AND conrelid = 'event_history_p56'::regclass) THEN
+        ALTER TABLE ONLY event_history_p56
+            ADD CONSTRAINT event_history_p56_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p57_pkey'
+                   AND conrelid = 'event_history_p57'::regclass) THEN
+        ALTER TABLE ONLY event_history_p57
+            ADD CONSTRAINT event_history_p57_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p58_pkey'
+                   AND conrelid = 'event_history_p58'::regclass) THEN
+        ALTER TABLE ONLY event_history_p58
+            ADD CONSTRAINT event_history_p58_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p59_pkey'
+                   AND conrelid = 'event_history_p59'::regclass) THEN
+        ALTER TABLE ONLY event_history_p59
+            ADD CONSTRAINT event_history_p59_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p5_pkey'
+                   AND conrelid = 'event_history_p5'::regclass) THEN
+        ALTER TABLE ONLY event_history_p5
+            ADD CONSTRAINT event_history_p5_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p60_pkey'
+                   AND conrelid = 'event_history_p60'::regclass) THEN
+        ALTER TABLE ONLY event_history_p60
+            ADD CONSTRAINT event_history_p60_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p61_pkey'
+                   AND conrelid = 'event_history_p61'::regclass) THEN
+        ALTER TABLE ONLY event_history_p61
+            ADD CONSTRAINT event_history_p61_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p62_pkey'
+                   AND conrelid = 'event_history_p62'::regclass) THEN
+        ALTER TABLE ONLY event_history_p62
+            ADD CONSTRAINT event_history_p62_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p63_pkey'
+                   AND conrelid = 'event_history_p63'::regclass) THEN
+        ALTER TABLE ONLY event_history_p63
+            ADD CONSTRAINT event_history_p63_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p6_pkey'
+                   AND conrelid = 'event_history_p6'::regclass) THEN
+        ALTER TABLE ONLY event_history_p6
+            ADD CONSTRAINT event_history_p6_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p7_pkey'
+                   AND conrelid = 'event_history_p7'::regclass) THEN
+        ALTER TABLE ONLY event_history_p7
+            ADD CONSTRAINT event_history_p7_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p8_pkey'
+                   AND conrelid = 'event_history_p8'::regclass) THEN
+        ALTER TABLE ONLY event_history_p8
+            ADD CONSTRAINT event_history_p8_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_p9_pkey'
+                   AND conrelid = 'event_history_p9'::regclass) THEN
+        ALTER TABLE ONLY event_history_p9
+            ADD CONSTRAINT event_history_p9_pkey PRIMARY KEY (tenant_id, workflow_id, step);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'idempotency_keys_pkey'
                    AND conrelid = 'idempotency_keys'::regclass) THEN
         ALTER TABLE ONLY idempotency_keys
             ADD CONSTRAINT idempotency_keys_pkey PRIMARY KEY (key_hash, tenant_id);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'payload_encryption_ever_enabled_pkey'
+                   AND conrelid = 'payload_encryption_ever_enabled'::regclass) THEN
+        ALTER TABLE ONLY payload_encryption_ever_enabled
+            ADD CONSTRAINT payload_encryption_ever_enabled_pkey PRIMARY KEY (singleton);
     END IF;
 END $do$;
 
@@ -985,6 +1598,14 @@ DO $do$ BEGIN
 END $do$;
 
 DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_leases_pkey'
+                   AND conrelid = 'workflow_leases'::regclass) THEN
+        ALTER TABLE ONLY workflow_leases
+            ADD CONSTRAINT workflow_leases_pkey PRIMARY KEY (id);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_memory_samples_pkey'
                    AND conrelid = 'workflow_memory_samples'::regclass) THEN
         ALTER TABLE ONLY workflow_memory_samples
@@ -997,6 +1618,14 @@ DO $do$ BEGIN
                    AND conrelid = 'workflow_memory_stats'::regclass) THEN
         ALTER TABLE ONLY workflow_memory_stats
             ADD CONSTRAINT workflow_memory_stats_pkey PRIMARY KEY (tenant_id, def_name);
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_payloads_pkey'
+                   AND conrelid = 'workflow_payloads'::regclass) THEN
+        ALTER TABLE ONLY workflow_payloads
+            ADD CONSTRAINT workflow_payloads_pkey PRIMARY KEY (id);
     END IF;
 END $do$;
 
@@ -1153,6 +1782,22 @@ DO $do$ BEGIN
 END $do$;
 
 DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_leases_id_fkey'
+                   AND conrelid = 'workflow_leases'::regclass) THEN
+        ALTER TABLE ONLY workflow_leases
+            ADD CONSTRAINT workflow_leases_id_fkey FOREIGN KEY (id) REFERENCES workflow_instances(id) ON DELETE CASCADE;
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_payloads_id_fkey'
+                   AND conrelid = 'workflow_payloads'::regclass) THEN
+        ALTER TABLE ONLY workflow_payloads
+            ADD CONSTRAINT workflow_payloads_id_fkey FOREIGN KEY (id) REFERENCES workflow_instances(id) ON DELETE CASCADE;
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_promises_workflow_id_fkey'
                    AND conrelid = 'workflow_promises'::regclass) THEN
         ALTER TABLE ONLY workflow_promises
@@ -1194,7 +1839,139 @@ END $do$;
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON admin.tenant_api_keys USING btree (key_hash) WHERE (disabled_at IS NULL);
 
+CREATE INDEX IF NOT EXISTS idx_operator_api_keys_hash ON admin.operator_api_keys USING btree (key_hash) WHERE (disabled_at IS NULL);
+
 CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON admin.workers USING btree (last_heartbeat_at);
+
+CREATE INDEX IF NOT EXISTS idx_event_history_pending ON ONLY event_history USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p0_workflow_id_step_idx ON event_history_p0 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p10_workflow_id_step_idx ON event_history_p10 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p11_workflow_id_step_idx ON event_history_p11 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p12_workflow_id_step_idx ON event_history_p12 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p13_workflow_id_step_idx ON event_history_p13 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p14_workflow_id_step_idx ON event_history_p14 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p15_workflow_id_step_idx ON event_history_p15 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p16_workflow_id_step_idx ON event_history_p16 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p17_workflow_id_step_idx ON event_history_p17 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p18_workflow_id_step_idx ON event_history_p18 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p19_workflow_id_step_idx ON event_history_p19 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p1_workflow_id_step_idx ON event_history_p1 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p20_workflow_id_step_idx ON event_history_p20 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p21_workflow_id_step_idx ON event_history_p21 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p22_workflow_id_step_idx ON event_history_p22 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p23_workflow_id_step_idx ON event_history_p23 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p24_workflow_id_step_idx ON event_history_p24 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p25_workflow_id_step_idx ON event_history_p25 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p26_workflow_id_step_idx ON event_history_p26 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p27_workflow_id_step_idx ON event_history_p27 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p28_workflow_id_step_idx ON event_history_p28 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p29_workflow_id_step_idx ON event_history_p29 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p2_workflow_id_step_idx ON event_history_p2 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p30_workflow_id_step_idx ON event_history_p30 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p31_workflow_id_step_idx ON event_history_p31 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p32_workflow_id_step_idx ON event_history_p32 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p33_workflow_id_step_idx ON event_history_p33 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p34_workflow_id_step_idx ON event_history_p34 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p35_workflow_id_step_idx ON event_history_p35 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p36_workflow_id_step_idx ON event_history_p36 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p37_workflow_id_step_idx ON event_history_p37 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p38_workflow_id_step_idx ON event_history_p38 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p39_workflow_id_step_idx ON event_history_p39 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p3_workflow_id_step_idx ON event_history_p3 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p40_workflow_id_step_idx ON event_history_p40 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p41_workflow_id_step_idx ON event_history_p41 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p42_workflow_id_step_idx ON event_history_p42 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p43_workflow_id_step_idx ON event_history_p43 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p44_workflow_id_step_idx ON event_history_p44 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p45_workflow_id_step_idx ON event_history_p45 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p46_workflow_id_step_idx ON event_history_p46 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p47_workflow_id_step_idx ON event_history_p47 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p48_workflow_id_step_idx ON event_history_p48 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p49_workflow_id_step_idx ON event_history_p49 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p4_workflow_id_step_idx ON event_history_p4 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p50_workflow_id_step_idx ON event_history_p50 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p51_workflow_id_step_idx ON event_history_p51 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p52_workflow_id_step_idx ON event_history_p52 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p53_workflow_id_step_idx ON event_history_p53 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p54_workflow_id_step_idx ON event_history_p54 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p55_workflow_id_step_idx ON event_history_p55 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p56_workflow_id_step_idx ON event_history_p56 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p57_workflow_id_step_idx ON event_history_p57 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p58_workflow_id_step_idx ON event_history_p58 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p59_workflow_id_step_idx ON event_history_p59 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p5_workflow_id_step_idx ON event_history_p5 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p60_workflow_id_step_idx ON event_history_p60 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p61_workflow_id_step_idx ON event_history_p61 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p62_workflow_id_step_idx ON event_history_p62 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p63_workflow_id_step_idx ON event_history_p63 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p6_workflow_id_step_idx ON event_history_p6 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p7_workflow_id_step_idx ON event_history_p7 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p8_workflow_id_step_idx ON event_history_p8 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
+CREATE INDEX IF NOT EXISTS event_history_p9_workflow_id_step_idx ON event_history_p9 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
 
 CREATE INDEX IF NOT EXISTS idx_concurrency_keys_expires ON concurrency_keys USING btree (expires_at);
 
@@ -1203,8 +1980,6 @@ CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys USI
 CREATE INDEX IF NOT EXISTS idx_defs_active ON workflow_defs USING btree (name, version DESC);
 
 CREATE INDEX IF NOT EXISTS idx_defs_tenant_name_version ON workflow_defs USING btree (tenant_id, name, version DESC);
-
-CREATE INDEX IF NOT EXISTS idx_event_history_pending ON event_history USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
 
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys USING btree (expires_at);
 
@@ -1248,11 +2023,11 @@ BEGIN
 END
 $trgm$;
 
-CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances USING btree (assigned_to, heartbeat_at) WHERE (status = 'running'::text);
+CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances USING btree (assigned_to) WHERE (status = 'running'::text);
 
 CREATE INDEX IF NOT EXISTS idx_instances_parent_policy ON workflow_instances USING btree (parent_workflow_id, parent_close_policy, status);
 
-CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances USING btree (status, heartbeat_at) WHERE (status = 'running'::text);
+CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances USING btree (status) WHERE (status = 'running'::text);
 
 CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances USING btree (sticky_worker_id) WHERE (sticky_worker_id IS NOT NULL);
 
@@ -1264,9 +2039,42 @@ CREATE INDEX IF NOT EXISTS idx_instances_tenant_status_created ON workflow_insta
 
 CREATE INDEX IF NOT EXISTS idx_instances_terminal_completed ON workflow_instances USING btree (tenant_id, status, completed_at) WHERE (status = ANY (ARRAY['done'::text, 'failed'::text, 'terminated'::text]));
 
+CREATE INDEX IF NOT EXISTS idx_leases_claim_order ON workflow_leases USING btree (tenant_id, task_queue, priority, created_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
+
+CREATE INDEX IF NOT EXISTS idx_leases_claimable ON workflow_leases USING btree (status, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
+
+CREATE INDEX IF NOT EXISTS idx_leases_concurrency_key ON workflow_leases USING btree (tenant_id, concurrency_key_hash) WHERE (concurrency_key_hash IS NOT NULL);
+
+CREATE INDEX IF NOT EXISTS idx_leases_defer_phase_deadline ON workflow_leases USING btree (defer_phase_deadline) WHERE (pending_terminal_status IS NOT NULL);
+
+CREATE INDEX IF NOT EXISTS idx_leases_heartbeat ON workflow_leases USING btree (assigned_to) WHERE (status = 'running'::text);
+
+CREATE INDEX IF NOT EXISTS idx_leases_stale ON workflow_leases USING btree (status, heartbeat_at) WHERE (status = 'running'::text);
+
+CREATE INDEX IF NOT EXISTS idx_leases_sticky ON workflow_leases USING btree (sticky_worker_id) WHERE (sticky_worker_id IS NOT NULL);
+
+CREATE INDEX IF NOT EXISTS idx_leases_tenant_claimable ON workflow_leases USING btree (tenant_id, status, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
+
+CREATE INDEX IF NOT EXISTS idx_leases_tenant_queue_claimable ON workflow_leases USING btree (tenant_id, task_queue, status, priority, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
+
 CREATE INDEX IF NOT EXISTS idx_mem_samples_def ON workflow_memory_samples USING btree (def_name, recorded_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_memory_samples_tenant_def ON workflow_memory_samples USING btree (tenant_id, def_name, recorded_at DESC);
+
+DO $trgm$
+DECLARE
+    ext_schema text;
+BEGIN
+    SELECT n.nspname INTO ext_schema
+      FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'pg_trgm';
+    IF ext_schema IS NULL THEN
+        RAISE EXCEPTION 'pg_trgm is not installed and CREATE EXTENSION IF NOT EXISTS did not create it';
+    END IF;
+    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_payloads_error_msg_trgm ON workflow_payloads USING GIN (error_msg %I.gin_trgm_ops) WHERE (error_msg IS NOT NULL)',
+                   ext_schema);
+END
+$trgm$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_promises_id_unique ON workflow_promises USING btree (tenant_id, promise_id);
 
@@ -1552,6 +2360,8 @@ CREATE OR REPLACE FUNCTION admin.grant_core_tables_to_tenant_role(p_role_name te
 BEGIN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_defs TO %I', current_schema(), p_role_name);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_instances TO %I', current_schema(), p_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_leases TO %I', current_schema(), p_role_name);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_payloads TO %I', current_schema(), p_role_name);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.event_history TO %I', current_schema(), p_role_name);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_signals TO %I', current_schema(), p_role_name);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.workflow_schedules TO %I', current_schema(), p_role_name);
@@ -1572,7 +2382,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION admin.grant_plugin_to_tenant(p_plugin_name text, p_tenant_id uuid) RETURNS void
+CREATE OR REPLACE FUNCTION admin.grant_plugin_to_tenant(p_plugin_name text, p_tenant_id uuid, p_schema_name text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
     AS $$
 DECLARE
@@ -1585,11 +2395,15 @@ BEGIN
         RETURN;
     END IF;
 
-    -- schema_name from the registry, not 'tenant_' || uuid. See the header.
+    -- BOTH predicates matter and they are different questions.
+    --   t.schema_name = p_schema_name  -- WHICH INSTALL. The fix.
+    --   v_table.schema_name in the GRANT -- WHICH SCHEMA to name, which is the
+    --   registry's value and not `'tenant_' || uuid` (cleat#2389, migration 066).
     FOR v_table IN
         SELECT t.schema_name, t.table_name
         FROM admin.plugin_tables t
         WHERE t.plugin_name = p_plugin_name
+          AND t.schema_name = p_schema_name
     LOOP
         EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %I.%I TO %I',
             v_table.schema_name, v_table.table_name, v_role_name);
@@ -1604,7 +2418,7 @@ CREATE OR REPLACE FUNCTION admin.in_flight_workflow_ids() RETURNS TABLE(id text)
     SELECT w.id FROM workflow_instances w WHERE w.status IN ('ready', 'running');
 $$;
 
-CREATE OR REPLACE FUNCTION admin.revoke_plugin_from_tenant(p_plugin_name text, p_tenant_id uuid) RETURNS void
+CREATE OR REPLACE FUNCTION admin.revoke_plugin_from_tenant(p_plugin_name text, p_tenant_id uuid, p_schema_name text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
     AS $$
 DECLARE
@@ -1617,11 +2431,11 @@ BEGIN
         RETURN;
     END IF;
 
-    -- schema_name from the registry, not 'tenant_' || uuid. See the header.
     FOR v_table IN
         SELECT t.schema_name, t.table_name
         FROM admin.plugin_tables t
         WHERE t.plugin_name = p_plugin_name
+          AND t.schema_name = p_schema_name
     LOOP
         EXECUTE format('REVOKE ALL ON %I.%I FROM %I',
             v_table.schema_name, v_table.table_name, v_role_name);
@@ -1721,9 +2535,13 @@ ALTER TABLE workflow_defs ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE workflow_instances ENABLE ROW LEVEL SECURITY;
 
+ALTER TABLE workflow_leases ENABLE ROW LEVEL SECURITY;
+
 ALTER TABLE workflow_memory_samples ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE workflow_memory_stats ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE workflow_payloads ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE workflow_promises ENABLE ROW LEVEL SECURITY;
 
@@ -2014,11 +2832,17 @@ CREATE POLICY tenant_isolation_events ON event_history USING ((tenant_id = cleat
 DROP POLICY IF EXISTS tenant_isolation_instances ON workflow_instances;
 CREATE POLICY tenant_isolation_instances ON workflow_instances USING ((tenant_id = cleat.assert_tenant_set()));
 
+DROP POLICY IF EXISTS tenant_isolation_leases ON workflow_leases;
+CREATE POLICY tenant_isolation_leases ON workflow_leases USING ((tenant_id = cleat.assert_tenant_set()));
+
 DROP POLICY IF EXISTS tenant_isolation_memory_samples ON workflow_memory_samples;
 CREATE POLICY tenant_isolation_memory_samples ON workflow_memory_samples USING ((tenant_id = cleat.assert_tenant_set()));
 
 DROP POLICY IF EXISTS tenant_isolation_memory_stats ON workflow_memory_stats;
 CREATE POLICY tenant_isolation_memory_stats ON workflow_memory_stats USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_payloads ON workflow_payloads;
+CREATE POLICY tenant_isolation_payloads ON workflow_payloads USING ((tenant_id = cleat.assert_tenant_set()));
 
 DROP POLICY IF EXISTS tenant_isolation_promises ON workflow_promises;
 CREATE POLICY tenant_isolation_promises ON workflow_promises USING ((tenant_id = cleat.assert_tenant_set()));
@@ -2276,21 +3100,23 @@ GRANT ALL ON FUNCTION admin.get_due_schedules() TO cleat_app;
 REVOKE ALL ON FUNCTION admin.grant_core_tables_to_tenant_role(p_role_name text) FROM PUBLIC;
 GRANT ALL ON FUNCTION admin.grant_core_tables_to_tenant_role(p_role_name text) TO cleat_app;
 
-REVOKE ALL ON FUNCTION admin.grant_plugin_to_tenant(p_plugin_name text, p_tenant_id uuid) FROM PUBLIC;
-GRANT ALL ON FUNCTION admin.grant_plugin_to_tenant(p_plugin_name text, p_tenant_id uuid) TO cleat_app;
+REVOKE ALL ON FUNCTION admin.grant_plugin_to_tenant(p_plugin_name text, p_tenant_id uuid, p_schema_name text) FROM PUBLIC;
+GRANT ALL ON FUNCTION admin.grant_plugin_to_tenant(p_plugin_name text, p_tenant_id uuid, p_schema_name text) TO cleat_app;
 
 REVOKE ALL ON FUNCTION admin.in_flight_workflow_ids() FROM PUBLIC;
 GRANT ALL ON FUNCTION admin.in_flight_workflow_ids() TO cleat_app;
 GRANT ALL ON FUNCTION admin.in_flight_workflow_ids() TO cleat_sweep;
 
-REVOKE ALL ON FUNCTION admin.revoke_plugin_from_tenant(p_plugin_name text, p_tenant_id uuid) FROM PUBLIC;
-GRANT ALL ON FUNCTION admin.revoke_plugin_from_tenant(p_plugin_name text, p_tenant_id uuid) TO cleat_app;
+REVOKE ALL ON FUNCTION admin.revoke_plugin_from_tenant(p_plugin_name text, p_tenant_id uuid, p_schema_name text) FROM PUBLIC;
+GRANT ALL ON FUNCTION admin.revoke_plugin_from_tenant(p_plugin_name text, p_tenant_id uuid, p_schema_name text) TO cleat_app;
 
 REVOKE ALL ON FUNCTION admin.tenants_org_id_is_immutable() FROM PUBLIC;
 GRANT ALL ON FUNCTION admin.tenants_org_id_is_immutable() TO cleat_app;
 
 GRANT ALL ON FUNCTION cleat.assert_tenant_set() TO cleat_app;
 GRANT ALL ON FUNCTION cleat.assert_tenant_set() TO cleat_sweep;
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE admin.operator_api_keys TO cleat_app;
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE admin.orgs TO cleat_app;
 
@@ -2317,6 +3143,8 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE event_history TO cleat_app;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE idempotency_keys TO cleat_app;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE idempotency_keys TO cleat_tenant_00000000_0000_0000_0000_000000000000;
 GRANT SELECT,DELETE ON TABLE idempotency_keys TO cleat_sweep;
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE payload_encryption_ever_enabled TO cleat_app;
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE plugin_defs TO cleat_app;
 
@@ -2345,12 +3173,19 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_instances TO cleat_tenant_00
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_instances TO cleat_app;
 GRANT SELECT,UPDATE ON TABLE workflow_instances TO cleat_dispatcher;
 
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_leases TO cleat_app;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_leases TO cleat_tenant_00000000_0000_0000_0000_000000000000;
+GRANT SELECT,UPDATE ON TABLE workflow_leases TO cleat_dispatcher;
+
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_memory_samples TO cleat_app;
 
 GRANT SELECT,USAGE ON SEQUENCE workflow_memory_samples_id_seq TO cleat_app;
 GRANT USAGE ON SEQUENCE workflow_memory_samples_id_seq TO cleat_tenant_00000000_0000_0000_0000_000000000000;
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_memory_stats TO cleat_app;
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_payloads TO cleat_app;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_payloads TO cleat_tenant_00000000_0000_0000_0000_000000000000;
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_promises TO cleat_tenant_00000000_0000_0000_0000_000000000000;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE workflow_promises TO cleat_app;
