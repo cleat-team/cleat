@@ -229,8 +229,9 @@ models differ:
   scoped to `ALL ON <db>.*`), so cleat_app's entire creation and every GRANT
   live in `deploy/mysql/900-app-role.sh` instead — there is no
   `migrations/mysql/*_app_login.sql` file at all.
-- **SQL Server**: `migrations/mssql/008_app_login.sql` creates a database
-  ROLE, `cleat_app_role`, with a schema-level GRANT (new tables, plugin or
+- **SQL Server**: `migrations/mssql/001_schema.sql` (folded in from
+  `008_app_login.sql`, cleat#3349) creates a database ROLE, `cleat_app_role`,
+  with a schema-level GRANT (new tables, plugin or
   core, are covered automatically) and an explicit `DENY` on this one table,
   which overrides the GRANT regardless of which came first — the one tool of
   the three that can say "except this" rather than "everything but this".

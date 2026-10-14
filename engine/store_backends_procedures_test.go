@@ -82,9 +82,12 @@ var mysqlProcedureMigrations = []string{
 // than by taking the last of nine in filename order. applyMSSQLProcedures
 // applies only the final entry, so the entries that used to be here were being
 // replayed one after another to arrive at a body 003 already contains.
+//
+// Back to ONE entry again after cleat#3349's re-compaction: 013 (added by
+// cleat#3171, the brief second entry here) is now folded into the
+// regenerated 003_procedures.sql and no longer exists as a separate file.
 var mssqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"013_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup

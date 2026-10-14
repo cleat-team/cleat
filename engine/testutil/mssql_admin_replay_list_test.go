@@ -9,10 +9,13 @@ import (
 
 // TestMSSQLPlainPredicateReplayFilesMatchesTheRealTree is the anti-vacuity
 // check: the derivation must agree with the one case whose right answer is
-// already known. cleat#3171 added migrations/mssql/013, which redefines
+// already known. cleat#3171 added migrations/mssql/013, which redefined
 // finalize_workflow_status -- a routine 003_procedures.sql also defines --
-// and nothing else in the tree redefines a 003-bundled routine (checked
-// 2026-10-06; re-derive with the command TestProcedureMigrationListsAreComplete's
+// and the want list here used to carry that filename as the live case.
+// cleat#3349 (the SQL Server re-compaction) folded 013's effect into the
+// regenerated 003_procedures.sql itself, so 013 no longer exists as a
+// separate file and nothing in the tree redefines a 003-bundled routine
+// (checked 2026-10-13; re-derive with the command TestProcedureMigrationListsAreComplete's
 // own sibling check uses, grepping migrations/mssql/*.sql for
 // finalize_workflow_status/fn_tenant_filter/drop_tenant). If this starts
 // failing because a later migration legitimately redefines a bundled
@@ -29,7 +32,6 @@ func TestMSSQLPlainPredicateReplayFilesMatchesTheRealTree(t *testing.T) {
 	want := []string{
 		"002_defaults.sql",
 		"003_procedures.sql",
-		"013_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("mssqlPlainPredicateReplayFiles(%s) = %v, want %v", dir, got, want)
@@ -152,6 +154,20 @@ func TestMSSQLStripSQLCommentsDefeatsACommentedOutRedefinition(t *testing.T) {
 // restoreMSSQLPlainPredicate replays its list, and finalize_workflow_status
 // must still read the POST-013 body afterward, not the pre-013 one 003 alone
 // would restore.
+//
+// cleat#3349 (the SQL Server re-compaction) made this test temporarily
+// VACUOUS on the real tree, and it is worth saying so rather than leaving a
+// green result to be read as continued coverage of cleat#3171's gap.
+// 013_a_promise_resolved_mid_segment_wakes_the_workflow.sql no longer exists
+// as a file -- its redefinition is baked into the regenerated
+// 003_procedures.sql -- so there is no longer a pre-013/post-013 difference
+// for a wrong replay list to fail to produce: replaying 002+003 ALONE now
+// gives the same body SetupMSSQLFullSchema builds, which is exactly the
+// hardcoded, pre-cleat#3173 behaviour this test was written to catch failing.
+// The mechanism itself is still exercised, non-vacuously, by
+// TestMSSQLPlainPredicateReplayFilesCatchesALaterRoutineRedefinition's
+// synthetic tree above -- this test regains its own teeth the next time a
+// real migration redefines a 003-bundled routine, the way 013 once did.
 func TestMSSQLAdminDBRestoreSurvivesTheRealFinalizeWorkflowStatusRedefinition(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
 		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
@@ -172,8 +188,9 @@ func TestMSSQLAdminDBRestoreSurvivesTheRealFinalizeWorkflowStatusRedefinition(t 
 
 	if !definitionContainsPromiseSeq(t) {
 		t.Fatalf("finalize_workflow_status does not mention promise_seq right after " +
-			"SetupMSSQLFullSchema -- migrations/mssql/013 is not what this database was built " +
-			"from, so this test cannot exercise the scenario it names")
+			"SetupMSSQLFullSchema -- the post-013 definition cleat#3349 folded into " +
+			"003_procedures.sql is not what this database was built from, so this test " +
+			"cannot exercise the scenario it names")
 	}
 
 	// A subtest that acquires the admin pool and releases it (its Cleanup
