@@ -600,7 +600,7 @@ jobs:
           python3 scripts/verify-postgres-baseline.py \
             --dsn 'postgres://postgres:postgres@127.0.0.1:5432/cleat_baseline_verify?sslmode=disable' \
             --pg-container "$CONTAINER" \
-            --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10 \
+            --prior-rebaseline d0484c853071872cf260ddf05de33f5e73cf5570 \
             --committed migrations/postgres
 
       - name: Create cleat database on MSSQL

@@ -616,7 +616,18 @@ def main(src, outdir):
     for kind, bodies in buckets.items():
         for b in bodies:
             for line in b.split("\n"):
-                if sp.match(line) or bare.search(line):
+                # A single-quoted STRING LITERAL spelling 'public' is a VALUE,
+                # not a schema qualifier -- cleat#3347, exposed by
+                # 005_workflow_defs_exposure_class.sql's
+                # CHECK (exposure IN ('public', 'auth', 'internal')), which
+                # pg_dump resolves to CHECK ((exposure = ANY (ARRAY['public'::text,
+                # ...]))). Strip it before testing, so `bare` keeps checking
+                # for an UNQUOTED "public" rather than being widened to
+                # tolerate one -- a real `public.table` or `SCHEMA public`
+                # reference has no quotes around the word and is untouched
+                # by this.
+                probe = re.sub(r"'public'", "", line)
+                if sp.match(line) or bare.search(probe):
                     bad.append("%s: %s" % (kind, line.strip()[:110]))
     if bad:
         raise SystemExit(
@@ -655,6 +666,32 @@ def main(src, outdir):
         # A/B diff then reports an EMPTY difference -- a pass, on a tree where the
         # one change this step exists to make did not happen.
         tb = buckets.get("TABLE", [])
+        # cleat#3347: a dump taken from an ALREADY-partitioned source -- true
+        # of every re-run after the first -- carries up to PARTITION_BUCKETS
+        # separate TABLE objects for the children pg_dump found attached,
+        # event_history_p0 through _p63, because the database being dumped
+        # genuinely has 64 real partitions by the time this generator runs a
+        # second time. The block below is about to synthesize all 64 of
+        # those itself -- attached, with RLS forced and the tenant policy,
+        # the way the parent is -- so a passthrough copy is not harmless: it
+        # is a bare, UNattached table that happens to share the child's
+        # name, created here (TABLE is emitted before PARTITION) and thus
+        # BEFORE the synthetic "PARTITION OF ... FOR VALUES" statement later
+        # in the file. `IF NOT EXISTS` makes that real attach a silent
+        # no-op, and every insert into that bucket then fails with
+        #   pq: no partition of relation "event_history" found for row
+        # -- measured 2026-10-13 via TestCascadeDelete/postgres on a clean,
+        # uncontended database; the structural A/B diff this file's own
+        # falsification relies on does not see it, because both sides have
+        # a table named event_history_p0 with the right columns and neither
+        # comparison asks whether it is actually attached as a partition.
+        # Strip any passthrough child before synthesizing the real ones.
+        child_re = re.compile(r"^CREATE TABLE (IF NOT EXISTS )?%s_p\d+\b" % PARTITIONED_TABLE)
+        stray = [b for b in tb if child_re.match(b)]
+        if stray:
+            print("  dropped %d stray %s_pN passthrough table(s) from an "
+                  "already-partitioned source" % (len(stray), PARTITIONED_TABLE))
+        tb[:] = [b for b in tb if not child_re.match(b)]
         # BOTH spellings, because make_idempotent has already run by this point
         # (it is applied per bucket, above) and has rewritten the declaration to
         # `CREATE TABLE IF NOT EXISTS event_history (`. Matching only the bare
@@ -678,10 +715,25 @@ def main(src, outdir):
         body = tb[found[0]]
         anchor = marker_ine if marker_ine in body else marker
         decl = body.index(anchor)
-        close = body.index("\n);", decl)
-        tb[found[0]] = (body[:close]
-                        + "\n)\nPARTITION BY HASH (tenant_id);"
-                        + body[close + len("\n);"):])
+        # cleat#3347: this splice assumed a dump of an UNPARTITIONED source --
+        # true the first time this generator ran (the chain it replaced
+        # predated partitioning), false every time since, because the
+        # committed baseline it is re-run against is already partitioned.
+        # A dump of an already-partitioned table closes the column list as
+        # "\n)\nPARTITION BY HASH (...);", not a bare "\n);", so the splice's
+        # own anchor cannot be found and raises ValueError on a correct tree
+        # -- the same "a silently unmatched rewrite" failure mode this
+        # function's own comments warn about, just not yet seen because
+        # nobody had re-run this generator against its own prior output
+        # until now. Detect that shape and pass it through unchanged rather
+        # than re-splicing a clause that is already there.
+        if "\nPARTITION BY HASH (tenant_id);" in body[decl:]:
+            pass
+        else:
+            close = body.index("\n);", decl)
+            tb[found[0]] = (body[:close]
+                            + "\n)\nPARTITION BY HASH (tenant_id);"
+                            + body[close + len("\n);"):])
 
         # IF NOT EXISTS on every child, because this bucket is built AFTER
         # make_idempotent has already run over the buckets that existed then --
@@ -730,6 +782,16 @@ def main(src, outdir):
             % (PARTITIONED_TABLE, i, PARTITIONED_TABLE, PARTITION_BUCKETS, i)
             for i in range(PARTITION_BUCKETS)
         ]
+        # Same already-partitioned-source issue as the TABLE bucket above: the
+        # dump carries a passthrough "ALTER TABLE event_history_pN ENABLE ROW
+        # LEVEL SECURITY" for each child it found already attached. Harmless
+        # on its own (ENABLE is idempotent), but it is about to be joined by
+        # the synthetic ENABLE+FORCE pair for all 64 below, and a generator
+        # that cannot run twice without its output growing is the same defect
+        # this comment block is otherwise warning about -- strip it first.
+        child_rls_re = re.compile(r"^ALTER TABLE (ONLY )?(public\.)?%s_p\d+\b" % PARTITIONED_TABLE)
+        buckets["ROW SECURITY"] = [b for b in buckets.get("ROW SECURITY", [])
+                                   if not child_rls_re.match(b)]
         buckets.setdefault("ROW SECURITY", []).extend(
             "ALTER TABLE %s_p%d %s ROW LEVEL SECURITY;"
             % (PARTITIONED_TABLE, i, clause)
@@ -741,6 +803,21 @@ def main(src, outdir):
         # does not start with CREATE POLICY -- which is what caught the first
         # draft of this:
         #   unrecognised policy body: 'DROP POLICY IF EXISTS ...'
+        # Same already-partitioned-source issue again: the dump carries a
+        # passthrough "CREATE POLICY tenant_isolation_events ON
+        # event_history_pN ..." for each child, unguarded (pg_dump never
+        # emits a DROP POLICY IF EXISTS), so a second CREATE POLICY of the
+        # same name on the same table below fails outright with
+        #   pq: policy "tenant_isolation_events" for table "event_history_p0"
+        #   already exists (42710)
+        # once guard_policy's own DROP-first rewrite is not there to save it
+        # -- which it isn't yet, this bucket is raw CREATE POLICY bodies
+        # until guard_policy runs over it afterwards. Strip the passthrough
+        # copy first.
+        child_policy_re = re.compile(
+            r"^CREATE POLICY tenant_isolation_events ON (public\.)?%s_p\d+\b" % PARTITIONED_TABLE)
+        buckets["POLICY"] = [b for b in buckets.get("POLICY", [])
+                             if not child_policy_re.match(b)]
         buckets.setdefault("POLICY", []).extend(
             "CREATE POLICY tenant_isolation_events ON %s_p%d "
             "USING ((tenant_id = cleat.assert_tenant_set()));"
@@ -753,9 +830,15 @@ def main(src, outdir):
         if len(hit) != 1:
             raise SystemExit("expected exactly one %s_pkey; found %d"
                              % (PARTITIONED_TABLE, len(hit)))
-        if OLD_PK not in cs[hit[0]]:
-            raise SystemExit("PK is not %r: %r" % (OLD_PK, cs[hit[0]]))
-        cs[hit[0]] = cs[hit[0]].replace(OLD_PK, NEW_PK)
+        # cleat#3347: the same "already in the post-partition shape" case as
+        # the CREATE TABLE splice above -- a dump of the committed, already-
+        # partitioned baseline carries NEW_PK already, not OLD_PK, since
+        # there is no unpartitioned predecessor left to rewrite FROM. Treat
+        # that as the no-op it is rather than refusing a correct tree.
+        if NEW_PK not in cs[hit[0]]:
+            if OLD_PK not in cs[hit[0]]:
+                raise SystemExit("PK is neither %r nor %r: %r" % (OLD_PK, NEW_PK, cs[hit[0]]))
+            cs[hit[0]] = cs[hit[0]].replace(OLD_PK, NEW_PK)
 
         # ...and drop ONLY from that same statement. pg_dump emits
         # `ALTER TABLE ONLY <t> ADD CONSTRAINT <t>_pkey ...` for every table,
@@ -863,13 +946,20 @@ def main(src, outdir):
         # NOTHING would say so -- it is a valid index, the catalog diff compares
         # structure on one side only, and the suite passes. A silent over-match
         # would drop an index the cursor read depends on.
+        # cleat#3347: "found 0" is the CORRECT reading the second time this
+        # generator runs, not a failure -- the prior compaction already
+        # dropped the index for good (see the comment above: "a line in a
+        # baseline", not something later migrations ever recreate), so a
+        # dump of the already-compacted chain has none to find. Only more
+        # than one is still an error.
         idx = buckets.get("INDEX", [])
         hit_idx = [i for i, b in enumerate(idx) if "idx_event_history_tenant_wf" in b]
-        if len(hit_idx) != 1:
+        if len(hit_idx) > 1:
             raise SystemExit(
-                "expected exactly one idx_event_history_tenant_wf index statement; "
+                "expected at most one idx_event_history_tenant_wf index statement; "
                 "found %d" % len(hit_idx))
-        del idx[hit_idx[0]]
+        if hit_idx:
+            del idx[hit_idx[0]]
         if any("idx_event_history_tenant_wf" in b for b in idx):
             raise SystemExit("idx_event_history_tenant_wf still present after removal")
 
@@ -995,7 +1085,8 @@ END $do$;"""]
     open(f"{outdir}/001_schema.sql", "w").write(emit(schema_kinds, """-- cleat consolidated schema (001)
 --
 -- GENERATED from a pg_dump of the database built by the previous
--- migrations/postgres chain, then wrapped by hand. cleat#2059.
+-- migrations/postgres chain, then wrapped by hand. cleat#2059, re-compacted
+-- cleat#3347.
 --
 -- Every CREATE TABLE carries its FINAL column set -- the dump has already
 -- applied every ALTER TABLE ADD COLUMN, so there is nothing to fold by hand.
@@ -1009,7 +1100,7 @@ END $do$;"""]
     open(f"{outdir}/003_procedures.sql", "w").write(emit(["PROCEDURE", "PROCEDURE_ACL"], """-- cleat consolidated procedures (003)
 --
 -- GENERATED from pg_get_functiondef via pg_dump, so each body is the LAST
--- definition of that routine. cleat#2059."""))
+-- definition of that routine. cleat#2059, re-compacted cleat#3347."""))
     # 002 is data and behaviour, which a catalog dump cannot carry -- it is
     # hand-assembled from the files that touched data. Left as a marker so the
     # omission is visible rather than silent.

@@ -267,9 +267,22 @@ def main():
             fail("could not extract migrations/postgres from the prior tree", 2)
         chain = sorted(x for x in os.listdir(os.path.join(old, "migrations", "postgres"))
                        if x.endswith(".sql"))
-        if len(chain) < 30:
-            fail(f"the prior tree yielded only {len(chain)} migration file(s); that is "
-                 "not a pre-rebaseline chain -- is --prior-rebaseline the right commit?", 2)
+        # cleat#3347: this used to be a hardcoded "< 30", tuned to cleat#2059's
+        # own ~87-file chain and never meant to survive a SECOND compaction.
+        # The invariant that actually matters is relative, not absolute: a
+        # prior-rebaseline chain must have had MORE files than the baseline it
+        # produced, or it is not a chain being compacted at all -- it is the
+        # committed baseline itself (or an earlier one), pointed at by mistake.
+        # A fixed floor would need re-tuning after every future compaction,
+        # the same "a count of a growing population drifts" trap this repo's
+        # own CLAUDE.md warns about; this does not, because it is checked
+        # against what IS committed rather than against a number frozen at
+        # the moment this script was written.
+        committed_count = len([x for x in os.listdir(args.committed) if x.endswith(".sql")])
+        if len(chain) <= committed_count:
+            fail(f"the prior tree yielded {len(chain)} migration file(s), not more than "
+                 f"the {committed_count} in --committed ({args.committed}); that is not a "
+                 "pre-rebaseline chain -- is --prior-rebaseline the right commit?", 2)
         # No abbreviated SHA here: the full one is printed once, above, and a short
         # form appearing a second time invites someone to copy that one.
         print(f"prior chain: {len(chain)} file(s)")

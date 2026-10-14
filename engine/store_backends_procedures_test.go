@@ -45,23 +45,22 @@ import (
 // contradicted by a suite that still passes. That happened: the query_state
 // fix below was written, applied to a real database, verified over HTTP, and
 // its own engine test still failed, because the harness was running 004.
-// ONE entry since the cleat#2059 rebaseline, and that is the whole point of it.
-// The list used to run to ten files, each redefining the routine on top of the
-// last, and this test exists because a missing entry made the harness keep
-// running an older definition while every test still passed. 003 now carries the
-// FINAL body -- generated from a pg_dump of the fully-migrated database, so it is
-// the last definition by construction rather than by taking the last of ten by
-// hand. There is no longer a sequence to keep in order.
+//
+// ONE entry since the cleat#3347 re-compaction, for the same reason the
+// MySQL list below has one: 003 now carries the FINAL body, generated from a
+// pg_dump of a database built by the whole chain through 021, so it is the
+// last definition by construction rather than by replaying 014/017/019/021
+// on top of it. The list used to run to five files, each redefining the
+// routine on top of the last -- cleat#3347 is what finally folded them in
+// and deleted the files; TestProcedureMigrationListsAreComplete is what
+// caught the four stale entries this left behind the first time it ran
+// against the re-compacted tree.
 //
 // TestProcedureMigrationListsAreComplete still checks this against the
 // directory, so it stays honest: if a later migration defines the routine, the
 // list must name it.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
-	"014_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
-	"017_finalize_workflow_status_dual_writes_leases_and_payloads.sql",
-	"019_finalize_workflow_status_mirrors_the_parent_wake.sql",
-	"021_finalize_workflow_status_mirrors_completed_at.sql",
 }
 
 // ONE entry since the cleat#3348 re-compaction, for the same reason the
