@@ -1,5 +1,6 @@
 .gitleaks.toml	migration 087
 auth/a_key_expiry_test.go	migration 038
+auth/operator_store_test.go	008_operator_api_keys.sql
 auth/tenant_store.go	migration 061
 auth/tenant_store.go	migration 105
 auth/tenant_store.go	migrations/mysql/104
