@@ -399,7 +399,8 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		`, workflowID, generation); err != nil {
 			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
 		}
-		// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020.
+		// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020
+		// (folded into migrations/postgres/001_schema.sql by #3358).
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL, completed_at = now() WHERE id = $1
 		`, workflowID, a.result); err != nil {

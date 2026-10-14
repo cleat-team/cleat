@@ -315,7 +315,8 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 
 	// cleat#3245 Phase 3 step 3 piece E: reads workflow_leases rather than
 	// workflow_instances. parent_workflow_id (migration 018) and status
-	// (migration 016) are both mirrored there -- StartChildWorkflow/
+	// (migration 016 (folded into migrations/postgres/001_schema.sql by
+	// #3358)) are both mirrored there -- StartChildWorkflow/
 	// StartChildWorkflowAtomic set ParentWorkflowID on their
 	// insertLeaseAndPayloadRows call, and every terminal-status write
 	// mirrors status onto workflow_leases (pieces 4a/4c/4d/6b/6d, B, C, D).

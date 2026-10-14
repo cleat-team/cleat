@@ -142,7 +142,8 @@ var sensitiveTableSpecs = []tableSpec{
 	},
 	{
 		// cleat#3344: workflow_payloads carries the same sensitive columns
-		// as workflow_instances (migrations/postgres/016_workflow_leases_and_payloads.sql,
+		// as workflow_instances (migrations/postgres/016_workflow_leases_and_payloads.sql
+		// (folded into migrations/postgres/001_schema.sql by #3358),
 		// extended by 018) but was missing from this list, so a reseal run
 		// reported success while leaving its ciphertext under the retired
 		// key. Re-derived, not copied from the issue, via the recipe this
@@ -152,7 +153,7 @@ var sensitiveTableSpecs = []tableSpec{
 		// writeResultPayload/writeErrorPayload/insertLeaseAndPayloadRows,
 		// engine/store_admin.go, engine/store_admin_rereplay.go) seals
 		// exactly these six columns. allowed_signals is also a
-		// workflow_payloads column (migration 016 (folded into migrations/postgres/001_schema.sql by #3358)) but is plain JSON via
+		// workflow_payloads column (migration 016) but is plain JSON via
 		// encodeAllowedSignals, not one of the encrypt helpers, so it is
 		// deliberately not listed here.
 		name:   "workflow_payloads",
