@@ -46,6 +46,7 @@ cmd/cleatctl/slackworkspace_test.go	migrations/postgres/104
 cmd/cleatctl/speaks_three_dialects_test.go	migrations/mssql/074
 docs/contributor/design/cleat-execution-design.md	migration 033
 docs/contributor/migrations.md	004_fix_finalize_workflow_status_fence.sql
+docs/contributor/migrations.md	008_app_login.sql
 docs/contributor/migrations.md	migrations/mysql/077
 docs/contributor/plugins/plugin-security.md	074_a_dropped_tenants_rows_go_with_it.sql
 docs/contributor/plugins/plugin-security.md	077_every_entity_records_when_it_last_changed.sql
@@ -119,6 +120,7 @@ engine/mssql_deployment.go	migrations/mssql/036
 engine/mssql_index_parity_test.go	035_ready_and_active_indexes.sql
 engine/mssql_index_parity_test.go	043_claim_terminating_workflows.sql
 engine/mssql_index_parity_test.go	migrations/postgres/040
+engine/mssql_json_parity_test.go	migrations/mssql/015
 engine/mssql_lifecycle.go	010_idempotency_keys_tenant_id.sql
 engine/mssql_plugin_deps_check_test.go	036_plugin_deps_isjson.sql
 engine/mssql_plugin_deps_check_test.go	migration 036
@@ -147,6 +149,7 @@ engine/rls_check.go	005_app_role.sql
 engine/rls_check_test.go	005_app_role.sql
 engine/rls_gap_concurrency_and_update_requests_test.go	031_rls_gap_concurrency_and_update_requests.sql
 engine/routine_definition_drift_test.go	004_fix_finalize_workflow_status_fence.sql
+engine/routine_definition_drift_test.go	migrations/mssql/004
 engine/routine_definition_drift_test.go	migrations/mysql/004
 engine/schedule_tenant_test.go	005_app_role.sql
 engine/schedules_retire_through_disabled_at_test.go	migration 089
@@ -172,6 +175,8 @@ engine/testutil/mssql_admin.go	migration 012
 engine/testutil/mssql_admin.go	migration 075
 engine/testutil/mssql_admin.go	migration 102
 engine/testutil/mssql_admin.go	migration 103
+engine/testutil/mssql_admin.go	migrations/mssql/013
+engine/testutil/mssql_admin_replay_list_test.go	migrations/mssql/013
 engine/testutil/mssql_row_disappearance.go	migration 075
 engine/testutil/mysql_schema.go	migration 030
 engine/testutil/plugin_backend.go	migration 103
@@ -192,6 +197,8 @@ engine/updater.go	migrations/postgres/068
 engine/workflow_def_tenant_test.go	migration 035
 engine/workflow_list_query.go	migration 033
 migration/a_non_default_schema_test.go	020_event_intent.sql
+migration/catalogdiff/mssql.go	008_app_login.sql
+migration/catalogdiff/the_mssql_snapshot_sees_schema_grants_and_denies_test.go	008_app_login.sql
 migration/idempotency_tenant_test.go	010_idempotency_keys_tenant_id.sql
 migration/migrations_do_not_hardcode_the_schema_test.go	005_app_role.sql
 migration/minimum_server_version.go	077_a_plugin_policy_can_use_its_index.sql
@@ -207,7 +214,6 @@ migration/runner.go	020_event_intent.sql
 migration/the_postgresql_16_requirement_is_enforced_test.go	migration 077
 migration/the_shared_schema_surface_is_a_declared_list_test.go	migration 066
 migration/two_entities_record_when_they_were_created_test.go	migration 085
-migrations/mssql/003_procedures.sql	101_the_finalize_procedure_stops_deleting_failed_history.sql
 migrations/mssql/optional/cross_tenant_claim.sql	075_the_admin_bypass_is_opt_in.sql
 migrations/mssql/optional/cross_tenant_claim.sql	migration 075
 migrations/mssql/optional/cross_tenant_claim.sql	migration 103
@@ -262,6 +268,7 @@ plugins/webhookingest/migrations.go	migrations/mysql/070
 scripts/entity-contract.tsv	migration 079
 scripts/entity-contract.tsv	migration 080
 scripts/entity-contract.tsv	migration 093
+scripts/gen-mssql-baseline/emit.go	008_app_login.sql
 scripts/skip-ledger.d/a-deleted-row-and-an-invisible-row-are-told-apart.tsv	migration 103
 scripts/skip-ledger.d/a-finalized-result-survives-the-column.tsv	migrations/mysql/070
 scripts/skip-ledger.d/a-secret-never-crosses-tenants-at-the-store.tsv	migration 038

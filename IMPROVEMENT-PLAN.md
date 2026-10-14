@@ -10948,3 +10948,199 @@ it returns to 0/200, and the three real tests in the file (`TestTheClaimOrderIsP
 repeated 15x with no flake.
 
 **Files**: `engine/the_claim_order_is_priority_then_age_test.go` (`claimOrderFixture.release`).
+
+### 3.504 `migrations/mssql/` re-compacted to a fresh three-file baseline — ✅ **FIXED 2026-10-14** (cleat#3349)
+
+**Scope.** Folded `migrations/mssql/`'s ten post-baseline files — `004` through `011`, `013` and
+`014` — back into `001_schema.sql`/`002_defaults.sql`/`003_procedures.sql`, the same compaction
+`docs/contributor/migrations.md` already documents as the baseline's own maintenance procedure.
+`002_defaults.sql` carried no DML across any of the ten (confirmed by reading each), so it is
+unchanged; `migrations/mssql/optional/cross_tenant_claim.sql` is untouched, out of scope per the
+issue.
+
+**The generator had a real gap, found only by the acceptance procedure it documents, not by
+inspection.** `scripts/gen-mssql-baseline/emit.go` had no grant-capturing logic at all — the first
+`-mode=diff` between a database built from the candidate baseline and one built from the real
+pre-compaction chain reported 13 differences, every one a `GRANT`/`DENY` on `cleat_app_role`. Fixed
+by adding `readGrants()`, mirroring the UNION query `migration/catalogdiff/mssql.go` already uses
+for the identical class=1/class=3, state IN ('G','D') join (the fix cleat#2446 made there), plus
+emission logic in `schemaFile()`. Re-verified clean: `-mode=diff` 0 differences, `-mode=supplementary`
+5/5 PASS, and `scripts/mssql-baseline-known-positive.sh` 12/12 — including the 13 grants this gap
+would have silently shipped missing, which is the whole of `cleat_app_role`'s least-privilege model
+(cleat#2203/#3171's `an_app_login_cannot_write_deployment_secrets_test.go` depends on it).
+
+**Final committed baseline, re-derived from the files as committed, not carried from an earlier
+measurement:** 31 tables, 4 routines (`admin.drop_tenant`, `admin.trg_tenants_org_id_immutable`,
+`dbo.finalize_workflow_status`, `dbo.fn_tenant_filter`), 14 security policies covering 56
+filter/block predicates, 13 grants/denies — all in `001_schema.sql` except the routines and
+policies, which `003_procedures.sql` carries.
+
+**Deleting ten files makes every citation of them dangling by construction, and that was
+anticipated rather than discovered.** `scripts/check-postgres-migration-citations.py` (cross-dialect
+despite its name, per cleat#2817) flags any comment citing a migration file that no longer exists.
+Worked through each dangling citation individually: navigational ones (telling a reader where to
+look) were repointed to `migrations/mssql/001_schema.sql (folded in from NNN_name.sql, cleat#3349)`
+— `cmd/cleat-worker/an_app_login_cannot_write_deployment_secrets_test.go`,
+`deploy/mssql/900-app-role.sh`, `deploy/mysql/900-app-role.sh`, `docs/how-to/use-deployment-secrets.md`,
+`engine/mssql_deployment.go`, `migrations/mysql/012_event_history_tenant_pk.sql` — and pure historical
+narration (describing a past event, not asserting current existence) was correctly left as-is or
+baselined via `--update` rather than rewritten; `docs/contributor/migrations.md`'s own description
+of the baseline gained a line naming this compaction. The two fixes in `deploy/mysql/900-app-role.sh`
+and the historical note in `engine/testutil/mssql_admin_replay_list.go` were found only by a direct
+`git grep` for each exact deleted filename, past the checker's own blind spot: its citation regex
+requires either a `migrations/<dialect>/` prefix or the literal word `migration` immediately before
+the number, so a bare `SQL Server's 008_app_login.sql covers it` with neither reads as plain prose,
+not a citation — the same "tool applied to a format it does not model" shape this file already
+catalogues elsewhere, found by not trusting the guard's silence as the whole answer.
+
+**A hand-maintained list this same compaction broke was found only by running the full suite, not by
+the citation guard.** `engine/store_backends_procedures_test.go`'s `mssqlProcedureMigrations` read
+migration files directly off disk by path (`003_procedures.sql`, `013_a_promise_resolved_...sql`) to
+install procedure definitions for engine-level backend tests — a `_test.go` file, invisible to the
+`grep -v _test.go` sweep used while fixing production-code citations, and outside the citation
+checker's scope entirely (it is a Go string literal driving file I/O, not a citation comment). Its
+`013` entry turned ~20 `./engine/` tests red with the identical error
+(`read migration ../migrations/mssql/013_...sql: ... no such file or directory`) the moment `013`
+was deleted. Fixed by shrinking the list to `["003_procedures.sql"]` alone, the exact precedent this
+same file already documents for the prior cleat#2434 compaction. The sibling
+`postgresProcedureMigrations`/`mysqlProcedureMigrations` lists were read but not touched — WS-1 and
+WS-3 (cleat#3353) own those compactions respectively, and WS-3's PR already edits this same file.
+
+**`engine/testutil/mssql_admin_replay_list_test.go`'s real-tree assertion is temporarily vacuous, and
+says so rather than silently overstating coverage.** `TestMSSQLAdminDBRestoreSurvivesTheRealFinalizeWorkflowStatusRedefinition`
+exercised `mssqlPlainPredicateReplayFiles`'s derivation against the real tree's `013`-redefines-
+`finalize_workflow_status` case; with `013` folded into `003`, there is no later file redefining
+anything, so the derivation's non-trivial branch never executes and the test can no longer
+distinguish correct from broken behavior for that scenario. Documented in place rather than deleted:
+the synthetic-tree sibling test above it still exercises the mechanism directly, so the coverage this
+test used to add is not lost, only relocated.
+
+**Verification run so far:** every module builds and vets clean (`go build ./... && go vet ./...`
+across all 8 of this repo's modules, per CLAUDE.md's "ONE MODULE" warning); `gofmt -l` is silent on
+every touched file; `scripts/check-postgres-migration-citations.py` reports OK; the full `go test -p 1
+./engine/...` suite was re-run against a database built from the new baseline (container
+`ws4-3349-mssql-a`) — first pass hit the package-level timeout this file's own "Is this result real?"
+section warns about (`panic: test timed out after 15m0s`, zero test failures, zero `build failed`),
+traced to `TestBothCloseArmsReachTheSameDepth/mssql` blocked mid-statement in
+`applyMSSQLCrossTenantOptIn`/`execMSSQLBatchFile`, not a hang in anything this PR touched: the same
+test passes in 3s in complete isolation against a second, idle database (`cleat_b`), and
+`sys.dm_exec_requests` showed no blocking session on `cleat_a` once checked — consistent with
+transient contention from the several other `go test`/`sqlcmd` invocations this verification itself
+ran against that same container, not a defect — confirmed by a second full run with a longer
+timeout (`-timeout=1800s`), which completed in 624s with **0 test failures, 0 package failures, 0
+`build failed`, 0 timeouts**, 5196 passed, 1166 skipped and **zero of the skips mssql-specific**
+(every skip is postgres/mysql, the two dialects this run deliberately left unconfigured).
+
+**Strengthened after cleat#3346's postgres finding: an empty `catalogdiff` is necessary, not
+sufficient.** WS-1 found a real defect in the postgres generator invisible to `-mode=diff` — a
+table-passthrough path and a separately-synthesized `ATTACH PARTITION` both targeted the same
+object, the passthrough ran first, and the attach silently no-op'd, so two structurally-identical
+trees disagreed on a live `INSERT`. Two things were asked of every stream holding an uncommitted
+compaction: check the local generator for the same passthrough-vs-synthetic duplication, and name
+what the local diff arm cannot see.
+
+Checked, not assumed: `scripts/gen-mssql-baseline/` has no passthrough path to duplicate against —
+its own header comment states why (`"there is no SQL Server equivalent of pg_dump --schema-only"`),
+and every emitted object class has exactly one source and one emission site (`readTables`→
+`writeTable`, `readIndexes`→`writeIndex`, `readModules`→`proceduresFile`, `readSecurityPolicies`→
+`writePolicy`, `readGrants`→`schemaFile`'s own loop) — confirmed by grepping every `CREATE`/`ALTER`
+literal in the package back to the single struct that produces it. The postgres bug's specific
+mechanism (two code paths racing to define the same object) cannot occur in a generator built this
+way.
+
+What the diff arm cannot see, named rather than left implicit: `migration/catalogdiff/mssql.go`
+reads a security policy's `is_enabled` (folded into every predicate row) but not a **trigger's**
+`is_disabled` — exactly the gap `scripts/mssql-baseline-known-positive.sh`'s "disable a trigger"
+case exists to cover, and it is caught only by the supplementary check, already 12/12 passing
+(including that case) before this message arrived.
+
+**The live-write half, done rather than only argued for:** `cleat_a`'s `schema_migrations` carries
+exactly three rows (versions 1/2/3, applied 2026-10-13T19:57:33), confirming it was built by
+`migration.Runner` — the real production applier `build()` calls, not a reimplementation — from the
+new three-file baseline, not the pre-compaction chain. The 5196-test engine run just above already
+ran against that exact database, through real `SQLDBAdapter`/`ReadOnlyDB` code paths. Beyond that,
+three tests exercising the one class engine/ doesn't reach — the `cleat_app_role` grants this PR's
+own `readGrants()` fix added — were run directly against `cleat_a` and all pass on `/mssql`:
+`TestTheAppLoginCannotWriteDeploymentSecrets` (a live `INSERT` as the `cleat_app` login, denied),
+`TestAWorkerBootsAndServesAsTheAppLoginOnEveryDialect` (a real worker boot and serve on that login),
+`TestMigrateOnlySucceedsWithADatabaseScopedLoginOnMySQLAndMSSQL`. **Accepted: empty diff plus a
+passing live write, both legs present.**
+
+**Was blocked, now clear — rebased onto `#3353` (merged `b5679197`, 2026-10-14).** Held rather than
+pushed: `auth/operator_store_test.go`'s `TestTheOperatorStatementsNameTheTableTheMigrationsCreate`
+globs `migrations/<dialect>/*operator_api_keys.sql`, and with `009_operator_api_keys.sql` folded
+away it failed on `/mssql` exactly as the mysql compaction (`#3353`) had already hit on its own arm
+— confirmed directly before `#3353` landed: `found 0 migration file(s) ... want exactly 1: []` on
+`/mssql`, `/postgres` and `/mysql` unaffected. `#3353` shipped the fix (a content scan, not a
+glob, covering both a dedicated file and one folded into a generated baseline) rather than this PR
+touching a file three streams shared. **Confirmed post-rebase: all three dialects now pass**
+(`go test ./auth/ -run TestTheOperatorStatementsNameTheTableTheMigrationsCreate -v`).
+
+The rebase carried one more shared-file resolution: `#3353` had already shortened
+`mysqlProcedureMigrations` to `["003_procedures.sql"]` in the same
+`engine/store_backends_procedures_test.go` this PR edits (`mssqlProcedureMigrations`); git's
+three-way merge auto-resolved it with no conflict, re-verified directly — both lists read correctly
+post-rebase, `postgresProcedureMigrations` untouched (WS-1's concern, not this PR's).
+`migrations/mysql/012_event_history_tenant_pk.sql`, which this PR's own citation fix had touched,
+was deleted by `#3353` (folded into mysql's own new baseline, which carries no prose comments at
+all — confirmed nothing was left to preserve); accepted the deletion. `scripts/migration-citation-baseline.txt`
+conflicted as expected and was resolved the same way `#3355`/`#3356` and WS-1's `#3347` independently
+converged on: regenerate fresh via `--update`, never hand-edit, then diff against develop's own
+baseline to confirm the only delta is this PR's own prior entries (7 additions, 1 removal — the
+exact set already recorded above), nothing else moved.
+
+**Full `go test -p 1 ./engine/...` re-run against a database rebuilt from the rebased tree:** 5245
+passed, 0 test failures, 0 package failures, 0 build-failed, 0 timeouts, 1191 skipped, 0
+mssql-specific skips — identical shape to `#3356`'s own clean run, as expected since both now build
+on the same post-`#3353` baseline. Build/vet clean across all 8 modules; `gofmt -l` silent;
+citation/plan-marker/section-number guards all clean.
+
+This section's own number moved from `3.503` to `3.504` during the rebase: `#3355`'s fix (cleat#3356)
+claimed `3.503` in `IMPROVEMENT-PLAN.d/` first (landed standalone, ahead of this PR, to unblock
+WS-1's postgres consolidation sooner — see cleat#3355's own entry).
+
+**A second, planned rebase, onto `#3356` itself.** Coordinator flagged an ordering hazard before
+either PR merged: `#3356` adds a standalone `migrations/mssql/015_entry_point_schemas_isjson_check.sql`
+on top of the *old* 14-file chain; this PR's own regeneration predates that file entirely. Landing
+this PR first would have put `#3356`'s later merge outside the newly-compacted baseline —
+numbering jumping `003` → `015`, and this PR's own "no `004`+ files remain" acceptance broken by
+the very next merge. Held `#3357` unenqueued (told cleat-review directly) until `#3356` merged,
+then rebased a second time onto it. **The plain rebase is not enough here, and does not fold
+anything on its own** — confirmed directly: immediately after the rebase, `015_*.sql` sat alone in
+the tree and `001_schema.sql` still had no `ISJSON` check at its `entry_point_schemas` column. Ran
+the full generator pipeline again (`emit` from a database built off the current 001/002/003/015,
+`diff`/`supplementary`/`mssql-baseline-known-positive.sh` against it) to fold `015`'s check into a
+freshly regenerated `001_schema.sql`, then deleted `015_*.sql`. Re-verified: `-mode=diff` 0
+differences, `-mode=supplementary` 5/5, known-positive 12/12 (first known-positive run reported
+10 of 12 UNMEASURED — `CLEAT_MSSQL_CONTAINER` was pointed at A's container instead of B's, the
+container the mutation step actually execs into; fixed and re-ran clean). A live `INSERT` of
+invalid JSON against the final regenerated tree is rejected by `ck_workflow_defs_entry_point_schemas`
+by name, same as `#3356`'s own verification.
+
+**That second rebase created a THIRD instance of the exact citation hazard this PR already fixed
+twice.** `engine/mssql_json_parity_test.go`'s own failure message (edited by `#3356` to point at
+`015_entry_point_schemas_isjson_check.sql` as a worked example) went dangling the moment this PR's
+regeneration folded that file away — the same shape as the `037_json_column_checks.sql` pointer
+`#3356` itself had just fixed, recurring one merge later. Repointed to the two check constraints
+`ck_workflow_defs_dag_spec`/`ck_workflow_defs_entry_point_schemas`, both now permanently inside
+`001_schema.sql` rather than a numbered file that compaction can delete out from under the message
+again. The remaining bare `migrations/mssql/015` reference (explaining the history) is baselined as
+deliberate, the same way `037`'s was.
+
+**Full `go test -p 1 ./engine/...` re-run a third time**, against a database rebuilt from this final
+tree: identical clean shape — 5245 passed, 0 test failures, 0 package failures, 0 build-failed, 0
+timeouts, 0 mssql-specific skips. Build/vet, `gofmt -l`, and all citation/plan-marker/section-number
+guards re-confirmed clean.
+
+**Files**: `scripts/gen-mssql-baseline/emit.go`, `migrations/mssql/001_schema.sql`,
+`migrations/mssql/003_procedures.sql` (regenerated, twice — once to compact `004`-`014`, again to
+fold `015` in after `#3356`); `migrations/mssql/004_workflow_defs_exposure_class.sql` through
+`011_promise_seq_closes_the_mid_segment_wake_gap.sql`, `013_a_promise_resolved_mid_segment_wakes_the_workflow.sql`,
+`014_event_history_tenant_pk.sql`, `015_entry_point_schemas_isjson_check.sql` (deleted, the last one
+by this PR's second rebase, not by `#3356`); `cmd/cleat-worker/an_app_login_cannot_write_deployment_secrets_test.go`,
+`deploy/mssql/900-app-role.sh`, `deploy/mysql/900-app-role.sh`, `docs/contributor/migrations.md`,
+`docs/how-to/use-deployment-secrets.md`, `engine/mssql_deployment.go`, `migrations/mysql/012_event_history_tenant_pk.sql`,
+`engine/mssql_json_parity_test.go` (citation fixes, the last one a second time); `engine/store_backends_procedures_test.go`
+(`mssqlProcedureMigrations`); `engine/testutil/mssql_admin_replay_list_test.go` (vacuity note);
+`scripts/migration-citation-baseline.txt`
+(regenerated).
