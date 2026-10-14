@@ -119,7 +119,6 @@ engine/mssql_deployment.go	migrations/mssql/036
 engine/mssql_index_parity_test.go	035_ready_and_active_indexes.sql
 engine/mssql_index_parity_test.go	043_claim_terminating_workflows.sql
 engine/mssql_index_parity_test.go	migrations/postgres/040
-engine/mssql_json_parity_test.go	037_json_column_checks.sql
 engine/mssql_lifecycle.go	010_idempotency_keys_tenant_id.sql
 engine/mssql_plugin_deps_check_test.go	036_plugin_deps_isjson.sql
 engine/mssql_plugin_deps_check_test.go	migration 036
