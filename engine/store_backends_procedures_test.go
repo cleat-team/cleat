@@ -64,14 +64,16 @@ var postgresProcedureMigrations = []string{
 	"021_finalize_workflow_status_mirrors_completed_at.sql",
 }
 
-// Same shape as the Postgres list above, for the same reason: MySQL was
-// compacted in cleat#2433 and 003_procedures.sql is now generated from a
-// mysqldump of the fully-migrated database, so it carries the FINAL body by
-// construction. There is no longer a sequence to keep in order -- the nine
-// migrations this used to name are folded into it and deleted.
+// ONE entry since the cleat#3348 re-compaction, for the same reason the
+// Postgres list above has one: 003 now carries the FINAL body, generated
+// from a database built by the whole chain through 012, so it is the last
+// definition by construction rather than by replaying 011 on top of it.
+// MySQL's FIRST compaction (cleat#2433) left this list at two entries
+// because 011_a_promise_resolved_mid_segment_wakes_the_workflow.sql was
+// added to the chain afterward and redefined the routine without ever being
+// folded in -- cleat#3348 is what finally did that, and deleted the file.
 var mysqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"011_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 }
 
 // ONE entry since the cleat#2434 rebaseline, for the same reason the Postgres

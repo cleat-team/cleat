@@ -23,8 +23,6 @@ CREATE PROCEDURE finalize_workflow_status(
 BEGIN
     DECLARE v_rows_updated INT DEFAULT 0;
 
-     
-     
     CASE p_final_status
         WHEN 'done' THEN
             UPDATE workflow_instances
@@ -44,6 +42,7 @@ BEGIN
                 next_wake_at = CASE
                                     WHEN signal_seq <> signal_seq_at_claim
                                       OR signal_consumed_seq <> signal_consumed_at_claim
+                                      OR promise_seq <> promise_seq_at_claim
                                     THEN NOW(6) ELSE p_next_wake_at END,
                 query_state = CAST(p_query_state AS JSON)
             WHERE id = p_workflow_id
@@ -57,11 +56,7 @@ BEGIN
 
     SET v_rows_updated = ROW_COUNT();
 
-     
-     
-     
     IF v_rows_updated > 0 AND p_final_status = 'done' THEN
-         
         UPDATE workflow_instances
         SET next_wake_at = NOW(6)
         WHERE id = (
@@ -73,13 +68,9 @@ BEGIN
         )
         AND status IN ('ready', 'suspended');
 
-
-         
         DELETE FROM event_history WHERE workflow_id = p_workflow_id;
     END IF;
 
-     
-     
     SELECT v_rows_updated > 0 AS fence_held;
 END ;;
 DELIMITER ;

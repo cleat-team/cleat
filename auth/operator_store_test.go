@@ -116,9 +116,20 @@ func bareTable(name string) string {
 // name a table no migration creates.
 //
 // It reads the migration files rather than a list of names, so a table renamed
-// in the schema and not in the code fails here. That is also why it globs for
-// the file instead of hardcoding a number: a renumbered migration is not a
-// reason for a guard to stop covering the table.
+// in the schema and not in the code fails here.
+//
+// It used to glob for the file by name (*operator_api_keys.sql) rather than
+// hardcode a number, on the reasoning that "a renumbered migration is not a
+// reason for a guard to stop covering the table". That is true of a
+// renumbering and false of a compaction: cleat#3348 folded
+// migrations/mysql/008_operator_api_keys.sql into the generated
+// 001_schema.sql baseline and deleted it, so the glob found zero files and
+// this test failed outright rather than saying anything about the table.
+// Scanning every .sql file in the dialect's directory for a CREATE TABLE
+// naming operator_api_keys -- rather than a file whose NAME mentions it --
+// covers both a dedicated numbered file and a folded-into-the-baseline one,
+// so the next dialect to compact (postgres, mssql: cleat#3347, cleat#3349)
+// does not hit the same red.
 func TestTheOperatorStatementsNameTheTableTheMigrationsCreate(t *testing.T) {
 	for dialect, dir := range map[string]string{
 		DialectPostgres: "postgres",
@@ -126,34 +137,40 @@ func TestTheOperatorStatementsNameTheTableTheMigrationsCreate(t *testing.T) {
 		DialectMSSQL:    "mssql",
 	} {
 		t.Run(dialect, func(t *testing.T) {
-			matches, err := filepath.Glob(filepath.Join("..", "migrations", dir, "*operator_api_keys.sql"))
+			migDir := filepath.Join("..", "migrations", dir)
+			entries, err := os.ReadDir(migDir)
 			if err != nil {
-				t.Fatalf("globbing the %s migrations: %v", dialect, err)
-			}
-			if len(matches) != 1 {
-				t.Fatalf("found %d migration file(s) matching *operator_api_keys.sql in migrations/%s, want exactly 1: %v",
-					len(matches), dir, matches)
-			}
-			body, err := os.ReadFile(matches[0])
-			if err != nil {
-				t.Fatalf("reading %s: %v", matches[0], err)
+				t.Fatalf("reading %s: %v", migDir, err)
 			}
 
-			body = []byte(stripLiteralsAndComments(string(body)))
-
-			// Exactly one, not simply the first. A file that creates two tables
-			// would otherwise let this guard pass by reading whichever came
-			// first, which is a denominator that says nothing about the table
-			// the statements actually name.
-			created := createTableRE.FindAllSubmatch(body, -1)
-			if len(created) != 1 {
-				t.Fatalf("%s has %d CREATE TABLE statement(s) after comments are stripped, want exactly 1, "+
-					"so this guard cannot say which table it is comparing against", matches[0], len(created))
+			// Exactly one, across the whole directory, not simply the first
+			// file found. A table defined twice (a stale numbered file left
+			// behind by an incomplete compaction, say) would otherwise let
+			// this guard pass by reading whichever came first, which is a
+			// denominator that says nothing about the table the statements
+			// actually name.
+			var defFiles []string
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+					continue
+				}
+				path := filepath.Join(migDir, e.Name())
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("reading %s: %v", path, err)
+				}
+				stripped := stripLiteralsAndComments(string(body))
+				for _, m := range createTableRE.FindAllSubmatch([]byte(stripped), -1) {
+					if bareTable(string(m[1])) == "operator_api_keys" {
+						defFiles = append(defFiles, path)
+					}
+				}
 			}
-			want := bareTable(string(created[0][1]))
-			if want == "" {
-				t.Fatalf("%s: the CREATE TABLE regex captured an empty name", matches[0])
+			if len(defFiles) != 1 {
+				t.Fatalf("found %d CREATE TABLE statement(s) for operator_api_keys in migrations/%s, want exactly 1: %v",
+					len(defFiles), dir, defFiles)
 			}
+			want := "operator_api_keys"
 
 			for name, stmt := range operatorStatements(dialect) {
 				found := targetTableRE.FindStringSubmatch(stmt)
@@ -163,10 +180,10 @@ func TestTheOperatorStatementsNameTheTableTheMigrationsCreate(t *testing.T) {
 					continue
 				}
 				if got := bareTable(found[1]); got != want {
-					t.Errorf("%s(%q) targets %q but %s creates %q.\n\nA credential written to one and read from the other "+
+					t.Errorf("%s(%q) targets %q but %s defines %q.\n\nA credential written to one and read from the other "+
 						"cannot authenticate anything, and the failure looks like a wrong key rather than a wrong table: "+
 						"the row is present, unrevoked, and its hash matches. cleat#866.",
-						name, dialect, got, filepath.Base(matches[0]), want)
+						name, dialect, got, filepath.Base(defFiles[0]), want)
 				}
 			}
 		})
