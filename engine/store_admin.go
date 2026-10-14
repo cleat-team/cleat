@@ -310,7 +310,8 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	// cleat#3245 Phase 3 step 3 piece C: this read stays on workflow_instances
 	// -- explicitly NOT cut over to workflow_leases, unlike adminResolveMiss
 	// just below. Two independent reasons: compaction_state is not a
-	// workflow_leases column (migration 016's split), and this FOR UPDATE's
+	// workflow_leases column (migration 016 (folded into
+	// migrations/postgres/001_schema.sql by #3358)'s split), and this FOR UPDATE's
 	// lock is reused by the workflow_instances UPDATE later in this same
 	// transaction (adminForceMark's or the inline one-phase arm's). Moving
 	// the lock to workflow_leases while that later write stays on
@@ -398,7 +399,8 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		`, workflowID, generation); err != nil {
 			return fmt.Errorf("admin %s: mirror lease: %w", a.action, err)
 		}
-		// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020.
+		// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020
+		// (folded into migrations/postgres/001_schema.sql by #3358).
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL, completed_at = now() WHERE id = $1
 		`, workflowID, a.result); err != nil {

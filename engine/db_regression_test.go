@@ -16,7 +16,8 @@ func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			// Three columns: ContinueAsNew's INSERT now RETURNs
-			// parent_workflow_id (migration 018) alongside id and
+			// parent_workflow_id (migration 018 (folded into
+			// migrations/postgres/001_schema.sql by #3358)) alongside id and
 			// task_queue -- nil here since this mock's "old-run" has no
 			// parent to inherit from.
 			match: "INSERT INTO workflow_instances (id, def_name",

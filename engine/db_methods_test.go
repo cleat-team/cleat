@@ -791,7 +791,8 @@ func TestPostgresStore_StartChildWorkflow(t *testing.T) {
 	// Three columns: StartChildWorkflow's INSERT now RETURNs task_queue and
 	// def_version alongside id -- task_queue for the insertLeaseAndPayloadRows
 	// mirror it added (cleat#3245 Phase 3 step 2 gap fix), def_version for
-	// migration 018's workflow_payloads.def_version mirror (same resolved-
+	// migration 018 (folded into migrations/postgres/001_schema.sql by
+	// #3358)'s workflow_payloads.def_version mirror (same resolved-
 	// version-via-RETURNING reasoning as task_queue's own comment there).
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID, "default", int64(1)}}},

@@ -473,7 +473,8 @@ func (tg *crashTarget) startWorker(t *testing.T, bin, taskQueue, svcURL string, 
 
 // startWorkflowEntry queues one crashcall instance.
 //
-// workflow_leases is PostgreSQL-only (migration 016); on that target the
+// workflow_leases is PostgreSQL-only (migration 016 (folded into
+// migrations/postgres/001_schema.sql by #3358)); on that target the
 // reclaim path piece A moved now requires a matching row there, for the same
 // reason harness_test.go's identically-named function does -- see its doc.
 // MySQL and SQL Server still reclaim from workflow_instances directly, so

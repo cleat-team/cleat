@@ -2215,7 +2215,8 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	// plus an in-memory sort of the whole 'running' set since -- the
 	// accepted regression that migration's own comment names (23x slower at
 	// 20k running, measured). workflow_leases carries idx_leases_stale
-	// (migration 016, status/heartbeat_at, never read from until now) for
+	// (migration 016 (folded into migrations/postgres/001_schema.sql by
+	// #3358), status/heartbeat_at, never read from until now) for
 	// exactly this query. The outer UPDATE still targets
 	// workflow_instances by id, unaffected by where the candidate ids came
 	// from; piece 6b's dual-write already keeps workflow_leases'

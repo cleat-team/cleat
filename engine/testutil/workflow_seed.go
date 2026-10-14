@@ -18,7 +18,8 @@ const (
 
 // WorkflowLeaseSeed describes the workflow_leases row to create alongside a
 // raw-seeded workflow_instances row of the same id. A zero-value field takes
-// workflow_leases' own column default (migrations/postgres/016), which
+// workflow_leases' own column default (migrations/postgres/016, folded
+// into migrations/postgres/001_schema.sql by #3358), which
 // agrees with workflow_instances' default for every field here -- both
 // tables default status to 'ready' and tenant_id to the zero UUID.
 type WorkflowLeaseSeed struct {

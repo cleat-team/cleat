@@ -73,7 +73,8 @@ var coreTables = []string{
 // correct, not incomplete.
 //
 // workflow_leases/workflow_payloads (cleat#3245 Phase 3 step 1,
-// migrations/postgres/016) are PostgreSQL-only by the issue's own scoping
+// migrations/postgres/016 (folded into migrations/postgres/001_schema.sql
+// by #3358)) are PostgreSQL-only by the issue's own scoping
 // decision -- MySQL and SQL Server have no equivalent migration and carry
 // this state on workflow_instances itself, same reasoning as the entry
 // above.

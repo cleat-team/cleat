@@ -276,7 +276,8 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 				runID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 			}
-			// cleat#3245: workflow_leases is PostgreSQL-only (migration 016).
+			// cleat#3245: workflow_leases is PostgreSQL-only (migration 016
+			// (folded into migrations/postgres/001_schema.sql by #3358)).
 			// Inlined rather than testutil.SeedWorkflowLease, which takes a
 			// *sql.DB and fixtureDB here is a *sql.Conn (CrossTenantConn).
 			if be.Dialect == testutil.DialectPostgres {
