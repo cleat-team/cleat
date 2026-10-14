@@ -60,6 +60,7 @@ self_test() {
 json=""
 while [ $# -gt 0 ]; do case "$1" in --json) json="$2"; shift 2 ;; *) shift ;; esac; done
 case "$json" in
+  author)                  printf '%s' "${STUB_IS_BOT:-false}" ;;
   body)                    printf '%s' "${STUB_BODY-}" ;;
   closingIssuesReferences) printf '%s' "${STUB_CLOSING-}" ;;
   *) echo "stub gh: unhandled --json '$json'" >&2; exit 9 ;;
@@ -85,6 +86,24 @@ STUB_GH
       bash "$self_path" 2>&1) || rc=$?
   check "both set, explicitly closes nothing" 0 "explicitly says" "$rc" "$out"
 
+  # 3d. cleat#3354: a BOT author (dependabot and friends) -- exempt, status 0,
+  # even with nothing linked and nothing declared. This is the case that was
+  # structurally unsatisfiable before this exemption: a bot never closes an
+  # issue and the body is machine-generated, so neither of the two escapes
+  # above is available to it.
+  rc=0; out=$(PATH="$stub_dir:$PATH" PR_NUMBER=1 REPO=owner/repo \
+      STUB_IS_BOT='true' STUB_BODY='Bumps foo from 1.2.3 to 1.2.4.' STUB_CLOSING='[]' \
+      bash "$self_path" 2>&1) || rc=$?
+  check "bot author, nothing linked, nothing declared" 0 "author is a bot" "$rc" "$out"
+
+  # 3e. The exemption must not swallow a REAL finding for a human author --
+  # same body/closing shape as 3a, with the bot flag explicitly false. Proves
+  # 3d is reading the flag rather than passing everything now.
+  rc=0; out=$(PATH="$stub_dir:$PATH" PR_NUMBER=1 REPO=owner/repo \
+      STUB_IS_BOT='false' STUB_BODY='Refactors the retry loop.' STUB_CLOSING='[]' \
+      bash "$self_path" 2>&1) || rc=$?
+  check "human author, nothing linked, nothing declared, still a finding" 1 "No linked issue" "$rc" "$out"
+
   if [ "$failures" -ne 0 ]; then
     echo "self-test: $failures case(s) failed" >&2
     return 1
@@ -108,6 +127,23 @@ if [ -z "${PR_NUMBER-}" ] || [ -z "${REPO-}" ]; then
   echo "            This wrapper reads the PR body and closing references live," >&2
   echo "            so it has nothing to measure without them." >&2
   exit 2
+fi
+
+# cleat#3354: a bot-authored PR (dependabot and friends) closes nothing and
+# names no issue, so it can never satisfy either escape the check below
+# offers -- a structural false positive, not an occasional one, and one that
+# was blocking every dependency-bump PR plus (the same night) a human
+# release-prep PR carried along by the same red. `gh pr view --json author`
+# gives a direct `is_bot` boolean rather than a login string to pattern-match
+# (`app/dependabot` here, `dependabot[bot]` elsewhere, a different name for
+# every other bot) -- read live, same discipline as everything else this
+# wrapper reads, and checked BEFORE the body/closing-issues reads below so a
+# bot PR never pays for a question that does not apply to it.
+author_is_bot=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json author --jq '.author.is_bot')
+if [ "$author_is_bot" = "true" ]; then
+  echo "OK: author is a bot (dependabot and friends never close an issue by design;" \
+    "the body is machine-generated, so there is nothing for a human to declare either way)."
+  exit 0
 fi
 
 pr_body=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body // ""')
