@@ -29,18 +29,11 @@ func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, rea
 		return fmt.Errorf("request cancellation: encrypt reason: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET cancellation_requested = true, cancellation_reason = $2
-		WHERE id = $1
-	`, workflowID, sealedReason)
-	if err != nil {
-		return err
-	}
-
-	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_leases, on the
-	// same tx. sealedReason is reused rather than re-sealed, so the two
-	// tables carry identical ciphertext.
+	// cleat#3245 Phase 3 step 2 piece 5a wrote this to workflow_instances
+	// first and mirrored it onto workflow_leases. cleat#3360 dropped
+	// cancellation_requested/cancellation_reason from workflow_instances --
+	// CheckCancellation has read workflow_leases exclusively since piece D,
+	// so workflow_leases is the only copy left to write.
 	if err := setLeaseCancellation(ctx, tx, workflowID, sealedReason); err != nil {
 		return err
 	}
@@ -61,7 +54,7 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 	var reason sql.NullString
 	// cleat#3245 Phase 3 step 3 piece D: reads workflow_leases rather than
 	// workflow_instances. cancellation_requested/cancellation_reason are
-	// grouped with the other lease columns by migration 016's own design
+	// grouped with the other lease columns by migration 016 (folded into migrations/postgres/001_schema.sql by #3358)'s own design
 	// note (checked on the hot resume/heartbeat path), and every writer
 	// (RequestCancellation, via setLeaseCancellation) already mirrors them
 	// there, step 2 piece 5a.
@@ -646,7 +639,7 @@ func (s *PostgresStore) SetAllowedSignalCallers(ctx context.Context, workflowID 
 	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_payloads, on
 	// the same tx -- a scope addition found and disclosed on the issue before
 	// this code was written (allowed_signals is a workflow_payloads column
-	// per migration 016, not a workflow_leases one like this file's other
+	// per migration 016 (folded into migrations/postgres/001_schema.sql by #3358), not a workflow_leases one like this file's other
 	// mirrors). Runs only after the n==0 check above has confirmed the row
 	// exists under this tenant, same as the UPDATE it mirrors.
 	if err := setPayloadAllowedSignals(ctx, tx, workflowID, encoded); err != nil {

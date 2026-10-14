@@ -101,11 +101,18 @@ type tableSpec struct {
 // three test names, which exercise exactly these columns end to end.
 var sensitiveTableSpecs = []tableSpec{
 	{
+		// cancellation_reason was dropped from workflow_instances by
+		// cleat#3360 -- CheckCancellation has read workflow_leases
+		// exclusively since piece D, and the one remaining writer
+		// (RequestCancellation) wrote only workflow_leases from the same
+		// change onward. workflow_leases is not in this list at all yet
+		// (cleat#3344's own gap); re-sealing cancellation_reason there is
+		// that issue's fix, not this one's.
 		name:   "workflow_instances",
 		pkCols: []string{"id"},
 		cols: []string{
 			"input", "result", "error_msg", "error_code", "error_op",
-			"cancellation_reason", "query_state",
+			"query_state",
 		},
 	},
 	{
@@ -145,7 +152,7 @@ var sensitiveTableSpecs = []tableSpec{
 		// writeResultPayload/writeErrorPayload/insertLeaseAndPayloadRows,
 		// engine/store_admin.go, engine/store_admin_rereplay.go) seals
 		// exactly these six columns. allowed_signals is also a
-		// workflow_payloads column (migration 016) but is plain JSON via
+		// workflow_payloads column (migration 016 (folded into migrations/postgres/001_schema.sql by #3358)) but is plain JSON via
 		// encodeAllowedSignals, not one of the encrypt helpers, so it is
 		// deliberately not listed here.
 		name:   "workflow_payloads",

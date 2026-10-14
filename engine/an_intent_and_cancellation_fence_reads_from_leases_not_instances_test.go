@@ -129,10 +129,13 @@ func TestCheckCancellationReadsFromLeasesNotInstances(t *testing.T) {
 
 	wfID := newIntentWorkflow(t, ctx, store, "cancellation-reads-leases")
 
-	// workflow_instances.cancellation_requested stays at its StartNewRun
-	// default (false) -- RequestCancellation, the only writer, is never
-	// called. Setting workflow_leases directly is what makes the two
-	// readings disagree.
+	// cleat#3360 dropped cancellation_requested from workflow_instances
+	// outright, so a regression back to reading it there would now fail
+	// with "column does not exist" rather than a silently wrong answer --
+	// this test's name predates that and still holds, since nothing here
+	// depends on the column existing. workflow_leases is the only row this
+	// writes to, which is what makes CheckCancellation's answer prove it
+	// read that row and not some unchanged default elsewhere.
 	if _, err := db.Exec(`UPDATE workflow_leases SET cancellation_requested = true WHERE id = $1`, wfID); err != nil {
 		t.Fatalf("diverge workflow_leases.cancellation_requested: %v", err)
 	}
