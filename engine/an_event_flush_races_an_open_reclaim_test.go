@@ -344,8 +344,11 @@ func holdReclaimOpen(t *testing.T, ctx context.Context, store WorkflowStore, wor
 		if err != nil {
 			t.Fatalf("begin reclaim tx (postgres): %v", err)
 		}
+		// Since cleat#3245 B3c the Postgres reclaim writes only the lease
+		// row, so this is ReapStaleInstances' statement with its selection
+		// narrowed to the one id.
 		res, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances
+			UPDATE workflow_leases
 			SET status = CASE WHEN pending_terminal_status IS NOT NULL
 			                  THEN 'terminating' ELSE 'ready' END,
 			    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
@@ -355,17 +358,6 @@ func holdReclaimOpen(t *testing.T, ctx context.Context, store WorkflowStore, wor
 			t.Fatalf("reclaim UPDATE (postgres): %v", err)
 		}
 		n, _ := res.RowsAffected()
-		// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflow's candidate scan
-		// now reads workflow_leases, not workflow_instances -- mirror this
-		// hand-rolled reclaim (it simulates ReapStaleInstances) the same way
-		// the real ReapStaleInstances does, via the production helper, or
-		// the "legitimate" worker's claim later in this test never sees the
-		// row as ready again.
-		if n > 0 {
-			if err := reapLeaseRows(ctx, tx, []string{workflowID}); err != nil {
-				t.Fatalf("mirror reclaim onto workflow_leases: %v", err)
-			}
-		}
 		return tx, n
 	case *MySQLStore:
 		tx, err := s.db.BeginTx(ctx, nil)

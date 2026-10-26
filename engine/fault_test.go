@@ -180,7 +180,7 @@ func TestFaultReapStaleInstances(t *testing.T) {
 
 	// Verify the instance is back to 'ready'.
 	var status string
-	db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, runID).Scan(&status)
+	db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, runID).Scan(&status)
 	if status != "ready" {
 		t.Errorf("Expected status 'ready', got %q", status)
 	}

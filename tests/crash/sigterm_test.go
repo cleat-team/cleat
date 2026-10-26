@@ -44,7 +44,7 @@ func awaitExit(t *testing.T, ch <-chan error, budget time.Duration, w *worker) {
 func runRow(t *testing.T, db *sql.DB, id string) (status, errMsg string) {
 	t.Helper()
 	var msg sql.NullString
-	if err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).Scan(&status, &msg); err != nil {
+	if err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_leases w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).Scan(&status, &msg); err != nil {
 		t.Fatalf("reading %s: %v", id, err)
 	}
 	return status, msg.String
@@ -276,8 +276,11 @@ func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.
 	}
 }
 
-// lockRow holds a row lock on the run, from the owner connection, until unlock is called. Whatever the worker
-// writes to that row (finalize, continue-as-new, and the release that follows a cancelled one) waits behind it.
+// lockRow holds a lock on the run's lease row, from the owner connection, until unlock is called. Whatever the
+// worker writes to that row (finalize, continue-as-new, and the release that follows a cancelled one) waits
+// behind it. It is the lease row and not the workflow_instances row because since cleat#3245 B3c-2 the release
+// writes the lease row alone, so a lock on the instance row held the finalize (through its event_count bump)
+// but let the release land early.
 func lockRow(t *testing.T, db *sql.DB, id string) (unlock func()) {
 	t.Helper()
 	tx, err := db.Begin()
@@ -285,7 +288,7 @@ func lockRow(t *testing.T, db *sql.DB, id string) (unlock func()) {
 		t.Fatal(err)
 	}
 	var one int
-	if err := tx.QueryRow(`SELECT 1 FROM workflow_instances WHERE id = $1 FOR UPDATE`, id).Scan(&one); err != nil {
+	if err := tx.QueryRow(`SELECT 1 FROM workflow_leases WHERE id = $1 FOR UPDATE`, id).Scan(&one); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("locking %s: %v", id, err)
 	}
@@ -389,7 +392,7 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	for {
 		var live, total, failed int
 		if err := db.QueryRow(`SELECT count(*) FILTER (WHERE status IN ('ready','running','terminating')),
-			count(*), count(*) FILTER (WHERE status = 'failed') FROM workflow_instances WHERE task_queue = $1`, taskQueue).
+			count(*), count(*) FILTER (WHERE status = 'failed') FROM workflow_leases WHERE task_queue = $1`, taskQueue).
 			Scan(&live, &total, &failed); err != nil {
 			t.Fatal(err)
 		}
@@ -497,7 +500,7 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 		var n int
 		var assigned sql.NullString
 		if err := db.QueryRow(`SELECT (SELECT count(*) FROM event_history WHERE workflow_id = $1 AND event_type = 'defer'), assigned_to
-			FROM workflow_instances WHERE id = $1`, wfID).Scan(&n, &assigned); err != nil {
+			FROM workflow_leases WHERE id = $1`, wfID).Scan(&n, &assigned); err != nil {
 			t.Fatal(err)
 		}
 		if n > 0 && !assigned.Valid {

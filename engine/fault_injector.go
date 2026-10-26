@@ -147,28 +147,15 @@ func (fi *FaultInjector) InjectWorkerCrash(workerID string) error {
 	defer fi.mu.Unlock()
 
 	if fi.db != nil {
-		// Both tables, as a real release writes them: claims and the reaper
-		// read workflow_leases, and heartbeat_at lives only there since
-		// cleat#3245 B2.
-		//
-		// Unlike a real release, these are two autocommit statements, not one
-		// transaction (cleat-review on #3399). A failure between them leaves
-		// the instance row released and the lease row not. That is acceptable
-		// for a test fault, whose caller fails on the returned error anyway,
-		// but it is not an example of how production writes the pair.
-		if _, err := fi.db.ExecContext(context.Background(),
-			`UPDATE workflow_instances
-			 SET status = 'ready', assigned_to = NULL
-			 WHERE status = 'running' AND assigned_to = $1`,
-			workerID); err != nil {
-			return fmt.Errorf("inject worker crash: %w", err)
-		}
+		// The lease row only, as a real release writes it since cleat#3245
+		// B3c: claims and the reaper read workflow_leases, and it holds the
+		// only copy of these columns that is written.
 		if _, err := fi.db.ExecContext(context.Background(),
 			`UPDATE workflow_leases
 			 SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
 			 WHERE status = 'running' AND assigned_to = $1`,
 			workerID); err != nil {
-			return fmt.Errorf("inject worker crash: lease: %w", err)
+			return fmt.Errorf("inject worker crash: %w", err)
 		}
 	}
 

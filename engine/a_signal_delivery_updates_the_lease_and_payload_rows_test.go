@@ -134,15 +134,6 @@ func TestConsumeSignalUpdatesTheLeaseRow(t *testing.T) {
 	if lease.signalConsumedSeq != 1 {
 		t.Errorf("workflow_leases.signal_consumed_seq = %d, want 1", lease.signalConsumedSeq)
 	}
-
-	var instConsumedSeq int64
-	if err := db.QueryRow(`SELECT signal_consumed_seq FROM workflow_instances WHERE id = $1`, id).Scan(&instConsumedSeq); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.signalConsumedSeq != instConsumedSeq {
-		t.Errorf("workflow_leases.signal_consumed_seq (%d) disagrees with workflow_instances (%d)",
-			lease.signalConsumedSeq, instConsumedSeq)
-	}
 }
 
 func TestDeliverSignalUpdatesTheLeaseRowAndWakesASuspendedWorkflow(t *testing.T) {
@@ -162,18 +153,6 @@ func TestDeliverSignalUpdatesTheLeaseRowAndWakesASuspendedWorkflow(t *testing.T)
 	}
 	if time.Since(lease.nextWakeAt) > 10*time.Second {
 		t.Errorf("workflow_leases.next_wake_at = %v, want set to roughly now for a suspended workflow", lease.nextWakeAt)
-	}
-
-	var instSeq int64
-	var instWake time.Time
-	if err := db.QueryRow(`SELECT signal_seq, next_wake_at FROM workflow_instances WHERE id = $1`, id).Scan(&instSeq, &instWake); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.signalSeq != instSeq {
-		t.Errorf("workflow_leases.signal_seq (%d) disagrees with workflow_instances (%d)", lease.signalSeq, instSeq)
-	}
-	if lease.nextWakeAt.Sub(instWake).Abs() > time.Second {
-		t.Errorf("workflow_leases.next_wake_at (%v) disagrees with workflow_instances' (%v)", lease.nextWakeAt, instWake)
 	}
 }
 

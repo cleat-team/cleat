@@ -426,7 +426,7 @@ func describeClaimState(t *testing.T, store WorkflowStore) {
 		       count(*) FILTER (WHERE status = 'ready'),
 		       count(*) FILTER (WHERE status = 'ready' AND next_wake_at <= now()),
 		       count(*) FILTER (WHERE status = 'running')
-		FROM workflow_instances`).Scan(&total, &ready, &due, &running)
+		FROM workflow_leases`).Scan(&total, &ready, &due, &running)
 	if err != nil {
 		t.Logf("claim state: query failed: %v", err)
 		return
@@ -436,7 +436,7 @@ func describeClaimState(t *testing.T, store WorkflowStore) {
 
 	rows, err := db.Query(`
 		SELECT coalesce(task_queue, '<null>'), status, count(*)
-		FROM workflow_instances GROUP BY 1, 2 ORDER BY 1, 2`)
+		FROM workflow_leases GROUP BY 1, 2 ORDER BY 1, 2`)
 	if err != nil {
 		return
 	}

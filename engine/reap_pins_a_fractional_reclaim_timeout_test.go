@@ -72,7 +72,13 @@ func assertReapFractionalStatuses(t *testing.T, dialect string, db *sql.DB, ctx 
 	t.Helper()
 	statusOf := func(id string) string {
 		var status string
-		q := fmt.Sprintf("SELECT status FROM workflow_instances WHERE id = %s", placeholder(1))
+		// PostgreSQL writes status to workflow_leases alone since
+		// cleat#3245 B3c; the other two dialects keep one table.
+		table := "workflow_instances"
+		if dialect == "postgres" {
+			table = "workflow_leases"
+		}
+		q := fmt.Sprintf("SELECT status FROM %s WHERE id = %s", table, placeholder(1))
 		if err := db.QueryRowContext(ctx, q, id).Scan(&status); err != nil {
 			t.Fatalf("%s: reading status of %s: %v", dialect, id, err)
 		}

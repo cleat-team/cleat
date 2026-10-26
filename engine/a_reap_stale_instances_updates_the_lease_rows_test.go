@@ -120,14 +120,6 @@ func TestReapStaleInstancesUpdatesTheLeaseRows(t *testing.T) {
 	if lease.reclaimCount != 1 {
 		t.Errorf("workflow_leases.reclaim_count = %d, want 1", lease.reclaimCount)
 	}
-
-	var instStatus string
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&instStatus); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.status != instStatus {
-		t.Errorf("workflow_leases.status (%q) disagrees with workflow_instances (%q)", lease.status, instStatus)
-	}
 }
 
 func TestReapStaleInstancesWithAPendingTerminalStatusGoesToTerminatingNotReady(t *testing.T) {

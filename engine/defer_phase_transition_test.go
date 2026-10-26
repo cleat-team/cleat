@@ -94,8 +94,9 @@ func setDeferPhaseDeadline(t *testing.T, store WorkflowStore, wfID string, secon
 	t.Helper()
 	switch s := store.(type) {
 	case *PostgresStore:
+		// workflow_leases: the only copy written, and swept, since cleat#3245 B3c.
 		if _, err := s.db.Exec(
-			`UPDATE workflow_instances SET defer_phase_deadline = now() - ($1 * interval '1 second') WHERE id = $2`,
+			`UPDATE workflow_leases SET defer_phase_deadline = now() - ($1 * interval '1 second') WHERE id = $2`,
 			secondsAgo, wfID); err != nil {
 			t.Fatalf("setDeferPhaseDeadline (postgres): %v", err)
 		}

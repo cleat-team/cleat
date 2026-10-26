@@ -121,7 +121,7 @@ func TestClaimWorkflows_RespectsLimitUnderConcurrency(t *testing.T) {
 			// behaved.
 			var running int
 			if err := ps.db.QueryRow(
-				`SELECT count(*) FROM workflow_instances WHERE status = 'running'`).Scan(&running); err != nil {
+				`SELECT count(*) FROM workflow_leases WHERE status = 'running'`).Scan(&running); err != nil {
 				t.Fatalf("count running: %v", err)
 			}
 			if running != claimed {

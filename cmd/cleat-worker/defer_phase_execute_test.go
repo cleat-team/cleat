@@ -215,7 +215,7 @@ func TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt(t *testing.T) {
 	var pending sql.NullString
 	var deadline sql.NullTime
 	if err := db.QueryRowContext(ctx,
-		`SELECT pending_terminal_status, defer_phase_deadline FROM workflow_instances WHERE id = $1`,
+		`SELECT pending_terminal_status, defer_phase_deadline FROM workflow_leases WHERE id = $1`,
 		wfID).Scan(&pending, &deadline); err != nil {
 		t.Fatalf("reading the marker back: %v", err)
 	}
@@ -369,29 +369,22 @@ func claimOne(t *testing.T, ctx context.Context, store engine.WorkflowStore, wor
 // stayed in its claimed state -- a claim after the simulated crash could not
 // see the row as claimable, and failed with "was not claimed; got N
 // workflow(s)" (claimOne above), got(9) counting the other ready leases it
-// COULD see rather than this test's own row. Mirrored the same way
-// ReapStaleInstances' own reclaim mirrors onto workflow_leases (store_lifecycle.go's
-// reapLeaseRows), minus that function's pending_terminal_status CASE -- these
-// fixtures never set one, and the workflow_instances UPDATE these tests ran
-// before this helper existed never accounted for it either.
+// COULD see rather than this test's own row. Since cleat#3245 B3c-2 the
+// helper writes workflow_leases alone, as ReapStaleInstances' own reclaim
+// does, minus that function's pending_terminal_status CASE -- these fixtures
+// never set one, and the workflow_instances UPDATE these tests ran before
+// this helper existed never accounted for it either.
 //
 // Returns an error rather than calling t.Fatalf: the fenced-execution
 // acceptance test calls this from inside an httptest.Server handler's own
 // goroutine, where only t.Errorf (never Fatal) is safe.
 func simulateCrashReclaim(ctx context.Context, db *sql.DB, wfID string) error {
 	if _, err := db.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
-		    generation = generation + 1, reclaim_count = reclaim_count + 1
-		WHERE id = $1`, wfID); err != nil {
-		return fmt.Errorf("workflow_instances: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `
 		UPDATE workflow_leases
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
 		    generation = generation + 1, reclaim_count = reclaim_count + 1
 		WHERE id = $1`, wfID); err != nil {
-		return fmt.Errorf("workflow_leases mirror: %w", err)
+		return fmt.Errorf("workflow_leases: %w", err)
 	}
 	return nil
 }

@@ -20,8 +20,9 @@ import (
 // frozen historical baseline (scripts/verify-postgres-baseline.py), so it
 // cannot be edited to drop the index alongside the column. Deferred to the
 // next baseline regeneration -- see engine/db.go's UpdateStickyWorker for
-// the full reasoning. Both tables still carry the column, so this file is
-// unchanged.
+// the full reasoning. Both tables still carry the column, but since
+// cleat#3245 B3c only workflow_leases is written, and this file no longer
+// compares the two.
 //
 // Seeds workflow_instances/workflow_leases/workflow_payloads directly via SQL
 // -- the same independent-testability pattern pieces 1-5b established --
@@ -76,15 +77,6 @@ func readLeaseStickyWorker(t *testing.T, db *sql.DB, id string) sql.NullString {
 	return v
 }
 
-func readInstanceStickyWorker(t *testing.T, db *sql.DB, id string) sql.NullString {
-	t.Helper()
-	var v sql.NullString
-	if err := db.QueryRow(`SELECT sticky_worker_id FROM workflow_instances WHERE id = $1`, id).Scan(&v); err != nil {
-		t.Fatalf("read workflow_instances.sticky_worker_id for %s: %v", id, err)
-	}
-	return v
-}
-
 func TestUpdateStickyWorkerUpdatesTheLeaseRow(t *testing.T) {
 	store, db := stickyWorkerLeaseTestStore(t)
 	ctx := context.Background()
@@ -99,10 +91,6 @@ func TestUpdateStickyWorkerUpdatesTheLeaseRow(t *testing.T) {
 	lease := readLeaseStickyWorker(t, db, id)
 	if !lease.Valid || lease.String != "worker-sticky-1" {
 		t.Errorf("workflow_leases.sticky_worker_id = %v, want %q", lease, "worker-sticky-1")
-	}
-	inst := readInstanceStickyWorker(t, db, id)
-	if lease.Valid != inst.Valid || lease.String != inst.String {
-		t.Errorf("workflow_leases.sticky_worker_id (%v) disagrees with workflow_instances (%v)", lease, inst)
 	}
 }
 
@@ -136,9 +124,5 @@ func TestClearStickyWorkerUpdatesTheLeaseRow(t *testing.T) {
 	lease := readLeaseStickyWorker(t, db, id)
 	if lease.Valid {
 		t.Errorf("workflow_leases.sticky_worker_id = %v, want NULL", lease)
-	}
-	inst := readInstanceStickyWorker(t, db, id)
-	if lease.Valid != inst.Valid {
-		t.Errorf("workflow_leases.sticky_worker_id (%v) disagrees with workflow_instances (%v)", lease, inst)
 	}
 }

@@ -49,9 +49,14 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		return fmt.Errorf("finalize defer phase: append events: %w", err)
 	}
 
+	// Since cleat#3245 B3c this lease UPDATE is the fence, and the lease row
+	// holds the only copy of these columns that is written.
+	// result/error_msg/error_code/error_op were already written at mark
+	// time, and this call only flips status -- the same reason
+	// adminForceMark's one-phase sibling needs no payload write here either.
 	var appliedStatus string
 	err = tx.QueryRowContext(ctx, `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
@@ -69,32 +74,16 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		return fmt.Errorf("finalize defer phase: %w", err)
 	}
 
-	// cleat#3245 Phase 3 step 2 piece 6d: mirror the same apply-defer-phase
-	// transition onto workflow_leases, same tx, same fence as the
-	// workflow_instances write above. result/error_msg/error_code/error_op
-	// were already written at mark time (pieces 4c/6c), and this call only
-	// flips status -- the same reason adminForceMark's one-phase sibling
-	// (piece 4c) needed no payload write here either.
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_leases
-		SET status = pending_terminal_status,
-		    pending_terminal_status = NULL,
-		    defer_phase_deadline = NULL,
-		    assigned_to = NULL
-		WHERE id = $1 AND assigned_to = $2 AND generation = $3 AND pending_terminal_status IS NOT NULL
-	`, runID, workerID, generation); err != nil {
-		return fmt.Errorf("finalize defer phase: mirror lease: %w", err)
-	}
 	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration
 	// 020 (folded into migrations/postgres/001_schema.sql by #3358). This
-	// DOES need its own workflow_payloads write, unlike the
-	// status-only lease mirror above: completed_at was never written at
-	// mark time (there is no completed_at concept yet at that point), so
-	// unlike result/error_msg/error_code/error_op, nothing else sets it.
+	// DOES need its own workflow_payloads write, unlike the status above:
+	// completed_at was never written at mark time (there is no completed_at
+	// concept yet at that point), so unlike result/error_msg/error_code/
+	// error_op, nothing else sets it.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_payloads SET completed_at = now() WHERE id = $1
 	`, runID); err != nil {
-		return fmt.Errorf("finalize defer phase: mirror payload: %w", err)
+		return fmt.Errorf("finalize defer phase: payload: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -147,8 +136,11 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback()
 
+	// Since cleat#3245 B3c the lease row holds the only copy of these
+	// columns that is written. The predicate is on the updated row itself,
+	// so a waiting UPDATE re-checks it against whatever committed meanwhile.
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
@@ -166,18 +158,9 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("expire defer phases: scan: %w", err)
 	}
 
-	// cleat#3245 Phase 3 step 2 piece 6d: mirror the same sweep onto
-	// workflow_leases, same tx. Captures the ids the instances UPDATE just
-	// returned rather than re-deriving the WHERE clause against the lease
-	// table -- the GAP-avoidance pattern pieces 4d/6b already use for a bulk
-	// write, since nothing else can have changed these rows mid-tx but
-	// re-deriving would still have to agree with what was actually touched.
 	// generation bumps here, matching the instances UPDATE above: unlike
 	// FinalizeDeferPhase (a single claimed row with a live holder to fence
 	// out), this sweep is exactly the case that bump exists for.
-	if err := mirrorExpiredDeferPhaseLeases(ctx, tx, expired); err != nil {
-		return 0, err
-	}
 	if err := mirrorExpiredDeferPhasePayloads(ctx, tx, expired); err != nil {
 		return 0, err
 	}
@@ -195,41 +178,11 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	return len(expired), nil
 }
 
-// mirrorExpiredDeferPhaseLeases mirrors ExpireDeferPhases' sweep onto
-// workflow_leases for exactly the rows the workflow_instances UPDATE just
-// touched. result/error_msg/error_code/error_op need no mirror here, for the
-// same reason FinalizeDeferPhase needs none for them: they were written at
-// mark time. completed_at is the exception -- see
-// mirrorExpiredDeferPhasePayloads below, added with it in cleat#3245 Phase 3
-// step 3 piece F.
-func mirrorExpiredDeferPhaseLeases(ctx context.Context, tx *sql.Tx, expired []expiredDeferPhase) error {
-	if len(expired) == 0 {
-		return nil
-	}
-	ids := make([]string, len(expired))
-	for i, wf := range expired {
-		ids[i] = wf.id
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_leases
-		SET status = pending_terminal_status,
-		    pending_terminal_status = NULL,
-		    defer_phase_deadline = NULL,
-		    assigned_to = NULL,
-		    generation = generation + 1
-		WHERE id = ANY($1)
-	`, pq.Array(ids)); err != nil {
-		return fmt.Errorf("expire defer phases: mirror lease: %w", err)
-	}
-	return nil
-}
-
 // mirrorExpiredDeferPhasePayloads mirrors ExpireDeferPhases' completed_at
 // write (migration 020, cleat#3245 Phase 3 step 3 piece F) onto
-// workflow_payloads for exactly the rows the workflow_instances UPDATE just
-// touched. Same gap-avoidance shape as mirrorExpiredDeferPhaseLeases: it
-// takes the ids the first UPDATE already returned rather than re-deriving
-// the WHERE clause against workflow_payloads.
+// workflow_payloads for exactly the rows the lease UPDATE just touched: it
+// takes the ids that UPDATE returned rather than re-deriving the WHERE clause
+// against workflow_payloads, which by then no longer matches.
 func mirrorExpiredDeferPhasePayloads(ctx context.Context, tx *sql.Tx, expired []expiredDeferPhase) error {
 	if len(expired) == 0 {
 		return nil

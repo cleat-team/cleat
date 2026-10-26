@@ -54,6 +54,12 @@ func TestInjectWorkerCrashActuallyReleasesWorkflows(t *testing.T) {
 		 VALUES ('fi-wf-1', 'fi-def', 1, 'running', '{}', $1, $2, now())`, tenant, worker); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	// InjectWorkerCrash releases workflow_leases, the only copy of these
+	// columns written since cleat#3245 B3c.
+	if _, err := db.Exec(
+		`INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at) VALUES ('fi-wf-1', $1, 'running', $2, now())`, tenant, worker); err != nil {
+		t.Fatalf("seed workflow_leases: %v", err)
+	}
 
 	fi := NewFaultInjector(db)
 	if err := fi.InjectWorkerCrash(worker); err != nil {
@@ -63,9 +69,9 @@ func TestInjectWorkerCrashActuallyReleasesWorkflows(t *testing.T) {
 	var status string
 	var assigned sql.NullString
 	if err := db.QueryRow(
-		`SELECT status, assigned_to FROM workflow_instances WHERE id = 'fi-wf-1'`).
+		`SELECT status, assigned_to FROM workflow_leases WHERE id = 'fi-wf-1'`).
 		Scan(&status, &assigned); err != nil {
-		t.Fatalf("reading instance: %v", err)
+		t.Fatalf("reading lease: %v", err)
 	}
 	if status != "ready" || assigned.Valid {
 		t.Errorf("after InjectWorkerCrash: status=%q assigned_to=%v; want ready / NULL.\n\n"+

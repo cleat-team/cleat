@@ -296,7 +296,7 @@ func (f *claimOrderFixture) rowStatus(id string) (status string, assignedTo, wor
 	var st string
 	var assigned, who interface{}
 	if err := f.store.db.QueryRow(
-		`SELECT status, assigned_to, trace_id FROM workflow_instances WHERE id = $1`, id).
+		`SELECT l.status, l.assigned_to, p.trace_id FROM workflow_leases l JOIN workflow_payloads p ON p.id = l.id WHERE l.id = $1`, id).
 		Scan(&st, &assigned, &who); err != nil {
 		f.t.Fatalf("reading status for %s: %v", id, err)
 	}

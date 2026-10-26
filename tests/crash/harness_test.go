@@ -824,7 +824,7 @@ func awaitTerminal(t *testing.T, db *sql.DB, id string, budget time.Duration) (s
 	for time.Now().Before(deadline) {
 		var msg sql.NullString
 		// error_msg is a workflow_payloads column since cleat#3245 B1b.
-		err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_instances w
+		err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_leases w
 			JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
 			Scan(&status, &msg)
 		if err != nil {

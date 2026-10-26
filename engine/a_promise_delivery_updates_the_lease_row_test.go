@@ -90,22 +90,6 @@ func readLeasePromiseFields(t *testing.T, db *sql.DB, id string) leasePromiseFie
 	return f
 }
 
-func assertLeaseMatchesInstancePromiseFields(t *testing.T, db *sql.DB, id string, lease leasePromiseFields) {
-	t.Helper()
-	var instSeq int64
-	var instWake time.Time
-	if err := db.QueryRow(`SELECT promise_seq, next_wake_at FROM workflow_instances WHERE id = $1`, id).
-		Scan(&instSeq, &instWake); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.promiseSeq != instSeq {
-		t.Errorf("workflow_leases.promise_seq (%d) disagrees with workflow_instances (%d)", lease.promiseSeq, instSeq)
-	}
-	if lease.nextWakeAt.Sub(instWake).Abs() > time.Second {
-		t.Errorf("workflow_leases.next_wake_at (%v) disagrees with workflow_instances' (%v)", lease.nextWakeAt, instWake)
-	}
-}
-
 func TestResolvePromiseUpdatesTheLeaseRow(t *testing.T) {
 	store, db := promiseLeaseTestStore(t)
 	ctx := context.Background()
@@ -125,7 +109,6 @@ func TestResolvePromiseUpdatesTheLeaseRow(t *testing.T) {
 	if time.Since(lease.nextWakeAt) > 10*time.Second {
 		t.Errorf("workflow_leases.next_wake_at = %v, want set to roughly now for a suspended workflow", lease.nextWakeAt)
 	}
-	assertLeaseMatchesInstancePromiseFields(t, db, id, lease)
 }
 
 func TestRejectPromiseUpdatesTheLeaseRow(t *testing.T) {
@@ -147,7 +130,6 @@ func TestRejectPromiseUpdatesTheLeaseRow(t *testing.T) {
 	if time.Since(lease.nextWakeAt) > 10*time.Second {
 		t.Errorf("workflow_leases.next_wake_at = %v, want set to roughly now for a suspended workflow", lease.nextWakeAt)
 	}
-	assertLeaseMatchesInstancePromiseFields(t, db, id, lease)
 }
 
 func TestCreateUpdateRequestUpdatesTheLeaseRowAndWakesASuspendedWorkflow(t *testing.T) {
@@ -168,7 +150,6 @@ func TestCreateUpdateRequestUpdatesTheLeaseRowAndWakesASuspendedWorkflow(t *test
 	if time.Since(lease.nextWakeAt) > 10*time.Second {
 		t.Errorf("workflow_leases.next_wake_at = %v, want set to roughly now for a suspended workflow", lease.nextWakeAt)
 	}
-	assertLeaseMatchesInstancePromiseFields(t, db, id, lease)
 }
 
 func TestCreateUpdateRequestLeavesNextWakeAtAloneForARunningWorkflow(t *testing.T) {

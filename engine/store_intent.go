@@ -188,12 +188,13 @@ func intentFenceOrNotPending(ctx context.Context, hb func(ctx context.Context, w
 //
 // cleat#3245 Phase 3 step 3 piece D: the fence subquery below reads
 // workflow_leases rather than workflow_instances. assigned_to/generation are
-// mirrored onto workflow_leases by every writer that touches them (claim,
+// written to workflow_leases by every writer that touches them (claim,
 // heartbeat, reclaim, terminal transitions, admin force-actions -- see the
-// piece D survey on the issue), and this is a PLAIN (non-locking) EXISTS
-// read, so it is behavior-preserving: a plain read's MVCC visibility is
-// governed by commit boundaries alone, which are identical for both
-// mirrored tables since they commit atomically in the same transaction.
+// piece D survey on the issue), and only there since cleat#3245 B3c. This is
+// a PLAIN (non-locking) EXISTS read, so moving it was behavior-preserving: a
+// plain read's MVCC visibility is governed by commit boundaries alone, which
+// were identical for both tables while every writer committed both
+// atomically in the same transaction.
 // flush.go's insertEventSQL has the identical fence shape but a FOR SHARE
 // lock, which is NOT safe to move the same way -- see that file's own
 // comment and the piece D survey for why the two cases differ.

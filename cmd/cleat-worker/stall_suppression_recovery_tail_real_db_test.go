@@ -103,7 +103,7 @@ func TestReapOnceRecoveryTailAgainstARealDatabase(t *testing.T) {
 	statusOf := func(id string) string {
 		t.Helper()
 		var status string
-		if err := db.QueryRowContext(ctx, `SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&status); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&status); err != nil {
 			t.Fatalf("reading status of %s: %v", id, err)
 		}
 		return status
@@ -120,10 +120,6 @@ func TestReapOnceRecoveryTailAgainstARealDatabase(t *testing.T) {
 
 	// Only worker-a's heartbeat lands. b and c are untouched -- still 20s
 	// stale, exactly as at tick 1.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET heartbeat_at = now() WHERE id = $1`, ids[0]); err != nil {
-		t.Fatalf("recovering worker-a's heartbeat: %v", err)
-	}
 	if _, err := db.ExecContext(ctx,
 		`UPDATE workflow_leases SET heartbeat_at = now() WHERE id = $1`, ids[0]); err != nil {
 		t.Fatalf("recovering worker-a's lease heartbeat: %v", err)

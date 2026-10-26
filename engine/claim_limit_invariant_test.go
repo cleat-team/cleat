@@ -141,7 +141,7 @@ func TestFinishClaim_ReleasesTheExcess(t *testing.T) {
 		var status string
 		var assignedTo *string
 		if err := adminDB.QueryRowContext(ctx,
-			`SELECT status, assigned_to FROM workflow_instances WHERE id = $1`, wf.ID).Scan(&status, &assignedTo); err != nil {
+			`SELECT status, assigned_to FROM workflow_leases WHERE id = $1`, wf.ID).Scan(&status, &assignedTo); err != nil {
 			t.Fatalf("status query for %s: %v", wf.ID, err)
 		}
 

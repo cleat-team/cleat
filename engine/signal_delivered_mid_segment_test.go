@@ -88,7 +88,11 @@ func TestASignalDeliveredWhileTheWorkflowIsAwakeStillWakesIt(t *testing.T) {
 					t.Fatalf("FinalizeWorkflowSegment: %v", err)
 				}
 				var wake time.Time
+				// PostgreSQL writes next_wake_at to workflow_leases alone since cleat#3245 B3c.
 				q := "SELECT next_wake_at FROM workflow_instances WHERE id = " + d.placeholder(1)
+				if d.placeholder(1) == "$1" {
+					q = "SELECT next_wake_at FROM workflow_leases WHERE id = $1"
+				}
 				if err := db.QueryRow(q, id).Scan(&wake); err != nil {
 					t.Fatalf("reading next_wake_at: %v", err)
 				}
@@ -177,7 +181,11 @@ func TestABurstOfSignalsIsDrainedRatherThanSleptThrough(t *testing.T) {
 			var handed time.Time
 			wokenEarly := func() bool {
 				var w time.Time
+				// PostgreSQL writes next_wake_at to workflow_leases alone since cleat#3245 B3c.
 				q := "SELECT next_wake_at FROM workflow_instances WHERE id = " + d.placeholder(1)
+				if d.placeholder(1) == "$1" {
+					q = "SELECT next_wake_at FROM workflow_leases WHERE id = $1"
+				}
 				if err := db.QueryRow(q, id).Scan(&w); err != nil {
 					t.Fatalf("reading next_wake_at: %v", err)
 				}

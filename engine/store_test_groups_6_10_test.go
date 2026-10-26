@@ -1351,7 +1351,7 @@ func updateWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID stri
 	t.Helper()
 	switch s := store.(type) {
 	case *PostgresStore:
-		_, err := s.db.Exec(`UPDATE workflow_instances SET next_wake_at = $1 WHERE id = $2`, tval, workflowID)
+		_, err := s.db.Exec(`UPDATE workflow_leases SET next_wake_at = $1 WHERE id = $2`, tval, workflowID)
 		if err != nil {
 			t.Fatalf("updateWorkflowNextWakeAt (postgres): %v", err)
 		}
@@ -1407,7 +1407,7 @@ func queryWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID strin
 	var nw time.Time
 	switch s := store.(type) {
 	case *PostgresStore:
-		err := s.db.QueryRow(`SELECT next_wake_at FROM workflow_instances WHERE id = $1`, workflowID).Scan(&nw)
+		err := s.db.QueryRow(`SELECT next_wake_at FROM workflow_leases WHERE id = $1`, workflowID).Scan(&nw)
 		if err != nil {
 			t.Fatalf("queryWorkflowNextWakeAt (postgres): %v", err)
 		}

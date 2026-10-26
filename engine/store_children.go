@@ -52,9 +52,9 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	// workflow_payloads INSERT, unlike every top-level StartNewRun* variant
 	// -- see insertLeaseAndPayloadRows' own doc. Every child workflow
 	// started through this method has had no lease/payload row at all until
-	// now, invisible because claimLeaseRows (piece 2) is a plain UPDATE, not
-	// an upsert, so claiming one silently touched zero rows on the lease
-	// side.
+	// now, invisible because the claim's lease write (piece 2) was a plain
+	// UPDATE, not an upsert, so claiming one silently touched zero rows on
+	// the lease side.
 	//
 	// resolvedDefVersion (migration 018 (folded into
 	// migrations/postgres/001_schema.sql by #3358)) is captured via RETURNING rather

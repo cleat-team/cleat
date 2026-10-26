@@ -55,12 +55,12 @@ func TestReapStaleInstancesReadsHeartbeatFromLeasesNotInstances(t *testing.T) {
 			"workflow_leases.heartbeat_at, not the fresh workflow_instances one", n)
 	}
 
-	var instStatus string
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&instStatus); err != nil {
-		t.Fatalf("read workflow_instances.status: %v", err)
+	var leaseStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&leaseStatus); err != nil {
+		t.Fatalf("read workflow_leases.status: %v", err)
 	}
-	if instStatus != "ready" {
-		t.Errorf("workflow_instances.status = %q, want %q (reclaimed)", instStatus, "ready")
+	if leaseStatus != "ready" {
+		t.Errorf("workflow_leases.status = %q, want %q (reclaimed)", leaseStatus, "ready")
 	}
 }
 

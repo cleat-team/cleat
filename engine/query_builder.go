@@ -153,8 +153,8 @@ func postgresWorkflowListJoinColumns() string {
 // Used by ListWorkflows on MySQL and SQL Server. PostgresStore.ListWorkflows
 // used this too until cleat#3245 Phase 3 step 3 piece F moved it onto the
 // workflow_leases/workflow_payloads join above; the DialectPostgres case
-// below is kept rather than deleted because workflow_instances itself is
-// still written (migration 016 mirrors onto it, it is not yet retired) and
+// below is kept rather than deleted because workflow_instances itself still
+// exists and is written at INSERT until the baseline regeneration (B5), and
 // the case is still correct for it -- it is just no longer this store's
 // ListWorkflows that calls it.
 //

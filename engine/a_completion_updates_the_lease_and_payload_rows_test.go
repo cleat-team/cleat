@@ -140,19 +140,6 @@ func TestCompleteWorkflowUpdatesTheLeaseAndPayloadRows(t *testing.T) {
 	if !payload.completedAt.Valid {
 		t.Errorf("workflow_payloads.completed_at is NULL, want set")
 	}
-
-	// Matches workflow_instances, which is what the running engine still
-	// reads today (step 3 moves reads over).
-	var instStatus string
-	var instAssignedTo sql.NullString
-	if err := db.QueryRow(`SELECT status, assigned_to FROM workflow_instances WHERE id = $1`, id).
-		Scan(&instStatus, &instAssignedTo); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.status != instStatus || lease.assignedTo.Valid != instAssignedTo.Valid {
-		t.Errorf("workflow_leases (%q/%v) disagrees with workflow_instances (%q/%v)",
-			lease.status, lease.assignedTo, instStatus, instAssignedTo)
-	}
 }
 
 func TestCompleteWorkflowWithWrongGenerationLeavesTheLeaseAndPayloadRowsUntouched(t *testing.T) {

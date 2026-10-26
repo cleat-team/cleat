@@ -144,19 +144,6 @@ func TestClaimWorkflowUpdatesTheLeaseRow(t *testing.T) {
 		t.Errorf("claim-snapshot columns = %d/%d/%d, want 0/0/0 on a freshly seeded row",
 			post.signalSeqAtClaim, post.signalConsumedAtClaim, post.promiseSeqAtClaim)
 	}
-
-	// Matches workflow_instances, which is what the running engine still
-	// reads today (step 3 moves reads over).
-	var instStatus, instAssignedTo string
-	var instGeneration int64
-	if err := db.QueryRow(`SELECT status, assigned_to, generation FROM workflow_instances WHERE id = $1`, id).
-		Scan(&instStatus, &instAssignedTo, &instGeneration); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if post.status != instStatus || post.assignedTo.String != instAssignedTo || post.generation != instGeneration {
-		t.Errorf("workflow_leases (%q/%q/%d) disagrees with workflow_instances (%q/%q/%d)",
-			post.status, post.assignedTo.String, post.generation, instStatus, instAssignedTo, instGeneration)
-	}
 }
 
 func TestReleaseWorkflowUpdatesTheLeaseRow(t *testing.T) {

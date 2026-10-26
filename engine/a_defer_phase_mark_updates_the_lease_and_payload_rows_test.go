@@ -64,16 +64,6 @@ func TestAdminForceCompleteWithADeferOwedMarksTheLeaseAndPayloadRows(t *testing.
 	if !payload.result.Valid || payload.result.String != `{"ok": true}` {
 		t.Errorf("workflow_payloads.result = %v, want %q", payload.result, `{"ok": true}`)
 	}
-
-	var instStatus, instPending string
-	if err := db.QueryRow(`SELECT status, pending_terminal_status FROM workflow_instances WHERE id = $1`, id).
-		Scan(&instStatus, &instPending); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.status != instStatus || leasePending != instPending {
-		t.Errorf("workflow_leases (%q/%q) disagrees with workflow_instances (%q/%q)",
-			lease.status, leasePending, instStatus, instPending)
-	}
 }
 
 func TestAdminForceFailWithADeferOwedMarksTheLeaseAndPayloadRows(t *testing.T) {
@@ -161,16 +151,6 @@ func TestTerminateWorkflowWithADeferOwedMarksTheLeaseAndPayloadRows(t *testing.T
 	if !payload.errorMsg.Valid || payload.errorMsg.String != "operator requested stop" {
 		t.Errorf("workflow_payloads.error_msg = %v, want %q", payload.errorMsg, "operator requested stop")
 	}
-
-	var instStatus, instPending string
-	if err := db.QueryRow(`SELECT status, pending_terminal_status FROM workflow_instances WHERE id = $1`, id).
-		Scan(&instStatus, &instPending); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.status != instStatus || leasePending != instPending {
-		t.Errorf("workflow_leases (%q/%q) disagrees with workflow_instances (%q/%q)",
-			lease.status, leasePending, instStatus, instPending)
-	}
 }
 
 // TestReleaseWorkflowWithAPendingTerminalStatusGoesToTerminatingNotReady is
@@ -210,13 +190,5 @@ func TestReleaseWorkflowWithAPendingTerminalStatusGoesToTerminatingNotReady(t *t
 	lease := readLeaseTerminalFields(t, db, id)
 	if lease.status != statusTerminating {
 		t.Errorf("workflow_leases.status = %q, want %q (pending_terminal_status is set)", lease.status, statusTerminating)
-	}
-
-	var instStatus string
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&instStatus); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.status != instStatus {
-		t.Errorf("workflow_leases.status (%q) disagrees with workflow_instances (%q)", lease.status, instStatus)
 	}
 }
