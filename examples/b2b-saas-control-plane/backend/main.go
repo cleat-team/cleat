@@ -303,7 +303,7 @@ func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 // This doc comment used to claim the shape was examples/order-lifecycle's
 // getOrder, "the run id is the capability" -- confirmed wrong running this
 // scenario end to end: order-lifecycle's adminClient DOES carry a real
-// credential (backend/main.go's authTransport, from CLEAT_API_KEY_FILE/
+// credential (backend/main.go's client.APIKey, from CLEAT_API_KEY_FILE/
 // CLEAT_API_KEY), because that scenario runs everything under one fixed
 // operator tenant. "The run id is the capability" is true only WITHIN that
 // one tenant's own scope, not across tenants -- and this scenario has no
@@ -384,9 +384,7 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 // ever signs up, so there is no single "the" tenant client to hold as a
 // field the way order-lifecycle's single-tenant demo does.
 func (s *server) clientForTenant(apiKey string) *backendkit.Client {
-	c := backendkit.New(s.cleatURL)
-	c.HTTPClient = &http.Client{Transport: &authTransport{key: apiKey}}
-	return c
+	return backendkit.New(s.cleatURL, backendkit.WithAPIKey(apiKey))
 }
 
 func bearerToken(r *http.Request) string {
@@ -573,17 +571,4 @@ func (s *server) serveFile(root, name, contentType string) http.HandlerFunc {
 			"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:")
 		_, _ = w.Write(body)
 	}
-}
-
-// authTransport attaches one tenant's API key. Matches
-// examples/order-lifecycle/backend/main.go's authTransport exactly, except
-// the key is chosen per client instance here rather than once at startup.
-type authTransport struct{ key string }
-
-func (t *authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Del("Authorization")
-	r.Header.Del("Cookie")
-	r.Header.Set("Authorization", "Bearer "+t.key)
-	return http.DefaultTransport.RoundTrip(r)
 }

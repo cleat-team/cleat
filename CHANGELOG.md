@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construct it as one directly. An out-of-tree plugin that called `env.Mux.Handle(...)` itself
   will not compile until it registers through `RegisterRoutes` instead.
 
+### Added
+
+- **`backendkit.Client` gains `UpdateWorkflow`, `CancelWorkflow`, `StreamWorkflow` and an API key.**
+  Closes cleat#3368. Each wraps a route the worker already served:
+  `POST /api/workflows/{id}/update/{name}` (returns the update's promise id; a second update of
+  the same name in flight is the new sentinel `ErrUpdateAlreadyPending`),
+  `POST /api/workflows/{id}/cancel` (`CancelOptions{Reason, Preemptive}`; returns the worker's
+  `cancellation_requested` / `cancelled`), and `GET /api/workflows/{id}/stream` (server-sent events
+  to a callback, resumable with `StreamOptions.LastEventID`, and not cut off by `HTTPClient`'s
+  30 s request timeout). `Client.APIKey` / `New(url, WithAPIKey(key))` sends
+  `Authorization: Bearer <key>` on every request -- typed methods, `PluginRoute`, `Health` and the
+  stream. `New` takes variadic options, so existing calls compile unchanged. The four examples that
+  each carried a private `authTransport` (`order-lifecycle`, `ai-agent-platform`,
+  `integration-hub`, `b2b-saas-control-plane`) use the option instead. The DBOS-pair counts move
+  with them: order-lifecycle 731 → 723 and b2b-saas-control-plane 641 → 631
+  (`scripts/dbos-pair-loc.sh`), recorded as "Corrected" entries in each pair's README.
+
 ### Fixed
 
 - **`Selector.Select` races a pending child against its timers and signals.** Closes cleat#3369.

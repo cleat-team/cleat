@@ -38,9 +38,10 @@ func WriteInternalError(w http.ResponseWriter) {
 //
 // cleat-review (cleat#2810 R1): every example backend that uses this holds
 // the worker's API key server-side and never lets a browser request supply
-// one -- authTransport (order-lifecycle/backend/main.go, and the same shape
-// in ai-agent-platform and integration-hub) deletes any Authorization/Cookie
-// header the browser sent and injects its own. So a 401 or 403 from the
+// one -- Client.APIKey (set in order-lifecycle/backend/main.go, and the same
+// way in the other example backends) is the only credential the worker sees:
+// Client builds every request itself and never forwards a browser's headers.
+// It was a per-example authTransport until cleat#3368. So a 401 or 403 from the
 // worker is ALWAYS about the backend's own key, never the browser caller's
 // credentials -- and the browser sent none, so passing that status straight
 // through tells it "your credentials were rejected" for credentials it never

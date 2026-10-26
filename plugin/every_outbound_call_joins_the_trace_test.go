@@ -59,6 +59,9 @@ var notYetPropagating = map[string]string{
 	"cleat/backendkit/client.go:StartWorkflow":            "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	"cleat/backendkit/client.go:StartWorkflowRaw":         "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	"cleat/backendkit/client.go:StartWorkflowWithOptions": "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
+	"cleat/backendkit/client.go:CancelWorkflow":           "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
+	"cleat/backendkit/client.go:UpdateWorkflow":           "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
+	"cleat/backendkit/stream.go:StreamWorkflow":           "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	// The reference scenarios' APPLICATION backends: clients OF cleat, the same
 	// shape as cleat/backendkit above and for the same reason.
 	//
