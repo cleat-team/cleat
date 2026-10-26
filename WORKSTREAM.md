@@ -1102,7 +1102,8 @@ Only the reflog is unforgeable by typing, and only the trailer names a person. (
 
 **What follows for attribution.** Two signals exist and both resolve to the *working tree*, not the
 session: the reflog says which checkout created an object, and the checkout has no single occupant.
-The `Claude-Stream:` trailer — `WS-1`, `WS-2`, `WS-3`, `coordinator`, adopted 2026-09-17 — is the
+The `Claude-Stream:` trailer — adopted 2026-09-17; the closed set lives in `VALID` in
+`.github/workflows/stream-trailer-check.yml` (eight values as of 2026-10-25) — is the
 only stream-scoped signal, and it replaced a session id for one reason: **a stream survives a host
 restart and a session id does not.** Every `session_…` mapping recorded before 2026-09-16 now names
 a session that no longer exists. A stream name is also a value each session can assert from its own
