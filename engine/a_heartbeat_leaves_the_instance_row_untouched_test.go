@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -106,6 +107,14 @@ func TestAHeartbeatLeavesTheInstanceRowUntouched(t *testing.T) {
 				t.Errorf("a heartbeat that lost its fence renewed the lease (age=%v)", age)
 			}
 		}},
+		{"sticky claim", func(t *testing.T, id string) {
+			diverge(t, db, "workflow_leases", `sticky_worker_id = $2`, id, worker)
+			wfs, err := store.ClaimStickyWorkflows(ctx, worker, 10)
+			if err != nil || len(wfs) != 1 || wfs[0].ID != id {
+				t.Fatalf("ClaimStickyWorkflows = %v, %v; want exactly %s", wfs, err, id)
+			}
+			wantFresh(t, id)
+		}},
 		{"batch heartbeat", func(t *testing.T, id string) {
 			gen := claim(t, id)
 			ageLease(t, id)
@@ -121,6 +130,15 @@ func TestAHeartbeatLeavesTheInstanceRowUntouched(t *testing.T) {
 			n, err := store.ReapStaleInstances(ctx, time.Minute, 10)
 			if err != nil || n != 1 {
 				t.Fatalf("ReapStaleInstances = %d, %v; want 1 reclaimed", n, err)
+			}
+			wantCleared(t, id)
+		}},
+		{"reap except", func(t *testing.T, id string) {
+			claim(t, id)
+			ageLease(t, id)
+			n, err := store.ReapStaleInstancesExcept(ctx, time.Minute, 10, nil)
+			if err != nil || n != 1 {
+				t.Fatalf("ReapStaleInstancesExcept = %d, %v; want 1 reclaimed", n, err)
 			}
 			wantCleared(t, id)
 		}},
@@ -201,3 +219,91 @@ func TestStaleSetShapeReadsHeartbeatAtFromWorkflowLeases(t *testing.T) {
 		t.Fatalf("StaleSetShape running=%d missedBeat=%d, want 1 and 1 -- missedBeat 0 means heartbeat_at was read from workflow_instances", shape.Running, shape.MissedBeat)
 	}
 }
+
+// TestTheHeartbeatFencesHoldTheInstanceRowLock pins the lock the three
+// heartbeat paths keep on workflow_instances after cleat#3245 B2 moved the
+// write to workflow_leases. The lock is what serializes a heartbeat with a
+// reclaim, which still updates the instance row first; nothing in the
+// statement text would show it gone, so this observes it by blocking: with
+// the row held elsewhere, each path must wait, then succeed once the holder
+// lets go.
+//
+// The holder takes FOR NO KEY UPDATE because that is the lock a reclaim's
+// UPDATE takes. A holder at FOR UPDATE would be too strong: it conflicts even
+// with FOR KEY SHARE, so a fence weakened to KEY SHARE -- which no longer
+// serializes with a reclaim -- would still block here and pass.
+func TestTheHeartbeatFencesHoldTheInstanceRowLock(t *testing.T) {
+	store, db := newRunTestStore(t)
+	ctx := context.Background()
+	const worker = "b2-lock-worker"
+
+	paths := []struct {
+		name string
+		run  func(id string, gen int64) error
+	}{
+		{"Heartbeat", func(id string, gen int64) error {
+			ok, err := store.Heartbeat(ctx, id, worker, gen)
+			if err == nil && !ok {
+				err = errFenceNotHeld
+			}
+			return err
+		}},
+		{"HeartbeatBatchFenced", func(id string, gen int64) error {
+			lost, err := store.HeartbeatBatchFenced(ctx, worker, []GenerationKey{{WorkflowID: id, Generation: gen}})
+			if err == nil && len(lost) != 0 {
+				err = errFenceNotHeld
+			}
+			return err
+		}},
+		{"partitionFencedBatch", func(id string, gen int64) error {
+			af := &AdaptiveFlusher{db: db, tenantID: DefaultTenantUUID}
+			_, lost, err := af.partitionFencedBatch(ctx, []batchEntry{{workflowID: id, workerID: worker, generation: gen}})
+			if err == nil && len(lost) != 0 {
+				err = errFenceNotHeld
+			}
+			return err
+		}},
+	}
+	for _, p := range paths {
+		t.Run(p.name, func(t *testing.T) {
+			if _, err := db.Exec(`DELETE FROM workflow_instances`); err != nil {
+				t.Fatalf("clear workflow_instances: %v", err)
+			}
+			id := startPayloadReaderRun(t, store, "b2-lock-"+p.name)
+			wf, err := store.ClaimWorkflow(ctx, worker)
+			if err != nil || wf == nil || wf.ID != id {
+				t.Fatalf("ClaimWorkflow = %v, %v; want %s", wf, err, id)
+			}
+
+			holder, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin holder: %v", err)
+			}
+			defer holder.Rollback()
+			if _, err := holder.ExecContext(ctx, `SELECT id FROM workflow_instances WHERE id = $1 FOR NO KEY UPDATE`, id); err != nil {
+				t.Fatalf("holder lock: %v", err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- p.run(id, wf.Generation) }()
+			select {
+			case err := <-done:
+				t.Fatalf("%s returned (%v) while another transaction held the instance row -- it no longer takes the lock that serializes it with a reclaim", p.name, err)
+			case <-time.After(400 * time.Millisecond):
+			}
+			if err := holder.Rollback(); err != nil {
+				t.Fatalf("release holder: %v", err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("%s after the holder released: %v", p.name, err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s still blocked 10s after the holder released", p.name)
+			}
+		})
+	}
+}
+
+var errFenceNotHeld = errors.New("the fence reported the run lost")

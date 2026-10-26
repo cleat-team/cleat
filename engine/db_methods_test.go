@@ -5475,9 +5475,9 @@ func TestPostgresStore_GetWorkflowByID_QueryError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // This used to pin RowsAffected > 0 (not == 1) on the instance UPDATE. Since
-// cleat#3245 B2 there is no such UPDATE: the fence row decides ownership, and
-// the lease write's row count does not -- a lease row that matched nothing
-// still leaves the caller owning the run it fenced.
+// cleat#3245 B2 there is no such UPDATE, and ownership needs BOTH the fence
+// row and a renewed lease row: the lease is heartbeat_at's only copy, so a
+// renewal that matched no lease row renewed nothing the reaper reads.
 func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
@@ -5491,8 +5491,8 @@ func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
-	if !owned {
-		t.Error("expected owned=true when the fence matched, whatever the lease write affected")
+	if owned {
+		t.Error("expected owned=false when the fence matched but the lease renewal matched no row")
 	}
 }
 

@@ -490,15 +490,23 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 		return false, fmt.Errorf("heartbeat: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases
 		SET heartbeat_at = now()
 		WHERE id = $1 AND assigned_to = $2 AND generation = $3
-	`, workflowID, workerID, generation); err != nil {
+	`, workflowID, workerID, generation)
+	if err != nil {
 		return false, fmt.Errorf("heartbeat: lease: %w", err)
 	}
+	// The lease row is the only copy of heartbeat_at, so a renewal that
+	// matched no lease row renewed nothing the reaper reads. Report it as a
+	// lost fence rather than let the caller believe it still holds the run.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("heartbeat: lease rows affected: %w", err)
+	}
 
-	return true, tx.Commit()
+	return n > 0, tx.Commit()
 }
 
 // HeartbeatBatchFenced heartbeats every given (workflowID, generation) pair
