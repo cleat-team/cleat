@@ -292,6 +292,23 @@ func TestTheFencesLockTheLeaseRowAndNotTheInstanceRow(t *testing.T) {
 			}
 			return nil
 		}},
+		// insertEventSQL's FOR SHARE, through the per-step flush that
+		// TestFlushEvent_RacingAnOpenReclaimTransaction drives. That test sees
+		// a weakened or dropped lock on the lease row; only this one sees a
+		// lock taken on the instance row instead (cleat-review on #3403).
+		{"flushEvent", func(id string, gen int64) error {
+			eng := NewEngine(nil, nil,
+				WithDB(db),
+				WithWorkflowStore(store),
+				WithWorkerID(worker),
+				WithGeneration(gen),
+				WithTenantID(DefaultTenantUUID))
+			err := eng.flushEvent(ctx, id, EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Response: "resp"}, "")
+			if errors.Is(err, ErrFenceLost) {
+				err = errFenceNotHeld
+			}
+			return err
+		}},
 	}
 	for _, p := range paths {
 		for li, lock := range []struct {
