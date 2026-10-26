@@ -45,17 +45,16 @@ func TestPartitionFencedBatchUpdatesTheLeaseRow(t *testing.T) {
 		t.Fatalf("ClaimWorkflow: %v (nil=%v)", err, claimed == nil)
 	}
 
-	var instBefore, leaseBefore time.Time
-	if err := db.QueryRow(`SELECT heartbeat_at FROM workflow_instances WHERE id = $1`, wfID).Scan(&instBefore); err != nil {
-		t.Fatalf("read workflow_instances.heartbeat_at (before): %v", err)
+	// cleat#3245 B2: heartbeat_at is renewed on workflow_leases only. Plant a
+	// sentinel on the instance row so a renewal still landing there would
+	// show; the claim no longer writes that column at all.
+	sentinel := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`UPDATE workflow_instances SET heartbeat_at = $2 WHERE id = $1`, wfID, sentinel); err != nil {
+		t.Fatalf("plant the instance sentinel: %v", err)
 	}
+	var leaseBefore time.Time
 	if err := db.QueryRow(`SELECT heartbeat_at FROM workflow_leases WHERE id = $1`, wfID).Scan(&leaseBefore); err != nil {
 		t.Fatalf("read workflow_leases.heartbeat_at (before): %v", err)
-	}
-	if !instBefore.Equal(leaseBefore) {
-		t.Fatalf("before the renewal, workflow_instances.heartbeat_at (%v) already disagrees with "+
-			"workflow_leases.heartbeat_at (%v): the claim itself (piece 2) did not seed this test's "+
-			"precondition correctly", instBefore, leaseBefore)
 	}
 
 	// A measurable gap before the renewal, so "renewed" can be distinguished
@@ -87,18 +86,13 @@ func TestPartitionFencedBatchUpdatesTheLeaseRow(t *testing.T) {
 		t.Fatalf("read workflow_leases.heartbeat_at (after): %v", err)
 	}
 
-	if !instAfter.After(instBefore) {
-		t.Errorf("workflow_instances.heartbeat_at did not advance (before=%v after=%v); the test's "+
-			"own fence check never took effect, so the assertions below would be vacuous", instBefore, instAfter)
-	}
 	if !leaseAfter.After(leaseBefore) {
-		t.Errorf("workflow_leases.heartbeat_at did not advance (before=%v after=%v): the gap this "+
-			"fix closes -- partitionFencedBatch renewed workflow_instances but not workflow_leases",
-			leaseBefore, leaseAfter)
+		t.Errorf("workflow_leases.heartbeat_at did not advance (before=%v after=%v): the batch "+
+			"fence renewed nothing", leaseBefore, leaseAfter)
 	}
-	if !instAfter.Equal(leaseAfter) {
-		t.Errorf("workflow_instances.heartbeat_at (%v) disagrees with workflow_leases.heartbeat_at "+
-			"(%v) after the renewal, want them equal (same transaction-local now())", instAfter, leaseAfter)
+	if !instAfter.Equal(sentinel) {
+		t.Errorf("workflow_instances.heartbeat_at = %v, want the planted %v untouched -- the batch "+
+			"fence must lock the instance row, not rewrite it", instAfter, sentinel)
 	}
 }
 

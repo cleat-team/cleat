@@ -31,7 +31,7 @@ func (s *PostgresStore) CountStalledWorkflows(ctx context.Context, threshold tim
 
 	var count int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM workflow_instances
+		SELECT COUNT(*) FROM workflow_leases -- cleat#3245 B2: heartbeat_at's only copy
 		WHERE status = 'running'
 		  AND (heartbeat_at IS NULL OR heartbeat_at < $1)
 		  AND created_at < $2

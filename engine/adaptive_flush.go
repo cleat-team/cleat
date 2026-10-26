@@ -332,11 +332,10 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 
 	rows, qerr := tx.QueryContext(ctx, fmt.Sprintf(`
 		WITH claims(workflow_id, worker_id, generation) AS (VALUES %s)
-		UPDATE workflow_instances wi
-		SET heartbeat_at = now()
-		FROM claims c
-		WHERE wi.id = c.workflow_id AND wi.assigned_to = c.worker_id AND wi.generation = c.generation
-		RETURNING wi.id
+		SELECT wi.id
+		FROM workflow_instances wi
+		JOIN claims c ON wi.id = c.workflow_id AND wi.assigned_to = c.worker_id AND wi.generation = c.generation
+		FOR NO KEY UPDATE OF wi
 	`, strings.Join(valuesSQL, ", ")), args...)
 	if qerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: %w", qerr)
@@ -354,20 +353,19 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 	if rerr := rows.Err(); rerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check rows: %w", rerr)
 	}
-	// Commit, or the heartbeat_at renewal this statement performs rolls back
-	// with the transaction and the lease is not actually refreshed. rows must
-	// be drained first, which the loop above has done.
+	// cleat#3245 B2: the statement above only fences and locks; the renewal is
+	// the workflow_leases write below, and it must commit or the lease is not
+	// actually refreshed. rows must be drained first, which the loop above has
+	// done. The FOR NO KEY UPDATE locks hold until that commit, so a reclaim
+	// cannot land between the fence and the renewal.
 	if cerr := rows.Close(); cerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check close: %w", cerr)
 	}
 
-	// cleat#3245 Phase 3 step 2, gap found scoping step 3 piece A: mirror the
-	// same renewal onto workflow_leases, same tx, for exactly the ids the
-	// statement above just renewed (fencedOK's keys) -- Heartbeat (db.go) got
-	// this mirror under piece 3; this batch-mode counterpart did not, so
-	// workflow_leases.heartbeat_at could go stale for a workflow kept alive
-	// only through this path, invisibly until something reads heartbeat_at
-	// from workflow_leases instead of workflow_instances.
+	// The renewal: workflow_leases.heartbeat_at for exactly the ids the fence
+	// above matched (fencedOK's keys). Since cleat#3245 B2 this is the only
+	// copy of heartbeat_at; it was added as a mirror when step 3 piece A found
+	// this batch path had never been given one.
 	if len(fencedOK) > 0 {
 		ids := make([]string, 0, len(fencedOK))
 		for id := range fencedOK {

@@ -471,19 +471,25 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET heartbeat_at = now()
+	// cleat#3245 B2: heartbeat_at is written to workflow_leases only, so a
+	// heartbeat no longer rewrites the workflow_instances row. The fence stays
+	// on workflow_instances, which claims and reaps still update first: FOR NO
+	// KEY UPDATE takes the row lock the UPDATE here used to take, so a reclaim
+	// either commits before it (and the fence matches nothing) or waits until
+	// this transaction commits.
+	var fenced string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_instances
 		WHERE id = $1 AND assigned_to = $2 AND generation = $3
-	`, workflowID, workerID, generation)
+		FOR NO KEY UPDATE
+	`, workflowID, workerID, generation).Scan(&fenced)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, tx.Commit()
+	}
 	if err != nil {
 		return false, fmt.Errorf("heartbeat: %w", err)
 	}
-	n, _ := result.RowsAffected()
 
-	// cleat#3245 Phase 3 step 2 piece 3: mirror onto workflow_leases, same
-	// predicate, same tx -- now() is transaction-local so the two rows agree
-	// on the exact timestamp with no value to pass explicitly.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases
 		SET heartbeat_at = now()
@@ -492,7 +498,7 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 		return false, fmt.Errorf("heartbeat: lease: %w", err)
 	}
 
-	return n > 0, tx.Commit()
+	return true, tx.Commit()
 }
 
 // HeartbeatBatchFenced heartbeats every given (workflowID, generation) pair
@@ -554,16 +560,10 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 	}
 
 	if len(eligible) > 0 {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances SET heartbeat_at = now() WHERE id = ANY($1)
-		`, pq.Array(eligible)); err != nil {
-			return nil, fmt.Errorf("heartbeat batch fenced: update: %w", err)
-		}
-
-		// cleat#3245 Phase 3 step 2 piece 3: mirror onto workflow_leases for
-		// the same ids, same tx, same now() -- "eligible" was already fenced
-		// against workflow_instances' live (id, generation) above, so no
-		// separate fence check is needed here.
+		// cleat#3245 B2: workflow_leases only -- heartbeat_at is no longer
+		// written to workflow_instances. "eligible" was fenced against
+		// workflow_instances' live (id, generation) above, and the FOR UPDATE
+		// still holds those rows, so no separate fence check is needed here.
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_leases SET heartbeat_at = now() WHERE id = ANY($1)
 		`, pq.Array(eligible)); err != nil {

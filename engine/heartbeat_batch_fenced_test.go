@@ -176,7 +176,8 @@ func setHeartbeatAtToSentinel(t *testing.T, ctx context.Context, dialect string,
 	var q string
 	switch dialect {
 	case "postgres":
-		q = `UPDATE workflow_instances SET heartbeat_at = $1 WHERE tenant_id = $2 AND id = $3`
+		// heartbeat_at lives on workflow_leases on PostgreSQL since cleat#3245 B2.
+		q = `UPDATE workflow_leases SET heartbeat_at = $1 WHERE tenant_id = $2 AND id = $3`
 	case "mysql":
 		q = `UPDATE workflow_instances SET heartbeat_at = ? WHERE tenant_id = ? AND id = ?`
 	case "mssql":
@@ -198,7 +199,7 @@ func heartbeatAtIsStillSentinel(t *testing.T, ctx context.Context, dialect strin
 	var q string
 	switch dialect {
 	case "postgres":
-		q = `SELECT heartbeat_at <= $1 FROM workflow_instances WHERE tenant_id = $2 AND id = $3`
+		q = `SELECT heartbeat_at <= $1 FROM workflow_leases WHERE tenant_id = $2 AND id = $3`
 	case "mysql":
 		q = `SELECT heartbeat_at <= ? FROM workflow_instances WHERE tenant_id = ? AND id = ?`
 	case "mssql":
