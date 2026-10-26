@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------------------
 # Stream Trailer Check — every commit names the workstream that wrote it
 #
-# Commits carry `Claude-Stream: <WS-1|WS-2|WS-3|WS-4|coordinator|cleat-review>`. The convention
+# Commits carry `Claude-Stream: <value>`, with the values enumerated ONCE, in
+# VALID below (every message that lists them is derived from it). The convention
 # replaced a session id on 2026-09-17 for one reason: a session id does not
 # survive a host restart and a stream does. After the 2026-09-16 reboot every
 # recorded `session_…` mapping named a session that no longer existed, three
@@ -131,6 +132,12 @@ jobs:
           # opens cleat PRs for the gaps it hits. Landed by the coordinator,
           # for the reason the paragraph above gives.
           VALID='^(WS-1|WS-2|WS-3|WS-4|WS-cleat|WS-clew|coordinator|cleat-review)$'
+          # The human-readable list is DERIVED from VALID, never repeated: two
+          # lists drift, and the drift is silent in the direction that matters
+          # (cleat#3372 review: a rejected author was told a list without the
+          # value it should have used). Same reason .githooks/prepare-commit-msg
+          # reads the set from this file rather than carrying its own.
+          VALID_LIST=$(printf '%s\n' "$VALID" | sed 's/^\^(//; s/)\$$//; s/|/, /g')
 
           # Commits that PREDATE the convention cannot carry the trailer, and a
           # check that demands one of them is asking for something impossible.
@@ -210,7 +217,7 @@ jobs:
                 echo "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
               fi
             elif ! printf '%s' "$value" | grep -qE "$VALID"; then
-              echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of WS-1, WS-2, WS-3, WS-4, coordinator, cleat-review"
+              echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of $VALID_LIST"
             fi
           done)
 
@@ -267,7 +274,7 @@ jobs:
             echo "  git rebase --exec \"git commit --amend --no-edit --trailer 'Claude-Stream: WS-1'\" ${BASE}"
             echo "  git push --force-with-lease"
             echo ""
-            echo "Valid values: WS-1, WS-2, WS-3, WS-4, coordinator, cleat-review."
+            echo "Valid values: $VALID_LIST."
             echo ""
             echo "If a commit is reported as carrying a line git will not parse:"
             echo "  the trailer must be in the message's FINAL paragraph, with no"
