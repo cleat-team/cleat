@@ -289,6 +289,18 @@ jobs:
           python3 scripts/check-go-toolchain-pins.py
           LINT_GUARD_EOF
 
+      # The landed-sha gate for rc-* images. It runs in develop-image.yml on a
+      # release push, where nothing exercises it until the first cut, so the
+      # self-test runs here on every PR. --self-test asserts the TEXT of each
+      # refusal, not only the exit status: a refusal and an UNMEASURED (exit 2)
+      # must not be able to stand in for each other.
+      - name: RC landed-sha guard self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "RC landed-sha guard self-test" >> "$LINT_FAILURES_FILE"
+          python3 scripts/check-rc-sha-landed.py --self-test
+          LINT_GUARD_EOF
+
       # Secret scanning. Nothing in this repo looked for credentials until
       # 2026-09-05: gosec's G101 is not that tool (it fired 3 times here and was
       # wrong all 3), and #731 excluded G306 and every _test.go from gosec, both

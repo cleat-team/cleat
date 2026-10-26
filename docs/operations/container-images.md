@@ -51,6 +51,27 @@ instead of building the worker with CGO from the branch.
   The check also lives in the workflow file of the pushed ref, so it stops a
   mistake, not a writer who edits it away; that control is the ruleset plus the
   organisation's Actions and package settings.
+- **Only a commit that landed the sanctioned way publishes.** The `release/**`
+  ruleset has no `creation` rule, so a writer can create `release/x` at any
+  commit and the protection check above would pass. A second job therefore asks
+  about the commit the tag names. It must be an ancestor of `develop` (a release
+  branch is cut at a `develop` commit), or the merge commit of a merged pull
+  request whose base is that release branch **and whose first parent has landed
+  too**. The walk matters: a fix merged onto a branch that was created at an
+  unlanded commit carries that commit with it, and without following first
+  parents it would be accepted. Anything else is refused, and the message names
+  the commit where the chain broke. Exit status `2` means the check could not
+  read something, or the walk ran out of its bound; it says nothing about the
+  commit and stops the job all the same. `scripts/check-rc-sha-landed.py` is the
+  judge. **"Landed" is a claim about the path, not about a person reading the
+  change:** the ruleset requires zero approving reviews, so a merged pull request
+  proves it went through the required status checks, not that anyone approved it.
+  **This prevents an accidental rc image from an unlanded commit. It is not an
+  authorization control:** repository write access already implies the ability
+  to publish packages, since any branch a writer pushes can carry a workflow that
+  grants itself `packages: write` and pushes to `ghcr.io/cleat-team/cleat-worker`
+  under any tag. Trust release tags (`vX.Y.Z`), not `rc-*`, for anything that
+  matters.
 - **An `rc-<40-hex sha>` tag is written once.** A re-run for a sha that already
   has the tag leaves the existing image alone, so the tag keeps pointing at the
   digest it was first given. To rebuild one on purpose, delete the tag first.
@@ -95,3 +116,14 @@ commit has no image. A maintainer can publish the current head by dispatching
 the workflow on that branch (`gh workflow run develop-image.yml --ref develop`,
 or `--ref release/v0.5.0`). A dispatch on any other ref is refused before
 anything is pushed, and the tag prefix is chosen from the ref alone.
+
+To exercise the landed-sha gate without publishing, dispatch on `develop` with
+`dry_run` set and name the branch and commit to judge:
+
+```
+gh workflow run develop-image.yml --ref develop -f dry_run=true \
+  -f check_branch=release/v0.5.0 -f check_sha=<40-hex sha>
+```
+
+Only the `landed` job runs; `publish` is skipped, so nothing is built or
+pushed.
