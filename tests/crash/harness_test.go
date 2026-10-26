@@ -823,7 +823,9 @@ func awaitTerminal(t *testing.T, db *sql.DB, id string, budget time.Duration) (s
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		var msg sql.NullString
-		err := db.QueryRow(`SELECT status, error_msg FROM workflow_instances WHERE id = $1`, id).
+		// error_msg is a workflow_payloads column since cleat#3245 B1b.
+		err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_instances w
+			JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
 			Scan(&status, &msg)
 		if err != nil {
 			t.Fatalf("polling %s: %v", id, err)

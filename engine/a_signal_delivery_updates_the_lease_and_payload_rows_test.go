@@ -209,15 +209,12 @@ func TestSetAllowedSignalCallersUpdatesThePayloadRow(t *testing.T) {
 		t.Fatalf("SetAllowedSignalCallers: %v", err)
 	}
 
-	var payloadAllowed, instAllowed sql.NullString
+	// cleat#3245 B1b: workflow_payloads holds the only copy.
+	var payloadAllowed sql.NullString
 	if err := db.QueryRow(`SELECT allowed_signals::text FROM workflow_payloads WHERE id = $1`, id).Scan(&payloadAllowed); err != nil {
 		t.Fatalf("read workflow_payloads: %v", err)
 	}
-	if err := db.QueryRow(`SELECT allowed_signals::text FROM workflow_instances WHERE id = $1`, id).Scan(&instAllowed); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if payloadAllowed.Valid != instAllowed.Valid || payloadAllowed.String != instAllowed.String {
-		t.Errorf("workflow_payloads.allowed_signals = %v, want byte-identical to workflow_instances' %v",
-			payloadAllowed, instAllowed)
+	if want := `["svc-a", "svc-b"]`; !payloadAllowed.Valid || payloadAllowed.String != want {
+		t.Errorf("workflow_payloads.allowed_signals = %v, want %s", payloadAllowed, want)
 	}
 }

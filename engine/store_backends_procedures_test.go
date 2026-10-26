@@ -46,8 +46,8 @@ import (
 // fix below was written, applied to a real database, verified over HTTP, and
 // its own engine test still failed, because the harness was running 004.
 //
-// ONE entry since the cleat#3347 re-compaction, for the same reason the
-// MySQL list below has one: 003 now carries the FINAL body, generated from a
+// This list was ONE entry after the cleat#3347 re-compaction, for the same
+// reason the MySQL list below is: 003 now carries the FINAL body, generated from a
 // pg_dump of a database built by the whole chain through 021, so it is the
 // last definition by construction rather than by replaying 014/017/019/021
 // on top of it. The list used to run to five files, each redefining the
@@ -58,13 +58,17 @@ import (
 //
 // TestProcedureMigrationListsAreComplete still checks this against the
 // directory, so it stays honest: if a later migration defines the routine, the
-// list must name it.
+// list must name it. 005 is the first since that compaction: cleat#3245 B1b
+// redefines finalize_workflow_status to stop writing payload columns to
+// workflow_instances, so the list is two entries again until the next
+// baseline regeneration folds 005 into 003.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
+	"005_finalize_workflow_status_writes_payloads_only.sql",
 }
 
 // ONE entry since the cleat#3348 re-compaction, for the same reason the
-// Postgres list above has one: 003 now carries the FINAL body, generated
+// Postgres list above had one until cleat#3245 B1b's 005: 003 now carries the FINAL body, generated
 // from a database built by the whole chain through 012, so it is the last
 // definition by construction rather than by replaying 011 on top of it.
 // MySQL's FIRST compaction (cleat#2433) left this list at two entries

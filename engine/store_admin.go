@@ -357,20 +357,18 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET status = 'done', result = $3, completed_at = now(),
-			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			SET status = 'done',
 			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
-			WHERE id = $1 AND tenant_id = $2 AND generation = $4
-		`, workflowID, s.tenantID, a.result, generation)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation)
 	} else {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET status = 'failed', error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
-			    completed_at = now(), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			SET status = 'failed', completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
-			WHERE id = $1 AND tenant_id = $2 AND generation = $5
-		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation)
 	}
 	if err != nil {
 		return fmt.Errorf("admin %s: %w", a.action, err)
@@ -469,23 +467,21 @@ func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflow
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET status = $5, pending_terminal_status = 'done', result = $3,
-			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    defer_phase_deadline = now() + ($6 * interval '1 second'),
+			SET status = $4, pending_terminal_status = 'done',
+			    defer_phase_deadline = now() + ($5 * interval '1 second'),
 			    next_wake_at = now(), assigned_to = NULL,
 			    generation = generation + 1
-			WHERE id = $1 AND tenant_id = $2 AND generation = $4
-		`, workflowID, s.tenantID, a.result, generation, statusTerminating, deadline)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation, statusTerminating, deadline)
 	} else {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET status = $6, pending_terminal_status = 'failed',
-			    error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
-			    defer_phase_deadline = now() + ($7 * interval '1 second'),
+			SET status = $4, pending_terminal_status = 'failed',
+			    defer_phase_deadline = now() + ($5 * interval '1 second'),
 			    next_wake_at = now(), assigned_to = NULL,
 			    generation = generation + 1
-			WHERE id = $1 AND tenant_id = $2 AND generation = $5
-		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation, statusTerminating, deadline)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation, statusTerminating, deadline)
 	}
 	if err != nil {
 		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)

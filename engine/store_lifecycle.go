@@ -811,7 +811,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	var newRunID, resolvedTaskQueue string
 	var inheritedParentWorkflowID sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
 		-- parent_workflow_id and parent_close_policy are INHERITED from the run
 		-- being continued, not left NULL. A child that continues as new is
 		-- still its parent's child: enforceParentClosePolicy selects on
@@ -820,13 +820,13 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		-- stopped its child (cleat#955). Measured against a plain sibling
 		-- child as a control -- that one WAS stopped by the same call, so the
 		-- policy was working and only the link was missing.
-		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $4), 'default'),
-			$4, $5, now() - INTERVAL '1 millisecond', $6,
-			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $6),
-			(SELECT parent_close_policy FROM workflow_instances WHERE id = $6))
+		VALUES (gen_random_uuid(), $1, $2, 'ready',
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3), 'default'),
+			$3, $4, now() - INTERVAL '1 millisecond', $5,
+			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $5),
+			(SELECT parent_close_policy FROM workflow_instances WHERE id = $5))
 		RETURNING id, task_queue, parent_workflow_id
-		`, defName, defVersion, sealedNewInput, s.tenantID, priority, currentRunID).Scan(&newRunID, &resolvedTaskQueue, &inheritedParentWorkflowID)
+		`, defName, defVersion, s.tenantID, priority, currentRunID).Scan(&newRunID, &resolvedTaskQueue, &inheritedParentWorkflowID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -878,9 +878,9 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
-		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, currentRunID, workerID, sealedResult, sealedQS, generation)
+		SET status = 'done', completed_by = assigned_to, assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2 AND generation = $3
+	`, currentRunID, workerID, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
@@ -1076,9 +1076,9 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
-		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, workflowID, workerID, sealedResult, sealedQS, generation)
+		SET status = 'done', completed_by = assigned_to, assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2 AND generation = $3
+	`, workflowID, workerID, generation)
 	if err != nil {
 		return err
 	}
@@ -1163,14 +1163,9 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
-		    error_msg = $3,
-		    error_code = $4,
-		    error_op = $5,
-		    completed_at = now(),
-		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = COALESCE($6::jsonb, query_state)
-		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, sealedErrorMsg, sealedErrorCode, sealedErrorOp, qsParam, generation)
+		    completed_by = assigned_to, assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2 AND generation = $3
+	`, workflowID, workerID, generation)
 	if err != nil {
 		return err
 	}
@@ -1389,9 +1384,8 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		// is what stops the four-way split cleat#1227 is really about.
 		{"TERMINATE", `
 		UPDATE workflow_instances
-		SET status = 'terminated', error_msg = $2, error_op = 'parent_close', error_code = NULL,
+		SET status = 'terminated',
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
-		    completed_at = now(),
 		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
@@ -1414,7 +1408,6 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		SET status = '` + statusTerminating + `',
 		    pending_terminal_status = 'terminated',
 		    defer_phase_deadline = ` + deferPhaseDeadlinePostgres + `,
-		    error_msg = $2, error_op = 'parent_close', error_code = NULL,
 		    next_wake_at = now(),
 		    assigned_to = NULL,
 		    generation = generation + 1
@@ -1523,13 +1516,12 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 // leaseQuery == "" skips the mirror (no step needs that today, but the
 // escape hatch costs nothing to keep).
 //
-// payloadQuery is the same mirror onto workflow_payloads (cleat#3245 Phase 3
-// step 3 piece F). It takes $1 = the same ids and, for the TERMINATE arms,
-// $2 = outcomeMsg -- args[1:] (everything after the step's own
-// parentWorkflowID) is passed through unchanged, so a step whose query needed
-// outcomeMsg as its own $2 gives payloadQuery the same value at the same
-// position. payloadQuery == "" skips the mirror, same convention as
-// leaseQuery.
+// payloadQuery writes the step's payload columns onto workflow_payloads
+// (added as a mirror in cleat#3245 Phase 3 step 3 piece F; since B1b it is
+// the only copy, and query writes none of them). It takes $1 = the same ids
+// and, for the TERMINATE arms, $2 = outcomeMsg -- args[1:] (everything after
+// the step's own parentWorkflowID). query itself takes only args[0].
+// payloadQuery == "" skips it, same convention as leaseQuery.
 func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, leaseQuery, payloadQuery string, args ...any) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1537,7 +1529,10 @@ func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, lea
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.QueryContext(ctx, query, args...)
+	// The workflow_instances query takes only the parent id: since cleat#3245
+	// B1b it writes no payload column, so the remaining args (the outcome
+	// message) belong to the workflow_payloads query alone.
+	rows, err := tx.QueryContext(ctx, query, args[0])
 	if err != nil {
 		return err
 	}
@@ -1598,11 +1593,9 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
-		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL,
-		    query_state = COALESCE($6::jsonb, query_state)
-		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam, generation)
+		SET status = 'dead_lettered', completed_by = assigned_to, assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2 AND generation = $3
+	`, workflowID, workerID, generation)
 	if err != nil {
 		return err
 	}
@@ -1663,7 +1656,6 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
-		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = now()
 		WHERE id = $1 AND status = 'dead_lettered'
 	`, workflowID)
@@ -2003,13 +1995,13 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		// frozen -- see UpdateStickyWorker's identical note in db.go.
 		var resolvedTaskQueue string
 		err = tx.QueryRowContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
-			VALUES ($1, $2, $3, 'ready', $4,
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond',
-			CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
+			VALUES ($1, $2, $3, 'ready',
+			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $4), 'default'),
+			$4, $5, now() - INTERVAL '1 millisecond',
+			CASE WHEN $6 = '' THEN NULL ELSE digest($6, 'sha256') END, $7, $8, $9, $10)
 			RETURNING task_queue
-		`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
+		`, runID, defName, defVersion, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -2038,13 +2030,13 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	// concurrency_key_hash stays, for idx_instances_concurrency_key's sake.
 	var resolvedTaskQueue string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
-		VALUES ($1, $2, $3, 'ready', $4,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond',
-			CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
+		VALUES ($1, $2, $3, 'ready',
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $4), 'default'),
+			$4, $5, now() - INTERVAL '1 millisecond',
+			CASE WHEN $6 = '' THEN NULL ELSE digest($6, 'sha256') END, $7, $8, $9, $10)
 		RETURNING task_queue
-	`, runID, defName, defVersion, sealedInput, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
+	`, runID, defName, defVersion, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

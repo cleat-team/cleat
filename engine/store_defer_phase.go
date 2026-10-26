@@ -55,7 +55,6 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
-		    completed_at = now(),
 		    assigned_to = NULL
 		WHERE id = $1
 		  AND assigned_to = $2
@@ -153,7 +152,6 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
-		    completed_at = now(),
 		    assigned_to = NULL,
 		    generation = generation + 1
 		WHERE pending_terminal_status IS NOT NULL

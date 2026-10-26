@@ -173,7 +173,7 @@ func TestSignalAuthStillEnforcesAConfiguredList(t *testing.T) {
 			}
 			var col sql.NullString
 			if err := db.QueryRow(
-				`SELECT allowed_signals::text FROM workflow_instances WHERE id = $1`,
+				`SELECT allowed_signals::text FROM workflow_payloads WHERE id = $1`,
 				runID).Scan(&col); err != nil {
 				t.Fatalf("read allowed_signals: %v", err)
 			}

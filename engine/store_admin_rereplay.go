@@ -67,7 +67,6 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
-		    completed_at = NULL, error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = now(), generation = generation + 1
 		WHERE id = $1 AND tenant_id = $2 AND generation = $3
 		  AND status = ANY($4)

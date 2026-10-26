@@ -614,11 +614,14 @@ func (s *PostgresStore) SetAllowedSignalCallers(ctx context.Context, workflowID 
 	}
 	defer tx.Rollback()
 
+	// allowed_signals is a workflow_payloads column, written only there since
+	// cleat#3245 B1b.
+	//
 	// tenant_id in the predicate as well as RLS underneath it. On PostgreSQL
 	// the policy would be enough; carrying it here keeps the three dialects'
 	// statements the same shape, and MySQL has no policy to fall back on.
 	res, err := tx.ExecContext(ctx,
-		`UPDATE workflow_instances SET allowed_signals = $1 WHERE id = $2 AND tenant_id = $3`,
+		`UPDATE workflow_payloads SET allowed_signals = $1 WHERE id = $2 AND tenant_id = $3`,
 		encoded, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("set allowed signal callers: %w", err)
@@ -635,15 +638,6 @@ func (s *PostgresStore) SetAllowedSignalCallers(ctx context.Context, workflowID 
 		// TestSetAllowedSignalCallersRejectsAnotherTenantsWorkflow/postgres red
 		// with "tenant B ... was told it succeeded".
 		return ErrWorkflowNotFound
-	}
-	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_payloads, on
-	// the same tx -- a scope addition found and disclosed on the issue before
-	// this code was written (allowed_signals is a workflow_payloads column
-	// per migration 016 (folded into migrations/postgres/001_schema.sql by #3358), not a workflow_leases one like this file's other
-	// mirrors). Runs only after the n==0 check above has confirmed the row
-	// exists under this tenant, same as the UPDATE it mirrors.
-	if err := setPayloadAllowedSignals(ctx, tx, workflowID, encoded); err != nil {
-		return err
 	}
 	return tx.Commit()
 }
@@ -705,20 +699,6 @@ func setLeaseCancellation(ctx context.Context, tx *sql.Tx, workflowID string, se
 		WHERE id = $1
 	`, workflowID, sealedReason); err != nil {
 		return fmt.Errorf("mirror lease row: %w", err)
-	}
-	return nil
-}
-
-// setPayloadAllowedSignals mirrors SetAllowedSignalCallers' write onto
-// workflow_payloads, on the same tx -- cleat#3245 Phase 3 step 2, piece 5a (a
-// scope addition: allowed_signals is a workflow_payloads column per migration
-// 016, found and disclosed on the issue before this was written, since it
-// wasn't named in step 2's original sequencing plan).
-func setPayloadAllowedSignals(ctx context.Context, tx *sql.Tx, workflowID string, encoded any) error {
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_payloads SET allowed_signals = $1 WHERE id = $2
-	`, encoded, workflowID); err != nil {
-		return fmt.Errorf("mirror payload row: %w", err)
 	}
 	return nil
 }

@@ -76,10 +76,10 @@ func TestWorkflowInstanceColumnsAreEncrypted(t *testing.T) {
 	t.Cleanup(func() { db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID) })
 
 	var rawInput string
-	if err := db.QueryRow(`SELECT input::text FROM workflow_instances WHERE id = $1`, runID).Scan(&rawInput); err != nil {
+	if err := db.QueryRow(`SELECT input::text FROM workflow_payloads WHERE id = $1`, runID).Scan(&rawInput); err != nil {
 		t.Fatalf("read raw input: %v", err)
 	}
-	assertSealed(t, "workflow_instances.input", rawInput, inputMarker, input)
+	assertSealed(t, "workflow_payloads.input", rawInput, inputMarker, input)
 
 	wf, err := store.GetWorkflowByID(ctx, runID)
 	if err != nil {
@@ -112,12 +112,12 @@ func TestWorkflowInstanceColumnsAreEncrypted(t *testing.T) {
 	}
 
 	var rawResult, rawQS string
-	if err := db.QueryRow(`SELECT result::text, query_state::text FROM workflow_instances WHERE id = $1`, runID).
+	if err := db.QueryRow(`SELECT result::text, query_state::text FROM workflow_payloads WHERE id = $1`, runID).
 		Scan(&rawResult, &rawQS); err != nil {
 		t.Fatalf("read raw result/query_state: %v", err)
 	}
-	assertSealed(t, "workflow_instances.result", rawResult, resultMarker, result)
-	assertSealed(t, "workflow_instances.query_state", rawQS, qsMarker, string(marshalQueryState(qs)))
+	assertSealed(t, "workflow_payloads.result", rawResult, resultMarker, result)
+	assertSealed(t, "workflow_payloads.query_state", rawQS, qsMarker, string(marshalQueryState(qs)))
 
 	wf, err = store.GetWorkflowByID(ctx, runID)
 	if err != nil {
@@ -174,13 +174,13 @@ func TestWorkflowInstanceColumnsAreEncrypted(t *testing.T) {
 	}
 
 	var rawErrMsg, rawErrCode, rawErrOp string
-	if err := db.QueryRow(`SELECT error_msg, error_code, error_op FROM workflow_instances WHERE id = $1`, runID2).
+	if err := db.QueryRow(`SELECT error_msg, error_code, error_op FROM workflow_payloads WHERE id = $1`, runID2).
 		Scan(&rawErrMsg, &rawErrCode, &rawErrOp); err != nil {
 		t.Fatalf("read raw error columns: %v", err)
 	}
-	assertSealed(t, "workflow_instances.error_msg", rawErrMsg, errMsgMarker, errMsgMarker)
-	assertSealed(t, "workflow_instances.error_code", rawErrCode, errCodeMarker, errCodeMarker)
-	assertSealed(t, "workflow_instances.error_op", rawErrOp, errOpMarker, errOpMarker)
+	assertSealed(t, "workflow_payloads.error_msg", rawErrMsg, errMsgMarker, errMsgMarker)
+	assertSealed(t, "workflow_payloads.error_code", rawErrCode, errCodeMarker, errCodeMarker)
+	assertSealed(t, "workflow_payloads.error_op", rawErrOp, errOpMarker, errOpMarker)
 
 	var rawIdempErrMsg string
 	if err := db.QueryRow(`SELECT error_msg FROM idempotency_keys WHERE workflow_id = $1`, runID2).Scan(&rawIdempErrMsg); err != nil {
@@ -283,7 +283,7 @@ func TestWorkflowInstanceColumnsAreEncrypted(t *testing.T) {
 		t.Fatalf("CompleteWorkflow (plain control): %v", err)
 	}
 	var rawPlainResult string
-	if err := db.QueryRow(`SELECT result::text FROM workflow_instances WHERE id = $1`, plainRunID).Scan(&rawPlainResult); err != nil {
+	if err := db.QueryRow(`SELECT result::text FROM workflow_payloads WHERE id = $1`, plainRunID).Scan(&rawPlainResult); err != nil {
 		t.Fatalf("read raw plain-control result: %v", err)
 	}
 	if !strings.Contains(rawPlainResult, plainResultMarker) {
@@ -551,10 +551,10 @@ func TestScheduleAndChildWorkflowInputAreEncrypted(t *testing.T) {
 	t.Cleanup(func() { db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, childID) })
 
 	var rawChildInput string
-	if err := db.QueryRow(`SELECT input::text FROM workflow_instances WHERE id = $1`, childID).Scan(&rawChildInput); err != nil {
+	if err := db.QueryRow(`SELECT input::text FROM workflow_payloads WHERE id = $1`, childID).Scan(&rawChildInput); err != nil {
 		t.Fatalf("read raw child input: %v", err)
 	}
-	assertSealed(t, "workflow_instances.input (child, StartChildWorkflow)", rawChildInput, childInputMarker, childInput)
+	assertSealed(t, "workflow_payloads.input (child, StartChildWorkflow)", rawChildInput, childInputMarker, childInput)
 
 	childWF, err := store.GetWorkflowByID(ctx, childID)
 	if err != nil {

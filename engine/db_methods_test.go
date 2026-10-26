@@ -2315,6 +2315,7 @@ func TestPostgresStore_CompactHistory_DeleteError(t *testing.T) {
 func TestPostgresStore_CompactHistory_UpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history", affected: 10},
 		{match: "SET compaction_state", err: errors.New("update failed")},
@@ -3878,7 +3879,7 @@ func TestPostgresStore_TraceWorkflow_Success(t *testing.T) {
 
 func TestPostgresStore_TraceWorkflow_ExecError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET trace_id", err: errors.New("update failed")},
+		{match: "UPDATE workflow_payloads SET trace_id", err: errors.New("update failed")},
 	})
 	defer db.Close()
 

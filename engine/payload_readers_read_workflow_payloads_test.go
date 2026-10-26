@@ -132,19 +132,13 @@ func TestClearExpiredCompactionStateClearsWorkflowPayloads(t *testing.T) {
 		t.Fatalf("ClearExpiredCompactionState cleared %d, want 1 -- 0 means the predicate read "+
 			"workflow_instances.completed_at, which is NULL here", n)
 	}
-	var pState, iState sql.NullString
+	var pState sql.NullString
 	var pStep sql.NullInt64
 	if err := db.QueryRow(`SELECT compaction_state::text, compaction_step FROM workflow_payloads WHERE id = $1`, id).Scan(&pState, &pStep); err != nil {
 		t.Fatalf("read workflow_payloads: %v", err)
 	}
-	if err := db.QueryRow(`SELECT compaction_state::text FROM workflow_instances WHERE id = $1`, id).Scan(&iState); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
 	if pState.Valid || pStep.Valid {
 		t.Errorf("workflow_payloads still carries compaction_state=%v step=%v -- the clear was not mirrored", pState, pStep)
-	}
-	if iState.Valid {
-		t.Errorf("workflow_instances still carries compaction_state=%v -- the dual-write stopped early", iState)
 	}
 }
 

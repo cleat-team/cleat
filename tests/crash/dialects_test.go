@@ -512,9 +512,14 @@ func (tg *crashTarget) startWorkflowEntry(t *testing.T, id, orderID, taskQueue, 
 func (tg *crashTarget) runRow(t *testing.T, id string) (status, errMsg string) {
 	t.Helper()
 	var msg sql.NullString
-	if err := tg.db.QueryRow(
-		tg.stmt(`SELECT status, error_msg FROM workflow_instances WHERE id = `+tg.placeholder(1)),
-		id).Scan(&status, &msg); err != nil {
+	q := `SELECT status, error_msg FROM workflow_instances WHERE id = ` + tg.placeholder(1)
+	if tg.placeholder(1) == "$1" {
+		// error_msg is a workflow_payloads column on PostgreSQL since
+		// cleat#3245 B1b; status is still a workflow_instances one.
+		q = `SELECT w.status, p.error_msg FROM workflow_instances w
+			JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`
+	}
+	if err := tg.db.QueryRow(tg.stmt(q), id).Scan(&status, &msg); err != nil {
 		t.Fatalf("reading %s on %s: %v", id, tg.name, err)
 	}
 	return status, msg.String

@@ -34,15 +34,15 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	var runID, resolvedTaskQueue string
 	var resolvedDefVersion int
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES (gen_random_uuid(), $1,
-		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND disabled_at IS NULL AND tenant_id = $6) END,
-		        'ready', $2, $3,
-		        COALESCE(NULLIF($5, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
-			$6, $7)
+		        CASE WHEN $3 > 0 THEN $3 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND disabled_at IS NULL AND tenant_id = $5) END,
+		        'ready', $2,
+		        COALESCE(NULLIF($4, ''), 'ABANDON'),
+		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $2), 'default'),
+			$5, $6)
 		RETURNING id, task_queue, def_version
-	`, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID, &resolvedTaskQueue, &resolvedDefVersion)
+	`, defName, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID, &resolvedTaskQueue, &resolvedDefVersion)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
@@ -122,15 +122,15 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	var resolvedTaskQueue string
 	var resolvedDefVersion int
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES ($1, $2,
-		        CASE WHEN $5 > 0 THEN $5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND disabled_at IS NULL AND tenant_id = $7) END,
-		        'ready', $3, $4,
-		        COALESCE(NULLIF($6, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),
-			$7, $8)
+		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND disabled_at IS NULL AND tenant_id = $6) END,
+		        'ready', $3,
+		        COALESCE(NULLIF($5, ''), 'ABANDON'),
+		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
+			$6, $7)
 		RETURNING task_queue, def_version
-	`, childID, defName, sealedInput, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&resolvedTaskQueue, &resolvedDefVersion)
+	`, childID, defName, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&resolvedTaskQueue, &resolvedDefVersion)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}
