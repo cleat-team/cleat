@@ -38,9 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Authorization: Bearer <key>` on every request -- typed methods, `PluginRoute`, `Health` and the
   stream. `New` takes variadic options, so existing calls compile unchanged. The four examples that
   each carried a private `authTransport` (`order-lifecycle`, `ai-agent-platform`,
-  `integration-hub`, `b2b-saas-control-plane`) use the option instead; `order-lifecycle`'s app
-  count moves 731 → 723 (`scripts/dbos-pair-loc.sh order-lifecycle`, recorded in
-  `examples/order-lifecycle-dbos-port/README.md`).
+  `integration-hub`, `b2b-saas-control-plane`) use the option instead. The DBOS-pair counts move
+  with them: order-lifecycle 731 → 723 and b2b-saas-control-plane 641 → 631
+  (`scripts/dbos-pair-loc.sh`), recorded as "Corrected" entries in each pair's README.
 
 ### Fixed
 

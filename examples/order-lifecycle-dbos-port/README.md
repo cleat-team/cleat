@@ -160,16 +160,16 @@ at all, which is the gap the comparison is naming, not a feature.
 | **total** | | **439** |
 
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
-on the same date: **731**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
+on the same date: **723**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
 
-**Re-measured 2026-10-26, cleat#3368**, the same command on develop `08ab4e139` and on
-the change: cleat's app total went from **731 to 723** (−8 code lines). Its backend's private
-`authTransport`, a `RoundTripper` setting the worker API key, was replaced by
-`backendkit.Client.APIKey`. DBOS is unchanged at **439**, so the app ratio moves from **1.67x to
-1.65x**. The cleat scenario harness is **469** on both, not the 438 in the table below: it had
-already grown before this change. With both harnesses counted, the ratio is **1.97x**
-(`(723+469)/(439+165)`), against 1.99x on develop.
+**Corrected 2026-10-26 (cleat#3368): cleat 731 → 723.** Eight code lines. The backend's private
+`authTransport`, a `RoundTripper` that set the worker API key, was replaced by
+`backendkit.Client.APIKey`, because the client now sends the key itself. DBOS is unchanged at
+**439**, so the app ratio goes from 1.67x to **1.65x**. The paragraphs below still quote the
+2026-10-03 figures (731, and 438 for the cleat scenario harness). Measured the same day as this
+correction, the harness is **469**, so with both harnesses counted the ratio is **1.97x**
+(`(723+469)/(439+165)`).
 
 **Both totals exclude each side's scenario harness, and the two harnesses are
 not the same size — a reader should be able to price that rather than assume
