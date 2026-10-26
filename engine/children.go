@@ -434,64 +434,73 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 		pr = pollResult{Status: "failed", Error: "no child workflow store"}
 	default:
 		out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
-		result := out.Result
-		completed := out.Completed
-		switch {
-		case err != nil:
-			pr = pollResult{Status: "failed", Error: err.Error()}
-		case out.Failed:
-			// A child that ran and failed. Before cleat#1115 this branch did
-			// not exist and the child fell through to "done" below, so a
-			// polling parent was told its failed child had succeeded -- the
-			// same defect as AwaitChild's, one status value away.
-			pr = pollResult{Status: "failed", Error: out.Error}
-		case !completed:
-			// Not complete now, so it was not complete at any earlier durable
+		if err != nil {
+			// The store could not answer. That says nothing about the child,
+			// so it is a HOST error, not a "failed" status: answering
+			// "failed" told a polling parent its child had failed when the
+			// database had blinked, and a Selector returned that child as a
+			// failed winner (cleat#3387 review).
+			written, _ := s.writeResult(ctx, m, resultPtr, "poll_child: "+err.Error(), resultMaxLen)
+			return int64(uint64(written)<<32 | 1)
+		}
+		if !out.Completed && !out.Failed {
+			// Not terminal now, so it was not terminal at any earlier durable
 			// time either. No second query needed.
 			pr = pollResult{Status: "running"}
+			break
+		}
+		// Terminal NOW -- completed OR failed. The replayable question is
+		// whether it was terminal as of the parent's durable time, and that
+		// applies to a failure exactly as to a success: a failed row has a
+		// completed_at too. Until the cleat#3387 review only "completed" was
+		// gated, so a child that failed after a parent's recorded wait read
+		// "failed" on the replay of the poll before that wait, and the parent
+		// branched differently from its own history.
+		completedAtMs, ok, cerr := s.engine.childWfStore.GetChildCompletedAtMs(context.Background(), runID)
+		switch {
+		case cerr != nil:
+			written, _ := s.writeResult(ctx, m, resultPtr, "poll_child: "+cerr.Error(), resultMaxLen)
+			return int64(uint64(written)<<32 | 1)
+		case !ok:
+			// Terminal but with no recorded instant. Fail closed rather
+			// than guessing: answering "completed" here would reintroduce
+			// exactly the non-replayable answer #847 is about, and it
+			// would do it silently.
+			//
+			// THERE IS A KNOWN POPULATION OF SUCH ROWS, so this is not a
+			// theoretical branch. Before #864 the first TERMINATE arm of
+			// enforceParentClosePolicy set status='failed' with no
+			// completed_at, in all three dialects. #864 fixed the write and
+			// touched no existing row, and every retention sweep gates on
+			// `completed_at IS NOT NULL` -- so those rows are never
+			// collected and the population never shrinks (#867).
+			//
+			// A child terminated that way is genuinely unanswerable here:
+			// its status is terminal and stable, but nothing on the row
+			// says WHEN it became terminal, so "was it complete at the
+			// parent's durable time" has no answer. Naming the cause beats
+			// a bare error, because the operator's next question is "which
+			// children?" and #867 has the enumeration.
+			pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp, so poll_child cannot answer deterministically; if this child was terminated by a parent close policy before the #864 fix, its completed_at is permanently NULL -- see #867"}
+		case completedAtMs > s.nowMs:
+			// Terminal, but AFTER the parent's durable clock. The original
+			// execution saw it running, so every replay must too.
+			pr = pollResult{Status: "running"}
+		case out.Failed:
+			// A child that ran and failed. Before cleat#1115 this branch did
+			// not exist and the child fell through to "completed", so a
+			// polling parent was told its failed child had succeeded.
+			pr = pollResult{Status: "failed", Error: out.Error}
 		default:
-			// Complete NOW. The replayable question is whether it was complete
-			// as of the parent's durable time.
-			completedAtMs, ok, cerr := s.engine.childWfStore.GetChildCompletedAtMs(context.Background(), runID)
-			switch {
-			case cerr != nil:
-				pr = pollResult{Status: "failed", Error: cerr.Error()}
-			case !ok:
-				// Complete but with no recorded instant. Fail closed rather
-				// than guessing: answering "completed" here would reintroduce
-				// exactly the non-replayable answer #847 is about, and it
-				// would do it silently.
-				//
-				// THERE IS A KNOWN POPULATION OF SUCH ROWS, so this is not a
-				// theoretical branch. Before #864 the first TERMINATE arm of
-				// enforceParentClosePolicy set status='failed' with no
-				// completed_at, in all three dialects. #864 fixed the write and
-				// touched no existing row, and every retention sweep gates on
-				// `completed_at IS NOT NULL` -- so those rows are never
-				// collected and the population never shrinks (#867).
-				//
-				// A child terminated that way is genuinely unanswerable here:
-				// its status is terminal and stable, but nothing on the row
-				// says WHEN it became terminal, so "was it complete at the
-				// parent's durable time" has no answer. Naming the cause beats
-				// a bare error, because the operator's next question is "which
-				// children?" and #867 has the enumeration.
-				pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp, so poll_child cannot answer deterministically; if this child was terminated by a parent close policy before the #864 fix, its completed_at is permanently NULL -- see #867"}
-			case completedAtMs > s.nowMs:
-				// Completed, but AFTER the parent's durable clock. The original
-				// execution saw it running, so every replay must too.
-				pr = pollResult{Status: "running"}
-			default:
-				// An empty result is NOT a failure. Until cleat#1115 this
-				// branch guessed -- "child workflow failed (empty result)" --
-				// because the store had no way to say whether the child had
-				// failed, and the guess is wrong in the other direction: a
-				// child that succeeds and returns nothing was reported as
-				// failed. `out.Failed` above answers it from the row, so the
-				// guess is gone rather than kept alongside an answer it can
-				// contradict.
-				pr = pollResult{Status: "completed", Result: result}
-			}
+			// An empty result is NOT a failure. Until cleat#1115 this
+			// branch guessed -- "child workflow failed (empty result)" --
+			// because the store had no way to say whether the child had
+			// failed, and the guess is wrong in the other direction: a
+			// child that succeeds and returns nothing was reported as
+			// failed. `out.Failed` above answers it from the row, so the
+			// guess is gone rather than kept alongside an answer it can
+			// contradict.
+			pr = pollResult{Status: "completed", Result: out.Result}
 		}
 	}
 

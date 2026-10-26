@@ -559,29 +559,87 @@ func TestPollChild_Running(t *testing.T) {
 	}
 }
 
-func TestPollChild_Failed(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
-		return ChildOutcome{}, fmt.Errorf("connection refused")
-	}}
-	s := newTestExecSession()
-	s.engine.childWfStore = mock
+// A store that cannot answer says nothing about the child: PollChild returns a
+// host error (a non-zero error code, which the guest adapter returns as an
+// error), not a "failed" status a caller would read as the child failing.
+// Both of its store reads. cleat#3387 review.
+func TestPollChild_StoreErrorIsAHostError(t *testing.T) {
+	for name, mock := range map[string]*mockChildStore{
+		"GetChildResult": {getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{}, fmt.Errorf("connection refused")
+		}},
+		"GetChildCompletedAtMs": {
+			getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+				return ChildOutcome{Completed: true, Failed: true, Error: "child blew up"}, nil
+			},
+			getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+				return 0, false, fmt.Errorf("connection refused")
+			},
+		},
+	} {
+		s := newTestExecSession()
+		s.engine.childWfStore = mock
 
+		buf := make([]byte, 256)
+		ctx := contextWithRawMemBuf(context.Background(), buf)
+		result := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+
+		if code := uint32(result); code == 0 {
+			t.Errorf("%s failing: PollChild answered %s with no error code; a store error "+
+				"must not read as a child status", name, buf[:result>>32])
+			continue
+		}
+		if msg := string(buf[:result>>32]); !strings.Contains(msg, "connection refused") {
+			t.Errorf("%s failing: host error %q does not carry the store's error", name, msg)
+		}
+	}
+}
+
+// pollFailedChild drives PollChild for a child that FAILED at failedAtMs,
+// with the parent's durable clock at nowMs.
+func pollFailedChild(t *testing.T, failedAtMs, nowMs int64) (string, string) {
+	t.Helper()
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Failed: true, Error: "child blew up"}, nil // failed NOW
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return failedAtMs, true, nil
+		},
+	}
+	s := newTestExecSession()
+	s.nowMs = nowMs
+	s.engine.childWfStore = mock
 	buf := make([]byte, 256)
 	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
-
+	res := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
 	var pr struct {
 		Status string `json:"status"`
 		Error  string `json:"error,omitempty"`
 	}
-	if err := json.Unmarshal(buf[:result>>32], &pr); err != nil {
+	if err := json.Unmarshal(buf[:res>>32], &pr); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if pr.Status != "failed" {
-		t.Errorf("expected status 'failed', got %q", pr.Status)
+	return pr.Status, pr.Error
+}
+
+// TestPollChildAnswersAFailureFromDurableTime is #847 for a FAILED child,
+// found in the cleat#3387 review. A Selector polls a running child, records a
+// wait and suspends; the child then fails. The resume replays the poll before
+// that wait, the store now says "failed", and answering from NOW returns the
+// child at the first poll where the history recorded a wait: divergence.
+// A failure, like a success, is visible only once the durable clock has
+// reached the instant it happened.
+func TestPollChildAnswersAFailureFromDurableTime(t *testing.T) {
+	if status, errMsg := pollFailedChild(t, 5_000, 1_000); status != "running" {
+		t.Fatalf("PollChild answered %q (%q) for a child that failed at 5000 when the parent's "+
+			"durable clock was 1000; the first execution saw it running, so a replay must too", status, errMsg)
 	}
-	if pr.Error != "connection refused" {
-		t.Errorf("expected error 'connection refused', got %q", pr.Error)
+	if status, _ := pollFailedChild(t, 5_000, 4_999); status != "running" {
+		t.Errorf("one ms before the failure must read running, got %q", status)
+	}
+	if status, errMsg := pollFailedChild(t, 5_000, 5_000); status != "failed" || errMsg != "child blew up" {
+		t.Errorf("at the failure's instant it must read failed with the child's error, got %q / %q", status, errMsg)
 	}
 }
 

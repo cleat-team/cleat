@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docs, which said child futures were unsupported and made `Select` return an error, now say
   what it does. `Selector.Select`'s import list gains `cleat_poll_child` and
   `cleat_await_any_child` and drops `cleat_await_child`, so a workflow using it must be rebuilt.
+  **`PollChild` answers a FAILED child as of the durable clock too:** only "completed" was gated
+  on the child's `completed_at` (#847), so a child that failed after a parent's recorded wait
+  read "failed" when the poll before that wait was replayed, and the parent branched off its own
+  history. A store read that errors is now a host error rather than a "failed" status, so a
+  database blip no longer reads as the child failing.
 
 - **A plugin route whose pattern overlapped one of the host's four always-anonymous routes
   (`POST /ingest/{source_id}`, the two `/oauth/{provider}/...` routes, `POST /slack/interactive`),
