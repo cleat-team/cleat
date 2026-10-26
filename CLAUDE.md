@@ -1685,8 +1685,8 @@ had not authored on the strength of a dead id. The new form:
 
     Claude-Stream: WS-1        # closed set, enumerated ONCE in VALID in
                                # .github/workflows/stream-trailer-check.yml:
-                               # WS-1, WS-2, WS-3, WS-4, WS-cleat, WS-clew,
-                               # coordinator, cleat-review (as of 2026-10-25)
+                               # WS-1, WS-2, WS-3, WS-4, WS-cleat, WS-cleat-2,
+                               # WS-clew, coordinator, cleat-review (as of 2026-10-26)
                                # anchor greps at ^Claude-Stream: , as before
 
 `WS-4` is a fourth delivery stream, added 2026-09-23 by owner decision to shorten the 0.3.0 critical path. Its IMPROVEMENT-PLAN block is `3.500–599` (`scripts/section-blocks.sh`).

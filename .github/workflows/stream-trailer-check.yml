@@ -131,7 +131,11 @@ jobs:
           # clew-service port whose own PRs land in cleat-team/clew but which
           # opens cleat PRs for the gaps it hits. Landed by the coordinator,
           # for the reason the paragraph above gives.
-          VALID='^(WS-1|WS-2|WS-3|WS-4|WS-cleat|WS-clew|coordinator|cleat-review)$'
+          # WS-cleat-2 added 2026-10-26: a second cleat delivery stream the owner
+          # started so the release-gate items that do not depend on the storage
+          # split (cleat#3377, #3386, #3398) run in parallel with it. Landed by
+          # the coordinator, same reason as above.
+          VALID='^(WS-1|WS-2|WS-3|WS-4|WS-cleat|WS-cleat-2|WS-clew|coordinator|cleat-review)$'
           # The human-readable list is DERIVED from VALID, never repeated: two
           # lists drift, and the drift is silent in the direction that matters
           # (cleat#3372 review: a rejected author was told a list without the
