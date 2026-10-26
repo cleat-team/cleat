@@ -151,3 +151,51 @@ func TestWorkflowLeasesRequiresAMatchingInstanceRow(t *testing.T) {
 		t.Fatal("inserting a workflow_leases row with no matching workflow_instances row succeeded, want a foreign key violation")
 	}
 }
+
+// cleat#3245 B1a: the payload row must carry the instance's own payload
+// columns. SeedWorkflowLease used to write input = '{}' whatever the
+// instance held, and once the claim read input from workflow_payloads,
+// tests/exhaustion's guest started with no input at all.
+func TestSeedWorkflowLeaseCopiesTheInstancesPayloadColumns(t *testing.T) {
+	db := TestDB(t, DialectPostgres)
+	id := uniqueLeaseTestID("payload-copy")
+	seedInstanceForLeaseTest(t, db, id)
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id) })
+	if _, err := db.Exec(`UPDATE workflow_instances SET input = '{"iterations": 7}', trace_id = 'trace-7' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set instance input: %v", err)
+	}
+
+	SeedWorkflowLease(t, db, id, WorkflowLeaseSeed{})
+
+	var input, traceID string
+	if err := db.QueryRow(`SELECT input::text, COALESCE(trace_id, '') FROM workflow_payloads WHERE id = $1`, id).
+		Scan(&input, &traceID); err != nil {
+		t.Fatalf("read workflow_payloads: %v", err)
+	}
+	if input != `{"iterations": 7}` || traceID != "trace-7" {
+		t.Fatalf("workflow_payloads input=%s trace_id=%q, want the instance's {\"iterations\": 7} and trace-7", input, traceID)
+	}
+}
+
+// SyncWorkflowPayload overwrites an existing payload row from a later
+// fixture write to workflow_instances.
+func TestSyncWorkflowPayloadCarriesALaterInstanceWrite(t *testing.T) {
+	db := TestDB(t, DialectPostgres)
+	id := uniqueLeaseTestID("payload-sync")
+	seedInstanceForLeaseTest(t, db, id)
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id) })
+	SeedWorkflowLease(t, db, id, WorkflowLeaseSeed{})
+	if _, err := db.Exec(`UPDATE workflow_instances SET completed_at = now() - interval '3 hours' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set instance completed_at: %v", err)
+	}
+
+	SyncWorkflowPayload(t, db, id)
+
+	var older bool
+	if err := db.QueryRow(`SELECT completed_at < now() - interval '2 hours' FROM workflow_payloads WHERE id = $1`, id).Scan(&older); err != nil {
+		t.Fatalf("read workflow_payloads.completed_at: %v", err)
+	}
+	if !older {
+		t.Fatal("workflow_payloads.completed_at did not take the instance's later write")
+	}
+}

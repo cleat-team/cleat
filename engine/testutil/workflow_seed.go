@@ -79,27 +79,75 @@ func SeedWorkflowLease(t *testing.T, db *sql.DB, id string, seed WorkflowLeaseSe
 	); err != nil {
 		t.Fatalf("seeding %s's workflow_leases row: %v", id, err)
 	}
-	// Same tenant_id COALESCE as the workflow_leases insert above, so the two
-	// rows agree -- the join piece F added has no predicate to notice if they
-	// did not, but RLS does.
-	//
-	// def_name/def_version come from the caller's own workflow_instances
-	// INSERT via subquery, not from this function's arguments -- it takes
-	// neither. Both are NOT a nullable column on the Go side
-	// (WorkflowInstance.DefName/.DefVersion scan into plain string/int), so
-	// leaving them unset here is not merely incomplete, it is a Scan error
-	// ("converting NULL to string is unsupported") the first time
-	// GetWorkflowByID or ListWorkflows reads the row -- measured via
-	// tests/scale's TestMaxConcurrentWorkflows while fixing the "not found"
-	// half of this same gap.
-	if _, err := db.Exec(`
-		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
-		SELECT $1, COALESCE(NULLIF($2, ''), $3)::uuid, '{}', wi.def_name, wi.def_version
+	// The workflow_payloads row copies every payload column from the
+	// caller's workflow_instances INSERT, with the same tenant_id COALESCE as
+	// the lease insert above so the two rows agree under RLS. It used to
+	// copy only def_name/def_version and hardcode input = '{}', which was
+	// harmless while every reader read workflow_instances; cleat#3245 B1a
+	// moved the readers to workflow_payloads, and the claim then handed
+	// tests/exhaustion's guest an empty input.
+	syncWorkflowPayload(t, db, id, seed.TenantID, false)
+}
+
+// SyncWorkflowPayload copies every workflow_payloads column of one run from
+// its workflow_instances row, inserting the payload row if it is missing.
+//
+// compacted_at and plugin_vers exist only on workflow_payloads and keep
+// whatever that row already holds (its defaults, for a new row).
+//
+// Call it after a fixture writes a payload column -- completed_at, result,
+// compaction_state, and so on -- straight into workflow_instances. Since
+// cleat#3245 B1a every PostgreSQL reader of those columns reads
+// workflow_payloads, so a value written only to workflow_instances is
+// invisible to the code under test. Writing through the store keeps both
+// copies in step and needs no call here.
+//
+// PostgreSQL only, like SeedWorkflowLease.
+func SyncWorkflowPayload(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	syncWorkflowPayload(t, db, id, "", true)
+}
+
+func syncWorkflowPayload(t *testing.T, db *sql.DB, id, tenantID string, overwrite bool) {
+	t.Helper()
+	// SeedWorkflowLease's path takes the lease row's tenant rule (the seed's,
+	// else the default), so the two rows it writes agree; a later sync takes
+	// the instance's own tenant.
+	tenantExpr := `COALESCE(NULLIF($2, ''), $3)::uuid`
+	args := []any{id, tenantID, defaultLeaseTenantID}
+	onConflict := `DO NOTHING`
+	if overwrite {
+		tenantExpr = `wi.tenant_id`
+		args = []any{id}
+		onConflict = `DO UPDATE SET
+			input = EXCLUDED.input, result = EXCLUDED.result,
+			query_state = EXCLUDED.query_state, compaction_state = EXCLUDED.compaction_state,
+			compaction_step = EXCLUDED.compaction_step,
+			allowed_signals = EXCLUDED.allowed_signals,
+			error_msg = EXCLUDED.error_msg, error_code = EXCLUDED.error_code,
+			error_op = EXCLUDED.error_op, def_name = EXCLUDED.def_name,
+			def_version = EXCLUDED.def_version, trace_id = EXCLUDED.trace_id,
+			completed_at = EXCLUDED.completed_at`
+	}
+	res, err := db.Exec(`
+		INSERT INTO workflow_payloads (id, tenant_id, input, result, query_state,
+			compaction_state, compaction_step,
+			allowed_signals, error_msg, error_code, error_op, def_name,
+			def_version, trace_id, completed_at)
+		SELECT $1, `+tenantExpr+`,
+			COALESCE(wi.input, '{}'), wi.result, wi.query_state,
+			wi.compaction_state, wi.compaction_step,
+			wi.allowed_signals, wi.error_msg,
+			wi.error_code, wi.error_op, wi.def_name, wi.def_version,
+			wi.trace_id, wi.completed_at
 		FROM workflow_instances wi WHERE wi.id = $1
-		ON CONFLICT (id) DO NOTHING
-	`,
-		id, seed.TenantID, defaultLeaseTenantID,
-	); err != nil {
+		ON CONFLICT (id) `+onConflict, args...)
+	if err != nil {
 		t.Fatalf("seeding %s's workflow_payloads row: %v", id, err)
+	}
+	if overwrite {
+		if n, _ := res.RowsAffected(); n == 0 {
+			t.Fatalf("SyncWorkflowPayload(%s): no workflow_instances row with that id", id)
+		}
 	}
 }
