@@ -54,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Python SDK's `fetch()` read an HTTP reply with no status as `200`.** Closes cleat#3413.
+  `HostCalls.fetch` and `CleatTestHarness.fetch` both returned `data.get("status", 200)`, so a
+  reply that was malformed, or used the old `status_code` key, looked like a success the host never
+  reported. They now read `status`, then `status_code`, and report `0` when neither is a number,
+  matching the Go and Java decoders. A guest that compared the status to `200` could not tell the
+  difference before; one that wrote `status >= 400` still cannot distinguish `0` from success, so
+  check for `200 <= status < 300` rather than for failure. The worker always sends `status`, so on
+  a stock worker this changes nothing; it matters for an embedder's own fetcher.
+
 - **The Go SDK's `DurableFetch` (and so `FetchGet`, `DurableFetchJSON`, `FetchGetJSON`) returned
   status 0 for every response on a real worker, and so did the Java SDK's `cleatFetch`.** Closes
   cleat#3408. Both decoded `{"status_code":N}`; the worker's `http.fetch` and the embedded runner

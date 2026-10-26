@@ -1186,6 +1186,28 @@ def _quorum_over(
     return results
 
 
+def _decode_fetch_response(result: str) -> tuple[str, int]:
+    """Decode an ``http.fetch`` reply into ``(body, status)``.
+
+    The worker answers ``{"status": N, "headers": {...}, "body": "..."}``. A host
+    an embedder wired up with its own fetcher may use ``status_code`` instead, so
+    that key is the fallback. A reply with neither, or with one that is not a
+    number, reports status ``0`` rather than a success the host never reported:
+    this used to be ``data.get("status", 200)`` (cleat#3413), which read a
+    malformed or renamed reply as HTTP 200. Go (``DurableFetch``) and Java
+    (``cleatFetch``) decode the same way, and AssemblyScript reports 0 on a
+    missing key. A boolean is not a status, though ``bool`` is an ``int``.
+    """
+    data = json.loads(result)
+    status = 0
+    for key in ("status", "status_code"):
+        value = data.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            status = value
+            break
+    return data.get("body", ""), status
+
+
 class HostCalls:
     """High-level Python wrapper around all 29 cleat WASM host function imports.
 
@@ -1832,12 +1854,11 @@ class HostCalls:
         Returns
         -------
         tuple[str, int]
-            ``(response_body, status_code)``.
+            ``(response_body, status_code)``.  The status is ``0`` when the
+            host's reply carries none; it is never defaulted to ``200``.
         """
         request = {"url": url, "method": method, "headers": headers or {}, "body": body}
-        result = self.call("http", "fetch", request)
-        data = json.loads(result)
-        return data.get("body", ""), data.get("status", 200)
+        return _decode_fetch_response(self.call("http", "fetch", request))
 
     # --------------------------------------------------------------------
     # 11b. fetch_json — fetch with JSON deserialization

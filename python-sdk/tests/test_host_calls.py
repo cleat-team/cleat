@@ -616,6 +616,48 @@ class TestCleatFetch:
         assert status == 201
 
 
+class TestCleatFetchStatusDecoding:
+    """``fetch`` reads the status the worker sends, and never invents a success.
+
+    The worker answers ``{"status": N, "headers": {...}, "body": "..."}``. A reply
+    with no status used to read as HTTP 200 (``data.get("status", 200)``), which
+    is a success the host never reported (cleat#3413). The Go and Java SDKs read
+    ``status``, fall back to ``status_code`` for an embedder's own fetcher, and
+    otherwise report 0; this is the same table.
+    """
+
+    @pytest.mark.parametrize(
+        "reply, want",
+        [
+            pytest.param('{"body": "x", "status": 418}', 418, id="the worker's key"),
+            pytest.param('{"body": "x", "status_code": 503}', 503, id="the old key, for an embedder's fetcher"),
+            pytest.param('{"body": "x", "status": 404, "status_code": 200}', 404, id="both: status wins"),
+            pytest.param('{"body": "x", "status": 0, "status_code": 200}', 0, id="a present 0 is not replaced"),
+            pytest.param('{"body": "x"}', 0, id="neither: 0, not a success"),
+            pytest.param('{"body": "x", "status": null}', 0, id="null status"),
+            pytest.param('{"body": "x", "status": "200"}', 0, id="a status that is not a number"),
+            pytest.param('{"body": "x", "status": true}', 0, id="a boolean is not a status"),
+        ],
+    )
+    def test_status_decoding(self, reply, want):
+        h = CleatTestHarness()
+        h.reset()
+        h.stub_call("http", "fetch", reply)
+        body, status = h.fetch("http://example.com")
+        assert body == "x"
+        assert status == want
+
+    def test_host_calls_fetch_decodes_the_same_way(self):
+        """``HostCalls.fetch`` is a second copy of the decoder; it must agree."""
+        from cleat_sdk.host_calls import HostCalls
+
+        class Stubbed(HostCalls):
+            def call(self, service, operation, request):  # type: ignore[override]
+                return '{"body": "x"}'
+
+        assert Stubbed().fetch("http://example.com") == ("x", 0)
+
+
 # ========================================================================
 # Behavioural tests – Promises
 # ========================================================================
