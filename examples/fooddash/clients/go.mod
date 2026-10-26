@@ -21,7 +21,7 @@ module github.com/cleat-team/cleat/examples/fooddash/clients
 
 go 1.27.0
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 require github.com/cleat-team/cleat/cleat v0.0.0
 

@@ -18,7 +18,7 @@ module github.com/cleat-team/cleat/tests/plugin-harness
 
 go 1.27.0
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 require (
 	github.com/cleat-team/cleat v0.4.0

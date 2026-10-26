@@ -50,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Go toolchain bumped to go1.27.3.** Closes cleat#3375. `govulncheck` reported one new reachable
+  finding on every head, `GO-2026-6809` (`crypto/x509`, fixed in go1.27.3), reached from
+  `engine.wasmtimeBackend.Execute` and `dagrun.LoadFromJSON`; it turned the required
+  `Vulnerability Check` red on every open PR (first seen on #3373, against a base tree whose last
+  green run predated the advisory). Same shape as cleat#3251: the `toolchain` line in all 8 `go.mod`
+  files plus `go.work`, and the two `golang:` image pins (tag and digest together, as Lint requires).
+  No `go` directive moved, so `scripts/check-test-only-code.sh`'s go1.27.1 staticcheck override is
+  unchanged and its note says why.
+
 - **`workflow_instances`' two heartbeat indexes (`idx_instances_heartbeat`, `idx_instances_stale`)
   no longer index `heartbeat_at`, and the table's `fillfactor` is now 70.** PostgreSQL only.
   Closes cleat#3272 and cleat#3274 (cleat#3245 Phase 2, one combined PR per owner decision).
