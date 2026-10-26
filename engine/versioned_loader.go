@@ -279,17 +279,17 @@ func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]Workf
 // active (ready or running) instances. Used to determine which versions
 // are safe to garbage-collect or deprecate.
 //
-// SQL: SELECT p.def_name, p.def_version FROM workflow_instances w
+// SQL: SELECT p.def_name, p.def_version FROM workflow_leases l
 //
-//	JOIN workflow_payloads p ON p.id = w.id
-//	WHERE w.status IN ('ready', 'running')
+//	JOIN workflow_payloads p ON p.id = l.id
+//	WHERE l.status IN ('ready', 'running')
 //	GROUP BY p.def_name, p.def_version
 func (l *WorkflowLoader) ActiveVersions(ctx context.Context) (map[string][]int, error) {
 	rows, err := l.db.QueryContext(ctx, `
 		SELECT p.def_name, p.def_version
-		FROM workflow_instances w
-		JOIN workflow_payloads p ON p.id = w.id
-		WHERE w.status IN ('ready', 'running')
+		FROM workflow_leases l
+		JOIN workflow_payloads p ON p.id = l.id
+		WHERE l.status IN ('ready', 'running')
 		GROUP BY p.def_name, p.def_version
 		ORDER BY p.def_name, p.def_version
 	`)

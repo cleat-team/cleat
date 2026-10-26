@@ -191,7 +191,6 @@ engine/store_children.go	migration 018
 engine/store_children.go	migration 053
 engine/store_defer_phase.go	migration 020
 engine/store_deployment.go	migrations/mssql/036
-engine/store_deployment.go	migrations/postgres/006
 engine/store_lifecycle.go	migration 015
 engine/store_lifecycle.go	migration 016
 engine/store_lifecycle.go	migration 018

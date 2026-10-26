@@ -1367,9 +1367,9 @@ func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, 
 		WHERE ck.tenant_id = $1
 		  AND (
 		    ck.expires_at < now()
-		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
-		                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
-		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		    OR NOT EXISTS (SELECT 1 FROM workflow_leases wl
+		                     WHERE wl.id = ck.workflow_id AND wl.tenant_id = ck.tenant_id
+		                       AND wl.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 		  )
 	`, s.tenantID)
 	if err != nil {
@@ -1385,9 +1385,9 @@ func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, 
 		WHERE qh.tenant_id = $1
 		  AND (
 		    qh.expires_at < now()
-		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
-		                     WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
-		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		    OR NOT EXISTS (SELECT 1 FROM workflow_leases wl
+		                     WHERE wl.id = qh.workflow_id AND wl.tenant_id = qh.tenant_id
+		                       AND wl.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 		  )
 	`, s.tenantID)
 	if err != nil {
@@ -1652,7 +1652,7 @@ func (s *PostgresStore) QueueDepth(ctx context.Context) (int64, error) {
 
 	var count int64
 	err = tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM workflow_instances WHERE status = 'ready' AND task_queue = ANY($1)`,
+		`SELECT COUNT(*) FROM workflow_leases WHERE status = 'ready' AND task_queue = ANY($1)`,
 		pq.Array(s.taskQueues)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("queue depth: %w", err)
@@ -2020,6 +2020,35 @@ func (s *PostgresStore) CancelWorkflow(ctx context.Context, workflowID, reason s
 	return s.preemptivelySettle(ctx, workflowID, reason, statusCancelled)
 }
 
+// pgRunStateUnderLock reads a run's status and its defer-phase inputs, for a
+// caller that has ALREADY locked the run's workflow_instances row in tx.
+//
+// It is a separate statement on purpose (cleat-review on #3399). Under READ
+// COMMITTED, one `SELECT ... FOR UPDATE OF w` that waits on w's lock re-checks
+// only w's NEW version after the wait (EvalPlanQual). A joined
+// workflow_leases row and every subquery keep the statement's original
+// snapshot, so a status read there could predate a writer that committed while
+// the lock was awaited -- measured by
+// TestALockedStatusReadSeesAWriterThatCommittedWhileItWaited. A new statement
+// takes a new snapshot, which sees that writer. And with the instance row
+// held, no later writer can change the lease's status before this transaction
+// commits, because every writer of it updates the instance row first.
+//
+// The two EXISTS reads gain the same freshness. They were snapshot-stale in the
+// single locking statement before status moved too.
+func pgRunStateUnderLock(ctx context.Context, tx *sql.Tx, workflowID string) (status string, hasDefers, compacted bool, err error) {
+	err = tx.QueryRowContext(ctx, `
+		SELECT l.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = l.id AND e.event_type = 'defer'),
+		       EXISTS(SELECT 1 FROM workflow_payloads p
+		              WHERE p.id = l.id AND p.compaction_state IS NOT NULL)
+		FROM workflow_leases l
+		WHERE l.id = $1
+	`, workflowID).Scan(&status, &hasDefers, &compacted)
+	return status, hasDefers, compacted, err
+}
+
 // preemptivelySettle is the shared body: mark-then-finalize when the workflow
 // owes a defer phase, one terminal write when it does not.
 //
@@ -2038,19 +2067,19 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	// Does this workflow owe a defer phase? See deferPhaseOwed for why a
 	// compacted workflow answers yes on a weaker basis than an uncompacted
 	// one. FOR UPDATE holds the row for the UPDATE that follows, so the
-	// status this reads is the status that gets marked.
-	var curStatus string
-	var hasDefers, compacted bool
+	// status this reads is the status that gets marked -- read AFTER the lock,
+	// in its own statement; see pgRunStateUnderLock for why.
+	var locked string
 	err = tx.QueryRowContext(ctx, `
-		SELECT w.status,
-		       EXISTS(SELECT 1 FROM event_history e
-		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
-		       EXISTS(SELECT 1 FROM workflow_payloads p
-		              WHERE p.id = w.id AND p.compaction_state IS NOT NULL)
-		FROM workflow_instances w
-		WHERE w.id = $1
-		FOR UPDATE
-	`, workflowID).Scan(&curStatus, &hasDefers, &compacted)
+		SELECT id FROM workflow_instances WHERE id = $1 FOR UPDATE
+	`, workflowID).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("%s workflow: lock: %w", finalStatus, err)
+	}
+	curStatus, hasDefers, compacted, err := pgRunStateUnderLock(ctx, tx, workflowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrWorkflowNotFound
 	}

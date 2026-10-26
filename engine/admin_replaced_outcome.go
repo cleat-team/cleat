@@ -71,17 +71,17 @@ type rowQueryer interface {
 // returning nil keeps that one place in charge of saying so.
 //
 // PostgreSQL reads the error_* and completed_at columns from workflow_payloads,
-// where they live since cleat#3245's split (B1a moved this reader). status
-// stays on workflow_instances until B3, and so does the row this tx already
-// holds -- the join reads workflow_payloads, it does not lock it.
+// where they live since cleat#3245's split (B1a moved this reader), and status
+// from workflow_leases (B3a). The row lock this tx already holds stays on
+// workflow_instances; this read takes no lock on either table.
 func readReplacedOutcome(ctx context.Context, q rowQueryer, d Dialect, workflowID, tenantID string) (*AdminReplacedOutcome, error) {
 	query := fmt.Sprintf(
 		"SELECT status, error_msg, error_code, error_op, completed_at FROM workflow_instances WHERE id = %s AND tenant_id = %s",
 		d.placeholder(1), d.placeholder(2))
 	if d == DialectPostgres {
-		query = "SELECT w.status, p.error_msg, p.error_code, p.error_op, p.completed_at" +
-			" FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id" +
-			" WHERE w.id = $1 AND w.tenant_id = $2"
+		query = "SELECT l.status, p.error_msg, p.error_code, p.error_op, p.completed_at" +
+			" FROM workflow_leases l JOIN workflow_payloads p ON p.id = l.id" +
+			" WHERE l.id = $1 AND l.tenant_id = $2"
 	}
 
 	var status string

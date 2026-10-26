@@ -82,6 +82,11 @@ func TestRetentionDeletesTheIdempotencyKeyWithTheWorkflow(t *testing.T) {
 		`UPDATE workflow_payloads SET completed_at = now() WHERE id = $1`, id); err != nil {
 		t.Fatalf("mark completed (workflow_payloads): %v", err)
 	}
+	// And status from workflow_leases since cleat#3245 B3a.
+	if _, err := adminDB.ExecContext(ctx,
+		`UPDATE workflow_leases SET status = 'done' WHERE id = $1`, id); err != nil {
+		t.Fatalf("mark completed (workflow_leases): %v", err)
+	}
 
 	// A future cutoff, so the sweep reaches a run completed a moment ago
 	// without depending on how much wall-clock elapses between two

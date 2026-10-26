@@ -199,3 +199,26 @@ func TestSyncWorkflowPayloadCarriesALaterInstanceWrite(t *testing.T) {
 		t.Fatal("workflow_payloads.completed_at did not take the instance's later write")
 	}
 }
+
+// TestSyncWorkflowLeaseCreatesAndOverwritesTheLeaseRow covers both shapes a
+// fixture hands it: an instance inserted raw, with no lease row at all, and an
+// instance whose status was then changed raw, behind an existing lease row.
+func TestSyncWorkflowLeaseCreatesAndOverwritesTheLeaseRow(t *testing.T) {
+	db := TestDB(t, DialectPostgres)
+	id := uniqueLeaseTestID("sync")
+	seedInstanceForLeaseTest(t, db, id)
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id) })
+
+	SyncWorkflowLease(t, db, id)
+	if _, _, status, _ := readLeaseRowForTest(t, db, id); status != "ready" {
+		t.Fatalf("after the first sync, workflow_leases.status = %q, want the instance's ready", status)
+	}
+
+	if _, err := db.Exec(`UPDATE workflow_instances SET status = 'done', assigned_to = 'w-sync' WHERE id = $1`, id); err != nil {
+		t.Fatalf("change the instance: %v", err)
+	}
+	SyncWorkflowLease(t, db, id)
+	if _, _, status, assigned := readLeaseRowForTest(t, db, id); status != "done" || assigned != "w-sync" {
+		t.Fatalf("after the second sync, workflow_leases = (%q, %q), want (done, w-sync) copied from the instance", status, assigned)
+	}
+}

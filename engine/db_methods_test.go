@@ -948,7 +948,7 @@ func TestPostgresStore_ListWorkflowDefs_NilPluginDeps(t *testing.T) {
 func TestPostgresStore_GetActiveInstanceCountsByVersion(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "FROM workflow_instances",
+			match: "FROM workflow_leases",
 			data: [][]driver.Value{
 				{"test-wf", int64(1), int64(5)},
 				{"other-wf", int64(2), int64(3)},
@@ -1093,19 +1093,24 @@ func TestPostgresStore_PurgeWorkflowDef_QueryError(t *testing.T) {
 	}
 }
 
+// The match used to be "FROM workflow_instances WHERE def_name", which stopped
+// matching when B1a joined workflow_payloads; the mock then returned no rows and
+// the test passed on that error instead of the injected one. errors.Is pins
+// which error came back.
 func TestPostgresStore_CountActiveInstances_QueryError(t *testing.T) {
+	injected := fmt.Errorf("simulated query error")
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "FROM workflow_instances WHERE def_name",
-			err:   fmt.Errorf("simulated query error"),
+			match: "FROM workflow_leases l",
+			err:   injected,
 		},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	_, err := store.CountActiveInstances(testCtx, "wf", 1)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if !errors.Is(err, injected) {
+		t.Fatalf("CountActiveInstances error = %v, want the injected query error", err)
 	}
 	if !strings.Contains(err.Error(), "count active instances") {
 		t.Errorf("expected error to contain 'count active instances', got: %v", err)
@@ -1113,18 +1118,19 @@ func TestPostgresStore_CountActiveInstances_QueryError(t *testing.T) {
 }
 
 func TestPostgresStore_GetActiveInstanceCountsByVersion_QueryError(t *testing.T) {
+	injected := fmt.Errorf("simulated query error")
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "FROM workflow_instances",
-			err:   fmt.Errorf("simulated query error"),
+			match: "FROM workflow_leases",
+			err:   injected,
 		},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	_, err := store.GetActiveInstanceCountsByVersion(testCtx)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if !errors.Is(err, injected) {
+		t.Fatalf("GetActiveInstanceCountsByVersion error = %v, want the injected query error", err)
 	}
 	if !strings.Contains(err.Error(), "get active instance counts") {
 		t.Errorf("expected error to contain 'get active instance counts', got: %v", err)

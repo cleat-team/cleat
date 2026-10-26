@@ -118,10 +118,12 @@ func TestClearExpiredCompactionStateClearsWorkflowPayloads(t *testing.T) {
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b1a-clear-compaction")
 
-	// Terminal by status (still a workflow_instances read until B3), expired
-	// by workflow_payloads.completed_at only: workflow_instances.completed_at
-	// is NULL, so a predicate still reading it selects nothing.
-	diverge(t, db, "workflow_instances", `status = 'done', completed_at = NULL, compaction_state = '{}'`, id)
+	// Terminal by status (read from workflow_leases since cleat#3245 B3a, so
+	// only the lease copy says 'done'), expired by workflow_payloads.
+	// completed_at only: workflow_instances.completed_at is NULL, so a
+	// predicate still reading it selects nothing.
+	diverge(t, db, "workflow_instances", `completed_at = NULL, compaction_state = '{}'`, id)
+	diverge(t, db, "workflow_leases", `status = 'done'`, id)
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours', compaction_state = '{}', compaction_step = 5`, id)
 
 	n, err := store.ClearExpiredCompactionState(context.Background(), time.Now().Add(-time.Hour))
@@ -146,7 +148,8 @@ func TestGetChildResultReadsWorkflowPayloads(t *testing.T) {
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b1a-child-result")
 
-	diverge(t, db, "workflow_instances", `status = 'done', result = '{"from":"instances"}'`, id)
+	diverge(t, db, "workflow_instances", `result = '{"from":"instances"}'`, id)
+	diverge(t, db, "workflow_leases", `status = 'done'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `result = '{"from":"payloads"}'`, id)
 
 	out, err := store.GetChildResult(context.Background(), id)
@@ -295,7 +298,8 @@ func TestDeleteCompletedWorkflowsReadsCompletedAtFromWorkflowPayloads(t *testing
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b1a-retention-completed")
 
-	diverge(t, db, "workflow_instances", `status = 'done', completed_at = NULL`, id)
+	diverge(t, db, "workflow_instances", `completed_at = NULL`, id)
+	diverge(t, db, "workflow_leases", `status = 'done'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
 
 	n, err := store.DeleteCompletedWorkflows(context.Background(), time.Now().Add(-time.Hour))
@@ -312,7 +316,8 @@ func TestReadReplacedOutcomeReadsWorkflowPayloadsOnPostgres(t *testing.T) {
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b1a-replaced-outcome")
 
-	diverge(t, db, "workflow_instances", `status = 'failed', error_msg = 'from-instances'`, id)
+	diverge(t, db, "workflow_instances", `error_msg = 'from-instances'`, id)
+	diverge(t, db, "workflow_leases", `status = 'failed'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `error_msg = 'from-payloads'`, id)
 
 	out, err := readReplacedOutcome(context.Background(), db, DialectPostgres, id, DefaultTenantUUID)
@@ -438,9 +443,10 @@ func TestDeleteExpiredEventsReadsCompletedAtFromWorkflowPayloads(t *testing.T) {
 		t.Fatalf("AppendEventHistoryBatch: %v", err)
 	}
 
-	// Terminal by status (a workflow_instances read until B3); expired by
+	// Terminal by status (read from workflow_leases since B3a); expired by
 	// workflow_payloads.completed_at only.
-	diverge(t, db, "workflow_instances", `status = 'done', completed_at = NULL`, id)
+	diverge(t, db, "workflow_instances", `completed_at = NULL`, id)
+	diverge(t, db, "workflow_leases", `status = 'done'`, id)
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
 
 	if _, err := store.DeleteExpiredEvents(ctx, time.Now().Add(-time.Hour)); err != nil {
@@ -461,7 +467,8 @@ func TestDeleteDeadLetteredWorkflowsReadsCompletedAtFromWorkflowPayloads(t *test
 	ctx := context.Background()
 	id := startPayloadReaderRun(t, store, "b1a-dead-lettered")
 
-	diverge(t, db, "workflow_instances", `status = 'dead_lettered', completed_at = NULL`, id)
+	diverge(t, db, "workflow_instances", `completed_at = NULL`, id)
+	diverge(t, db, "workflow_leases", `status = 'dead_lettered'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
 
 	n, err := store.DeleteDeadLetteredWorkflows(ctx, time.Now().Add(-time.Hour))

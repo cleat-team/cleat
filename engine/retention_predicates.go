@@ -86,7 +86,9 @@ package engine
 // the next sweep, matching this arm's own batch-termination loop.
 const (
 	pgExpiredEventsWorkflows = ` FROM workflow_instances
-				WHERE status IN ('done', 'failed')
+				WHERE EXISTS (SELECT 1 FROM workflow_leases l
+				              WHERE l.id = workflow_instances.id
+				                AND l.status IN ('done', 'failed'))
 				  AND EXISTS (SELECT 1 FROM workflow_payloads p
 				              WHERE p.id = workflow_instances.id
 				                AND p.completed_at IS NOT NULL
@@ -109,7 +111,9 @@ const (
 // ---- compaction bookkeeping on terminal workflows ---------------------------
 const (
 	pgExpiredCompactionState = ` FROM workflow_instances
-				WHERE status IN ('done', 'failed')
+				WHERE EXISTS (SELECT 1 FROM workflow_leases l
+				              WHERE l.id = workflow_instances.id
+				                AND l.status IN ('done', 'failed'))
 				  AND EXISTS (SELECT 1 FROM workflow_payloads p
 				              WHERE p.id = workflow_instances.id
 				                AND p.completed_at IS NOT NULL
@@ -142,7 +146,9 @@ const (
 				  AND completed_at < ?`
 
 	pgDeadLetteredWorkflows = ` FROM workflow_instances
-		WHERE status = 'dead_lettered'
+		WHERE EXISTS (SELECT 1 FROM workflow_leases l
+		              WHERE l.id = workflow_instances.id
+		                AND l.status = 'dead_lettered')
 		  AND EXISTS (SELECT 1 FROM workflow_payloads p
 		              WHERE p.id = workflow_instances.id
 		                AND p.completed_at IS NOT NULL
@@ -177,7 +183,9 @@ const (
 				  AND completed_at < ?`
 
 	pgCompletedWorkflows = ` FROM workflow_instances
-		WHERE status IN ('done', 'failed', 'terminated', 'cancelled')
+		WHERE EXISTS (SELECT 1 FROM workflow_leases l
+		              WHERE l.id = workflow_instances.id
+		                AND l.status IN ('done', 'failed', 'terminated', 'cancelled'))
 		  AND EXISTS (SELECT 1 FROM workflow_payloads p
 		              WHERE p.id = workflow_instances.id
 		                AND p.completed_at IS NOT NULL

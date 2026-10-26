@@ -229,6 +229,12 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 						runID, tenant.String(), defName, completedAt); err != nil {
 						t.Fatalf("insert workflow_payloads on %s: %v", be.Name, err)
 					}
+					// And status from workflow_leases since cleat#3245 B3a.
+					if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+						`INSERT INTO workflow_leases (id, tenant_id, status) VALUES ($1, $2, 'terminated')`,
+						runID, tenant.String()); err != nil {
+						t.Fatalf("insert workflow_leases on %s: %v", be.Name, err)
+					}
 				}
 
 				// id is supplied explicitly rather than left to a column
