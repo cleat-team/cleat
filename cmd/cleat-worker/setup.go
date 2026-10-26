@@ -3950,6 +3950,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	if f := w.workflowFetcherFor(caller); f != nil {
 		engineOpts = append(engineOpts, engine.WithFetcher(f))
+		// The only runtime-visible trace that this execution got a Fetcher, and
+		// the reason it exists: TestExecuteWorkflowInstallsTheFetcherOnlyWhenTheFlagIsSet
+		// reads it, because a static reachability test passes with this block
+		// present and never run (cleat-review, cleat#3404).
+		w.logger.Debug("cleat_fetch is enabled for this execution", "workflow_id", wf.ID)
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics

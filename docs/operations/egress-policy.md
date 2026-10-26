@@ -59,9 +59,13 @@ still reaches nothing. Responses larger than
 `--workflow-fetch-max-response-bytes` (default 1 MiB) fail the call with an
 error that names the cap, rather than being cut.
 
-It does not send the engine's `Idempotency-Key` header, which `http.fetch`
-does; a destination that must deduplicate retried requests should be reached
-with `DurableCall("http", "fetch")`.
+It differs from `http.fetch` in two more ways. It does not send the engine's
+`Idempotency-Key` header, so a destination that must deduplicate retried
+requests should be reached with `DurableCall("http", "fetch")`. And it does not
+resolve `${secret:name}` references: `DurableCall` substitutes them in the
+request on the way out, but a `cleat_fetch` URL, header or body carrying one
+is sent as the literal text. Use `DurableCall("http", "fetch")` for any request
+that needs a secret.
 
 ## Operator policy
 

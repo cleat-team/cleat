@@ -25,10 +25,12 @@ const defaultWorkflowFetchMaxBody = 1 << 20
 // attempt a fetch; it does not grant any destination. A second spelling of the
 // guard here would be the thing to distrust.
 //
-// What differs from http.fetch is two things, both because the call shape
+// What differs from http.fetch is three things, all because the call shape
 // differs. The engine's replay-stable Idempotency-Key is not sent, since the
-// Fetcher interface carries no step; and an oversized response is an error that
-// names the cap rather than a silent cut.
+// Fetcher interface carries no step; ${secret:name} references are not resolved,
+// since that substitution lives in dbServiceCaller.call and not in guardedFetch;
+// and an oversized response is an error that names the cap rather than a silent
+// cut.
 type workflowFetcher struct {
 	caller  *dbServiceCaller
 	maxBody int64

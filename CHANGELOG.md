@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant's own list (`cleatctl egress-allow`) must permit the host, so the flag grants no
   destination by itself. A response larger than `--workflow-fetch-max-response-bytes` (default
   1 MiB) fails the call with an error naming the cap. The `Idempotency-Key` header that
-  `http.fetch` sends is not sent. ABI.md 2.48 no longer calls `cleat_fetch` embedder-only.
+  `http.fetch` sends is not sent, and `${secret:name}` references are not resolved. ABI.md 2.48 no longer calls `cleat_fetch` embedder-only.
 
 - **`backendkit.Client` gains `UpdateWorkflow`, `CancelWorkflow`, `StreamWorkflow` and an API key.**
   Closes cleat#3368. Each wraps a route the worker already served:

@@ -1440,7 +1440,9 @@ Schedule a delayed one-shot invocation of an external service operation.
 > the requesting tenant's own list must permit the host, where an empty list
 > permits nothing. A response body larger than
 > `--workflow-fetch-max-response-bytes` (default 1 MiB) fails the call with an
-> error naming the cap. See `docs/operations/egress-policy.md`. cleat#3377.
+> error naming the cap. Unlike `DurableCall("http", "fetch")` it sends no
+> `Idempotency-Key` header and does not resolve `${secret:name}` references.
+> See `docs/operations/egress-policy.md`. cleat#3377.
 >
 > Re-derive where the worker installs it:
 >

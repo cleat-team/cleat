@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 // cleat#3377: cleat_fetch on a stock worker, behind --enable-workflow-fetch.
@@ -176,5 +180,87 @@ func TestWorkflowFetchRejectsHeadersThatAreNotAJSONObject(t *testing.T) {
 	_, err := f.Fetch(context.Background(), "GET", "https://example.com/", `["not","an","object"]`, "")
 	if err == nil || !strings.Contains(err.Error(), "headers must be a JSON object") {
 		t.Errorf("err = %v, want one saying headers must be a JSON object", err)
+	}
+}
+
+// cleat-review's one green mutation on #3404: the wiring in executeWorkflow kept
+// present but never run. TestEveryEngineOptionIsReachableFromProduction is a
+// static scan and passes with the call site dead.
+//
+// This runs the real executeWorkflow -- a real PostgreSQL, a real wasmtime guest
+// -- and reads the trace the wiring leaves. It cannot make the guest call
+// cleat_fetch: the Go SDK has no adapter for that import (DurableFetch is a
+// wrapper over DurableCall), and the AssemblyScript and Java guests that do
+// import it are not built by this package's tests. So it proves the Fetcher is
+// installed on a real execution, and the refusals above prove what the
+// installed Fetcher does.
+func TestExecuteWorkflowInstallsTheFetcherOnlyWhenTheFlagIsSet(t *testing.T) {
+	requireShutdownTestDB(t)
+
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+	}{
+		{"flag off", false},
+		{"flag on", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := testutil.SuiteTestDB(t, "cleat_worker")
+			store := engine.NewPostgresStore(db)
+
+			wasmBytes := buildDeferFixture(t)
+			meta, err := wasm.ReadMetadata(wasmBytes)
+			if err != nil {
+				t.Fatalf("ReadMetadata: %v", err)
+			}
+			const defName = "workflow-fetch-wiring-worker"
+			if err := store.DeployWorkflowDef(ctx, &engine.WorkflowDef{
+				Name: defName, Version: meta.WorkflowVersion, WASMBytes: wasmBytes,
+				ABIVersion: meta.ABIVersion, MinVersion: meta.MinCompatibleVersion,
+			}); err != nil {
+				t.Fatalf("DeployWorkflowDef: %v", err)
+			}
+			wfID := fmt.Sprintf("workflow-fetch-wiring-%d", time.Now().UnixNano())
+			if _, _, err := store.StartNewRun(ctx, wfID, defName, meta.WorkflowVersion,
+				json.RawMessage(`{"__entry_point":"defer_survives_suspension"}`), "",
+				engine.DefaultTenantUUID, 0); err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+
+			// The fixture's one durable call must succeed or the run fails
+			// before it reaches the sleep this test reads as "the guest ran".
+			svc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"ok":true}`)
+			}))
+			defer svc.Close()
+			oldSvcURL := *benchSvcURL
+			*benchSvcURL = svc.URL
+			defer func() { *benchSvcURL = oldSvcURL }()
+
+			logs := &syncBuffer{}
+			w := newRealDeferPhaseWorker(t, db, store, logs)
+			w.egress = &engine.EgressGuard{
+				AllowLoopback:  true,
+				TenantOptional: func(context.Context) bool { return true },
+			}
+			w.workflowFetch = tc.enabled
+
+			runExecuteWorkflow(w, claimOne(t, ctx, store, w.id, wfID))
+
+			// The control: the guest really ran, in both arms. Without it a
+			// "no trace" reading is also what an execution that never started
+			// would give.
+			if !strings.Contains(logs.String(), "workflow suspended") {
+				t.Fatalf("UNMEASURED: the guest did not reach its sleep, so the absence or "+
+					"presence of the trace below says nothing (logs:\n%s)", logs.String())
+			}
+			got := strings.Contains(logs.String(), "cleat_fetch is enabled for this execution")
+			if got != tc.enabled {
+				t.Errorf("trace present = %v with --enable-workflow-fetch = %v (logs:\n%s)",
+					got, tc.enabled, logs.String())
+			}
+		})
 	}
 }
