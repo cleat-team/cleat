@@ -218,6 +218,17 @@ func seedWorkflow(t *testing.T, adminDB *sql.DB, o seedWorkflowOpts) string {
 	`, id, o.tenantID, o.taskQueue, o.nextWakeAt, o.createdAt, o.priority, o.generation); err != nil {
 		t.Fatalf("seed workflow_leases: %v", err)
 	}
+	// cleat#3245 B1a: the claim hands back input, def_name, def_version,
+	// error_code, error_op and trace_id from workflow_payloads, and refuses a
+	// run that has no row there -- so the fields this fixture controls are
+	// mirrored onto it too.
+	if _, err := adminDB.Exec(`
+		INSERT INTO workflow_payloads
+			(id, tenant_id, input, def_name, def_version, error_code, error_op, trace_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, id, o.tenantID, o.input, xtcDefName, xtcDefVersion, o.errorCode, o.errorOp, o.traceID); err != nil {
+		t.Fatalf("seed workflow_payloads: %v", err)
+	}
 	return id
 }
 

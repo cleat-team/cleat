@@ -600,7 +600,7 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 
 	var value sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT query_state ->> $2 FROM workflow_instances WHERE id = $1
+		SELECT query_state ->> $2 FROM workflow_payloads WHERE id = $1
 	`, workflowID, key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", tx.Commit()
@@ -628,7 +628,7 @@ func (s *PostgresStore) ListQueryState(ctx context.Context, workflowID string) (
 
 	var raw sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT query_state FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
+		`SELECT query_state FROM workflow_payloads WHERE id = $1`, workflowID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return map[string]string{}, tx.Commit()
 	}
@@ -1143,13 +1143,30 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	// cleat#3360: compacted_at had no reader anywhere -- not even the
 	// payloads mirror this table was never given -- so it was dropped from
 	// workflow_instances rather than kept write-only.
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = $1, compaction_step = $2
 		WHERE id = $3 AND generation = $4
 	`, compactionState, compactionStep, workflowID, gen)
 	if err != nil {
 		return fmt.Errorf("compact history: update: %w", err)
+	}
+
+	// cleat#3245 B1a: the workflow_payloads mirror step 2 never gave this
+	// write. compaction_state/compaction_step are payloads columns, and every
+	// reader of them now reads workflow_payloads -- so without this, a
+	// compacted workflow read as uncompacted, and LoadCompactionState handed
+	// replay no snapshot for history this function had just deleted. Gated on
+	// the instances UPDATE having matched, so a generation that moved under
+	// us writes neither copy.
+	if n, _ := res.RowsAffected(); n > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads
+			SET compaction_state = $1, compaction_step = $2
+			WHERE id = $3
+		`, compactionState, compactionStep, workflowID); err != nil {
+			return fmt.Errorf("compact history: mirror payload row: %w", err)
+		}
 	}
 
 	return tx.Commit()
@@ -1166,6 +1183,9 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 	rows, err := tx.QueryContext(ctx, `
 		SELECT w.id
 		FROM workflow_instances w
+		-- cleat#3245 B1a: def_name/def_version/compaction_step are
+		-- workflow_payloads columns; read them there.
+		JOIN workflow_payloads p ON p.id = w.id
 		JOIN (
 			SELECT workflow_id, COUNT(*) AS cnt
 			FROM event_history
@@ -1176,11 +1196,11 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		-- compaction entirely. With d NULL, NULLIF(NULL,0) is NULL and COALESCE
 		-- falls through to $1, which is exactly the behaviour before cleat#889.
 		LEFT JOIN workflow_defs d
-		       ON d.name = w.def_name AND d.version = w.def_version
+		       ON d.name = p.def_name AND d.version = p.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), $1)
-		  AND (w.compaction_step IS NULL
-		       OR w.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), $1))
+		  AND (p.compaction_step IS NULL
+		       OR p.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), $1))
 		ORDER BY e.cnt DESC
 		LIMIT $2
 	`, threshold, limit)
@@ -1213,7 +1233,7 @@ func (s *PostgresStore) LoadCompactionState(ctx context.Context, workflowID stri
 
 	var rawJSON []byte
 	err = tx.QueryRowContext(ctx, `
-		SELECT compaction_state FROM workflow_instances
+		SELECT compaction_state FROM workflow_payloads
 		WHERE id = $1
 	`, workflowID).Scan(&rawJSON)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1894,24 +1914,65 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 		if err != nil {
 			return totalCleared, fmt.Errorf("delete expired events: begin compaction: %w", err)
 		}
-		result, err := tx.ExecContext(ctx, `
+		// cleat#3245 B1a: workflow_instances first, then workflow_payloads by
+		// the same ids. That is the order deleteCompletedWorkflowsBatch takes
+		// -- it deletes the instance row and the ON DELETE CASCADE then locks
+		// the payload row -- and both sweeps act on terminal rows past
+		// retention, so the opposite order here could deadlock the two
+		// (40P01). The payload copy is the one counted: it is what every
+		// reader of compaction_state reads. The instance-side clear goes when
+		// B1b stops writing that copy.
+		rows, err := tx.QueryContext(ctx, `
 			UPDATE workflow_instances
 			SET compaction_state = NULL, compaction_step = NULL
 			WHERE id IN (
 				SELECT id`+pgExpiredCompactionState+`
 				LIMIT 10000
 			)
+			RETURNING id
 		`, olderThan)
 		if err != nil {
 			_ = tx.Rollback()
 			break
 		}
+		var ids []string
+		var scanErr error
+		for rows.Next() {
+			var id string
+			if scanErr = rows.Scan(&id); scanErr != nil {
+				break
+			}
+			ids = append(ids, id)
+		}
+		rerr := rows.Err()
+		rows.Close()
+		// A truncated id list must not commit: the instance side would be
+		// cleared for every row and the payload side for only some of them.
+		if scanErr != nil || rerr != nil {
+			_ = tx.Rollback()
+			break
+		}
+		var n int64
+		if len(ids) > 0 {
+			res, err := tx.ExecContext(ctx, `
+				UPDATE workflow_payloads
+				SET compaction_state = NULL, compaction_step = NULL
+				WHERE id = ANY($1)
+			`, pq.Array(ids))
+			if err != nil {
+				_ = tx.Rollback()
+				break
+			}
+			if n, err = res.RowsAffected(); err != nil {
+				_ = tx.Rollback()
+				break
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			break
 		}
-		n, _ := result.RowsAffected()
 		totalCleared += n
-		if n == 0 {
+		if len(ids) == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2005,7 +2066,8 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 		SELECT w.status,
 		       EXISTS(SELECT 1 FROM event_history e
 		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
-		       w.compaction_state IS NOT NULL
+		       EXISTS(SELECT 1 FROM workflow_payloads p
+		              WHERE p.id = w.id AND p.compaction_state IS NOT NULL)
 		FROM workflow_instances w
 		WHERE w.id = $1
 		FOR UPDATE

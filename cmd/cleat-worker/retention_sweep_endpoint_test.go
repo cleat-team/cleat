@@ -179,6 +179,8 @@ func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
 			id, completedAt); err != nil {
 			t.Fatalf("mark completed: %v", err)
 		}
+		// completed_at is read from workflow_payloads since cleat#3245 B1a.
+		testutil.SyncWorkflowPayload(t, db, id)
 		return id
 	}
 	exists := func(t *testing.T, id string) bool {
@@ -283,6 +285,7 @@ func TestAnOverrideDoesNotEnableADisabledArm(t *testing.T) {
 		`UPDATE workflow_instances SET status = 'done', completed_at = now() WHERE id = $1`, id); err != nil {
 		t.Fatalf("mark completed: %v", err)
 	}
+	testutil.SyncWorkflowPayload(t, db, id)
 	t.Cleanup(func() {
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM workflow_instances WHERE id = $1`, id)
 	})

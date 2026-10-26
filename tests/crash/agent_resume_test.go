@@ -743,6 +743,14 @@ func startWorkflowWithInput(t *testing.T, db *sql.DB, id, defName, inputJSON, ta
 		id, defaultTenant, taskQueue); err != nil {
 		t.Fatalf("queueing workflow %s's lease row: %v", id, err)
 	}
+	// cleat#3245 B1a: the claim reads input and def_name/def_version from
+	// workflow_payloads, and refuses a run with no row there.
+	if _, err := db.Exec(`
+		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
+		VALUES ($1, $2, $3::jsonb, $4, 1)`,
+		id, defaultTenant, inputJSON, defName); err != nil {
+		t.Fatalf("queueing workflow %s's payload row: %v", id, err)
+	}
 	t.Cleanup(func() {
 		// Descendants first, and TWO levels of them. The client's child is the
 		// agent; the agent's child is the workflow tool's summarise. Deleting

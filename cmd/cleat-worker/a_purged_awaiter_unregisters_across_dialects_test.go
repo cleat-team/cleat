@@ -219,6 +219,17 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 					runID, defName, 1, tenant.String(), completedAt); err != nil {
 					t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 				}
+				// PostgreSQL's retention predicate reads completed_at from
+				// workflow_payloads since cleat#3245 B1a; the row a real run
+				// would have there is part of the shape this fixture stands in for.
+				if be.Name == "postgres" {
+					if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+						`INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version, completed_at) `+
+							`VALUES ($1, $2, '{}', $3, 1, $4)`,
+						runID, tenant.String(), defName, completedAt); err != nil {
+						t.Fatalf("insert workflow_payloads on %s: %v", be.Name, err)
+					}
+				}
 
 				// id is supplied explicitly rather than left to a column
 				// default: Postgres and SQL Server's event_awaiters.id have

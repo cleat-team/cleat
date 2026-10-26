@@ -324,7 +324,8 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		SELECT w.status,
 		       EXISTS(SELECT 1 FROM event_history e
 		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
-		       w.compaction_state IS NOT NULL
+		       EXISTS(SELECT 1 FROM workflow_payloads p
+		              WHERE p.id = w.id AND p.compaction_state IS NOT NULL)
 		FROM workflow_instances w
 		WHERE w.id = $1 AND w.tenant_id = $2
 		FOR UPDATE

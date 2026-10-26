@@ -194,6 +194,17 @@ func seedRetentionFixture(t *testing.T, ctx context.Context, db *sql.DB, store r
 		wfID, defName, status, DefaultTenantUUID, completedAt); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	// PostgreSQL's retention predicates read completed_at from
+	// workflow_payloads since cleat#3245 B1a, so on that dialect the run gets
+	// its payloads row, as StartNewRun would give it. MySQL has no such table.
+	if ph(1) == "$1" {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version, completed_at)
+			 VALUES ($1, $2, '{}', $3, 1, $4)`,
+			wfID, DefaultTenantUUID, defName, completedAt); err != nil {
+			t.Fatalf("seed workflow_payloads: %v", err)
+		}
+	}
 
 	expires := time.Now().UTC().Add(7 * 24 * time.Hour)
 	for _, s := range []struct {

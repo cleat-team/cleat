@@ -440,9 +440,10 @@ func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, v
 
 	var count int
 	err = tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM workflow_instances
-		WHERE def_name = $1 AND def_version = $2
-		  AND status IN ('ready', 'running')
+		SELECT COUNT(*) FROM workflow_instances w
+		JOIN workflow_payloads p ON p.id = w.id
+		WHERE p.def_name = $1 AND p.def_version = $2
+		  AND w.status IN ('ready', 'running')
 	`, name, version).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
@@ -460,10 +461,11 @@ func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (m
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT def_name, def_version, COUNT(*) as cnt
-		FROM workflow_instances
-		WHERE status IN ('ready', 'running')
-		GROUP BY def_name, def_version
+		SELECT p.def_name, p.def_version, COUNT(*) as cnt
+		FROM workflow_instances w
+		JOIN workflow_payloads p ON p.id = w.id
+		WHERE w.status IN ('ready', 'running')
+		GROUP BY p.def_name, p.def_version
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("get active instance counts: %w", err)

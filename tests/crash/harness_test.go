@@ -803,6 +803,14 @@ func startWorkflowEntry(t *testing.T, db *sql.DB, id, orderID, taskQueue, entry 
 		id, defaultTenant, taskQueue); err != nil {
 		t.Fatalf("queueing workflow %s's lease row: %v", id, err)
 	}
+	// cleat#3245 B1a: the claim reads input and def_name/def_version from
+	// workflow_payloads, and refuses a run with no row there.
+	if _, err := db.Exec(`
+		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
+		VALUES ($1, $2, $3::jsonb, 'crashcall', 1)`,
+		id, defaultTenant, input); err != nil {
+		t.Fatalf("queueing workflow %s's payload row: %v", id, err)
+	}
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)

@@ -265,4 +265,11 @@ func setAllowedSignals(t *testing.T, backend StoreBackend, admin *sql.DB, workfl
 	if err != nil {
 		t.Fatalf("set allowed_signals: %v", err)
 	}
+	// PostgreSQL reads allowed_signals from workflow_payloads since cleat#3245
+	// B1a; write that copy too, as the dual-write does.
+	if backend.Name() == "postgres" {
+		if _, err := admin.Exec(`UPDATE workflow_payloads SET allowed_signals = $2::jsonb WHERE id = $1`, workflowID, jsonList); err != nil {
+			t.Fatalf("set allowed_signals (workflow_payloads): %v", err)
+		}
+	}
 }
