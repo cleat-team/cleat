@@ -345,14 +345,30 @@ func (h *HostCallsImpl) DurableFetch(url, method string, headers map[string]stri
 	if callErr != nil {
 		return "", 0, callErr
 	}
+	// The worker's http.fetch answers {"status":N,"headers":{...},"body":"..."}, and so
+	// does the embedded runner; the Rust, Python and AssemblyScript SDKs read "status".
+	// This read "status_code" until cleat#3408, and returned 0 for every response on a
+	// real worker, because its tests stubbed the host with the key it read.
+	//
+	// "status_code" is still accepted when "status" is absent: an embedder's Fetcher
+	// (engine.WithFetcher) chooses its own response, and some answered the old key.
+	// Pointers, so an absent key is not confused with a status of 0.
 	var respData struct {
 		Body       string `json:"body"`
-		StatusCode int    `json:"status_code"`
+		Status     *int   `json:"status"`
+		StatusCode *int   `json:"status_code"`
 	}
 	if unmarshalErr := json.Unmarshal([]byte(resp), &respData); unmarshalErr != nil {
 		return "", 0, fmt.Errorf("durable: unmarshal fetch response: %w", unmarshalErr)
 	}
-	return respData.Body, respData.StatusCode, nil
+	status := 0
+	switch {
+	case respData.Status != nil:
+		status = *respData.Status
+	case respData.StatusCode != nil:
+		status = *respData.StatusCode
+	}
+	return respData.Body, status, nil
 }
 
 func (h *HostCallsImpl) DurableFetchJSON(url, method string, headers map[string]string, body string, result interface{}) error {

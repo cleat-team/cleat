@@ -48,9 +48,11 @@ That is not laziness, and it is not the shape a real deployment should copy:
   **by name to a plugin** (`engine/app.go`). This is one example directory, not a
   plugin set.
 - The cleat SDK's generic outbound-HTTP call, `DurableCall("http", "fetch", …)`,
-  is **embedder-only**. A stock `cleat-worker` cannot serve it and never could —
-  `ABI.md` §2.48. `cmd/cleat/templates/fullstack` uses a placeholder for exactly
-  this reason.
+  does work on a stock `cleat-worker`, but only for hosts the tenant's egress
+  allowlist permits (`docs/operations/egress-policy.md`), and this example
+  configures none. A PSP, an inventory system and a 3PL each want their own
+  credentials and retry rules, which is a plugin's job. So these steps are
+  placeholders, as in `cmd/cleat/templates/fullstack`.
 
 What *is* real, and is the part the playbook is about:
 

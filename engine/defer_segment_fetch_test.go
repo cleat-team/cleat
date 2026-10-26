@@ -26,7 +26,7 @@ type recordingFetcher struct{ called bool }
 
 func (f *recordingFetcher) Fetch(ctx context.Context, method, url, headersJSON, body string) (string, error) {
 	f.called = true
-	return `{"body":"","status_code":200}`, nil
+	return `{"status":200,"headers":{},"body":""}`, nil
 }
 
 func deferPhaseFetchSession(t *testing.T, deferPhase bool) (*execSession, *recordingFetcher) {

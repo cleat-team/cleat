@@ -51,11 +51,12 @@ func SubmitOrder(h cleat.HostCalls, input string) (string, error) {
 	// than starting the order over. It also leaves `charging` visible to the
 	// browser for a few seconds, which is what the polling in web/index.html is
 	// for. Replace it with a call to your provider -- README.md's "Next steps"
-	// explains what that takes on this template (a plugin or an embedded
-	// deployment, not DurableCall("http", "fetch", ...), which this template's
-	// stock worker cannot serve -- cleat#2517) -- and pass your own idempotency
-	// key downstream: cleat's Idempotency-Key protects the START of this
-	// workflow, not your provider's charge endpoint.
+	// explains what that takes on this template (DurableCall("http", "fetch",
+	// ...) works on this template's stock worker once the tenant's egress
+	// allowlist permits your provider's host; a plugin is the better path for a
+	// provider with its own client) -- and pass your own idempotency key
+	// downstream: cleat's Idempotency-Key protects the START of this workflow,
+	// not your provider's charge endpoint.
 	h.DurableSleepMs(3000)
 
 	h.SetQueryState("status", "complete")

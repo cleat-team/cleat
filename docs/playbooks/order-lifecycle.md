@@ -56,9 +56,10 @@ code resumes where it stopped.
 
 - Stripe, Adyen, your PSP — reached through a plugin's host function, a
   `DurableCall` that resolves by name to a plugin you write (`engine/app.go`).
-  **Not** through cleat's generic outbound-HTTP call
-  (`DurableCall("http", "fetch", …)`), which is embedder-only and cannot serve
-  a stock `cleat-worker` (ABI.md 2.48, cleat#2517). Cleat orchestrates the
+  Cleat's generic outbound-HTTP call (`DurableCall("http", "fetch", …)`) does
+  work on a stock `cleat-worker`, but only for hosts the tenant has allowed
+  (`docs/operations/egress-policy.md`); a PSP client with its own credentials,
+  retries and idempotency rules belongs in a plugin. Cleat orchestrates the
   call; it does not replace the PSP.
 - Your inventory, shipping and tax systems
 - Your storefront and your customer portal front-end

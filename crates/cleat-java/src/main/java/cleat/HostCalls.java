@@ -2905,12 +2905,30 @@ public class HostCalls {
             return CleatResult.err(errMsg);
         }
 
-        String responseJson = readOutput(responseLen);
+        return parseFetchResponse(readOutput(responseLen));
+    }
+
+    /**
+     * Decode the host's answer to {@code cleat_fetch}: {@code
+     * {"status":N,"headers":{...},"body":"..."}}.
+     *
+     * <p>Package-private and static so a test can reach it. The decoding used to
+     * sit inside {@link #cleatFetch}, behind a native import no unit test can
+     * call, which is how it came to read a key the host never sent (cleat#3408).
+     */
+    static CleatResult<FetchResult> parseFetchResponse(String responseJson) {
         try {
             java.util.Map<String, Object> parsed = JsonHelper.parseObject(responseJson);
 
+            // The host answers {"status":N,...}; this read "status_code" until
+            // cleat#3408 and so reported 0 for every response. "status_code" is
+            // still accepted when "status" is absent, for an embedder's Fetcher
+            // that chose that key.
             int statusCode = 0;
-            Object sc = parsed.get("status_code");
+            Object sc = parsed.get("status");
+            if (!(sc instanceof Number)) {
+                sc = parsed.get("status_code");
+            }
             if (sc instanceof Number) {
                 statusCode = ((Number) sc).intValue();
             }

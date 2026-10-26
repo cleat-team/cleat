@@ -154,26 +154,27 @@ plugin that wants a key of the same name.
   `charging` stands in for your payment provider, and reaching a real one from
   here takes more than swapping the line for a durable call.
 
-  **`h.DurableCall("http", "fetch", …)` will not work on the worker this
-  template deploys.** `cleat_fetch` is embedder-only (ABI.md 2.48, cleat#2517):
-  it needs an engine built with `engine.WithFetcher(...)`, and the
-  `docker-compose.yml` above deploys the stock `ghcr.io/cleat-team/cleat-worker`
-  image, which sets none. The call compiles, passes every `cleattest` stub (it
-  stubs by name, not by what the real worker can serve), and fails at runtime
-  with `cleat_fetch is unavailable: this engine has no Fetcher` — an error that
-  names the call rather than the reason.
+  **`h.DurableCall("http", "fetch", …)` works on the worker this template
+  deploys, but only for hosts your tenant has allowed.** A tenant's egress
+  allowlist is empty by default and an empty list permits nothing, so the first
+  call to a real provider fails with `no egress allowlist is configured for this
+  tenant, and an empty list permits nothing`. Allow the host and try again:
 
-  Two ways to actually reach your provider from this template:
+  ```bash
+  cleatctl egress-allow add <tenant-uuid> api.your-provider.example
+  ```
 
-  - **Write a plugin.** A bundled plugin's host function is how a workflow
-    reaches an external system on a stock worker — `DurableCall` resolving by
-    name to a plugin you write. See `plugins/slacknotify` for the shape and
-    `plugin/plugin.go` for the interface. This is the supported path for a
-    provider this template does not already integrate.
-  - **Switch to an embedded deployment.** `cleat/embedded` lets your own binary
-    build the engine and supply `engine.WithFetcher(...)` directly, trading
-    this template's stock-worker deploy shape for your process owning the
-    engine.
+  The floor (loopback, link-local, private ranges) is refused whatever is
+  listed. See `docs/operations/egress-policy.md`. The raw `cleat_fetch` import,
+  which the Java and AssemblyScript SDKs call directly, is a different path and
+  is off unless the worker starts with `--enable-workflow-fetch`.
+
+  Or **write a plugin.** A bundled plugin's host function is how a workflow
+  reaches a provider with its own client, credentials and retry rules —
+  `DurableCall` resolving by name to a plugin you write. See
+  `plugins/slacknotify` for the shape and `plugin/plugin.go` for the interface.
+  This is the better path for a provider this template does not already
+  integrate and that you will call from many workflows.
 
   Whichever path you take, record the charge's own idempotency key downstream:
   cleat's `Idempotency-Key` protects the START of this workflow, not your
