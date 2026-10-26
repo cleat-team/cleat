@@ -48,23 +48,19 @@ func seedSignalTriple(t *testing.T, store *PostgresStore, db *sql.DB, id, defNam
 	}); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         id,
+		TenantID:   DefaultTenantUUID,
+		DefName:    defName,
+		DefVersion: 1,
+		Input:      "{}",
+		TaskQueue:  "default",
+		Status:     status,
+	})
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, next_wake_at)
-		VALUES ($1, $2, 1, $3, '{}', 'default', $4, now() + interval '1 hour')
-	`, id, defName, status, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_leases (id, tenant_id, task_queue, status, next_wake_at)
-		VALUES ($1, $2, 'default', $3, now() + interval '1 hour')
-	`, id, DefaultTenantUUID, status); err != nil {
-		t.Fatalf("seed workflow_leases: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_payloads (id, tenant_id, input)
-		VALUES ($1, $2, '{}')
-	`, id, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_payloads: %v", err)
+		UPDATE workflow_leases SET next_wake_at = now() + interval '1 hour' WHERE id = $1
+	`, id); err != nil {
+		t.Fatalf("set workflow_leases.next_wake_at: %v", err)
 	}
 }
 

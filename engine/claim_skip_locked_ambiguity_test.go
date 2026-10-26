@@ -102,8 +102,11 @@ func TestAZeroClaimIsAmbiguousWhenRowsAreMerelyLocked(t *testing.T) {
 			len(got), n)
 	}
 	for _, wf := range got {
+		// workflow_leases, not workflow_instances: ClaimWorkflows' candidate
+		// scan and its own claim UPDATE have read and written status there
+		// exclusively since cleat#3245 Phase 3 step 3 piece B.
 		if _, err := db.ExecContext(ctx,
-			`UPDATE workflow_instances SET status='ready', assigned_to=NULL WHERE id=$1`, wf.ID); err != nil {
+			`UPDATE workflow_leases SET status='ready', assigned_to=NULL WHERE id=$1`, wf.ID); err != nil {
 			t.Fatalf("resetting %s: %v", wf.ID, err)
 		}
 	}
@@ -128,8 +131,13 @@ func TestAZeroClaimIsAmbiguousWhenRowsAreMerelyLocked(t *testing.T) {
 		"SELECT set_config('cleat.tenant_id', $1, true)", DefaultTenantUUID); err != nil {
 		t.Fatalf("setting RLS context on the holder: %v", err)
 	}
+	// workflow_leases, not workflow_instances: the candidate scan and lock
+	// ClaimWorkflows itself takes (FOR UPDATE SKIP LOCKED) are both on
+	// workflow_leases since cleat#3245 Phase 3 step 3 piece B, so the held
+	// lock has to land on the same table or it locks nothing the claim
+	// would contend on.
 	if _, err := tx.ExecContext(ctx, `
-		SELECT id FROM workflow_instances
+		SELECT id FROM workflow_leases
 		WHERE status IN ('ready','terminating') AND next_wake_at <= now()
 		FOR UPDATE`); err != nil {
 		t.Fatalf("holder lock: %v", err)
@@ -148,7 +156,7 @@ func TestAZeroClaimIsAmbiguousWhenRowsAreMerelyLocked(t *testing.T) {
 	// production must use all of it.
 	var ready int
 	if err := db.QueryRowContext(ctx, `
-		SELECT count(*) FROM workflow_instances
+		SELECT count(*) FROM workflow_leases
 		WHERE status IN ('ready','terminating') AND next_wake_at <= now()`).Scan(&ready); err != nil {
 		t.Fatalf("ready count: %v", err)
 	}

@@ -84,8 +84,11 @@ func TestReapStaleInstancesIgnoresAStaleInstancesHeartbeatWhenLeasesIsFresh(t *t
 	const id = "stale-scan-ignores-instances-wf-1"
 	seedClaimedTriple(t, db, id, defName, "worker-stale-scan-2", 1)
 
-	if _, err := db.Exec(`UPDATE workflow_instances SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
-		t.Fatalf("set workflow_instances.heartbeat_at stale: %v", err)
+	// The instance copy is planted as a stale running run, which a scan that
+	// read it would reclaim. seedClaimedTriple writes a narrow instance row
+	// (cleat#3245 B4a), so status is planted here too, not just heartbeat_at.
+	if _, err := db.Exec(`UPDATE workflow_instances SET status = 'running', heartbeat_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set workflow_instances stale and running: %v", err)
 	}
 	if _, err := db.Exec(`UPDATE workflow_leases SET heartbeat_at = now() WHERE id = $1`, id); err != nil {
 		t.Fatalf("set workflow_leases.heartbeat_at fresh: %v", err)

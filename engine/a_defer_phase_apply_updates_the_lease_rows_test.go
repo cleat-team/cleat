@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // cleat#3245 Phase 3 step 2, piece 6d: FinalizeDeferPhase and ExpireDeferPhases
@@ -39,29 +41,25 @@ import (
 func seedDeferOwedTriple(t *testing.T, db *sql.DB, id, defName, workerID, outcome string, generation int64, deadlineOffset time.Duration) {
 	t.Helper()
 	ctx := context.Background()
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         id,
+		TenantID:   DefaultTenantUUID,
+		DefName:    defName,
+		DefVersion: 1,
+		Input:      "{}",
+		TaskQueue:  "default",
+		Status:     statusTerminating,
+		AssignedTo: workerID,
+		Generation: generation,
+	})
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (
-			id, def_name, def_version, status, pending_terminal_status, input, task_queue,
-			tenant_id, assigned_to, generation, defer_phase_deadline, next_wake_at, heartbeat_at, started_at
-		)
-		VALUES ($1, $2, 1, $3, $4, '{}', 'default', $5, $6, $7, now() + ($8 * interval '1 second'), now(), now(), now())
-	`, id, defName, statusTerminating, outcome, DefaultTenantUUID, workerID, generation, deadlineOffset.Seconds()); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_leases (
-			id, tenant_id, task_queue, status, pending_terminal_status, assigned_to, generation,
-			defer_phase_deadline, heartbeat_at, started_at
-		)
-		VALUES ($1, $2, 'default', $3, $4, $5, $6, now() + ($7 * interval '1 second'), now(), now())
-	`, id, DefaultTenantUUID, statusTerminating, outcome, workerID, generation, deadlineOffset.Seconds()); err != nil {
-		t.Fatalf("seed workflow_leases: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_payloads (id, tenant_id, input)
-		VALUES ($1, $2, '{}')
-	`, id, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_payloads: %v", err)
+		UPDATE workflow_leases SET
+			pending_terminal_status = $1,
+			defer_phase_deadline = now() + ($2 * interval '1 second'),
+			next_wake_at = now(), heartbeat_at = now(), started_at = now()
+		WHERE id = $3
+	`, outcome, deadlineOffset.Seconds(), id); err != nil {
+		t.Fatalf("set workflow_leases defer-owed fields: %v", err)
 	}
 }
 

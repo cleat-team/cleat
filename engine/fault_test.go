@@ -62,17 +62,12 @@ func TestFaultConcurrentClaim(t *testing.T) {
 
 	// Create a test instance.
 	runID := fmt.Sprintf("test-concurrent-%d", time.Now().UnixNano())
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
-	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflows' candidate scan now
-	// reads workflow_leases, not workflow_instances -- a raw INSERT into
-	// workflow_instances alone leaves no row there, and the claim below
-	// finds nothing to claim (the same "Expected exactly 1 claim, got 0"
-	// symptom this file's own deployFaultTestDef comment already recorded
-	// once, for an unrelated missing-FK reason).
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
+	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflows' candidate scan reads
+	// workflow_leases, not workflow_instances -- SeedRun lays down both (the
+	// same "Expected exactly 1 claim, got 0" symptom this file's own
+	// deployFaultTestDef comment already recorded once, for an unrelated
+	// missing-FK reason).
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", DefVersion: 1, Status: "ready"})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	var wg sync.WaitGroup
@@ -110,10 +105,7 @@ func TestFaultEventHistoryIdempotency(t *testing.T) {
 	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-idempotent-%d", time.Now().UnixNano())
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", DefVersion: 1, Status: "ready"})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -153,20 +145,16 @@ func TestFaultReapStaleInstances(t *testing.T) {
 	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-reap-%d", time.Now().UnixNano())
-	// Insert directly with an old heartbeat.
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, assigned_to, heartbeat_at)
-		VALUES ($1, 'test', 1, 'running', '{}', 'dead-worker', now() - interval '2 minutes')
-		ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
-	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate scan
-	// now reads workflow_leases, not workflow_instances, so this fixture
-	// (pre-dating the dual-write entirely) needs the matching row there too.
-	if _, err := db.Exec(`INSERT INTO workflow_leases (id, status, assigned_to, heartbeat_at)
-		VALUES ($1, 'running', 'dead-worker', now() - interval '2 minutes')
-		ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test lease: %v", err)
+	// reads workflow_leases, not workflow_instances; SeedRun lays down both
+	// with an old heartbeat set below.
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID: runID, DefName: "test", DefVersion: 1,
+		Status: "running", AssignedTo: "dead-worker",
+	})
+	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
+	if _, err := db.Exec(`UPDATE workflow_leases SET heartbeat_at = now() - interval '2 minutes' WHERE id = $1`, runID); err != nil {
+		t.Fatalf("seed workflow_leases heartbeat_at: %v", err)
 	}
 
 	// Reap with a short timeout.
@@ -197,11 +185,7 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-heartbeat-%d", time.Now().UnixNano())
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", DefVersion: 1, Status: "ready"})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Worker A claims the instance.

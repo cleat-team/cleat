@@ -821,8 +821,13 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 // TestCascadeDelete's SQL Server arm can hand insertWorkflowInstance and
 // insertChildRows a single dedicated connection (see pinnedConnExecer)
 // without those two functions needing to know which dialect they got.
+//
+// ExecContext is here too, which is what lets insertWorkflowInstance's
+// PostgreSQL arm call testutil.SeedRun directly -- SeedRun's own Execer
+// interface asks for nothing more.
 type dbExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // pinnedConnExecer adapts a *sql.Conn -- which has no Exec, only
@@ -839,15 +844,22 @@ func (p pinnedConnExecer) Exec(query string, args ...any) (sql.Result, error) {
 	return p.conn.ExecContext(context.Background(), query, args...)
 }
 
+func (p pinnedConnExecer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return p.conn.ExecContext(ctx, query, args...)
+}
+
 // insertWorkflowInstance inserts a single workflow_instances row for cascade testing.
 func insertWorkflowInstance(t *testing.T, db dbExecer, dialect testutil.Dialect, wfID string) {
 	t.Helper()
 
 	switch dialect {
 	case testutil.DialectPostgres:
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, completed_at) VALUES ($1, 'cascade-test-def', 1, 'dead_lettered', NOW())`, wfID)
-		if err != nil {
-			t.Fatalf("insert workflow_instances (postgres): %v", err)
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: wfID, DefName: "cascade-test-def", DefVersion: 1, Status: "dead_lettered",
+		})
+		if _, err := db.ExecContext(context.Background(),
+			`UPDATE workflow_payloads SET completed_at = NOW() WHERE id = $1`, wfID); err != nil {
+			t.Fatalf("insert workflow_instances (postgres, workflow_payloads completed_at): %v", err)
 		}
 	case testutil.DialectMySQL:
 		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, completed_at) VALUES (?, 'cascade-test-def', 1, 'dead_lettered', NOW(6))`, wfID)

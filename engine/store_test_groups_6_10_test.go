@@ -1432,16 +1432,10 @@ func setWorkflowStatus(t *testing.T, store WorkflowStore, workflowID, status str
 	t.Helper()
 	switch s := store.(type) {
 	case *PostgresStore:
-		_, err := s.db.Exec(`UPDATE workflow_instances SET status = $1 WHERE id = $2`, status, workflowID)
-		if err != nil {
-			t.Fatalf("setWorkflowStatus (postgres): %v", err)
-		}
-		// cleat#3245 Phase 3 step 3 piece F: GetWorkflowByID/ListWorkflows now
-		// read status from workflow_leases, not workflow_instances, so a
-		// fixture that sets only the old table is invisible to them. Mirror
-		// it, same as the real write paths do.
+		// cleat#3245 Phase 3 step 3 piece F: GetWorkflowByID/ListWorkflows read
+		// status from workflow_leases, not workflow_instances.
 		if _, err := s.db.Exec(`UPDATE workflow_leases SET status = $1 WHERE id = $2`, status, workflowID); err != nil {
-			t.Fatalf("setWorkflowStatus (postgres, leases mirror): %v", err)
+			t.Fatalf("setWorkflowStatus (postgres): %v", err)
 		}
 	case *MySQLStore:
 		_, err := s.db.Exec(`UPDATE workflow_instances SET status = ? WHERE id = ?`, status, workflowID)

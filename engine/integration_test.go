@@ -49,10 +49,10 @@ func TestIntegrationFullPipeline(t *testing.T) {
 	}
 
 	// Insert a workflow instance in 'ready' status.
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
-		runID, defName, 1, "ready", input); err != nil {
-		t.Fatalf("insert workflow_instances: %v", err)
-	}
+	// Narrow workflow_instances row (cleat#3245 B4a); workflow_leases and
+	// workflow_payloads rows aren't needed here since Execute runs the
+	// compiled WASM directly rather than through the claim path.
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, DefVersion: 1, Status: "ready", Input: input})
 
 	// Clean up test data on exit.
 	defer func() {
@@ -198,10 +198,10 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 		defName, 1, wasmBytes, `{place_order,cancel_order}`); err != nil {
 		t.Fatalf("insert workflow_defs: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
-		runID, defName, 1, "ready", input); err != nil {
-		t.Fatalf("insert workflow_instances: %v", err)
-	}
+	// Narrow workflow_instances row (cleat#3245 B4a); workflow_leases and
+	// workflow_payloads rows aren't needed here since Execute runs the
+	// compiled WASM directly rather than through the claim path.
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, DefVersion: 1, Status: "ready", Input: input})
 
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
@@ -302,10 +302,10 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 		defName, 1, wasmBytes, `{place_order,cancel_order}`); err != nil {
 		t.Fatalf("insert workflow_defs: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
-		runID, defName, 1, "ready", input); err != nil {
-		t.Fatalf("insert workflow_instances: %v", err)
-	}
+	// Narrow workflow_instances row (cleat#3245 B4a); workflow_leases and
+	// workflow_payloads rows aren't needed here since Execute runs the
+	// compiled WASM directly rather than through the claim path.
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, DefVersion: 1, Status: "ready", Input: input})
 
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
@@ -442,10 +442,10 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 		defName, 1, wasmBytes, `{place_order,cancel_order}`); err != nil {
 		t.Fatalf("insert workflow_defs: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
-		runID, defName, 1, "ready", input); err != nil {
-		t.Fatalf("insert workflow_instances: %v", err)
-	}
+	// Narrow workflow_instances row (cleat#3245 B4a); workflow_leases and
+	// workflow_payloads rows aren't needed here since Execute runs the
+	// compiled WASM directly rather than through the claim path.
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, DefVersion: 1, Status: "ready", Input: input})
 
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)

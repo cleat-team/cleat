@@ -137,10 +137,7 @@ func TestCleanupPostgresTestData(t *testing.T) {
 
 	// Insert test data.
 	insertTestDef(t, db)
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version)
-		VALUES ('test-cleanup-id', 'test-def', 1)`); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
+	SeedRun(t, db, RunSeed{ID: "test-cleanup-id", DefName: "test-def", DefVersion: 1})
 	if _, err := db.Exec(`INSERT INTO workflow_signals (workflow_id, signal_name)
 		VALUES ('test-cleanup-id', 'test-signal')`); err != nil {
 		t.Fatalf("insert test signal: %v", err)
@@ -207,10 +204,7 @@ func TestCleanupTestData(t *testing.T) {
 	runID := "test-cleanup-pattern-%"
 
 	insertTestDef(t, db)
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version)
-		VALUES ('test-cleanup-pattern-1', 'test-def', 1)`); err != nil {
-		t.Fatalf("insert instance: %v", err)
-	}
+	SeedRun(t, db, RunSeed{ID: "test-cleanup-pattern-1", DefName: "test-def", DefVersion: 1})
 
 	CleanupTestData(t, db, DialectPostgres, runID)
 

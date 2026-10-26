@@ -122,15 +122,10 @@ func backdateHeartbeat(t *testing.T, store WorkflowStore, wfID string, secondsAg
 	t.Helper()
 	switch s := store.(type) {
 	case *PostgresStore:
-		if _, err := s.db.Exec(
-			`UPDATE workflow_instances SET heartbeat_at = now() - ($1 * interval '1 second') WHERE id = $2`,
-			secondsAgo, wfID); err != nil {
-			t.Fatalf("backdateHeartbeat (postgres): %v", err)
-		}
-		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances'/
-		// ListStaleHolders' candidate scan now reads workflow_leases, not
-		// workflow_instances, so this helper's whole point -- "look stale to
-		// ReapStaleInstances" -- requires backdating both.
+		// heartbeat_at's only copy since cleat#3245 B2 -- ReapStaleInstances'/
+		// ListStaleHolders' candidate scan reads workflow_leases exclusively,
+		// not workflow_instances, so that is the only table this helper's
+		// whole point -- "look stale to ReapStaleInstances" -- needs to touch.
 		if _, err := s.db.Exec(
 			`UPDATE workflow_leases SET heartbeat_at = now() - ($1 * interval '1 second') WHERE id = $2`,
 			secondsAgo, wfID); err != nil {

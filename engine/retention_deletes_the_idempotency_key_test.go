@@ -72,10 +72,6 @@ func TestRetentionDeletesTheIdempotencyKeyWithTheWorkflow(t *testing.T) {
 		t.Fatalf("precondition: expected 1 idempotency_keys row for %s, found %d", id, keysBefore)
 	}
 
-	if _, err := adminDB.ExecContext(ctx,
-		`UPDATE workflow_instances SET status = 'done', completed_at = now() WHERE id = $1`, id); err != nil {
-		t.Fatalf("mark completed: %v", err)
-	}
 	// The retention predicate reads completed_at from workflow_payloads since
 	// cleat#3245 B1a; mark that copy as the dual-write would.
 	if _, err := adminDB.ExecContext(ctx,

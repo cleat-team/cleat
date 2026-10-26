@@ -35,30 +35,28 @@ func claimTestStore(t *testing.T) (*PostgresStore, *sql.DB) {
 }
 
 // seedInstanceAndLeaseRow creates a workflow_instances row and its matching
-// workflow_leases and workflow_payloads rows directly, standing in for what
-// piece 1's insertLeaseAndPayloadRows does inside StartNewRun. The payloads
-// row became load-bearing with cleat#3245 B1a: the claim reads input and
-// def_name from it, and refuses a run that has none.
+// workflow_leases and workflow_payloads rows via testutil.SeedRun, standing
+// in for what piece 1's insertLeaseAndPayloadRows does inside StartNewRun.
+// The payloads row became load-bearing with cleat#3245 B1a: the claim reads
+// input and def_name from it, and refuses a run that has none. next_wake_at
+// is set a second ago afterwards -- SeedRun does not take it -- so a claim
+// that filters on it still finds this row due.
 func seedInstanceAndLeaseRow(t *testing.T, db *sql.DB, id, defName string) {
 	t.Helper()
 	ctx := context.Background()
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         id,
+		TenantID:   DefaultTenantUUID,
+		DefName:    defName,
+		DefVersion: 1,
+		Input:      "{}",
+		TaskQueue:  "default",
+		Status:     "ready",
+	})
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, next_wake_at)
-		VALUES ($1, $2, 1, 'ready', '{}', 'default', $3, now() - INTERVAL '1 second')
-	`, id, defName, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_leases (id, tenant_id, task_queue)
-		VALUES ($1, $2, 'default')
-	`, id, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_leases: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
-		VALUES ($1, $2, '{}', $3, 1)
-	`, id, DefaultTenantUUID, defName); err != nil {
-		t.Fatalf("seed workflow_payloads: %v", err)
+		UPDATE workflow_leases SET next_wake_at = now() - INTERVAL '1 second' WHERE id = $1
+	`, id); err != nil {
+		t.Fatalf("set workflow_leases.next_wake_at: %v", err)
 	}
 }
 
@@ -213,13 +211,9 @@ func TestClaimStickyWorkflowsUpdatesTheLeaseRow(t *testing.T) {
 
 	const id = "claim-sticky-lease-wf-1"
 	seedInstanceAndLeaseRow(t, db, id, defName)
-	if _, err := db.ExecContext(ctx, `UPDATE workflow_instances SET sticky_worker_id = $1 WHERE id = $2`, "worker-sticky-1", id); err != nil {
-		t.Fatalf("set sticky_worker_id: %v", err)
-	}
 	// cleat#3245 Phase 3 step 3 piece B: ClaimStickyWorkflows' candidate
-	// scan now reads sticky_worker_id from workflow_leases, not
-	// workflow_instances -- mirror the UPDATE above or the candidate never
-	// matches and the claim below returns nothing.
+	// scan reads sticky_worker_id from workflow_leases, not
+	// workflow_instances, which no longer carries the column at all.
 	if _, err := db.ExecContext(ctx, `UPDATE workflow_leases SET sticky_worker_id = $1 WHERE id = $2`, "worker-sticky-1", id); err != nil {
 		t.Fatalf("set sticky_worker_id on workflow_leases: %v", err)
 	}

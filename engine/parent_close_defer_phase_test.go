@@ -28,11 +28,6 @@ func setWorkflowShape(t *testing.T, store WorkflowStore, wfID, status string, co
 		// Both copies of compaction_state, as the dual-write keeps them:
 		// deferPhaseOwedSQLPostgres reads workflow_payloads' (cleat#3245 B1a).
 		if _, err := s.db.Exec(
-			`UPDATE workflow_instances SET status = $1, compaction_state = $2 WHERE id = $3`,
-			status, comp, wfID); err != nil {
-			t.Fatalf("setWorkflowShape (postgres): %v", err)
-		}
-		if _, err := s.db.Exec(
 			`UPDATE workflow_payloads SET compaction_state = $1 WHERE id = $2`,
 			comp, wfID); err != nil {
 			t.Fatalf("setWorkflowShape (postgres, payloads): %v", err)

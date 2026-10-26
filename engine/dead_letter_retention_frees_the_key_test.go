@@ -87,10 +87,16 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 			// it by hand keeps this test about retention rather than about the
 			// poll loop.
 			const workerID = "worker-1324"
-			if _, err := db.ExecContext(ctx,
-				`UPDATE workflow_instances SET assigned_to = `+d.ph(1)+` WHERE id = `+d.ph(2),
-				workerID, id); err != nil {
-				t.Fatalf("claim: %v", err)
+			// On PostgreSQL assigned_to lives on workflow_leases alone since
+			// cleat#3245 B3c, so the claim has nothing to do on
+			// workflow_instances there; MySQL still keeps the one wide
+			// table.
+			if d.dialect != testutil.DialectPostgres {
+				if _, err := db.ExecContext(ctx,
+					`UPDATE workflow_instances SET assigned_to = `+d.ph(1)+` WHERE id = `+d.ph(2),
+					workerID, id); err != nil {
+					t.Fatalf("claim: %v", err)
+				}
 			}
 			// MoveToDeadLetterQueue's workflow_leases mirror is fenced on the
 			// lease's own assigned_to, and the retention sweep reads status from

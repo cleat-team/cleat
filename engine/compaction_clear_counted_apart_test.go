@@ -100,13 +100,10 @@ func setCompactionStateForTest(t *testing.T, store WorkflowStore, id string) {
 		// cleat#3360 dropped compacted_at from workflow_instances --
 		// nothing read it, on this table or workflow_payloads' copy, so
 		// there is no reason for this test's seed to write it either.
-		if _, err := s.db.Exec(
-			`UPDATE workflow_instances SET compaction_state = $1, compaction_step = 1,
-			 completed_at = now() WHERE id = $2`, `{}`, id); err != nil {
-			t.Fatalf("seed compaction state (postgres): %v", err)
-		}
-		// Both copies, as the dual-write keeps them: the sweep's predicate
-		// reads workflow_payloads since cleat#3245 B1a.
+		// compaction_state, compaction_step and completed_at themselves are
+		// workflow_payloads-only now: the sweep's predicate has read them
+		// there exclusively since cleat#3245 B1a, and workflow_instances'
+		// copies are soon-dropped, so this seed writes payloads alone.
 		if _, err := s.db.Exec(
 			`UPDATE workflow_payloads SET compaction_state = $1, compaction_step = 1,
 			 completed_at = now() WHERE id = $2`, `{}`, id); err != nil {
