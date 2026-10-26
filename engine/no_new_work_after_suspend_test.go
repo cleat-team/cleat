@@ -113,7 +113,8 @@ func TestOnlyAwaitsAreGatedAfterASuspend(t *testing.T) {
 
 // TestTheFirstSuspendingCallStillWorks is the control. The fix must gate what
 // comes AFTER a suspend, not the call that causes it -- gating too early would
-// stop a workflow suspending at all.
+// stop a workflow suspending at all. The call that causes it records its
+// await and suspends, and tells the guest so.
 func TestTheFirstSuspendingCallStillWorks(t *testing.T) {
 	s := freshSuspendSession(t)
 
@@ -126,9 +127,13 @@ func TestTheFirstSuspendingCallStillWorks(t *testing.T) {
 		t.Errorf("the first await recorded %d events, want 1: it must still write its "+
 			"await_signals", len(s.history))
 	}
-	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
-		t.Error("the suspending call itself returned the stop sentinel; only calls after " +
-			"it should")
+	// This used to assert the OPPOSITE -- "the suspending call itself returned
+	// the stop sentinel; only calls after it should" -- which pinned
+	// cleat#3378 in place: the suspending await returned an ordinary timeout,
+	// and the guest acted on it before the run stopped.
+	if packed != callSuspendSentinel {
+		t.Errorf("the suspending await returned %016x, want callSuspendSentinel: any "+
+			"other word reads as a timeout the guest will act on (cleat#3378)", uint64(packed))
 	}
 }
 
