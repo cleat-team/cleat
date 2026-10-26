@@ -376,3 +376,110 @@ func TestTerminateTreatsARunCompactedOnWorkflowPayloadsAsOwingADeferPhase(t *tes
 			"a one-phase terminate means the check read workflow_instances", status, statusTerminating)
 	}
 }
+
+// The four below were added in review (cleat#3389): each reader could be put
+// back on workflow_instances with every test above still green, because
+// nothing made its two copies disagree.
+
+func TestGetCompactionCandidatesReadsCompactionStepFromWorkflowPayloads(t *testing.T) {
+	store, db := newRunTestStore(t)
+	ctx := context.Background()
+	id := startPayloadReaderRun(t, store, "b1a-compaction-candidates")
+	if err := store.AppendEventHistoryBatch(ctx, id, []EventRecord{
+		{Step: 0, EventType: EventTypePluginCall, Service: "s", Op: "o"},
+		{Step: 1, EventType: EventTypePluginCall, Service: "s", Op: "o"},
+		{Step: 2, EventType: EventTypePluginCall, Service: "s", Op: "o"},
+	}); err != nil {
+		t.Fatalf("AppendEventHistoryBatch: %v", err)
+	}
+
+	// Three events against a threshold of 2. Never compacted per
+	// workflow_payloads, so a candidate; compacted far past its history per
+	// workflow_instances, so not one.
+	diverge(t, db, "workflow_payloads", `compaction_step = NULL`, id)
+	diverge(t, db, "workflow_instances", `compaction_step = 1000`, id)
+
+	ids, err := store.GetCompactionCandidates(ctx, 2, 10)
+	if err != nil {
+		t.Fatalf("GetCompactionCandidates: %v", err)
+	}
+	for _, got := range ids {
+		if got == id {
+			return
+		}
+	}
+	t.Fatalf("GetCompactionCandidates = %v, want it to include %s -- its absence means "+
+		"compaction_step was read from workflow_instances (1000), not workflow_payloads (NULL)", ids, id)
+}
+
+func TestAdminForceResolveReadsCompactionStateFromWorkflowPayloads(t *testing.T) {
+	store, db := newRunTestStore(t)
+	ctx := context.Background()
+	id := startPayloadReaderRun(t, store, "b1a-admin-compacted")
+
+	// No defer events, so only "compacted" can make a defer phase owed.
+	diverge(t, db, "workflow_payloads", `compaction_state = '{}'`, id)
+	diverge(t, db, "workflow_instances", `compaction_state = NULL`, id)
+
+	if err := store.AdminForceComplete(ctx, id, 0, `{"ok":true}`, "operator-1"); err != nil {
+		t.Fatalf("AdminForceComplete: %v", err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&status); err != nil {
+		t.Fatalf("read workflow_leases.status: %v", err)
+	}
+	if status != statusTerminating {
+		t.Fatalf("status after AdminForceComplete = %q, want %q -- a compacted workflow owes a defer "+
+			"phase, and %q means compaction_state was read from workflow_instances (NULL)", status, statusTerminating, status)
+	}
+}
+
+func TestDeleteExpiredEventsReadsCompletedAtFromWorkflowPayloads(t *testing.T) {
+	store, db := newRunTestStore(t)
+	ctx := context.Background()
+	id := startPayloadReaderRun(t, store, "b1a-expired-events")
+	if err := store.AppendEventHistoryBatch(ctx, id, []EventRecord{
+		{Step: 0, EventType: EventTypePluginCall, Service: "s", Op: "o"},
+	}); err != nil {
+		t.Fatalf("AppendEventHistoryBatch: %v", err)
+	}
+
+	// Terminal by status (a workflow_instances read until B3); expired by
+	// workflow_payloads.completed_at only.
+	diverge(t, db, "workflow_instances", `status = 'done', completed_at = NULL`, id)
+	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
+
+	if _, err := store.DeleteExpiredEvents(ctx, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("DeleteExpiredEvents: %v", err)
+	}
+	var left int
+	if err := db.QueryRow(`SELECT count(*) FROM event_history WHERE workflow_id = $1`, id).Scan(&left); err != nil {
+		t.Fatalf("count event_history: %v", err)
+	}
+	if left != 0 {
+		t.Fatalf("%d event_history row(s) survived the sweep, want 0 -- the predicate read "+
+			"workflow_instances.completed_at, which is NULL here", left)
+	}
+}
+
+func TestDeleteDeadLetteredWorkflowsReadsCompletedAtFromWorkflowPayloads(t *testing.T) {
+	store, db := newRunTestStore(t)
+	ctx := context.Background()
+	id := startPayloadReaderRun(t, store, "b1a-dead-lettered")
+
+	diverge(t, db, "workflow_instances", `status = 'dead_lettered', completed_at = NULL`, id)
+	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
+
+	n, err := store.DeleteDeadLetteredWorkflows(ctx, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("DeleteDeadLetteredWorkflows: %v", err)
+	}
+	var left int
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances WHERE id = $1`, id).Scan(&left); err != nil {
+		t.Fatalf("count workflow_instances: %v", err)
+	}
+	if n != 1 || left != 0 {
+		t.Fatalf("DeleteDeadLetteredWorkflows deleted %d, row left=%d; want 1 and 0 -- the predicate "+
+			"read workflow_instances.completed_at, which is NULL here", n, left)
+	}
+}

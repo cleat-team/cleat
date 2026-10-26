@@ -726,7 +726,10 @@ func (s *PostgresStore) claimStickyWorkflowsOnce(ctx context.Context, workerID s
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
-			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
+			// Scan assigns in column order, so id is set even when a later
+			// column fails -- a run with no workflow_payloads row fails on
+			// def_name, and naming it is what makes that diagnosable.
+			return nil, fmt.Errorf("claim sticky workflows scan (workflow %q): %w", wf.ID, err)
 		}
 
 		if nextWakeAt.Valid {
@@ -2585,7 +2588,8 @@ func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp,
 			&wf.Generation, &wf.Priority, &wf.TraceID, &wf.PendingTerminalStatus); err != nil {
-			return nil, fmt.Errorf("claim workflows scan: %w", err)
+			// As in ClaimStickyWorkflows: id is column 0 and already set.
+			return nil, fmt.Errorf("claim workflows scan (workflow %q): %w", wf.ID, err)
 		}
 
 		if nextWakeAt.Valid {

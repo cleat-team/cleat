@@ -1914,13 +1914,16 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 		if err != nil {
 			return totalCleared, fmt.Errorf("delete expired events: begin compaction: %w", err)
 		}
-		// cleat#3245 B1a: workflow_payloads first, and it is the copy that
-		// is counted -- it is the one every reader of compaction_state now
-		// reads, and step 2 never mirrored this clear onto it at all. The
-		// workflow_instances copy follows by the same ids until B1b stops
-		// writing it.
+		// cleat#3245 B1a: workflow_instances first, then workflow_payloads by
+		// the same ids. That is the order deleteCompletedWorkflowsBatch takes
+		// -- it deletes the instance row and the ON DELETE CASCADE then locks
+		// the payload row -- and both sweeps act on terminal rows past
+		// retention, so the opposite order here could deadlock the two
+		// (40P01). The payload copy is the one counted: it is what every
+		// reader of compaction_state reads. The instance-side clear goes when
+		// B1b stops writing that copy.
 		rows, err := tx.QueryContext(ctx, `
-			UPDATE workflow_payloads
+			UPDATE workflow_instances
 			SET compaction_state = NULL, compaction_step = NULL
 			WHERE id IN (
 				SELECT id`+pgExpiredCompactionState+`
@@ -1933,25 +1936,34 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 			break
 		}
 		var ids []string
+		var scanErr error
 		for rows.Next() {
 			var id string
-			if err := rows.Scan(&id); err != nil {
+			if scanErr = rows.Scan(&id); scanErr != nil {
 				break
 			}
 			ids = append(ids, id)
 		}
 		rerr := rows.Err()
 		rows.Close()
-		if rerr != nil {
+		// A truncated id list must not commit: the instance side would be
+		// cleared for every row and the payload side for only some of them.
+		if scanErr != nil || rerr != nil {
 			_ = tx.Rollback()
 			break
 		}
+		var n int64
 		if len(ids) > 0 {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE workflow_instances
+			res, err := tx.ExecContext(ctx, `
+				UPDATE workflow_payloads
 				SET compaction_state = NULL, compaction_step = NULL
 				WHERE id = ANY($1)
-			`, pq.Array(ids)); err != nil {
+			`, pq.Array(ids))
+			if err != nil {
+				_ = tx.Rollback()
+				break
+			}
+			if n, err = res.RowsAffected(); err != nil {
 				_ = tx.Rollback()
 				break
 			}
@@ -1959,9 +1971,8 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 		if err := tx.Commit(); err != nil {
 			break
 		}
-		n := int64(len(ids))
 		totalCleared += n
-		if n == 0 {
+		if len(ids) == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
