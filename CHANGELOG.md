@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Selector.Select` races a pending child against its timers and signals.** Closes cleat#3369.
+  The children were checked with `AwaitChild`, which suspends on a running child, so a workflow
+  that added a child, a timer and a signal woke only when the child finished: the timer and the
+  signal could never win, which is the race `Selector` exists for. Children are now checked
+  with `PollChild` (answered as of the durable clock, so replay sees what the first run saw);
+  while a child is pending beside a timer or a signal, the wait is bounded by a child poll that
+  starts at 1 s and doubles to 30 s, so a completed child is seen within that and a long race
+  records a bounded number of durable waits. With only children added, `Select` uses
+  `AwaitAnyChild` and polls nothing. A child that failed now resolves its future: `Select`
+  returns its runID with `Err()` set (it never won before). The type and `AddChildWorkflow`
+  docs, which said child futures were unsupported and made `Select` return an error, now say
+  what it does. `Selector.Select`'s import list gains `cleat_poll_child` and
+  `cleat_await_any_child` and drops `cleat_await_child`, so a workflow using it must be rebuilt.
+
 - **A plugin route whose pattern overlapped one of the host's four always-anonymous routes
   (`POST /ingest/{source_id}`, the two `/oauth/{provider}/...` routes, `POST /slack/interactive`),
   but was not textually identical to it, was never recognized as auth-exempt, so

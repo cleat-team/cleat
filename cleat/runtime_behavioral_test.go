@@ -1469,13 +1469,15 @@ func TestSelectorErrorPreserved(t *testing.T) {
 	_ = winner
 }
 
-func TestSelectorAddChildReturnsError(t *testing.T) {
+// A child future is polled (cleat#3369); a host that cannot answer the poll
+// is an error the caller can see, not a hang and not a winner.
+func TestSelectorChildPollErrorIsReported(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		PollSignal: func(name string) (string, bool, error) {
 			return "", false, nil
 		},
-		AwaitChild: func(runID string) (string, error) {
-			return "", errors.New("child not ready")
+		PollChild: func(runID string) (string, string, error) {
+			return "", "", errors.New("store unavailable")
 		},
 		Now: func() int64 {
 			return 1000
@@ -1483,7 +1485,9 @@ func TestSelectorAddChildReturnsError(t *testing.T) {
 	})
 	s := NewSelector(h)
 	s.AddChildWorkflow("child-run", new(string))
-	_ = s.Select()
+	if winner := s.Select(); winner != "" || s.Err() == nil {
+		t.Errorf("winner %q, err %v; want \"\" and the poll error", winner, s.Err())
+	}
 }
 
 // ---------------------------------------------------------------------------

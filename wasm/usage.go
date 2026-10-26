@@ -54,10 +54,11 @@ var sdkHelperImports = map[string][]string{
 	"Saga.Run":           {"cleat_log", "set_query_state"},
 	"Saga.RunWithResult": {"cleat_log", "set_query_state"},
 
-	// Selector.Select calls five HostCalls methods -- DurableSleep, Now,
-	// AwaitSignals, PollSignal and AwaitChild -- and this list is the union of
-	// what each of those needs, including the update-dispatch imports the
-	// composites pull in.
+	// Selector.Select calls six HostCalls methods -- DurableSleep, Now,
+	// AwaitSignals, PollSignal, PollChild and AwaitAnyChild -- and this list
+	// is the union of what each of those needs, including the update-dispatch
+	// imports the composites pull in. (It called AwaitChild until cleat#3369,
+	// which suspended on a running child instead of racing it.)
 	//
 	// Spelled out rather than derived, to match hostFunctions and
 	// compositeRequires, which are hand lists for the same reason: the tables
@@ -69,7 +70,8 @@ var sdkHelperImports = map[string][]string{
 		"cleat_now",
 		"cleat_await_signals",
 		"cleat_poll_signal",
-		"cleat_await_child",
+		"cleat_poll_child",
+		"cleat_await_any_child",
 		"cleat_poll_update",
 		"cleat_complete_update",
 		"cleat_log",
