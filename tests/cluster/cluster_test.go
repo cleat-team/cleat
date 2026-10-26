@@ -60,15 +60,7 @@ func TestClusterWorkersRegister(t *testing.T) {
 	for i, q := range queues {
 		id := fmt.Sprintf("test-cluster-register-%d", i)
 		EnsureDef(t, db, "test", 1)
-		_, err := db.Exec(`
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', $2)
-			ON CONFLICT (id) DO NOTHING
-		`, id, q)
-		if err != nil {
-			t.Fatalf("Insert workflow for queue %s: %v", q, err)
-		}
-		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: q})
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: q})
 		workflowIDs = append(workflowIDs, id)
 	}
 
@@ -123,15 +115,7 @@ func TestClusterSpreadWorkflows(t *testing.T) {
 		id := fmt.Sprintf("test-cluster-spread-%d", i)
 		q := queues[i%len(queues)]
 		EnsureDef(t, db, "spread-test", 1)
-		_, err := db.Exec(`
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'spread-test', 1, 'ready', '{}', $2)
-			ON CONFLICT (id) DO NOTHING
-		`, id, q)
-		if err != nil {
-			t.Fatalf("Insert workflow %d: %v", i, err)
-		}
-		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: q})
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "spread-test", TaskQueue: q})
 		workflowIDs = append(workflowIDs, id)
 	}
 
@@ -193,15 +177,7 @@ func TestClusterBasicWorkflowExecution(t *testing.T) {
 
 	runID := "test-cluster-execution"
 	EnsureDef(t, db, "basic-test", 1)
-	_, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'basic-test', 1, 'ready', '{}', $2)
-		ON CONFLICT (id) DO NOTHING
-	`, runID, TestQueue1)
-	if err != nil {
-		t.Fatalf("Insert workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: TestQueue1})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "basic-test", TaskQueue: TestQueue1})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow.

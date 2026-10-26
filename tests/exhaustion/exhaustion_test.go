@@ -148,12 +148,7 @@ func deploySpin(t *testing.T, db *sql.DB) {
 func start(t *testing.T, db *sql.DB, id string, iterations int64) {
 	t.Helper()
 	input := fmt.Sprintf(`{"__entry_point":"spin","iterations":%d}`, iterations)
-	if _, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'spin', 1, 'ready', $2::jsonb, $3)`, id, input, taskQueue); err != nil {
-		t.Fatalf("starting workflow %s: %v", id, err)
-	}
-	testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: taskQueue})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "spin", Input: input, TaskQueue: taskQueue})
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 	})

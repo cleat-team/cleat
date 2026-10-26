@@ -35,12 +35,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 	var wfIDs []string
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("scale-maxwf-%d-%d", i, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %d: %v", i, err)
-		}
-		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 	defer func() {
@@ -169,12 +164,7 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 	var wfIDs []string
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("scale-mem-%d-%d", i, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %d: %v", i, err)
-		}
-		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 	defer func() {

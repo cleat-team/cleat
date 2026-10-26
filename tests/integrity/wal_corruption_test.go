@@ -271,12 +271,7 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		// Create a separate workflow run for each iteration.
 		runID := fmt.Sprintf("int-wal-%d-%d", time.Now().UnixNano(), i)
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-		if err != nil {
-			t.Fatalf("create workflow instance: %v", err)
-		}
-		testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 		t.Cleanup(func() {
 			db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 			db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -343,12 +338,7 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 	runID := fmt.Sprintf("int-replay-%d", time.Now().UnixNano())
 
 	// Create a workflow instance directly.
-	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-	if err != nil {
-		t.Fatalf("create workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -416,12 +406,7 @@ func TestWalCorruption_DefaultOnReplayFailure(t *testing.T) {
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-default-on-%d", time.Now().UnixNano())
 
-	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-	if err != nil {
-		t.Fatalf("create workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -440,7 +425,7 @@ func TestWalCorruption_DefaultOnReplayFailure(t *testing.T) {
 	}
 
 	// Corrupt a checksum.
-	_, err = db.Exec(`UPDATE event_history SET checksum = 'corrupted' WHERE workflow_id = $1 AND step = 1`, runID)
+	_, err := db.Exec(`UPDATE event_history SET checksum = 'corrupted' WHERE workflow_id = $1 AND step = 1`, runID)
 	if err != nil {
 		t.Fatalf("corrupt checksum: %v", err)
 	}
