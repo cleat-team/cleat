@@ -15,6 +15,12 @@
 # it exists to catch an arm64-only regression (e.g. something in the
 # Dockerfile that only breaks under emulation) BETWEEN tags, since tags can
 # be sparse.
+#
+# cleat#3370: develop-image.yml now builds (and pushes) arm64 on every push to
+# develop, which covers this while something is merging. This stays because the
+# Dockerfile's inputs change without a commit -- apt packages, the bookworm-slim
+# base -- and develop can go days with no push, so a cadence still sees what a
+# merge-triggered build cannot.
 # ---------------------------------------------------------------------------
 name: Release Image Dry Run (arm64)
 

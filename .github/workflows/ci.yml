@@ -3426,8 +3426,9 @@ jobs:
       # `RUN /cleat-worker --verify-backend` (see Dockerfile and
       # scripts/verify-release-worker.sh) passes -- the same assertion, on
       # the architecture this runner is native on. The arm64 leg is proven
-      # weekly instead, in release-image-dryrun-arm64.yml, and for real on
-      # every tag by release.yml itself.
+      # on every push to develop by develop-image.yml (cleat#3370), weekly by
+      # release-image-dryrun-arm64.yml, and for real on every tag by
+      # release.yml itself.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 

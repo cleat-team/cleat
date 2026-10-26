@@ -1,0 +1,145 @@
+# ---------------------------------------------------------------------------
+# Develop image — publish cleat-worker on every push to develop
+#
+# cleat#3370. release.yml pushes ghcr.io/cleat-team/cleat-worker only on a v*
+# tag, so between releases the only way to run the worker at a develop sha was
+# `go build ./cmd/cleat-worker` with CGO on and wasmtime's headers present, on
+# every machine and in every CI job that wanted it. The first consumer is the
+# clew-service port, which by owner decision (2026-10-25) targets develop at a
+# PINNED sha rather than a release.
+#
+# Tags pushed, per develop commit:
+#
+#   develop-<first 9 hex of the sha>   what a consumer pins (`develop-34fec6ef7`)
+#   develop-<full 40-char sha>         the same manifest, unambiguous forever
+#   develop                            moving; a convenience, never a pin
+#
+# The image is built exactly as release.yml's `container-image` job builds the
+# release image -- same Dockerfile, same buildx, same two platforms -- so
+# Dockerfile's `RUN /cleat-worker --verify-backend` runs for each architecture
+# and a develop image cannot ship without the wasmtime backend either.
+#
+# Develop tags carry NO compatibility promise: no migration path between two
+# develop images, no upgrade path to the next release. See
+# docs/operations/container-images.md.
+#
+# WHY release-image-dryrun-arm64.yml IS KEPT. This builds arm64 on every merge,
+# which covers what the dry run exists for only while something is merging.
+# The Dockerfile's inputs also change WITHOUT a commit (apt packages, the
+# bookworm-slim base), and develop has gone eleven days with no push
+# (2026-10-14 to 2026-10-25), so the weekly cron is the only thing that sees
+# those between merges.
+# ---------------------------------------------------------------------------
+name: Develop Image
+
+on:
+  push:
+    branches: [develop]
+
+  # For the first image after this lands, or a re-publish after a failed run.
+  # Dispatch on develop: the job refuses any other ref before pushing.
+  workflow_dispatch: {}
+
+# Per-commit group, never cancelled: every develop commit should get its image,
+# and a shared group would let the next merge evict a queued run before it
+# starts (scripts/check-workflow-concurrency.sh).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish cleat-worker:develop-<sha> (linux/amd64, linux/arm64)
+    runs-on: ubuntu-26.04
+    # arm64 under QEMU emulates the whole build: measured 18m56s for the
+    # amd64+arm64 pair on #2076 (see the comment in ci.yml's release dry run).
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # A dispatch on a feature branch would otherwise publish that branch's
+      # head under a develop-* tag that no develop commit has.
+      - name: Refuse anything but develop
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/develop" ]; then
+            echo "::error::ref is '$GITHUB_REF'; develop-* images are published only from refs/heads/develop"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Required, and per job: buildx fails on linux/arm64 without it.
+      - name: Set up QEMU for the arm64 image leg
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute cleat-worker image tags
+        id: worker_image
+        run: |
+          set -euo pipefail
+          if ! [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GITHUB_SHA '$GITHUB_SHA' is not a 40-char hex sha -- refusing to guess a tag from it"
+            exit 1
+          fi
+          IMAGE="ghcr.io/cleat-team/cleat-worker"
+          {
+            echo "short=$IMAGE:develop-${GITHUB_SHA:0:9}"
+            echo "full=$IMAGE:develop-$GITHUB_SHA"
+            echo "moving=$IMAGE:develop"
+          } >> "$GITHUB_OUTPUT"
+
+      # Only the sha tags here. `:develop` is moved separately below, so that a
+      # slower build of an older commit cannot finish last and drag it back.
+      - name: Build and push cleat-worker image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.worker_image.outputs.short }}
+            ${{ steps.worker_image.outputs.full }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref.name=develop
+
+      # Move `:develop` only if this commit is still develop's head. Two merges
+      # seconds apart run in separate groups (above), and the older one can
+      # finish second. This narrows that race to the interval between the
+      # ls-remote and the retag rather than closing it -- which is why the tag
+      # is documented as a convenience and the sha tags as the pin.
+      - name: Move the develop tag if this is still develop's head
+        env:
+          FULL: ${{ steps.worker_image.outputs.full }}
+          MOVING: ${{ steps.worker_image.outputs.moving }}
+        run: |
+          set -euo pipefail
+          head="$(git ls-remote origin refs/heads/develop | cut -f1)"
+          if [ -z "$head" ]; then
+            echo "::error::could not read develop's head from origin; not moving $MOVING"
+            exit 1
+          fi
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "develop is now at $head, not $GITHUB_SHA -- leaving $MOVING to that commit's run"
+            exit 0
+          fi
+          docker buildx imagetools create --tag "$MOVING" "$FULL"
+          echo "moved $MOVING -> $FULL"
