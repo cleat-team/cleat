@@ -185,9 +185,10 @@ func (s *execSession) WaitForEvent(ctx context.Context, m api.Module,
 		// recorded value rather than anything computed here.
 		aw := s.DurableAwaitSignals(ctx, m, signalNames, waitMs, 0, 0, 0, 0)
 		if aw == callSuspendSentinel {
-			// DurableAwaitSignals refused the wait outright -- a defer segment, or
-			// a session that has already suspended. Propagate the refusal
-			// unchanged: the guest's suspend check decodes it as a stop.
+			// DurableAwaitSignals refused the wait outright (a defer segment, or
+			// a session that has already suspended) or, since cleat#3378,
+			// suspended on it. Propagate the stop unchanged: the guest's
+			// suspend check decodes it as a stop.
 			return aw
 		}
 		if s.suspendErr != nil {

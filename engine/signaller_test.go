@@ -84,9 +84,10 @@ func TestDurableAwaitSignals_ReplayWithAwaitNoSignal(t *testing.T) {
 
 	result := s.DurableAwaitSignals(context.Background(), nil, `["my-signal"]`, 5000, 0, 0, 0, 0)
 
-	timedOut := uint16((result >> 16) & 0xFFFF)
-	if timedOut != 1 {
-		t.Errorf("expected timedOut 1 (suspend), got %d", timedOut)
+	// A suspending await returns the stop, not a timed-out word the guest
+	// would act on. cleat#3378.
+	if result != callSuspendSentinel {
+		t.Errorf("expected callSuspendSentinel (suspend), got %016x", uint64(result))
 	}
 }
 
@@ -163,9 +164,10 @@ func TestDurableAwaitSignals_FreshNoSignalSuspends(t *testing.T) {
 
 	result := s.DurableAwaitSignals(context.Background(), nil, `["my-signal"]`, 5000, 0, 0, 0, 0)
 
-	timedOut := uint16((result >> 16) & 0xFFFF)
-	if timedOut != 1 {
-		t.Errorf("expected timedOut 1 (suspend), got %d", timedOut)
+	// A suspending await returns the stop, not a timed-out word the guest
+	// would act on. cleat#3378.
+	if result != callSuspendSentinel {
+		t.Errorf("expected callSuspendSentinel (suspend), got %016x", uint64(result))
 	}
 	if s.suspendErr == nil {
 		t.Fatal("expected suspendErr")

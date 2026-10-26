@@ -152,12 +152,14 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				// any replay that reaches the await before the signal arrives,
 				// and it is the ordinary case rather than an edge one.
 				//
-				// THE TWO PATHS RETURN THE SAME WORD AND DIFFER IN WHETHER THE
-				// RUN SUSPENDS, which is what made this survive: the fresh path
-				// below also returns timedOut=true, but it sets suspendErr
-				// first, so the segment ends and the guest never observes the
+				// THE TWO PATHS RETURNED THE SAME WORD AND DIFFERED IN WHETHER
+				// THE RUN SUSPENDED, which is what made this survive: the fresh
+				// path below also returned timedOut=true, on the belief that
+				// setting suspendErr first meant the guest never observed the
 				// value. Here nothing suspended, so the guest read it as a real
-				// timeout and ran on to its next await.
+				// timeout and ran on to its next await. (The belief was wrong
+				// for the fresh path too -- cleat#3378 -- and both now return
+				// suspendingAwaitResult.)
 				//
 				// That is what wrote the corrupt history cleat#933 reports.
 				// Measured, two straight-line awaits and one signal:
@@ -204,7 +206,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						rec.SignalNames, rec.TimeoutMs),
 					Until: time.UnixMilli(deadline),
 				}
-				return packAwaitSignalsResult(0, 0, true, 0)
+				return s.suspendingAwaitResult()
 			}
 		}
 		s.exitReplay()
@@ -221,11 +223,14 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 	// A SECOND AWAIT IN A SESSION THAT HAS ALREADY SUSPENDED IS ALSO NEW WORK,
 	// and missing that is cleat#933.
 	//
-	// A suspending await sets s.suspendErr and returns
+	// A suspending await set s.suspendErr and returned
 	// packAwaitSignalsResult(0, 0, true, 0) -- byte-identical to a genuine
-	// timeout. The guest cannot tell the two apart, so it runs on and the next
-	// await records a second await_signals into a segment that has already
-	// ended. Measured on a fresh session with an empty store:
+	// timeout. The guest could not tell the two apart, so it ran on and the
+	// next await recorded a second await_signals into a segment that had
+	// already ended. (Since cleat#3378 the suspending await itself returns the
+	// stop, so this guard is now the backstop for a guest that ignores it, and
+	// for the defer drain, which still gets the old word.) Measured on a fresh
+	// session with an empty store:
 	//
 	//	step 0  await_signals  ts=1788874160927
 	//	step 1  await_signals  ts=1788874160927   <- same millisecond
@@ -320,7 +325,33 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
 	}
 
-	return packAwaitSignalsResult(0, 0, true, 0)
+	return s.suspendingAwaitResult()
+}
+
+// suspendingAwaitResult is what an await that has just suspended the run hands
+// back to the guest: callSuspendSentinel, which every SDK's await_signals
+// binding reads as a stop before decoding any field -- Go panics ErrSuspend,
+// Rust returns Err(Suspended), Java throws, Python raises, AssemblyScript sets
+// its stop flag (IMPROVEMENT-PLAN 3.202). cleat#3378.
+//
+// It used to return packAwaitSignalsResult(0, 0, true, 0), on the belief that
+// setting suspendErr ended the segment before the guest could observe the
+// value. It did not. That word is byte-identical to a genuine timeout, the
+// guest ran on down its timeout branch, and the first call there that did not
+// check suspendErr executed: a PluginCall delivered a real webhook 5ms into a
+// 120s wait, and its plugin_call record then committed every replay to the
+// same false timeout. The only call that did stop it was a second await
+// (cleat#933's guard below), which is why a loop of awaits looked fine.
+//
+// EXCEPT INSIDE THE HOST-RUN DEFER DRAIN, for the reason the cleat#933 guard
+// exempts it: there the host is running the guest's cleanup itself, and a stop
+// raised from inside a defer body would abandon the cleanup after it. The run
+// still suspends -- suspendErr is set either way.
+func (s *execSession) suspendingAwaitResult() int64 {
+	if s.inDeferDrain {
+		return packAwaitSignalsResult(0, 0, true, 0)
+	}
+	return callSuspendSentinel
 }
 
 func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reasonPtr, reasonMaxLen uint32) int64 {

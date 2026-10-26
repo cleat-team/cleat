@@ -27,7 +27,10 @@ var goFixtureExpectations = map[string]string{
 	// "" means analysis must report no threading errors.
 	"allhostcalls": "",
 	"autothread":   "",
-	"basic":        "",
+	// cleat#3378: AwaitSignals -> PluginCall on timeout -> AwaitSignals, one
+	// entry point taking one struct. Must verify cleanly.
+	"awaittimeoutbranch": "",
+	"basic":              "",
 	// cleat#1065: the Go reader for tests/conformance/entry_point_binding_cases.json.
 	"bindingconformance": "",
 	"cancelpoll":         "",
