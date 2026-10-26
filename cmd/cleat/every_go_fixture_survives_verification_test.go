@@ -37,6 +37,8 @@ var goFixtureExpectations = map[string]string{
 	"clew-lifecycle":     "",
 	"crashcall":          "",
 	"crosslang":          "",
+	// cleat#3408: one entry point, one string input, one DurableFetch. Must verify cleanly.
+	"fetchprobe": "",
 	// cleat#1617: its only host-call route is cleat/dagrun, whose needs are
 	// declared by a //cleat:require directive in that package rather than in
 	// this fixture. It must verify cleanly -- if it does not, the directive is

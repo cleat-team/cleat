@@ -7,11 +7,12 @@
 // **It is workflow-only, and the rope side is a placeholder.** Your PSP, your
 // inventory system and your 3PL are not called. A durable call that reaches an
 // external system resolves BY NAME to a plugin (engine/app.go), and this is one
-// example directory rather than a plugin set; the SDK's generic outbound-HTTP
-// call is embedder-only and cannot serve a stock cleat-worker (ABI.md 2.48).
-// So each rope-side step is a recorded DurableSleep standing where the round
-// trip goes — the same shape cmd/cleat/templates/fullstack uses, and for the
-// same reason. The seam is marked in each function.
+// example directory rather than a plugin set. The SDK's generic outbound-HTTP
+// call does work on a stock cleat-worker, but only for hosts the tenant's egress
+// allowlist permits (docs/operations/egress-policy.md), and a PSP wants its own
+// credentials and retry rules besides. So each rope-side step is a recorded
+// DurableSleep standing where the round trip goes — the same shape
+// cmd/cleat/templates/fullstack uses. The seam is marked in each function.
 //
 // What is REAL, and it is the part the playbook is about:
 //
@@ -365,10 +366,11 @@ func PlaceOrder(h cleat.HostCalls, input string) (string, error) {
 // Your PSP, your inventory system and your 3PL are reached from a workflow by
 // a durable call that resolves BY NAME to a plugin (`engine/app.go`), and this
 // scenario ships none — it is one example directory, not a plugin set. The
-// cleat SDK's generic outbound-HTTP call, `DurableCall("http", "fetch", …)`, is
-// **embedder-only** and cannot serve a stock `cleat-worker` (ABI.md 2.48). So
-// the honest shape is what `cmd/cleat/templates/fullstack` already does for the
-// same reason: a recorded `DurableSleep` standing where the round trip goes.
+// cleat SDK's generic outbound-HTTP call, `DurableCall("http", "fetch", …)`,
+// works on a stock `cleat-worker` for hosts the tenant's egress allowlist
+// permits (docs/operations/egress-policy.md), and this scenario allows none. So
+// the honest shape is what `cmd/cleat/templates/fullstack` already does: a
+// recorded `DurableSleep` standing where the round trip goes.
 //
 // Each placeholder is:
 //

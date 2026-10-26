@@ -54,6 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Go SDK's `DurableFetch` (and so `FetchGet`, `DurableFetchJSON`, `FetchGetJSON`) returned
+  status 0 for every response on a real worker, and so did the Java SDK's `cleatFetch`.** Closes
+  cleat#3408. Both decoded `{"status_code":N}`; the worker's `http.fetch` and the embedded runner
+  answer `{"status":N,"headers":{...},"body":"..."}`, which the Rust, Python and AssemblyScript SDKs
+  already read. The Go SDK's own tests stubbed the host with the key it read, so nothing noticed.
+  Both now read `status` and still accept `status_code` when `status` is absent, for an embedder's
+  `Fetcher` that chose the old key. A new test runs a real Go guest's `DurableFetch` through the
+  real worker handler. Four documents (the order-lifecycle playbook, the fullstack template README
+  and `main.go`, `examples/order-lifecycle`) also said `DurableCall("http","fetch")` was
+  embedder-only and could not run on a stock worker; it can, for hosts the tenant's egress
+  allowlist permits.
+
 - **`Selector.Select` races a pending child against its timers and signals.** Closes cleat#3369.
   The children were checked with `AwaitChild`, which suspends on a running child, so a workflow
   that added a child, a timer and a signal woke only when the child finished: the timer and the
