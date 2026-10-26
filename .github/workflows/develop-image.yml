@@ -178,11 +178,23 @@ jobs:
           set -euo pipefail
           case "$GITHUB_REF" in
             refs/heads/release/*)
-              if docker buildx imagetools inspect "$FULL" >/dev/null 2>&1; then
+              # Three outcomes, not two. Only ": not found" means the tag is
+              # absent. A network error, a registry 5xx or an authorization
+              # failure says nothing about whether it exists, and reading it as
+              # "absent" would repoint an rc tag on a blip -- the thing this
+              # step is here to prevent. So anything else stops the job.
+              if out="$(docker buildx imagetools inspect "$FULL" 2>&1)"; then
                 echo "$FULL already exists; leaving it as it is (an rc tag is written once)"
                 echo "exists=true" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
+              case "$out" in
+                *": not found"*) ;;
+                *)
+                  echo "::error::could not tell whether $FULL exists; refusing to risk repointing it: $out"
+                  exit 1
+                  ;;
+              esac
               ;;
           esac
           echo "exists=false" >> "$GITHUB_OUTPUT"

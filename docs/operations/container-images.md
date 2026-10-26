@@ -48,6 +48,9 @@ instead of building the worker with CGO from the branch.
   neither, or if it cannot tell. "Protected" is the floor, not a review
   guarantee: a rule that only forbids force-push satisfies it. Requiring a pull
   request on `release/**` is a repository ruleset, and it is the owner's to add.
+  The check also lives in the workflow file of the pushed ref, so it stops a
+  mistake, not a writer who edits it away; that control is the ruleset plus the
+  organisation's Actions and package settings.
 - **An `rc-<40-hex sha>` tag is written once.** A re-run for a sha that already
   has the tag leaves the existing image alone, so the tag keeps pointing at the
   digest it was first given. To rebuild one on purpose, delete the tag first.
