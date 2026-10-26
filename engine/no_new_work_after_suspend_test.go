@@ -173,3 +173,43 @@ func TestADeliveryStillSatisfiesTheFirstAwait(t *testing.T) {
 		t.Error("suspended even though a delivery was available")
 	}
 }
+
+// TestASuspendingAwaitInsideTheHostRunDeferDrainKeepsTheTimeoutWord pins the
+// one exemption in suspendingAwaitResult (cleat#3378). Inside the drain the
+// host runs itself -- runGuestDefersAfterSuspend, bracketed by setDeferDrain --
+// _cleatRunDeferred has already taken the whole defer table, so a stop raised
+// from one defer body would consume the cleanup after it rather than skip it.
+// The run still suspends; only the word differs.
+//
+// The control half is an ordinary segment, which must get the stop. Without it, this would pass against a suspendingAwaitResult that
+// had stopped returning the sentinel anywhere.
+//
+// Not covered here, deliberately: the GUEST-drained defers at a
+// continue-as-new boundary. ContinueAsNew sets suspendErr before it returns
+// to the guest, so an await in those defers is answered by the cleat#933
+// guard (TestASecondAwaitAfterASuspendRecordsNothing) before it can reach
+// suspendingAwaitResult at all.
+func TestASuspendingAwaitInsideTheHostRunDeferDrainKeepsTheTimeoutWord(t *testing.T) {
+	for _, drain := range []bool{true, false} {
+		s := freshSuspendSession(t)
+		// The drain only exists inside a defer segment; the control is an
+		// ordinary segment (a defer segment outside the bracket refuses the
+		// await outright via stopBeforeNewWork and never suspends).
+		s.engine.deferPhase = drain
+		s.inDeferDrain = drain
+
+		packed := awaitOnce(s)
+
+		if s.suspendErr == nil {
+			t.Fatalf("drain=%v: the await did not suspend", drain)
+		}
+		switch {
+		case drain && packed != packAwaitSignalsResult(0, 0, true, 0):
+			t.Errorf("inside the host-run drain the await returned %016x, want the timed-out "+
+				"word: a stop here would abandon the cleanup after this defer body", uint64(packed))
+		case !drain && packed != callSuspendSentinel:
+			t.Errorf("in an ordinary segment the await returned %016x, want "+
+				"callSuspendSentinel", uint64(packed))
+		}
+	}
+}
