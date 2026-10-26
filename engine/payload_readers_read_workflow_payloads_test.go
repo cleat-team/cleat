@@ -286,7 +286,7 @@ func TestAClaimOfARunWithNoPayloadsRowFailsLoudly(t *testing.T) {
 		t.Fatalf("ClaimWorkflows = %v, nil; want an error for a run with no workflow_payloads row", wfs)
 	}
 	var status string
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&status); err != nil {
+	if err := db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "ready" {

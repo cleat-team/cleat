@@ -123,7 +123,7 @@ func TestConcurrencyKeyConflict_RejectedRunIsNotClaimable(t *testing.T) {
 			var status string
 			var assigned any
 			if qerr := adminDB.QueryRowContext(ctx,
-				`SELECT status, assigned_to FROM workflow_instances WHERE id = $1`, rejectedID,
+				`SELECT status, assigned_to FROM workflow_leases WHERE id = $1`, rejectedID,
 			).Scan(&status, &assigned); qerr != nil {
 				t.Fatalf("post-claim status query: %v", qerr)
 			}
@@ -177,7 +177,7 @@ func TestFailWorkflowFenceCannotMatchUnclaimedRun(t *testing.T) {
 
 	var status string
 	if err := adminDB.QueryRowContext(ctx,
-		`SELECT status FROM workflow_instances WHERE id = $1`, runID,
+		`SELECT status FROM workflow_leases WHERE id = $1`, runID,
 	).Scan(&status); err != nil {
 		t.Fatalf("status query: %v", err)
 	}

@@ -2110,13 +2110,6 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: scan: %w", err)
 	}
-	// cleat#3245 Phase 3 step 2 piece 6b: mirror onto workflow_leases, on the
-	// same tx -- the exact set of ids the UPDATE above just reclaimed,
-	// captured via RETURNING rather than re-run against workflow_leases'
-	// own heartbeat_at/status columns. Piece 3 keeps those in sync, so the
-	// two subqueries SHOULD already agree, but capturing avoids depending on
-	// that agreement holding -- the same reasoning pieces 1/4b/4d use for
-	// RETURNING over re-deriving.
 	return len(reapedIDs), tx.Commit()
 }
 
