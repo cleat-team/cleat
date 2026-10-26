@@ -200,7 +200,7 @@ func awaitReleaseNotTerminal(t *testing.T, db *sql.DB, id string, w *worker) {
 func workflowOutcome(t *testing.T, db *sql.DB, id string) (status, errMsg, result string) {
 	t.Helper()
 	var msg, res sql.NullString
-	if err := db.QueryRow(`SELECT status, error_msg, result::text FROM workflow_instances WHERE id = $1`, id).
+	if err := db.QueryRow(`SELECT w.status, p.error_msg, p.result::text FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
 		Scan(&status, &msg, &res); err != nil {
 		t.Fatalf("reading %s: %v", id, err)
 	}

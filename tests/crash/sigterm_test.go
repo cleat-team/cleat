@@ -44,7 +44,7 @@ func awaitExit(t *testing.T, ch <-chan error, budget time.Duration, w *worker) {
 func runRow(t *testing.T, db *sql.DB, id string) (status, errMsg string) {
 	t.Helper()
 	var msg sql.NullString
-	if err := db.QueryRow(`SELECT status, error_msg FROM workflow_instances WHERE id = $1`, id).Scan(&status, &msg); err != nil {
+	if err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).Scan(&status, &msg); err != nil {
 		t.Fatalf("reading %s: %v", id, err)
 	}
 	return status, msg.String

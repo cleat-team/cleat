@@ -143,7 +143,7 @@ func TestWorkerShutdownAbortsADurableCallsHostBackoffWait(t *testing.T) {
 	// deploy lost the run. Released, it is `ready` again with no owner, for another worker to replay.
 	var status string
 	var errMsg sql.NullString
-	if err := db.QueryRowContext(ctx, `SELECT status, error_msg FROM workflow_instances WHERE id = $1`, wfID).Scan(&status, &errMsg); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT w.status, p.error_msg FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, wfID).Scan(&status, &errMsg); err != nil {
 		t.Fatalf("reading the run's status: %v", err)
 	}
 	if status != "ready" {
@@ -257,7 +257,7 @@ func TestShutdownDuringABackoffNeverReachesAGuestThatCompensates(t *testing.T) {
 			}
 			var status string
 			var errMsg sql.NullString
-			if err := db.QueryRowContext(ctx, `SELECT status, error_msg FROM workflow_instances WHERE id = $1`, wfID).Scan(&status, &errMsg); err != nil {
+			if err := db.QueryRowContext(ctx, `SELECT w.status, p.error_msg FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, wfID).Scan(&status, &errMsg); err != nil {
 				t.Fatalf("reading the run's status: %v", err)
 			}
 			if status != "ready" {
