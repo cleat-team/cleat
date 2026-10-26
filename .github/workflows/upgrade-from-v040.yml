@@ -1,0 +1,121 @@
+# ---------------------------------------------------------------------------
+# Upgrade From v0.4.0 (cleat#3386, gate G4 of the 0.5.0 runbook)
+#
+# Seeds a database with the PUBLISHED v0.4.0 cleat-worker, then runs the release
+# candidate against it. Owner decision D18 (cleat#3405): 0.5.0 requires a fresh
+# database, so what is asserted is not an in-place upgrade but two halves, each
+# reported on its own so a red job says which is missing:
+#
+#   REFUSAL  the RC's --migrate-only AND its boot refuse a database a v0.4.0
+#            worker wrote, loudly, by name. The refusal is WS-cleat's (B5); until
+#            it lands this half is red, and its message says MISSING.
+#   FRESH    the same binary migrates a fresh database and serves it. This is the
+#            control for the first half: a refusal means something only if the
+#            same binary demonstrably works on a fresh database.
+#
+# `--expect upgrade` in scripts/upgrade_from_v040.py runs the in-place variant
+# (migrate, resume the in-flight runs, a corrupted-checksum control) for the day
+# the owner reverses D18.
+#
+# WHERE IT RUNS, and why not on every PR or on develop. It runs on a push to a
+# release/** branch and on demand. Until the refusal lands it is expected to be
+# red, and a red check on develop is stop-the-line (WORKSTREAM.md R10), which is
+# the wrong response to a known-missing feature. The PR trigger runs only the
+# harness self-test, which is cheap and green. Runtime on develop has not been
+# measured; measure before adding a develop trigger.
+#
+# Exit statuses: 0 passed, 1 a finding, 2 UNMEASURED (the check could not look,
+# which is a failure of the check, not a finding about cleat).
+# ---------------------------------------------------------------------------
+name: Upgrade From v0.4.0
+
+on:
+  push:
+    branches: ["release/**"]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - scripts/upgrade_from_v040.py
+      - scripts/upgrade-from-v040/**
+      - .github/workflows/upgrade-from-v040.yml
+  workflow_dispatch:
+
+# Keyed on the commit for pushes, so one queued release-branch run is never
+# cancelled by the next push (GitHub keeps one pending run per group, and a
+# cancelled run is a gate that did not run); superseded PR runs are cancelled.
+# scripts/check-workflow-concurrency.sh requires exactly this shape.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    name: Upgrade harness self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Self-test
+        run: python3 scripts/upgrade_from_v040.py --self-test
+
+  upgrade-from-v040:
+    name: Upgrade From v0.4.0 (PostgreSQL)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # 127.0.0.1, not localhost: see engine-race.yml.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # An EMPTY database: the seed script migrates it with the v0.4.0 worker.
+      OWNER_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      STATE_DIR: ${{ github.workspace }}/.upgrade-state
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # CGO on: with it off there is no WASM backend and the worker exits 1
+      # at startup (CLAUDE.md, "Build and test with CGO on"). --verify-backend
+      # turns that into a failure HERE rather than a refusal-shaped one below.
+      - name: Build the release candidate's cleat-worker
+        run: |
+          go build -o "$RUNNER_TEMP/cleat-worker-rc" ./cmd/cleat-worker
+          "$RUNNER_TEMP/cleat-worker-rc" -verify-backend
+
+      - name: Seed a database with the published v0.4.0
+        run: python3 scripts/upgrade_from_v040.py seed --owner-db "$OWNER_DB" --state-dir "$STATE_DIR"
+
+      - name: The RC refuses it, and serves a fresh database
+        run: python3 scripts/upgrade_from_v040.py verify --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
+
+      - name: Upload worker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-from-v040-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .upgrade-state/*.log
+            .upgrade-state/manifest.json
+          retention-days: 14
+          if-no-files-found: ignore

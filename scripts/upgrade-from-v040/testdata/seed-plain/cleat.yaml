@@ -1,0 +1,8 @@
+# One of the three definitions scripts/seed-v040-database.sh deploys to a
+# cleat-worker v0.4.0. Built by the PUBLISHED v0.4.0 `cleat` against the
+# PUBLISHED v0.4.0 SDK, in a throwaway module the script writes, so the history
+# it leaves behind is what a v0.4.0 guest wrote. See that script's header.
+name: seed-plain
+language: go
+entry_points:
+  - plain

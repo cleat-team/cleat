@@ -1,0 +1,4 @@
+name: seed-parent
+language: go
+entry_points:
+  - parent

@@ -1,0 +1,4 @@
+name: seed-waiter
+language: go
+entry_points:
+  - wait
