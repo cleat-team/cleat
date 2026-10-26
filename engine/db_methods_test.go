@@ -3865,8 +3865,15 @@ func TestPostgresStore_AppendEventHistory_Success(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_TraceWorkflow_Success(t *testing.T) {
+	// The mock accepts any statement it has no entry for, so record which
+	// ones ran: since cleat#3245 B1b trace_id is written to workflow_payloads
+	// and never to workflow_instances.
+	var wrotePayload, wroteInstance bool
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET trace_id", affected: 1},
+		{match: "UPDATE workflow_payloads SET trace_id", affected: 1,
+			sideEffect: func(*[]mockRowsResult, *[]mockExecResult) { wrotePayload = true }},
+		{match: "UPDATE workflow_instances SET trace_id", affected: 1,
+			sideEffect: func(*[]mockRowsResult, *[]mockExecResult) { wroteInstance = true }},
 	})
 	defer db.Close()
 
@@ -3874,6 +3881,12 @@ func TestPostgresStore_TraceWorkflow_Success(t *testing.T) {
 	err := store.TraceWorkflow(testCtx, "wf-1", "trace-1")
 	if err != nil {
 		t.Fatalf("TraceWorkflow: %v", err)
+	}
+	if !wrotePayload {
+		t.Error("TraceWorkflow did not write trace_id to workflow_payloads")
+	}
+	if wroteInstance {
+		t.Error("TraceWorkflow wrote trace_id to workflow_instances, which no reader reads")
 	}
 }
 

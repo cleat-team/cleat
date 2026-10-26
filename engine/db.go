@@ -1915,10 +1915,13 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 		}
 		// cleat#3245 B1b: workflow_payloads only. compaction_state is no
 		// longer written to workflow_instances, so there is no instance-side
-		// copy to clear. Only payload rows are locked here: the instance read
-		// in the predicate takes no lock, so this cannot form a cycle with
-		// deleteCompletedWorkflowsBatch, which locks the instance row and then
-		// the payload row through the ON DELETE CASCADE.
+		// copy to clear. Only payload rows are locked here -- the instance read
+		// in the predicate takes no lock -- so the lock-ORDER inversion against
+		// deleteCompletedWorkflowsBatch (instance row, then the payload row
+		// through the ON DELETE CASCADE) that B1a's two-table version had is
+		// gone. Two batches over overlapping rows can still deadlock on ROW
+		// order, as any two batched writers can; that ends in 40P01, this
+		// transaction rolls back, and the sweep tries again next tick.
 		res, err := tx.ExecContext(ctx, `
 			UPDATE workflow_payloads
 			SET compaction_state = NULL, compaction_step = NULL

@@ -163,6 +163,13 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 					status, errMsg, right.output())
 			}
 			_, _, result = workflowOutcome(t, db, wfID)
+			// The positive half first: an empty result also contains no
+			// sentinel, so without it the check below passes when nothing was
+			// stored at all -- which it did for as long as this read
+			// workflow_instances after cleat#3245 B1b stopped writing there.
+			if result == "" {
+				t.Fatalf("the run ended done but stored no result")
+			}
 			if strings.Contains(result, "DECRYPTION_FAILED") {
 				t.Fatalf("result carries the decryption sentinel: %s", result)
 			}
