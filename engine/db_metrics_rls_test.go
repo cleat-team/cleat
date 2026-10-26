@@ -62,6 +62,14 @@ func TestMetricsQueriesWorkUnderRLS(t *testing.T) {
 		tenant, stalled); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	// CountStalledWorkflows reads status, created_at and heartbeat_at from
+	// workflow_leases (heartbeat_at's only copy since cleat#3245 B2).
+	if _, err := adminDB.Exec(
+		`INSERT INTO workflow_leases (id, tenant_id, status, created_at, heartbeat_at)
+		 VALUES ('rls-metrics-wf', $1, 'running', $2, $2)`,
+		tenant, stalled); err != nil {
+		t.Fatalf("seed workflow_leases: %v", err)
+	}
 	if _, err := adminDB.Exec(
 		`INSERT INTO event_history (workflow_id, step, event_type, tenant_id)
 		 VALUES ('rls-metrics-wf', 1, 'call', $1)`, tenant); err != nil {

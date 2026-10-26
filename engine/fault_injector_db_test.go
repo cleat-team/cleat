@@ -90,6 +90,12 @@ func TestInjectClockSkewActuallyMovesHeartbeats(t *testing.T) {
 		 VALUES ('fi-wf-2', 'fi-def', 1, 'running', '{}', $1, now())`, tenant); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}
+	// InjectClockSkew moves workflow_leases.heartbeat_at, its only copy since
+	// cleat#3245 B2 and the one the reaper reads.
+	if _, err := db.Exec(
+		`INSERT INTO workflow_leases (id, tenant_id, status, heartbeat_at) VALUES ('fi-wf-2', $1, 'running', now())`, tenant); err != nil {
+		t.Fatalf("seed workflow_leases: %v", err)
+	}
 
 	fi := NewFaultInjector(db)
 	if err := fi.InjectClockSkew(2 * time.Hour); err != nil {
@@ -98,7 +104,7 @@ func TestInjectClockSkewActuallyMovesHeartbeats(t *testing.T) {
 
 	var ahead bool
 	if err := db.QueryRow(
-		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_instances WHERE id = 'fi-wf-2'`).
+		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_leases WHERE id = 'fi-wf-2'`).
 		Scan(&ahead); err != nil {
 		t.Fatalf("reading heartbeat: %v", err)
 	}
@@ -110,7 +116,7 @@ func TestInjectClockSkewActuallyMovesHeartbeats(t *testing.T) {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if err := db.QueryRow(
-		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_instances WHERE id = 'fi-wf-2'`).
+		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_leases WHERE id = 'fi-wf-2'`).
 		Scan(&ahead); err != nil {
 		t.Fatalf("reading heartbeat after cleanup: %v", err)
 	}

@@ -113,14 +113,12 @@ func TestHeartbeatUpdatesTheLeaseRow(t *testing.T) {
 
 	postInst := readInstanceHeartbeatAt(t, db, id)
 	postLease := readLeaseHeartbeatAt(t, db, id)
-	if !postInst.After(preInst) {
-		t.Errorf("workflow_instances.heartbeat_at did not advance: pre=%v post=%v", preInst, postInst)
-	}
 	if !postLease.After(preLease) {
 		t.Errorf("workflow_leases.heartbeat_at did not advance: pre=%v post=%v", preLease, postLease)
 	}
-	if !postInst.Equal(postLease) {
-		t.Errorf("workflow_instances.heartbeat_at (%v) disagrees with workflow_leases.heartbeat_at (%v)", postInst, postLease)
+	// cleat#3245 B2: heartbeat_at is written to workflow_leases only.
+	if !postInst.Equal(preInst) {
+		t.Errorf("workflow_instances.heartbeat_at moved (pre=%v post=%v) -- a heartbeat must not rewrite the instance row", preInst, postInst)
 	}
 }
 
@@ -176,6 +174,7 @@ func TestHeartbeatBatchFencedUpdatesTheLeaseRows(t *testing.T) {
 	// must not advance.
 	seedClaimedInstanceAndLeaseRow(t, db, staleID, defName, worker, 1)
 
+	preLiveInst := readInstanceHeartbeatAt(t, db, liveID)
 	preLiveLease := readLeaseHeartbeatAt(t, db, liveID)
 	preStaleLease := readLeaseHeartbeatAt(t, db, staleID)
 
@@ -195,8 +194,9 @@ func TestHeartbeatBatchFencedUpdatesTheLeaseRows(t *testing.T) {
 	if !postLiveLease.After(preLiveLease) {
 		t.Errorf("workflow_leases.heartbeat_at for the live id did not advance: pre=%v post=%v", preLiveLease, postLiveLease)
 	}
-	if !postLiveInst.Equal(postLiveLease) {
-		t.Errorf("workflow_instances.heartbeat_at (%v) disagrees with workflow_leases.heartbeat_at (%v) for the live id", postLiveInst, postLiveLease)
+	// cleat#3245 B2: heartbeat_at is written to workflow_leases only.
+	if !postLiveInst.Equal(preLiveInst) {
+		t.Errorf("workflow_instances.heartbeat_at for the live id moved (pre=%v post=%v) -- a heartbeat must not rewrite the instance row", preLiveInst, postLiveInst)
 	}
 
 	postStaleLease := readLeaseHeartbeatAt(t, db, staleID)

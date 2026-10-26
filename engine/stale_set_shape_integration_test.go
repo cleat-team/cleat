@@ -91,6 +91,14 @@ func TestStaleSetShapePostgresAgainstARealDatabase(t *testing.T) {
 			ids[i], assignedTo, ageSeconds, store.tenantID); err != nil {
 			t.Fatalf("seeding row %d: %v", i, err)
 		}
+		// StaleSetShape reads workflow_leases, which holds heartbeat_at's
+		// only copy since cleat#3245 B2.
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at)
+			VALUES ($1, $4, 'running', $2, now() - make_interval(secs => $3))`,
+			ids[i], assignedTo, ageSeconds, store.tenantID); err != nil {
+			t.Fatalf("seeding lease row %d: %v", i, err)
+		}
 	}
 	t.Cleanup(func() {
 		for _, id := range ids {
@@ -109,7 +117,7 @@ func TestStaleSetShapePostgresAgainstARealDatabase(t *testing.T) {
 	})
 
 	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET heartbeat_at = now() - interval '1 hour' WHERE id = ANY($1)`,
+		`UPDATE workflow_leases SET heartbeat_at = now() - interval '1 hour' WHERE id = ANY($1)`,
 		pgTextArray(ids)); err != nil {
 		t.Fatalf("age every row: %v", err)
 	}

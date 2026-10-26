@@ -343,7 +343,6 @@ func (s *PostgresStore) claimWorkflowsOnce(ctx context.Context, workerID string,
 		    signal_consumed_at_claim = w.signal_consumed_seq,
 		    promise_seq_at_claim = w.promise_seq,
 		    assigned_to = $1,
-		    heartbeat_at = now(),
 		    started_at = COALESCE(w.started_at, now()),
 		    generation = w.generation + 1
 		FROM unnest($2::text[]) AS c(id)`+claimPayloadJoinSQL+`
@@ -704,7 +703,6 @@ func (s *PostgresStore) claimStickyWorkflowsOnce(ctx context.Context, workerID s
 		    signal_consumed_at_claim = w.signal_consumed_seq,
 		    promise_seq_at_claim = w.promise_seq,
 		    assigned_to = $1,
-		    heartbeat_at = now(),
 		    started_at = COALESCE(w.started_at, now()),
 		    generation = w.generation + 1
 		FROM candidates c`+claimPayloadJoinSQL+`
@@ -1655,7 +1653,7 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
+		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL,
 		    next_wake_at = now()
 		WHERE id = $1 AND status = 'dead_lettered'
 	`, workflowID)
@@ -2239,14 +2237,15 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	// #3358), status/heartbeat_at, never read from until now) for
 	// exactly this query. The outer UPDATE still targets
 	// workflow_instances by id, unaffected by where the candidate ids came
-	// from; piece 6b's dual-write already keeps workflow_leases'
-	// status/heartbeat_at in sync with workflow_instances', and the piece
-	// found scoping this piece (#3329) closed the one gap in that.
+	// from; piece 6b's dual-write keeps workflow_leases' status in sync with
+	// workflow_instances' (the piece found scoping this piece, #3329, closed
+	// the one gap in that), and since cleat#3245 B2 heartbeat_at is written
+	// to workflow_leases only.
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
-		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    assigned_to = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
 		    SELECT id FROM workflow_leases
@@ -2372,7 +2371,7 @@ func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout ti
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
-		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    assigned_to = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
 		    SELECT id FROM workflow_leases
@@ -2433,7 +2432,7 @@ func (s *PostgresStore) StaleSetShape(ctx context.Context, timeout, missedBeatTi
 		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $2::interval),
 		    (CASE WHEN MAX(heartbeat_at) < now() - $1::interval THEN true ELSE false END),
 		    COUNT(DISTINCT assigned_to)
-		FROM workflow_instances
+		FROM workflow_leases -- cleat#3245 B2: heartbeat_at's only copy
 		WHERE status = 'running'
 	`, fmt.Sprintf("%d milliseconds", missedBeatTimeout.Milliseconds()),
 		fmt.Sprintf("%d milliseconds", timeout.Milliseconds()),
