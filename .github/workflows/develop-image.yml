@@ -53,15 +53,15 @@ on:
   # Dispatch on develop or a release/** branch: the job refuses any other ref
   # before pushing.
   #
-  # dry_run exists so the reviewed-sha gate below can be exercised without
+  # dry_run exists so the landed-sha gate below can be exercised without
   # publishing anything, and without creating a release/** branch (the release
   # ruleset forbids deleting one, so a test branch would stay). With dry_run the
-  # `reviewed` job judges check_branch@check_sha and `publish` is skipped. Dispatch
+  # `landed` job judges check_branch@check_sha and `publish` is skipped. Dispatch
   # it on develop.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Only judge check_branch@check_sha with the reviewed-sha gate; publish nothing"
+        description: "Only judge check_branch@check_sha with the landed-sha gate; publish nothing"
         type: boolean
         default: false
       check_branch:
@@ -92,21 +92,24 @@ jobs:
   # that is true of release/x however it was created, because the release/**
   # ruleset has no `creation` rule and cannot usefully have one (every stream
   # pushes as the owner). So this asks about the COMMIT the rc-<sha> tag names:
-  # see scripts/check-rc-sha-reviewed.py for the two arms and the exit statuses.
+  # see scripts/check-rc-sha-landed.py for the two arms, the first-parent walk
+  # and the exit statuses. "Landed" is a claim about the path (develop's merge
+  # queue, or a merged PR into this branch under the ruleset's required checks),
+  # not about a person reading it: the ruleset requires 0 approvals.
   #
-  # WHAT THIS IS, AND IS NOT. It prevents an ACCIDENTAL rc image from an
-  # unreviewed commit. It is not an authorization control, because repository
-  # write access already implies the ability to publish packages: any branch a
-  # writer pushes can carry a workflow that grants itself `packages: write` and
-  # pushes to ghcr.io/cleat-team/cleat-worker under any tag, with or without this
-  # file. Separately, a push runs the workflow file AT THE PUSHED COMMIT, so a
+  # WHAT THIS IS, AND IS NOT. It prevents an ACCIDENTAL rc image from a
+  # commit that did not land the sanctioned way. It is not an authorization
+  # control, because repository write access already implies the ability to
+  # publish packages: any branch a writer pushes can carry a workflow that grants
+  # itself `packages: write` and pushes to ghcr.io/cleat-team/cleat-worker under
+  # any tag, with or without this file. Separately, a push runs the workflow file AT THE PUSHED COMMIT, so a
   # release/x created with this file edited would not run this job at all (GitHub's
   # documented behaviour for push events; not tested here, since a test needs a
   # real release/** branch that nobody can delete). The boundary is the
   # repository's write list; consumers should trust release tags (vX.Y.Z) built
   # by release.yml, and treat develop-* and rc-* as unpromised.
-  reviewed:
-    name: Verify the commit being published is reviewed code
+  landed:
+    name: Verify the commit being published landed through develop or a pull request
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -115,11 +118,11 @@ jobs:
       - name: Checkout the gate script only
         uses: actions/checkout@v7
         with:
-          sparse-checkout: scripts/check-rc-sha-reviewed.py
+          sparse-checkout: scripts/check-rc-sha-landed.py
           sparse-checkout-cone-mode: false
 
       - name: Self-test the gate
-        run: python3 scripts/check-rc-sha-reviewed.py --self-test
+        run: python3 scripts/check-rc-sha-landed.py --self-test
 
       - name: Judge the commit
         env:
@@ -140,16 +143,16 @@ jobs:
               refs/heads/release/*) branch="$GITHUB_REF_NAME"; sha="$GITHUB_SHA" ;;
               *)
                 # develop-* images come from the merge queue; nothing to judge.
-                echo "$GITHUB_REF is not a release branch; the reviewed-sha gate does not apply"
+                echo "$GITHUB_REF is not a release branch; the landed-sha gate does not apply"
                 exit 0
                 ;;
             esac
           fi
-          python3 scripts/check-rc-sha-reviewed.py --repo "$GITHUB_REPOSITORY" --branch "$branch" --sha "$sha"
+          python3 scripts/check-rc-sha-landed.py --repo "$GITHUB_REPOSITORY" --branch "$branch" --sha "$sha"
 
   publish:
     name: Publish cleat-worker image (linux/amd64, linux/arm64)
-    needs: reviewed
+    needs: landed
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-26.04
     # arm64 under QEMU emulates the whole build: measured 18m56s for the
