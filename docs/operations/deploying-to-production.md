@@ -8,6 +8,10 @@ and graceful shutdown for running cleat in production.
 > [egress-policy.md](egress-policy.md). An unconfigured tenant reaches nothing,
 > which is deliberate.
 
+> **Which image to run.** Release tags (`vX.Y.Z`) are the deployable ones;
+> `develop-*` tags are published on every merge and carry no compatibility
+> promise. See [container-images.md](container-images.md).
+
 ## Migrate the schema first
 
 A worker does not migrate the database when it starts: a normal start verifies the
