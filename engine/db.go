@@ -471,25 +471,14 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 	}
 	defer tx.Rollback()
 
-	// cleat#3245 B2: heartbeat_at is written to workflow_leases only, so a
-	// heartbeat no longer rewrites the workflow_instances row. The fence stays
-	// on workflow_instances, which claims and reaps still update first: FOR NO
-	// KEY UPDATE takes the row lock the UPDATE here used to take, so a reclaim
-	// either commits before it (and the fence matches nothing) or waits until
-	// this transaction commits.
-	var fenced string
-	err = tx.QueryRowContext(ctx, `
-		SELECT id FROM workflow_instances
-		WHERE id = $1 AND assigned_to = $2 AND generation = $3
-		FOR NO KEY UPDATE
-	`, workflowID, workerID, generation).Scan(&fenced)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, tx.Commit()
-	}
-	if err != nil {
-		return false, fmt.Errorf("heartbeat: %w", err)
-	}
-
+	// cleat#3245 B2 moved heartbeat_at to workflow_leases, and B3b moved the
+	// fence there too: this one UPDATE is the whole heartbeat. It takes the
+	// lease row's lock, and a reclaim mirrors its generation bump onto that
+	// row in its own transaction, so the two serialize on it. A reclaim that
+	// commits first leaves the predicate matching nothing -- an UPDATE that
+	// waited on the row re-checks its WHERE against the row's new version --
+	// and one that comes second waits for this commit. The workflow_instances
+	// row is neither read nor locked.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases
 		SET heartbeat_at = now()
@@ -534,7 +523,7 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 	// transaction -- a reclaim landing between a check and a separate update
 	// statement is exactly the race this exists to close, not reopen.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, generation FROM workflow_instances
+		SELECT id, generation FROM workflow_leases
 		WHERE assigned_to = $1 AND status = 'running' AND id = ANY($2)
 		FOR UPDATE
 	`, workerID, pq.Array(ids))
@@ -569,9 +558,10 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 
 	if len(eligible) > 0 {
 		// cleat#3245 B2: workflow_leases only -- heartbeat_at is no longer
-		// written to workflow_instances. "eligible" was fenced against
-		// workflow_instances' live (id, generation) above, and the FOR UPDATE
-		// still holds those rows, so no separate fence check is needed here.
+		// written to workflow_instances. "eligible" was fenced against the
+		// leases' live (id, generation) above (B3b moved that fence off
+		// workflow_instances), and the FOR UPDATE still holds those rows, so
+		// no separate fence check is needed here.
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_leases SET heartbeat_at = now() WHERE id = ANY($1)
 		`, pq.Array(eligible)); err != nil {
@@ -1133,7 +1123,7 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 
 	// Read current generation for optimistic locking.
 	var gen int64
-	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = $1`, workflowID).Scan(&gen)
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_leases WHERE id = $1`, workflowID).Scan(&gen)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return tx.Commit() // Workflow no longer exists.
@@ -1152,13 +1142,13 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	// payloads mirror this table was never given -- so it was dropped from
 	// workflow_instances rather than kept write-only.
 	// cleat#3245 B1b: compaction_state/compaction_step are written to
-	// workflow_payloads only. The generation fence stays on workflow_instances,
-	// taken as the same row lock the UPDATE here used to take: FOR NO KEY
+	// workflow_payloads only. The generation fence is on workflow_leases since
+	// B3b, which every reclaim updates in its own transaction: FOR NO KEY
 	// UPDATE re-checks generation after waiting on a concurrent writer, so a
 	// generation that moved under us still writes nothing.
 	var fenced string
 	err = tx.QueryRowContext(ctx, `
-		SELECT id FROM workflow_instances
+		SELECT id FROM workflow_leases
 		WHERE id = $1 AND generation = $2
 		FOR NO KEY UPDATE
 	`, workflowID, gen).Scan(&fenced)

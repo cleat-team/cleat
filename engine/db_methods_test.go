@@ -242,13 +242,13 @@ var testCtx = context.Background()
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_Heartbeat_NotOwned(t *testing.T) {
-	// cleat#3245 B2: ownership is the workflow_instances fence row. No row
-	// (the mock has no FOR NO KEY UPDATE entry) means not owned, and the
-	// lease must not be renewed.
-	var renewed bool
+	// cleat#3245 B3b: the fenced workflow_leases UPDATE is the whole
+	// heartbeat, so it matching no row is what "not owned" means. The mock
+	// must say so explicitly: an unmatched exec reports rows affected.
+	var renewalTried bool
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_leases", affected: 1,
-			sideEffect: func(*[]mockRowsResult, *[]mockExecResult) { renewed = true }},
+		{match: "UPDATE workflow_leases", affected: 0,
+			sideEffect: func(*[]mockRowsResult, *[]mockExecResult) { renewalTried = true }},
 	})
 	defer db.Close()
 
@@ -257,18 +257,16 @@ func TestPostgresStore_Heartbeat_NotOwned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
-	if owned {
-		t.Error("expected owned=false when the fence matched no row")
+	if !renewalTried {
+		t.Fatal("Heartbeat never issued the fenced workflow_leases UPDATE, so this test measured nothing")
 	}
-	if renewed {
-		t.Error("a heartbeat whose fence matched nothing renewed the lease")
+	if owned {
+		t.Error("expected owned=false when the fenced lease UPDATE matched no row")
 	}
 }
 
 func TestPostgresStore_Heartbeat_Owned(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
-	}, []mockExecResult{
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_leases", affected: 1},
 	})
 	defer db.Close()
@@ -3697,9 +3695,7 @@ func TestPostgresStore_Heartbeat_BeginError(t *testing.T) {
 }
 
 func TestPostgresStore_Heartbeat_ExecError(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
-	}, []mockExecResult{
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET heartbeat_at", err: errors.New("update failed")},
 	})
 	defer db.Close()
@@ -5480,15 +5476,14 @@ func TestPostgresStore_GetWorkflowByID_QueryError(t *testing.T) {
 // Heartbeat — ownership comes from the fence, not the lease write
 // ---------------------------------------------------------------------------
 
-// This used to pin RowsAffected > 0 (not == 1) on the instance UPDATE. Since
-// cleat#3245 B2 there is no such UPDATE, and ownership needs BOTH the fence
-// row and a renewed lease row: the lease is heartbeat_at's only copy, so a
-// renewal that matched no lease row renewed nothing the reaper reads.
+// Pins RowsAffected > 0, not == 1, which is what this test was written for.
+// It used to pin that on the instance UPDATE. Since cleat#3245 B3b the fenced
+// workflow_leases UPDATE is the whole heartbeat, so it pins it there: any
+// matched row means the renewal landed. (Zero rows is
+// TestPostgresStore_Heartbeat_NotOwned.)
 func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
-	}, []mockExecResult{
-		{match: "SET heartbeat_at", affected: 0},
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET heartbeat_at", affected: 2},
 	})
 	defer db.Close()
 
@@ -5497,8 +5492,8 @@ func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
-	if owned {
-		t.Error("expected owned=false when the fence matched but the lease renewal matched no row")
+	if !owned {
+		t.Error("expected owned=true when the fenced lease UPDATE matched rows")
 	}
 }
 
