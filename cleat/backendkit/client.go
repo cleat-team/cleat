@@ -21,6 +21,21 @@ type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
 	TenantID   string // optional tenant_id; sent to worker for namespace isolation
+
+	// APIKey, when set, is sent as "Authorization: Bearer <APIKey>" on every
+	// request this client makes. Set it with WithAPIKey or directly. cleat#3368:
+	// the worker requires a key and Client never sent one, so every example
+	// backend wrapped HTTPClient in its own copy of the same RoundTripper.
+	APIKey string
+}
+
+// Option configures a Client built by New.
+type Option func(*Client)
+
+// WithAPIKey makes the client authenticate to the worker with key. See
+// Client.APIKey.
+func WithAPIKey(key string) Option {
+	return func(c *Client) { c.APIKey = key }
 }
 
 // WorkflowSummary is a summary of a workflow instance returned by ListWorkflows.
@@ -75,6 +90,12 @@ type HistoryEvent struct {
 var (
 	ErrIdempotencyKeyInputMismatch      = errors.New("idempotency key was used with a different payload")
 	ErrIdempotencyKeyDefinitionMismatch = errors.New("idempotency key already started a different workflow definition")
+
+	// ErrUpdateAlreadyPending is UpdateWorkflow's refusal of a second update
+	// with the same name while one is in flight (the worker's 409 with
+	// detail "update_already_pending"). Unlike the two above it clears: the
+	// same request succeeds once the in-flight update is answered.
+	ErrUpdateAlreadyPending = errors.New("an update with this name is already pending")
 )
 
 // StartOptions carries the per-start values that are not the input.
@@ -136,16 +157,29 @@ func (r StartResult) Terminal() bool {
 }
 
 // New creates a new Cleat API client with the given base URL.
-func New(baseURL string) *Client {
-	return &Client{
+func New(baseURL string, opts ...Option) *Client {
+	c := &Client{
 		BaseURL:    strings.TrimRight(baseURL, "/"),
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
+}
+
+// send is the one place a request leaves the client, so the API key rides
+// every request: the typed methods, Health and StreamWorkflow alike.
+func (c *Client) send(hc *http.Client, req *http.Request) (*http.Response, error) {
+	if c.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	return hc.Do(req)
 }
 
 // doRequest performs an HTTP request and checks for a successful response.
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.send(c.HTTPClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -207,6 +241,8 @@ func classifyError(status int, body []byte) error {
 		return generic
 	}
 	switch detail.Detail {
+	case "update_already_pending":
+		return fmt.Errorf("%w: %w", ErrUpdateAlreadyPending, generic)
 	case "idempotency_key_input_mismatch":
 		return fmt.Errorf("%w: %w", ErrIdempotencyKeyInputMismatch, generic)
 	case "idempotency_key_definition_mismatch":
@@ -577,6 +613,85 @@ func (c *Client) DeleteWorkflow(ctx context.Context, id string) error {
 	return nil
 }
 
+// UpdateWorkflow sends the update name to a running workflow with payload as
+// its body, passed through unparsed (nil sends "{}"). The worker queues it and
+// answers 202 with the id of the promise the workflow resolves when it has
+// handled the update; that id is returned. The result is read from the run's
+// promises (GET /api/workflows/{id}/promises).
+//
+// A second update with the same name while one is in flight is refused with
+// ErrUpdateAlreadyPending; a run that has ended refuses every update with a
+// 409, as an UpstreamStatusError.
+func (c *Client) UpdateWorkflow(ctx context.Context, id, name string, payload []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.BaseURL+"/api/workflows/"+url.PathEscape(id)+"/update/"+url.PathEscape(name),
+		bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return "", fmt.Errorf("update workflow: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		PromiseID string `json:"promise_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode update response: %w", err)
+	}
+	if out.PromiseID == "" {
+		return "", fmt.Errorf("update workflow: the worker accepted the update but returned no promise_id")
+	}
+	return out.PromiseID, nil
+}
+
+// CancelOptions are CancelWorkflow's optional settings. The zero value asks
+// for a cooperative cancellation with no reason.
+type CancelOptions struct {
+	// Reason is recorded with the cancellation.
+	Reason string
+	// Preemptive stops the run and records "cancelled" as its terminal
+	// status, rather than setting a flag the workflow observes when it next
+	// checks (cleat#1153).
+	Preemptive bool
+}
+
+// CancelWorkflow asks the worker to cancel a run, and returns the worker's
+// answer: "cancellation_requested" for a cooperative cancellation, or
+// "cancelled" for a pre-emptive one, which names the outcome the run will end
+// with even while its defers still run. An unknown id is a 404 and a
+// pre-emptive cancel of a settled run a 409, both as UpstreamStatusError.
+func (c *Client) CancelWorkflow(ctx context.Context, id string, opts CancelOptions) (string, error) {
+	bodyBytes, err := json.Marshal(map[string]any{"reason": opts.Reason, "preemptive": opts.Preemptive})
+	if err != nil {
+		return "", fmt.Errorf("marshal request body: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.BaseURL+"/api/workflows/"+url.PathEscape(id)+"/cancel", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return "", fmt.Errorf("cancel workflow: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode cancel response: %w", err)
+	}
+	return out.Status, nil
+}
+
 // CallPlugin invokes a plugin function on the cleat worker.
 func (c *Client) CallPlugin(ctx context.Context, pluginName, functionName, inputJSON string) (string, error) {
 	u := c.BaseURL + "/api/plugins/" + url.PathEscape(pluginName) + "/" + url.PathEscape(functionName)
@@ -676,7 +791,7 @@ func (c *Client) Health(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("create request: %w", err)
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.send(c.HTTPClient, req)
 	if err != nil {
 		return false, fmt.Errorf("health check failed: %w", err)
 	}

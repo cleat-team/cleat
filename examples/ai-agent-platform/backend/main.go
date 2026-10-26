@@ -141,9 +141,10 @@ func main() {
 	client.TenantID = os.Getenv("CLEAT_TENANT_ID")
 	if key := apiKey(); key != "" {
 		// The worker's API is authenticated with a key that must never reach a
-		// browser. It is read here, server-side, and attached by the client; the
+		// browser. It is read here, server-side, and the client attaches it to
+		// every request it makes (backendkit.Client.APIKey, cleat#3368); the
 		// front end never sees it and never sends an Authorization header.
-		client.HTTPClient = &http.Client{Transport: &authTransport{key: key}}
+		client.APIKey = key
 	}
 
 	s := &server{client: client, log: logger}
@@ -651,19 +652,6 @@ func (s *server) serveFile(root, name, contentType string) http.HandlerFunc {
 			"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:")
 		_, _ = w.Write(body)
 	}
-}
-
-// authTransport attaches the worker API key. It is on the transport rather than
-// in each call so that no handler can forget it, and so that the header is
-// stripped from anything the browser sent.
-type authTransport struct{ key string }
-
-func (t *authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Del("Authorization")
-	r.Header.Del("Cookie")
-	r.Header.Set("Authorization", "Bearer "+t.key)
-	return http.DefaultTransport.RoundTrip(r)
 }
 
 // apiKey reads the key from a file first. A file is preferred because an
