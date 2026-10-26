@@ -124,7 +124,13 @@ jobs:
           # An enumerated set is still right: this check exists to catch a typo,
           # and an open set catches none. What it costs is exactly this -- a new
           # participant is a CI change, and cannot land it under its own name.
-          VALID='^(WS-1|WS-2|WS-3|WS-4|coordinator|cleat-review)$'
+          #
+          # WS-cleat and WS-clew added 2026-10-25 (cleat#3371): the two streams
+          # the owner started for the 0.5.0 run-in -- engine work, and the
+          # clew-service port whose own PRs land in cleat-team/clew but which
+          # opens cleat PRs for the gaps it hits. Landed by the coordinator,
+          # for the reason the paragraph above gives.
+          VALID='^(WS-1|WS-2|WS-3|WS-4|WS-cleat|WS-clew|coordinator|cleat-review)$'
 
           # Commits that PREDATE the convention cannot carry the trailer, and a
           # check that demands one of them is asking for something impossible.
