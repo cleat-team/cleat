@@ -1143,29 +1143,28 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	// cleat#3360: compacted_at had no reader anywhere -- not even the
 	// payloads mirror this table was never given -- so it was dropped from
 	// workflow_instances rather than kept write-only.
-	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET compaction_state = $1, compaction_step = $2
-		WHERE id = $3 AND generation = $4
-	`, compactionState, compactionStep, workflowID, gen)
-	if err != nil {
-		return fmt.Errorf("compact history: update: %w", err)
+	// cleat#3245 B1b: compaction_state/compaction_step are written to
+	// workflow_payloads only. The generation fence stays on workflow_instances,
+	// taken as the same row lock the UPDATE here used to take: FOR NO KEY
+	// UPDATE re-checks generation after waiting on a concurrent writer, so a
+	// generation that moved under us still writes nothing.
+	var fenced string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE id = $1 AND generation = $2
+		FOR NO KEY UPDATE
+	`, workflowID, gen).Scan(&fenced)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("compact history: fence: %w", err)
 	}
 
-	// cleat#3245 B1a: the workflow_payloads mirror step 2 never gave this
-	// write. compaction_state/compaction_step are payloads columns, and every
-	// reader of them now reads workflow_payloads -- so without this, a
-	// compacted workflow read as uncompacted, and LoadCompactionState handed
-	// replay no snapshot for history this function had just deleted. Gated on
-	// the instances UPDATE having matched, so a generation that moved under
-	// us writes neither copy.
-	if n, _ := res.RowsAffected(); n > 0 {
+	if err == nil {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_payloads
 			SET compaction_state = $1, compaction_step = $2
 			WHERE id = $3
 		`, compactionState, compactionStep, workflowID); err != nil {
-			return fmt.Errorf("compact history: mirror payload row: %w", err)
+			return fmt.Errorf("compact history: update: %w", err)
 		}
 	}
 
@@ -1914,65 +1913,37 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 		if err != nil {
 			return totalCleared, fmt.Errorf("delete expired events: begin compaction: %w", err)
 		}
-		// cleat#3245 B1a: workflow_instances first, then workflow_payloads by
-		// the same ids. That is the order deleteCompletedWorkflowsBatch takes
-		// -- it deletes the instance row and the ON DELETE CASCADE then locks
-		// the payload row -- and both sweeps act on terminal rows past
-		// retention, so the opposite order here could deadlock the two
-		// (40P01). The payload copy is the one counted: it is what every
-		// reader of compaction_state reads. The instance-side clear goes when
-		// B1b stops writing that copy.
-		rows, err := tx.QueryContext(ctx, `
-			UPDATE workflow_instances
+		// cleat#3245 B1b: workflow_payloads only. compaction_state is no
+		// longer written to workflow_instances, so there is no instance-side
+		// copy to clear. Only payload rows are locked here -- the instance read
+		// in the predicate takes no lock -- so the lock-ORDER inversion against
+		// deleteCompletedWorkflowsBatch (instance row, then the payload row
+		// through the ON DELETE CASCADE) that B1a's two-table version had is
+		// gone. Two batches over overlapping rows can still deadlock on ROW
+		// order, as any two batched writers can; that ends in 40P01, this
+		// transaction rolls back, and the sweep tries again next tick.
+		res, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads
 			SET compaction_state = NULL, compaction_step = NULL
 			WHERE id IN (
 				SELECT id`+pgExpiredCompactionState+`
 				LIMIT 10000
 			)
-			RETURNING id
 		`, olderThan)
 		if err != nil {
 			_ = tx.Rollback()
 			break
 		}
-		var ids []string
-		var scanErr error
-		for rows.Next() {
-			var id string
-			if scanErr = rows.Scan(&id); scanErr != nil {
-				break
-			}
-			ids = append(ids, id)
-		}
-		rerr := rows.Err()
-		rows.Close()
-		// A truncated id list must not commit: the instance side would be
-		// cleared for every row and the payload side for only some of them.
-		if scanErr != nil || rerr != nil {
+		n, err := res.RowsAffected()
+		if err != nil {
 			_ = tx.Rollback()
 			break
-		}
-		var n int64
-		if len(ids) > 0 {
-			res, err := tx.ExecContext(ctx, `
-				UPDATE workflow_payloads
-				SET compaction_state = NULL, compaction_step = NULL
-				WHERE id = ANY($1)
-			`, pq.Array(ids))
-			if err != nil {
-				_ = tx.Rollback()
-				break
-			}
-			if n, err = res.RowsAffected(); err != nil {
-				_ = tx.Rollback()
-				break
-			}
 		}
 		if err := tx.Commit(); err != nil {
 			break
 		}
 		totalCleared += n
-		if len(ids) == 0 {
+		if n == 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2104,15 +2075,14 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 		// this workflow is fenced out, and its own finalize now loses.
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET status = $3,
-			    pending_terminal_status = $5,
-			    defer_phase_deadline = now() + ($4 * interval '1 second'),
-			    error_msg = $2,
+			SET status = $2,
+			    pending_terminal_status = $4,
+			    defer_phase_deadline = now() + ($3 * interval '1 second'),
 			    next_wake_at = now(),
 			    assigned_to = NULL,
 			    generation = generation + 1
 			WHERE id = $1
-		`, workflowID, reason, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
+		`, workflowID, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
 			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
 		}
 
@@ -2156,15 +2126,13 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = $3,
-		    error_msg = $2,
-		    completed_at = now(),
+		SET status = $2,
 		    completed_by = assigned_to, assigned_to = NULL,
 		    generation = generation + 1,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL
 		WHERE id = $1
-	`, workflowID, reason, finalStatus)
+	`, workflowID, finalStatus)
 	if err != nil {
 		return fmt.Errorf("%s workflow: %w", finalStatus, err)
 	}

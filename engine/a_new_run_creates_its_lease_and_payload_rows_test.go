@@ -182,12 +182,11 @@ func TestStartNewRunCreatesMatchingLeaseAndPayloadRows(t *testing.T) {
 	}
 
 	gotInput := readPayloadInput(t, db, runID)
-	var wantInput string
-	if err := db.QueryRow(`SELECT input::text FROM workflow_instances WHERE id = $1`, runID).Scan(&wantInput); err != nil {
-		t.Fatalf("read workflow_instances.input: %v", err)
-	}
-	if gotInput != wantInput {
-		t.Errorf("workflow_payloads.input = %q, workflow_instances.input = %q, want byte-identical (same sealed value reused, not re-sealed)", gotInput, wantInput)
+	// cleat#3245 B1b: workflow_payloads holds the only copy of input; the
+	// workflow_instances column keeps its default (asserted by
+	// TestAPayloadWriteLeavesTheInstanceCopyUntouched).
+	if gotInput == "{}" {
+		t.Errorf("workflow_payloads.input = {} -- the run's input was not stored")
 	}
 }
 
@@ -221,12 +220,11 @@ func TestStartNewRunWithIdempotencyKeyAlsoCreatesLeaseAndPayloadRows(t *testing.
 		t.Errorf("workflow_leases.priority = %d, want 3", leaseRow.priority)
 	}
 	gotInput := readPayloadInput(t, db, runID)
-	var wantInput string
-	if err := db.QueryRow(`SELECT input::text FROM workflow_instances WHERE id = $1`, runID).Scan(&wantInput); err != nil {
-		t.Fatalf("read workflow_instances.input: %v", err)
-	}
-	if gotInput != wantInput {
-		t.Errorf("workflow_payloads.input = %q, workflow_instances.input = %q, want byte-identical", gotInput, wantInput)
+	// cleat#3245 B1b: workflow_payloads holds the only copy of input; the
+	// workflow_instances column keeps its default (asserted by
+	// TestAPayloadWriteLeavesTheInstanceCopyUntouched).
+	if gotInput == "{}" {
+		t.Errorf("workflow_payloads.input = {} -- the run's input was not stored")
 	}
 
 	// A SECOND call with the same key must short-circuit before either

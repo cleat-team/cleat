@@ -104,9 +104,14 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 
 			var status string
 			var completedAt sql.NullTime
-			if err := db.QueryRowContext(ctx,
-				`SELECT status, completed_at FROM workflow_instances WHERE id = `+d.ph(1),
-				id).Scan(&status, &completedAt); err != nil {
+			// completed_at lives on workflow_payloads on PostgreSQL since
+			// cleat#3245 B1b; status is still a workflow_instances column.
+			q := `SELECT status, completed_at FROM workflow_instances WHERE id = ` + d.ph(1)
+			if d.ph(1) == "$1" {
+				q = `SELECT w.status, p.completed_at FROM workflow_instances w
+					JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`
+			}
+			if err := db.QueryRowContext(ctx, q, id).Scan(&status, &completedAt); err != nil {
 				t.Fatalf("read status: %v", err)
 			}
 			if status != "dead_lettered" || !completedAt.Valid {

@@ -112,6 +112,9 @@ func TestADryRunReportsWithoutDeleting(t *testing.T) {
 		id, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("age the seeded row: %v", err)
 	}
+	// completed_at is read from workflow_payloads since cleat#3245 B1a, so
+	// ageing only the instance copy aged nothing the sweep can see.
+	testutil.SyncWorkflowPayload(t, db, id)
 
 	decode := func(t *testing.T, body []byte) retentionSweepResult {
 		t.Helper()

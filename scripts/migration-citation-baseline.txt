@@ -177,7 +177,6 @@ engine/routine_definition_drift_test.go	004_fix_finalize_workflow_status_fence.s
 engine/routine_definition_drift_test.go	migrations/mssql/004
 engine/routine_definition_drift_test.go	migrations/mysql/004
 engine/schedule_tenant_test.go	005_app_role.sql
-engine/schedule_tenant_test.go	migration 005
 engine/schedules_retire_through_disabled_at_test.go	migration 089
 engine/schema_doc_matches_the_database_test.go	migration 040
 engine/search_does_not_scan_every_payload_test.go	migration 033
@@ -191,7 +190,6 @@ engine/store_children.go	migration 016
 engine/store_children.go	migration 018
 engine/store_children.go	migration 053
 engine/store_defer_phase.go	migration 020
-engine/store_deployment.go	migration 020
 engine/store_deployment.go	migrations/mssql/036
 engine/store_deployment.go	migrations/postgres/006
 engine/store_lifecycle.go	migration 015

@@ -163,6 +163,13 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 					status, errMsg, right.output())
 			}
 			_, _, result = workflowOutcome(t, db, wfID)
+			// The positive half first: an empty result also contains no
+			// sentinel, so without it the check below passes when nothing was
+			// stored at all -- which it did for as long as this read
+			// workflow_instances after cleat#3245 B1b stopped writing there.
+			if result == "" {
+				t.Fatalf("the run ended done but stored no result")
+			}
 			if strings.Contains(result, "DECRYPTION_FAILED") {
 				t.Fatalf("result carries the decryption sentinel: %s", result)
 			}
@@ -200,7 +207,7 @@ func awaitReleaseNotTerminal(t *testing.T, db *sql.DB, id string, w *worker) {
 func workflowOutcome(t *testing.T, db *sql.DB, id string) (status, errMsg, result string) {
 	t.Helper()
 	var msg, res sql.NullString
-	if err := db.QueryRow(`SELECT status, error_msg, result::text FROM workflow_instances WHERE id = $1`, id).
+	if err := db.QueryRow(`SELECT w.status, p.error_msg, p.result::text FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
 		Scan(&status, &msg, &res); err != nil {
 		t.Fatalf("reading %s: %v", id, err)
 	}

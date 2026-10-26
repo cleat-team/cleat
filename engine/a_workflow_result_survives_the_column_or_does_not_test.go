@@ -114,7 +114,7 @@ func TestAWorkflowResultSurvivesTheColumnOrDoesNot(t *testing.T) {
 				// what hides this: json.Unmarshal into a float64 turns both
 				// sides into the same value at the cliff edge and the test
 				// passes.
-				checkPreserved(t, backend.Name(), "workflow_instances.result",
+				checkPreserved(t, backend.Name(), payloadColumnsTable(backend.Name())+".result",
 					tc.name, tc.payload, sent, stored)
 			}
 		})
@@ -135,7 +135,7 @@ func TestAWorkflowResultSurvivesTheColumnOrDoesNot(t *testing.T) {
 // one -- a pool read would set it on one connection and select on another.
 func readResultColumn(t *testing.T, ctx context.Context, db *sql.DB, dialect, tenant, wfID string) string {
 	t.Helper()
-	return readJSONColumn(t, ctx, db, dialect, tenant, "workflow_instances", "result", "id", wfID, "")
+	return readJSONColumn(t, ctx, db, dialect, tenant, payloadColumnsTable(dialect), "result", "id", wfID, "")
 }
 
 // readJSONColumn is readResultColumn generalised to any JSON-typed column, for
@@ -274,7 +274,7 @@ func TestAFinalizedResultSurvivesTheColumn(t *testing.T) {
 				}
 
 				stored := readResultColumn(t, ctx, db, backend.Name(), tenant, wfID)
-				checkPreserved(t, backend.Name(), "workflow_instances.result (finalize path)",
+				checkPreserved(t, backend.Name(), payloadColumnsTable(backend.Name())+".result (finalize path)",
 					tc.name, tc.payload, sent, stored)
 			}
 		})
