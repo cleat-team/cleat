@@ -593,6 +593,20 @@ def schema_fingerprint(dsn: str) -> dict[str, list[str]]:
         "functions": "SELECT n.nspname||'.'||p.proname||' '||md5(pg_get_functiondef(p.oid)) FROM pg_proc p "
                      "JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema')",
     }
+    # Constraints, triggers and RLS policies are part of "the schema": a change
+    # that adds a foreign key or rewrites a tenant policy and leaves every column
+    # alone must still read as a change.
+    facets["constraints"] = (
+        "SELECT n.nspname||'.'||c.relname||'.'||k.conname||' '||pg_get_constraintdef(k.oid) FROM pg_constraint k "
+        "JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname NOT IN ('pg_catalog','information_schema')")
+    facets["triggers"] = (
+        "SELECT n.nspname||'.'||c.relname||'.'||t.tgname||' '||md5(pg_get_triggerdef(t.oid)) FROM pg_trigger t "
+        "JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE NOT t.tgisinternal AND n.nspname NOT IN ('pg_catalog','information_schema')")
+    facets["policies"] = (
+        "SELECT schemaname||'.'||tablename||'.'||policyname||' '||md5(coalesce(qual,'')||'|'||coalesce(with_check,'')) "
+        "FROM pg_policies")
     return {k: sorted(psql(dsn, q).splitlines()) for k, q in facets.items()}
 
 
