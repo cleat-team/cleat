@@ -2,7 +2,7 @@ module github.com/cleat-team/cleat
 
 go 1.27.0
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 // The root module deliberately does NOT require github.com/cleat-team/cleat/cleat
 // (the SDK module), and must not start. cleat/ requires the root module back --

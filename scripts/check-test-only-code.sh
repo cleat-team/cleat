@@ -79,7 +79,14 @@ STATICCHECK="honnef.co/go/tools/cmd/staticcheck@2026.2.1"
 # `toolchain` line a go.mod carries: every package this scans still gets
 # analysed, just compiled by go1.27.1 for export-data purposes only, while
 # the rest of the repo (build, test, lint, vulncheck) runs on go1.27.2 as
-# normal. Confirmed non-vacuous by seeding a genuine unused function and
+# normal.
+#
+# cleat#3375 (2026-10-26): the toolchain moved again, go1.27.2 -> go1.27.3
+# (GO-2026-6809, crypto/x509). Nothing above changes: the `go` floor is
+# still 1.27.0, so the go1.27.1 pin for this scan alone still satisfies it,
+# and the proxy still lists 2026.2.1 as staticcheck's newest release. Re-check
+# dominikh/go-tools#1832 on the next bump; when a release understands export
+# data v5, delete the GOTOOLCHAIN override below and this paragraph. Confirmed non-vacuous by seeding a genuine unused function and
 # watching this scan catch it under this exact override, before relying on
 # the clean result.
 #
