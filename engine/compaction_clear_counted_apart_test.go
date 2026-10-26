@@ -105,6 +105,13 @@ func setCompactionStateForTest(t *testing.T, store WorkflowStore, id string) {
 			 completed_at = now() WHERE id = $2`, `{}`, id); err != nil {
 			t.Fatalf("seed compaction state (postgres): %v", err)
 		}
+		// Both copies, as the dual-write keeps them: the sweep's predicate
+		// reads workflow_payloads since cleat#3245 B1a.
+		if _, err := s.db.Exec(
+			`UPDATE workflow_payloads SET compaction_state = $1, compaction_step = 1,
+			 completed_at = now() WHERE id = $2`, `{}`, id); err != nil {
+			t.Fatalf("seed compaction state (postgres, payloads): %v", err)
+		}
 	case *MySQLStore:
 		if _, err := s.db.Exec(
 			`UPDATE workflow_instances SET compaction_state = ?, compaction_step = 1,

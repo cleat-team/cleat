@@ -331,18 +331,24 @@ func (s *PostgresStore) claimWorkflowsOnce(ctx context.Context, workerID string,
 
 	// The UPDATE is the same as before, except the winners were already decided
 	// above, so the predicate is just membership in ids.
+	//
+	// cleat#3245 B1a: what the claim hands the worker -- input, def_name,
+	// def_version, error_code, error_op, trace_id -- is read from
+	// workflow_payloads, through claimPayloadJoinSQL. See its comment for why
+	// a LEFT JOIN among the FROM items rather than an inner join.
 	rows2, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances w
 		SET status = 'running',
-		    signal_seq_at_claim = signal_seq,
-		    signal_consumed_at_claim = signal_consumed_seq,
-		    promise_seq_at_claim = promise_seq,
+		    signal_seq_at_claim = w.signal_seq,
+		    signal_consumed_at_claim = w.signal_consumed_seq,
+		    promise_seq_at_claim = w.promise_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
-		    started_at = COALESCE(started_at, now()),
-		    generation = generation + 1
-		WHERE w.id = ANY($2)
-		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id, COALESCE(w.pending_terminal_status, '') AS pending_terminal_status
+		    started_at = COALESCE(w.started_at, now()),
+		    generation = w.generation + 1
+		FROM unnest($2::text[]) AS c(id)`+claimPayloadJoinSQL+`
+		WHERE w.id = c.id
+		RETURNING w.id, p.def_name, p.def_version, w.status, p.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, p.error_code, p.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(p.trace_id, '') AS trace_id, COALESCE(w.pending_terminal_status, '') AS pending_terminal_status
 	`, workerID, pq.Array(ids))
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: update: %w", err)
@@ -366,6 +372,25 @@ func (s *PostgresStore) claimWorkflowsOnce(ctx context.Context, workerID string,
 	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
+
+// claimPayloadJoinSQL is the tail both claim UPDATEs append to their FROM item
+// (aliased c, carrying the claimed id) so RETURNING can read the
+// workflow_payloads columns the claim hands back -- cleat#3245 B1a.
+//
+// LEFT, deliberately. The FROM item already decides which rows are claimed;
+// this join must not change that. An inner join would make a run with no
+// workflow_payloads row silently unclaimable -- skipped by every poll, forever,
+// with nothing logged. A LEFT JOIN claims it and returns a NULL def_name,
+// which scanClaimedWorkflows (and claimStickyWorkflowsOnce's scan) cannot put
+// into a string, so the claim fails loudly and rolls back instead. Every run
+// gets its workflow_payloads row in the same transaction as its
+// workflow_instances row, so this only ever fires on a broken invariant.
+//
+// The SET clause qualifies its right-hand columns with w. because the FROM
+// list now carries workflow_payloads, and several names would otherwise be
+// ambiguous to a reader even where PostgreSQL could resolve them.
+const claimPayloadJoinSQL = `
+		LEFT JOIN workflow_payloads p ON p.id = c.id`
 
 // claimLeaseRows mirrors the claim UPDATE's SET clause onto workflow_leases
 // -- cleat#3245 Phase 3 step 2, piece 2 (dual-write). Called from both
@@ -675,16 +700,16 @@ func (s *PostgresStore) claimStickyWorkflowsOnce(ctx context.Context, workerID s
 		)
 		UPDATE workflow_instances w
 		SET status = 'running',
-		    signal_seq_at_claim = signal_seq,
-		    signal_consumed_at_claim = signal_consumed_seq,
-		    promise_seq_at_claim = promise_seq,
+		    signal_seq_at_claim = w.signal_seq,
+		    signal_consumed_at_claim = w.signal_consumed_seq,
+		    promise_seq_at_claim = w.promise_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
-		    started_at = COALESCE(started_at, now()),
-		    generation = generation + 1
-		FROM candidates c
+		    started_at = COALESCE(w.started_at, now()),
+		    generation = w.generation + 1
+		FROM candidates c`+claimPayloadJoinSQL+`
 		WHERE w.id = c.id
-		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
+		RETURNING w.id, p.def_name, p.def_version, w.status, p.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, p.error_code, p.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(p.trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -1368,7 +1393,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-		  AND NOT ` + deferPhaseOwedSQL + `
+		  AND NOT ` + deferPhaseOwedSQLPostgres + `
 		RETURNING id
 	`, []any{parentWorkflowID, outcomeMsg}, `
 		UPDATE workflow_leases
@@ -1393,7 +1418,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-		  AND ` + deferPhaseOwedSQL + `
+		  AND ` + deferPhaseOwedSQLPostgres + `
 		RETURNING id
 	`, []any{parentWorkflowID, outcomeMsg}, `
 		UPDATE workflow_leases
@@ -1481,7 +1506,7 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-		  AND NOT `+deferPhaseOwedSQL+`
+		  AND NOT `+deferPhaseOwedSQLPostgres+`
 	`, parentWorkflowID)
 	if err != nil {
 		return nil, err

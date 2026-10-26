@@ -35,8 +35,10 @@ func claimTestStore(t *testing.T) (*PostgresStore, *sql.DB) {
 }
 
 // seedInstanceAndLeaseRow creates a workflow_instances row and its matching
-// workflow_leases row directly, standing in for what piece 1's
-// insertLeaseAndPayloadRows does inside StartNewRun.
+// workflow_leases and workflow_payloads rows directly, standing in for what
+// piece 1's insertLeaseAndPayloadRows does inside StartNewRun. The payloads
+// row became load-bearing with cleat#3245 B1a: the claim reads input and
+// def_name from it, and refuses a run that has none.
 func seedInstanceAndLeaseRow(t *testing.T, db *sql.DB, id, defName string) {
 	t.Helper()
 	ctx := context.Background()
@@ -51,6 +53,12 @@ func seedInstanceAndLeaseRow(t *testing.T, db *sql.DB, id, defName string) {
 		VALUES ($1, $2, 'default')
 	`, id, DefaultTenantUUID); err != nil {
 		t.Fatalf("seed workflow_leases: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
+		VALUES ($1, $2, '{}', $3, 1)
+	`, id, DefaultTenantUUID, defName); err != nil {
+		t.Fatalf("seed workflow_payloads: %v", err)
 	}
 }
 

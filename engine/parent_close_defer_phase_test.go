@@ -25,10 +25,17 @@ func setWorkflowShape(t *testing.T, store WorkflowStore, wfID, status string, co
 	}
 	switch s := store.(type) {
 	case *PostgresStore:
+		// Both copies of compaction_state, as the dual-write keeps them:
+		// deferPhaseOwedSQLPostgres reads workflow_payloads' (cleat#3245 B1a).
 		if _, err := s.db.Exec(
 			`UPDATE workflow_instances SET status = $1, compaction_state = $2 WHERE id = $3`,
 			status, comp, wfID); err != nil {
 			t.Fatalf("setWorkflowShape (postgres): %v", err)
+		}
+		if _, err := s.db.Exec(
+			`UPDATE workflow_payloads SET compaction_state = $1 WHERE id = $2`,
+			comp, wfID); err != nil {
+			t.Fatalf("setWorkflowShape (postgres, payloads): %v", err)
 		}
 	case *MySQLStore:
 		if _, err := s.db.Exec(
@@ -47,7 +54,8 @@ func setWorkflowShape(t *testing.T, store WorkflowStore, wfID, status string, co
 	}
 }
 
-// sqlSaysDeferPhaseOwed evaluates deferPhaseOwedSQL against one real row.
+// sqlSaysDeferPhaseOwed evaluates the store dialect's deferPhaseOwedSQL
+// (deferPhaseOwedSQLPostgres on PostgreSQL) against one real row.
 func sqlSaysDeferPhaseOwed(t *testing.T, store WorkflowStore, wfID string) bool {
 	t.Helper()
 	var n int
@@ -56,7 +64,8 @@ func sqlSaysDeferPhaseOwed(t *testing.T, store WorkflowStore, wfID string) bool 
 	}
 	switch s := store.(type) {
 	case *PostgresStore:
-		if err := s.db.QueryRow(q("$1"), wfID).Scan(&n); err != nil {
+		pq := `SELECT COUNT(*) FROM workflow_instances WHERE id = $1 AND ` + deferPhaseOwedSQLPostgres
+		if err := s.db.QueryRow(pq, wfID).Scan(&n); err != nil {
 			t.Fatalf("sqlSaysDeferPhaseOwed (postgres): %v", err)
 		}
 	case *MySQLStore:

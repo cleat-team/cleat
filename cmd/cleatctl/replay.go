@@ -224,14 +224,17 @@ Examples:
 // column on the same dialect, rather than a second spelling of one idea.
 func loadWorkflowInstanceSQL() plugin.Query {
 	return plugin.Query{
+		// PostgreSQL reads the payload columns from workflow_payloads, where
+		// they live since cleat#3245's storage split (B1a).
 		Default: `
-		SELECT id, def_name, def_version, status, input,
-		       COALESCE(result::text, ''), COALESCE(error_msg, ''),
-		       COALESCE(error_code, ''), COALESCE(error_op, ''),
-		       COALESCE(assigned_to, ''), next_wake_at, tenant_id::text,
-		       created_at, generation
-		FROM workflow_instances
-		WHERE id = $1`,
+		SELECT w.id, p.def_name, p.def_version, w.status, p.input,
+		       COALESCE(p.result::text, ''), COALESCE(p.error_msg, ''),
+		       COALESCE(p.error_code, ''), COALESCE(p.error_op, ''),
+		       COALESCE(w.assigned_to, ''), w.next_wake_at, w.tenant_id::text,
+		       w.created_at, w.generation
+		FROM workflow_instances w
+		JOIN workflow_payloads p ON p.id = w.id
+		WHERE w.id = $1`,
 		MySQL: `
 		SELECT id, def_name, def_version, status, input,
 		       COALESCE(result, ''), COALESCE(error_msg, ''),

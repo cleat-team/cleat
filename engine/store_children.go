@@ -229,7 +229,10 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (Child
 	var status string
 	var errMsg sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT COALESCE(result, '{}'), status, error_msg FROM workflow_instances WHERE id = $1
+		SELECT COALESCE(p.result, '{}'), w.status, p.error_msg
+		FROM workflow_instances w
+		JOIN workflow_payloads p ON p.id = w.id
+		WHERE w.id = $1
 	`, runID).Scan(&result, &status, &errMsg)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChildOutcome{}, tx.Commit()
@@ -392,7 +395,7 @@ func (s *PostgresStore) GetChildCompletedAtMs(ctx context.Context, runID string)
 
 	var completedAt sql.NullTime
 	err = tx.QueryRowContext(ctx, `
-		SELECT completed_at FROM workflow_instances WHERE id = $1
+		SELECT completed_at FROM workflow_payloads WHERE id = $1
 	`, runID).Scan(&completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, tx.Commit()

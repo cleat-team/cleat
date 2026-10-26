@@ -494,6 +494,13 @@ func (tg *crashTarget) startWorkflowEntry(t *testing.T, id, orderID, taskQueue, 
 		if _, err := tg.db.Exec(tg.stmt(lq), id, defaultTenant, taskQueue); err != nil {
 			t.Fatalf("queueing workflow %s's lease row on %s: %v", id, tg.name, err)
 		}
+		// cleat#3245 B1a: the claim reads input and def_name/def_version from
+		// workflow_payloads, and refuses a run with no row there.
+		pq := `INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version) VALUES (` +
+			tg.placeholder(1) + `, ` + tg.placeholder(2) + `, ` + tg.jsonArg(tg.placeholder(3)) + `, 'crashcall', 1)`
+		if _, err := tg.db.Exec(tg.stmt(pq), id, defaultTenant, input); err != nil {
+			t.Fatalf("queueing workflow %s's payload row on %s: %v", id, tg.name, err)
+		}
 	}
 	t.Cleanup(func() {
 		_, _ = tg.db.Exec(tg.stmt(`DELETE FROM event_history WHERE workflow_id = `+tg.placeholder(1)), id)
