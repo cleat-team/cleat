@@ -507,6 +507,19 @@ var (
 			"cloud metadata endpoint is what this whole policy exists to refuse.\n"+
 			"Entry forms: an exact host as it appears in the endpoint URL. Matching is on "+
 			"the HOST, so \"localhost\" and \"127.0.0.1\" are different entries. cleat#1627")
+	enableWorkflowFetch = flag.Bool("enable-workflow-fetch", false,
+		"Serve cleat_fetch, the guest's direct outbound HTTP call. Off by default, and while off "+
+			"every cleat_fetch fails with an error that names this flag.\n"+
+			"Turning it on grants workflows the ability to ATTEMPT an outbound request from this "+
+			"worker; it grants no destination. The request goes through the same egress guard as "+
+			"DurableCall(\"http\", \"fetch\"): the floor (loopback, link-local, RFC1918) is always "+
+			"refused, --egress-allowlist narrows what this deployment may reach, and the "+
+			"requesting tenant's own list (cleatctl egress-allow) must permit the host -- an empty "+
+			"tenant list permits nothing. See docs/operations/egress-policy.md. cleat#3377")
+	workflowFetchMaxResponseBytes = flag.Int64("workflow-fetch-max-response-bytes", defaultWorkflowFetchMaxBody,
+		"Largest response body cleat_fetch will return. A larger response fails the call with an "+
+			"error that names this cap, rather than being cut. Only read when --enable-workflow-fetch "+
+			"is set. cleat#3377")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
 	migrationLockTimeout     = flag.Duration("migration-lock-timeout", migration.DefaultLockTimeout,
 		"How long a migration statement waits for a lock before failing. A migration needing ACCESS EXCLUSIVE "+

@@ -2347,6 +2347,8 @@ func main() {
 		payloadKeyFilePrevious:           *encryptionKeyFilePrevious,
 		payloadKeyVersions:               payloadKeyVersionsFromFlags(),
 		operatorEgress:                   operatorEgress,
+		workflowFetch:                    *enableWorkflowFetch,
+		workflowFetchMaxBody:             *workflowFetchMaxResponseBytes,
 		workerRegistry:                   workerRegistry,
 		internalAuthSecret:               os.Getenv("CLEAT_INTERNAL_AUTH_KEY"),
 		connectionShare:                  share,

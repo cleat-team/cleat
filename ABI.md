@@ -1428,25 +1428,28 @@ Schedule a delayed one-shot invocation of an external service operation.
 
 #### 2.48 `cleat_fetch`
 
-> **Embedder-only. A stock `cleat-worker` cannot serve this call and never could.**
-> cleat ships no default `Fetcher` and `cmd/cleat-worker` sets none, so every
-> `cleat_fetch` from a worker takes the failure branch in `engine/lifecycle.go`.
-> It works only when the engine is embedded as a library and the host supplies
-> one:
+> **Off by default on a `cleat-worker`; enabled by `--enable-workflow-fetch`.**
+> A worker installs a `Fetcher` only when started with that flag. Without it
+> every `cleat_fetch` fails with an error that names the flag. An engine
+> embedded as a library supplies its own with `engine.WithFetcher(...)`.
 >
->     eng := engine.New(..., engine.WithFetcher(myFetcher))
+> The flag grants the ability to *attempt* a request, not a destination. The
+> worker's `Fetcher` goes through the same egress guard as
+> `DurableCall("http", "fetch")`: the floor (loopback, link-local, RFC1918) is
+> always refused, `--egress-allowlist` narrows what the deployment may reach, and
+> the requesting tenant's own list must permit the host, where an empty list
+> permits nothing. A response body larger than
+> `--workflow-fetch-max-response-bytes` (default 1 MiB) fails the call with an
+> error naming the cap. Unlike `DurableCall("http", "fetch")` it sends no
+> `Idempotency-Key` header and does not resolve `${secret:name}` references.
+> See `docs/operations/egress-policy.md`. cleat#3377.
 >
-> Re-derive — the only reference outside test files is the declaration itself:
+> Re-derive where the worker installs it:
 >
 >     git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
 >
-> This entry described the call without qualification until 2026-09-08, so an
-> SDK author had every reason to bind it and expect it to work. Whether a stock
-> worker should get a default fetcher is open (IMPROVEMENT-PLAN 3.317): it would
-> grant every workflow arbitrary outbound HTTP from the worker, which is a
-> capability decision rather than a missing line of wiring. Documenting the
-> present behaviour does not settle that question — it stops the document
-> claiming the opposite of what happens.
+> Until cleat#3377 this entry said a stock worker "cannot serve this call and
+> never could", because nothing installed a `Fetcher` (IMPROVEMENT-PLAN.d 3.317).
 
 Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all configurable.
 
