@@ -768,11 +768,33 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
     return 0
 
 
-# What a refusal must say.  The refusal itself is WS-cleat's (cleat#3405, with B5)
-# and its wording is theirs to choose, so the markers live here, in one place,
-# and are edited when that text lands.  Exit status is the hard assertion; this
-# only decides whether the refusal NAMES its cause rather than merely failing.
-REFUSAL_MARKERS = ("v0.4.0", "0.4.0", "baseline", "foreign", "chain", "fresh database", "not created by")
+# What a refusal must say.  The refusal itself is WS-cleat's (cleat#3405, with B5).
+# The marker is ONE distinctive phrase, proposed to WS-cleat on cleat#3386 to be
+# included verbatim in both the --migrate-only error and the boot log.  It must
+# not be a word that an unrelated failure also contains: the first draft listed
+# "foreign", "chain" and "baseline", which a PostgreSQL foreign-key violation
+# (the RC's 004-006 failing partway over a v0.4.0 schema), a hash-chain
+# verification failure and a baseline mismatch all contain, so a half-applied
+# migration would have read as a refusal.  Edit this when B5's text lands.
+REFUSAL_MARKER = "foreign migration chain"
+
+
+def judge_untouched(stage: str, applied: int, versions_before: str, versions_after: str,
+                    fp_before: dict, fp_after: dict) -> str | None:
+    """A refusal must leave the database exactly as it found it.
+
+    Exit status and message cannot tell a refusal from a migration that applied
+    some files and then failed; the database can.
+    """
+    if applied:
+        return (f"{stage} applied {applied} migration(s) to the v0.4.0 database before it failed; "
+                "a refusal changes nothing")
+    if versions_before != versions_after:
+        return f"{stage} changed schema_migrations: {versions_before!r} -> {versions_after!r}"
+    if fp_before != fp_after:
+        changed = [k for k in fp_before if fp_before[k] != fp_after.get(k)]
+        return f"{stage} changed the schema ({', '.join(changed)}); a refusal changes nothing"
+    return None
 
 
 def judge_migrate_refusal(exit_code: int, output: str, applied: int) -> str | None:
@@ -780,9 +802,9 @@ def judge_migrate_refusal(exit_code: int, output: str, applied: int) -> str | No
     if exit_code == 0:
         return ("MISSING (cleat#3405, WS-cleat with B5): the RC's --migrate-only ACCEPTED a v0.4.0 database "
                 f"(exit 0, {applied} migration(s) applied). A 0.5.0 worker must refuse a foreign chain.")
-    if not any(k.lower() in output.lower() for k in REFUSAL_MARKERS):
-        return ("the RC's --migrate-only failed on the v0.4.0 database, but its message does not name the "
-                f"cause (none of {REFUSAL_MARKERS} appears). Failing is not refusing by name. Output tail:\n{output[-500:]}")
+    if REFUSAL_MARKER not in output.lower():
+        return ("the RC's --migrate-only failed on the v0.4.0 database, but its message does not contain "
+                f"{REFUSAL_MARKER!r}. Failing is not refusing by name. Output tail:\n{output[-500:]}")
     return None
 
 
@@ -795,9 +817,9 @@ def judge_boot_refusal(served: bool, exited: bool, exit_code: int | None, log_ta
         return "the RC's boot neither served nor exited within 30s on the v0.4.0 database"
     if exit_code == 0:
         return "the RC's boot exited 0 on the v0.4.0 database; a refusal must be a failure status"
-    if not any(k.lower() in log_tail.lower() for k in REFUSAL_MARKERS):
-        return (f"the RC's boot exited {exit_code} on the v0.4.0 database but its log does not name the cause "
-                f"(none of {REFUSAL_MARKERS}). Tail:\n{log_tail[-500:]}")
+    if REFUSAL_MARKER not in log_tail.lower():
+        return (f"the RC's boot exited {exit_code} on the v0.4.0 database but its log does not contain "
+                f"{REFUSAL_MARKER!r}. Tail:\n{log_tail[-500:]}")
     return None
 
 
@@ -876,6 +898,7 @@ def verify_refusal_and_fresh(a, state: Path, m: dict) -> int:
 
     # ---- REFUSAL --------------------------------------------------------
     log(f"REFUSAL: the RC against a database a v0.4.0 worker wrote (versions: {seeded_versions})")
+    fp0 = schema_fingerprint(owner)
     p = subprocess.run([str(rc), "-db", owner, "-migrate-only"], capture_output=True, text=True, cwd=REPO)
     out = p.stdout + p.stderr
     applied = len(re.findall(r"\[migration\] applying", out))
@@ -886,6 +909,9 @@ def verify_refusal_and_fresh(a, state: Path, m: dict) -> int:
         finding("REFUSAL", why)
     else:
         print("    --migrate-only refused, by name", flush=True)
+    untouched = judge_untouched("--migrate-only", applied, seeded_versions, after, fp0, schema_fingerprint(owner))
+    if untouched:
+        finding("REFUSAL", untouched)
 
     port = free_port()
     api = f"http://127.0.0.1:{port}"
@@ -905,6 +931,14 @@ def verify_refusal_and_fresh(a, state: Path, m: dict) -> int:
             finding("REFUSAL", why)
         else:
             print("    boot refused, by name", flush=True)
+        # The boot half runs with --migrate-db, so it can migrate; judge the
+        # database again after it, against the same starting point.
+        boot_applied = len(re.findall(r"\[migration\] applying", boot.tail(400)))
+        untouched = judge_untouched("boot", boot_applied, seeded_versions,
+                                    psql(owner, "SELECT string_agg(version, ' ' ORDER BY version) FROM schema_migrations"),
+                                    fp0, schema_fingerprint(owner))
+        if untouched:
+            finding("REFUSAL", untouched)
     finally:
         boot.stop()
 
@@ -946,16 +980,27 @@ def self_test() -> int:
     check("swap_database without a query", swap_database("postgres://u:p@h:1/a", "b") == "postgres://u:p@h:1/b")
     check("app_dsn swaps the userinfo", app_dsn("postgres://postgres:x@h:5432/db?sslmode=disable")
           == f"postgres://cleat_app:{APP_ROLE_PASSWORD}@h:5432/db?sslmode=disable")
-    ok_msg = "refusing: this database was created by v0.4.0, a foreign migration chain"
+    ok_msg = "refusing to start: this database holds a foreign migration chain written by v0.4.0"
+    fk = 'pq: insert or update on table "workflow_leases" violates foreign key constraint "workflow_leases_fkey"'
+    hashchain = "event hash chain verification failed at step 3"
     check("a migrate that exits 0 is MISSING", "MISSING" in (judge_migrate_refusal(0, "", 0) or ""))
     check("a migrate that fails for no stated cause is not a refusal by name",
-          "does not name" in (judge_migrate_refusal(1, "dial tcp: connection refused", 0) or ""))
+          "does not contain" in (judge_migrate_refusal(1, "dial tcp: connection refused", 0) or ""))
+    check("a foreign-key violation is NOT a refusal", judge_migrate_refusal(1, fk, 2) is not None)
+    check("a hash-chain verification failure is NOT a refusal", judge_migrate_refusal(1, hashchain, 0) is not None)
     check("a migrate that refuses by name passes", judge_migrate_refusal(1, ok_msg, 0) is None)
     check("a boot that serves is MISSING", "MISSING" in (judge_boot_refusal(True, False, None, "") or ""))
     check("a boot that hangs is a finding", "neither served nor exited" in (judge_boot_refusal(False, False, None, "") or ""))
     check("a boot that exits 0 is a finding", "exited 0" in (judge_boot_refusal(False, True, 0, ok_msg) or ""))
-    check("a boot that dies unnamed is a finding", "does not name" in (judge_boot_refusal(False, True, 1, "panic: nil") or ""))
+    check("a boot log with only a foreign-key error is NOT a refusal", judge_boot_refusal(False, True, 1, fk) is not None)
+    check("a boot log with only a hash-chain failure is NOT a refusal", judge_boot_refusal(False, True, 1, hashchain) is not None)
     check("a boot that refuses by name passes", judge_boot_refusal(False, True, 1, ok_msg) is None)
+    fp = {"columns": ["a"], "indexes": ["i"], "functions": ["f"]}
+    check("an untouched database passes", judge_untouched("x", 0, "1 2", "1 2", fp, dict(fp)) is None)
+    check("a refusal that applied 2 migrations first is a finding", judge_untouched("x", 2, "1 2", "1 2", fp, dict(fp)) is not None)
+    check("a refusal that changed schema_migrations is a finding", judge_untouched("x", 0, "1 2", "1 2 3", fp, dict(fp)) is not None)
+    check("a refusal that changed the schema is a finding",
+          judge_untouched("x", 0, "1 2", "1 2", fp, {**fp, "columns": ["a", "b"]}) is not None)
     try:
         need(False, "x")
         check("need() raises Unmeasured", False)
