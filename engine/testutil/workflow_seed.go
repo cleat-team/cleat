@@ -151,3 +151,52 @@ func syncWorkflowPayload(t *testing.T, db *sql.DB, id, tenantID string, overwrit
 		}
 	}
 }
+
+// SyncWorkflowLease copies a workflow_instances row's lease columns onto its
+// workflow_leases row, creating that row if it is missing.
+//
+// Call it after a fixture writes a lease column -- status above all, or
+// assigned_to, generation, continued_from, a run_* limit -- straight into
+// workflow_instances. Since cleat#3245 B3a the engine's PostgreSQL readers of
+// those columns read workflow_leases, so a value written only to
+// workflow_instances is invisible to the code under test. Writing through the
+// store keeps both copies in step and needs no call here.
+//
+// heartbeat_at is deliberately not copied: since B2 nothing writes it to
+// workflow_instances, so the instance copy is stale by construction.
+//
+// PostgreSQL only, like SeedWorkflowLease.
+func SyncWorkflowLease(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	res, err := db.Exec(`
+		INSERT INTO workflow_leases (id, tenant_id, task_queue, priority, status,
+			assigned_to, next_wake_at, generation, pending_terminal_status,
+			defer_phase_deadline, completed_by, continued_from, parent_workflow_id,
+			run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms,
+			run_host_retry_budget_ms, run_max_workflow_duration_ms)
+		SELECT wi.id, wi.tenant_id, wi.task_queue, wi.priority, wi.status,
+			wi.assigned_to, wi.next_wake_at, wi.generation, wi.pending_terminal_status,
+			wi.defer_phase_deadline, wi.completed_by, wi.continued_from, wi.parent_workflow_id,
+			wi.run_wasm_instance_timeout_ms, wi.run_wasm_wall_clock_ceiling_ms,
+			wi.run_host_retry_budget_ms, wi.run_max_workflow_duration_ms
+		FROM workflow_instances wi WHERE wi.id = $1
+		ON CONFLICT (id) DO UPDATE SET
+			tenant_id = EXCLUDED.tenant_id, task_queue = EXCLUDED.task_queue,
+			priority = EXCLUDED.priority, status = EXCLUDED.status,
+			assigned_to = EXCLUDED.assigned_to, next_wake_at = EXCLUDED.next_wake_at,
+			generation = EXCLUDED.generation,
+			pending_terminal_status = EXCLUDED.pending_terminal_status,
+			defer_phase_deadline = EXCLUDED.defer_phase_deadline,
+			completed_by = EXCLUDED.completed_by, continued_from = EXCLUDED.continued_from,
+			parent_workflow_id = EXCLUDED.parent_workflow_id,
+			run_wasm_instance_timeout_ms = EXCLUDED.run_wasm_instance_timeout_ms,
+			run_wasm_wall_clock_ceiling_ms = EXCLUDED.run_wasm_wall_clock_ceiling_ms,
+			run_host_retry_budget_ms = EXCLUDED.run_host_retry_budget_ms,
+			run_max_workflow_duration_ms = EXCLUDED.run_max_workflow_duration_ms`, id)
+	if err != nil {
+		t.Fatalf("syncing %s's workflow_leases row: %v", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		t.Fatalf("SyncWorkflowLease(%s): no workflow_instances row with that id", id)
+	}
+}

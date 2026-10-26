@@ -160,7 +160,7 @@ func (s *PostgresStore) successorOfRun(ctx context.Context, id string) (string, 
 	defer func() { _ = tx.Rollback() }()
 
 	return successorScan(tx.QueryRowContext(ctx,
-		`SELECT id FROM workflow_instances WHERE continued_from = $1 AND tenant_id = $2`,
+		`SELECT id FROM workflow_leases WHERE continued_from = $1 AND tenant_id = $2`,
 		id, s.tenantID))
 }
 

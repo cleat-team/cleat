@@ -46,7 +46,7 @@ func (s *PostgresStore) GetRunLimits(ctx context.Context, workflowID string) (Te
 	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
 	err = tx.QueryRowContext(ctx, `
 		SELECT run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms
-		FROM workflow_instances WHERE id = $1 AND tenant_id = $2
+		FROM workflow_leases WHERE id = $1 AND tenant_id = $2
 	`, workflowID, s.tenantID).Scan(&instanceMs, &wallClockMs, &retryMs, &maxWorkflowMs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TenantSettings{}, tx.Commit()

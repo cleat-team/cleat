@@ -83,6 +83,14 @@ func forceWorkflowTerminalWithoutRelease(t *testing.T, ctx context.Context, db *
 	if _, err := db.ExecContext(ctx, q, tenantID, workflowID); err != nil {
 		t.Fatalf("force workflow terminal: %v", err)
 	}
+	// The reaper reads status from workflow_leases on PostgreSQL since
+	// cleat#3245 B3a, so the forced terminal state goes onto that copy too.
+	if dialect == "postgres" {
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_leases SET status = 'done' WHERE tenant_id = $1 AND id = $2`, tenantID, workflowID); err != nil {
+			t.Fatalf("force workflow terminal (workflow_leases): %v", err)
+		}
+	}
 }
 
 // TestARegisteredQueueHolderPastItsOldExpiryStillBlocksWhileItsRunIsLive is

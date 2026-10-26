@@ -204,6 +204,8 @@ func seedRetentionFixture(t *testing.T, ctx context.Context, db *sql.DB, store r
 			wfID, DefaultTenantUUID, defName, completedAt); err != nil {
 			t.Fatalf("seed workflow_payloads: %v", err)
 		}
+		// And status from workflow_leases since cleat#3245 B3a.
+		testutil.SeedWorkflowLease(t, db, wfID, testutil.WorkflowLeaseSeed{Status: status})
 	}
 
 	expires := time.Now().UTC().Add(7 * 24 * time.Hour)

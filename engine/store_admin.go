@@ -307,29 +307,31 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	// -- restarting the phase clock on every operator action -- is the one
 	// deferPhaseOwed's comment rejects.
 	//
-	// cleat#3245 Phase 3 step 3 piece C: this read stays on workflow_instances
-	// -- explicitly NOT cut over to workflow_leases, unlike adminResolveMiss
-	// just below. Two independent reasons: compaction_state is not a
-	// workflow_leases column (migration 016 (folded into
-	// migrations/postgres/001_schema.sql by #3358)'s split), and this FOR UPDATE's
-	// lock is reused by the workflow_instances UPDATE later in this same
-	// transaction (adminForceMark's or the inline one-phase arm's). Moving
-	// the lock to workflow_leases while that later write stays on
-	// workflow_instances would reintroduce exactly the two-table-lock
-	// deadlock class piece B's ClaimWorkflows cutover had to add
-	// postgres_retry.go for (see that file's doc comment).
-	var curStatus string
-	var hasDefers, compacted bool
+	// cleat#3245 Phase 3 step 3 piece C kept this read on workflow_instances,
+	// for two reasons: compaction_state was not a workflow_leases column, and
+	// this FOR UPDATE's lock is reused by the workflow_instances UPDATE later in
+	// this same transaction (adminForceMark's or the inline one-phase arm's).
+	// Moving the lock to workflow_leases while that later write stays on
+	// workflow_instances would reintroduce exactly the two-table-lock deadlock
+	// class piece B's ClaimWorkflows cutover had to add postgres_retry.go for
+	// (see that file's doc comment).
+	//
+	// B3a moved only the status read, and the second reason is why the lock did
+	// not move with it: the row lock stays on workflow_instances, and status is
+	// read from workflow_leases afterwards, in its own statement -- see
+	// pgRunStateUnderLock for why a read inside the locking statement could be
+	// stale. compaction_state comes from workflow_payloads since B1a.
+	var locked string
 	err = tx.QueryRowContext(ctx, `
-		SELECT w.status,
-		       EXISTS(SELECT 1 FROM event_history e
-		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
-		       EXISTS(SELECT 1 FROM workflow_payloads p
-		              WHERE p.id = w.id AND p.compaction_state IS NOT NULL)
-		FROM workflow_instances w
-		WHERE w.id = $1 AND w.tenant_id = $2
-		FOR UPDATE
-	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+		SELECT id FROM workflow_instances WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: lock: %w", a.action, err)
+	}
+	curStatus, hasDefers, compacted, err := pgRunStateUnderLock(ctx, tx, workflowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return adminNotFound(a.action, workflowID)
 	}

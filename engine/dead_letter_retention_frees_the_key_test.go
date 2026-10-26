@@ -92,6 +92,17 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 				workerID, id); err != nil {
 				t.Fatalf("claim: %v", err)
 			}
+			// MoveToDeadLetterQueue's workflow_leases mirror is fenced on the
+			// lease's own assigned_to, and the retention sweep reads status from
+			// workflow_leases since cleat#3245 B3a -- a claim made on
+			// workflow_instances alone would leave the lease 'ready' and the run
+			// invisible to the sweep.
+			if d.dialect == testutil.DialectPostgres {
+				if _, err := db.ExecContext(ctx,
+					`UPDATE workflow_leases SET assigned_to = $1 WHERE id = $2`, workerID, id); err != nil {
+					t.Fatalf("claim (workflow_leases): %v", err)
+				}
+			}
 			var generation int64
 			if err := db.QueryRowContext(ctx,
 				`SELECT generation FROM workflow_instances WHERE id = `+d.ph(1), id).Scan(&generation); err != nil {
