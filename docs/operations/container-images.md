@@ -43,6 +43,15 @@ instead of building the worker with CGO from the branch.
 - **No moving `rc` tag.** There is no `rc` or `rc-latest`. A release branch is
   re-pushed, and a tag that means "the newest candidate" is the one that gets
   pinned by accident. Pin the sha.
+- **Only a protected `release/**` branch publishes.** The job asks the API
+  whether the branch is protected or covered by a ruleset and refuses if it is
+  neither, or if it cannot tell. "Protected" is the floor, not a review
+  guarantee: a rule that only forbids force-push satisfies it. Requiring a pull
+  request on `release/**` is a repository ruleset, and it is the owner's to add.
+- **An `rc-<40-hex sha>` tag is written once.** A re-run for a sha that already
+  has the tag leaves the existing image alone, so the tag keeps pointing at the
+  digest it was first given. To rebuild one on purpose, delete the tag first.
+  (`develop-*` tags are re-published by a dispatch, as described below.)
 - **An `rc-*` image is not a release.** It has the same lack of promise as a
   `develop-*` image. The release is the `vX.Y.Z` tag that `release.yml`
   publishes after the branch is merged to `main`.

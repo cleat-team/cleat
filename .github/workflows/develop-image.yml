@@ -91,6 +91,34 @@ jobs:
               ;;
           esac
 
+      # THE REASON RELEASE BRANCHES NEED THIS AND DEVELOP DOES NOT. Before rc-*,
+      # this workflow published only merge-queue develop. A release/** branch has
+      # no ruleset of its own (the one ruleset is develop's merge queue), so
+      # without this any writer could push release/x and publish unreviewed code
+      # as a public ghcr cleat-worker:rc-<sha> (cleat-review, cleat#3410).
+      #
+      # It fails CLOSED: a branch the API says is neither protected nor covered by
+      # a ruleset, or one it cannot read, publishes nothing. "Protected" is a
+      # weaker claim than "reviewed" -- a rule that only forbids force-push passes
+      # it -- so this is the floor, not the policy. The policy is a release/**
+      # ruleset requiring a pull request, which is the repository owner's to add.
+      # Both mechanisms are read because the repo uses both: develop has a ruleset
+      # and classic protection, main has classic protection only.
+      - name: Refuse a release branch that nothing protects
+        if: startsWith(github.ref, 'refs/heads/release/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          protected="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .protected)"
+          rules="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$BRANCH" --jq 'length')"
+          echo "branch $BRANCH: protected=$protected, rules from rulesets=$rules"
+          if [ "$protected" != "true" ] && [ "$rules" = "0" ]; then
+            echo "::error::$BRANCH is not protected and no ruleset applies to it; refusing to publish an rc-* image from a branch anyone with write access can push. Ask the repository owner for a release/** ruleset."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -135,9 +163,34 @@ jobs:
             echo "moving=$MOVING"
           } >> "$GITHUB_OUTPUT"
 
+      # An rc-<full sha> tag is written once. A re-run of the same sha would
+      # rebuild and repoint it to a new digest (the build is not bit-for-bit
+      # reproducible), and the docs say that tag is unambiguous forever. So an
+      # existing one is left alone and the push is skipped. develop-* tags keep
+      # their re-publish behaviour: the docs describe a dispatch as the repair
+      # for a missing or failed one. To rebuild an rc image on purpose, delete
+      # the tag first.
+      - name: Is this rc image already published?
+        id: exists
+        env:
+          FULL: ${{ steps.worker_image.outputs.full }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/release/*)
+              if docker buildx imagetools inspect "$FULL" >/dev/null 2>&1; then
+                echo "$FULL already exists; leaving it as it is (an rc tag is written once)"
+                echo "exists=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+          esac
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+
       # Only the sha tags here. `:develop` is moved separately below, so that a
       # slower build of an older commit cannot finish last and drag it back.
       - name: Build and push cleat-worker image (linux/amd64, linux/arm64)
+        if: steps.exists.outputs.exists != 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
