@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------------------
-# Develop image — publish cleat-worker on every push to develop
+# Develop image — publish cleat-worker on every push to develop, and an rc-*
+# image on every push to a release/** branch
 #
-# cleat#3370. release.yml pushes ghcr.io/cleat-team/cleat-worker only on a v*
+# cleat#3370 (develop-*), cleat#3398 (rc-*). release.yml pushes ghcr.io/cleat-team/cleat-worker only on a v*
 # tag, so between releases the only way to run the worker at a develop sha was
 # `go build ./cmd/cleat-worker` with CGO on and wasmtime's headers present, on
 # every machine and in every CI job that wanted it. The first consumer is the
@@ -19,7 +20,19 @@
 # Dockerfile's `RUN /cleat-worker --verify-backend` runs for each architecture
 # and a develop image cannot ship without the wasmtime backend either.
 #
-# Develop tags carry NO compatibility promise: no migration path between two
+# A push to release/** publishes the same image under two tags and no moving one:
+#
+#   rc-<first 9 hex of the sha>        what a validation consumer pins
+#   rc-<full 40-char sha>              the same manifest, unambiguous forever
+#
+# That is the release candidate, for the two consumers the 0.5.0 gate has before
+# the tag: the upgrade test (cleat#3386) and the clew slice re-run at the RC.
+# Neither should have to build the worker with CGO from the branch. There is no
+# `rc` tag that moves: a release branch is re-pushed, and "the latest RC" is
+# exactly the kind of tag that gets pinned by accident. The job still refuses
+# any ref that is not develop or release/**.
+#
+# develop-* and rc-* tags carry NO compatibility promise: no migration path between two
 # develop images, no upgrade path to the next release. See
 # docs/operations/container-images.md.
 #
@@ -34,17 +47,21 @@ name: Develop Image
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, "release/**"]
 
   # For the first image after this lands, or a re-publish after a failed run.
-  # Dispatch on develop: the job refuses any other ref before pushing.
+  # Dispatch on develop or a release/** branch: the job refuses any other ref
+  # before pushing.
   workflow_dispatch: {}
 
 # Per-commit group, never cancelled: every develop commit should get its image,
 # and a shared group would let the next merge evict a queued run before it
-# starts (scripts/check-workflow-concurrency.sh).
+# starts (scripts/check-workflow-concurrency.sh). The ref is in the key as well,
+# because a release branch is cut AT develop's head: the same sha arrives twice,
+# once as develop-<sha> and once as rc-<sha>, and one group would let a third
+# run evict the pending one of the two.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.sha }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -52,7 +69,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish cleat-worker:develop-<sha> (linux/amd64, linux/arm64)
+    name: Publish cleat-worker image (linux/amd64, linux/arm64)
     runs-on: ubuntu-26.04
     # arm64 under QEMU emulates the whole build: measured 18m56s for the
     # amd64+arm64 pair on #2076 (see the comment in ci.yml's release dry run).
@@ -62,14 +79,17 @@ jobs:
       packages: write
     steps:
       # A dispatch on a feature branch would otherwise publish that branch's
-      # head under a develop-* tag that no develop commit has.
-      - name: Refuse anything but develop
+      # head under a develop-* or rc-* tag that no develop or release commit has.
+      - name: Refuse anything but develop and release/**
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" != "refs/heads/develop" ]; then
-            echo "::error::ref is '$GITHUB_REF'; develop-* images are published only from refs/heads/develop"
-            exit 1
-          fi
+          case "$GITHUB_REF" in
+            refs/heads/develop|refs/heads/release/*) ;;
+            *)
+              echo "::error::ref is '$GITHUB_REF'; develop-* images are published only from refs/heads/develop and rc-* images only from refs/heads/release/*"
+              exit 1
+              ;;
+          esac
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -99,10 +119,20 @@ jobs:
             exit 1
           fi
           IMAGE="ghcr.io/cleat-team/cleat-worker"
+          # The prefix is decided by the ref and nothing else. The moving tag
+          # exists for develop only: an rc-* image is never given one.
+          case "$GITHUB_REF" in
+            refs/heads/develop)    PREFIX=develop; MOVING="$IMAGE:develop" ;;
+            refs/heads/release/*)  PREFIX=rc;      MOVING="" ;;
+            *)
+              echo "::error::ref '$GITHUB_REF' is neither develop nor release/*; refusing to pick a tag prefix"
+              exit 1
+              ;;
+          esac
           {
-            echo "short=$IMAGE:develop-${GITHUB_SHA:0:9}"
-            echo "full=$IMAGE:develop-$GITHUB_SHA"
-            echo "moving=$IMAGE:develop"
+            echo "short=$IMAGE:$PREFIX-${GITHUB_SHA:0:9}"
+            echo "full=$IMAGE:$PREFIX-$GITHUB_SHA"
+            echo "moving=$MOVING"
           } >> "$GITHUB_OUTPUT"
 
       # Only the sha tags here. `:develop` is moved separately below, so that a
@@ -119,7 +149,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.ref.name=develop
+            org.opencontainers.image.ref.name=${{ github.ref_name }}
 
       # Move `:develop` only if this commit is still develop's head. Two merges
       # seconds apart run in separate groups (above), and the older one can
@@ -127,6 +157,8 @@ jobs:
       # ls-remote and the retag rather than closing it -- which is why the tag
       # is documented as a convenience and the sha tags as the pin.
       - name: Move the develop tag if this is still develop's head
+        # Never for an rc-* image: it has no moving tag, and MOVING is empty.
+        if: github.ref == 'refs/heads/develop'
         env:
           FULL: ${{ steps.worker_image.outputs.full }}
           MOVING: ${{ steps.worker_image.outputs.moving }}

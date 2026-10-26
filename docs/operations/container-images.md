@@ -1,7 +1,8 @@
 # cleat-worker container images
 
-The worker image is published to `ghcr.io/cleat-team/cleat-worker` from two
-places. They differ in what they promise.
+The worker image is published to `ghcr.io/cleat-team/cleat-worker` from three
+places. They differ in what they promise. **`develop-*` and `rc-*` tags carry no
+compatibility promise; `vX.Y.Z` tags are releases.**
 
 | tag | published by | when | promise |
 |---|---|---|---|
@@ -11,6 +12,8 @@ places. They differ in what they promise.
 | `develop-<9-hex sha>` | `develop-image.yml` | every push to `develop` | **none** — see below |
 | `develop-<40-hex sha>` | `develop-image.yml` | every push to `develop` | the same image as the 9-hex tag |
 | `develop` | `develop-image.yml` | every push to `develop` | **none**, and it moves |
+| `rc-<9-hex sha>` | `develop-image.yml` | every push to a `release/**` branch | **none** — a release candidate, see below |
+| `rc-<40-hex sha>` | `develop-image.yml` | every push to a `release/**` branch | the same image as the 9-hex tag |
 
 All of them are `linux/amd64` and `linux/arm64`, built from the same
 `Dockerfile`. That Dockerfile runs `cleat-worker --verify-backend` for each
@@ -29,6 +32,23 @@ A `develop-*` image is whatever was on `develop` at that commit. Specifically:
   previous *release*, not from an arbitrary develop commit.
 - **No API or ABI stability.** Breaking changes land on `develop` before they
   are released.
+
+## Release candidates: `rc-*`
+
+A push to a `release/**` branch publishes the head of that branch as
+`rc-<9-hex sha>` and `rc-<40-hex sha>`, so the things that validate a release
+before its tag (the upgrade test, a consumer's re-run) can pull the candidate
+instead of building the worker with CGO from the branch.
+
+- **No moving `rc` tag.** There is no `rc` or `rc-latest`. A release branch is
+  re-pushed, and a tag that means "the newest candidate" is the one that gets
+  pinned by accident. Pin the sha.
+- **An `rc-*` image is not a release.** It has the same lack of promise as a
+  `develop-*` image. The release is the `vX.Y.Z` tag that `release.yml`
+  publishes after the branch is merged to `main`.
+- A release branch is cut at `develop`'s head, so the first `rc-<sha>` is the
+  same commit as a `develop-<sha>` image that already exists. They are separate
+  builds of one commit.
 
 ## Pin the sha, not `develop`
 
@@ -55,10 +75,11 @@ docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revis
   ghcr.io/cleat-team/cleat-worker:develop-34fec6ef7
 ```
 
-## When a develop tag is missing
+## When a develop or rc tag is missing
 
-`develop-image.yml` runs once per push to `develop`. If a run failed, or a
-commit landed before the workflow existed, that commit has no image. A
-maintainer can publish the current `develop` head by dispatching the workflow
-on `develop` (`gh workflow run develop-image.yml --ref develop`). A dispatch
-on any other ref is refused before anything is pushed.
+`develop-image.yml` runs once per push to `develop` and to a `release/**`
+branch. If a run failed, or a commit landed before the workflow existed, that
+commit has no image. A maintainer can publish the current head by dispatching
+the workflow on that branch (`gh workflow run develop-image.yml --ref develop`,
+or `--ref release/v0.5.0`). A dispatch on any other ref is refused before
+anything is pushed, and the tag prefix is chosen from the ref alone.
