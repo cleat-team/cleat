@@ -77,19 +77,20 @@ func TestCompleteCallIntentFenceReadsGenerationFromLeasesNotInstances(t *testing
 	}
 
 	err = st.CompleteCallIntent(ctx, wfID, intent, []byte(`{"status":"ok"}`), "chk-1", "worker-A", originalGeneration)
-	// n==0 here routes through intentFenceOrNotPending, which calls Heartbeat
-	// -- itself still reading workflow_instances (piece D does not touch it,
-	// see the piece D survey) -- against the ORIGINAL generation, which
-	// workflow_instances still carries unchanged, so Heartbeat reports the
-	// fence held and intentFenceOrNotPending returns nil. The method then
-	// falls through to its own n!=1 check and reports errIntentNotPending,
-	// NOT ErrFenceLost. If the completing UPDATE's EXISTS subquery had
-	// instead (wrongly) read workflow_instances, it would still match the
-	// unchanged original generation there, so the UPDATE would succeed
-	// (n=1) and this call would return nil -- a directly observable
-	// difference from the expected errIntentNotPending.
-	if !errors.Is(err, errIntentNotPending) {
-		t.Fatalf("CompleteCallIntent with a diverged workflow_leases generation: err = %v, want errIntentNotPending "+
+	// n==0 here routes through intentFenceOrNotPending, which calls
+	// Heartbeat against the ORIGINAL generation. Heartbeat fences on
+	// workflow_instances, which still matches, but since cleat#3245 B2's
+	// follow-up it also needs the lease renewal to match a row -- and the
+	// diverged workflow_leases generation matches none -- so it reports the
+	// fence lost and this call returns ErrFenceLost. (Until that follow-up
+	// Heartbeat ignored the lease write's row count, reported the fence held,
+	// and this test expected errIntentNotPending instead.) If the completing
+	// UPDATE's EXISTS subquery had (wrongly) read workflow_instances, it would
+	// match the unchanged original generation there, so the UPDATE would
+	// succeed (n=1) and this call would return nil -- a directly observable
+	// difference from the expected ErrFenceLost.
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("CompleteCallIntent with a diverged workflow_leases generation: err = %v, want ErrFenceLost "+
 			"-- nil means the fence subquery read the unchanged workflow_instances value instead and completed the intent", err)
 	}
 }
@@ -117,8 +118,8 @@ func TestResolveCallIntentFenceReadsGenerationFromLeasesNotInstances(t *testing.
 
 	err = store.ResolveCallIntent(ctx, wfID, intent, []byte(`{"status":"ok"}`), "worker-A", originalGeneration, nil)
 	// Same disambiguation shape as CompleteCallIntent above.
-	if !errors.Is(err, errIntentNotPending) {
-		t.Fatalf("ResolveCallIntent with a diverged workflow_leases generation: err = %v, want errIntentNotPending "+
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("ResolveCallIntent with a diverged workflow_leases generation: err = %v, want ErrFenceLost "+
 			"-- nil means the fence subquery read the unchanged workflow_instances value instead and resolved the intent", err)
 	}
 }
