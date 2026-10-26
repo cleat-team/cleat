@@ -132,8 +132,8 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// and a row in the tenant database, and fails if the count comes back
 		// from the base one. A PREPARE here could only have told us the
 		// PostgreSQL form parses, which is the form that never had the bug.
-		"SELECT status, COUNT(*) AS cnt FROM %sworkflow_instances GROUP BY status ORDER BY status": "a format string: the database qualifier is substituted at the call site (empty off MySQL), so there is no statement here to parse. Exercised assembled by TestCheckDBCountsTheTenantsDatabaseOnMySQL",
-		"SELECT COUNT(*) FROM %sevent_history":                                                     "a format string, as the statement above; same substitution and same assembled coverage",
+		"SELECT status, COUNT(*) AS cnt FROM %s%s GROUP BY status ORDER BY status": "a format string: the database qualifier (empty off MySQL) and the table (workflow_leases on PostgreSQL since cleat#3245 B3a) are substituted at the call site, so there is no statement here to parse. Exercised assembled by TestCheckDBCountsTheTenantsDatabaseOnMySQL and TestCheckDBCountsStatusFromWorkflowLeases",
+		"SELECT COUNT(*) FROM %sevent_history":                                     "a format string, as the statement above; same substitution and same assembled coverage",
 
 		// reseal-payloads (cleat#1794) builds both of its statements by
 		// concatenating engine.EncryptedEventColumns, so what is in the source
