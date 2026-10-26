@@ -130,6 +130,25 @@ purpose, and is the last change before the 0.3.0 tag. Provision a fresh
 database for 0.3.0; there is no cleat v0.7.0, and no version of cleat before
 0.3.0 to migrate from.
 
+**0.5.0 requires a fresh database too. There is no upgrade path from v0.4.0**
+(owner decision, cleat#3405). 0.4.0 and 0.5.0 record migrations under the same
+version numbers for different files, and 0.5.0 replaces the `workflow_instances`
+columns with `workflow_leases` and `workflow_payloads`, so a database a 0.4.0 worker
+wrote cannot be brought forward by running 0.5.0's `--migrate-only`. A 0.5.0 worker
+is meant to refuse such a database, by name, at `--migrate-only` and at boot rather
+than start on it. Provision a fresh database for 0.5.0 and start your workflows on
+it; runs that were in flight on 0.4.0 are not carried over.
+
+What is checked, by `scripts/upgrade_from_v040.py` (the **Upgrade From v0.4.0**
+workflow, on every push to a `release/**` branch): a database seeded by the
+*published* 0.4.0 worker with finished, failed, dead-lettered, parked and
+mid-execution runs is refused by the release candidate, and a fresh database
+migrates and serves a run. What is **not** covered: upgrades from 0.3.x or 0.2.x,
+downgrade, MySQL and SQL Server (the seed provisions a tenant with
+`cleat-worker --create-tenant`, which is PostgreSQL only), and a real deployment's
+data rather than a synthetic one. The refusal is implemented separately; until it
+lands that half of the job reports `MISSING` and fails.
+
 The guidance below describes ordinary migrations between later releases,
 once those exist: migrate as a deploy step (see
 [Migration is a deploy step](#migration-is-a-deploy-step)), then start the workers,
