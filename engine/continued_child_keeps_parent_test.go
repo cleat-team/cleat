@@ -146,9 +146,15 @@ func TestAContinuedChildStaysItsParentsChild(t *testing.T) {
 			// the column is what enforceParentClosePolicy selects on.
 			d := dialectOf(t, store)
 			db := rawDBOf(t, store)
+			// PostgreSQL keeps parent_workflow_id on workflow_leases alone after
+			// cleat#3245's B5, and enforceParentClosePolicy selects it there.
+			table := "workflow_instances"
+			if d.placeholder(1) == "$1" {
+				table = "workflow_leases"
+			}
 			for i, id := range chainOf(t, ctx, store, child) {
 				var got *string
-				q := "SELECT parent_workflow_id FROM workflow_instances WHERE id = " + d.placeholder(1)
+				q := "SELECT parent_workflow_id FROM " + table + " WHERE id = " + d.placeholder(1)
 				if err := db.QueryRow(q, id).Scan(&got); err != nil {
 					t.Fatalf("reading parent_workflow_id for chain[%d]: %v", i, err)
 				}
