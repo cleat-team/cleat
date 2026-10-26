@@ -2679,6 +2679,16 @@ direction as the engine-side error at the top of this section, twice in one chan
 
 ### 3.224 Seven public Go SDK methods compile to nothing, and the build says OK — 🟡 **1 FIXED, 1 CLEAN, 5 NEED DECISIONS 2026-09-06** (WS-1, 2026-09-05)
 
+**Update 2026-10-26 (re-derived on develop `eb707d3c`, not carried from this section's body):** `RunDetached`, `SetScope` and
+`GetScope` are no longer wired to nothing. Each has an `adapterDefs` entry (`wasm/adapter_metadata.go`: `SetScope` :152,
+`GetScope` :168, `RunDetached` :653), a `hostFunctions` row (`wasm/usage.go` :198-200, :221), an `importDefs` entry
+(`wasm/generator.go` :144, :152, :275) and a host export (`engine/imports.go`: `cleat_set_scope` :654, `cleat_get_scope` :661,
+`cleat_run_detached` :821). `RunDetached` now takes `(name, inputJSON string)` rather than a closure, and unwired it returns an
+error where it used to return `nil` (`cleat/runtime_workflow.go:309`). So none of the three is non-functional public surface. The
+decisions recorded below (what a scope means in this SDK, whether a guest should be told of contention) are design questions and
+stay open; the body below is as written on 2026-09-06. Not run: a guest calling these three through a built `.wasm`;
+`TestEveryAdapterDefCompiles` covers that the adapters compile, and `TestEachRewiredMethodWiresItsImport` has no row for them.
+
 §3.223 measured that **17 of the engine's 52 exports have no row** in `wasm/usage.go`'s
 `hostFunctions` table, and said explicitly that the number was **not** a defect count and that the
 triage was undone. This is the triage, and it splits 7 / 7.
