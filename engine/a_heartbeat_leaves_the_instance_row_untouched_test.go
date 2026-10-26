@@ -225,8 +225,13 @@ func TestStaleSetShapeReadsHeartbeatAtFromWorkflowLeases(t *testing.T) {
 // write to workflow_leases. The lock is what serializes a heartbeat with a
 // reclaim, which still updates the instance row first; nothing in the
 // statement text would show it gone, so this observes it by blocking: with
-// the row held FOR UPDATE elsewhere, each path must wait, then succeed once
-// the holder lets go.
+// the row held elsewhere, each path must wait, then succeed once the holder
+// lets go.
+//
+// The holder takes FOR NO KEY UPDATE because that is the lock a reclaim's
+// UPDATE takes. A holder at FOR UPDATE would be too strong: it conflicts even
+// with FOR KEY SHARE, so a fence weakened to KEY SHARE -- which no longer
+// serializes with a reclaim -- would still block here and pass.
 func TestTheHeartbeatFencesHoldTheInstanceRowLock(t *testing.T) {
 	store, db := newRunTestStore(t)
 	ctx := context.Background()
@@ -275,7 +280,7 @@ func TestTheHeartbeatFencesHoldTheInstanceRowLock(t *testing.T) {
 				t.Fatalf("begin holder: %v", err)
 			}
 			defer holder.Rollback()
-			if _, err := holder.ExecContext(ctx, `SELECT id FROM workflow_instances WHERE id = $1 FOR UPDATE`, id); err != nil {
+			if _, err := holder.ExecContext(ctx, `SELECT id FROM workflow_instances WHERE id = $1 FOR NO KEY UPDATE`, id); err != nil {
 				t.Fatalf("holder lock: %v", err)
 			}
 
