@@ -807,6 +807,59 @@ func TestAwaitAnyChild_ReplayEmptyThenCached(t *testing.T) {
 	}
 }
 
+// TestAwaitAnyChild_ReplaySkipsEveryEmptySuspendBeforeTheResult is cleat#3391's
+// second half: a history written BEFORE the fix. A child that took two wakes
+// left two empty await_any_child records and then the result. Peeking only at
+// the record after the first one found the second empty one, took that for "no
+// cached result", and re-ran the call fresh on every wake.
+func TestAwaitAnyChild_ReplaySkipsEveryEmptySuspendBeforeTheResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild},
+		{Step: 1, EventType: EventTypeAwaitAnyChild},
+		{Step: 2, EventType: EventTypeAwaitAnyChild, Response: `{"run_id":"run-1","result":"done"}`},
+		{Step: 3, EventType: EventTypeCall},
+	}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if errCode := uint32(result & 0xFFFFFFFF); errCode != 0 {
+		t.Errorf("expected errCode 0, got %d", errCode)
+	}
+	if s.stepCount != 3 {
+		t.Errorf("stepCount = %d, want 3: the two empty suspends and the result are all consumed", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("the session left replay although the recorded result was there to return")
+	}
+	if s.suspendErr != nil {
+		t.Errorf("the call suspended (%v) with a recorded result in the history", s.suspendErr.Reason)
+	}
+}
+
+// TestAwaitAnyChild_AStillRunningChildAddsNoRowOnALaterWake is the other half:
+// a wake that replays the call's suspend and finds the child still running has
+// nothing new to record.
+func TestAwaitAnyChild_AStillRunningChildAddsNoRowOnALaterWake(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // still running
+	}}
+	s.isReplay = true
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeAwaitAnyChild}}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Fatalf("expected the suspend sentinel, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Errorf("history has %d records, want the 1 it started with: a second empty suspend is what "+
+			"made the completed result unrecordable (cleat#3391)", len(s.history))
+	}
+}
+
 func TestAwaitAnyChild_ReplayMismatch(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
