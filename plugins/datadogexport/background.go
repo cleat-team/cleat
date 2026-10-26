@@ -47,6 +47,15 @@ var leaseSQL = struct {
 	},
 }
 
+// statusCountsSQL counts one tenant's workflow runs by status. PostgreSQL
+// reads status from workflow_leases since cleat#3245 B3a; MySQL and SQL Server
+// have no such table and read workflow_instances.
+var statusCountsSQL = plugin.Query{
+	Default: `SELECT status, COUNT(*) AS count FROM workflow_leases WHERE tenant_id = $1 GROUP BY status`,
+	MySQL:   `SELECT status, COUNT(*) AS count FROM workflow_instances WHERE tenant_id = $1 GROUP BY status`,
+	MSSQL:   `SELECT status, COUNT(*) AS count FROM workflow_instances WHERE tenant_id = $1 GROUP BY status`,
+}
+
 // Run starts the background metric export loop. Leader election is performed
 // via the plugin_lease table: every 30 seconds the worker tries to acquire or
 // renew the lease. Only the leader (the worker holding the lease) exports
@@ -281,12 +290,7 @@ func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 	}
 
 	// Query workflow counts by status for this tenant.
-	statusRows, err := p.db.Query(ctx, `
-			SELECT status, COUNT(*) AS count
-			FROM workflow_instances
-			WHERE tenant_id = $1
-			GROUP BY status
-		`, cfg.TenantID)
+	statusRows, err := p.db.Query(ctx, statusCountsSQL.For(p.dialect), cfg.TenantID)
 	if err != nil {
 		return fmt.Errorf("query workflow stats: %w", err)
 	}

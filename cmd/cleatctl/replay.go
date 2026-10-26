@@ -225,16 +225,18 @@ Examples:
 func loadWorkflowInstanceSQL() plugin.Query {
 	return plugin.Query{
 		// PostgreSQL reads the payload columns from workflow_payloads, where
-		// they live since cleat#3245's storage split (B1a).
+		// they live since cleat#3245's storage split (B1a), and the lease
+		// columns -- status, assigned_to, next_wake_at, generation -- from
+		// workflow_leases (B3a).
 		Default: `
-		SELECT w.id, p.def_name, p.def_version, w.status, p.input,
+		SELECT l.id, p.def_name, p.def_version, l.status, p.input,
 		       COALESCE(p.result::text, ''), COALESCE(p.error_msg, ''),
 		       COALESCE(p.error_code, ''), COALESCE(p.error_op, ''),
-		       COALESCE(w.assigned_to, ''), w.next_wake_at, w.tenant_id::text,
-		       w.created_at, w.generation
-		FROM workflow_instances w
-		JOIN workflow_payloads p ON p.id = w.id
-		WHERE w.id = $1`,
+		       COALESCE(l.assigned_to, ''), l.next_wake_at, l.tenant_id::text,
+		       l.created_at, l.generation
+		FROM workflow_leases l
+		JOIN workflow_payloads p ON p.id = l.id
+		WHERE l.id = $1`,
 		MySQL: `
 		SELECT id, def_name, def_version, status, input,
 		       COALESCE(result, ''), COALESCE(error_msg, ''),
