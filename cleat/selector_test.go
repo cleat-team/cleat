@@ -21,10 +21,22 @@ type fakeClockHost struct {
 	awaitFn  func(names []string, timeout time.Duration) SignalResult
 	sleepFn  func(ms int64)
 	awaitErr error
+
+	// children completes each child at a durable instant; PollChild answers
+	// as of nowMs, the way the engine's does (cleat#3369).
+	children    map[string]fakeChild
+	awaitedAny  [][]string
+	pollsOfKids int
+}
+
+type fakeChild struct {
+	doneAtMs int64
+	result   string
+	err      error // a child that failed
 }
 
 func newFakeClockHost(startMs int64) (*fakeClockHost, HostCalls) {
-	f := &fakeClockHost{nowMs: startMs, signals: map[string]string{}}
+	f := &fakeClockHost{nowMs: startMs, signals: map[string]string{}, children: map[string]fakeChild{}}
 	impl := &HostCallsImpl{}
 	impl.now = func() int64 { return f.nowMs }
 	impl.durableSleep = func(ms int64) {
@@ -53,6 +65,45 @@ func newFakeClockHost(startMs int64) (*fakeClockHost, HostCalls) {
 		}
 		f.nowMs += timeoutMs
 		return "", "", true, nil
+	}
+	impl.pollChild = func(runID string) (string, string, error) {
+		f.pollsOfKids++
+		c, ok := f.children[runID]
+		switch {
+		case !ok:
+			return "failed", "", &selectorTestError{"no such child " + runID}
+		case f.nowMs < c.doneAtMs:
+			return "running", "", nil
+		case c.err != nil:
+			return "failed", "", c.err
+		}
+		return "completed", c.result, nil
+	}
+	// AwaitChild suspends until the child completes: the clock moves to its
+	// instant. The pre-#3369 Select called this on a running child, which is
+	// how a child at +5s beat a timer at +1.5s.
+	impl.awaitChild = func(runID string) (string, error) {
+		c := f.children[runID]
+		if c.doneAtMs > f.nowMs {
+			f.nowMs = c.doneAtMs
+		}
+		return c.result, c.err
+	}
+	// AwaitAnyChild suspends until the first of runIDs completes: the clock
+	// moves to that child's instant.
+	impl.awaitAnyChild = func(runIDs []string) (string, string, error) {
+		f.awaitedAny = append(f.awaitedAny, runIDs)
+		first := ""
+		for _, id := range runIDs {
+			if first == "" || f.children[id].doneAtMs < f.children[first].doneAtMs {
+				first = id
+			}
+		}
+		c := f.children[first]
+		if c.doneAtMs > f.nowMs {
+			f.nowMs = c.doneAtMs
+		}
+		return first, c.result, c.err
 	}
 	return f, HostCalls{HostCallsImpl: impl}
 }
@@ -173,3 +224,159 @@ func TestASelectorReportsAnAwaitSignalsError(t *testing.T) {
 type selectorTestError struct{ msg string }
 
 func (e *selectorTestError) Error() string { return e.msg }
+
+// TestASelectorChildThatFinishesAfterTheTimerLosesToIt is cleat#3369.
+//
+// The children were checked with AwaitChild, which suspends on a running
+// child, so a Selector racing a child against a timer woke only when the
+// child finished: here at +5s, past a 1.5s deadline. The timer must win, at
+// its deadline, with the child never reported.
+func TestASelectorChildThatFinishesAfterTheTimerLosesToIt(t *testing.T) {
+	for _, withSignal := range []bool{false, true} {
+		f, h := newFakeClockHost(1_000_000)
+		f.children["child-1"] = fakeChild{doneAtMs: 1_005_000, result: "late"}
+
+		var result, payload string
+		var fired bool
+		s := NewSelector(h)
+		s.AddChildWorkflow("child-1", &result)
+		s.AddTimer(1500*time.Millisecond, &fired)
+		if withSignal {
+			s.AddSignal("approved", &payload)
+		}
+
+		winner := s.Select()
+
+		if winner != SelectorTimer || !fired {
+			t.Fatalf("signal=%v: winner = %q (fired %v), want the timer: a child finishing at +5s "+
+				"won a race against a 1.5s deadline (cleat#3369)", withSignal, winner, fired)
+		}
+		if result != "" {
+			t.Errorf("signal=%v: the losing child's result was written: %q", withSignal, result)
+		}
+		if got := f.nowMs - 1_000_000; got != 1500 {
+			t.Errorf("signal=%v: the timer fired at +%dms, want +1500ms", withSignal, got)
+		}
+		if len(f.awaitedAny) != 0 {
+			t.Errorf("signal=%v: Select suspended on the child alone (AwaitAnyChild %v) with a timer pending", withSignal, f.awaitedAny)
+		}
+	}
+}
+
+// The other half: a child that finishes before the deadline wins, seen at
+// the first poll after it finished, not at the deadline.
+func TestASelectorChildThatFinishesBeforeTheTimerWins(t *testing.T) {
+	f, h := newFakeClockHost(1_000_000)
+	f.children["child-1"] = fakeChild{doneAtMs: 1_002_500, result: `{"ok":true}`}
+
+	var result string
+	var fired bool
+	s := NewSelector(h)
+	s.AddChildWorkflow("child-1", &result)
+	s.AddTimer(10*time.Second, &fired)
+
+	if winner := s.Select(); winner != "child-1" {
+		t.Fatalf("winner = %q, want child-1", winner)
+	}
+	if result != `{"ok":true}` || fired || s.Err() != nil {
+		t.Errorf("result %q, fired %v, err %v", result, fired, s.Err())
+	}
+	// Polls at +1s and +3s (1s, then doubled): seen at +3s, well before +10s.
+	if got := f.nowMs - 1_000_000; got != 3000 {
+		t.Errorf("the child was seen at +%dms, want +3000ms (polls at 1s, then 2s more)", got)
+	}
+}
+
+// A signal that arrives while a child is pending wins: the signal wait is
+// bounded by the next poll, and the signal is not lost to it.
+func TestASelectorSignalBeatsAPendingChild(t *testing.T) {
+	f, h := newFakeClockHost(1_000_000)
+	f.children["child-1"] = fakeChild{doneAtMs: 1_600_000}
+	f.awaitFn = func(names []string, timeout time.Duration) SignalResult {
+		if f.nowMs-1_000_000 >= 3000 {
+			return SignalResult{Name: "approved", Payload: "yes"}
+		}
+		f.nowMs += timeout.Milliseconds()
+		return SignalResult{TimedOut: true}
+	}
+
+	var payload string
+	s := NewSelector(h)
+	s.AddChildWorkflow("child-1", new(string))
+	s.AddSignal("approved", &payload)
+
+	if winner := s.Select(); winner != "approved" || payload != "yes" {
+		t.Fatalf("winner = %q, payload %q, want the signal", winner, payload)
+	}
+	if len(f.awaitedAny) != 0 {
+		t.Errorf("Select suspended on the child alone with a signal pending: %v", f.awaitedAny)
+	}
+}
+
+// With nothing but children, there is nothing to race: Select suspends in
+// AwaitAnyChild until one completes, and polls nothing.
+func TestASelectorWithOnlyChildrenAwaitsTheFirst(t *testing.T) {
+	f, h := newFakeClockHost(1_000_000)
+	f.children["a"] = fakeChild{doneAtMs: 1_009_000, result: "A"}
+	f.children["b"] = fakeChild{doneAtMs: 1_004_000, result: "B"}
+
+	var a, b string
+	s := NewSelector(h)
+	s.AddChildWorkflow("a", &a)
+	s.AddChildWorkflow("b", &b)
+
+	if winner := s.Select(); winner != "b" || b != "B" || a != "" {
+		t.Fatalf("winner %q, a %q, b %q; want b", winner, a, b)
+	}
+	if len(f.awaitedAny) != 1 || len(f.slept) != 0 {
+		t.Errorf("AwaitAnyChild calls %v, sleeps %v; want one await and no polling sleeps", f.awaitedAny, f.slept)
+	}
+}
+
+// A child that failed resolves its future: its runID wins, Err() says why,
+// and its destination is left alone.
+func TestASelectorReportsAFailedChild(t *testing.T) {
+	f, h := newFakeClockHost(1_000_000)
+	f.children["child-1"] = fakeChild{doneAtMs: 1_000_000, err: &selectorTestError{"child trapped"}}
+
+	result := "untouched"
+	var fired bool
+	s := NewSelector(h)
+	s.AddChildWorkflow("child-1", &result)
+	s.AddTimer(time.Minute, &fired)
+
+	if winner := s.Select(); winner != "child-1" {
+		t.Fatalf("winner = %q, want child-1", winner)
+	}
+	if s.Err() == nil || result != "untouched" || fired {
+		t.Errorf("err %v, result %q, fired %v", s.Err(), result, fired)
+	}
+}
+
+// A long race costs a bounded number of durable waits: the poll interval
+// doubles from minChildPoll to maxChildPoll, so ten minutes is a couple of
+// dozen waits, not one every poll.
+func TestASelectorBacksOffWhilePolling(t *testing.T) {
+	f, h := newFakeClockHost(1_000_000)
+	f.children["child-1"] = fakeChild{doneAtMs: 1 << 62}
+
+	var fired bool
+	s := NewSelector(h)
+	s.AddChildWorkflow("child-1", new(string))
+	s.AddTimer(10*time.Minute, &fired)
+
+	if winner := s.Select(); winner != SelectorTimer {
+		t.Fatalf("winner = %q", winner)
+	}
+	if n := len(f.slept); n > 25 {
+		t.Errorf("%d durable waits for a 10-minute race; the polling does not back off: %v", n, f.slept)
+	}
+	for _, ms := range f.slept {
+		if ms > s.maxChildPoll.Milliseconds() {
+			t.Errorf("a %dms wait exceeds maxChildPoll", ms)
+		}
+	}
+	if got := f.nowMs - 1_000_000; got != 600_000 {
+		t.Errorf("the timer fired at +%dms, want +600000ms", got)
+	}
+}
