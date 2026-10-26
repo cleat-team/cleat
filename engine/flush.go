@@ -196,6 +196,18 @@ func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, va
 // assigned_to/generation -- so the fence correctly reports ErrFenceLost
 // instead of racing past it.
 //
+// The row it locks is the workflow_leases row since cleat#3245 B3b, not the
+// workflow_instances one. The argument carries over because every reclaim
+// mirrors its (assigned_to, generation) change onto workflow_leases in its own
+// transaction. A reclaim that has already written the lease row holds it, so
+// this read blocks and then sees the committed change, exactly as above. One
+// that has not written it yet must wait for this transaction to commit before
+// it can, so the write lands strictly BEFORE the reclaim -- a worker writing
+// just before it is reclaimed, which was always legitimate history. Neither
+// ordering lets a write land after a committed reclaim. event_history has no
+// foreign key to workflow_instances, so the insert takes no lock on that row
+// either.
+//
 // MySQL and SQL Server do not need the same fix here, and it was measured
 // rather than assumed why: PostgresStore is the only WorkflowStore that
 // does NOT implement perStepEventFlusher (flush_dialect.go), so it is the
@@ -383,7 +395,7 @@ const insertEventSQL = `
 		$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
 		$30, $34, $31, $35
 	WHERE ($32 = '' OR EXISTS (
-		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33 FOR SHARE
+		SELECT 1 FROM workflow_leases WHERE id = $1 AND assigned_to = $32 AND generation = $33 FOR SHARE
 	))
 	ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
 		promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,

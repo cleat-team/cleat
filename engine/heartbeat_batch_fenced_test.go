@@ -166,6 +166,16 @@ func bumpGeneration(t *testing.T, ctx context.Context, dialect string, store Wor
 	if _, err := sqlDB.ExecContext(ctx, q, DefaultTenantUUID, workflowID); err != nil {
 		t.Fatalf("bump generation: %v", err)
 	}
+	// The reaper mirrors its generation bump onto workflow_leases, and on
+	// PostgreSQL that row is where the batch fence reads it since
+	// cleat#3245 B3b.
+	if dialect == "postgres" {
+		if _, err := sqlDB.ExecContext(ctx,
+			`UPDATE workflow_leases SET generation = generation + 1 WHERE tenant_id = $1 AND id = $2`,
+			DefaultTenantUUID, workflowID); err != nil {
+			t.Fatalf("bump generation (workflow_leases): %v", err)
+		}
+	}
 }
 
 // setHeartbeatAtToSentinel writes heartbeatSentinel directly into one row's

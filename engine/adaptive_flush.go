@@ -332,10 +332,10 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 
 	rows, qerr := tx.QueryContext(ctx, fmt.Sprintf(`
 		WITH claims(workflow_id, worker_id, generation) AS (VALUES %s)
-		SELECT wi.id
-		FROM workflow_instances wi
-		JOIN claims c ON wi.id = c.workflow_id AND wi.assigned_to = c.worker_id AND wi.generation = c.generation
-		FOR NO KEY UPDATE OF wi
+		SELECT wl.id
+		FROM workflow_leases wl
+		JOIN claims c ON wl.id = c.workflow_id AND wl.assigned_to = c.worker_id AND wl.generation = c.generation
+		FOR NO KEY UPDATE OF wl
 	`, strings.Join(valuesSQL, ", ")), args...)
 	if qerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: %w", qerr)
@@ -357,7 +357,10 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 	// the workflow_leases write below, and it must commit or the lease is not
 	// actually refreshed. rows must be drained first, which the loop above has
 	// done. The FOR NO KEY UPDATE locks hold until that commit, so a reclaim
-	// cannot land between the fence and the renewal.
+	// cannot land between the fence and the renewal. They are on
+	// workflow_leases since cleat#3245 B3b: a reclaim mirrors its generation
+	// bump onto that row in its own transaction, so it serializes on it, and
+	// the workflow_instances row is no longer locked by a flush at all.
 	if cerr := rows.Close(); cerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check close: %w", cerr)
 	}
