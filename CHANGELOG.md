@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cleat-worker --enable-workflow-fetch` serves `cleat_fetch`.** Closes cleat#3377
+  (IMPROVEMENT-PLAN.d 3.317, option 2). Off by default; while off, `cleat_fetch` fails with an
+  error that names the flag instead of saying only that embedding is the way. On, the worker
+  installs a `Fetcher` that goes through the same egress guard as `DurableCall("http", "fetch")`:
+  the floor is always refused, `--egress-allowlist` narrows the deployment, and the requesting
+  tenant's own list (`cleatctl egress-allow`) must permit the host, so the flag grants no
+  destination by itself. A response larger than `--workflow-fetch-max-response-bytes` (default
+  1 MiB) fails the call with an error naming the cap. The `Idempotency-Key` header that
+  `http.fetch` sends is not sent. ABI.md 2.48 no longer calls `cleat_fetch` embedder-only.
+
 - **`backendkit.Client` gains `UpdateWorkflow`, `CancelWorkflow`, `StreamWorkflow` and an API key.**
   Closes cleat#3368. Each wraps a route the worker already served:
   `POST /api/workflows/{id}/update/{name}` (returns the update's promise id; a second update of

@@ -519,18 +519,21 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	var response string
 	var fetchErr error
 	if s.engine.fetcher != nil {
-		response, fetchErr = s.engine.fetcher.Fetch(ctx, method, url, headersJSON, body)
+		// Scoped to this execution's tenant, as callService does for a durable
+		// call: the worker's fetcher answers to the tenant's egress allowlist,
+		// and without a tenant in context that list denies everything.
+		response, fetchErr = s.engine.fetcher.Fetch(s.tenantScopedContext(ctx), method, url, headersJSON, body)
 	} else {
-		// NOT a misconfiguration an operator can fix, and the old text --
-		// "no fetcher configured" -- read like one. cleat ships no default
-		// Fetcher and cleat-worker sets none, so this branch is taken on
-		// EVERY cleat_fetch from a stock worker (IMPROVEMENT-PLAN 3.317).
-		// Say who can supply one, so the reader stops looking for a flag.
+		// Not a failure of the guest's request: this engine was built without a
+		// Fetcher. On a cleat-worker that is the default, and the operator turns
+		// it on (IMPROVEMENT-PLAN.d 3.317, cleat#3377); in an embedding host it
+		// is engine.WithFetcher. Name both, so the reader is sent to whichever
+		// applies instead of to a flag that does not exist where they are.
 		fetchErr = fmt.Errorf(
-			"cleat_fetch is unavailable: this engine has no Fetcher, and cleat "+
-				"ships no default one. cleat_fetch works only when the engine is "+
-				"embedded and the host supplies engine.WithFetcher(...); a stock "+
-				"cleat-worker cannot serve it. Workflow %s attempted %s %s",
+			"cleat_fetch is disabled: this engine has no Fetcher. A cleat-worker "+
+				"serves cleat_fetch only when started with --enable-workflow-fetch "+
+				"(off by default; docs/operations/egress-policy.md); an embedding "+
+				"host supplies engine.WithFetcher(...). Workflow %s attempted %s %s",
 			s.engine.workflowID, method, url)
 	}
 

@@ -17,7 +17,6 @@ engine/engine.go	func WithBackend
 engine/engine.go	func WithClock
 engine/engine.go	func WithContinueAsNewHandler
 engine/engine.go	func WithDeferPassBudget
-engine/engine.go	func WithFetcher
 engine/engine.go	func WithPluginCallGuard
 engine/engine.go	func WithPluginCallObserver
 engine/errors.go	func NewCancelledError

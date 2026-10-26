@@ -221,22 +221,14 @@ func WithChildWorkflowStore(cws ChildWorkflowStore) EngineOption {
 	return func(e *Engine) { e.childWfStore = cws }
 }
 
-// WithFetcher sets the HTTP fetcher, and nothing in a shipped binary calls it.
+// WithFetcher sets the Fetcher that serves cleat_fetch. Without one every
+// cleat_fetch fails, and the error says how to supply one.
 //
-// cleat ships no default Fetcher and cmd/cleat-worker sets none, so every
-// cleat_fetch from a stock worker takes the failure branch at
-// engine/lifecycle.go:529 -- not a misconfiguration an operator can fix, but
-// the designed state (IMPROVEMENT-PLAN 3.317). cleat_fetch works only when the
-// engine is embedded and the host supplies one.
-//
-// This is a REAL GAP rather than a deliberate extension point, which is why it
-// is worth saying here: the error text tells whoever HITS it, and the exemption
-// table in engine_option_reachability_test.go tells whoever audits reachability,
-// but neither reaches someone deciding from this declaration whether cleat_fetch
-// is available to them. cleat#1878.
-//
-// If you wire a fetcher, the caveat in ABI.md 2.48 and the explanation above
-// that error both stop being true and should go with it.
+// cmd/cleat-worker calls it only when started with --enable-workflow-fetch,
+// with a Fetcher that goes through the same egress guard as
+// DurableCall("http", "fetch") (cleat#3377). An embedding host supplies its
+// own, and then its own policy is the only one: cleat's egress guard does not
+// wrap a Fetcher it did not build.
 func WithFetcher(f Fetcher) EngineOption { return func(e *Engine) { e.fetcher = f } }
 
 func WithConcurrencyKeyStore(cks ConcurrencyKeyStore) EngineOption {

@@ -669,11 +669,30 @@ func (c *dbServiceCaller) egressGuard(ctx context.Context) *engine.EgressGuard {
 	return g
 }
 
+// httpFetchMaxBody is the response-body cap on the DurableCall("http", "fetch")
+// path, which has always been 1 MiB and which truncates silently. cleat_fetch
+// takes its own cap (--workflow-fetch-max-response-bytes) and refuses an
+// oversized body instead.
+const httpFetchMaxBody = 1 << 20
+
 func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON, idempotencyKey string) (string, error) {
 	var req fetchRequest
 	if err := json.Unmarshal([]byte(requestJSON), &req); err != nil {
 		return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf("invalid request JSON: %w", err))
 	}
+	return c.guardedFetch(ctx, req, idempotencyKey, httpFetchMaxBody, false)
+}
+
+// guardedFetch performs one guest-named HTTP request through the egress guard.
+// It is the single implementation behind both DurableCall("http", "fetch") and
+// cleat_fetch (workflowFetcher), so the two cannot differ on what they refuse.
+//
+// maxBody bounds the response body. With overflowIsError false a larger body is
+// cut to maxBody and returned as if complete -- the original http.fetch
+// behaviour, kept as it was. With it true the call fails and the message names
+// the cap, because a guest that cannot tell its answer was cut is the
+// cleat#1312 defect again.
+func (c *dbServiceCaller) guardedFetch(ctx context.Context, req fetchRequest, idempotencyKey string, maxBody int64, overflowIsError bool) (string, error) {
 	if req.URL == "" {
 		return "", engine.NewPermanentError("http.fetch", "", errors.New("url is required"))
 	}
@@ -758,9 +777,20 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON, idem
 		return "", engine.NewTransientError("http.fetch", "", fmt.Errorf("request %s %q failed: %w", req.Method, req.URL, err))
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// One byte past the cap, so "exactly maxBody" and "more than maxBody" are
+	// distinguishable.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return "", engine.NewTransientError("http.fetch", "", fmt.Errorf("reading response: %w", err))
+	}
+	if int64(len(respBody)) > maxBody {
+		if overflowIsError {
+			// Permanent: the same URL answers with the same body next time.
+			return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf(
+				"response body from %s %q is larger than the %d-byte cap (--workflow-fetch-max-response-bytes)",
+				req.Method, req.URL, maxBody))
+		}
+		respBody = respBody[:maxBody]
 	}
 	respHeaders := make(map[string]string)
 	for k := range resp.Header {
@@ -2101,6 +2131,12 @@ type Worker struct {
 	// operatorEgress answers "which hosts may this DEPLOYMENT reach at all".
 	// Egress needs both this and the tenant's permission. cleat#1565.
 	operatorEgress *engine.HostAllowlist
+
+	// workflowFetch is --enable-workflow-fetch: whether cleat_fetch is served at
+	// all. Off, the engine gets no Fetcher. workflowFetchMaxBody is its response
+	// cap; both are read only through workflowFetcherFor. cleat#3377.
+	workflowFetch        bool
+	workflowFetchMaxBody int64
 
 	// secrets resolves ${secret:name} in a DurableCall's request, on the way
 	// out to the service. Nil leaves references as literal text -- the same
@@ -3911,6 +3947,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	deferPhase := wf.PendingTerminalStatus != ""
 	if deferPhase {
 		engineOpts = append(engineOpts, engine.WithDeferPhase())
+	}
+	if f := w.workflowFetcherFor(caller); f != nil {
+		engineOpts = append(engineOpts, engine.WithFetcher(f))
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics

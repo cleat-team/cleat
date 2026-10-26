@@ -70,7 +70,10 @@ func TestDurableCallClientSitesDeriveTheirTimeoutRatherThanHardcodingOne(t *test
 	literalTimeout := regexp.MustCompile(`Timeout:\s*\d+\s*\*\s*time\.Second`)
 
 	mustDeriveFromReclaimWindow := []string{
-		"forwardToService", "ResolveCall", "ReplayUnderOriginalKey", "handleHTTPFetch",
+		// guardedFetch, not handleHTTPFetch: the client moved when cleat_fetch
+		// began sharing the implementation (cleat#3377), and handleHTTPFetch is
+		// now a parse-and-delegate wrapper that holds no client at all.
+		"forwardToService", "ResolveCall", "ReplayUnderOriginalKey", "guardedFetch",
 	}
 	for _, fn := range mustDeriveFromReclaimWindow {
 		body := funcBody(t, text, fn)
