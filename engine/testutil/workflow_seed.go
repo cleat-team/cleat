@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 )
 
@@ -244,10 +245,17 @@ type RunSeed struct {
 // in a transaction; pass a *sql.Tx to make them atomic.
 func SeedRun(t testing.TB, db Execer, seed RunSeed) {
 	t.Helper()
-	if seed.ID == "" || seed.DefName == "" {
-		t.Fatalf("SeedRun: ID and DefName are required, got %+v", seed)
+	if err := SeedRunErr(context.Background(), db, seed); err != nil {
+		t.Fatal(err)
 	}
-	ctx := context.Background()
+}
+
+// SeedRunErr is SeedRun for code with no *testing.T to fail, such as a
+// goroutine in a load test. It returns the first error instead.
+func SeedRunErr(ctx context.Context, db Execer, seed RunSeed) error {
+	if seed.ID == "" || seed.DefName == "" {
+		return fmt.Errorf("SeedRun: ID and DefName are required, got %+v", seed)
+	}
 	defVersion := seed.DefVersion
 	if defVersion == 0 {
 		defVersion = 1
@@ -257,7 +265,7 @@ func SeedRun(t testing.TB, db Execer, seed RunSeed) {
 		VALUES ($1, COALESCE(NULLIF($2, ''), $5)::uuid, $3, $4, COALESCE(NULLIF($6, ''), 'ABANDON'))`,
 		seed.ID, seed.TenantID, seed.DefName, defVersion, defaultLeaseTenantID, seed.ParentClosePolicy,
 	); err != nil {
-		t.Fatalf("seeding %s's workflow_instances row: %v", seed.ID, err)
+		return fmt.Errorf("seeding %s's workflow_instances row: %w", seed.ID, err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_leases (id, tenant_id, task_queue, status, assigned_to, generation, parent_workflow_id)
@@ -273,13 +281,14 @@ func SeedRun(t testing.TB, db Execer, seed RunSeed) {
 		seed.ID, seed.TenantID, seed.TaskQueue, seed.Status, seed.AssignedTo, seed.Generation,
 		seed.ParentWorkflowID, defaultLeaseTenantID, defaultLeaseTaskQueue, defaultLeaseStatus,
 	); err != nil {
-		t.Fatalf("seeding %s's workflow_leases row: %v", seed.ID, err)
+		return fmt.Errorf("seeding %s's workflow_leases row: %w", seed.ID, err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_payloads (id, tenant_id, def_name, def_version, input)
 		VALUES ($1, COALESCE(NULLIF($2, ''), $6)::uuid, $3, $4, COALESCE(NULLIF($5, ''), '{}')::jsonb)`,
 		seed.ID, seed.TenantID, seed.DefName, defVersion, seed.Input, defaultLeaseTenantID,
 	); err != nil {
-		t.Fatalf("seeding %s's workflow_payloads row: %v", seed.ID, err)
+		return fmt.Errorf("seeding %s's workflow_payloads row: %w", seed.ID, err)
 	}
+	return nil
 }
