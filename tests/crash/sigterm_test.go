@@ -356,8 +356,8 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	release := svc.holdOperation("Reserve")
 	defer release()
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id IN (SELECT id FROM workflow_instances WHERE task_queue = $1)`, taskQueue)
-		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE task_queue = $1`, taskQueue)
+		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id IN (SELECT id FROM workflow_leases WHERE task_queue = $1)`, taskQueue)
+		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id IN (SELECT id FROM workflow_leases WHERE task_queue = $1)`, taskQueue)
 	})
 
 	first := startWorker(t, bin, taskQueue, svc.srv.URL, "--shutdown-grace", "3s")
@@ -373,7 +373,7 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	// Non-vacuity: held behind the lock the continue-as-new cannot have committed, so the queue still holds only
 	// the original run. Without the lock there would already be two and this scenario would prove nothing.
 	var held int
-	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances WHERE task_queue = $1`, taskQueue).Scan(&held); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE task_queue = $1`, taskQueue).Scan(&held); err != nil {
 		t.Fatal(err)
 	}
 	if held != 1 {

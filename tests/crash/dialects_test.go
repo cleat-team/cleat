@@ -55,6 +55,7 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -473,33 +474,23 @@ func (tg *crashTarget) startWorker(t *testing.T, bin, taskQueue, svcURL string, 
 
 // startWorkflowEntry queues one crashcall instance.
 //
-// workflow_leases is PostgreSQL-only (migration 016 (folded into
-// migrations/postgres/001_schema.sql by #3358)); on that target the
-// reclaim path piece A moved now requires a matching row there, for the same
-// reason harness_test.go's identically-named function does -- see its doc.
-// MySQL and SQL Server still reclaim from workflow_instances directly, so
-// they need no second insert.
+// workflow_leases and workflow_payloads are PostgreSQL-only, and the reclaim
+// path and the claim require a row in each there, for the same reason
+// harness_test.go's identically-named function does -- see its doc. SeedRun
+// writes all three on that target. MySQL and SQL Server keep the one wide
+// workflow_instances table and still reclaim from it directly.
 func (tg *crashTarget) startWorkflowEntry(t *testing.T, id, orderID, taskQueue, entry string) {
 	t.Helper()
 	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
-	q := `INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES (` + tg.placeholder(1) + `, 'crashcall', 1, 'ready', ` + tg.jsonArg(tg.placeholder(2)) + `, ` +
-		tg.placeholder(3) + `, ` + tg.placeholder(4) + `)`
-	if _, err := tg.db.Exec(tg.stmt(q), id, input, taskQueue, defaultTenant); err != nil {
-		t.Fatalf("queueing workflow %s on %s: %v", id, tg.name, err)
-	}
 	if tg.name == "postgres" {
-		lq := `INSERT INTO workflow_leases (id, tenant_id, task_queue) VALUES (` +
-			tg.placeholder(1) + `, ` + tg.placeholder(2) + `, ` + tg.placeholder(3) + `)`
-		if _, err := tg.db.Exec(tg.stmt(lq), id, defaultTenant, taskQueue); err != nil {
-			t.Fatalf("queueing workflow %s's lease row on %s: %v", id, tg.name, err)
-		}
-		// cleat#3245 B1a: the claim reads input and def_name/def_version from
-		// workflow_payloads, and refuses a run with no row there.
-		pq := `INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version) VALUES (` +
-			tg.placeholder(1) + `, ` + tg.placeholder(2) + `, ` + tg.jsonArg(tg.placeholder(3)) + `, 'crashcall', 1)`
-		if _, err := tg.db.Exec(tg.stmt(pq), id, defaultTenant, input); err != nil {
-			t.Fatalf("queueing workflow %s's payload row on %s: %v", id, tg.name, err)
+		testutil.SeedRun(t, tg.db, testutil.RunSeed{
+			ID: id, DefName: "crashcall", TenantID: defaultTenant, Input: input, TaskQueue: taskQueue})
+	} else {
+		q := `INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+			VALUES (` + tg.placeholder(1) + `, 'crashcall', 1, 'ready', ` + tg.jsonArg(tg.placeholder(2)) + `, ` +
+			tg.placeholder(3) + `, ` + tg.placeholder(4) + `)`
+		if _, err := tg.db.Exec(tg.stmt(q), id, input, taskQueue, defaultTenant); err != nil {
+			t.Fatalf("queueing workflow %s on %s: %v", id, tg.name, err)
 		}
 	}
 	t.Cleanup(func() {
