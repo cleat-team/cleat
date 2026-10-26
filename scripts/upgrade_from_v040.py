@@ -277,7 +277,12 @@ def build_workflows(cli: Path, work: Path) -> dict[str, Path]:
     if mod.exists():
         shutil.rmtree(mod)
     mod.mkdir(parents=True)
-    env = dict(os.environ, GOFLAGS="-mod=mod")
+    # GOWORK=off: the module is a standalone one this function writes, and the state
+    # directory may sit inside a checkout that has a go.work (CI puts it in
+    # $GITHUB_WORKSPACE). Go then finds that go.work and refuses -mod=mod, which
+    # is how the first CI run ended UNMEASURED on the Linux path. Locally the state
+    # directory was in /tmp, outside any workspace, so nothing showed it.
+    env = dict(os.environ, GOFLAGS="-mod=mod", GOWORK="off")
     for cmd in (["go", "mod", "init", "seedwf"], ["go", "get", f"github.com/cleat-team/cleat/cleat@{VERSION}"]):
         p = subprocess.run(cmd, cwd=mod, env=env, capture_output=True, text=True)
         need(p.returncode == 0, f"{' '.join(cmd)}: {p.stderr.strip()[:300]}")
