@@ -282,11 +282,9 @@ func TestPostgresStore_Heartbeat_Owned(t *testing.T) {
 }
 
 func TestPostgresStore_ReapStaleInstances(t *testing.T) {
-	// UPDATE workflow_instances ... RETURNING id, not an Exec with
-	// RowsAffected -- cleat#3245 Phase 3 step 2 piece 6b needs the reclaimed
-	// ids to mirror the same set onto workflow_leases.
+	// One UPDATE workflow_leases ... RETURNING id since cleat#3245 B3c.
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "UPDATE workflow_instances", data: [][]driver.Value{{"wf-1"}, {"wf-2"}, {"wf-3"}}},
+		{match: "UPDATE workflow_leases", data: [][]driver.Value{{"wf-1"}, {"wf-2"}, {"wf-3"}}},
 	}, nil)
 	defer db.Close()
 
@@ -1476,7 +1474,7 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
@@ -1505,7 +1503,7 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
@@ -1530,7 +1528,7 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1", nil, nil, nil, int64(0), int64(0), ""},
 			},
@@ -1563,7 +1561,7 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
@@ -1850,7 +1848,7 @@ func TestPostgresStore_FailWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// logged but FailWorkflow still succeeds.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		// Main workflow status update succeeds (fence held).
-		{match: "SET status = 'failed'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 		// Idempotency update fails — logged but non-fatal.
 		{match: "UPDATE idempotency_keys SET error_msg =", err: sql.ErrConnDone},
 	})
@@ -3243,7 +3241,7 @@ func TestPostgresStore_ContinueAsNew_SuccessMock(t *testing.T) {
 		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{newRunID, "default", nil}}},
 	}, []mockExecResult{
 		{match: "INSERT INTO event_history", affected: 1},
-		{match: "SET status = 'done'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 	})
 	defer db.Close()
 
@@ -4053,7 +4051,7 @@ func TestPostgresStore_ResolvePromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_ResolvePromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_leases", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 
@@ -4112,7 +4110,7 @@ func TestPostgresStore_RejectPromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_RejectPromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_leases", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 
@@ -4156,7 +4154,7 @@ func TestPostgresStore_UpdateStickyWorker_Success(t *testing.T) {
 
 func TestPostgresStore_UpdateStickyWorker_ExecError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET sticky_worker_id", err: errors.New("update failed")},
+		{match: "UPDATE workflow_leases SET sticky_worker_id", err: errors.New("update failed")},
 	})
 	defer db.Close()
 
@@ -4609,7 +4607,7 @@ func TestPostgresStore_DeliverSignal_InsertError(t *testing.T) {
 func TestPostgresStore_DeliverSignal_UpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "INSERT INTO workflow_signals", affected: 1},
-		{match: "UPDATE workflow_instances", err: errors.New("update failed")},
+		{match: "UPDATE workflow_leases", err: errors.New("update failed")},
 	})
 	defer db.Close()
 
@@ -5365,7 +5363,7 @@ func TestPostgresStore_ClaimWorkflows_ScanError(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				// Wrong type for def_version (string instead of int64) causes scan error
 				{"wf-1", "test-wf", "not-an-int", "running", []byte(`{}`), "worker-1", nil, nil, nil, nil, nil, int64(0), int64(0), ""},

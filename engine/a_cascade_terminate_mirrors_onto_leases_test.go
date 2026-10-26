@@ -35,27 +35,24 @@ func TestCascadeTerminatedChildIsNotRevivedByAClaim(t *testing.T) {
 		t.Fatalf("TerminateWorkflow(root): %v", err)
 	}
 
-	instStatus := readInstanceRow(t, db, child).status
-	if instStatus != "terminated" {
-		t.Fatalf("child workflow_instances.status = %q, want %q (sanity on the existing cascade write, before any claim)", instStatus, "terminated")
-	}
 	leaseStatus := readLeaseRow(t, db, child).status
 	if leaseStatus != "terminated" {
-		t.Errorf("child workflow_leases.status = %q, want %q -- the cascade's lease mirror is missing or scoped wrong", leaseStatus, "terminated")
+		t.Fatalf("child workflow_leases.status = %q, want %q -- the cascade's lease write is missing or scoped wrong", leaseStatus, "terminated")
 	}
 
 	// The actual failure mode: a claim broad enough to consider this child
 	// must not touch it. Before the fix, workflow_leases.status stayed
 	// 'ready' (the child's creation-time value), so this call claimed it
-	// and set workflow_instances back to 'running'.
+	// and set it back to 'running'. Since cleat#3245 B3c the claim writes
+	// workflow_leases alone, so that is where a revival would show.
 	if _, err := store.ClaimWorkflows(ctx, "worker-cascade-revive", 50); err != nil {
 		t.Fatalf("ClaimWorkflows: %v", err)
 	}
 
-	instAfter := readInstanceRow(t, db, child).status
-	if instAfter != "terminated" {
-		t.Errorf("child workflow_instances.status AFTER a broad ClaimWorkflows = %q, want still %q -- "+
+	leaseAfter := readLeaseRow(t, db, child).status
+	if leaseAfter != "terminated" {
+		t.Errorf("child workflow_leases.status AFTER a broad ClaimWorkflows = %q, want still %q -- "+
 			"a cascade-terminated workflow was revived by a claim that should never have seen it",
-			instAfter, "terminated")
+			leaseAfter, "terminated")
 	}
 }

@@ -643,7 +643,7 @@ sampling:
 	// having executed nothing at all. Rows in 'done' cannot be faked that
 	// way; only CompleteWorkflow puts them there.
 	var done int64
-	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances WHERE id LIKE 'soak-%' AND status = 'done'`).Scan(&done); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE id LIKE 'soak-%' AND status = 'done'`).Scan(&done); err != nil {
 		t.Fatalf("count completed workflows: %v", err)
 	}
 	t.Logf("  Reached 'done' in the database: %d", done)

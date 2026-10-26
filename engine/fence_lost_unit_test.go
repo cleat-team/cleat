@@ -34,10 +34,11 @@ import (
 // Fake driver: records every statement executed against it and returns a
 // caller-controlled RowsAffected for whichever statement looks like the
 // primary generation-fenced UPDATE (identified by referencing both
-// "assigned_to =" and "generation =" on workflow_instances -- the one
-// pattern shared by CompleteWorkflow / FailWorkflow /
+// "assigned_to =" and "generation =" in an UPDATE of workflow_leases -- the
+// one pattern shared by CompleteWorkflow / FailWorkflow /
 // MoveToDeadLetterQueue / ContinueAsNew's fencing UPDATE, and by no other
-// statement those methods issue). All other statements succeed as a 1-row
+// statement those methods issue; since cleat#3245 B3c that UPDATE is on the
+// lease row, the only copy of these columns written). All other statements succeed as a 1-row
 // no-op so the surrounding transaction machinery behaves normally.
 // ---------------------------------------------------------------------
 
@@ -68,7 +69,7 @@ func (s *fenceFakeState) counts() (committed, rolledBack int) {
 }
 
 func isFencedWorkflowUpdate(query string) bool {
-	return strings.Contains(query, "workflow_instances") &&
+	return strings.Contains(query, "UPDATE workflow_leases") &&
 		strings.Contains(query, "assigned_to =") &&
 		strings.Contains(query, "generation =")
 }

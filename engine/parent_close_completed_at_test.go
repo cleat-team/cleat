@@ -145,12 +145,12 @@ func statusAndCompletedAt(t *testing.T, store WorkflowStore, workflowID string) 
 
 	var status string
 	var completedAt *time.Time
-	// status is still a workflow_instances column; completed_at lives on
-	// workflow_payloads on PostgreSQL since cleat#3245 B1b.
+	// On PostgreSQL completed_at lives on workflow_payloads since cleat#3245
+	// B1b, and status on workflow_leases since B3c.
 	q := `SELECT status, completed_at FROM workflow_instances WHERE id = ` + ph
 	if ph == "$1" {
-		q = `SELECT w.status, p.completed_at FROM workflow_instances w
-			JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`
+		q = `SELECT l.status, p.completed_at FROM workflow_leases l
+			JOIN workflow_payloads p ON p.id = l.id WHERE l.id = $1`
 	}
 	err := db.QueryRow(q, workflowID).Scan(&status, &completedAt)
 	if err == sql.ErrNoRows {

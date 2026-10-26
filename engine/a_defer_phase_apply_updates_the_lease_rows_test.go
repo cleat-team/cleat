@@ -106,18 +106,6 @@ func TestFinalizeDeferPhaseUpdatesTheLeaseRow(t *testing.T) {
 		t.Errorf("workflow_leases.defer_phase_deadline = %v, want NULL", leaseDeadline)
 	}
 
-	var instStatus string
-	var instPending sql.NullString
-	if err := db.QueryRow(`
-		SELECT status, pending_terminal_status FROM workflow_instances WHERE id = $1
-	`, id).Scan(&instStatus, &instPending); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.status != instStatus || leasePending.Valid != instPending.Valid {
-		t.Errorf("workflow_leases (%q/%v) disagrees with workflow_instances (%q/%v)",
-			lease.status, leasePending, instStatus, instPending)
-	}
-
 	// cleat#3245 Phase 3 step 3 piece F: completed_at now lands on
 	// workflow_payloads too, same tx.
 	var payloadCompletedAt sql.NullTime
@@ -174,14 +162,6 @@ func TestExpireDeferPhasesUpdatesTheLeaseRows(t *testing.T) {
 		}
 		if leasePending.Valid {
 			t.Errorf("%s: workflow_leases.pending_terminal_status = %v, want NULL", id, leasePending)
-		}
-
-		var instStatus string
-		if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&instStatus); err != nil {
-			t.Fatalf("%s: read workflow_instances: %v", id, err)
-		}
-		if lease.status != instStatus {
-			t.Errorf("%s: workflow_leases.status (%q) disagrees with workflow_instances (%q)", id, lease.status, instStatus)
 		}
 
 		// cleat#3245 Phase 3 step 3 piece F: completed_at now lands on

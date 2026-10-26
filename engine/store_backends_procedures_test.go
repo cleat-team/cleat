@@ -61,10 +61,12 @@ import (
 // list must name it. 005 is the first since that compaction: cleat#3245 B1b
 // redefines finalize_workflow_status to stop writing payload columns to
 // workflow_instances, so the list is two entries again until the next
-// baseline regeneration folds 005 into 003.
+// baseline regeneration folds 005 into 003. 007 (cleat#3245 B3c) redefines it
+// again to stop writing the lease columns there; B5 folds both.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
 	"005_finalize_workflow_status_writes_payloads_only.sql",
+	"007_finalize_workflow_status_writes_leases_only.sql",
 }
 
 // ONE entry since the cleat#3348 re-compaction, for the same reason the

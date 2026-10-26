@@ -69,14 +69,6 @@ func TestFinalizeWorkflowSegmentDoneUpdatesTheLeaseAndPayloadRows(t *testing.T) 
 	if !payload.queryState.Valid || payload.queryState.String != `{"k": "v"}` {
 		t.Errorf("workflow_payloads.query_state = %v, want %q", payload.queryState, `{"k": "v"}`)
 	}
-
-	var instStatus string
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&instStatus); err != nil {
-		t.Fatalf("read workflow_instances: %v", err)
-	}
-	if lease.status != instStatus {
-		t.Errorf("workflow_leases.status (%q) disagrees with workflow_instances.status (%q)", lease.status, instStatus)
-	}
 }
 
 func TestFinalizeWorkflowSegmentReadyUpdatesTheLeaseAndPayloadRows(t *testing.T) {
@@ -111,18 +103,12 @@ func TestFinalizeWorkflowSegmentReadyUpdatesTheLeaseAndPayloadRows(t *testing.T)
 		t.Errorf("workflow_leases.assigned_to = %v, want NULL", lease.assignedTo)
 	}
 
-	var leaseNextWake, instNextWake time.Time
+	var leaseNextWake time.Time
 	if err := db.QueryRow(`SELECT next_wake_at FROM workflow_leases WHERE id = $1`, id).Scan(&leaseNextWake); err != nil {
 		t.Fatalf("read workflow_leases.next_wake_at: %v", err)
 	}
-	if err := db.QueryRow(`SELECT next_wake_at FROM workflow_instances WHERE id = $1`, id).Scan(&instNextWake); err != nil {
-		t.Fatalf("read workflow_instances.next_wake_at: %v", err)
-	}
 	if !leaseNextWake.Equal(nextWake) {
 		t.Errorf("workflow_leases.next_wake_at = %v, want %v", leaseNextWake, nextWake)
-	}
-	if !leaseNextWake.Equal(instNextWake) {
-		t.Errorf("workflow_leases.next_wake_at (%v) disagrees with workflow_instances.next_wake_at (%v)", leaseNextWake, instNextWake)
 	}
 }
 
@@ -142,13 +128,11 @@ func TestFinalizeWorkflowSegmentReadyWithALiveSignalWakesNow(t *testing.T) {
 	seedClaimedTriple(t, db, id, defName, worker, 1)
 
 	// A settlement that arrived mid-segment: signal_seq has moved past the
-	// claim-time snapshot on workflow_instances (the table this comparison
-	// still reads, piece 5's job to dual-write). The resolved next_wake_at
-	// should come back as "now" rather than the far-future argument, and
-	// workflow_leases should receive that SAME resolved value via
-	// migration 017's RETURNING ... INTO, not its own (still-zero,
-	// not-yet-dual-written) counters.
-	if _, err := db.ExecContext(ctx, `UPDATE workflow_instances SET signal_seq = 1 WHERE id = $1`, id); err != nil {
+	// claim-time snapshot. The resolved next_wake_at should come back as
+	// "now" rather than the far-future argument. Since cleat#3245 B3c
+	// (migration 007) finalize computes that from workflow_leases' own
+	// counters, the only copy DeliverSignal bumps.
+	if _, err := db.ExecContext(ctx, `UPDATE workflow_leases SET signal_seq = 1 WHERE id = $1`, id); err != nil {
 		t.Fatalf("bump signal_seq: %v", err)
 	}
 
@@ -157,18 +141,12 @@ func TestFinalizeWorkflowSegmentReadyWithALiveSignalWakesNow(t *testing.T) {
 		t.Fatalf("FinalizeWorkflowSegment: %v", err)
 	}
 
-	var leaseNextWake, instNextWake time.Time
+	var leaseNextWake time.Time
 	if err := db.QueryRow(`SELECT next_wake_at FROM workflow_leases WHERE id = $1`, id).Scan(&leaseNextWake); err != nil {
 		t.Fatalf("read workflow_leases.next_wake_at: %v", err)
 	}
-	if err := db.QueryRow(`SELECT next_wake_at FROM workflow_instances WHERE id = $1`, id).Scan(&instNextWake); err != nil {
-		t.Fatalf("read workflow_instances.next_wake_at: %v", err)
-	}
 	if leaseNextWake.Equal(farFuture) {
 		t.Fatalf("workflow_leases.next_wake_at = the far-future argument, want approximately now (a live signal should wake it immediately)")
-	}
-	if !leaseNextWake.Equal(instNextWake) {
-		t.Errorf("workflow_leases.next_wake_at (%v) disagrees with workflow_instances.next_wake_at (%v)", leaseNextWake, instNextWake)
 	}
 }
 

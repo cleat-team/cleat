@@ -335,7 +335,7 @@ func TestDeferPhaseOwedReadsCompactionStateFromWorkflowPayloadsOnPostgres(t *tes
 	owed := func() bool {
 		t.Helper()
 		var n int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_instances WHERE id = $1 AND `+deferPhaseOwedSQLPostgres, id).Scan(&n); err != nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_leases WHERE id = $1 AND `+deferPhaseOwedSQLPostgres, id).Scan(&n); err != nil {
 			t.Fatalf("evaluate deferPhaseOwedSQLPostgres: %v", err)
 		}
 		return n == 1
@@ -367,7 +367,7 @@ func TestTerminateTreatsARunCompactedOnWorkflowPayloadsAsOwingADeferPhase(t *tes
 		t.Fatalf("TerminateWorkflow: %v", err)
 	}
 	var status string
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&status); err != nil {
+	if err := db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, id).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != statusTerminating {

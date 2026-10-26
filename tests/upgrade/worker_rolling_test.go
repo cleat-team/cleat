@@ -161,7 +161,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 	}
 
 	var notDone int
-	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_leases
 		WHERE id = ANY($1) AND status <> 'done'`, pq.Array(wfIDs)).Scan(&notDone); err != nil {
 		t.Fatalf("count unfinished: %v", err)
 	}

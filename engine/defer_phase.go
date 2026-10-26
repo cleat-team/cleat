@@ -89,16 +89,19 @@ const deferPhaseOwedSQL = `(workflow_instances.status IN ('ready', 'running', 's
 
 // deferPhaseOwedSQLPostgres is deferPhaseOwedSQL for PostgreSQL, where
 // compaction_state is a workflow_payloads column (cleat#3245 B1a) and is read
-// there through a correlated EXISTS. Same rule, same no-alias shape, and
+// there through a correlated EXISTS, and where status is read from
+// workflow_leases (cleat#3245 B3c), the only copy written since. So the
+// statement it is embedded in must have workflow_leases, unaliased, in
+// scope. Same rule, same no-alias shape, and
 // TestTheSQLPredicateAgreesWithTheGoOne evaluates whichever of the two the
 // store's dialect uses -- so the "two carriers of one rule" hazard above now
 // has three carriers, and the test covers all three.
-const deferPhaseOwedSQLPostgres = `(workflow_instances.status IN ('ready', 'running', 'suspended')
+const deferPhaseOwedSQLPostgres = `(workflow_leases.status IN ('ready', 'running', 'suspended')
 		   AND (EXISTS (SELECT 1 FROM workflow_payloads p
-		                WHERE p.id = workflow_instances.id
+		                WHERE p.id = workflow_leases.id
 		                  AND p.compaction_state IS NOT NULL)
 		        OR EXISTS (SELECT 1 FROM event_history e
-		                   WHERE e.workflow_id = workflow_instances.id
+		                   WHERE e.workflow_id = workflow_leases.id
 		                     AND e.event_type = 'defer')))`
 
 // The deadline expression, per dialect, with the timeout embedded as a literal

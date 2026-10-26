@@ -56,8 +56,8 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 	// workflow_instances. cancellation_requested/cancellation_reason are
 	// grouped with the other lease columns by migration 016 (folded into migrations/postgres/001_schema.sql by #3358)'s own design
 	// note (checked on the hot resume/heartbeat path), and every writer
-	// (RequestCancellation, via setLeaseCancellation) already mirrors them
-	// there, step 2 piece 5a.
+	// (RequestCancellation, via setLeaseCancellation) writes them there,
+	// step 2 piece 5a.
 	err = tx.QueryRowContext(ctx, `
 		SELECT cancellation_requested, cancellation_reason
 		FROM workflow_leases WHERE id = $1
@@ -109,14 +109,7 @@ func (s *PostgresStore) ConsumeSignal(ctx context.Context, workflowID string, id
 	`, id, workflowID); err != nil {
 		return fmt.Errorf("consume signal: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
-		WHERE id = $1
-	`, workflowID); err != nil {
-		return fmt.Errorf("consume signal: bump consumed counter: %w", err)
-	}
-	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_leases, on the
-	// same tx.
+	// Since cleat#3245 B3c the lease row holds the only copy written.
 	if err := bumpLeaseSignalConsumedSeq(ctx, tx, workflowID); err != nil {
 		return fmt.Errorf("consume signal: %w", err)
 	}
@@ -405,18 +398,9 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
 	// DeliverSignalNonexistentID cases; IMPROVEMENT-PLAN 3.86/3.215;
 	// cleat#2218, cleat#2227.)
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET signal_seq = signal_seq + 1,
-		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
-		WHERE id = $1
-	`, workflowID); err != nil {
-		return err
-	}
-	// cleat#3245 Phase 3 step 2 piece 5a: mirror onto workflow_leases, on the
-	// same tx. deliverSignalTx has no store receiver (shared by DeliverSignal
-	// and DeliverSignalIdempotent), so this mirror is a free function too --
-	// it needs nothing from the store beyond the transaction.
+	// Since cleat#3245 B3c the lease row holds the only copy written. A free
+	// function, like deliverSignalTx itself, which DeliverSignal and
+	// DeliverSignalIdempotent share.
 	if err := bumpLeaseSignalSeqAndWake(ctx, tx, workflowID); err != nil {
 		return err
 	}
@@ -658,8 +642,9 @@ func encodeAllowedSignals(callers []string) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
-// bumpLeaseSignalSeqAndWake mirrors deliverSignalTx's signal_seq bump and
-// conditional wake onto workflow_leases, on the same tx -- cleat#3245 Phase 3
+// bumpLeaseSignalSeqAndWake is deliverSignalTx's signal_seq bump and
+// conditional wake on workflow_leases, the only copy written since cleat#3245
+// B3c, on the same tx -- cleat#3245 Phase 3
 // step 2, piece 5a. Free function, not a *PostgresStore method: deliverSignalTx
 // itself has no store receiver (shared by DeliverSignal and
 // DeliverSignalIdempotent), and this mirror needs nothing from the store
@@ -676,8 +661,8 @@ func bumpLeaseSignalSeqAndWake(ctx context.Context, tx *sql.Tx, workflowID strin
 	return nil
 }
 
-// bumpLeaseSignalConsumedSeq mirrors ConsumeSignal's signal_consumed_seq bump
-// onto workflow_leases, on the same tx -- cleat#3245 Phase 3 step 2, piece 5a.
+// bumpLeaseSignalConsumedSeq is ConsumeSignal's signal_consumed_seq bump on
+// workflow_leases, the only copy written since cleat#3245 B3c.
 func bumpLeaseSignalConsumedSeq(ctx context.Context, tx *sql.Tx, workflowID string) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases SET signal_consumed_seq = signal_consumed_seq + 1

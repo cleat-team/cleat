@@ -140,11 +140,8 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 				t.Errorf("the store logged %d per-field \"decrypt failed\" WARNs on the replay read, want 0\n--- worker log ---\n%s", n, wrong.output())
 			}
 			wrong.kill()
-			if _, err := db.Exec(`UPDATE workflow_instances SET status = 'ready', assigned_to = NULL, next_wake_at = now() WHERE id = $1`, wfID); err != nil {
-				t.Fatalf("returning the run to ready: %v", err)
-			}
-			// cleat#3245 Phase 3 step 3 piece B: mirror onto workflow_leases, the
-			// same way the production ClaimWorkflows cutover needs it. Without
+			// cleat#3245: the lease row is the only copy of the run's state
+			// written after insert (B3c-2), and ClaimWorkflows reads it. Without
 			// this, worker C's claim below cannot see the row as ready -- it is
 			// only rescued, slowly, by the background stale-lease reclaim sweep
 			// once the row's (unaffected) heartbeat_at ages out, which is a false
@@ -207,7 +204,7 @@ func awaitReleaseNotTerminal(t *testing.T, db *sql.DB, id string, w *worker) {
 func workflowOutcome(t *testing.T, db *sql.DB, id string) (status, errMsg, result string) {
 	t.Helper()
 	var msg, res sql.NullString
-	if err := db.QueryRow(`SELECT w.status, p.error_msg, p.result::text FROM workflow_instances w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
+	if err := db.QueryRow(`SELECT w.status, p.error_msg, p.result::text FROM workflow_leases w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
 		Scan(&status, &msg, &res); err != nil {
 		t.Fatalf("reading %s: %v", id, err)
 	}
@@ -256,7 +253,7 @@ func requireAdminRefusals(t *testing.T, db *sql.DB, addr, id string, w *worker) 
 	// claim it while the calls are made.
 	parked := false
 	for i := 0; i < 80 && !parked; i++ {
-		res, err := db.Exec(`UPDATE workflow_instances SET next_wake_at = now() + interval '1 hour' WHERE id = $1 AND status = 'ready'`, id)
+		res, err := db.Exec(`UPDATE workflow_leases SET next_wake_at = now() + interval '1 hour' WHERE id = $1 AND status = 'ready'`, id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -270,7 +267,7 @@ func requireAdminRefusals(t *testing.T, db *sql.DB, addr, id string, w *worker) 
 		t.Fatalf("could not park the run\n--- worker log ---\n%s", w.output())
 	}
 	var generation int64
-	if err := db.QueryRow(`SELECT generation FROM workflow_instances WHERE id = $1`, id).Scan(&generation); err != nil {
+	if err := db.QueryRow(`SELECT generation FROM workflow_leases WHERE id = $1`, id).Scan(&generation); err != nil {
 		t.Fatal(err)
 	}
 	before := eventCount(t, db, id)
@@ -310,7 +307,7 @@ func requireAdminRefusals(t *testing.T, db *sql.DB, addr, id string, w *worker) 
 	}
 
 	// Then re-replay and resolve-step, which need a re-replayable run.
-	if _, err := db.Exec(`UPDATE workflow_instances SET status = 'failed' WHERE id = $1`, id); err != nil {
+	if _, err := db.Exec(`UPDATE workflow_leases SET status = 'failed' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct{ name, path, confirm, body string }{

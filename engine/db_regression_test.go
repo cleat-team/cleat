@@ -26,7 +26,7 @@ func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
 		// ContinueAsNew to commit and return the new run ID.
-		{match: "SET status = 'done'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 	})
 	defer db.Close()
 
@@ -57,7 +57,7 @@ func TestPostgresStore_ContinueAsNew_NoEvents(t *testing.T) {
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
 		// ContinueAsNew to commit and return the new run ID.
-		{match: "SET status = 'done'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 	})
 	defer db.Close()
 

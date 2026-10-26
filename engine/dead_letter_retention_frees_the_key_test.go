@@ -104,8 +104,13 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 				}
 			}
 			var generation int64
-			if err := db.QueryRowContext(ctx,
-				`SELECT generation FROM workflow_instances WHERE id = `+d.ph(1), id).Scan(&generation); err != nil {
+			// PostgreSQL writes generation and status to workflow_leases
+			// alone since cleat#3245 B3c.
+			genQ := `SELECT generation FROM workflow_instances WHERE id = ` + d.ph(1)
+			if d.ph(1) == "$1" {
+				genQ = `SELECT generation FROM workflow_leases WHERE id = $1`
+			}
+			if err := db.QueryRowContext(ctx, genQ, id).Scan(&generation); err != nil {
 				t.Fatalf("read generation: %v", err)
 			}
 			if err := store.MoveToDeadLetterQueue(ctx, id, workerID, generation,
@@ -115,12 +120,12 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 
 			var status string
 			var completedAt sql.NullTime
-			// completed_at lives on workflow_payloads on PostgreSQL since
-			// cleat#3245 B1b; status is still a workflow_instances column.
+			// On PostgreSQL completed_at lives on workflow_payloads since
+			// cleat#3245 B1b, and status on workflow_leases since B3c.
 			q := `SELECT status, completed_at FROM workflow_instances WHERE id = ` + d.ph(1)
 			if d.ph(1) == "$1" {
-				q = `SELECT w.status, p.completed_at FROM workflow_instances w
-					JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`
+				q = `SELECT l.status, p.completed_at FROM workflow_leases l
+					JOIN workflow_payloads p ON p.id = l.id WHERE l.id = $1`
 			}
 			if err := db.QueryRowContext(ctx, q, id).Scan(&status, &completedAt); err != nil {
 				t.Fatalf("read status: %v", err)

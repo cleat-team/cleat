@@ -103,25 +103,6 @@ func TestContinueAsNewUpdatesBothRunsLeaseAndPayloadRows(t *testing.T) {
 	if newPayloadInput != `{"next": true}` {
 		t.Errorf("new run workflow_payloads.input = %q, want %q", newPayloadInput, `{"next": true}`)
 	}
-
-	// Matches workflow_instances for both runs, which is what the running
-	// engine still reads today (step 3 moves reads over).
-	var oldInstStatus, newInstStatus, newInstTaskQueue string
-	var newInstPriority int
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, oldID).Scan(&oldInstStatus); err != nil {
-		t.Fatalf("read old run workflow_instances: %v", err)
-	}
-	if err := db.QueryRow(`SELECT status, task_queue, priority FROM workflow_instances WHERE id = $1`, newRunID).
-		Scan(&newInstStatus, &newInstTaskQueue, &newInstPriority); err != nil {
-		t.Fatalf("read new run workflow_instances: %v", err)
-	}
-	if oldLease.status != oldInstStatus {
-		t.Errorf("old run: workflow_leases.status (%q) disagrees with workflow_instances.status (%q)", oldLease.status, oldInstStatus)
-	}
-	if newLeaseStatus != newInstStatus || newLeaseTaskQueue != newInstTaskQueue || newLeasePriority != newInstPriority {
-		t.Errorf("new run: workflow_leases (%q/%q/%d) disagrees with workflow_instances (%q/%q/%d)",
-			newLeaseStatus, newLeaseTaskQueue, newLeasePriority, newInstStatus, newInstTaskQueue, newInstPriority)
-	}
 }
 
 func TestContinueAsNewWithWrongGenerationCreatesNoNewRunAndLeavesTheOldRowsUntouched(t *testing.T) {

@@ -37,6 +37,12 @@ func setWorkflowShape(t *testing.T, store WorkflowStore, wfID, status string, co
 			comp, wfID); err != nil {
 			t.Fatalf("setWorkflowShape (postgres, payloads): %v", err)
 		}
+		// And status where it is read since cleat#3245 B3c.
+		if _, err := s.db.Exec(
+			`UPDATE workflow_leases SET status = $1 WHERE id = $2`,
+			status, wfID); err != nil {
+			t.Fatalf("setWorkflowShape (postgres, leases): %v", err)
+		}
 	case *MySQLStore:
 		if _, err := s.db.Exec(
 			`UPDATE workflow_instances SET status = ?, compaction_state = ? WHERE id = ?`,
@@ -64,7 +70,7 @@ func sqlSaysDeferPhaseOwed(t *testing.T, store WorkflowStore, wfID string) bool 
 	}
 	switch s := store.(type) {
 	case *PostgresStore:
-		pq := `SELECT COUNT(*) FROM workflow_instances WHERE id = $1 AND ` + deferPhaseOwedSQLPostgres
+		pq := `SELECT COUNT(*) FROM workflow_leases WHERE id = $1 AND ` + deferPhaseOwedSQLPostgres
 		if err := s.db.QueryRow(pq, wfID).Scan(&n); err != nil {
 			t.Fatalf("sqlSaysDeferPhaseOwed (postgres): %v", err)
 		}

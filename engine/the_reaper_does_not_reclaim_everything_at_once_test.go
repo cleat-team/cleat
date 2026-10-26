@@ -67,7 +67,7 @@ func TestTheReaperDoesNotReclaimEverythingAtOnce(t *testing.T) {
 		t.Helper()
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM workflow_instances WHERE id = ANY($1) AND status = 'running'`,
+			`SELECT count(*) FROM workflow_leases WHERE id = ANY($1) AND status = 'running'`,
 			pgTextArray(ids)).Scan(&n); err != nil {
 			t.Fatalf("counting running: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestTheReaperDoesNotReclaimEverythingAtOnce(t *testing.T) {
 	for i := 0; i < limit; i++ {
 		var status string
 		if err := db.QueryRowContext(ctx,
-			`SELECT status FROM workflow_instances WHERE id = $1`, ids[i]).Scan(&status); err != nil {
+			`SELECT status FROM workflow_leases WHERE id = $1`, ids[i]).Scan(&status); err != nil {
 			t.Fatalf("reading status of instance %d: %v", i, err)
 		}
 		if status == "running" {

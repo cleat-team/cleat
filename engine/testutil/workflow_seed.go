@@ -36,8 +36,8 @@ type WorkflowLeaseSeed struct {
 // workflow_instances INSERT, with the same id and whatever of
 // TenantID/TaskQueue/Status/AssignedTo that INSERT set explicitly.
 //
-// cleat#3245 Phase 3: ClaimWorkflows' own mirror write (claimLeaseRows) is a
-// plain UPDATE, which is a silent no-op against a row that was never
+// cleat#3245 Phase 3: ClaimWorkflows' lease write is a plain UPDATE (the
+// only claim write since B3c), which is a silent no-op against a row that was never
 // inserted here -- so a fixture that skips this call does not fail loudly,
 // it fails the moment something reads the candidate set from
 // workflow_leases instead of workflow_instances (piece A's

@@ -104,9 +104,10 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	// workflow_instances -- which is what a raw INSERT here produced before
 	// this fix -- is invisible to the reaper regardless of its
 	// heartbeat_at, so it is never reclaimed and the test hangs at "left
-	// running" no matter how stale it is seeded. Every production writer of
-	// a running row dual-writes both tables (pieces 1-6d); this helper must
-	// match that, not merely match workflow_instances.
+	// running" no matter how stale it is seeded. Since cleat#3245 B3c-2 the
+	// lease row is the only copy of a run's state that is written after
+	// insert, so the INSERT seeds both rows and every later change here
+	// touches workflow_leases alone.
 	seedRun := func(staleBy string) {
 		t.Helper()
 		if _, err := db.ExecContext(ctx, `
@@ -129,11 +130,6 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	ageRun := func(staleBy string) {
 		t.Helper()
 		if _, err := db.ExecContext(ctx, `
-			UPDATE workflow_instances SET heartbeat_at = now() - $2::interval WHERE id = $1`,
-			runID, staleBy); err != nil {
-			t.Fatalf("ageing the run: %v", err)
-		}
-		if _, err := db.ExecContext(ctx, `
 			UPDATE workflow_leases SET heartbeat_at = now() - $2::interval WHERE id = $1`,
 			runID, staleBy); err != nil {
 			t.Fatalf("ageing the run's lease row: %v", err)
@@ -143,7 +139,7 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 		t.Helper()
 		var status string
 		if err := db.QueryRowContext(ctx,
-			`SELECT status FROM workflow_instances WHERE id = $1`, runID).Scan(&status); err != nil {
+			`SELECT status FROM workflow_leases WHERE id = $1`, runID).Scan(&status); err != nil {
 			t.Fatalf("reading status of %s: %v", runID, err)
 		}
 		return status
@@ -194,13 +190,6 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	// nothing while reading as coverage.
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Fatalf("stopping the holder's listener: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'running', assigned_to = $2, generation = $3,
-		    heartbeat_at = now() - interval '47 seconds'
-		WHERE id = $1`, runID, holderID, generation); err != nil {
-		t.Fatalf("re-seeding the run as running for the killed-holder phase: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		UPDATE workflow_leases

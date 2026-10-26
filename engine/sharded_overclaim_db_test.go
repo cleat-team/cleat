@@ -106,7 +106,7 @@ func TestShardedClaimWorkflows_DoesNotOverClaim_RealDB(t *testing.T) {
 	// the lease expires.
 	var running int
 	if err := adminDB.QueryRowContext(ctx,
-		`SELECT count(*) FROM workflow_instances WHERE def_name = $1 AND status = 'running'`,
+		`SELECT count(*) FROM workflow_leases l JOIN workflow_payloads p ON p.id = l.id WHERE p.def_name = $1 AND l.status = 'running'`,
 		defName).Scan(&running); err != nil {
 		t.Fatalf("count running: %v", err)
 	}

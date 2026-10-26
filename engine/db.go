@@ -1452,42 +1452,26 @@ func (s *PostgresStore) UpdateStickyWorker(ctx context.Context, workflowID, work
 	// MySQL's copies carry the predicate and Postgres's do not,
 	// which is cleat#1012's exact shape -- a statement tenant-scoped on one
 	// dialect of three -- and it has been half-filed as a defect at least once.
-	// It is not one. workflow_instances has
+	// It is not one. workflow_leases has
 	//
-	//   CREATE POLICY tenant_isolation_instances ON workflow_instances
-	//       FOR ALL USING (tenant_id = cleat.assert_tenant_set());
+	//   CREATE POLICY tenant_isolation_leases ON workflow_leases
+	//       USING (tenant_id = cleat.assert_tenant_set());
 	//
-	// and FOR ALL covers UPDATE, so the row this statement can reach is already
-	// bounded to the session's tenant. SQL Server has session-context policies
-	// doing the same job. MySQL has no row-level security, which is precisely
-	// why its copy states the predicate in SQL.
+	// and a policy with no FOR clause applies to every command, UPDATE
+	// included, so the row this statement can reach is already bounded to
+	// the session's tenant. SQL Server has session-context policies doing the
+	// same job. MySQL has no row-level security, which is precisely why its
+	// copy states the predicate in SQL.
 	//
 	// The asymmetry IS the design. Before filing one of these, check which
 	// layer holds the property up: the answer is in the migration, not in the
-	// Go, and `FOR ALL` is the word that decides it.
-	// cleat#3245 Phase 3 step 2 piece 6a: mirror onto workflow_leases, on the
-	// same tx. cleat#3360 considered dropping workflow_instances'
-	// sticky_worker_id -- claimStickyWorkflowsOnce's candidate scan has read
-	// workflow_leases exclusively since piece B, so nothing READS this copy
-	// any more -- and did NOT: idx_instances_sticky (migrations/postgres/
-	// 001_schema.sql) is a partial index on this exact column, and 001 is
-	// byte-verified against a frozen historical baseline
-	// (scripts/verify-postgres-baseline.py), so it cannot be edited to drop
-	// the index alongside the column. Re-applying 001 after a migration that
-	// dropped the column would then fail re-creating that index on a replay
-	// (column does not exist) -- TestShippedSchema_IsIdempotent catches
-	// this. Deferred to the next baseline regeneration, which will fold the
-	// drop in without that conflict. See migrations/postgres/004_*.sql.
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET sticky_worker_id = $2 WHERE id = $1
-	`, workflowID, workerID)
-	if err != nil {
-		return fmt.Errorf("update sticky worker: %w", err)
-	}
+	// Go. Since cleat#3245 B3c the lease row holds the only copy of
+	// sticky_worker_id that is written; the workflow_instances column goes
+	// with the baseline regeneration (B5).
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases SET sticky_worker_id = $2 WHERE id = $1
 	`, workflowID, workerID); err != nil {
-		return fmt.Errorf("update sticky worker: mirror lease row: %w", err)
+		return fmt.Errorf("update sticky worker: %w", err)
 	}
 	return tx.Commit()
 }
@@ -1500,21 +1484,12 @@ func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		-- No AND tenant_id, deliberately: RLS bounds this. See the note on
 		-- UpdateStickyWorker above.
-		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = $1
-	`, workflowID)
-	if err != nil {
-		return fmt.Errorf("clear sticky worker: %w", err)
-	}
-	// cleat#3245 Phase 3 step 2 piece 6a: mirror onto workflow_leases, on the
-	// same tx. cleat#3360: NOT dropped from workflow_instances -- see
-	// UpdateStickyWorker's note above.
-	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_leases SET sticky_worker_id = NULL WHERE id = $1
 	`, workflowID); err != nil {
-		return fmt.Errorf("clear sticky worker: mirror lease row: %w", err)
+		return fmt.Errorf("clear sticky worker: %w", err)
 	}
 	return tx.Commit()
 }
@@ -2011,7 +1986,8 @@ func (s *PostgresStore) CancelWorkflow(ctx context.Context, workflowID, reason s
 }
 
 // pgRunStateUnderLock reads a run's status and its defer-phase inputs, for a
-// caller that has ALREADY locked the run's workflow_instances row in tx.
+// caller that has ALREADY locked the run's workflow_leases row in tx (the
+// instance row until cleat#3245 B3c).
 //
 // It is a separate statement on purpose (cleat-review on #3399). Under READ
 // COMMITTED, one `SELECT ... FOR UPDATE OF w` that waits on w's lock re-checks
@@ -2020,9 +1996,9 @@ func (s *PostgresStore) CancelWorkflow(ctx context.Context, workflowID, reason s
 // snapshot, so a status read there could predate a writer that committed while
 // the lock was awaited -- measured by
 // TestALockedStatusReadSeesAWriterThatCommittedWhileItWaited. A new statement
-// takes a new snapshot, which sees that writer. And with the instance row
-// held, no later writer can change the lease's status before this transaction
-// commits, because every writer of it updates the instance row first.
+// takes a new snapshot, which sees that writer. And with the lease row held,
+// no later writer can change its status before this transaction commits,
+// because every writer of status updates the lease row.
 //
 // The two EXISTS reads gain the same freshness. They were snapshot-stale in the
 // single locking statement before status moved too.
@@ -2056,12 +2032,14 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 
 	// Does this workflow owe a defer phase? See deferPhaseOwed for why a
 	// compacted workflow answers yes on a weaker basis than an uncompacted
-	// one. FOR UPDATE holds the row for the UPDATE that follows, so the
+	// one. FOR UPDATE holds the lease row for the UPDATE that follows, so the
 	// status this reads is the status that gets marked -- read AFTER the lock,
-	// in its own statement; see pgRunStateUnderLock for why.
+	// in its own statement; see pgRunStateUnderLock for why. Since cleat#3245
+	// B3c this locks the lease row, not the instance row: every write below
+	// lands on workflow_leases or workflow_payloads.
 	var locked string
 	err = tx.QueryRowContext(ctx, `
-		SELECT id FROM workflow_instances WHERE id = $1 FOR UPDATE
+		SELECT id FROM workflow_leases WHERE id = $1 FOR UPDATE
 	`, workflowID).Scan(&locked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrWorkflowNotFound
@@ -2100,27 +2078,8 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 		// generation is still bumped, and assigned_to still cleared, for the
 		// same reason the one-phase transition did it: whatever worker held
 		// this workflow is fenced out, and its own finalize now loses.
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = $2,
-			    pending_terminal_status = $4,
-			    defer_phase_deadline = now() + ($3 * interval '1 second'),
-			    next_wake_at = now(),
-			    assigned_to = NULL,
-			    generation = generation + 1
-			WHERE id = $1
-		`, workflowID, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
-			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
-		}
-
-		// cleat#3245 Phase 3 step 2 piece 6c: mirror this mark-defer-phase
-		// transition onto workflow_leases/workflow_payloads, same tx, no
-		// fence (matching the UPDATE above -- this path is protected by the
-		// FOR UPDATE row lock and the isSettledStatus check already done,
-		// not by a generation match). This is the piece-4c-deferred half:
-		// piece 4c mirrored this function's ONE-PHASE arm only, because this
-		// arm writes pending_terminal_status/defer_phase_deadline with a
-		// real value, and nothing dual-wrote either column until now.
+		// No fence: this path is protected by the FOR UPDATE row lock and
+		// the isSettledStatus check already done, not by a generation match.
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_leases
 			SET status = $2,
@@ -2131,12 +2090,12 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 			    generation = generation + 1
 			WHERE id = $1
 		`, workflowID, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
-			return fmt.Errorf("%s workflow: mirror lease: %w", finalStatus, err)
+			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE workflow_payloads SET error_msg = $2 WHERE id = $1
 		`, workflowID, reason); err != nil {
-			return fmt.Errorf("%s workflow: mirror payload: %w", finalStatus, err)
+			return fmt.Errorf("%s workflow: payload: %w", finalStatus, err)
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -2152,12 +2111,9 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	}
 
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = $2,
-		    completed_by = assigned_to, assigned_to = NULL,
-		    generation = generation + 1,
-		    pending_terminal_status = NULL,
-		    defer_phase_deadline = NULL
+		UPDATE workflow_leases
+		SET status = $2, completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL
 		WHERE id = $1
 	`, workflowID, finalStatus)
 	if err != nil {
@@ -2170,26 +2126,11 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	if n == 0 {
 		return ErrWorkflowNotFound
 	}
-
-	// cleat#3245 Phase 3 step 2 piece 4c: mirror this one-phase transition
-	// onto workflow_leases/workflow_payloads, same tx. The TWO-phase
-	// (defer-owed) arm above has its own mirror (piece 6c) -- it was
-	// deliberately left unmirrored here because it writes
-	// pending_terminal_status with a real value, which nothing dual-wrote
-	// until piece 6c landed.
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_leases
-		SET status = $2, completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
-		    pending_terminal_status = NULL, defer_phase_deadline = NULL
-		WHERE id = $1
-	`, workflowID, finalStatus); err != nil {
-		return fmt.Errorf("%s workflow: mirror lease: %w", finalStatus, err)
-	}
 	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 (folded into migrations/postgres/001_schema.sql by #3358).
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_payloads SET error_msg = $2, completed_at = now() WHERE id = $1
 	`, workflowID, reason); err != nil {
-		return fmt.Errorf("%s workflow: mirror payload: %w", finalStatus, err)
+		return fmt.Errorf("%s workflow: payload: %w", finalStatus, err)
 	}
 
 	if err := tx.Commit(); err != nil {

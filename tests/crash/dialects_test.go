@@ -515,8 +515,8 @@ func (tg *crashTarget) runRow(t *testing.T, id string) (status, errMsg string) {
 	q := `SELECT status, error_msg FROM workflow_instances WHERE id = ` + tg.placeholder(1)
 	if tg.placeholder(1) == "$1" {
 		// error_msg is a workflow_payloads column on PostgreSQL since
-		// cleat#3245 B1b; status is still a workflow_instances one.
-		q = `SELECT w.status, p.error_msg FROM workflow_instances w
+		// cleat#3245 B1b, and status a workflow_leases one since B3c-2.
+		q = `SELECT w.status, p.error_msg FROM workflow_leases w
 			JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`
 	}
 	if err := tg.db.QueryRow(tg.stmt(q), id).Scan(&status, &msg); err != nil {
