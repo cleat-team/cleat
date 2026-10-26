@@ -134,20 +134,61 @@ database for 0.3.0; there is no cleat v0.7.0, and no version of cleat before
 (owner decision, cleat#3405). 0.4.0 and 0.5.0 record migrations under the same
 version numbers for different files, and 0.5.0 replaces the `workflow_instances`
 columns with `workflow_leases` and `workflow_payloads`, so a database a 0.4.0 worker
-wrote cannot be brought forward by running 0.5.0's `--migrate-only`. A 0.5.0 worker
-is meant to refuse such a database, by name, at `--migrate-only` and at boot rather
-than start on it. Provision a fresh database for 0.5.0 and start your workflows on
-it; runs that were in flight on 0.4.0 are not carried over.
+wrote cannot be brought forward by running 0.5.0's `--migrate-only`. In-place
+upgrade is the first candidate for 0.6.0.
 
-What is checked, by `scripts/upgrade_from_v040.py` (the **Upgrade From v0.4.0**
-workflow, on every push to a `release/**` branch): a database seeded by the
-*published* 0.4.0 worker with finished, failed, dead-lettered, parked and
-mid-execution runs is refused by the release candidate, and a fresh database
-migrates and serves a run. What is **not** covered: upgrades from 0.3.x or 0.2.x,
-downgrade, MySQL and SQL Server (the seed provisions a tenant with
-`cleat-worker --create-tenant`, which is PostgreSQL only), and a real deployment's
-data rather than a synthetic one. The refusal is implemented separately; until it
-lands that half of the job reports `MISSING` and fails.
+**What the worker checks.** Every migration a 0.5.0 runner applies is recorded in
+`schema_migrations` with the file's name and the SHA-256 of its bytes. Before it
+changes anything, `cleat-worker` compares what the database recorded with what the
+binary ships, and refuses when a recorded version:
+
+- carries no name or checksum. Every database migrated before 0.5.0 is like this,
+  0.4.0 included, because the columns did not exist;
+- or is a version the binary ships, under a different name or checksum.
+
+The refusal happens at `--migrate-only`, at a normal start and at
+`--migrate-on-start`, before the runner creates or alters anything, before plugin
+migrations, and, on MySQL, after checking the tenant database as well. A refused
+database is left exactly as it was found. The message starts `foreign migration
+chain`, names each mismatched version with both sides, and exits non-zero:
+
+```
+foreign migration chain: the migrations recorded in public.schema_migrations were not
+applied by this binary's chain, so this database was built by a different cleat version
+and cannot be used as is.
+  version 1: database has no identity (schema_migrations has no name or checksum column);
+  this binary ships 001_schema.sql (<sha256 of the file>)
+  ...
+Nothing was changed. ...
+```
+
+A recorded version the binary does *not* ship, carrying a name and checksum, is
+allowed. That is the rolling-upgrade case described under
+[Migration is a deploy step](#migration-is-a-deploy-step), where workers on release
+N run against a database release N+1's deploy step already migrated.
+
+**Moving from 0.4.0.** There is no export/import tool. The route is to run the two
+side by side until 0.4.0 has nothing left to do:
+
+1. Provision a fresh database and run 0.5.0's `cleat-worker --migrate-only` against it.
+2. Deploy your workflow definitions to it from source, as you would to a new environment.
+3. Point new starts at the 0.5.0 deployment. Leave the 0.4.0 workers running on their
+   own database until their in-flight runs finish. Runs are not carried across.
+4. Keep the 0.4.0 database, or a dump of it, for as long as you need its history and
+   results. Query it directly, or through the 0.4.0 admin API while those workers run.
+
+What is checked end to end, by `scripts/upgrade_from_v040.py` (the **Upgrade From
+v0.4.0** workflow, on every push to a `release/**` branch): a database seeded by the
+*published* 0.4.0 worker, with finished, failed, dead-lettered, parked and
+mid-execution runs, is refused by the release candidate, and a fresh database
+migrates and serves a run. It matches the refusal on the `foreign migration chain`
+phrase. What it does **not** cover: upgrades from 0.3.x or 0.2.x, downgrade, MySQL and
+SQL Server (the seed provisions a tenant with `cleat-worker --create-tenant`, which is
+PostgreSQL only), and a real deployment's data rather than a synthetic one. On all
+three dialects the refusal itself is tested in-tree, by
+`migration/a_foreign_migration_chain_is_refused_test.go` and
+`cmd/cleat-worker/a_foreign_migration_chain_is_refused_before_any_change_test.go`.
+The second takes a fingerprint of the whole database before and after each refused run.
 
 The guidance below describes ordinary migrations between later releases,
 once those exist: migrate as a deploy step (see

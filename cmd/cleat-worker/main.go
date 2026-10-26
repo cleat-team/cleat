@@ -1089,6 +1089,38 @@ func main() {
 		sqlDriver := sqlDriverName(*driver)
 		dbDSN := dsnWithSchema(*dbURL, *schemaName, *driver)
 
+		// FOREIGN MIGRATION CHAIN, first pass (cleat#3405). Checked before the
+		// per-driver setup below, because on MySQL that setup opens the default
+		// tenant's database -- the heartbeat pool (OpenIsolatedStore) and
+		// OpenStore both run CREATE DATABASE IF NOT EXISTS -- which on a server
+		// with no such database creates one, so a refusal that came after it
+		// would not leave the server as it found it. On a pool of its own,
+		// opened on the DSN the migration uses, so a split --migrate-db
+		// deployment reads schema_migrations with the role that owns it. The
+		// full check, which also covers the MySQL tenant database and the
+		// sharded path, runs again where the migrator is built below.
+		{
+			chainDSN := dbDSN
+			if *migrateDBURL != "" {
+				chainDSN = dsnWithSchema(*migrateDBURL, *schemaName, *driver)
+			}
+			chainDB, cErr := sql.Open(sqlDriver, chainDSN)
+			if cErr != nil {
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", cErr)
+				os.Exit(1)
+			}
+			err := migration.NewRunner(chainDB, migration.Dialect(*driver), *migrationsDir).
+				WithFS(migrationsOverrideFS()).
+				WithLockTimeout(*migrationLockTimeout).
+				WithSchema(*schemaName).
+				CheckChain(ctx)
+			chainDB.Close()
+			if err != nil {
+				logger.ErrorContext(context.Background(), "refusing to start (database): "+err.Error(), "worker_id", workerID)
+				os.Exit(1)
+			}
+		}
+
 		var err error
 		switch *driver {
 		case "postgres":
@@ -1709,6 +1741,46 @@ func main() {
 		WithLockTimeout(*migrationLockTimeout).
 		WithSchema(*schemaName)
 
+	// FOREIGN MIGRATION CHAIN (cleat#3405, owner decision D18). A database built
+	// by a different cleat version's migrations is refused here, at
+	// --migrate-only and at boot alike, before anything below changes it: before
+	// the core runner's own CREATE and ALTER, before plugin migrations, and
+	// before the MySQL tenant database is migrated. 0.5.0 does not convert such
+	// a database; the message says what to do instead. An unsharded worker has
+	// already checked the shared database once, before opening its stores; this pass
+	// repeats it for the sharded path and adds the tenant database. Runner.Run
+	// and Runner.Verify refuse the same way.
+	refuseForeignChain := func(where string, r *migration.Runner) {
+		if err := r.CheckChain(ctx); err != nil {
+			logger.ErrorContext(context.Background(), "refusing to start ("+where+"): "+err.Error(), "worker_id", workerID)
+			os.Exit(1)
+		}
+	}
+	refuseForeignChain("database", migrator)
+
+	// For MySQL, the factory creates a per-tenant database that needs its own
+	// copy of the schema, migrated or verified exactly as the shared one is.
+	// Its chain is checked here too, before the shared database is migrated, so
+	// a refusal leaves both as they were. Opened only after the shared check
+	// above, because TenantDB issues CREATE DATABASE IF NOT EXISTS: a no-op on
+	// an existing install, and a change on one that has no tenant database yet.
+	var tenantDB *sql.DB
+	var tenantMigrator *migration.Runner
+	if *driver == "mysql" {
+		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
+			var terr error
+			if tenantDB, terr = mf.TenantDB(ctx, defaultTenantID); terr != nil {
+				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
+				os.Exit(1)
+			}
+			tenantMigrator = migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
+				WithFS(migrationsOverrideFS()).
+				WithLockTimeout(*migrationLockTimeout).
+				WithSchema(*schemaName)
+			refuseForeignChain("tenant database", tenantMigrator)
+		}
+	}
+
 	// MIGRATE OR VERIFY (cleat#2117). Migration is a deploy step: `--migrate-only`
 	// applies it and exits; a normal start only VERIFIES that the schema is not
 	// behind this binary and refuses, with the remediation, if it is. The old
@@ -1736,39 +1808,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// For MySQL, the factory creates a per-tenant database that needs its own
-	// copy of the schema: migrated or verified exactly as the shared one is.
-	// (This block used to sit further down, after the row-level-security check;
-	// nothing there depends on it, and --migrate-only has to finish it before it
-	// exits.)
-	if *driver == "mysql" {
-		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
-			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
-			if terr != nil {
-				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
+	// The MySQL tenant database, migrated or verified exactly as the shared one
+	// is. (This block used to sit further down, after the row-level-security
+	// check; nothing there depends on it, and --migrate-only has to finish it
+	// before it exits.)
+	if tenantMigrator != nil {
+		var terr error
+		if migrating {
+			if terr = tenantMigrator.Run(ctx); terr != nil {
+				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
-				WithFS(migrationsOverrideFS()).
-				WithLockTimeout(*migrationLockTimeout).
-				WithSchema(*schemaName)
-			if migrating {
-				if terr = tm.Run(ctx); terr != nil {
-					logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
-					os.Exit(1)
-				}
-				if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
-					plugin.WithSchema(*schemaName)); terr != nil {
-					logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
-					os.Exit(1)
-				}
-			} else if terr = verifySchema(ctx, tm, tenantDB, plugin.Dialect(factory.Dialect()), plugList,
-				*schemaName, func(msg string, args ...any) {
-					logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
-				}); terr != nil {
-				logger.ErrorContext(context.Background(), "refusing to start (tenant database): "+terr.Error(), "worker_id", workerID)
+			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+				plugin.WithSchema(*schemaName)); terr != nil {
+				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
+		} else if terr = verifySchema(ctx, tenantMigrator, tenantDB, plugin.Dialect(factory.Dialect()), plugList,
+			*schemaName, func(msg string, args ...any) {
+				logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
+			}); terr != nil {
+			logger.ErrorContext(context.Background(), "refusing to start (tenant database): "+terr.Error(), "worker_id", workerID)
+			os.Exit(1)
 		}
 	}
 
