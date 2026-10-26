@@ -65,8 +65,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // agentConfigJSON is the agent's configuration, and it is ONE configuration for
@@ -729,10 +727,30 @@ func deployOneDef(t *testing.T, db *sql.DB, name string, wasm []byte, taskQueue 
 // depend on, so the scenario exercises it rather than sidestepping it.
 func startWorkflowWithInput(t *testing.T, db *sql.DB, id, defName, inputJSON, taskQueue string) {
 	t.Helper()
-	testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: defName, TenantID: defaultTenant, Input: inputJSON, TaskQueue: taskQueue})
-	// SeedRun also writes the run's workflow_leases and workflow_payloads rows,
-	// which the reclaim path and the claim read (see harness_test.go's
-	// startWorkflowEntry).
+	if _, err := db.Exec(`
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		VALUES ($1, $2, 1, 'ready', $3::jsonb, $4, $5)`,
+		id, defName, inputJSON, taskQueue, defaultTenant); err != nil {
+		t.Fatalf("queueing workflow %s: %v", id, err)
+	}
+	// cleat#3245 Phase 3 step 3 piece A: see harness_test.go's
+	// startWorkflowEntry for why this is needed -- the reclaim path now
+	// reads workflow_leases, and ClaimWorkflows' mirror write is a no-op
+	// against a row that was never inserted there.
+	if _, err := db.Exec(`
+		INSERT INTO workflow_leases (id, tenant_id, task_queue)
+		VALUES ($1, $2, $3)`,
+		id, defaultTenant, taskQueue); err != nil {
+		t.Fatalf("queueing workflow %s's lease row: %v", id, err)
+	}
+	// cleat#3245 B1a: the claim reads input and def_name/def_version from
+	// workflow_payloads, and refuses a run with no row there.
+	if _, err := db.Exec(`
+		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
+		VALUES ($1, $2, $3::jsonb, $4, 1)`,
+		id, defaultTenant, inputJSON, defName); err != nil {
+		t.Fatalf("queueing workflow %s's payload row: %v", id, err)
+	}
 	t.Cleanup(func() {
 		// Descendants first, and TWO levels of them. The client's child is the
 		// agent; the agent's child is the workflow tool's summarise. Deleting

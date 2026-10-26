@@ -174,15 +174,17 @@ func TestTheSweepDeletesOnlyWithTheOverride(t *testing.T) {
 		// Terminal, completed at the instant asked for. Set through the same
 		// columns DeleteCompletedWorkflows selects on, against the schema the
 		// migrations built -- not a table invented for this test.
+		// completed_at is read from workflow_payloads (cleat#3245 B1a) and
+		// status from workflow_leases (B3a), so each is set where it is read.
 		if _, err := db.ExecContext(ctx,
-			`UPDATE workflow_instances SET status = 'done', completed_at = $2 WHERE id = $1`,
+			`UPDATE workflow_payloads SET completed_at = $2 WHERE id = $1`,
 			id, completedAt); err != nil {
-			t.Fatalf("mark completed: %v", err)
+			t.Fatalf("mark completed_at: %v", err)
 		}
-		// completed_at is read from workflow_payloads since cleat#3245 B1a,
-		// and status from workflow_leases since B3a.
-		testutil.SyncWorkflowPayload(t, db, id)
-		testutil.SyncWorkflowLease(t, db, id)
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_leases SET status = 'done' WHERE id = $1`, id); err != nil {
+			t.Fatalf("mark status: %v", err)
+		}
 		return id
 	}
 	exists := func(t *testing.T, id string) bool {
@@ -284,11 +286,13 @@ func TestAnOverrideDoesNotEnableADisabledArm(t *testing.T) {
 		t.Fatalf("StartNewRun: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET status = 'done', completed_at = now() WHERE id = $1`, id); err != nil {
-		t.Fatalf("mark completed: %v", err)
+		`UPDATE workflow_payloads SET completed_at = now() WHERE id = $1`, id); err != nil {
+		t.Fatalf("mark completed_at: %v", err)
 	}
-	testutil.SyncWorkflowPayload(t, db, id)
-	testutil.SyncWorkflowLease(t, db, id)
+	if _, err := db.ExecContext(ctx,
+		`UPDATE workflow_leases SET status = 'done' WHERE id = $1`, id); err != nil {
+		t.Fatalf("mark status: %v", err)
+	}
 	t.Cleanup(func() {
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM workflow_instances WHERE id = $1`, id)
 	})

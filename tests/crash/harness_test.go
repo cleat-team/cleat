@@ -35,7 +35,6 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -792,7 +791,26 @@ func startWorkflow(t *testing.T, db *sql.DB, id, orderID, taskQueue string) {
 func startWorkflowEntry(t *testing.T, db *sql.DB, id, orderID, taskQueue, entry string) {
 	t.Helper()
 	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
-	testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "crashcall", TenantID: defaultTenant, Input: input, TaskQueue: taskQueue})
+	if _, err := db.Exec(`
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		VALUES ($1, 'crashcall', 1, 'ready', $2::jsonb, $3, $4)`,
+		id, input, taskQueue, defaultTenant); err != nil {
+		t.Fatalf("queueing workflow %s: %v", id, err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO workflow_leases (id, tenant_id, task_queue)
+		VALUES ($1, $2, $3)`,
+		id, defaultTenant, taskQueue); err != nil {
+		t.Fatalf("queueing workflow %s's lease row: %v", id, err)
+	}
+	// cleat#3245 B1a: the claim reads input and def_name/def_version from
+	// workflow_payloads, and refuses a run with no row there.
+	if _, err := db.Exec(`
+		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
+		VALUES ($1, $2, $3::jsonb, 'crashcall', 1)`,
+		id, defaultTenant, input); err != nil {
+		t.Fatalf("queueing workflow %s's payload row: %v", id, err)
+	}
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)

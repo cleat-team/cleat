@@ -271,20 +271,18 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 			}
 			// status is left to its column default, which is 'ready' on every
 			// dialect -- one of the two values the sweep treats as in flight.
-			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-				`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id) VALUES ($1, $2, $3, $4)`,
-				runID, defName, 1, tenant); err != nil {
-				t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
-			}
-			// cleat#3245: workflow_leases is PostgreSQL-only (migration 016
-			// (folded into migrations/postgres/001_schema.sql by #3358)).
-			// Inlined rather than testutil.SeedWorkflowLease, which takes a
-			// *sql.DB and fixtureDB here is a *sql.Conn (CrossTenantConn).
+			// PostgreSQL splits a run across workflow_instances, workflow_leases
+			// and workflow_payloads (cleat#3245), and SeedRun writes all three;
+			// its status default is 'ready' too. MySQL and SQL Server keep the
+			// one wide table.
 			if be.Dialect == testutil.DialectPostgres {
-				if _, err := fixtureDB.ExecContext(ctx,
-					`INSERT INTO workflow_leases (id, tenant_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-					runID, tenant.String()); err != nil {
-					t.Fatalf("insert %s's lease row on %s: %v", runID, be.Name, err)
+				testutil.SeedRun(t, fixtureDB, testutil.RunSeed{
+					ID: runID, DefName: defName, TenantID: tenant.String()})
+			} else {
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+					`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id) VALUES ($1, $2, $3, $4)`,
+					runID, defName, 1, tenant); err != nil {
+					t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 				}
 			}
 			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,

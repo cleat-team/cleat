@@ -514,22 +514,17 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 
 	// Terminate it: phase 1 of the two-phase transition, as engine.preemptivelySettle writes it for a run that
 	// owes a defer phase. (The HTTP terminate route is the dead-letter queue's and does not reach this.)
-	if _, err := db.Exec(`UPDATE workflow_instances
-		SET status = 'terminating', pending_terminal_status = 'terminated',
-		    defer_phase_deadline = now() + interval '300 seconds', error_msg = 'test terminate',
-		    next_wake_at = now(), assigned_to = NULL, generation = generation + 1
-		WHERE id = $1`, wfID); err != nil {
+	//
+	// error_msg lives on workflow_payloads; status, pending_terminal_status,
+	// defer_phase_deadline, next_wake_at, assigned_to and generation are exactly
+	// what ClaimWorkflows' candidate scan reads from workflow_leases (cleat#3245
+	// migration 016's split, folded into migrations/postgres/001_schema.sql by
+	// #3358). Without the lease write the defer phase this test drives is
+	// invisible to any claim: confirmed by falsification (reverting it reproduces
+	// "Cleanup was invoked 0 times within 1m0s, want 1").
+	if _, err := db.Exec(`UPDATE workflow_payloads SET error_msg = 'test terminate' WHERE id = $1`, wfID); err != nil {
 		t.Fatal(err)
 	}
-	// cleat#3245 Phase 3 step 3 piece B: mirror the claimability columns onto
-	// workflow_leases -- error_msg stays workflow_payloads-only (migration
-	// 016's split (folded into migrations/postgres/001_schema.sql by
-	// #3358): workflow_leases carries only what claim/heartbeat/reclaim/
-	// fence care about), but status/pending_terminal_status/defer_phase_deadline/
-	// next_wake_at/assigned_to/generation are exactly what ClaimWorkflows'
-	// candidate scan reads now. Without this mirror the defer phase this test
-	// drives is invisible to any claim: confirmed by falsification (reverting
-	// this mirror reproduces "Cleanup was invoked 0 times within 1m0s, want 1").
 	if _, err := db.Exec(`UPDATE workflow_leases
 		SET status = 'terminating', pending_terminal_status = 'terminated',
 		    defer_phase_deadline = now() + interval '300 seconds',

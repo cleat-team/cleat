@@ -107,11 +107,7 @@ func seedResealRow(t *testing.T, db *sql.DB, ctx context.Context,
 		VALUES ($1, 1, '\x00', $2) ON CONFLICT DO NOTHING`, "reseal-def", tenant); err != nil {
 		t.Fatalf("seed workflow_defs: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO workflow_instances (id, def_name, def_version, status, tenant_id)
-		VALUES ($1, 'reseal-def', 1, 'ready', $2)`, workflowID, tenant); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, workflowID, testutil.WorkflowLeaseSeed{TenantID: tenant})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: workflowID, DefName: "reseal-def", TenantID: tenant})
 
 	names := []string{"workflow_id", "step", "tenant_id"}
 	args := []any{workflowID, 0, tenant}
