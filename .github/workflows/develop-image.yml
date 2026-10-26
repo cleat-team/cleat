@@ -52,7 +52,26 @@ on:
   # For the first image after this lands, or a re-publish after a failed run.
   # Dispatch on develop or a release/** branch: the job refuses any other ref
   # before pushing.
-  workflow_dispatch: {}
+  #
+  # dry_run exists so the reviewed-sha gate below can be exercised without
+  # publishing anything, and without creating a release/** branch (the release
+  # ruleset forbids deleting one, so a test branch would stay). With dry_run the
+  # `reviewed` job judges check_branch@check_sha and `publish` is skipped. Dispatch
+  # it on develop.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only judge check_branch@check_sha with the reviewed-sha gate; publish nothing"
+        type: boolean
+        default: false
+      check_branch:
+        description: "dry_run only: the release branch to judge, e.g. release/v0.5.0"
+        type: string
+        default: ""
+      check_sha:
+        description: "dry_run only: the full 40-char commit sha to judge"
+        type: string
+        default: ""
 
 # Per-commit group, never cancelled: every develop commit should get its image,
 # and a shared group would let the next merge evict a queued run before it
@@ -68,8 +87,70 @@ permissions:
   contents: read
 
 jobs:
+  # THE GATE ON WHAT IS PUBLISHED, as opposed to where it is published from. The
+  # protection probe in `publish` asks whether the BRANCH is covered by a rule;
+  # that is true of release/x however it was created, because the release/**
+  # ruleset has no `creation` rule and cannot usefully have one (every stream
+  # pushes as the owner). So this asks about the COMMIT the rc-<sha> tag names:
+  # see scripts/check-rc-sha-reviewed.py for the two arms and the exit statuses.
+  #
+  # WHAT THIS IS, AND IS NOT. It prevents an ACCIDENTAL rc image from an
+  # unreviewed commit. It is not an authorization control, because repository
+  # write access already implies the ability to publish packages: any branch a
+  # writer pushes can carry a workflow that grants itself `packages: write` and
+  # pushes to ghcr.io/cleat-team/cleat-worker under any tag, with or without this
+  # file. Separately, a push runs the workflow file AT THE PUSHED COMMIT, so a
+  # release/x created with this file edited would not run this job at all (GitHub's
+  # documented behaviour for push events; not tested here, since a test needs a
+  # real release/** branch that nobody can delete). The boundary is the
+  # repository's write list; consumers should trust release tags (vX.Y.Z) built
+  # by release.yml, and treat develop-* and rc-* as unpromised.
+  reviewed:
+    name: Verify the commit being published is reviewed code
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the gate script only
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/check-rc-sha-reviewed.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test the gate
+        run: python3 scripts/check-rc-sha-reviewed.py --self-test
+
+      - name: Judge the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          IN_BRANCH: ${{ inputs.check_branch }}
+          IN_SHA: ${{ inputs.check_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            branch="$IN_BRANCH"; sha="$IN_SHA"
+            case "$branch" in
+              release/*) ;;
+              *) echo "::error::UNMEASURED: dry_run needs check_branch to be a release/* branch, got '$branch'"; exit 2 ;;
+            esac
+          else
+            case "$GITHUB_REF" in
+              refs/heads/release/*) branch="$GITHUB_REF_NAME"; sha="$GITHUB_SHA" ;;
+              *)
+                # develop-* images come from the merge queue; nothing to judge.
+                echo "$GITHUB_REF is not a release branch; the reviewed-sha gate does not apply"
+                exit 0
+                ;;
+            esac
+          fi
+          python3 scripts/check-rc-sha-reviewed.py --repo "$GITHUB_REPOSITORY" --branch "$branch" --sha "$sha"
+
   publish:
     name: Publish cleat-worker image (linux/amd64, linux/arm64)
+    needs: reviewed
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-26.04
     # arm64 under QEMU emulates the whole build: measured 18m56s for the
     # amd64+arm64 pair on #2076 (see the comment in ci.yml's release dry run).
