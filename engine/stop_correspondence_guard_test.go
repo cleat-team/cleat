@@ -1,6 +1,8 @@
 package engine
 
 import (
+	goscanner "go/scanner"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -365,12 +367,50 @@ func hostStopSites(t *testing.T) map[string]bool {
 				continue
 			}
 			body := src[loc[0]:end]
-			if strings.Contains(body, "stopBeforeNewWork()") || strings.Contains(body, "suspendingAwaitResult()") {
+			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") {
 				sites[name] = true
 			}
 		}
 	}
 	return sites
+}
+
+// callsInCode reports whether src contains a call `name()` in CODE: the three
+// tokens name ( ) as the Go scanner reads them, which skips comments and keeps a
+// string literal as one token.
+//
+// It replaced strings.Contains on the raw method text, and the difference is the
+// whole point. A substring scan cannot tell a call from a sentence about the
+// call: the comment cleat#3383 added above AwaitPromise's deadline-passed return
+// quoted `suspendingAwaitResult()`, so with all three real returns reverted this
+// scan still counted AwaitPromise as a stop site and the guard reported
+// agreement. Measured by the reviewer on that head: reverted host, comment
+// present, PASS; the same revert with the comment reworded, FAIL. A check that
+// is satisfied by the text describing the thing it checks passes on exactly the
+// trees it exists to reject.
+func callsInCode(src, name string) bool {
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(src))
+	var sc goscanner.Scanner
+	// A body is a fragment, not a file, and it may end mid-token; errors are
+	// expected and say nothing about whether a call was seen.
+	sc.Init(file, []byte(src), func(token.Position, string) {}, 0)
+	var ident, lparen bool
+	for {
+		_, tok, lit := sc.Scan()
+		if tok == token.EOF {
+			return false
+		}
+		switch {
+		case ident && lparen && tok == token.RPAREN:
+			return true
+		case ident && tok == token.LPAREN:
+			lparen = true
+			continue
+		}
+		ident = tok == token.IDENT && lit == name
+		lparen = false
+	}
 }
 
 // adaptersWithSuspendCheck returns the adapterDefs keys whose decoder is wrapped
@@ -484,32 +524,42 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 		got  map[string]bool
 		min  int
 		must string
+		// alsoIf names a second reason the canary can be absent, when the scan
+		// being too narrow is not the only one.
+		alsoIf string
 	}{
-		{"host stop sites", sites, 6, "DurableCall"},
+		{"host stop sites", sites, 6, "DurableCall", ""},
 		// A member only the suspendingAwaitResult arm of the scan can find
 		// (cleat#3383). Without it, narrowing the scan back to
 		// stopBeforeNewWork passes this vacuity check and fails only the
 		// reverse direction below, for a reason that reads like a host regression.
-		{"host stop sites", sites, 6, "AwaitPromise"},
-		{"adapters with withSuspendCheck", wrappedAdapters, 6, "DurableCall"},
-		{"all adapterDefs keys", allAdapters, 30, "DurableSleep"},
-		{"WIT call-outcome functions", outcomeWit, 6, "durable-call"},
-		{"WIT scalar-returning functions", scalarWit, 15, "durable-acquire-lock"},
+		{"host stop sites", sites, 6, "AwaitPromise",
+			"OR AwaitPromise's host sites were reverted: it is a stop site only by returning " +
+				"suspendingAwaitResult() in code (cleat#3383), so check engine/promises.go before " +
+				"widening the scan"},
+		{"adapters with withSuspendCheck", wrappedAdapters, 6, "DurableCall", ""},
+		{"all adapterDefs keys", allAdapters, 30, "DurableSleep", ""},
+		{"WIT call-outcome functions", outcomeWit, 6, "durable-call", ""},
+		{"WIT scalar-returning functions", scalarWit, 15, "durable-acquire-lock", ""},
 		// The canary is deliberately NOT acquire_lock_ms, the method this file
 		// actually requires. Using the method under test makes the vacuity check
 		// fire first when it is removed, so the per-site check below can never
 		// be reached and cannot be falsified. Measured: it did exactly that.
-		{"Python methods testing the stop sentinel", pyChecks, 8, "signal_workflow"},
-		{"all WIT functions", allWit, 30, "durable-sleep"},
+		{"Python methods testing the stop sentinel", pyChecks, 8, "signal_workflow", ""},
+		{"all WIT functions", allWit, 30, "durable-sleep", ""},
 	} {
 		if len(c.got) < c.min {
 			t.Fatalf("%s: found %d, expected at least %d -- this scan is matching "+
 				"almost nothing and would pass whatever the tree said", c.what, len(c.got), c.min)
 		}
 		if !c.got[c.must] {
-			t.Fatalf("%s: %q is missing, so the scan is reading the wrong thing. "+
+			why := "the scan is reading the wrong thing"
+			if c.alsoIf != "" {
+				why += ", " + c.alsoIf
+			}
+			t.Fatalf("%s: %q is missing, so %s. "+
 				"A size floor alone would not have caught this: the other entries are present.",
-				c.what, c.must)
+				c.what, c.must, why)
 		}
 	}
 
@@ -757,4 +807,30 @@ func funcBody(t *testing.T, src, name string) string {
 		return rest[:end[1]]
 	}
 	return rest
+}
+
+// callsInCode is what lets the scan above tell a call from prose, so it gets its
+// own known-positives: a scan helper that cannot be shown to refuse a comment or
+// a string is the defect it replaced.
+func TestCallsInCodeSeesACallAndNotAnythingElse(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"a real call", "func f() int64 { return s.suspendingAwaitResult() }", true},
+		{"a call with whitespace before the paren", "x := suspendingAwaitResult ( )", true},
+		{"only a line comment", "// return s.suspendingAwaitResult(): a suspending await", false},
+		{"only a block comment", "/* s.suspendingAwaitResult() */", false},
+		{"only a string literal", `msg := "call suspendingAwaitResult() here"`, false},
+		{"a different name", "return s.suspendingAwaitResultX()", false},
+		{"the name without a call", "f := s.suspendingAwaitResult", false},
+		{"a call with arguments is not this call", "s.suspendingAwaitResult(1)", false},
+		{"a comment AND a real call", "// suspendingAwaitResult()\nreturn s.suspendingAwaitResult()", true},
+		{"a source that ends mid-token", `return s.suspendingAwaitResult() + "unterminated`, true},
+	} {
+		if got := callsInCode(c.src, "suspendingAwaitResult"); got != c.want {
+			t.Errorf("%s: callsInCode = %v, want %v\n  src: %s", c.name, got, c.want, c.src)
+		}
+	}
 }
