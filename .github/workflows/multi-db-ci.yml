@@ -314,7 +314,13 @@ jobs:
       - name: Run tests
         run: |
           set -o pipefail
-          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+          # -timeout=1800s, raised from 900s 2026-10-27 (cleat#3458). Six passing runs
+          # that day took 590.6-863.6s in ./engine alone, leaving as little as 36s (4%),
+          # and a docs-only PR's merge group was killed at 900.138s with no failing test
+          # (the cleat#472 shape). 1800s is ~2x the slowest passing run, the same
+          # reasoning as ci.yml's 300s -> 900s note. It does not decide whether this job
+          # should run the whole engine suite; that belongs to whoever owns the job.
+          go test -count=1 -p 1 -timeout=1800s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
 
       # cleat#3348: found while re-compacting migrations/mysql/ that this
       # script -- the known-positives for what migration/catalogdiff is
@@ -452,7 +458,13 @@ jobs:
       - name: Run tests
         run: |
           set -o pipefail
-          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+          # -timeout=1800s, raised from 900s 2026-10-27 (cleat#3458). Six passing runs
+          # that day took 590.6-863.6s in ./engine alone, leaving as little as 36s (4%),
+          # and a docs-only PR's merge group was killed at 900.138s with no failing test
+          # (the cleat#472 shape). 1800s is ~2x the slowest passing run, the same
+          # reasoning as ci.yml's 300s -> 900s note. It does not decide whether this job
+          # should run the whole engine suite; that belongs to whoever owns the job.
+          go test -count=1 -p 1 -timeout=1800s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
 
       - name: Skip budget
         if: always()
