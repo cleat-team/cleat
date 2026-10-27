@@ -105,8 +105,9 @@ func (e *ForeignChainError) Error() string {
 		fmt.Fprintf(&b, "\n  version %s: database has %s; this binary ships %s", m.Version, m.Recorded, shipped)
 	}
 	b.WriteString("\nNothing was changed. cleat 0.5.0 does not convert a database built by an earlier version: " +
-		"create a fresh database, run `cleat-worker --migrate-only` against it, and move your data across " +
-		"with an export and import. See docs/operations/upgrading.md.")
+		"create a fresh database, run `cleat-worker --migrate-only` against it, and run 0.5.0 beside the old " +
+		"version until the old one has drained; there is no in-place conversion or export tool. " +
+		"See docs/operations/upgrading.md.")
 	return b.String()
 }
 
