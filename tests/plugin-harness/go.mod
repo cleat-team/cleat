@@ -21,7 +21,7 @@ go 1.27.0
 toolchain go1.27.3
 
 require (
-	github.com/cleat-team/cleat v0.4.0
+	github.com/cleat-team/cleat v0.5.0
 	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/google/uuid v1.6.0
 	github.com/minio/minio-go/v7 v7.4.1
