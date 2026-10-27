@@ -12,9 +12,10 @@ export default defineConfig({
     // directory has not been reaching the shipped binary.
     //
     // Reintroduced by the revert in fbaf7506 (2026-06-06) after 14dec5e8 had
-    // corrected it, which is the same date the committed bundle was last
-    // touched -- see the note in ci.yml's `web` job about that bundle still
-    // being stale, which this change does not by itself fix.
+    // corrected it. ci.yml's `Web Dashboard` job builds into this directory
+    // and fails if the result differs from what is committed (cleat#3468), so
+    // after changing anything under web/, including web/package-lock.json,
+    // run `npm run build` here and commit cmd/cleat-worker/web/dist.
     outDir: '../cmd/cleat-worker/web/dist',
     emptyOutDir: true,
   },

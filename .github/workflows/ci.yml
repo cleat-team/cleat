@@ -3019,12 +3019,12 @@ jobs:
   #
   # WHAT THIS JOB DOES NOT DO, STATED SO IT IS NOT MISTAKEN FOR MORE:
   #
-  #   * It builds to a THROWAWAY directory, not to cmd/cleat-worker/web/dist.
-  #     That bundle is committed and has not been regenerated since 2026-06-06
-  #     (fbaf7506, the same commit that broke outDir). Whether CI should
-  #     rebuild and diff it is a release-process decision, not a lint one, and
-  #     release.yml already has the cleanliness check that would enforce it
-  #     once its build step is made real. Left alone deliberately.
+  #   * (It used to build to a throwaway directory and so never compared the
+  #     committed cmd/cleat-worker/web/dist bundle against its source. The
+  #     bundle went stale across three toolchain bumps and the first check to
+  #     notice was release.yml's `Validate no dirty dist/`, at the v0.5.0 tag
+  #     -- release run 40541389358, cleat#3468. It now builds into the
+  #     committed directory and fails on a difference; see the last step.)
   #   * 5 of 25 source files have any test coverage (cost.ts, api.ts,
   #     StatusBadge, SummaryCard). This job catches build breaks, type errors
   #     and regressions in those four. It would pass through a runtime
@@ -3071,21 +3071,40 @@ jobs:
         working-directory: web
         run: npm test
 
-      # Into RUNNER_TEMP rather than the configured outDir: this step asks
-      # "does the dashboard build", and answering it must not entangle the
-      # committed cmd/cleat-worker/web/dist bundle. See the note above.
+      # Into the configured outDir (../cmd/cleat-worker/web/dist), the bundle
+      # the worker embeds, so the step after this one can ask whether what is
+      # committed is what the source produces.
       - name: Build
         working-directory: web
-        run: npx vite build --outDir "$RUNNER_TEMP/web-dist" --emptyOutDir
+        run: npm run build
 
       # A build that emits nothing exits 0. Cheapest possible guard against
       # this job going green on an empty output.
       - name: Build produced something
         run: |
           set -euo pipefail
-          test -f "$RUNNER_TEMP/web-dist/index.html" \
+          test -f cmd/cleat-worker/web/dist/index.html \
             || { echo "::error title=Web Dashboard::build produced no index.html" >&2; exit 1; }
-          echo "built: $(find "$RUNNER_TEMP/web-dist" -type f | wc -l) files"
+          echo "built: $(find cmd/cleat-worker/web/dist -type f | wc -l) files"
+
+      # The same comparison release.yml's `Validate no dirty dist/` makes, run
+      # on every PR instead of first at a v* tag (cleat#3468). Not path-filtered
+      # on purpose: a dependabot bump of web/package-lock.json changes the
+      # bundle without touching web/src, which is how the committed one went
+      # stale. `git status --porcelain` is used and not `git diff` so a NEW
+      # hashed asset (untracked) and a REMOVED one (deleted) both count.
+      - name: Committed bundle matches its source
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain cmd/cleat-worker/web/dist/)" ]; then
+            echo "::error title=Web Dashboard::cmd/cleat-worker/web/dist/ differs from a fresh build of web/."
+            echo "The committed dashboard is not what this source produces. Run:"
+            echo "    cd web && npm ci && npm run build"
+            echo "and commit cmd/cleat-worker/web/dist/."
+            git status --porcelain cmd/cleat-worker/web/dist/
+            exit 1
+          fi
+          echo "cmd/cleat-worker/web/dist/ matches a fresh build"
 
   # -------------------------------------------------------------------------
   # Test Rust
