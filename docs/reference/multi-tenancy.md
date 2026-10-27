@@ -95,9 +95,9 @@ is a trusted component, and cleat's own SQL never issues a cross-tenant write
 because the statement-level gate above forbids it — but the backstop no longer
 depends on that gate alone. It carries the same admin-bypass property FILTER
 does: `dbo.cleat_admin` connections under the optional
-`--claim-across-tenants` predicate form (`migrations/mssql/optional/
-cross_tenant_claim.sql`) bypass BLOCK exactly as they bypass FILTER, since both
-share the one predicate function.
+predicate form (`migrations/mssql/optional/cross_tenant_claim.sql`, which admits
+`cleat_admin` members; `--claim-across-tenants` does not need it) bypass BLOCK
+exactly as they bypass FILTER, since both share the one predicate function.
 
 **PostgreSQL's 19 of 23 is deliberate, not partial.** The four without RLS are
 the tenant registry itself — `admin.tenants`, `admin.tenant_api_keys`,

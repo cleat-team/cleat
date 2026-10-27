@@ -586,7 +586,9 @@ var (
 	claimAcrossTenants      = flag.Bool("claim-across-tenants", true, "Execute work for every tenant, not only this worker's own. "+
 		"DEFAULTS ON: the dispatch loop rotates through admin.tenants -- which carries no row-level "+
 		"security -- and then claims and reads due schedules under each tenant's OWN RLS context. "+
-		"Nothing is exempt from a policy and nothing has to be granted, on any dialect.\n"+
+		"Nothing is exempt from a policy and nothing has to be granted, on PostgreSQL or SQL Server. "+
+		"MySQL and sharded (--shards-file) workers cannot enumerate tenants: they warn once at startup "+
+		"and claim their own tenant only.\n"+
 		"It was off by default because the only mechanism used to be a widened admin.claim_workflows "+
 		"query, whose owner needed BYPASSRLS: a privilege only a superuser can grant, and one managed "+
 		"PostgreSQL cannot grant at all. Turning that on had to be a deliberate act. That mechanism, "+
@@ -595,7 +597,7 @@ var (
 		"tenant's work unexecuted by default stopped being caution and became a surprise.\n"+
 		"WITH ONE TENANT THIS COSTS ONE QUERY PER TICK -- the tenant list -- and nothing else changes.\n"+
 		"Set false to run this worker against its own tenant only. A worker reports on both loops at startup "+
-		"which mechanism it actually has, so a half-completed setup says so rather than running silently "+
+		"whether it can rotate, so a worker that cannot says so rather than running silently "+
 		"single-tenant.")
 	claimTenantsPerTick = flag.Int("claim-tenants-per-tick", defaultClaimTenantsPerTick,
 		"The most tenants one dispatch tick will poll when claiming across tenants. Unserved tenants are "+
