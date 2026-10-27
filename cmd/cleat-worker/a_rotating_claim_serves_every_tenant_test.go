@@ -515,18 +515,26 @@ func newMSSQLRotationRig(t *testing.T) *rotationRig {
 		t.Fatalf("apply mssql migrations: %v", err)
 	}
 
-	// PRECONDITION, so that "needs no grant" is measured and not assumed: the
-	// principal is not a member of cleat_admin, and the shipped
-	// dbo.fn_tenant_filter carries no admission for it. The optional
+	// PRECONDITION, so that "needs no grant" is measured and not assumed. The
+	// assertion that carries the weight is the SECOND one below: the shipped
+	// dbo.fn_tenant_filter carries no cleat_admin admission. The optional
 	// cross_tenant_claim.sql is never applied by the Runner (it sits under
 	// migrations/mssql/optional), but this checks the result rather than the
 	// directory layout.
+	//
+	// THE FIRST ONE IS VACUOUS FOR THE DEFAULT DSN. Under sa the principal is
+	// dbo, and dbo cannot be made a role member (ALTER ROLE cleat_admin ADD
+	// MEMBER dbo fails with Msg 15405 "Cannot use the special principal 'dbo'",
+	// measured), so IS_ROLEMEMBER returns 0 whatever the setup. It is kept
+	// because a CLEAT_TEST_MSSQL naming any other login makes it meaningful.
+	// That sa still does not bypass the policy is shown by the mis-routing
+	// control below, not by this check. Pointed out by cleat-review-69 on #3451.
 	var member sql.NullInt64
 	if err := db.QueryRowContext(ctx, `SELECT IS_ROLEMEMBER(N'cleat_admin')`).Scan(&member); err != nil {
 		t.Fatalf("reading cleat_admin membership: %v", err)
 	}
 	if !member.Valid || member.Int64 != 0 {
-		t.Fatalf("IS_ROLEMEMBER('cleat_admin') = %v for this principal; want 0, a non-member", member)
+		t.Fatalf("IS_ROLEMEMBER('cleat_admin') = %v for this principal; want 0 (vacuous under sa/dbo, meaningful for any other login)", member)
 	}
 	var predicate string
 	if err := db.QueryRowContext(ctx,
