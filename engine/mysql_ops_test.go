@@ -661,6 +661,7 @@ func TestMySQLStore_LoadCompactionState_QueryError(t *testing.T) {
 func TestMySQLStore_CompactHistory_Success(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		queryRowOk("SELECT generation FROM workflow_instances WHERE id = ? AND tenant_id = ?", int64(1)),
+		queryRowOk("SELECT id FROM workflow_instances", "wf-1"),
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history WHERE workflow_id", affected: 10},
 		{match: "UPDATE workflow_instances", affected: 1},
@@ -692,25 +693,27 @@ func TestMySQLStore_CompactHistory_GenerationError(t *testing.T) {
 func TestMySQLStore_CompactHistory_DeleteError(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		queryRowOk("SELECT generation FROM workflow_instances WHERE id = ? AND tenant_id = ?", int64(1)),
+		queryRowOk("SELECT id FROM workflow_instances", "wf-1"),
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history WHERE workflow_id", err: sql.ErrConnDone},
 	})
 	err := store.CompactHistory(testCtx, "wf-1", []byte(`{}`), 50, 50)
-	if err == nil {
-		t.Fatal("expected delete error")
+	if !errors.Is(err, sql.ErrConnDone) || !strings.Contains(err.Error(), "CompactHistory: delete") {
+		t.Fatalf("CompactHistory = %v, want the delete failure (cleat#3409: it used to pass on ANY error, and with the fence row missing it got ErrFenceLost instead)", err)
 	}
 }
 
 func TestMySQLStore_CompactHistory_UpdateError(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		queryRowOk("SELECT generation FROM workflow_instances WHERE id = ? AND tenant_id = ?", int64(1)),
+		queryRowOk("SELECT id FROM workflow_instances", "wf-1"),
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history WHERE workflow_id", affected: 1},
 		{match: "UPDATE workflow_instances", err: sql.ErrConnDone},
 	})
 	err := store.CompactHistory(testCtx, "wf-1", []byte(`{}`), 50, 50)
-	if err == nil {
-		t.Fatal("expected update error")
+	if !errors.Is(err, sql.ErrConnDone) || !strings.Contains(err.Error(), "CompactHistory: update") {
+		t.Fatalf("CompactHistory = %v, want the update failure", err)
 	}
 }
 
@@ -728,6 +731,24 @@ func TestMySQLStore_CompactHistory_CommitError(t *testing.T) {
 	err := store.CompactHistory(testCtx, "wf-1", []byte(`{}`), 50, 50)
 	if err == nil {
 		t.Fatal("expected commit error")
+	}
+}
+
+// cleat#3409: with the fence finding no row, nothing has been deleted and the
+// call reports the lost fence. The DELETE and the UPDATE are registered to FAIL,
+// because the mock accepts an unregistered statement silently: a CompactHistory
+// that deleted before taking the fence would return the DELETE's error here.
+func TestMySQLStore_CompactHistory_LostFenceDeletesNothing(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		queryRowOk("SELECT generation FROM workflow_instances WHERE id = ? AND tenant_id = ?", int64(1)),
+		{match: "SELECT id FROM workflow_instances", data: [][]driver.Value{}},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history WHERE workflow_id", err: errors.New("DELETE ran before the fence was held")},
+		{match: "UPDATE workflow_instances", err: errors.New("UPDATE ran with the fence lost")},
+	})
+	err := store.CompactHistory(testCtx, "wf-1", []byte(`{}`), 50, 50)
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("CompactHistory with a lost fence = %v, want ErrFenceLost", err)
 	}
 }
 

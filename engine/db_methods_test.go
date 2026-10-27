@@ -2309,6 +2309,7 @@ func TestPostgresStore_CompactHistory_GenerationError(t *testing.T) {
 func TestPostgresStore_CompactHistory_DeleteError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history", err: errors.New("delete failed")},
 	})
@@ -2347,6 +2348,7 @@ func TestPostgresStore_CompactHistory_UpdateError(t *testing.T) {
 func TestPostgresStore_CompactHistory_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history", affected: 10},
 		{match: "SET compaction_state", affected: 1},
@@ -2357,6 +2359,28 @@ func TestPostgresStore_CompactHistory_Success(t *testing.T) {
 	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1,"compacted_step":100}`), 100, 50)
 	if err != nil {
 		t.Fatalf("CompactHistory: %v", err)
+	}
+}
+
+// cleat#3409: with the fence finding no row, nothing has been deleted and the
+// call reports the lost fence. The DELETE and the UPDATE are registered to FAIL,
+// because this mock accepts an unregistered statement silently: a CompactHistory
+// that deleted before taking the fence would return the DELETE's error here
+// instead of ErrFenceLost.
+func TestPostgresStore_CompactHistory_LostFenceDeletesNothing(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{}},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history", err: errors.New("DELETE ran before the fence was held")},
+		{match: "SET compaction_state", err: errors.New("UPDATE ran with the fence lost")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1}`), 100, 50)
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("CompactHistory with a lost fence = %v, want ErrFenceLost", err)
 	}
 }
 
