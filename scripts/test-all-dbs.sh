@@ -87,8 +87,14 @@ import json, re, sys
 path = sys.argv[1]
 passed = 0
 test_fail, pkg_fail, skips = [], [], []
-build_failed, timeouts = [], []
-pkg_out = {}
+build_failed, timeout_text = set(), set()
+started, finished = set(), set()
+
+# Go's own line shapes, anchored. A test that merely PRINTS "[build failed]" must
+# not read as a build failure, so the build markers are taken only from
+# package-level output (no "Test" field), where `go test` writes them.
+BUILD = re.compile(r"^FAIL\s+\S+\s+\[(build|setup) failed\]", re.M)
+TIMEOUT = re.compile(r"^panic: test timed out after [0-9]", re.M)
 
 for line in open(path, encoding="utf-8", errors="replace"):
     line = line.strip()
@@ -101,32 +107,53 @@ for line in open(path, encoding="utf-8", errors="replace"):
     act, test, pkg = e.get("Action"), e.get("Test"), e.get("Package", "")
     if act == "output":
         out = e.get("Output", "")
-        if re.search(r"\[(build|setup) failed\]", out):
-            build_failed.append(pkg or out.strip())
-        if "panic: test timed out after" in out:
-            timeouts.append(pkg or out.strip())
+        if not test and BUILD.search(out):
+            build_failed.add(pkg)
+        if TIMEOUT.search(out):
+            timeout_text.add(pkg)
         continue
     if test:
         if act == "pass":
             passed += 1
         elif act == "fail":
-            test_fail.append(f"{pkg} {test}")
+            test_fail.append((pkg, test))
         elif act == "skip":
             skips.append(f"{pkg} {test}")
-    elif act == "fail":
-        pkg_fail.append(pkg)
+        continue
+    # Package-level events.
+    if act == "start":
+        started.add(pkg)
+    elif act in ("pass", "fail", "skip"):
+        finished.add(pkg)
+        if act == "fail":
+            pkg_fail.append(pkg)
+
+# A real timeout writes its panic line under the RUNNING TEST's name (measured on
+# real `go test -json`: Test="TestSlow"), the same shape as a passing test that
+# merely prints those words. What separates them is that a real timeout also
+# fails the package, so the text only counts for a package that failed.
+timeouts = {p for p in timeout_text if p in set(pkg_fail)}
+
+# Go emits a package-level fail beside every test failure. That one is the
+# consequence of the test failure, not a second finding, so only a package that
+# failed with NO test failure is reported as a package failure.
+failed_pkgs = {p for p, _ in test_fail}
+pkg_only = [p for p in pkg_fail if p not in failed_pkgs]
+unfinished = sorted(started - finished)
 
 print(f"passed={passed} test-failures={len(test_fail)} "
-      f"package-failures={len(pkg_fail)} build-failed={len(set(build_failed))} "
-      f"timeouts={len(set(timeouts))} skipped={len(skips)}")
+      f"package-only-failures={len(pkg_only)} build-failed={len(build_failed)} "
+      f"timeouts={len(timeouts)} unfinished-packages={len(unfinished)} skipped={len(skips)}")
 
-for t in test_fail:
-    print(f"  FAIL  {t}")
-for p in pkg_fail:
+for pkg, t in test_fail:
+    print(f"  FAIL  {pkg} {t}")
+for p in pkg_only:
     why = ("did not build" if p in build_failed
            else "timed out" if p in timeouts
            else "failed with no test failure and neither a build error nor a timeout; read its output")
     print(f"  PACKAGE FAIL  {p}: {why}")
+for p in unfinished:
+    print(f"  UNFINISHED  {p}: started and never reported a result; the run was cut short")
 
 # Names, not the count. A name that mentions a dialect may mean a DSN did not
 # take; several are structural (a MySQL subtest that is single-tenant by
@@ -137,11 +164,32 @@ print(f"skips: {len(skips)} ({len(named)} name a dialect)")
 for s in named:
     print(f"  skip names a dialect: {s}")
 
-if passed + len(test_fail) == 0 and not pkg_fail:
-    print("no test event of any kind was reported", file=sys.stderr)
+finding = bool(test_fail or pkg_only or build_failed or timeouts)
+if finding:
+    sys.exit(1)
+if unfinished:
+    print("a package that never finished cannot be called passing", file=sys.stderr)
     sys.exit(2)
-sys.exit(1 if (test_fail or pkg_fail or build_failed or timeouts) else 0)
+if passed == 0:
+    print("no test passed or failed: nothing ran, or everything skipped", file=sys.stderr)
+    sys.exit(2)
+sys.exit(0)
 PY
+}
+
+# finish <report> <go test's own exit status>: summarise, and do not discard what
+# `go test` itself said. A non-zero status over a report that shows no failure
+# means the report cannot be trusted (go test killed, output lost, a truncated
+# stream), and that is "could not establish", not a pass.
+finish() {
+  local src
+  summarise "$1"; src=$?
+  if [ "$src" = 0 ] && [ "$2" != 0 ]; then
+    echo "go test exited $2 but the report shows no failure; the report may be truncated or go test was killed" >&2
+    echo "This is a failure of the check, not a finding about the tree." >&2
+    return 2
+  fi
+  return "$src"
 }
 
 # Every pattern must name at least one package. `go test` on a pattern that
@@ -163,11 +211,13 @@ self_test() {
   d=$(mktemp -d) || exit 2   # deliberately not local: the EXIT trap outlives this function
   trap 'rm -rf "${d:-}"' EXIT
 
-  expect() { # name want-rc want-text
-    local name=$1 want=$2 text=$3 out
+  expect() { # name want-rc want-text [text that must be absent]
+    local name=$1 want=$2 text=$3 absent=${4:-} out
     out=$(summarise "$d/$name.json" 2>&1); rc=$?
-    if [ "$rc" != "$want" ] || { [ -n "$text" ] && ! grep -qF -- "$text" <<<"$out"; }; then
-      echo "  FAIL $name: rc=$rc (want $want), wanted text: ${text:-none}"; awk '{print "        " $0}' <<<"$out"
+    if [ "$rc" != "$want" ] || { [ -n "$text" ] && ! grep -qF -- "$text" <<<"$out"; } \
+       || { [ -n "$absent" ] && grep -qF -- "$absent" <<<"$out"; }; then
+      echo "  FAIL $name: rc=$rc (want $want), wanted text: ${text:-none}, text that must be absent: ${absent:-none}"
+      awk '{print "        " $0}' <<<"$out"
       fails=$((fails + 1))
     else
       echo "  ok   $name: rc=$rc"
@@ -186,8 +236,9 @@ self_test() {
     ev output b '"Output":"FAIL\tp/b [build failed]\n"'; ev fail b; } > "$d/buildfail.json"
   expect buildfail 1 "PACKAGE FAIL  p/b: did not build"
 
+  # The panic line carries the running test's name, as real `go test -json` writes it.
   { ev pass a '"Test":"TestOne"'
-    ev output b '"Output":"panic: test timed out after 30m0s\n"'; ev fail b; } > "$d/timeout.json"
+    ev output b '"Test":"TestSlow","Output":"panic: test timed out after 30m0s\n"'; ev fail b; } > "$d/timeout.json"
   expect timeout 1 "PACKAGE FAIL  p/b: timed out"
 
   # A package-level failure with neither: still a finding, and says to read it.
@@ -195,10 +246,46 @@ self_test() {
   expect otherpkg 1 "read its output"
 
   : > "$d/empty.json"
-  expect empty 2 "no test event of any kind"
+  expect empty 2 "no test passed or failed"
+
+  # Everything skipped: the run measured nothing, which is not a pass either.
+  { ev start a; ev skip a '"Test":"TestNeedsMySQL"'; ev skip a; } > "$d/allskip.json"
+  expect allskip 2 "no test passed or failed"
 
   { ev pass a '"Test":"TestOne"'; ev skip a '"Test":"TestNeedsMySQL"'; } > "$d/skipname.json"
   expect skipname 0 "skip names a dialect: p/a TestNeedsMySQL"
+
+  # Go emits a package-level fail beside every test failure. It is the consequence
+  # of the test failure and must not be reported as a second, unexplained failure
+  # next to the one that explains it (the earlier text said "failed with no test
+  # failure" on a package that had one).
+  { ev start a; ev fail a '"Test":"TestTwo"'; ev fail a; } > "$d/testfail_pkg.json"
+  expect testfail_pkg 1 "FAIL  p/a TestTwo" "PACKAGE FAIL"
+
+  # A package that started and never reported a result: the run was cut short
+  # (go test killed, the runner lost). Nothing failed, and nothing finished, so
+  # it must not read as a clean pass.
+  { ev start a; ev pass a '"Test":"TestOne"'; ev start b; ev pass b '"Test":"TestOne"'; ev pass b; } > "$d/truncated.json"
+  expect truncated 2 "UNFINISHED  p/a"
+
+  # A passing test that prints the marker text is not a build failure; only Go's
+  # own package-level line shape is.
+  { ev start a; ev output a '"Test":"TestOne","Output":"saw [build failed] in a log\n"'
+    ev output a '"Test":"TestOne","Output":"panic: test timed out after 1s in prose\n"'
+    ev pass a '"Test":"TestOne"'; ev pass a; } > "$d/marker.json"
+  expect marker 0 "passed=1" "timeouts=1"
+
+  # go test's own exit status is not discarded: non-zero over a report that shows no
+  # failure means the report cannot be trusted (killed, truncated, output lost).
+  finish "$d/clean.json" 1 >"$d/finish.out" 2>&1; rc=$?
+  if [ "$rc" = 2 ] && grep -q "go test exited 1" "$d/finish.out"; then
+    echo "  ok   go test non-zero over a clean report: rc=2"
+  else
+    echo "  FAIL go test non-zero over a clean report: rc=$rc (want 2 and 'go test exited 1')"; fails=$((fails + 1))
+  fi
+  finish "$d/clean.json" 0 >/dev/null 2>&1; rc=$?
+  if [ "$rc" = 0 ]; then echo "  ok   go test zero over a clean report: rc=0"
+  else echo "  FAIL go test zero over a clean report: rc=$rc (want 0)"; fails=$((fails + 1)); fi
 
   # An unset DSN is UNMEASURED, never a pass: run the real script with none.
   out=$(env -i PATH="$PATH" HOME="${HOME:-/}" bash "$SELF" 2>&1); rc=$?
@@ -265,6 +352,7 @@ fi
 echo "probe: TestPluginMigrations_AllDialects ran ${runs} tests across the three dialects"
 
 JSON="${JSON:-$(mktemp "${TMPDIR:-/tmp}/test-all-dbs.XXXXXX")}"
+echo "note: plugins/ runs last, and a run needs freshly created databases; a database an earlier run used fails cmd/cleatctl's reseal test on MySQL and SQL Server (cleat#3474)"
 echo "running: go test -count=1 -p 1 -timeout=$TIMEOUT -json $PKGS"
 echo "report:  $JSON"
 # -p 1 is both rules at once: engine/testutil's cleanup is an unqualified DELETE
@@ -272,5 +360,6 @@ echo "report:  $JSON"
 # PostgreSQL connection limit. Two reasons for one flag (CLAUDE.md).
 # shellcheck disable=SC2086 # PKGS is a deliberate word list
 go test -count=1 -p 1 -timeout="$TIMEOUT" -json $PKGS > "$JSON" 2>&1
-summarise "$JSON"
+grc=$?
+finish "$JSON" "$grc"
 exit $?
