@@ -565,13 +565,38 @@ helm install cleat oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z
 
 ### 4. Run multi-database tests
 
-Run the WorkflowStore test suite against all three supported backends to verify
-that no regressions were introduced:
+Run the database-backed tests against all three supported backends, in one
+invocation, to verify that no regressions were introduced:
 
 ```bash
-# Requires MySQL and SQL Server running locally or via Docker.
+# Requires PostgreSQL, MySQL and SQL Server running locally or via Docker, with
+# all three DSNs exported. There are no defaults, on purpose: an unset DSN skips
+# its dialect and the suite still prints ok, so the script exits 2 instead.
+# The DSNs are in WORKSTREAM.md.
+export CLEAT_TEST_POSTGRES=... CLEAT_TEST_MYSQL=... CLEAT_TEST_MSSQL=...
 make test-all-dbs
 ```
+
+Start from freshly created databases: a database a previous run used holds rows
+that fail a later run on MySQL and SQL Server (cleat#3474).
+
+The script's exit `0` means every test that ran passed. `1` is a finding. `2`
+means the check could not establish what it was measuring (a DSN unset or not
+connecting, a package pattern matching nothing); that is a failure of the check,
+not a finding about the tree. Under `make`, any failure shows as make's own exit
+`2`; the script's code is on the `make: *** [test-all-dbs] Error N` line. Read the summary it prints rather than the exit
+status alone: the test-failure, package-failure, `build failed` and timeout
+counts, and the **skip names**. No remaining skip should be an unset or
+unreachable DSN. It is a long run, dominated by `./engine/...` against SQL Server;
+budget for it rather than waiting on the clock.
+
+It does not run `./tests/exhaustion` or `./tests/cluster`, which need a running
+worker cluster, and it does not apply the CI skip budget, because that budget
+describes CI jobs rather than this run. CI's cluster job covers those two suites.
+
+Until cleat#3457 this step named a `make` target that ran `go test
+./internal/host/...`, a path that had not existed since commit 3eeb74e moved it to
+`engine/`, and failed on every leg. A release run before that fix cannot have used it.
 
 Verify that all three migration directories are in sync:
 

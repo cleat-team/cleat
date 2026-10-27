@@ -1595,6 +1595,17 @@ jobs:
           fi
           echo "OK: all Go files are gofmt-clean."
 
+      # scripts/test-all-dbs.sh --self-test, and it needs no database. `make
+      # test-all-dbs` ran `go test ./internal/host/...` for months after that path
+      # became engine/ (3eeb74e), and the release runbook named it throughout
+      # (cleat#3457): nothing ran the target, so nothing noticed. This resolves
+      # every package pattern the script runs, so a directory that moves fails
+      # here and not at a release. It also exercises the script's own exit
+      # statuses, including `2` for an unset DSN. Lives in this job because it
+      # needs Go and this is the lint job that has it.
+      - name: test-all-dbs self-test
+        run: scripts/test-all-dbs.sh --self-test
+
       # --timeout, because golangci-lint's default is one minute and this job
       # has been finishing inside it only by virtue of a warm build cache.
       #

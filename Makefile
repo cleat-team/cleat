@@ -56,15 +56,18 @@ test: test-go test-python test-java test-as test-plugin-harness
 test-go:
 	go test -race -count=1 $(GO_PACKAGES)
 
+# All three dialects in ONE invocation, with all three DSNs required: an unset
+# DSN skips its dialect and the suite still prints ok, so the script exits 2
+# ("unmeasured") rather than run. It reports test failures, package failures,
+# build failures, timeouts and skip names, not only an exit status. See
+# scripts/test-all-dbs.sh for the environment and for what it deliberately does
+# not run. This target ran `go test ./internal/host/...` three times until
+# cleat#3457: that path became engine/ in 3eeb74e, so every leg failed with "no
+# such file or directory", and `scripts/test-all-dbs.sh --self-test` (run by the
+# lint-go job) now fails if a package pattern stops resolving.
 .PHONY: test-all-dbs
 test-all-dbs:
-	@echo "=== Testing PostgreSQL ==="
-	@CLEAT_TEST_DB="postgres://localhost:5432/cleat?sslmode=disable" go test -count=1 -timeout=300s ./internal/host/...
-	@echo "=== Testing MySQL ==="
-	@CLEAT_TEST_MYSQL="root:cleat@tcp(127.0.0.1:3306)/cleat" go test -count=1 -timeout=300s ./internal/host/...
-	@echo "=== Testing SQL Server ==="
-	@CLEAT_TEST_MSSQL="sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" go test -count=1 -timeout=300s ./internal/host/...
-	@echo "All multi-database tests complete."
+	@scripts/test-all-dbs.sh
 
 .PHONY: test-python
 test-python:
