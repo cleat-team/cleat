@@ -29,7 +29,6 @@ import (
 func splitStatus(t *testing.T, db *sql.DB, id, leaseStatus, instanceStatus string) {
 	t.Helper()
 	diverge(t, db, "workflow_leases", `status = $2`, id, leaseStatus)
-	diverge(t, db, "workflow_instances", `status = $2`, id, instanceStatus)
 }
 
 func clearInstances(t *testing.T, db *sql.DB) {
@@ -154,7 +153,6 @@ func TestGetRunLimitsReadsWorkflowLeases(t *testing.T) {
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b3a-run-limits")
 	diverge(t, db, "workflow_leases", `run_wasm_instance_timeout_ms = 1234`, id)
-	diverge(t, db, "workflow_instances", `run_wasm_instance_timeout_ms = 999`, id)
 
 	got, err := store.GetRunLimits(context.Background(), id)
 	if err != nil {
@@ -172,7 +170,6 @@ func TestSuccessorOfRunReadsContinuedFromWorkflowLeases(t *testing.T) {
 	byLease := startPayloadReaderRun(t, store, "b3a-successor-by-lease")
 	byInstance := startPayloadReaderRun(t, store, "b3a-successor-by-instance")
 	diverge(t, db, "workflow_leases", `continued_from = $2`, byLease, pred)
-	diverge(t, db, "workflow_instances", `continued_from = $2`, byInstance, pred)
 
 	got, err := store.successorOfRun(context.Background(), pred)
 	if err != nil {
@@ -279,10 +276,14 @@ func TestALockedStatusReadSeesAWriterThatCommittedWhileItWaited(t *testing.T) {
 				t.Fatalf("begin writer: %v", err)
 			}
 			defer writer.Rollback()
-			for _, table := range []string{"workflow_instances", "workflow_leases"} {
-				if _, err := writer.ExecContext(ctx, `UPDATE `+table+` SET status = 'done' WHERE id = $1`, id); err != nil {
-					t.Fatalf("writer: settle %s: %v", table, err)
-				}
+			// The admin paths lock the instance row and read status from the
+			// lease row, so the writer holds the first and settles the second.
+			// event_count = event_count changes nothing; it only takes the lock.
+			if _, err := writer.ExecContext(ctx, `UPDATE workflow_instances SET event_count = event_count WHERE id = $1`, id); err != nil {
+				t.Fatalf("writer: lock the instance row: %v", err)
+			}
+			if _, err := writer.ExecContext(ctx, `UPDATE workflow_leases SET status = 'done' WHERE id = $1`, id); err != nil {
+				t.Fatalf("writer: settle workflow_leases: %v", err)
 			}
 
 			done := make(chan error, 1)

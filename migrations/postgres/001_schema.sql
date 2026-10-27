@@ -67,7 +67,7 @@ BEGIN
         BEGIN
             CREATE ROLE cleat_dispatcher NOLOGIN BYPASSRLS;
         EXCEPTION WHEN insufficient_privilege THEN
-            RAISE NOTICE 'cleat_dispatcher needs BYPASSRLS, which only a superuser can grant, and this connection is not one. The cross-tenant claim function is still created but will not see across tenants; use --claim-strategy=rotate, which needs no grant. (SQLSTATE %)', SQLSTATE;
+            RAISE NOTICE 'cleat_dispatcher needs BYPASSRLS, which only a superuser can grant, and this connection is not one. The cross-tenant functions are still created but will not see across tenants; use --claim-strategy=rotate, which needs no grant. (SQLSTATE %)', SQLSTATE;
         END;
     END IF;
 END $$;
@@ -452,59 +452,10 @@ ALTER TABLE ONLY workflow_defs FORCE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS workflow_instances (
     id text NOT NULL,
-    def_name text NOT NULL,
-    def_version integer NOT NULL,
-    status text DEFAULT 'ready'::text NOT NULL,
-    input jsonb DEFAULT '{}'::jsonb NOT NULL,
-    assigned_to text,
-    heartbeat_at TIMESTAMPTZ,
-    next_wake_at TIMESTAMPTZ DEFAULT now() NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
-    completed_at TIMESTAMPTZ,
-    cancellation_requested boolean DEFAULT false NOT NULL,
-    cancellation_reason text,
-    result jsonb,
-    error_msg text,
-    error_code text,
-    error_op text,
-    parent_workflow_id text,
     parent_close_policy text DEFAULT 'ABANDON'::text,
-    query_state jsonb DEFAULT '{}'::jsonb,
-    trace_id text,
-    sticky_worker_id text,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
-    task_queue text DEFAULT 'default'::text NOT NULL,
-    compaction_state jsonb,
-    compacted_at TIMESTAMPTZ,
-    compaction_step integer,
-    plugin_vers jsonb DEFAULT '{}'::jsonb NOT NULL,
     event_count bigint DEFAULT 0 NOT NULL,
-    allowed_signals jsonb,
-    priority integer DEFAULT 0 NOT NULL,
-    generation bigint DEFAULT 0 NOT NULL,
-    pending_terminal_status text,
-    defer_phase_deadline TIMESTAMPTZ,
-    continued_from text,
-    signal_seq bigint DEFAULT 0 NOT NULL,
-    signal_seq_at_claim bigint DEFAULT 0 NOT NULL,
-    signal_consumed_seq bigint DEFAULT 0 NOT NULL,
-    signal_consumed_at_claim bigint DEFAULT 0 NOT NULL,
-    reclaim_count bigint DEFAULT 0 NOT NULL,
-    started_at TIMESTAMPTZ,
-    concurrency_key text,
-    concurrency_key_hash bytea,
-    run_wasm_instance_timeout_ms bigint,
-    run_wasm_wall_clock_ceiling_ms bigint,
-    run_host_retry_budget_ms bigint,
-    completed_by text,
-    run_max_workflow_duration_ms bigint,
-    history_swept_at TIMESTAMPTZ,
-    promise_seq bigint DEFAULT 0 NOT NULL,
-    promise_seq_at_claim bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT ck_wi_run_instance_timeout_positive CHECK (((run_wasm_instance_timeout_ms IS NULL) OR (run_wasm_instance_timeout_ms > 0))),
-    CONSTRAINT ck_wi_run_max_workflow_duration_positive CHECK (((run_max_workflow_duration_ms IS NULL) OR (run_max_workflow_duration_ms > 0))),
-    CONSTRAINT ck_wi_run_retry_budget_positive CHECK (((run_host_retry_budget_ms IS NULL) OR (run_host_retry_budget_ms > 0))),
-    CONSTRAINT ck_wi_run_wall_clock_positive CHECK (((run_wasm_wall_clock_ceiling_ms IS NULL) OR (run_wasm_wall_clock_ceiling_ms > 0)))
+    history_swept_at TIMESTAMPTZ
 )
 WITH (fillfactor='70');
 
@@ -1774,18 +1725,18 @@ DO $do$ BEGIN
 END $do$;
 
 DO $do$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_instances_def_fkey'
-                   AND conrelid = 'workflow_instances'::regclass) THEN
-        ALTER TABLE ONLY workflow_instances
-            ADD CONSTRAINT workflow_instances_def_fkey FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version);
-    END IF;
-END $do$;
-
-DO $do$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_leases_id_fkey'
                    AND conrelid = 'workflow_leases'::regclass) THEN
         ALTER TABLE ONLY workflow_leases
             ADD CONSTRAINT workflow_leases_id_fkey FOREIGN KEY (id) REFERENCES workflow_instances(id) ON DELETE CASCADE;
+    END IF;
+END $do$;
+
+DO $do$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workflow_payloads_def_fkey'
+                   AND conrelid = 'workflow_payloads'::regclass) THEN
+        ALTER TABLE ONLY workflow_payloads
+            ADD CONSTRAINT workflow_payloads_def_fkey FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version);
     END IF;
 END $do$;
 
@@ -1842,8 +1793,6 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON admin.tenant_api_keys USING btre
 CREATE INDEX IF NOT EXISTS idx_operator_api_keys_hash ON admin.operator_api_keys USING btree (key_hash) WHERE (disabled_at IS NULL);
 
 CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON admin.workers USING btree (last_heartbeat_at);
-
-CREATE INDEX IF NOT EXISTS idx_event_history_pending ON ONLY event_history USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
 
 CREATE INDEX IF NOT EXISTS event_history_p0_workflow_id_step_idx ON event_history_p0 USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
 
@@ -1981,63 +1930,11 @@ CREATE INDEX IF NOT EXISTS idx_defs_active ON workflow_defs USING btree (name, v
 
 CREATE INDEX IF NOT EXISTS idx_defs_tenant_name_version ON workflow_defs USING btree (tenant_id, name, version DESC);
 
+CREATE INDEX IF NOT EXISTS idx_event_history_pending ON ONLY event_history USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
+
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys USING btree (expires_at);
 
 CREATE INDEX IF NOT EXISTS idx_idempotency_workflow_id ON idempotency_keys USING btree (workflow_id);
-
-CREATE INDEX IF NOT EXISTS idx_instances_claim_order ON workflow_instances USING btree (tenant_id, task_queue, priority, created_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
-
-CREATE INDEX IF NOT EXISTS idx_instances_claimable ON workflow_instances USING btree (status, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
-
-CREATE INDEX IF NOT EXISTS idx_instances_concurrency_key ON workflow_instances USING btree (tenant_id, concurrency_key_hash) WHERE (concurrency_key_hash IS NOT NULL);
-
-CREATE INDEX IF NOT EXISTS idx_instances_created_at ON workflow_instances USING btree (tenant_id, created_at DESC);
-
-DO $trgm$
-DECLARE
-    ext_schema text;
-BEGIN
-    SELECT n.nspname INTO ext_schema
-      FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
-     WHERE e.extname = 'pg_trgm';
-    IF ext_schema IS NULL THEN
-        RAISE EXCEPTION 'pg_trgm is not installed and CREATE EXTENSION IF NOT EXISTS did not create it';
-    END IF;
-    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_instances_def_name_trgm ON workflow_instances USING GIN (def_name %I.gin_trgm_ops)',
-                   ext_schema);
-END
-$trgm$;
-
-DO $trgm$
-DECLARE
-    ext_schema text;
-BEGIN
-    SELECT n.nspname INTO ext_schema
-      FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
-     WHERE e.extname = 'pg_trgm';
-    IF ext_schema IS NULL THEN
-        RAISE EXCEPTION 'pg_trgm is not installed and CREATE EXTENSION IF NOT EXISTS did not create it';
-    END IF;
-    EXECUTE format('CREATE INDEX IF NOT EXISTS idx_instances_error_msg_trgm ON workflow_instances USING GIN (error_msg %I.gin_trgm_ops) WHERE (error_msg IS NOT NULL)',
-                   ext_schema);
-END
-$trgm$;
-
-CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances USING btree (assigned_to) WHERE (status = 'running'::text);
-
-CREATE INDEX IF NOT EXISTS idx_instances_parent_policy ON workflow_instances USING btree (parent_workflow_id, parent_close_policy, status);
-
-CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances USING btree (status) WHERE (status = 'running'::text);
-
-CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances USING btree (sticky_worker_id) WHERE (sticky_worker_id IS NOT NULL);
-
-CREATE INDEX IF NOT EXISTS idx_instances_tenant_claimable ON workflow_instances USING btree (tenant_id, status, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
-
-CREATE INDEX IF NOT EXISTS idx_instances_tenant_queue_claimable ON workflow_instances USING btree (tenant_id, task_queue, status, priority, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
-
-CREATE INDEX IF NOT EXISTS idx_instances_tenant_status_created ON workflow_instances USING btree (tenant_id, status, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_instances_terminal_completed ON workflow_instances USING btree (tenant_id, status, completed_at) WHERE (status = ANY (ARRAY['done'::text, 'failed'::text, 'terminated'::text]));
 
 CREATE INDEX IF NOT EXISTS idx_leases_claim_order ON workflow_leases USING btree (tenant_id, task_queue, priority, created_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
 
@@ -2045,9 +1942,13 @@ CREATE INDEX IF NOT EXISTS idx_leases_claimable ON workflow_leases USING btree (
 
 CREATE INDEX IF NOT EXISTS idx_leases_concurrency_key ON workflow_leases USING btree (tenant_id, concurrency_key_hash) WHERE (concurrency_key_hash IS NOT NULL);
 
+CREATE INDEX IF NOT EXISTS idx_leases_continued_from ON workflow_leases USING btree (continued_from) WHERE (continued_from IS NOT NULL);
+
 CREATE INDEX IF NOT EXISTS idx_leases_defer_phase_deadline ON workflow_leases USING btree (defer_phase_deadline) WHERE (pending_terminal_status IS NOT NULL);
 
 CREATE INDEX IF NOT EXISTS idx_leases_heartbeat ON workflow_leases USING btree (assigned_to) WHERE (status = 'running'::text);
+
+CREATE INDEX IF NOT EXISTS idx_leases_parent ON workflow_leases USING btree (parent_workflow_id) WHERE (parent_workflow_id IS NOT NULL);
 
 CREATE INDEX IF NOT EXISTS idx_leases_stale ON workflow_leases USING btree (status, heartbeat_at) WHERE (status = 'running'::text);
 
@@ -2056,6 +1957,8 @@ CREATE INDEX IF NOT EXISTS idx_leases_sticky ON workflow_leases USING btree (sti
 CREATE INDEX IF NOT EXISTS idx_leases_tenant_claimable ON workflow_leases USING btree (tenant_id, status, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
 
 CREATE INDEX IF NOT EXISTS idx_leases_tenant_queue_claimable ON workflow_leases USING btree (tenant_id, task_queue, status, priority, next_wake_at) WHERE (status = ANY (ARRAY['ready'::text, 'terminating'::text]));
+
+CREATE INDEX IF NOT EXISTS idx_leases_terminal ON workflow_leases USING btree (tenant_id, status) WHERE (status = ANY (ARRAY['done'::text, 'failed'::text, 'terminated'::text, 'cancelled'::text, 'dead_lettered'::text]));
 
 CREATE INDEX IF NOT EXISTS idx_mem_samples_def ON workflow_memory_samples USING btree (def_name, recorded_at DESC);
 
@@ -2102,40 +2005,9 @@ CREATE INDEX IF NOT EXISTS idx_update_requests_pending ON workflow_update_reques
 
 CREATE INDEX IF NOT EXISTS idx_update_requests_pending_name ON workflow_update_requests USING btree (workflow_id, update_name, status);
 
-CREATE INDEX IF NOT EXISTS idx_workflow_instances_continued_from ON workflow_instances USING btree (continued_from) WHERE (continued_from IS NOT NULL);
-
-CREATE INDEX IF NOT EXISTS idx_workflow_instances_defer_phase_deadline ON workflow_instances USING btree (defer_phase_deadline) WHERE (pending_terminal_status IS NOT NULL);
-
 CREATE INDEX IF NOT EXISTS idx_workflow_signals_queue ON workflow_signals USING btree (workflow_id, signal_name);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_schedules_idempotency_key ON workflow_schedules USING btree (tenant_id, idempotency_key) WHERE (idempotency_key IS NOT NULL);
-
-CREATE OR REPLACE FUNCTION admin.claim_workflows(p_worker_id text, p_task_queues text[], p_limit integer) RETURNS TABLE(id text, def_name text, def_version integer, status text, input jsonb, assigned_to text, next_wake_at TIMESTAMPTZ, tenant_id uuid, created_at TIMESTAMPTZ, error_code text, error_op text, generation bigint, priority integer, trace_id text, pending_terminal_status text)
-    LANGUAGE sql SECURITY DEFINER
-    SET search_path FROM CURRENT
-    AS $$
-    WITH candidates AS (
-        SELECT w.id FROM workflow_instances w
-        WHERE w.status IN ('ready', 'terminating')
-          AND w.next_wake_at <= now()
-          AND w.task_queue = ANY(p_task_queues)
-        ORDER BY w.priority ASC, w.created_at
-        LIMIT p_limit
-        FOR UPDATE SKIP LOCKED
-    )
-    UPDATE workflow_instances w
-    SET status = 'running',
-        assigned_to = p_worker_id,
-        heartbeat_at = now(),
-        started_at = COALESCE(w.started_at, now()),
-        generation = w.generation + 1
-    FROM candidates c
-    WHERE w.id = c.id
-    RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to,
-              w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op,
-              w.generation, COALESCE(w.priority, 0), COALESCE(w.trace_id, ''),
-              COALESCE(w.pending_terminal_status, '');
-$$;
 
 CREATE OR REPLACE FUNCTION admin.create_tenant_role(p_tenant_id uuid, p_password text) RETURNS text
     LANGUAGE plpgsql SECURITY DEFINER
@@ -2415,7 +2287,9 @@ CREATE OR REPLACE FUNCTION admin.in_flight_workflow_ids() RETURNS TABLE(id text)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path FROM CURRENT
     AS $$
-    SELECT w.id FROM workflow_instances w WHERE w.status IN ('ready', 'running');
+    SELECT l.id
+    FROM workflow_leases l
+    WHERE l.status IN ('ready', 'running');
 $$;
 
 CREATE OR REPLACE FUNCTION admin.revoke_plugin_from_tenant(p_plugin_name text, p_tenant_id uuid, p_schema_name text) RETURNS void
@@ -2483,11 +2357,11 @@ $$;
 
 -- ── Function ownership ──────────────────────────────────────────────────────
 -- `pg_dump --no-owner` was used to generate this file, so that the baseline does
--- not pin every object to the role that happened to run the dump. These three
+-- not pin every object to the role that happened to run the dump. These two
 -- are the exception, and they carry their ownership because it is not cosmetic:
 -- a SECURITY DEFINER function executes with the OWNER's privileges, so the owner
 -- IS the policy. cleat_dispatcher is the only role holding BYPASSRLS, which is
--- what these three need to read across tenants.
+-- what these two need to read across tenants.
 --
 -- Guarded on the role existing, as 023/024/040/073 each are: BYPASSRLS needs a
 -- superuser to grant, so a non-superuser deployment has no cleat_dispatcher and
@@ -2508,7 +2382,6 @@ DO $do$ BEGIN
     -- clean one. Measured here: the guard-on-existence version failed
     -- TestTheMigrationSetAppliesWithoutASuperuser with exactly 42501.
     BEGIN
-        EXECUTE 'ALTER FUNCTION admin.claim_workflows(text, text[], integer) OWNER TO cleat_dispatcher';
         EXECUTE 'ALTER FUNCTION admin.get_due_schedules() OWNER TO cleat_dispatcher';
         EXECUTE 'ALTER FUNCTION admin.in_flight_workflow_ids() OWNER TO cleat_dispatcher';
     EXCEPTION WHEN insufficient_privilege OR undefined_object THEN
@@ -3084,9 +2957,6 @@ END $do$;
 DO $do$ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', current_schema(), 'cleat_sweep');
 END $do$;
-
-REVOKE ALL ON FUNCTION admin.claim_workflows(p_worker_id text, p_task_queues text[], p_limit integer) FROM PUBLIC;
-GRANT ALL ON FUNCTION admin.claim_workflows(p_worker_id text, p_task_queues text[], p_limit integer) TO cleat_app;
 
 REVOKE ALL ON FUNCTION admin.create_tenant_role(p_tenant_id uuid, p_password text) FROM PUBLIC;
 GRANT ALL ON FUNCTION admin.create_tenant_role(p_tenant_id uuid, p_password text) TO cleat_app;

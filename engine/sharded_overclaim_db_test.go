@@ -124,7 +124,7 @@ func TestShardedClaimWorkflows_DoesNotOverClaim_RealDB(t *testing.T) {
 		byID[wf.ID] = true
 	}
 	rows, err := adminDB.QueryContext(ctx,
-		`SELECT id FROM workflow_instances WHERE def_name = $1 AND status = 'running'`, defName)
+		`SELECT l.id FROM workflow_leases l JOIN workflow_payloads p ON p.id = l.id WHERE p.def_name = $1 AND l.status = 'running'`, defName)
 	if err != nil {
 		t.Fatalf("list running: %v", err)
 	}

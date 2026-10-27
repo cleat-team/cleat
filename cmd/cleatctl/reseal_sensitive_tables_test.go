@@ -97,18 +97,12 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 	const wfID = "reseal6-wf-1"
 	seedSixTablesFixture(t, db, ctx, tenant, wfID)
 
-	// workflow_instances: input is jsonb (quoted wire form), error_msg is text
+	// workflow_payloads: input is jsonb (quoted wire form), error_msg is text
 	// (bare). Seed one of each so the quoting-preservation path is exercised
-	// on this table too, not only on event_history's payload column.
-	instInputPlain := `{"order_id":"4111111111111111"}`
-	instErrPlain := "boom: card 4111111111111111"
-	legacyInput := `"` + sealNilAAD(t, key, instInputPlain) + `"`
-	legacyErr := sealNilAAD(t, key, instErrPlain)
-	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET input = $1::jsonb, error_msg = $2 WHERE id = $3`,
-		legacyInput, legacyErr, wfID); err != nil {
-		t.Fatalf("seed workflow_instances columns: %v", err)
-	}
+	// on this table too, not only on event_history's payload column. This was
+	// workflow_instances' pair until cleat#3245 B5 moved those columns off it.
+	payloadInputPlain := `{"order_id":"4111111111111111"}`
+	legacyInput := `"` + sealNilAAD(t, key, payloadInputPlain) + `"`
 
 	// workflow_signals: PK is a bigint id with no app-supplied value -- let
 	// the sequence assign it, and read it back for the post-sweep lookup.
@@ -167,22 +161,16 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 		t.Fatalf("seed idempotency_keys: %v", err)
 	}
 
-	// workflow_payloads: PK is "id", the dual-write companion row
-	// cleat#3245 Phase 3 step 2 keeps beside workflow_instances -- cleat#3344.
-	// ON CONFLICT DO UPDATE, not a plain INSERT: cleat#3245 Phase 3 step 3
-	// piece F (cleat#3343) made seedSixTablesFixture's own
-	// testutil.SeedWorkflowLease call above ALSO insert a workflow_payloads
-	// row for this same id (its own ON CONFLICT (id) DO NOTHING, to satisfy
-	// the INNER JOIN piece F's reads now need), so a bare INSERT here would
-	// collide with that row rather than create it. Same idempotent-insert
-	// shape SeedWorkflowLease itself uses, so which of the two writes this
-	// row first no longer matters.
+	// workflow_payloads: PK is "id" -- cleat#3344. ON CONFLICT DO UPDATE, not a
+	// plain INSERT: seedSixTablesFixture's SeedRun already wrote a
+	// workflow_payloads row for this id, so a bare INSERT would collide with
+	// it rather than create it.
 	payloadErrPlain := "payload error with 4111111111111111"
 	legacyPayloadErr := sealNilAAD(t, key, payloadErrPlain)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO workflow_payloads (id, tenant_id, error_msg) VALUES ($1, $2, $3)
-		 ON CONFLICT (id) DO UPDATE SET error_msg = $3`,
-		wfID, tenant, legacyPayloadErr); err != nil {
+		`INSERT INTO workflow_payloads (id, tenant_id, input, error_msg) VALUES ($1, $2, $3::jsonb, $4)
+		 ON CONFLICT (id) DO UPDATE SET input = $3::jsonb, error_msg = $4`,
+		wfID, tenant, legacyInput, legacyPayloadErr); err != nil {
 		t.Fatalf("seed workflow_payloads: %v", err)
 	}
 
@@ -194,8 +182,7 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 	for _, c := range []struct {
 		label, legacy string
 	}{
-		{"workflow_instances.input", legacyInput},
-		{"workflow_instances.error_msg", legacyErr},
+		{"workflow_payloads.input", legacyInput},
 		{"workflow_signals.payload", legacySignal},
 		{"workflow_promises.result", legacyPromise},
 		{"workflow_update_requests.payload", legacyUpdate},
@@ -222,28 +209,16 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resealSensitiveTables: %v", err)
 	}
-	// Eight legacy values: two on workflow_instances, one each on the other
-	// six (including workflow_payloads, cleat#3344).
-	if total.Older != 8 || total.Rewrote != 8 {
-		t.Errorf("total: Older=%d Rewrote=%d, want 8 and 8", total.Older, total.Rewrote)
+	// Seven legacy values: two on workflow_payloads (cleat#3344), one each on
+	// the other five.
+	if total.Older != 7 || total.Rewrote != 7 {
+		t.Errorf("total: Older=%d Rewrote=%d, want 7 and 7", total.Older, total.Rewrote)
 	}
 	if total.Unreadable != 0 {
 		t.Errorf("total: Unreadable=%d, want 0", total.Unreadable)
 	}
 	if len(results) != len(sensitiveTableSpecs) {
 		t.Errorf("results has %d entries, want %d (one per table)", len(results), len(sensitiveTableSpecs))
-	}
-
-	var gotInstInput, gotInstErr string
-	if err := db.QueryRowContext(ctx,
-		`SELECT input::text, error_msg FROM workflow_instances WHERE id = $1`, wfID).
-		Scan(&gotInstInput, &gotInstErr); err != nil {
-		t.Fatalf("read back workflow_instances: %v", err)
-	}
-	assertNowDerivedAndBoundToOwnTenant(t, enc, "workflow_instances.input", tenant, foreign, gotInstInput, instInputPlain)
-	assertNowDerivedAndBoundToOwnTenant(t, enc, "workflow_instances.error_msg", tenant, foreign, gotInstErr, instErrPlain)
-	if !strings.HasPrefix(gotInstInput, `"`) || !strings.HasSuffix(gotInstInput, `"`) {
-		t.Errorf("workflow_instances.input lost its JSON string quoting: %q", gotInstInput)
 	}
 
 	var gotSignal string
@@ -285,14 +260,19 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 	}
 	assertNowDerivedAndBoundToOwnTenant(t, enc, "idempotency_keys.error_msg", tenant, foreign, gotIdem, idemPlain)
 
-	var gotPayloadErr string
+	var gotPayloadInput, gotPayloadErr string
 	if err := db.QueryRowContext(ctx,
-		`SELECT error_msg FROM workflow_payloads WHERE id = $1`, wfID).Scan(&gotPayloadErr); err != nil {
+		`SELECT input::text, error_msg FROM workflow_payloads WHERE id = $1`, wfID).
+		Scan(&gotPayloadInput, &gotPayloadErr); err != nil {
 		t.Fatalf("read back workflow_payloads: %v", err)
+	}
+	assertNowDerivedAndBoundToOwnTenant(t, enc, "workflow_payloads.input", tenant, foreign, gotPayloadInput, payloadInputPlain)
+	if !strings.HasPrefix(gotPayloadInput, `"`) || !strings.HasSuffix(gotPayloadInput, `"`) {
+		t.Errorf("workflow_payloads.input lost its JSON string quoting: %q", gotPayloadInput)
 	}
 	assertNowDerivedAndBoundToOwnTenant(t, enc, "workflow_payloads.error_msg", tenant, foreign, gotPayloadErr, payloadErrPlain)
 
-	// Idempotent: a second sweep finds nothing left, across all seven tables.
+	// Idempotent: a second sweep finds nothing left, across all six tables.
 	_, total2, err := resealSensitiveTables(ctx, db, enc, false, io.Discard)
 	if err != nil {
 		t.Fatalf("second resealSensitiveTables: %v", err)
@@ -316,7 +296,6 @@ func TestResealSensitiveTablesConvertsEachOfTheSix(t *testing.T) {
 // line rather than a silent omission.
 func TestSensitiveTableSpecsNamesExactlyTheKnownSensitiveTables(t *testing.T) {
 	want := map[string]bool{
-		"workflow_instances":       true,
 		"workflow_signals":         true,
 		"workflow_promises":        true,
 		"workflow_update_requests": true,
@@ -369,7 +348,7 @@ func TestResealSensitiveTablesDryRunWritesNothing(t *testing.T) {
 	plain := "dry run plaintext 4111111111111111"
 	legacy := sealNilAAD(t, key, plain)
 	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET error_msg = $1 WHERE id = $2`, legacy, wfID); err != nil {
+		`UPDATE workflow_payloads SET error_msg = $1 WHERE id = $2`, legacy, wfID); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -383,7 +362,7 @@ func TestResealSensitiveTablesDryRunWritesNothing(t *testing.T) {
 
 	var stillLegacy string
 	if err := db.QueryRowContext(ctx,
-		`SELECT error_msg FROM workflow_instances WHERE id = $1`, wfID).Scan(&stillLegacy); err != nil {
+		`SELECT error_msg FROM workflow_payloads WHERE id = $1`, wfID).Scan(&stillLegacy); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
 	if stillLegacy != legacy {

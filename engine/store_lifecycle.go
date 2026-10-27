@@ -771,41 +771,44 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 
 	// Create the new workflow run.
 	// Use the store's tenant scope to preserve tenant isolation.
-	var newRunID, resolvedTaskQueue string
+	var newRunID string
 	var inheritedParentWorkflowID sql.NullString
+	// parent_workflow_id and parent_close_policy are INHERITED from the run
+	// being continued, not left NULL. A child that continues as new is
+	// still its parent's child: enforceParentClosePolicy selects on
+	// parent_workflow_id and NULL matches nothing, so a TERMINATE parent
+	// left every continued iteration running while reporting that it had
+	// stopped its child (cleat#955). Measured against a plain sibling
+	// child as a control -- that one WAS stopped by the same call, so the
+	// policy was working and only the link was missing.
+	// parent_workflow_id is read from the lease row; parent_close_policy
+	// stays on workflow_instances (cleat#3245).
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
-		-- parent_workflow_id and parent_close_policy are INHERITED from the run
-		-- being continued, not left NULL. A child that continues as new is
-		-- still its parent's child: enforceParentClosePolicy selects on
-		-- parent_workflow_id and NULL matches nothing, so a TERMINATE parent
-		-- left every continued iteration running while reporting that it had
-		-- stopped its child (cleat#955). Measured against a plain sibling
-		-- child as a control -- that one WAS stopped by the same call, so the
-		-- policy was working and only the link was missing.
-		-- parent_workflow_id is read from the lease row, which B5 keeps;
-		-- parent_close_policy stays on workflow_instances (cleat#3245).
-		VALUES (gen_random_uuid(), $1, $2, 'ready',
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3), 'default'),
-			$3, $4, now() - INTERVAL '1 millisecond', $5,
-			(SELECT parent_workflow_id FROM workflow_leases WHERE id = $5),
-			(SELECT parent_close_policy FROM workflow_instances WHERE id = $5))
-		RETURNING id, task_queue, parent_workflow_id
-		`, defName, defVersion, s.tenantID, priority, currentRunID).Scan(&newRunID, &resolvedTaskQueue, &inheritedParentWorkflowID)
+		INSERT INTO workflow_instances (id, tenant_id, parent_close_policy)
+		VALUES (gen_random_uuid(), $1,
+			(SELECT parent_close_policy FROM workflow_instances WHERE id = $2))
+		RETURNING id
+		`, s.tenantID, currentRunID).Scan(&newRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
+	resolvedTaskQueue, err := s.resolveRunTaskQueue(ctx, tx, defName, defVersion, s.tenantID)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: start new run: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT (SELECT parent_workflow_id FROM workflow_leases WHERE id = $1)`,
+		currentRunID).Scan(&inheritedParentWorkflowID); err != nil {
+		return "", fmt.Errorf("continue as new: read the inherited parent: %w", err)
+	}
 
-	// cleat#3245 Phase 3 step 2 piece 4d / migration 018: create the new
-	// run's workflow_leases/workflow_payloads rows, same as startNewRun
-	// (piece 1) -- resolvedTaskQueue and the inherited parent_workflow_id
-	// are both captured via RETURNING rather than re-evaluated, for the
-	// identical reason startNewRun's own call does. continued_from is
-	// currentRunID itself, not a column this INSERT needed to return.
-	// concurrency_key and the run-limit overrides are not inherited by a
-	// continued run on workflow_instances either (this INSERT's own column
-	// list has never carried them), so they are left unset here too --
-	// mirroring only what workflow_instances itself writes.
+	// Create the new run's workflow_leases/workflow_payloads rows, as
+	// StartNewRun does. resolvedTaskQueue and the inherited parent_workflow_id
+	// were each read once, by the statements above, and are passed in rather
+	// than re-evaluated; until cleat#3245 B5 they came back through RETURNING
+	// on the workflow_instances INSERT, which no longer carries them.
+	// continued_from is currentRunID itself. concurrency_key and the run-limit
+	// overrides are not inherited by a continued run, so they are left unset.
 	if err := s.insertLeaseAndPayloadRows(ctx, tx, newRunID, s.tenantID, resolvedTaskQueue, priority, sealedNewInput, leaseAndPayloadCols{
 		DefName: defName, DefVersion: defVersion,
 		ParentWorkflowID: inheritedParentWorkflowID.String, ContinuedFrom: currentRunID,
@@ -1823,25 +1826,14 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		// It used to be set HERE, after the idempotency_keys work, and that
 		// ordering is the whole of cleat#1534.
 
-		// Insert the workflow instance.
-		// cleat#3360: concurrency_key (the text) dropped from
-		// workflow_instances -- nothing read it there, only
-		// concurrency_key_hash via the candidate scan's own column (and
-		// that scan reads workflow_leases now, not workflow_instances
-		// either). concurrency_key_hash stays for now: it is still
-		// written here, because idx_instances_concurrency_key
-		// (migrations/postgres/001_schema.sql) indexes it, and 001 is
-		// frozen -- see UpdateStickyWorker's identical note in db.go.
-		var resolvedTaskQueue string
-		err = tx.QueryRowContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
-			VALUES ($1, $2, $3, 'ready',
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $4), 'default'),
-			$4, $5, now() - INTERVAL '1 millisecond',
-			CASE WHEN $6 = '' THEN NULL ELSE digest($6, 'sha256') END, $7, $8, $9, $10)
-			RETURNING task_queue
-		`, runID, defName, defVersion, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
+		// Insert the workflow instance. Its row is id, tenant and the close
+		// policy; everything else about the run goes on the lease and payload
+		// rows below (cleat#3245 B5).
+		resolvedTaskQueue, err := s.resolveRunTaskQueue(ctx, tx, defName, defVersion, tenantID)
 		if err != nil {
+			return "", false, fmt.Errorf("start new run: %w", err)
+		}
+		if err := insertInstanceRow(ctx, tx, runID, tenantID, ""); err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
 
@@ -1864,19 +1856,12 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	}
 	defer tx.Rollback()
 
-	// cleat#3360: same drop as the idempotency-key branch above -- only
-	// concurrency_key (the text) is gone from workflow_instances;
-	// concurrency_key_hash stays, for idx_instances_concurrency_key's sake.
-	var resolvedTaskQueue string
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, task_queue, tenant_id, priority, next_wake_at, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
-		VALUES ($1, $2, $3, 'ready',
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $4), 'default'),
-			$4, $5, now() - INTERVAL '1 millisecond',
-			CASE WHEN $6 = '' THEN NULL ELSE digest($6, 'sha256') END, $7, $8, $9, $10)
-		RETURNING task_queue
-	`, runID, defName, defVersion, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs).Scan(&resolvedTaskQueue)
+	// Same two statements as the idempotency-key branch above.
+	resolvedTaskQueue, err := s.resolveRunTaskQueue(ctx, tx, defName, defVersion, tenantID)
 	if err != nil {
+		return "", false, fmt.Errorf("start new run: %w", err)
+	}
+	if err := insertInstanceRow(ctx, tx, runID, tenantID, ""); err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
 	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
@@ -1890,42 +1875,64 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	return runID, false, tx.Commit()
 }
 
+// insertInstanceRow writes the workflow_instances row of a new run. Since
+// cleat#3245 B5 that row is id, tenant_id, parent_close_policy and the two
+// counters that default; everything else a run has lives on its
+// workflow_leases and workflow_payloads rows, which insertLeaseAndPayloadRows
+// writes next. An empty parentClosePolicy takes the column's own default,
+// ABANDON.
+func insertInstanceRow(ctx context.Context, tx *sql.Tx, id, tenantID, parentClosePolicy string) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_instances (id, tenant_id, parent_close_policy)
+		VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'ABANDON'))
+	`, id, tenantID, parentClosePolicy); err != nil {
+		return fmt.Errorf("insert instance row: %w", err)
+	}
+	return nil
+}
+
+// resolveRunTaskQueue is the task queue a run of defName@defVersion starts on:
+// the definition's own, or "default" when it names none. It used to ride on the
+// workflow_instances INSERT as a subquery and come back through RETURNING;
+// that row no longer has the column, so it is one statement of its own, read
+// once and passed to insertLeaseAndPayloadRows.
+func (s *PostgresStore) resolveRunTaskQueue(ctx context.Context, tx *sql.Tx, defName string, defVersion int, tenantID string) (string, error) {
+	var q string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3), 'default')
+	`, defName, defVersion, tenantID).Scan(&q); err != nil {
+		return "", fmt.Errorf("resolve task queue: %w", err)
+	}
+	return q, nil
+}
+
 // insertLeaseAndPayloadRows creates the workflow_leases and workflow_payloads
 // rows that go with a freshly inserted workflow_instances row, on the SAME
-// tx -- cleat#3245 Phase 3 step 2 (dual-write), piece 1. There is no backfill
-// (owner decision: a fresh database is required for 0.5.0, so no supported
-// upgrade path has a pre-existing workflow_instances row to catch up), which
-// is what makes "create both rows together, from here on, every time" the
-// whole of this step's job for new runs.
+// tx. Since cleat#3245 B5 those two rows are where a run's state lives, and
+// the instance row beside them is only its identity and close policy.
+// There is no backfill: a fresh database is required for 0.5.0, so no
+// supported upgrade path has a pre-existing run to catch up.
 //
-// next_wake_at is set explicitly to the same `now() - 1ms` the
-// workflow_instances INSERT uses, rather than relying on this table's own
-// `DEFAULT now()` -- the two would otherwise disagree by whatever the gap
-// between the two statements happens to be, and this column feeds claim
-// ordering. created_at is NOT passed explicitly: both tables default it to
-// `now()`, and `now()` is the TRANSACTION timestamp in PostgreSQL (constant
-// across every statement in one tx), so the two columns agree without having
-// to say so.
+// next_wake_at is set explicitly to `now() - 1ms`, so a new run is claimable
+// at once; this column feeds claim ordering. created_at is NOT passed
+// explicitly: both tables default it to `now()`, and `now()` is the
+// TRANSACTION timestamp in PostgreSQL (constant across every statement in one
+// tx), so the two rows agree without having to say so.
 //
-// taskQueue is the value workflow_instances' own INSERT just resolved via
-// its COALESCE-against-workflow_defs subquery, captured with RETURNING
-// rather than re-evaluated here -- a second subquery risks reading a
-// workflow_defs row that changed between the two statements, however
-// unlikely, and silently duplicating a drifted value is worse than reusing
-// the one already decided.
+// taskQueue is decided by the caller (resolveRunTaskQueue, or
+// resolveChildRun for a child) and passed in rather than re-evaluated here --
+// a second subquery risks reading a workflow_defs row that changed between
+// the two statements, and reusing the one already decided is safer than
+// silently using a drifted value. Until B5 it rode on the instance INSERT as
+// a subquery and came back through RETURNING.
 //
-// sealedPayloadInput is whatever startNewRun already bound to
-// workflow_instances.input (ciphertext when encryption is on, per
-// cleat#2312) -- reused rather than re-sealed, so the two tables carry
-// identical bytes rather than two independent encryptions of the same
-// plaintext.
+// sealedPayloadInput is the input as the caller already sealed it
+// (ciphertext when encryption is on, per cleat#2312), stored as given rather
+// than re-sealed here.
 //
-// cols carries every field migration 018 added that an individual creation
-// path may or may not set on its own workflow_instances INSERT -- callers
-// that do not set a given workflow_instances column pass its zero value
-// here too, rather than this function guessing a default, so the two tables
-// can never disagree about a column this function did not independently
-// decide.
+// cols carries the fields an individual creation path may or may not set;
+// a caller that does not set one passes its zero value, rather than this
+// function guessing a default.
 func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.Tx, id, tenantID, taskQueue string, priority int, sealedPayloadInput string, cols leaseAndPayloadCols) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_leases (
@@ -1955,12 +1962,11 @@ func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.T
 	return nil
 }
 
-// leaseAndPayloadCols carries migration 018's columns into
-// insertLeaseAndPayloadRows. def_name/def_version are required on every
-// call (workflow_payloads.def_name mirrors piece F's listing filter, per
-// the owner's split decision on cleat#3245 -- see migration 018's own
-// comment); the rest are each NULL on whichever creation paths do not set
-// the matching workflow_instances column themselves.
+// leaseAndPayloadCols carries the per-run columns of the lease and payload
+// rows into insertLeaseAndPayloadRows. def_name/def_version are required on
+// every call: since cleat#3245 B5 workflow_payloads is their only home, and
+// workflow_payloads_def_fkey holds them to a deployed definition. The rest
+// are each NULL on whichever creation paths do not set them.
 type leaseAndPayloadCols struct {
 	DefName                   string
 	DefVersion                int

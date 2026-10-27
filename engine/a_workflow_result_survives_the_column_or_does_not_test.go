@@ -280,3 +280,14 @@ func TestAFinalizedResultSurvivesTheColumn(t *testing.T) {
 		})
 	}
 }
+
+// payloadColumnsTable names the table a dialect keeps workflow payload
+// columns in: workflow_payloads on PostgreSQL since cleat#3245 B1b,
+// workflow_instances on MySQL and SQL Server, which have no split. dialect is
+// a StoreBackend name.
+func payloadColumnsTable(dialect string) string {
+	if dialect == "postgres" {
+		return "workflow_payloads"
+	}
+	return "workflow_instances"
+}

@@ -71,7 +71,6 @@ var (
 		"admin.workers",
 	}
 	sharedRoutines = []string{
-		"admin.claim_workflows",
 		"admin.create_tenant_role",
 		"admin.drop_tenant",
 		"admin.get_due_schedules",
@@ -79,14 +78,15 @@ var (
 		"admin.grant_plugin_to_tenant",
 		// Migration 073, cleat#1528. Deliberately shared and deliberately
 		// `SET search_path FROM CURRENT`, for the same reason
-		// admin.claim_workflows is: its body reads workflow_instances
-		// unqualified, --schema moves that table, and a literal search_path
-		// would send the function to the wrong copy. So it carries the
-		// rebinding exposure this file's header describes -- a pool upgrading
-		// rewrites it for the others -- and that is the accepted trade, not an
-		// oversight. Pinning is only available to a function that qualifies
-		// its own names, which is why 069 and 070 could pin the three below
-		// and 023 could not pin the one above.
+		// admin.claim_workflows was (that function was deleted by cleat#3245
+		// B5): its body reads workflow_leases unqualified, --schema moves that
+		// table, and a literal search_path would send the function to the wrong
+		// copy. So it carries the rebinding exposure this file's header
+		// describes -- a pool upgrading rewrites it for the others -- and that
+		// is the accepted trade, not an oversight. Pinning is only available
+		// to a function that qualifies its own names, which is why 069 and 070
+		// could pin the three below and 023 could not pin the function this
+		// one replaced.
 		"admin.in_flight_workflow_ids",
 		"admin.revoke_plugin_from_tenant",
 		// Migration 091, cleat#1898. A trigger function on the shared

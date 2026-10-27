@@ -258,7 +258,7 @@ PROCEDURES = {"finalize_workflow_status", "flush_event_step", "batch_flush_event
 
 # Function OWNERSHIP, which `pg_dump --no-owner` throws away and which is not
 # cosmetic on a SECURITY DEFINER function: the function runs with the OWNER's
-# privileges, so ownership IS the security policy. Three routines are deliberately
+# privileges, so ownership IS the security policy. Two routines are deliberately
 # owned by cleat_dispatcher, the only role holding BYPASSRLS -- a function owned
 # by the migration role instead would look identical in a catalog diff, apply
 # cleanly, and enforce nothing.
@@ -269,16 +269,17 @@ PROCEDURES = {"finalize_workflow_status", "flush_event_step", "batch_flush_event
 #   SECURITY the table owner has none to lend -- only BYPASSRLS does.
 #
 # --no-owner stays: it keeps the baseline from pinning every table and sequence
-# to whatever role ran the dump, which is the reason it is there. These three are
-# re-declared explicitly instead, copied from 023/024/040/073.
+# to whatever role ran the dump, which is the reason it is there. These two are
+# re-declared explicitly instead, copied from 023/024/040/073. (A third,
+# admin.claim_workflows, was deleted with the instance columns it read; cleat#3245 B5.)
 FUNCTION_OWNERSHIP = r"""
 -- ── Function ownership ──────────────────────────────────────────────────────
 -- `pg_dump --no-owner` was used to generate this file, so that the baseline does
--- not pin every object to the role that happened to run the dump. These three
+-- not pin every object to the role that happened to run the dump. These two
 -- are the exception, and they carry their ownership because it is not cosmetic:
 -- a SECURITY DEFINER function executes with the OWNER's privileges, so the owner
 -- IS the policy. cleat_dispatcher is the only role holding BYPASSRLS, which is
--- what these three need to read across tenants.
+-- what these two need to read across tenants.
 --
 -- Guarded on the role existing, as 023/024/040/073 each are: BYPASSRLS needs a
 -- superuser to grant, so a non-superuser deployment has no cleat_dispatcher and
@@ -299,7 +300,6 @@ DO $do$ BEGIN
     -- clean one. Measured here: the guard-on-existence version failed
     -- TestTheMigrationSetAppliesWithoutASuperuser with exactly 42501.
     BEGIN
-        EXECUTE 'ALTER FUNCTION admin.claim_workflows(text, text[], integer) OWNER TO cleat_dispatcher';
         EXECUTE 'ALTER FUNCTION admin.get_due_schedules() OWNER TO cleat_dispatcher';
         EXECUTE 'ALTER FUNCTION admin.in_flight_workflow_ids() OWNER TO cleat_dispatcher';
     EXCEPTION WHEN insufficient_privilege OR undefined_object THEN
@@ -383,7 +383,7 @@ BEGIN
         BEGIN
             CREATE ROLE cleat_dispatcher NOLOGIN BYPASSRLS;
         EXCEPTION WHEN insufficient_privilege THEN
-            RAISE NOTICE 'cleat_dispatcher needs BYPASSRLS, which only a superuser can grant, and this connection is not one. The cross-tenant claim function is still created but will not see across tenants; use --claim-strategy=rotate, which needs no grant. (SQLSTATE %)', SQLSTATE;
+            RAISE NOTICE 'cleat_dispatcher needs BYPASSRLS, which only a superuser can grant, and this connection is not one. The cross-tenant functions are still created but will not see across tenants; use --claim-strategy=rotate, which needs no grant. (SQLSTATE %)', SQLSTATE;
         END;
     END IF;
 END $$;

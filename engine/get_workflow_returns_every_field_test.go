@@ -162,8 +162,13 @@ func makeEveryColumnNonZero(t *testing.T, store WorkflowStore, id string) {
 	}
 	stmt := `UPDATE workflow_instances SET ` + strings.Join(cols, ", ") + ` WHERE id = ` + ph
 
-	if _, err := db.Exec(stmt, id); err != nil {
-		t.Fatalf("populating every column: %v", err)
+	// On Postgres the run's fields are not on workflow_instances any more
+	// (cleat#3245 B5): the lease and payload updates below are the whole of
+	// its population.
+	if _, ok := store.(*PostgresStore); !ok {
+		if _, err := db.Exec(stmt, id); err != nil {
+			t.Fatalf("populating every column: %v", err)
+		}
 	}
 
 	// cleat#3245 Phase 3 step 3 piece F: PostgresStore.GetWorkflowByID and

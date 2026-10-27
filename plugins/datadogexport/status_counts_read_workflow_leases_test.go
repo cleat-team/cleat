@@ -10,11 +10,12 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// TestStatusCountsReadStatusFromWorkflowLeases pins cleat#3245 B3a for this
-// plugin: on PostgreSQL the per-tenant status counts it exports read
-// workflow_leases. One run's two copies disagree, with statuses no other test
-// writes, so a statement still reading workflow_instances reports the other
-// copy's status.
+// TestStatusCountsReadStatusFromWorkflowLeases is the only test that runs this
+// plugin's PostgreSQL status-count statement against a real schema; the
+// behavioural suite's fake driver matches the query text and would pass whatever
+// table it named. Since cleat#3245 B5 workflow_instances has no status, so a
+// statement pointed back at it is a runtime `column "status" does not exist`.
+// The status is one no other test writes, so the count is about this run alone.
 func TestStatusCountsReadStatusFromWorkflowLeases(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
@@ -26,16 +27,8 @@ func TestStatusCountsReadStatusFromWorkflowLeases(t *testing.T) {
 		ON CONFLICT (tenant_id, name, version) DO NOTHING`); err != nil {
 		t.Fatalf("seed workflow_defs: %v", err)
 	}
-	if _, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status)
-		VALUES ($1, 'datadog-b3a-def', 1, 'b3a-dd-instance-status')`, id); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "datadog-b3a-def", Status: "b3a-dd-lease-status"})
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id) })
-	testutil.SyncWorkflowLease(t, db, id)
-	if _, err := db.Exec(`UPDATE workflow_leases SET status = 'b3a-dd-lease-status' WHERE id = $1`, id); err != nil {
-		t.Fatalf("diverge workflow_leases: %v", err)
-	}
 
 	rows, err := db.Query(statusCountsSQL.For(plugin.DialectPostgres), engine.DefaultTenantUUID)
 	if err != nil {
@@ -54,7 +47,7 @@ func TestStatusCountsReadStatusFromWorkflowLeases(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows: %v", err)
 	}
-	if counts["b3a-dd-lease-status"] != 1 || counts["b3a-dd-instance-status"] != 0 {
-		t.Fatalf("status counts = %v, want b3a-dd-lease-status=1 and no b3a-dd-instance-status -- it read workflow_instances.status", counts)
+	if counts["b3a-dd-lease-status"] != 1 {
+		t.Fatalf("status counts = %v, want b3a-dd-lease-status=1", counts)
 	}
 }
