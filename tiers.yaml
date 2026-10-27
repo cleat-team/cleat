@@ -955,7 +955,12 @@ tier2:
         THE RETIRED MECHANISM IS STILL IN THE SCHEMA, UNCALLED. `admin.claim_workflows`
         and `admin.get_due_schedules` are still defined in migrations/postgres/001_schema.sql
         (the re-baselined schema; the two grant migrations no longer exist as files) and nothing calls
-        them. cleat#3245's B5b deletes them. Re-derive both facts:
+        them. B5b of cleat#3245 (PR #3444, still open on 2026-10-27) removes
+        `admin.claim_workflows` from that file -- measured: 0 references there against 4 on
+        develop -- but its 001_schema.sql still defines `admin.get_due_schedules` (4
+        references, as on develop), so that one stays, uncalled, after B5b. An earlier
+        version of this paragraph said B5b deletes both; it was written from the issue
+        text and not from the PR. Re-derive:
 
           git grep -n 'admin\.claim_workflows\|admin\.get_due_schedules' -- '*.go' ':!*_test.go'
             # only comments and the flag's help text -- no call
