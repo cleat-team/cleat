@@ -1,0 +1,8 @@
+multi-db/mysql	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/postgres$	cleat#3483: engine/a_shrinking_set_await_any_child_loop_delivers_every_child_once_test.go runs one body over postgres/mssql/mysql via t.Run and each arm calls testutil.TestDB for its own dialect, which skips when that dialect's DSN is unset. multi-db/mysql sets only CLEAT_TEST_MYSQL, so the postgres arm skips -- its own line, not the broad /postgres$ one.
+multi-db/mysql	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/mssql$	same test, same reason, the mssql arm.
+multi-db/mssql	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/postgres$	same test as the multi-db/mysql lines above; multi-db/mssql sets only CLEAT_TEST_MSSQL, so here it is the postgres arm that skips.
+multi-db/mssql	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/mysql$	same test, same reason, the mysql arm.
+cluster	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/mysql$	the cluster job's CLEAT_TEST_DB gives it Postgres only, so of this test's three arms only mysql and mssql skip. 
+cluster	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/mssql$	same test, same reason, the mssql arm.
+test-go/engine	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/mysql$	the engine job's CLEAT_TEST_POSTGRES gives it Postgres only, so of this test's three arms only mysql and mssql skip; paired with the cluster lines above by the same regex (scripts/check-skip-ledger-engine-coverage.py).
+test-go/engine	1	^TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce/mssql$	same test, same reason, the mssql arm.
