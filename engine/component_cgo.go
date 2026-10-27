@@ -285,8 +285,8 @@ package engine
 // }
 //
 // // Read a `run-outcome` the guest returned from its `run` export.
-// // Returns 0 completed / 1 suspended / -1 for anything else, and sets *out to
-// // the payload when the case carries one.
+// // Returns 0 completed / 1 suspended / 2 failed / -1 for anything else, and
+// // sets *out to the payload when the case carries one.
 // static int component_val_get_run_outcome(const wasmtime_component_val_t *v,
 //                                          const char **out, size_t *outlen) {
 //     *out = NULL;
@@ -301,6 +301,7 @@ package engine
 //     }
 //     if (dlen == 9 && memcmp(d, "completed", 9) == 0) { return 0; }
 //     if (dlen == 9 && memcmp(d, "suspended", 9) == 0) { return 1; }
+//     if (dlen == 6 && memcmp(d, "failed", 6) == 0) { return 2; }
 //     return -1;
 // }
 //
@@ -465,6 +466,10 @@ const (
 	runOutcomeCompleted runOutcomeKind = iota
 	runOutcomeSuspended
 	runOutcomeUnrecognised
+	// runOutcomeFailed is the guest's workflow body having raised (cleat#3433).
+	// Appended after runOutcomeUnrecognised rather than before it so no existing
+	// value moves.
+	runOutcomeFailed
 )
 
 // componentCallRun calls the world's `run` export and decodes its `run-outcome`.
@@ -519,6 +524,11 @@ func componentCallRun(
 		return runOutcomeCompleted, C.GoStringN(payload, C.int(payloadLen)), nil
 	case 1:
 		return runOutcomeSuspended, "", nil
+	case 2:
+		if payload == nil {
+			return runOutcomeFailed, "", nil
+		}
+		return runOutcomeFailed, C.GoStringN(payload, C.int(payloadLen)), nil
 	}
 	return runOutcomeUnrecognised, "", fmt.Errorf(
 		"the guest's run export returned a value that is not a run-outcome variant")
@@ -1180,6 +1190,22 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 			return nil, fmt.Errorf("host: component export %q: %w", entryPoint, limitErr)
 		}
 		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
+	}
+
+	if outcome == runOutcomeFailed {
+		// The workflow body raised, and the guest's entry wrapper caught it and
+		// said so in the type (cleat#3433). It used to arrive as a completed
+		// {"error": ...} result, so a Python workflow that raised reported
+		// success.
+		//
+		// Marked as a failure the GUEST reported, like the core-module path
+		// marks one that came out through cleat_complete: the module did not
+		// fault, so the error must not be labelled "wasm trap", which sends a
+		// reader hunting a memory fault. The wrapper has already run the
+		// registered defers on its way out.
+		return nil, &GuestReturnedError{
+			Err: fmt.Errorf("host: component export %q failed: %s", entryPoint, resultStr),
+		}
 	}
 
 	if outcome == runOutcomeSuspended {

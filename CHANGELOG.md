@@ -25,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construct it as one directly. An out-of-tree plugin that called `env.Mux.Handle(...)` itself
   will not compile until it registers through `RegisterRoutes` instead.
 
+- **A Python workflow that raises now FAILS the run; it used to complete.** Closes cleat#3433
+  (owner decision D28). The SDK's entry wrapper caught the exception and returned
+  `{"error": "<message>"}` as an ordinary completed result, so `Execute` returned no error and
+  the worker recorded a success: no retry, no dead-lettering, no failure alert, and a parent
+  awaiting the run as a child saw a result. Every other SDK already failed the run. The
+  `run-outcome` variant in `python-sdk/wit/cleat.wit` gained a `failed(string)` case, appended
+  after `suspended`, and a raise now arrives as a failure carrying the exception's type and message
+  (`ValueError: boom`; the type alone for an exception with no text, such as `KeyError()`).
+  **What to check:** anything that read the `{"error": ...}` output of a Python workflow that
+  raised must now read the run's failure instead, and a Python workflow that raises on purpose
+  to "return an error" will now be retried or dead-lettered like any failed run. A workflow that
+  *returns* a dictionary with an `error` key is unaffected: that is a result, and stays one.
+  **Skew, measured:** the change is in both the SDK and the worker, and a Python component only
+  gets the new behaviour when it is *rebuilt* with the new SDK. A component built with an older
+  SDK keeps returning `{"error": ...}` as a completed result on any worker. A component built
+  with the new SDK and run on a worker that predates this change still fails the run when it
+  raises, but the failure is reported as `wasm trap: ... not a run-outcome variant` with no
+  exception message; upgrade the worker before, or together with, rebuilding Python components.
+
 ### Added
 
 - **`cleat-worker --enable-workflow-fetch` serves `cleat_fetch`.** Closes cleat#3377
@@ -54,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Python workflow that raised reported success.** Closes cleat#3433. See the upgrade note
+  above for the behaviour change and the skew between SDK and worker. The `{"error": ...}`
+  result was the entry wrapper catching the exception to keep it from crossing the ABI as a
+  trap, which is still why it catches; it now reports what it caught as the `failed` case of
+  `run-outcome` instead of as a completed result. The host marks it as a failure the guest
+  reported, so it is not labelled a wasm trap. Not a shape check on the result: a workflow may
+  legitimately return `{"error": ...}`, and a host that sniffed for it could not tell that
+  from a raise. A raising guest and an error-shaped return are both tested against a real
+  componentized guest.
 - **A parent whose `AwaitAnyChild` waited across two or more wakes re-ran everything after the await on every later wake, so a `StartChild` after it started a new child each time.** Closes cleat#3391. `Selector.Select` over children only is the same call and had the same effect. The first wake that found the child still running recorded an empty suspend, and each later wake recorded another one at the next step. When the child finished, its result was written against that second row, and the event upsert only reopens `await_child`, `await_promise` and `await_all_children` rows, so the result was dropped and every following wake found the child done again and carried on fresh. A wake that replays the call's suspend and finds the child still running now records nothing, so the result lands at the next step as an ordinary insert; and a replay skips every directly following empty `await_any_child` record of the same call (the same set of child run IDs, in any order, since `dagrun` lists them from a map) before looking for the result, which also reads histories written before the fix. A call that arrives after its segment has already suspended no longer records a second, different empty suspend beside the first, and a replay never carries one call across another call's records. A run already stuck by the bug (an empty record at the step its `StartChild` was later recorded) is not repaired. The regression test drives four wakes of a running child and five of a finished one against a real `event_history`, and the follow-up operation ran five times in five wakes before the fix.
 - **A Go workflow's `AwaitAllChildren` did not unwind when a child was still running.** Closes cleat#3385. The engine answers a fan-in with a suspend sentinel (`1<<62`) while any child is unfinished, which is the normal case, and the generated guest adapter for `AwaitAllChildren` never tested it: it read the sentinel as a result length of `1<<30` and parsed that much memory, where `AwaitChild` and `AwaitAnyChild` panic with `cleat.ErrSuspend`. The adapter now tests the same bit. The engine reported such a run as suspended either way, because a suspension wins over the trap that accompanied it, so the `AwaitAllChildren` row in the host-call harness stayed green throughout and could not have caught it; the new test reads the guest's own `recover()` instead. This fixes the Go guest adapter only; the other SDKs' decoders are not changed here.
 - **The Python SDK's `fetch()` read an HTTP reply with no status as `200`.** Closes cleat#3413.

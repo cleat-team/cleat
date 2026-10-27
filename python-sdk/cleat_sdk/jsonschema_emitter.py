@@ -39,8 +39,9 @@ ARE DELIBERATE, NOT OVERSIGHTS:
    own struct fields, which ``encoding/json`` never enforces the presence
    of. That ``TypeError`` is raised INSIDE ``export_wrapper``'s own
    ``try/except Exception`` -- the same boundary that turns a missing
-   TOP-LEVEL required parameter into a completed run's ``{"error": ...}``
-   result rather than a WASM trap (contrast Go, where the analogous failure
+   TOP-LEVEL required parameter into a FAILED run (it was a completed run's
+   ``{"error": ...}`` result until cleat#3433) rather than a WASM trap
+   (contrast Go, where the analogous failure
    ``panic``s and the engine sees a dead guest -- cleat#1981's whole reason
    to validate before dispatch) -- so enforcing "required" here is a
    DELIBERATE, DOCUMENTED BREAKING CHANGE: a payload missing a nested
@@ -118,9 +119,10 @@ ARE DELIBERATE, NOT OVERSIGHTS:
    KEY being absent from the input object, and (b) a nested dataclass's
    required FIELD being absent when its container value already happens to
    be a dict -- and neither of those is today a hard refusal either; both
-   are caught by ``export_wrapper``'s own ``except Exception`` and returned
-   as an ordinary completed run carrying ``{"error": ...}``, same as any
-   workflow-body exception.
+   are caught by ``export_wrapper``'s own ``except Exception`` and reported
+   as a failed run, same as any workflow-body exception. (They were returned
+   as an ordinary completed run carrying ``{"error": ...}`` until
+   cleat#3433.)
 
    A STRICTLY faithful schema -- "describe what the binding does, not what
    might be nicer", this issue's own words -- would instead emit

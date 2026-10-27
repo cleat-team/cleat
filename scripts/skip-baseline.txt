@@ -264,6 +264,7 @@ engine	pythonChildPollEngine	1
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
 engine	pythonEntryEngine	1
+engine	pythonExecuteFixture	1
 engine	requireDialectDSN	1
 engine	runConsumeSignalUnknownOutcome	2
 engine	runReclaimRaceMSSQL	1
