@@ -92,7 +92,7 @@ class _WorkflowFailure(str):
 
     message: str
 
-    def __new__(cls, payload: str, message: str) -> "_WorkflowFailure":
+    def __new__(cls, payload: str, message: str) -> _WorkflowFailure:
         obj = super().__new__(cls, payload)
         obj.message = message
         return obj
