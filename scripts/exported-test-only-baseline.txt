@@ -109,6 +109,7 @@ plugins/plugintest/rebound.go	func QueryRowRebound
 plugins/plugintest/schema_cleanup.go	func CleanupPluginSchema
 plugins/plugintest/secrets.go	func FakeSecrets.Seed
 plugins/plugintest/secrets.go	func NewFakeSecrets
+plugins/plugintest/tenant_secrets_cleanup.go	func RemoveTenantSecretsWithPrefix
 wasm/adapter_metadata.go	func AdapterFieldNames
 wasm/metadata.go	func HasImport
 wasm/metadata.go	func Metadata.EffectivePolicy

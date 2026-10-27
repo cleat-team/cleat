@@ -39,6 +39,7 @@ func TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent(t *testing.T) {
 		be := be
 		t.Run(be.Name, func(t *testing.T) {
 			defer be.Cleanup()
+			defer removeLeakedWebhookSecrets(t, be)
 
 			ctx := context.Background()
 			dialect := plugin.Dialect(string(be.Dialect))
