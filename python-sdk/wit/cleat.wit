@@ -475,15 +475,32 @@ world cleat-workflow {
     /// Rust returns an ``Err``, AssemblyScript sets a flag -- and none of them
     /// can be confused with a result. This makes the component path say it in
     /// the type too.
-    /// Two cases, not three: there is no ``failed``, and that is deliberate.
     ///
-    /// A workflow body that raises is caught by the SDK's entry wrapper and
-    /// turned into a completed step carrying an ``{"error": ...}`` payload.
-    /// That boundary is load-bearing -- an exception that escaped it would
-    /// cross the ABI as a trap and the engine would see a dead guest instead
-    /// of a failed step -- so a ``failed`` case here would either duplicate it
-    /// or invite someone to change what it means. A variant case with no
-    /// producer is worse than no case.
+    /// Three cases. ``failed`` was left out at first, deliberately, and was
+    /// added for cleat#3433 (owner decision D28) when the reason for leaving it
+    /// out turned out to be wrong.
+    ///
+    /// The SDK's entry wrapper catches every exception a workflow body raises.
+    /// That boundary is load-bearing: an exception that escaped it would cross
+    /// the ABI as a trap, and the engine would see a dead guest instead of a
+    /// failed workflow. What it used to do with the exception was return
+    /// ``{"error": ...}`` as a ``completed`` result, so a Python workflow that
+    /// raised reported success: Execute returned no error, and retry, the
+    /// dead-letter queue and a parent awaiting the run all saw a result.
+    ///
+    /// A failure now has its own case. It is not recognised by the SHAPE of a
+    /// result, and that is the reason it cannot be: a workflow may legitimately
+    /// RETURN ``{"error": ...}``, and a host that sniffed for the shape could
+    /// not tell that from a raise. A type can.
+    ///
+    /// ``failed`` is appended after ``suspended``, so the two older cases keep
+    /// their positions. A guest built before it existed still produces only
+    /// ``completed`` and ``suspended`` and is read exactly as before. The skew
+    /// that matters is the other direction: a guest that produces ``failed``
+    /// running on a host that predates it. That host reads the case as "not a
+    /// run-outcome variant" and fails the run, so a raise is still a failure
+    /// there -- reported as a "wasm trap" with no exception message
+    /// (measured, cleat#3433).
     variant run-outcome {
         /// The workflow finished. Carries the serialised result JSON.
         completed(string),
@@ -492,6 +509,11 @@ world cleat-workflow {
         /// (``outcomes.call-failure.suspended``). Its defer table is still
         /// populated -- see ``run-deferred``.
         suspended,
+
+        /// The workflow body raised. Carries the exception's message. The
+        /// guest has already run its own registered defers on the way out. The
+        /// host reports the failure as one the guest returned, not as a trap.
+        failed(string),
     }
 
     /// Main workflow entry point.
