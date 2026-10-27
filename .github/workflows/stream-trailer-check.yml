@@ -188,9 +188,37 @@ jobs:
             exit 2
           fi
 
+          # A COMMIT THAT IS ALREADY PUBLISHED CANNOT BE AMENDED, so a finding on
+          # one is reported rather than failed (cleat#3488).
+          #
+          # Measured on cleat#3486, the v0.5.0 back-merge: 739dffed (#3464) had
+          # been squash-merged onto release/v0.5.0 with `Claude-Stream: WS-cleat`,
+          # a blank line, then `Signed-off-by` / `Co-authored-by`, so git no
+          # longer read it as a trailer. By then it sat under the v0.5.0 tag on
+          # `main`, and the remedy this check prints (`--amend`, `--force-with-
+          # lease`) would have meant rewriting a released tag.
+          #
+          # NOT a check that failed to run. This job DID run on #3464 (base
+          # release/v0.5.0, SUCCESS), and it examined the pull request's own
+          # commit, whose trailer was fine. GitHub's squash wrote the malformed
+          # shape at merge, when no PR-time check can see it -- so running this
+          # on release/** (the first option on the issue) would not have caught
+          # it, and any squash onto a release branch can do it again.
+          #
+          # "Published" is: reachable from a vX.Y.Z tag. Exactly that shape --
+          # a prerelease tag (v1.0.0-rc.1), an rc-* image tag or any other `v*`
+          # name does not count, so a typo cannot widen the exemption to commits
+          # that can still be fixed. Findings on everything else fail as before.
+          #
+          # Without tags this classifies nothing and every finding fails, which is
+          # the strict direction. actions/checkout with fetch-depth: 0 fetches them.
+          released_in() {
+            git tag --contains "$1" --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true
+          }
+
           TOTAL=0
           EXEMPT=0
-          FAILING=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r commit; do
+          FINDINGS=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r commit; do
             if [ "$(git show -s --format='%ct' "$commit")" -lt "$CONVENTION_START" ]; then
               continue
             fi
@@ -221,14 +249,31 @@ jobs:
               # send someone to edit a message that was never wrong if the loop
               # were ever pointed at develop.
               if git log -1 --format='%B' "$commit" | grep -qE '^Claude-Stream:'; then
-                echo "  $(git log -1 --format='%h %s' "$commit")  -- has a Claude-Stream: line that git does NOT parse as a trailer (it is not in the final paragraph -- remove the blank line before the trailer block)"
+                printf '%s\t%s\n' "$commit" "  $(git log -1 --format='%h %s' "$commit")  -- has a Claude-Stream: line that git does NOT parse as a trailer (it is not in the final paragraph -- remove the blank line before the trailer block)"
               else
-                echo "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
+                printf '%s\t%s\n' "$commit" "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
               fi
             elif ! printf '%s' "$value" | grep -qE "$VALID"; then
-              echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of $VALID_LIST"
+              printf '%s\t%s\n' "$commit" "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of $VALID_LIST"
             fi
           done)
+
+          # Sort each finding into fails-the-check or already-published.
+          FAILING=""
+          NOTICES=""
+          while IFS=$'\t' read -r finding_sha finding_msg; do
+            [ -n "$finding_sha" ] || continue
+            published_in=$(released_in "$finding_sha")
+            if [ -n "$published_in" ]; then
+              NOTICES="${NOTICES}${finding_msg}  [published in ${published_in}: it cannot be amended]"$'\n'
+            else
+              FAILING="${FAILING}${finding_msg}"$'\n'
+            fi
+          done <<< "$FINDINGS"
+          FAILING="${FAILING%$'\n'}"
+          NOTICES="${NOTICES%$'\n'}"
+          NOTICED=0
+          if [ -n "$NOTICES" ]; then NOTICED=$(printf '%s\n' "$NOTICES" | grep -c .); fi
 
           # A range with no commits is not a pass. An empty base..head means the
           # range was wrong, not that every commit is marked -- the same
@@ -253,7 +298,25 @@ jobs:
             echo "This is a failure of the check, not a finding about the pull request." >&2
             exit 2
           fi
-          echo "commits in range: $TOTAL, checked: $CHECKED, exempt (predate the convention): $EXEMPT"
+          echo "commits in range: $TOTAL, checked: $CHECKED, exempt (predate the convention): $EXEMPT, reported as already published: $NOTICED"
+          if [ -z "$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*')" ]; then
+            echo "note: no vX.Y.Z tag is present in this checkout, so no commit can be classified as published and every finding fails."
+          fi
+          if [ "$NOTICED" -gt 0 ]; then
+            echo "============================================"
+            echo "  ALREADY PUBLISHED -- REPORTED, NOT FAILED"
+            echo "============================================"
+            echo ""
+            echo "$NOTICES"
+            echo ""
+            echo "These commits are reachable from a release tag, so the repair this check"
+            echo "normally asks for would rewrite released history. They are named here"
+            echo "so the finding stays visible (cleat#3488)."
+            echo ""
+            printf '%s\n' "$NOTICES" | while IFS= read -r line; do
+              echo "::notice title=Stream trailer on an already-published commit::${line#"${line%%[![:space:]]*}"}"
+            done
+          fi
           # NAME WHAT WAS WAIVED. A count says "3 exempt"; a reviewer needs to
           # see WHICH three, or a silent exemption is indistinguishable from a
           # silent cap -- CLAUDE.md's "no silent caps" applied to a guard's own
@@ -298,6 +361,8 @@ jobs:
           # "all commits carry a valid trailer" about a run that examined none
           # -- vacuously true, and the exact register this check exists to
           # refuse. The CHECKED == 0 branch above has already said what happened.
-          if [ "$CHECKED" -gt 0 ]; then
+          if [ "$CHECKED" -gt 0 ] && [ "$NOTICED" -eq 0 ]; then
             echo "All $CHECKED checked commit(s) carry a valid Claude-Stream trailer."
+          elif [ "$CHECKED" -gt 0 ]; then
+            echo "Of $CHECKED checked commit(s), $((CHECKED - NOTICED)) carry a valid Claude-Stream trailer and $NOTICED are already-published commits reported above."
           fi
