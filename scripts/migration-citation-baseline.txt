@@ -247,7 +247,6 @@ migration/the_postgresql_16_requirement_is_enforced_test.go	migration 077
 migration/the_shared_schema_surface_is_a_declared_list_test.go	migration 066
 migration/two_entities_record_when_they_were_created_test.go	migration 085
 migrations/mssql/003_procedures.sql	migrations/postgres/014
-migrations/mssql/optional/cross_tenant_claim.sql	075_the_admin_bypass_is_opt_in.sql
 migrations/mssql/optional/cross_tenant_claim.sql	migration 075
 migrations/mssql/optional/cross_tenant_claim.sql	migration 103
 migrations/mysql/002_defaults.sql	migrations/mysql/078

@@ -51,8 +51,13 @@
 --
 -- TO REVERSE IT
 -- -------------
--- Re-apply migrations/mssql/075_the_admin_bypass_is_opt_in.sql. It is
--- idempotent and restores the plain predicate and the 'plain' marker.
+-- There is no shipped reversal. Migration 075, which used to restore the plain
+-- predicate and the 'plain' marker, was compacted away with the other numbered
+-- migrations (cleat#2422), and nothing replaced it (cleat#3453). By hand it is
+-- the sequence this file performs, run the other way and untested: drop the
+-- security policies, recreate dbo.fn_tenant_filter with the plain body from
+-- 003_procedures.sql (no IS_ROLEMEMBER term), recreate the policies with their
+-- FILTER and BLOCK predicates, and set admin.rls_predicate_form to N'plain'.
 -- ===========================================================================
 
 SET XACT_ABORT ON;
@@ -66,19 +71,21 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_admin'
     THROW 50075, N'the dbo.cleat_admin role does not exist; apply the numbered migrations first (the role is created by 001_schema.sql)', 1;
 
 IF OBJECT_ID(N'admin.rls_predicate_form') IS NULL
-    THROW 50075, N'admin.rls_predicate_form does not exist; migration 075 has not been applied, and without it nothing records which predicate is installed', 1;
+    THROW 50075, N'admin.rls_predicate_form does not exist; apply the numbered migrations first (001_schema.sql creates it), and without it nothing records which predicate is installed', 1;
 
--- Derived, not listed. See 075 for why: the hand-written list is wrong the
--- moment a later migration adds a policy, and there are more of them than the
--- file that introduced them suggests.
+-- Derived, not listed: the hand-written list is wrong the moment a later
+-- migration adds a policy, and there are more of them than the file that
+-- introduced them suggests. (Migration 075, which this script replaces as the
+-- way to opt in, derived its list the same way before it was compacted away.)
 --
 -- FILTER predicates only, and that restriction is load-bearing, not tidiness:
--- see 075's identical comment on its own capture query. cleat#2205 (migration
--- 103) puts three BLOCK predicates on the same function beside every FILTER
--- one, so an unfiltered capture returns four rows per table and the CREATE
--- loop below -- one CREATE SECURITY POLICY per row, no DISTINCT -- fails on
--- the second row for the same table with "There is already an object named
--- ...". Reproduced against a database with 103 applied.
+-- the retired migration 075 made the same restriction on its own capture query.
+-- cleat#2205 (migration 103, now part of 003_procedures.sql) puts three BLOCK
+-- predicates on the same function beside every FILTER one, so an unfiltered
+-- capture returns four rows per table and the CREATE loop below -- one CREATE
+-- SECURITY POLICY per row, no DISTINCT -- fails on the second row for the same
+-- table with "There is already an object named ...". Reproduced against a
+-- database with 103 applied.
 DECLARE @bound TABLE (policy_name SYSNAME, target_schema SYSNAME, target_name SYSNAME);
 
 INSERT INTO @bound (policy_name, target_schema, target_name)
@@ -134,7 +141,8 @@ SELECT @sql = @sql
 IF LEN(@sql) > 0
     EXEC sp_executesql @sql;
 
--- The marker is what CheckCrossTenantCapability reads. Role membership alone
+-- The marker is what `cleatctl` reads to report the predicate form
+-- (cmd/cleatctl/rlsposture.go); the worker does not read it. Role membership alone
 -- cannot answer the question once the predicate is variable: a member under the
 -- plain predicate reads IS_ROLEMEMBER = 1 and sees zero rows.
 UPDATE admin.rls_predicate_form SET form = N'admin', applied_at = SYSUTCDATETIME();

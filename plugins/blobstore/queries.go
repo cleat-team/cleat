@@ -136,7 +136,8 @@ var jsonbContains = plugin.Query{
 // refused and cleanupExpired returned before reaching phase 2. Every tick.
 //
 // admin.in_flight_workflow_ids() (migration 073) is owned by cleat_dispatcher,
-// the NOLOGIN BYPASSRLS role that already owns admin.claim_workflows. It takes
+// the NOLOGIN BYPASSRLS role that owns the cross-tenant admin functions (it
+// owned admin.claim_workflows too, until cleat#3444 dropped that). It takes
 // no arguments and returns ids, so the exemption is bounded by the body rather
 // than by what a caller asks for.
 //

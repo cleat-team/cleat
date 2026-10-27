@@ -7,22 +7,18 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// PostgreSQL-only: admin.claim_workflows (defined in migrations/postgres/001_schema.sql;
-// find the current definition with
-// `grep -rn "CREATE.*FUNCTION admin.claim_workflows" migrations/postgres/*.sql`
-// rather than trusting a migration number here) does not exist on MySQL or
-// SQL Server. #1926 retired the CrossTenantClaimer interface that once made
-// this dialect-specific -- unconditional per-tenant rotation needs no such
-// interface at all -- but the function this file's fixtures were built to
-// exercise is still Postgres-only, because the schema it reads is. These
+// PostgreSQL-only: these fixtures were built for admin.claim_workflows, which
+// cleat#3444 dropped, and the schema they read is still Postgres-only. #1926
+// retired the CrossTenantClaimer interface that once made this dialect-specific --
+// unconditional per-tenant rotation needs no such interface at all. These
 // tests are written directly against *PostgresStore rather than looped over
 // registeredBackends, so a run without CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL set
 // doesn't pay a skip for a dialect that was never going to run this SQL in
-// the first place.
+// the first place. crossTenantClaimDB, the helper that provisioned an RLS
+// connection and granted it EXECUTE on that function, was removed with it
+// (cleat#3453): it had no caller and its GRANT would have failed.
 
 // xtcTenantA and xtcTenantB are two distinct tenants used throughout this
 // file. workflow_instances.tenant_id carries no foreign key into
@@ -50,64 +46,6 @@ const (
 	xtcDefName    = "cross-tenant-claim-test"
 	xtcDefVersion = 1
 )
-
-// crossTenantClaimDB provisions two connections against the same schema.
-//
-// adminDB is the superuser/owner connection SetupFullSchema needs, and every
-// raw fixture INSERT in this file uses it: it bypasses RLS, so a fixture row
-// can carry any tenant_id regardless of what the connection itself is scoped
-// to.
-//
-// appDB is a *separate* connection authenticated as
-// testutil.PostgresRLSTestRole -- an ordinary, non-owning role that Postgres
-// always subjects to Row-Level Security. It matters here specifically:
-// ClaimWorkflows carries no `WHERE tenant_id = ...` in its own SQL (see
-// engine/store_lifecycle.go) and relies entirely on the
-// tenant_isolation_instances RLS policy to keep tenants apart. Calling it
-// through adminDB would "prove" tenant isolation without RLS ever being
-// evaluated -- a superuser bypasses it unconditionally -- so the contrast
-// this file draws between an RLS-enforced connection and an RLS-bypassing one
-// would be meaningless. (This used to also contrast ClaimWorkflows against
-// ClaimWorkflowsAcrossTenants, a second Go path #1926 retired.) See
-// testutil.OpenPostgresRLSTestDB and the same pattern in
-// engine/integration_test.go's TestRLSTenantIsolation.
-//
-// This helper itself has no current caller in the tree
-// (`grep -rn crossTenantClaimDB --include="*.go" .` finds only this
-// definition) -- worth checking before assuming the contrast above is being
-// exercised anywhere today.
-//
-// admin.claim_workflows needs its own grant beyond what SetupPostgresRLSRole
-// gives the role: EXECUTE on the function itself, and USAGE on the admin
-// schema it lives in. Neither is part of the role's deliberately-minimal
-// baseline, so this file adds them itself rather than touching
-// engine/testutil.
-func crossTenantClaimDB(t *testing.T) (adminDB, appDB *sql.DB, teardown func()) {
-	t.Helper()
-	adminDB = testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
-	testutil.CleanupPostgresTestData(t, adminDB)
-
-	appDB = testutil.OpenPostgresRLSTestDB(t, adminDB)
-
-	for _, stmt := range []string{
-		`GRANT USAGE ON SCHEMA admin TO ` + testutil.PostgresRLSTestRole,
-		`GRANT EXECUTE ON FUNCTION admin.claim_workflows(text, text[], integer) TO ` + testutil.PostgresRLSTestRole,
-		// 024's function, granted here for the same reason: the RLS test role's
-		// baseline is deliberately minimal and neither grant is part of it.
-		`GRANT EXECUTE ON FUNCTION admin.get_due_schedules() TO ` + testutil.PostgresRLSTestRole,
-	} {
-		if _, err := adminDB.Exec(stmt); err != nil {
-			t.Fatalf("grant cross-tenant claim access to the RLS test role: %v\nstatement: %s", err, stmt)
-		}
-	}
-
-	return adminDB, appDB, func() {
-		appDB.Close()
-		testutil.CleanupPostgresTestData(t, adminDB)
-		adminDB.Close()
-	}
-}
 
 // deployCrossTenantDef deploys the shared (xtcDefName, xtcDefVersion) row
 // every plain seedWorkflow fixture below depends on via the FK on
