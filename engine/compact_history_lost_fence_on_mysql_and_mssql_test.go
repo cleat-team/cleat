@@ -405,16 +405,20 @@ func TestMySQLLockWaitProbeIgnoresAWaitOnAnotherSessionsLock(t *testing.T) {
 		}
 		return tx
 	}
-	holder := begin(x)
-	defer holder.Rollback()
-	bystander := begin(y)
-	defer bystander.Rollback()
-
+	// The waiter's deferred Rollback is registered BEFORE the bystander's:
+	// defers run last-in first-out, and the waiter's Rollback waits on its own
+	// in-flight Exec, which only returns once the bystander has let go. The other
+	// order made any Fatalf below stall for innodb_lock_wait_timeout (50 s).
 	waiter, err := d.begin(ctx)
 	if err != nil {
 		t.Fatalf("begin waiter: %v", err)
 	}
 	defer waiter.Rollback()
+	holder := begin(x)
+	defer holder.Rollback()
+	bystander := begin(y)
+	defer bystander.Rollback()
+
 	waiterDone := make(chan error, 1)
 	go func() {
 		_, err := waiter.ExecContext(ctx, d.lock, y)
@@ -422,10 +426,18 @@ func TestMySQLLockWaitProbeIgnoresAWaitOnAnotherSessionsLock(t *testing.T) {
 	}()
 
 	bystanderID, holderID := connID(bystander), connID(holder)
-	pollUntil(t, "bystander", func() (bool, error) {
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(5 * time.Millisecond) {
 		n, err := mysqlWaitersOn(db, bystanderID)
-		return n > 0, err
-	})
+		if err != nil {
+			t.Fatalf("probe the bystander: %v", err)
+		}
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the waiter never blocked on the bystander's row within 20s: the setup of this test is wrong, not the probe")
+		}
+	}
 
 	var anyWait int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM performance_schema.data_lock_waits`).Scan(&anyWait); err != nil {
