@@ -144,7 +144,12 @@ func TestTheFencesLockTheLeaseRowAndNotTheInstanceRow(t *testing.T) {
 			return err
 		}},
 		{"CompactHistory", func(id string, gen int64) error {
+			// A lost fence is an error since cleat#3409; before it returned nil and
+			// this closure had to read compaction_step to find out.
 			if err := store.CompactHistory(ctx, id, []byte(`{"version":1,"compacted_step":0,"events":[]}`), 1, 0); err != nil {
+				if errors.Is(err, ErrFenceLost) {
+					err = errFenceNotHeld
+				}
 				return err
 			}
 			var step sql.NullInt64

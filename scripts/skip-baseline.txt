@@ -275,6 +275,7 @@ engine	mssqlDropTenantDB	2
 engine	mssqlTenantTestPool	2
 engine	mysqlDSNWithInterpolateParams	1
 engine	mysqlIntegrationStore	2
+engine	openMSSQLCompactArm	1
 engine	pythonChildPollEngine	1
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1

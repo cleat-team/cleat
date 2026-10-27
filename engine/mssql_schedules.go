@@ -384,6 +384,38 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 		return fmt.Errorf("compact history: get generation: %w", err)
 	}
 
+	// THE FENCE COMES FIRST, and a lost fence is an error (cleat#3409). The delete
+	// used to run first and the UPDATE ... WHERE generation = @p4 after it, with the
+	// commit unconditional: a reclaim that landed in between left the events
+	// deleted, no snapshot written and a nil error. Measured on SQL Server 2022
+	// with READ_COMMITTED_SNAPSHOT on (where the plain generation read above does
+	// not wait for the reclaim, so the window exists), events at steps 0-4 and a
+	// 400 ms holder that bumped the generation:
+	//
+	//	before   err=nil  events left 2 of 5  compaction_step NULL
+	//	after    err=ErrFenceLost  events left 5 of 5  compaction_step NULL
+	//
+	// It also fixes the lock order: finalize_workflow_status updates the instance
+	// row and then deletes the run's events, and this deleted events then updated
+	// the instance, so the two deadlocked (error 1205, reproduced on every run, with
+	// the snapshot setting on and off, by
+	// TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrderOnMySQLAndMSSQL).
+	//
+	// UPDLOCK makes this a locking read even under READ_COMMITTED_SNAPSHOT, so it
+	// waits on a concurrent writer and then sees the latest committed generation.
+	var fenced string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_instances WITH (UPDLOCK, ROWLOCK)
+		WHERE id = @p1 AND generation = @p2 AND tenant_id = @p3
+	`, workflowID, gen, s.tenantID).Scan(&fenced)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing has been written; returning rolls the transaction back.
+		return fmt.Errorf("compact history: %w", ErrFenceLost)
+	}
+	if err != nil {
+		return fmt.Errorf("compact history: fence: %w", err)
+	}
+
 	// Delete events older than keepStep.
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history
@@ -397,8 +429,8 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = @p2, compaction_step = @p3, compacted_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND generation = @p4 AND tenant_id = @p5
-	`, workflowID, string(compactionState), compactionStep, gen, s.tenantID)
+		WHERE id = @p1 AND tenant_id = @p4
+	`, workflowID, string(compactionState), compactionStep, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("compact history: update state: %w", err)
 	}

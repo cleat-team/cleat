@@ -1114,6 +1114,27 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 }
 
 // CompactHistory deletes old events and saves compaction state for a workflow.
+//
+// THE FENCE COMES FIRST, and a lost fence is an error. It used to delete the
+// events, then take the fence, then COMMIT whether or not the fence held
+// (cleat#3409): when a reclaim moved the generation in between, the delete
+// committed, no snapshot was written and the call returned nil -- steps below
+// keepStep gone with nothing covering them. Measured on PostgreSQL with events
+// at steps 0-4 and a 400 ms holder that bumped the generation:
+//
+//	before   err=nil  events left 2 of 5  compaction_step NULL
+//	after    err=ErrFenceLost  events left 5 of 5  compaction_step NULL
+//
+// Fence-first also fixes the lock order. finalize_workflow_status (migration
+// 007) takes the lease row and THEN deletes the run's events; this took events
+// then lease, so the two deadlocked (40P01, reproduced 3 of 3 runs by
+// TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrder). It now takes the
+// lease row first, in finalize's order.
+//
+// The generation compared here is read in this same transaction, not supplied by
+// the caller, so the fence only catches a reclaim that lands between the read
+// and the lock. It does not establish that the caller still owns the run; that
+// is a separate question (see cleat#3409).
 func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1131,13 +1152,6 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 		return fmt.Errorf("compact history: get generation: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2
-	`, workflowID, keepStep)
-	if err != nil {
-		return fmt.Errorf("compact history: delete: %w", err)
-	}
-
 	// cleat#3360: compacted_at had no reader anywhere -- not even the
 	// payloads mirror this table was never given -- so it was dropped from
 	// workflow_instances rather than kept write-only.
@@ -1145,25 +1159,34 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	// workflow_payloads only. The generation fence is on workflow_leases since
 	// B3b, which every reclaim updates in its own transaction: FOR NO KEY
 	// UPDATE re-checks generation after waiting on a concurrent writer, so a
-	// generation that moved under us still writes nothing.
+	// generation that moved under us matches nothing.
 	var fenced string
 	err = tx.QueryRowContext(ctx, `
 		SELECT id FROM workflow_leases
 		WHERE id = $1 AND generation = $2
 		FOR NO KEY UPDATE
 	`, workflowID, gen).Scan(&fenced)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing has been written; returning rolls the transaction back.
+		return fmt.Errorf("compact history: %w", ErrFenceLost)
+	}
+	if err != nil {
 		return fmt.Errorf("compact history: fence: %w", err)
 	}
 
-	if err == nil {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_payloads
-			SET compaction_state = $1, compaction_step = $2
-			WHERE id = $3
-		`, compactionState, compactionStep, workflowID); err != nil {
-			return fmt.Errorf("compact history: update: %w", err)
-		}
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2
+	`, workflowID, keepStep)
+	if err != nil {
+		return fmt.Errorf("compact history: delete: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads
+		SET compaction_state = $1, compaction_step = $2
+		WHERE id = $3
+	`, compactionState, compactionStep, workflowID); err != nil {
+		return fmt.Errorf("compact history: update: %w", err)
 	}
 
 	return tx.Commit()
