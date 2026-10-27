@@ -456,7 +456,6 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 			runID := fmt.Sprintf("stress-fuzz-%d-%d", size, time.Now().UnixNano())
 			idCopy := runID
 			testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
-			testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
 			defer func() {
 				db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, idCopy)
 				db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, idCopy)

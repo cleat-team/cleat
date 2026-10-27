@@ -739,11 +739,18 @@ func startWorkflowWithInput(t *testing.T, db *sql.DB, id, defName, inputJSON, ta
 		// only direct children leaves the grandchild's instances and events
 		// behind, and a later run counting instances by definition name would
 		// find them.
+		//
+		// The parent link lives on workflow_leases, not workflow_instances. Both
+		// statements read it while the lease rows still exist: the second deletes
+		// the descendants' workflow_instances rows, and workflow_leases and
+		// workflow_payloads go with them by ON DELETE CASCADE. These errors are
+		// discarded, so a query naming a column the table no longer has would
+		// stop cleaning up without a word.
 		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id = $1
-			OR workflow_id IN (SELECT id FROM workflow_instances WHERE parent_workflow_id = $1
-				OR parent_workflow_id IN (SELECT id FROM workflow_instances WHERE parent_workflow_id = $1))`, id)
-		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE parent_workflow_id = $1
-			OR parent_workflow_id IN (SELECT id FROM workflow_instances WHERE parent_workflow_id = $1)`, id)
+			OR workflow_id IN (SELECT id FROM workflow_leases WHERE parent_workflow_id = $1
+				OR parent_workflow_id IN (SELECT id FROM workflow_leases WHERE parent_workflow_id = $1))`, id)
+		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id IN (SELECT id FROM workflow_leases WHERE parent_workflow_id = $1
+			OR parent_workflow_id IN (SELECT id FROM workflow_leases WHERE parent_workflow_id = $1))`, id)
 		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 	})
 }
@@ -762,7 +769,8 @@ func childRunID(t *testing.T, db *sql.DB, parentID, defName string) string {
 	t.Helper()
 	var id string
 	err := db.QueryRow(
-		`SELECT id FROM workflow_instances WHERE parent_workflow_id = $1 AND def_name = $2`,
+		`SELECT l.id FROM workflow_leases l JOIN workflow_payloads p ON p.id = l.id
+		 WHERE l.parent_workflow_id = $1 AND p.def_name = $2`,
 		parentID, defName).Scan(&id)
 	if err == sql.ErrNoRows {
 		t.Fatalf("%s never started a child named %q; the workflow it is being read for "+
