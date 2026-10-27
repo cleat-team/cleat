@@ -95,6 +95,13 @@ var goFixtureExpectations = map[string]string{
 	"signalworkflow": "",
 	"spin":           "",
 	"updatedispatch": "",
+	// cleat#3418: the one-call fixtures behind TestEachRewiredMethodWiresItsImport's
+	// SetScope, GetScope and RunDetached rows (wasm/hostcall_wiring_test.go).
+	// One entry point, one host call each, so they must verify cleanly. This
+	// table was missed when they were added, and the guard below is what said so.
+	"getscope":    "",
+	"rundetached": "",
+	"setscope":    "",
 	// cleat#2407: two entry points split across two files, used by
 	// TestWasmOutputName_CrossFileEntryPointsNameTheRightFile to prove
 	// wasmOutputName resolves the SELECTED entry point's own file rather

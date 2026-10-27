@@ -70,6 +70,32 @@ func TestEachRewiredMethodWiresItsImport(t *testing.T) {
 				"the waiter has no way to be told the thing it waits for will never arrive",
 		},
 		{
+			method: "SetScope",
+			pkg:    "github.com/cleat-team/cleat/testdata/setscope",
+			imp:    "cleat_set_scope",
+			why: "the virtual-object lock: SetScope takes the scope on the host. Unwired, " +
+				"HostCallsImpl.SetScope set three local fields against a host call that was never " +
+				"generated, so a workflow believed it held a scope it never took (3.223, #984)",
+		},
+		{
+			method: "GetScope",
+			pkg:    "github.com/cleat-team/cleat/testdata/getscope",
+			imp:    "cleat_get_scope",
+			why: "reads the scope the host holds. Unwired, HostCallsImpl.GetScope falls back to the " +
+				"guest's local mirror of what SetScope last asked for, so it reports the request " +
+				"rather than the scope actually held, and nothing fails to say so",
+		},
+		{
+			method: "RunDetached",
+			pkg:    "github.com/cleat-team/cleat/testdata/rundetached",
+			imp:    "cleat_run_detached",
+			why: "fire-and-forget start of a named workflow. Until its signature stopped taking a " +
+				"closure it worked under localdev and cleattest, which populate the field directly, " +
+				"and did nothing in every compiled workflow while returning nil, so the call reported " +
+				"success for work that never started. The unwired branch now returns an error, which " +
+				"makes a missing import a loud failure at run time; this row catches it before the workflow ships",
+		},
+		{
 			method: "NowMs",
 			pkg:    "github.com/cleat-team/cleat/testdata/nowms",
 			imp:    "cleat_now",
