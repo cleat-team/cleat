@@ -897,7 +897,7 @@ tier2:
       why: |
         Rewritten 2026-10-27 (cleat#3441, owner decision D30). This entry described the
         mechanism cleat#1926 retired -- a SECURITY DEFINER function, a BYPASSRLS owner,
-        migrations 023 and 024, a deployment grant, default OFF -- and none of that is how
+        two pre-rebaseline grant migrations, a deployment grant, default OFF -- and none of that is how
         the worker claims work now.
 
         WHAT HAPPENS. `--claim-across-tenants` (default TRUE, cmd/cleat-worker/config.go)
@@ -954,7 +954,7 @@ tier2:
 
         THE RETIRED MECHANISM IS STILL IN THE SCHEMA, UNCALLED. `admin.claim_workflows`
         and `admin.get_due_schedules` are still defined in migrations/postgres/001_schema.sql
-        (the re-baselined schema; 023 and 024 no longer exist as files) and nothing calls
+        (the re-baselined schema; the two grant migrations no longer exist as files) and nothing calls
         them. cleat#3245's B5b deletes them. Re-derive both facts:
 
           git grep -n 'admin\.claim_workflows\|admin\.get_due_schedules' -- '*.go' ':!*_test.go'
@@ -1003,7 +1003,7 @@ tier2:
       status: SUPPORTED on postgres and mssql, by the same per-tenant rotation and with no database grant — NOT on mysql, and not on a sharded worker
       why: |
         Rewritten 2026-10-27 (cleat#3441, owner decision D30); the previous text described
-        migration 024 and `admin.get_due_schedules`, which the worker no longer uses.
+        the second of those grant migrations and `admin.get_due_schedules`, which the worker no longer uses.
 
         The other half of cross-tenant-claim: that one lets a worker CLAIM another tenant's
         runnable workflow, this one is what ever enqueues one. Without it a non-default
