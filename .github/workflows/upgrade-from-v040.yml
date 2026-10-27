@@ -109,6 +109,13 @@ jobs:
       - name: The RC refuses it, and serves a fresh database
         run: python3 scripts/upgrade_from_v040.py verify --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
 
+      # include-hidden-files: STATE_DIR is `.upgrade-state`, a hidden directory,
+      # and upload-artifact skips hidden files by default. Until cleat#3461 this
+      # step found nothing on every run; its log said so at info level, and with
+      # if-no-files-found: ignore no warning annotation marked the step.
+      # `warn` and not `error`: when an early step fails there
+      # is legitimately no state directory, and a second failure would bury the
+      # first.
       - name: Upload worker logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -117,5 +124,6 @@ jobs:
           path: |
             .upgrade-state/*.log
             .upgrade-state/manifest.json
+          include-hidden-files: true
           retention-days: 14
-          if-no-files-found: ignore
+          if-no-files-found: warn
