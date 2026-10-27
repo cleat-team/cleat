@@ -3211,6 +3211,16 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host answers a fan-in with the suspend sentinel while any child is
+    // still running, which is the normal case. Without this check its length
+    // field (bits 32-63) read as 1<<30 and the readString below ran off the end
+    // of linear memory, killing the guest instead of suspending it (cleat#3430).
+    // Same check as awaitAnyChild and awaitChild.
+    if ((result as u64) === (SUSPEND_SENTINEL as u64)) {
+      setWorkflowSuspended();
+      return null;
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0 || decoded.extra === 0) {
       return null;

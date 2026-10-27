@@ -2443,6 +2443,15 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        // The host answers a fan-in with the suspend sentinel while any child is
+        // still running, which is the normal case. Without this check its length
+        // field read as 1<<30, readOutput clamped that to the buffer, and the
+        // workflow was handed an Ok carrying 64 KiB of buffer instead of being
+        // told to suspend (cleat#3430). Same check as awaitAnyChild.
+        if (result == Memory.SUSPEND_SENTINEL) {
+            return CleatResult.err("not all child workflows complete yet; workflow must suspend");
+        }
+
         int errCode = Memory.decodeSimpleErrCode(result);
         int resultLen = Memory.decodeSimpleExtra(result);
 
