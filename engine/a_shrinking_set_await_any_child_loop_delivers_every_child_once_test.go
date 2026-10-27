@@ -84,10 +84,15 @@ func TestAShrinkingSetAwaitAnyChildLoopDeliversEveryChildOnce(t *testing.T) {
 // finds nothing new.
 //
 // legacyEmpties, when set, writes that many extra EMPTY await_any_child records
-// after the first wake, the way an engine from before #3423 left them: it
-// recorded another empty suspend on every wake that found its child still
-// running. A history like that can be in a database that was upgraded
-// mid-flight, and the fixed engine has to read it (the second half of #3423).
+// after the first wake. One extra is the history an engine from before #3423
+// left for a child that took a second wake: it replayed the first empty
+// suspend, advanced past it, found the child still running and recorded
+// another empty one at the next step. A third wake could not add a third --
+// it re-recorded at that same next step, where the conflict clause drops the
+// write -- so the old engine stopped at TWO adjacent empties. Two extras is
+// NOT a history it could write; it is kept as a robustness case for the
+// skip-every-empty loop (the second half of #3423) reading more of them than
+// the old engine ever left.
 type shrinkingScenario struct {
 	name          string
 	n             int
@@ -127,10 +132,13 @@ var shrinkingScenarios = []shrinkingScenario{
 	{"one done at the first await then a pair", 3, [][]int{{1}, {0, 2}}, 0},
 	// One at a time, as a baseline: no wake has two to hand back.
 	{"one at a time", 3, [][]int{{}, {2}, {0}, {1}}, 0},
-	// A history written by the engine BEFORE #3423: the first await recorded
-	// two (and then three) empty suspends for a child that took several wakes.
+	// A history written by the engine BEFORE #3423: the first await left two
+	// adjacent empty suspends (the most that engine could write).
 	{"a history from before the fix, two empty suspends", 3, [][]int{{}, {0, 1, 2}}, 1},
-	{"a history from before the fix, three empty suspends then a pair", 4, [][]int{{}, {1, 3}, {0, 2}}, 2},
+	{"a history from before the fix, two empty suspends then a pair", 4, [][]int{{}, {1, 3}, {0, 2}}, 1},
+	// More adjacent empties than the old engine could write, as a robustness
+	// case only (see legacyEmpties).
+	{"three adjacent empty suspends then a pair", 4, [][]int{{}, {1, 3}, {0, 2}}, 2},
 }
 
 // postAwaitOp is what the guest does after each await. A durable call is the
@@ -180,6 +188,9 @@ func runShrinkingSetScenario(t *testing.T, dialect testutil.Dialect, db *sql.DB,
 		t.Fatalf("the %s store does not implement ChildWorkflowStore", dialect)
 	}
 	finished := map[string]bool{}
+	if sc.n > 10 {
+		t.Fatalf("scenario %q has %d children; the run IDs are only in lexical order up to 10", sc.name, sc.n)
+	}
 	// Children get explicit run IDs, "<parent>-c0" ... "<parent>-cN", so that
 	// their lexical order -- the order a sorted poll tries them in -- is known
 	// to the test before they exist. Follow-up starts get "<parent>-after-K".
@@ -371,7 +382,9 @@ func runShrinkingSetScenario(t *testing.T, dialect testutil.Dialect, db *sql.DB,
 	// ---- the oracle: the rule, written without reading the engine ----------
 	//
 	// Whenever the guest asks, it is handed the lexically first child that has
-	// finished and has not been handed over yet.
+	// finished and has not been handed over yet. "Lexically first" is index
+	// order here BY CONSTRUCTION (the IDs are <parent>-c0 ... -c9), not a
+	// second call to sort.Strings: the engine sorts, this states the rule.
 	var delivered []string
 	oracleStep := func(done map[string]bool) {
 		for {
