@@ -509,7 +509,44 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 	return packSimpleResult(writtenEC, written)
 }
 
+// sameRunIDSet reports whether two recorded AwaitAnyChild requests name the
+// same set of child run IDs, whatever order they were written in. A request
+// that does not parse is compared as text, so a malformed record never
+// matches a well-formed one.
+func sameRunIDSet(a, b string) bool {
+	var ia, ib []string
+	if json.Unmarshal([]byte(a), &ia) != nil || json.Unmarshal([]byte(b), &ib) != nil {
+		return a == b
+	}
+	if len(ia) != len(ib) {
+		return false
+	}
+	sort.Strings(ia)
+	sort.Strings(ib)
+	for i := range ia {
+		if ia[i] != ib[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
+	// resumedFromSuspend is set when this call replayed one or more empty
+	// (suspend) records and is now re-checking fresh. See the comment where the
+	// suspend would be recorded below.
+	resumedFromSuspend := false
+
+	// A segment that has already decided to suspend does not start another
+	// await. The guest keeps running after a suspend sentinel -- AssemblyScript
+	// gets a null back and Rust an Err it may ignore -- so a second, different
+	// AwaitAnyChild can arrive in the same segment, and without this it would
+	// record a second empty suspend row beside the first: [X empty, Y empty].
+	// Same guard, same reason as AwaitSignal (signaller.go).
+	if s.suspendErr != nil && !s.inDeferDrain {
+		return packAwaitChildResultSuspend()
+	}
+
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -522,22 +559,38 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 					return packSimpleResult(writtenEC, written)
 				}
 				// Empty response: this was a suspend (no child was done yet).
-				// Peek at the next event — if it is also an AwaitAnyChild with
-				// a non-empty response, that is the re-execution result. Consume
-				// both events and return the cached result. This avoids a
+				// Look at what follows it. If an await_any_child record with a
+				// non-empty response comes next, that is the re-execution result:
+				// consume it and return the cached result. This avoids a
 				// non-deterministic fall-through to fresh where multiple children
 				// might show as completed on replay.
-				if s.stepCount < len(s.history) {
+				//
+				// Every directly following EMPTY record of THIS call is skipped
+				// first, not only the first one (cleat#3391). Histories written
+				// before this fix hold two of them for a child that took more than
+				// one wake, and peeking at just the next record found the second
+				// empty one, concluded there was no cached result, and went fresh
+				// again on every wake.
+				//
+				// "Of this call" is the Request comparison below. Adjacent empties
+				// are NOT always the same call: the guest keeps running after a
+				// suspend, so one segment can record [X empty, Y empty], and
+				// replaying X across Y's records would hand Y's result to X.
+				for s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
-					if nextRec.EventType == EventTypeAwaitAnyChild && nextRec.Response != "" {
-						if !s.advanceReplayStep(ctx, &nextRec) {
-							return 0
-						}
+					if nextRec.EventType != EventTypeAwaitAnyChild || !sameRunIDSet(nextRec.Request, rec.Request) {
+						break
+					}
+					if !s.advanceReplayStep(ctx, &nextRec) {
+						return 0
+					}
+					if nextRec.Response != "" {
 						written, writtenEC := s.writeOut(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
 						return packSimpleResult(writtenEC, written)
 					}
 				}
 				// No cached re-execution result — fall through to fresh.
+				resumedFromSuspend = true
 				s.exitReplay()
 			} else {
 				// Event type mismatch — replay divergence.
@@ -604,12 +657,25 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 	}
 
 	// No child completed — suspend.
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeAwaitAnyChild,
-		Request:   runIDsJSON,
+	//
+	// A call that has already recorded its suspend does not record another
+	// one (cleat#3391). The first wake that finds the child still running
+	// writes the empty record; every later wake replays it and, with the child
+	// still running, has nothing new to say. Recording again put a second empty
+	// row at the next step, then hit the conflict clause that only reopens
+	// await_child, await_promise and await_all_children, so when the child did
+	// finish its result was dropped against that second row, and each following
+	// wake re-ran the parent from here: a StartChild after the await started a
+	// new child every time. Left unrecorded, the result lands at the next step
+	// as an ordinary insert, and a replay finds it after the one suspend record.
+	if !resumedFromSuspend {
+		rec := EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypeAwaitAnyChild,
+			Request:   runIDsJSON,
+		}
+		s.recordEvent(rec)
 	}
-	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("await_any_child(%s)", runIDsJSON),
