@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Structural guards over .github/workflows/, run by the Lint job.
 
-Six checks, each catching a *class* of defect that has already cost this repo
+Nine checks, each catching a *class* of defect that has already cost this repo
 a session to find one instance of by hand:
 
   1. Every context in .github/required-checks.txt resolves to a job that
@@ -84,7 +84,7 @@ guard that quietly skips the case it does not understand is the thing it was
 written to prevent.
 
 Usage:
-    scripts/check-workflow-guards.py                       # all eight guards
+    scripts/check-workflow-guards.py                       # all nine guards
     scripts/check-workflow-guards.py --verify-against-api  # needs an admin token
     scripts/check-workflow-guards.py --self-test            # known-positive/negative pairs
 """
@@ -821,6 +821,86 @@ def guard_publish_approval_order(errors: list[str]) -> None:
         errors.extend(find_publish_approval_order_violations(path, doc))
 
 
+# cleat#3487: every image a workflow PUSHES (or loads, to inspect) takes its
+# OCI labels from scripts/oci_image_labels.py. v0.4.0 and v0.5.0 were published
+# with no labels at all because release.yml's build step simply had no
+# `labels:` input, which does not fail -- it yields `null`. The rc-* path had its
+# own inline copy and so did carry them. One definition, wired the same way
+# everywhere, is only a fix while nobody drops the wiring, so this checks it.
+LABELS_SCRIPT = "scripts/oci_image_labels.py"
+LABELS_OUTPUT_RE = re.compile(r"\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.labels\s*\}\}")
+# Workflows that must each contain at least one examined build, so the guard
+# cannot pass vacuously because a rename took a build out of its sight.
+LABELLED_BUILD_WORKFLOWS = (
+    ".github/workflows/release.yml",
+    ".github/workflows/develop-image.yml",
+    ".github/workflows/ci.yml",
+)
+
+
+def _is_false(value: object) -> bool:
+    return str(value).strip().lower() == "false"
+
+
+def find_image_label_violations(path: str, doc: dict) -> tuple[list[str], int]:
+    """Returns (violations, number of image builds examined)."""
+    out: list[str] = []
+    examined = 0
+    for job_id, job in (doc.get("jobs") or {}).items():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        for i, step in enumerate(steps or []):
+            if not isinstance(step, dict) or not str(step.get("uses", "")).startswith("docker/build-push-action@"):
+                continue
+            w = step.get("with") or {}
+            pushes = not _is_false(w.get("push", "false"))
+            loads = str(w.get("load", "false")).strip().lower() == "true"
+            if not (pushes or loads):
+                continue
+            examined += 1
+            where = f"{path}: job '{job_id}' step {step.get('name', i)!r}"
+            kind = "pushes" if pushes else "loads"
+            m = LABELS_OUTPUT_RE.search(str(w.get("labels", "")))
+            if not m:
+                out.append(
+                    f"{where} {kind} an image but its `labels:` is not "
+                    "${{ steps.<id>.outputs.labels }} from " + LABELS_SCRIPT + " emit (cleat#3487: an image built "
+                    "with no labels is `null`, not an error)"
+                )
+                continue
+            producers = [s for s in steps[:i] if isinstance(s, dict) and s.get("id") == m.group(1)]
+            if not producers or f"{LABELS_SCRIPT} emit" not in str(producers[-1].get("run", "")):
+                out.append(
+                    f"{where} takes `labels:` from step '{m.group(1)}', which is not an earlier step "
+                    f"that runs `{LABELS_SCRIPT} emit` (cleat#3487)"
+                )
+            if loads and not any(
+                isinstance(s, dict) and f"{LABELS_SCRIPT} check" in str(s.get("run", "")) for s in steps[i + 1 :]
+            ):
+                out.append(
+                    f"{where} loads an image but no later step in the job runs `{LABELS_SCRIPT} check` "
+                    "against it (cleat#3487)"
+                )
+    return out, examined
+
+
+def guard_image_labels_come_from_the_shared_script(errors: list[str]) -> None:
+    examined_by_file: dict[str, int] = {}
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        found, examined = find_image_label_violations(path, doc)
+        errors.extend(found)
+        examined_by_file[path] = examined
+    for path in LABELLED_BUILD_WORKFLOWS:
+        if examined_by_file.get(path, 0) == 0:
+            errors.append(
+                f"{path}: guard 9 examined no image build here, so it checked nothing -- either the build "
+                "moved (update LABELLED_BUILD_WORKFLOWS) or it lost its push/load (cleat#3487)"
+            )
+
+
 # cleat#2895/#2902: the fail-fast-safe shape #2896 gave ci.yml's `lint` job.
 # The `|| echo ... >> "$LINT_FAILURES_FILE"` is bash syntax attached to the
 # OPENING heredoc line (`bash -e <<'DELIM' || echo ...`) -- it applies to
@@ -1529,6 +1609,55 @@ def self_test() -> int:
     if got_no_lint:
         failures.append(f"no 'lint' job present: expected [], got {got_no_lint}")
 
+    # --- guard 9: published/loaded images take their labels from the script --
+    def check_labels(label: str, yaml_text: str, want_count: int, want_substrings: list[str], want_examined: int):
+        nonlocal cases
+        cases += 1
+        got, examined = find_image_label_violations("workflow.yml", yaml.safe_load(yaml_text))
+        missing = [w for w in want_substrings if not any(w in g for g in got)]
+        if missing or len(got) != want_count or examined != want_examined:
+            failures.append(
+                f"{label}: {len(got)} problems (want {want_count}), examined {examined} (want {want_examined}); "
+                f"missing {missing}; got {got}"
+            )
+
+    def labels_job(build_with: str, extra_steps: str = "", producer: str = None) -> str:
+        producer = producer or "python3 scripts/oci_image_labels.py emit --repo r/r --ref x --sha y >> \"$GITHUB_OUTPUT\""
+        return f"""
+        jobs:
+          image:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v7
+              - id: labels
+                run: {producer}
+              - uses: docker/build-push-action@v7
+                with:
+{build_with}
+{extra_steps}
+        """
+
+    GOOD_PUSH = "                  push: true\n                  labels: ${{ steps.labels.outputs.labels }}"
+    check_labels("good: push with labels from the script", labels_job(GOOD_PUSH), 0, [], 1)
+    # KNOWN-POSITIVE: release.yml as it was at v0.5.0 -- a pushing build with no labels.
+    check_labels("KNOWN-POSITIVE: push with no labels (v0.5.0)", labels_job("                  push: true"), 1,
+                 ["is not ${{ steps.<id>.outputs.labels }}"], 1)
+    # KNOWN-POSITIVE: the rc path's shape -- a copy of the labels inline.
+    check_labels("KNOWN-POSITIVE: inline copy of the labels", labels_job(
+        "                  push: true\n                  labels: |\n                    org.opencontainers.image.revision=${{ github.sha }}"),
+        1, ["is not ${{ steps.<id>.outputs.labels }}"], 1)
+    check_labels("KNOWN-POSITIVE: labels from a step that does not run emit", labels_job(GOOD_PUSH, producer="echo hi"), 1,
+                 ["not an earlier step that runs"], 1)
+    LOADED = "                  push: false\n                  load: true\n                  labels: ${{ steps.labels.outputs.labels }}"
+    check_labels("KNOWN-POSITIVE: loaded image never checked", labels_job(LOADED), 1,
+                 ["no later step in the job runs"], 1)
+    check_labels("good: loaded image checked", labels_job(
+        LOADED, "              - run: python3 scripts/oci_image_labels.py check --image i --repo r/r --ref x --sha y"), 0, [], 1)
+    # KNOWN-NEGATIVE: a build that neither pushes nor loads is out of scope.
+    check_labels("KNOWN-NEGATIVE: push false, no load", labels_job("                  push: false"), 0, [], 0)
+    # A workflow with no build at all examines nothing; the real-tree wrapper reports that.
+    check_labels("no build at all examines nothing", "jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: true\n", 0, [], 0)
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAILED: {f}")
@@ -1577,7 +1706,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="run known-positive/known-negative cases for guards 6, 7 and 8 against synthetic YAML, not the real tree",
+        help="run known-positive/known-negative cases for guards 6, 7, 8 and 9 against synthetic YAML, not the real tree",
     )
     args = parser.parse_args()
 
@@ -1613,6 +1742,7 @@ def main() -> int:
     guard_no_untrusted_expressions_in_privileged_workflows(errors)
     guard_publish_approval_order(errors)
     guard_lint_step_wrapper(errors)
+    guard_image_labels_come_from_the_shared_script(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")

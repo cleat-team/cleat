@@ -259,6 +259,25 @@ jobs:
             echo "latest=$IMAGE:latest"
           } >> "$GITHUB_OUTPUT"
 
+      # cleat#3487: v0.4.0 and v0.5.0 were published with NO OCI labels (`null`
+      # on both platforms), so a release image did not say what commit it was
+      # built from -- the rc-* images did, from their own inline copy in
+      # develop-image.yml. Both now take the labels from one definition,
+      # scripts/oci_image_labels.py, and `Release Dry Run` (ci.yml) asserts the
+      # built image carries them. A build with no `labels:` does not fail, it
+      # yields `null`, so check-workflow-guards.py (guard 9) fails a pushing
+      # build that is not wired to the script.
+      #
+      # revision is GITHUB_SHA: for a tag push, and for a dispatch on a tag, the
+      # commit the tag points at. version drops the leading `v`.
+      - name: Compute cleat-worker image labels
+        id: labels
+        run: |
+          set -euo pipefail
+          python3 scripts/oci_image_labels.py emit \
+            --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" \
+            --version "${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       # push: true is safe only because this job is reachable solely from a v*
       # tag push or a workflow_dispatch whose tag passed the check above.
       # ghcr.io's package visibility (public/private) and this token's
@@ -275,6 +294,7 @@ jobs:
             ${{ steps.worker_image.outputs.full }}
             ${{ steps.worker_image.outputs.minor }}
             ${{ steps.worker_image.outputs.latest }}
+          labels: ${{ steps.labels.outputs.labels }}
 
   # cleat#2068: publish a Homebrew tap so `brew install cleat-team/tap/cleat`
   # works, kept in sync automatically instead of the hand-maintained bump

@@ -1307,6 +1307,17 @@ jobs:
           scripts/check-workflow-guards.py
           LINT_GUARD_EOF
 
+      # cleat#3487: the label script the release and develop images share. Its
+      # self-test runs the known-positive that matters -- `null`, the shape
+      # v0.5.0 had -- and checks UNMEASURED is a different exit status from a
+      # finding.
+      - name: Image label script self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Image label script self-test" >> "$LINT_FAILURES_FILE"
+          python3 scripts/oci_image_labels.py --self-test
+          LINT_GUARD_EOF
+
       # Dependabot coverage. Two directions, both silent without this: an entry
       # naming a directory that does not exist is skipped by Dependabot with no
       # error at all, and a manifest in no entry gets security updates only.
@@ -3509,12 +3520,39 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # cleat#3487: the labels a release image must carry, from the script
+      # release.yml uses. The version is synthetic: a PR has no tag, and what
+      # this proves is that the labels reach the built image, not their values.
+      - name: Compute cleat-worker image labels
+        id: labels
+        run: |
+          set -euo pipefail
+          python3 scripts/oci_image_labels.py emit \
+            --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" \
+            --version 0.0.0-dryrun >> "$GITHUB_OUTPUT"
+
+      # load: true (one platform, so it can be) puts the image in the local
+      # daemon, which is the only way to read the labels it was really built with.
       - name: Docker build cleat-worker (linux/amd64, no push)
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
           push: false
+          load: true
+          tags: cleat-worker:release-dryrun
+          labels: ${{ steps.labels.outputs.labels }}
+
+      # cleat#3487: v0.4.0 and v0.5.0 shipped with no labels, and nothing in this
+      # job could have said so. Fails -- exit 1 for a missing or wrong label,
+      # exit 2 if the image cannot be inspected -- so a build step that loses its
+      # `labels:` input turns this job red instead of producing `null`.
+      - name: The built image carries the release labels
+        run: |
+          set -euo pipefail
+          python3 scripts/oci_image_labels.py check \
+            --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" --sha "$GITHUB_SHA" \
+            --version 0.0.0-dryrun --image cleat-worker:release-dryrun
 
       # cleat#2069: install the .deb goreleaser just built and prove the
       # unit systemd sees is the one this PR shipped -- on a hosted runner,
