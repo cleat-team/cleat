@@ -316,7 +316,6 @@ tests/crash/dialects_test.go	migration 075
 tests/crash/harness_test.go	migrations/postgres/008
 tests/plugin-harness/mssql_migration_rerun_test.go	migration 031
 tests/plugin-harness/testdb.go	migration 031
-tiers.yaml	023_cross_tenant_claim.sql
 tiers.yaml	038_single_tenant_guard.sql
 tiers.yaml	077_a_plugin_policy_can_use_its_index.sql
 tiers.yaml	migration 077
