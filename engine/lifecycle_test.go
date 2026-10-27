@@ -748,10 +748,11 @@ func TestAwaitPromise_FreshPending(t *testing.T) {
 
 	result := s.AwaitPromise(context.Background(), nil, "prom-1", 5000, 0, 0)
 
-	// Should suspend (timeout flag = true).
-	timeoutFlag := uint16((result >> 16) & 0xFFFF)
-	if timeoutFlag != 1 {
-		t.Errorf("expected timeout flag 1 for suspend, got %d", timeoutFlag)
+	// Should suspend, and say so with the stop sentinel. It used to return the
+	// timed-out word, which a guest cannot tell from a genuine timeout
+	// (cleat#3383).
+	if result != callSuspendSentinel {
+		t.Errorf("expected the stop sentinel %#x for suspend, got %#x", callSuspendSentinel, result)
 	}
 	if s.suspendErr == nil {
 		t.Fatal("expected suspendErr for pending promise")

@@ -741,7 +741,11 @@ var adapterDefs = map[string]adapterDef{
 			// which is also what the import's timeoutMs argument needs.
 			{"timeout", "time.Duration"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#3383. A suspending await returns the stop
+		// sentinel, whose bit 31 lands inside the timed-out field read below, so
+		// without the check up front a suspend decoded as an ordinary timeout and
+		// the guest took its timeout branch before the run stopped.
+		ResultStmts: withSuspendCheck(
 			"resultLen := uint32(uint64(result) >> 32)",
 			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 			"errCode := uint32(result & 0xFFFF)",
@@ -749,7 +753,7 @@ var adapterDefs = map[string]adapterDef{
 			"return \"\", false, fmt.Errorf(\"cleat_await_promise: %s\", hostErrMessage(resultOutBuf[:], resultLen))",
 			"}",
 			"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
-		},
+		),
 	},
 	"RegisterUpdateHandler": {
 		FieldName: "RegisterUpdateHandler",

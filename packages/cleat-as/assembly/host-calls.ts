@@ -2074,6 +2074,14 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // A fresh await that has to wait answers with the stop sentinel, not a
+    // timed-out word (cleat#3383). Ask before decoding: bit 31 lands inside
+    // this layout's timed-out field, so decoding first reads a suspend as a
+    // timeout. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new AwaitPromiseOutcome("", false, "cleat: await_promise stopped -- the workflow is suspending");
+    }
+
     let decoded = decodeAwaitPromiseResult(result);
 
     if (decoded.errCode !== 0) {

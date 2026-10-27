@@ -1077,6 +1077,12 @@ public class HostCalls {
             p[0], p[1], timeoutMs,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        // A fresh await that has to wait answers with the stop sentinel, not a
+        // timed-out word (cleat#3383). Before any field is decoded: bit 31 lands
+        // inside the timed-out field, so decoding first reads a suspend as a
+        // timeout and the workflow takes its timeout branch before the run stops.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeAwaitErrCode(result);
         boolean timedOut = Memory.decodeAwaitPromiseTimedOut(result);
         int resultLen = Memory.decodeSimpleExtra(result);
