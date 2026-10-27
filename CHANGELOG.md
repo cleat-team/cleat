@@ -94,6 +94,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A component (Python) guest could make the host call a service, promise, signal, lock or
+  workflow with a name the core-module path refuses.** Closes cleat#3436. The core-module host
+  functions run `validServiceName` (`[a-zA-Z0-9._-]+`, non-empty) on those names before any
+  handler sees them; the component dispatchers read the same strings with `readStrArg` and
+  passed them on, so `""` and `"bad name!"` reached the service caller, the promise store and
+  the signal store while the SDK returned normally. The dispatchers now refuse as the core path
+  does, in the shape each import's WIT type allows: `result<_, call-failure>` imports return
+  `err(failed)` classified invalid-request (the SDK raises `CleatCallPermanentError`), `u64`/`s64`
+  imports return `errBadParam`, and a bare `-> string` (or no result) cannot carry a failure and
+  traps the guest, except in a defer segment, where it answers `""` so the cleanup still runs.
+  Nothing is recorded in the history for a refused call. A guard compares, for every import,
+  how many names the core host function and its dispatcher validate. 27 of 27 differ on the
+  previous tree, none do now.
+
 - **A Python guest could not tell how a wait on a promise ended.** Closes cleat#3425. See the
   upgrade note above for the behaviour change and what a pre-0.5.0 component now does. The
   wait's four non-resolved endings (a rejection, a timeout, a host error, a stop) were all
