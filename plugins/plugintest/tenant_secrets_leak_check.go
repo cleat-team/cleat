@@ -34,16 +34,29 @@ import (
 //   - A database that has no tenant_secrets table has nothing to leak: that is
 //     a clean answer, and the only one reached without reading a row.
 func LeakedTenantSecrets(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefixes ...string) ([]string, error) {
+	found, _, err := leakedTenantSecrets(ctx, db, dialect, prefixes...)
+	return found, err
+}
+
+// leakedTenantSecrets is LeakedTenantSecrets plus whether the table was there at
+// all, so a caller can SAY "no tenant_secrets table" instead of printing the
+// same nothing it prints when it read the table and found no row.
+func leakedTenantSecrets(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefixes ...string) (found []string, tablePresent bool, err error) {
 	if len(prefixes) == 0 {
-		return nil, fmt.Errorf("LeakedTenantSecrets: no prefix given, so it would measure nothing")
+		return nil, false, fmt.Errorf("LeakedTenantSecrets: no prefix given, so it would measure nothing")
 	}
 	has, err := hasTenantSecretsTable(ctx, db, dialect)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !has {
-		return nil, nil
+		return nil, false, nil
 	}
+	found, err = readLeaked(ctx, db, dialect, prefixes)
+	return found, true, err
+}
+
+func readLeaked(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefixes []string) ([]string, error) {
 
 	var found []string
 	switch dialect {
@@ -145,11 +158,17 @@ func hasTenantSecretsTable(ctx context.Context, db *sql.DB, dialect testutil.Dia
 	var q string
 	switch dialect {
 	case testutil.DialectPostgres:
-		q = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'tenant_secrets'`
+		// to_regclass resolves the name the way the statement below will, through
+		// the connection's search_path. information_schema compared against
+		// current_schema() did not: the migrations create a schema named for the
+		// role, so for that role current_schema() is not the schema holding the
+		// table, the lookup said "no table", and the check returned clean without
+		// reading a row (found in review of cleat#3491).
+		q = `SELECT CASE WHEN to_regclass('tenant_secrets') IS NULL THEN 0 ELSE 1 END`
 	case testutil.DialectMySQL:
 		q = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'tenant_secrets'`
 	case testutil.DialectMSSQL:
-		q = `SELECT COUNT(*) FROM sys.tables WHERE name = 'tenant_secrets'`
+		q = `SELECT CASE WHEN OBJECT_ID(N'tenant_secrets', N'U') IS NULL THEN 0 ELSE 1 END`
 	default:
 		return false, fmt.Errorf("unknown dialect %v", dialect)
 	}
@@ -209,12 +228,22 @@ func RunAndCheckTenantSecretLeaks(m *testing.M, prefixes ...string) int {
 			failed = true
 			continue
 		}
-		leaked, err := LeakedTenantSecrets(ctx, db, c.dialect, prefixes...)
+		leaked, present, err := leakedTenantSecrets(ctx, db, c.dialect, prefixes...)
 		db.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "UNMEASURED: tenant_secrets leak check on %s: %v\n  This is a failure of the check, not a finding about the tests (cleat#3484).\n", c.dialect, err)
 			failed = true
 			continue
+		}
+		if len(leaked) == 0 {
+			// A clean result must be visible as a result: without this line a log
+			// cannot tell "looked at every tenant and found nothing" from "never
+			// looked" (cleat#3484 review).
+			if present {
+				fmt.Fprintf(os.Stderr, "tenant_secrets leak check: %s: read tenant_secrets, no row with prefix %q left\n", c.dialect, prefixes)
+			} else {
+				fmt.Fprintf(os.Stderr, "tenant_secrets leak check: %s: no tenant_secrets table on this database, nothing to leak\n", c.dialect)
+			}
 		}
 		if len(leaked) > 0 {
 			fmt.Fprintf(os.Stderr, "LEAKED tenant_secrets on %s: %d row(s) left on the shared database by this package's tests (cleat#3484):\n", c.dialect, len(leaked))

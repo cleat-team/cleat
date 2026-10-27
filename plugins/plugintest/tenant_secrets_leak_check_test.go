@@ -3,6 +3,7 @@ package plugintest
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -135,5 +136,71 @@ func setupFull(t *testing.T, be testutil.PluginTestBackend) {
 		testutil.SetupMySQLFullSchema(t, be.DB)
 	case testutil.DialectMSSQL:
 		testutil.SetupMSSQLFullSchema(t, be.DB)
+	}
+}
+
+// The case cleat-review-69 found in cleat#3491: the migrations create a schema
+// named for the role, so for that role the search_path starts somewhere other
+// than the schema holding tenant_secrets. A table lookup that compared
+// current_schema() with it said "no table" and the check returned clean
+// without reading a row, with a leaked row present. This opens a SECOND
+// connection pool whose search_path starts at an empty schema and requires the
+// check to see the row all the same.
+func TestLeakedTenantSecretsFindsTheTableWhenTheSearchPathStartsElsewhere(t *testing.T) {
+	const prefix = "zz-3484-searchpath."
+	for _, be := range testutil.NewPluginTestBackends(t) {
+		be := be
+		if be.Dialect != testutil.DialectPostgres {
+			be.Cleanup()
+			continue
+		}
+		t.Run(be.Name, func(t *testing.T) {
+			t.Cleanup(be.Cleanup)
+			ctx := context.Background()
+			setupFull(t, be)
+
+			const probe = "cleat3484_searchpath_probe"
+			if _, err := be.DB.Exec(`CREATE SCHEMA IF NOT EXISTS ` + probe); err != nil {
+				t.Fatalf("create the empty schema: %v", err)
+			}
+			t.Cleanup(func() { be.DB.Exec(`DROP SCHEMA IF EXISTS ` + probe) }) //nolint:errcheck // best-effort cleanup
+
+			u, err := url.Parse(testutil.PostgresTestDSN())
+			if err != nil {
+				t.Fatalf("parse the DSN: %v", err)
+			}
+			q := u.Query()
+			q.Set("search_path", probe+",public")
+			u.RawQuery = q.Encode()
+			far, err := sql.Open("postgres", u.String())
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			t.Cleanup(func() { far.Close() })
+			var cur string
+			if err := far.QueryRow(`SELECT current_schema()`).Scan(&cur); err != nil || cur != probe {
+				t.Fatalf("precondition: current_schema() = %q, %v; want %q (this test would not exercise the case)", cur, err, probe)
+			}
+
+			key := make([]byte, 32)
+			ring, err := engine.NewKeyRing(engine.VersionedKey{Version: 1, Key: key})
+			if err != nil {
+				t.Fatalf("key ring: %v", err)
+			}
+			store := engine.NewSecretStoreWithRing(be.DB, string(be.Dialect), ring)
+			tn := engine.DefaultTenantUUID
+			t.Cleanup(func() { RemoveTenantSecretsWithPrefix(t, be.DB, be.Dialect, tn, prefix) })
+			if err := store.PutSecret(auth.WithTenantID(ctx, uuid.MustParse(tn)), tn, prefix+"x", "v"); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			got, present, err := leakedTenantSecrets(ctx, far, testutil.DialectPostgres, prefix)
+			if err != nil {
+				t.Fatalf("leakedTenantSecrets: %v", err)
+			}
+			if !present || len(got) != 1 {
+				t.Fatalf("search_path %s,public: present=%v got=%v; want the table found and the row named", probe, present, got)
+			}
+		})
 	}
 }
