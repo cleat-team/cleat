@@ -36,11 +36,7 @@ func seedSixTablesFixture(t *testing.T, db *sql.DB, ctx context.Context, tenant,
 		VALUES ($1, 1, '\x00', $2) ON CONFLICT DO NOTHING`, "reseal6-def", tenant); err != nil {
 		t.Fatalf("seed workflow_defs: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO workflow_instances (id, def_name, def_version, status, tenant_id)
-		VALUES ($1, 'reseal6-def', 1, 'ready', $2)`, workflowID, tenant); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, workflowID, testutil.WorkflowLeaseSeed{TenantID: tenant})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: workflowID, DefName: "reseal6-def", TenantID: tenant})
 }
 
 // assertNowDerivedAndBoundToOwnTenant is the shared post-sweep check every

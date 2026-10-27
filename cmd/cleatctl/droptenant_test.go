@@ -157,11 +157,7 @@ func TestRunDropTenant_DryRunDeletesNothing(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, tenant, "dryrun-tenant"); err != nil {
 		t.Fatalf("seed admin.tenants: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO workflow_instances (id, def_name, def_version, status, tenant_id) VALUES ($1, $2, 1, 'ready', $3)`,
-		"dryrun-wf", defName, tenant); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, "dryrun-wf", testutil.WorkflowLeaseSeed{TenantID: tenant})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: "dryrun-wf", DefName: defName, TenantID: tenant})
 
 	stdout, stderr := captureOutputs(t, func() {
 		runDropTenant(ctx, db, dialectPostgres, []string{tenant, "--dry-run"})
@@ -229,11 +225,7 @@ func TestRunDropTenant_YesFlagDeletesWithoutPrompt(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, tenant, "yes-tenant"); err != nil {
 		t.Fatalf("seed admin.tenants: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO workflow_instances (id, def_name, def_version, status, tenant_id) VALUES ($1, $2, 1, 'ready', $3)`,
-		"yes-wf", defName, tenant); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, "yes-wf", testutil.WorkflowLeaseSeed{TenantID: tenant})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: "yes-wf", DefName: defName, TenantID: tenant})
 	if _, err := db.ExecContext(ctx, `INSERT INTO event_history (workflow_id, step, tenant_id) VALUES ($1, 0, $2)`, "yes-wf", tenant); err != nil {
 		t.Fatalf("seed event_history: %v", err)
 	}

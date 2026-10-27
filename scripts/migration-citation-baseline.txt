@@ -268,7 +268,6 @@ plugins/auditlog/audit_rows_are_scoped_to_their_tenant_test.go	migrations/postgr
 plugins/blobstore/blobstore_stale_refs_race_test.go	migration 012
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	038_single_tenant_guard.sql
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 012
-plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 016
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 035
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 075
 plugins/blobstore/blobstore_stale_workflow_refs_multidb_test.go	migration 102
@@ -280,7 +279,6 @@ plugins/featureflags/migrations.go	migrations/mysql/070
 plugins/jobqueue/background.go	migration 073
 plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	038_single_tenant_guard.sql
 plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 012
-plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 016
 plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 073
 plugins/jobqueue/jobqueue_abandonment_sweep_multidb_test.go	migration 102
 plugins/jobqueue/migrations.go	migrations/mysql/070
@@ -319,7 +317,6 @@ specs/CleatDurableCallIntent.md	101_the_finalize_procedure_stops_deleting_failed
 specs/CleatQueueAdmission.tla	migration 097
 specs/CleatQueueAdmission.tla	migrations/postgres/094
 specs/CleatQueueAdmission.tla	migrations/postgres/098
-tests/crash/dialects_test.go	migration 016
 tests/crash/dialects_test.go	migration 075
 tests/crash/harness_test.go	migrations/postgres/008
 tests/plugin-harness/mssql_migration_rerun_test.go	migration 031

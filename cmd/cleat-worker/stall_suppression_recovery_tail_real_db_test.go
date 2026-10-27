@@ -63,24 +63,21 @@ func TestReapOnceRecoveryTailAgainstARealDatabase(t *testing.T) {
 	workers := []string{"recovery-tail-a", "recovery-tail-b", "recovery-tail-c"}
 	for i, worker := range workers {
 		ids[i] = fmt.Sprintf("recovery-tail-%d-%d", time.Now().UnixNano(), i)
+		// ReapStaleInstances reads its candidate set from workflow_leases
+		// (cleat#3245 Phase 3 step 3 piece A). SeedRun writes that row, and
+		// the heartbeat is set on it: without a stale lease row the reaper
+		// would find nothing to reclaim regardless of whether suppression
+		// held, which would let this test keep passing even if the
+		// suppression logic under test were broken, since "stays running" is
+		// also what an always-empty candidate set produces.
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: ids[i], DefName: defName, TenantID: engine.DefaultTenantUUID,
+			Status: "running", AssignedTo: worker,
+		})
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-			                                assigned_to, heartbeat_at, tenant_id)
-			VALUES ($1, $2, 1, 'running', '{}', $3, now() - interval '20 seconds', $4)`,
-			ids[i], defName, worker, engine.DefaultTenantUUID); err != nil {
-			t.Fatalf("seeding row %d (%s): %v", i, worker, err)
-		}
-		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances now reads its
-		// candidate set from workflow_leases. Without a matching lease row,
-		// ReapStaleInstances would find nothing to reclaim regardless of
-		// whether suppression held -- which would let this test keep passing
-		// even if the suppression logic under test were broken, since "stays
-		// running" is also what an always-empty candidate set produces.
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at)
-			VALUES ($1, $2, 'running', $3, now() - interval '20 seconds')`,
-			ids[i], engine.DefaultTenantUUID, worker); err != nil {
-			t.Fatalf("seeding row %d (%s)'s lease row: %v", i, worker, err)
+			UPDATE workflow_leases SET heartbeat_at = now() - interval '20 seconds' WHERE id = $1`,
+			ids[i]); err != nil {
+			t.Fatalf("seeding row %d (%s)'s heartbeat: %v", i, worker, err)
 		}
 	}
 	t.Cleanup(func() {

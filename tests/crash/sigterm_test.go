@@ -356,8 +356,8 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	release := svc.holdOperation("Reserve")
 	defer release()
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id IN (SELECT id FROM workflow_instances WHERE task_queue = $1)`, taskQueue)
-		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE task_queue = $1`, taskQueue)
+		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id IN (SELECT id FROM workflow_leases WHERE task_queue = $1)`, taskQueue)
+		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id IN (SELECT id FROM workflow_leases WHERE task_queue = $1)`, taskQueue)
 	})
 
 	first := startWorker(t, bin, taskQueue, svc.srv.URL, "--shutdown-grace", "3s")
@@ -373,7 +373,7 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	// Non-vacuity: held behind the lock the continue-as-new cannot have committed, so the queue still holds only
 	// the original run. Without the lock there would already be two and this scenario would prove nothing.
 	var held int
-	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances WHERE task_queue = $1`, taskQueue).Scan(&held); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE task_queue = $1`, taskQueue).Scan(&held); err != nil {
 		t.Fatal(err)
 	}
 	if held != 1 {
@@ -514,22 +514,17 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 
 	// Terminate it: phase 1 of the two-phase transition, as engine.preemptivelySettle writes it for a run that
 	// owes a defer phase. (The HTTP terminate route is the dead-letter queue's and does not reach this.)
-	if _, err := db.Exec(`UPDATE workflow_instances
-		SET status = 'terminating', pending_terminal_status = 'terminated',
-		    defer_phase_deadline = now() + interval '300 seconds', error_msg = 'test terminate',
-		    next_wake_at = now(), assigned_to = NULL, generation = generation + 1
-		WHERE id = $1`, wfID); err != nil {
+	//
+	// error_msg lives on workflow_payloads; status, pending_terminal_status,
+	// defer_phase_deadline, next_wake_at, assigned_to and generation are exactly
+	// what ClaimWorkflows' candidate scan reads from workflow_leases (the split
+	// of the run row from cleat#3245, folded into
+	// migrations/postgres/001_schema.sql by #3358). Without the lease write the defer phase this test drives is
+	// invisible to any claim: confirmed by falsification (reverting it reproduces
+	// "Cleanup was invoked 0 times within 1m0s, want 1").
+	if _, err := db.Exec(`UPDATE workflow_payloads SET error_msg = 'test terminate' WHERE id = $1`, wfID); err != nil {
 		t.Fatal(err)
 	}
-	// cleat#3245 Phase 3 step 3 piece B: mirror the claimability columns onto
-	// workflow_leases -- error_msg stays workflow_payloads-only (migration
-	// 016's split (folded into migrations/postgres/001_schema.sql by
-	// #3358): workflow_leases carries only what claim/heartbeat/reclaim/
-	// fence care about), but status/pending_terminal_status/defer_phase_deadline/
-	// next_wake_at/assigned_to/generation are exactly what ClaimWorkflows'
-	// candidate scan reads now. Without this mirror the defer phase this test
-	// drives is invisible to any claim: confirmed by falsification (reverting
-	// this mirror reproduces "Cleanup was invoked 0 times within 1m0s, want 1").
 	if _, err := db.Exec(`UPDATE workflow_leases
 		SET status = 'terminating', pending_terminal_status = 'terminated',
 		    defer_phase_deadline = now() + interval '300 seconds',

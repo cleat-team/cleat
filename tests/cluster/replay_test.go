@@ -51,15 +51,7 @@ func TestCrashMidWorkflowReplay(t *testing.T) {
 	// Create a workflow instance.
 	runID := fmt.Sprintf("replay-test-crash-%d", time.Now().UnixNano())
 	EnsureDef(t, db, "replay-workflow", 1)
-	_, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'replay-workflow', 1, 'ready', '{}', 'default')
-		ON CONFLICT (id) DO NOTHING
-	`, runID)
-	if err != nil {
-		t.Fatalf("Insert workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "replay-workflow"})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -125,15 +117,7 @@ func TestReplayProducesSameHistory(t *testing.T) {
 	// Create a workflow.
 	runID := fmt.Sprintf("replay-test-identical-%d", time.Now().UnixNano())
 	EnsureDef(t, db, "replay-identical", 1)
-	_, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'replay-identical', 1, 'ready', '{}', 'default')
-		ON CONFLICT (id) DO NOTHING
-	`, runID)
-	if err != nil {
-		t.Fatalf("Insert workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "replay-identical"})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -230,27 +214,11 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 
 	// Create a version 1 workflow.
 	runIDv1 := fmt.Sprintf("replay-test-version1-%d", time.Now().UnixNano())
-	_, err = db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'versioned-workflow', 1, 'ready', '{}', 'default')
-		ON CONFLICT (id) DO NOTHING
-	`, runIDv1)
-	if err != nil {
-		t.Fatalf("Insert v1 instance: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runIDv1, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runIDv1, DefName: "versioned-workflow"})
 
 	// Create a version 2 workflow (new version for new workflows).
 	runIDv2 := fmt.Sprintf("replay-test-version2-%d", time.Now().UnixNano())
-	_, err = db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'versioned-workflow', 2, 'ready', '{}', 'default')
-		ON CONFLICT (id) DO NOTHING
-	`, runIDv2)
-	if err != nil {
-		t.Fatalf("Insert v2 instance: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runIDv2, testutil.WorkflowLeaseSeed{TaskQueue: "default"})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runIDv2, DefName: "versioned-workflow", DefVersion: 2})
 
 	defer func() {
 		db.Exec(`DELETE FROM workflow_instances WHERE id IN ($1, $2)`, runIDv1, runIDv2)

@@ -110,21 +110,14 @@ func TestAVetoedRunSurvivesOneMoreWindowAndAKilledHolderDoesNot(t *testing.T) {
 	// touches workflow_leases alone.
 	seedRun := func(staleBy string) {
 		t.Helper()
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: runID, DefName: defName, TenantID: engine.DefaultTenantUUID,
+			Status: "running", AssignedTo: holderID, Generation: generation,
+		})
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-			                                assigned_to, heartbeat_at, generation, tenant_id)
-			VALUES ($1, $2, 1, 'running', '{}', $3, now() - $4::interval, $5, $6)`,
-			runID, defName, holderID, staleBy, generation, engine.DefaultTenantUUID); err != nil {
-			t.Fatalf("seeding the run: %v", err)
-		}
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at, generation)
-			VALUES ($1, $2, 'running', $3, now() - $4::interval, $5)
-			ON CONFLICT (id) DO UPDATE SET
-				status = EXCLUDED.status, assigned_to = EXCLUDED.assigned_to,
-				heartbeat_at = EXCLUDED.heartbeat_at, generation = EXCLUDED.generation`,
-			runID, engine.DefaultTenantUUID, holderID, staleBy, generation); err != nil {
-			t.Fatalf("seeding the run's lease row: %v", err)
+			UPDATE workflow_leases SET heartbeat_at = now() - $2::interval WHERE id = $1`,
+			runID, staleBy); err != nil {
+			t.Fatalf("seeding the run's heartbeat: %v", err)
 		}
 	}
 	ageRun := func(staleBy string) {

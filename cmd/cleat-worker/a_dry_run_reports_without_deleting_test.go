@@ -107,14 +107,13 @@ func TestADryRunReportsWithoutDeleting(t *testing.T) {
 	// Not a production defect: the real sweep's window is 30 days, against which
 	// 270ms of skew is nothing. The 1ns window exists only here, to mean "match
 	// everything already completed".
+	// completed_at lives on workflow_payloads (cleat#3245 B1a), which is where
+	// the sweep reads it.
 	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET completed_at = $2 WHERE id = $1`,
+		`UPDATE workflow_payloads SET completed_at = $2 WHERE id = $1`,
 		id, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("age the seeded row: %v", err)
 	}
-	// completed_at is read from workflow_payloads since cleat#3245 B1a, so
-	// ageing only the instance copy aged nothing the sweep can see.
-	testutil.SyncWorkflowPayload(t, db, id)
 
 	decode := func(t *testing.T, body []byte) retentionSweepResult {
 		t.Helper()

@@ -22,12 +22,7 @@ func TestReplayProducesIdenticalHistory(t *testing.T) {
 	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-replay-%d", time.Now().UnixNano())
-	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-	if err != nil {
-		t.Fatalf("create workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -92,12 +87,7 @@ func TestReplayDifferentInputsProducesDifferentHistory(t *testing.T) {
 	// Create two workflows with different event sequences.
 	makeID := func(suffix string) string {
 		id := fmt.Sprintf("int-replay-diff-%s-%d", suffix, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %s: %v", suffix, err)
-		}
-		testutil.SeedWorkflowLease(t, db, id, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		t.Cleanup(func() {
 			db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 			db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
@@ -168,12 +158,7 @@ func TestReplayVersionMismatch(t *testing.T) {
 
 	// Create a workflow instance at version 1 with events.
 	runID := fmt.Sprintf("int-version-%d", time.Now().UnixNano())
-	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{}', '`+suiteQueue+`')`, runID, defName)
-	if err != nil {
-		t.Fatalf("create workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -226,12 +211,7 @@ func TestReplayHashMismatch(t *testing.T) {
 	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-hash-%d", time.Now().UnixNano())
-	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-	if err != nil {
-		t.Fatalf("create workflow: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{TaskQueue: suiteQueue})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
