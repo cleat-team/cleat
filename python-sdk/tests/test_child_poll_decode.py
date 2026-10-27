@@ -71,3 +71,14 @@ class TestAwaitAnyChildDecodesTheHostsDocument:
     def test_a_host_error_message_is_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with pytest.raises(RuntimeError, match="invalid runIDs"):
             _await_any(monkeypatch, "invalid runIDs: unexpected end of JSON input")
+
+    def test_a_host_error_document_is_reported_not_returned_as_a_child(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The host answers a bad run-ID list with {"error": ...} and no run_id.
+
+        That used to come back as ChildResult(run_id="", error=...), a "winner"
+        nobody started, which a caller racing children would branch on.
+        """
+        with pytest.raises(RuntimeError, match="invalid runIDs"):
+            _await_any(monkeypatch, json.dumps({"error": "invalid runIDs: unexpected end"}))

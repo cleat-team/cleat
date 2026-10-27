@@ -2354,6 +2354,12 @@ class HostCalls:
                 "response means no child was awaited rather than that none won."
             )
         data = _parse_child_document("await_any_child", result_json)
+        # A host error that is itself a JSON document: the host answers an
+        # unparseable run-ID list with {"error": "invalid runIDs: ..."} and no
+        # run_id. A WINNER that failed carries both, so the absence of run_id is
+        # what separates "the call failed" from "the child did".
+        if "run_id" not in data and data.get("error"):
+            raise RuntimeError(f"await_any_child failed: {data['error']}")
         return ChildResult(
             run_id=data.get("run_id", ""),
             result=data.get("result", ""),
