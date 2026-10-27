@@ -2499,7 +2499,10 @@ jobs:
     # t+30 <= ~46 -- at or slightly over this job's 45m, not safely under
     # it. The margin here is small because the matrix's slowest leg is
     # itself small, not because the mechanism differs from coverage's.
-    timeout-minutes: 45
+    # Raised from 45 to 70, cleat#3482, so the t+30 <= ~46 case above reaches
+    # its own 30m Go timeout, with a goroutine dump, before this cap. 45 was
+    # 1.69x the longest successful pull_request run, below cleat#3479's margin.
+    timeout-minutes: 70  # max 27.0m over 676 successful runs (develop push + pull_request samples); internal go test -timeout 30m, 2026-10-27; cleat#3482
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
@@ -3769,7 +3772,10 @@ jobs:
     # goroutine dump. Flagged rather than resolved: changing the number,
     # or restructuring these two sequential `go test` calls, is a call for
     # whoever owns this job next.
-    timeout-minutes: 60
+    # Raised from 60 to 85, cleat#3482: 60 was 1.87x the longest successful
+    # pull_request run (32.0m). Coverage runs only on pull_request and main, so
+    # its develop-push sample is empty and this figure rests on those 22 runs.
+    timeout-minutes: 85  # max 32.0m over 22 successful runs (pull_request samples; no develop push runs it); internal go test -timeout 40m, 2026-10-27; cleat#3482
     # WHY THIS JOB HAS A DATABASE.
     #
     # The floors were calibrated on 2026-06-10 with backends configured -- the
