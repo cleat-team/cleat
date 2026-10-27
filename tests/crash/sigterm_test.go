@@ -517,9 +517,9 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 	//
 	// error_msg lives on workflow_payloads; status, pending_terminal_status,
 	// defer_phase_deadline, next_wake_at, assigned_to and generation are exactly
-	// what ClaimWorkflows' candidate scan reads from workflow_leases (cleat#3245
-	// migration 016's split, folded into migrations/postgres/001_schema.sql by
-	// #3358). Without the lease write the defer phase this test drives is
+	// what ClaimWorkflows' candidate scan reads from workflow_leases (the split
+	// of the run row from cleat#3245, folded into
+	// migrations/postgres/001_schema.sql by #3358). Without the lease write the defer phase this test drives is
 	// invisible to any claim: confirmed by falsification (reverting it reproduces
 	// "Cleanup was invoked 0 times within 1m0s, want 1").
 	if _, err := db.Exec(`UPDATE workflow_payloads SET error_msg = 'test terminate' WHERE id = $1`, wfID); err != nil {
