@@ -2687,7 +2687,7 @@ direction as the engine-side error at the top of this section, twice in one chan
 error where it used to return `nil` (`cleat/runtime_workflow.go:309`). So none of the three is non-functional public surface. The
 decisions recorded below (what a scope means in this SDK, whether a guest should be told of contention) are design questions and
 stay open; the body below is as written on 2026-09-06. Not run: a guest calling these three through a built `.wasm`;
-`TestEveryAdapterDefCompiles` covers that the adapters compile, and `TestEachRewiredMethodWiresItsImport` has no row for them.
+`TestEveryAdapterDefCompiles` covers that the adapters compile, and `TestEachRewiredMethodWiresItsImport` had no row for them until cleat#3418 added one each (falsified 2026-10-27 by deleting each method's `wasm/usage.go` row: exactly that subtest fails, with no import wired).
 
 §3.223 measured that **17 of the engine's 52 exports have no row** in `wasm/usage.go`'s
 `hostFunctions` table, and said explicitly that the number was **not** a defect count and that the
