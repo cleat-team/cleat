@@ -827,6 +827,13 @@ def guard_publish_approval_order(errors: list[str]) -> None:
 # `labels:` input, which does not fail -- it yields `null`. The rc-* path had its
 # own inline copy and so did carry them. One definition, wired the same way
 # everywhere, is only a fix while nobody drops the wiring, so this checks it.
+#
+# THE BOUNDARY, since a guard's blind spot is part of what it says: this sees
+# `docker/build-push-action` steps and nothing else. A future `run:` step that
+# calls `docker push`, `docker buildx build --push` or `docker buildx bake`, or
+# a composite action wrapping the build, publishes an image this does not look
+# at. Measured 2026-10-27: none of those exists anywhere under .github/, so
+# every push path in the tree is in scope today.
 LABELS_SCRIPT = "scripts/oci_image_labels.py"
 LABELS_OUTPUT_RE = re.compile(r"\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.labels\s*\}\}")
 # Workflows that must each contain at least one examined build, so the guard
