@@ -802,16 +802,13 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		return "", fmt.Errorf("continue as new: read the inherited parent: %w", err)
 	}
 
-	// cleat#3245 Phase 3 step 2 piece 4d / migration 018: create the new
-	// run's workflow_leases/workflow_payloads rows, same as startNewRun
-	// (piece 1) -- resolvedTaskQueue and the inherited parent_workflow_id
-	// are both captured via RETURNING rather than re-evaluated, for the
-	// identical reason startNewRun's own call does. continued_from is
-	// currentRunID itself, not a column this INSERT needed to return.
-	// concurrency_key and the run-limit overrides are not inherited by a
-	// continued run on workflow_instances either (this INSERT's own column
-	// list has never carried them), so they are left unset here too --
-	// mirroring only what workflow_instances itself writes.
+	// Create the new run's workflow_leases/workflow_payloads rows, as
+	// StartNewRun does. resolvedTaskQueue and the inherited parent_workflow_id
+	// were each read once, by the statements above, and are passed in rather
+	// than re-evaluated; until cleat#3245 B5 they came back through RETURNING
+	// on the workflow_instances INSERT, which no longer carries them.
+	// continued_from is currentRunID itself. concurrency_key and the run-limit
+	// overrides are not inherited by a continued run, so they are left unset.
 	if err := s.insertLeaseAndPayloadRows(ctx, tx, newRunID, s.tenantID, resolvedTaskQueue, priority, sealedNewInput, leaseAndPayloadCols{
 		DefName: defName, DefVersion: defVersion,
 		ParentWorkflowID: inheritedParentWorkflowID.String, ContinuedFrom: currentRunID,
@@ -1911,40 +1908,31 @@ func (s *PostgresStore) resolveRunTaskQueue(ctx context.Context, tx *sql.Tx, def
 
 // insertLeaseAndPayloadRows creates the workflow_leases and workflow_payloads
 // rows that go with a freshly inserted workflow_instances row, on the SAME
-// tx -- cleat#3245 Phase 3 step 2 (dual-write), piece 1. There is no backfill
-// (owner decision: a fresh database is required for 0.5.0, so no supported
-// upgrade path has a pre-existing workflow_instances row to catch up), which
-// is what makes "create both rows together, from here on, every time" the
-// whole of this step's job for new runs.
+// tx. Since cleat#3245 B5 those two rows are where a run's state lives, and
+// the instance row beside them is only its identity and close policy.
+// There is no backfill: a fresh database is required for 0.5.0, so no
+// supported upgrade path has a pre-existing run to catch up.
 //
-// next_wake_at is set explicitly to the same `now() - 1ms` the
-// workflow_instances INSERT uses, rather than relying on this table's own
-// `DEFAULT now()` -- the two would otherwise disagree by whatever the gap
-// between the two statements happens to be, and this column feeds claim
-// ordering. created_at is NOT passed explicitly: both tables default it to
-// `now()`, and `now()` is the TRANSACTION timestamp in PostgreSQL (constant
-// across every statement in one tx), so the two columns agree without having
-// to say so.
+// next_wake_at is set explicitly to `now() - 1ms`, so a new run is claimable
+// at once; this column feeds claim ordering. created_at is NOT passed
+// explicitly: both tables default it to `now()`, and `now()` is the
+// TRANSACTION timestamp in PostgreSQL (constant across every statement in one
+// tx), so the two rows agree without having to say so.
 //
-// taskQueue is the value workflow_instances' own INSERT just resolved via
-// its COALESCE-against-workflow_defs subquery, captured with RETURNING
-// rather than re-evaluated here -- a second subquery risks reading a
-// workflow_defs row that changed between the two statements, however
-// unlikely, and silently duplicating a drifted value is worse than reusing
-// the one already decided.
+// taskQueue is decided by the caller (resolveRunTaskQueue, or
+// resolveChildRun for a child) and passed in rather than re-evaluated here --
+// a second subquery risks reading a workflow_defs row that changed between
+// the two statements, and reusing the one already decided is safer than
+// silently using a drifted value. Until B5 it rode on the instance INSERT as
+// a subquery and came back through RETURNING.
 //
-// sealedPayloadInput is whatever startNewRun already bound to
-// workflow_instances.input (ciphertext when encryption is on, per
-// cleat#2312) -- reused rather than re-sealed, so the two tables carry
-// identical bytes rather than two independent encryptions of the same
-// plaintext.
+// sealedPayloadInput is the input as the caller already sealed it
+// (ciphertext when encryption is on, per cleat#2312), stored as given rather
+// than re-sealed here.
 //
-// cols carries every field migration 018 added that an individual creation
-// path may or may not set on its own workflow_instances INSERT -- callers
-// that do not set a given workflow_instances column pass its zero value
-// here too, rather than this function guessing a default, so the two tables
-// can never disagree about a column this function did not independently
-// decide.
+// cols carries the fields an individual creation path may or may not set;
+// a caller that does not set one passes its zero value, rather than this
+// function guessing a default.
 func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.Tx, id, tenantID, taskQueue string, priority int, sealedPayloadInput string, cols leaseAndPayloadCols) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_leases (
@@ -1974,12 +1962,11 @@ func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.T
 	return nil
 }
 
-// leaseAndPayloadCols carries migration 018's columns into
-// insertLeaseAndPayloadRows. def_name/def_version are required on every
-// call (workflow_payloads.def_name mirrors piece F's listing filter, per
-// the owner's split decision on cleat#3245 -- see migration 018's own
-// comment); the rest are each NULL on whichever creation paths do not set
-// the matching workflow_instances column themselves.
+// leaseAndPayloadCols carries the per-run columns of the lease and payload
+// rows into insertLeaseAndPayloadRows. def_name/def_version are required on
+// every call: since cleat#3245 B5 workflow_payloads is their only home, and
+// workflow_payloads_def_fkey holds them to a deployed definition. The rest
+// are each NULL on whichever creation paths do not set them.
 type leaseAndPayloadCols struct {
 	DefName                   string
 	DefVersion                int

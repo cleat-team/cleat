@@ -44,24 +44,14 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
 
-	// cleat#3245 Phase 3 step 2 gap fix (found scoping step 3's piece A):
-	// StartChildWorkflow never got piece 1's workflow_leases/
-	// workflow_payloads INSERT, unlike every top-level StartNewRun* variant
-	// -- see insertLeaseAndPayloadRows' own doc. Every child workflow
-	// started through this method has had no lease/payload row at all until
-	// now, invisible because the claim's lease write (piece 2) was a plain
-	// UPDATE, not an upsert, so claiming one silently touched zero rows on
-	// the lease side.
-	//
-	// resolvedDefVersion (migration 018 (folded into
-	// migrations/postgres/001_schema.sql by #3358)) is captured via RETURNING rather
-	// than re-evaluated, for the same reason resolvedTaskQueue already was
-	// -- the INSERT above resolves an unspecified version through its own
-	// MAX(version) subquery, and a second subquery here could read a
-	// workflow_defs row that changed between the two statements. A child
-	// workflow has no concurrency_key, run-limit overrides, or
-	// continued_from of its own: this method's workflow_instances INSERT
-	// has never carried those columns, so they are left unset here too.
+	// The lease and payload rows go in on the same tx. resolvedDefVersion
+	// and resolvedTaskQueue were decided once, by resolveChildRun above, and
+	// are passed in rather than re-evaluated: a second subquery could read a
+	// workflow_defs row that changed between the two statements. Until
+	// cleat#3245 B5 both rode on the workflow_instances INSERT as subqueries
+	// and came back through RETURNING; that row no longer has the columns.
+	// A child workflow has no concurrency_key, run-limit overrides or
+	// continued_from of its own, so those are left unset.
 	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, s.tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
 		DefName: defName, DefVersion: resolvedDefVersion, ParentWorkflowID: parentID,
 	}); err != nil {
@@ -145,10 +135,8 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}
 
-	// cleat#3245 Phase 3 step 2 gap fix (found scoping step 3's piece A):
-	// same gap as StartChildWorkflow above, same fix -- see its comment,
-	// including why resolvedDefVersion (migration 018) is captured via
-	// RETURNING rather than re-evaluated.
+	// Same as StartChildWorkflow above: the version and task queue are
+	// resolved once, by resolveChildRun, and passed in -- see its comment.
 	if err := s.insertLeaseAndPayloadRows(ctx, tx, childID, s.tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
 		DefName: defName, DefVersion: resolvedDefVersion, ParentWorkflowID: parentID,
 	}); err != nil {
