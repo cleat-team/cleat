@@ -38,6 +38,7 @@ jobs:
   dryrun-arm64:
     name: Docker build cleat-worker (linux/arm64, no push)
     runs-on: ubuntu-latest
+    timeout-minutes: 40  # max 15.3m over 5 successful runs, 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 

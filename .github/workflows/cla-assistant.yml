@@ -131,6 +131,7 @@ jobs:
   cla:
     name: Contributor License Agreement
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.1m over 28 successful runs, 2026-10-27; cleat#3479
     steps:
       # In the merge queue this check is both impossible and pointless.
       #
