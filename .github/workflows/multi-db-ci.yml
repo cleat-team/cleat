@@ -197,6 +197,7 @@ jobs:
   test-mysql:
     name: Test MySQL
     runs-on: ubuntu-latest
+    timeout-minutes: 40  # max 12.2m over 54 successful runs (develop push + pull_request samples); internal go test -timeout 30m, 2026-10-27; cleat#3479
     services:
       mysql:
         image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
@@ -343,6 +344,7 @@ jobs:
   test-mssql:
     name: Test SQL Server
     runs-on: ubuntu-latest
+    timeout-minutes: 45  # max 17.8m over 51 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     services:
       mssql:
         # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
@@ -498,6 +500,7 @@ jobs:
   test-plugin-migrations:
     name: Plugin Migrations
     runs-on: ubuntu-latest
+    timeout-minutes: 25  # max 6.3m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 15m, 2026-10-27; cleat#3479
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
@@ -747,6 +750,7 @@ jobs:
   crash-shutdown-dialects:
     name: Crash Shutdown Scenarios (MySQL, SQL Server)
     runs-on: ubuntu-latest
+    timeout-minutes: 25  # max 3.5m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 15m, 2026-10-27; cleat#3479
     services:
       mysql:
         image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb

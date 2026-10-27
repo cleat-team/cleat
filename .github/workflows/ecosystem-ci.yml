@@ -59,6 +59,7 @@ jobs:
   python-sdk:
     name: Python SDK Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 1.2m over 60 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -76,6 +77,7 @@ jobs:
   rust-sdk:
     name: Rust SDK Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 1.4m over 60 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -91,6 +93,7 @@ jobs:
   java-sdk:
     name: Java SDK Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 1.8m over 60 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
@@ -109,6 +112,7 @@ jobs:
     # ("Test AS SDK") reported success. The flag was forgiving a job that had nothing
     # to forgive.
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.5m over 60 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
