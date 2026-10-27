@@ -187,6 +187,17 @@ func cgotestReadResultU64(r unsafe.Pointer) uint64 {
 	return uint64(C.cgotest_val_get_u64((*C.wasmtime_component_val_t)(r)))
 }
 
+// cgotestReadResultString returns the string written into a result slot, and
+// false when the slot holds no string at all.
+func cgotestReadResultString(r unsafe.Pointer) (string, bool) {
+	var slen C.size_t
+	p := C.cgotest_val_get_string((*C.wasmtime_component_val_t)(r), &slen)
+	if p == nil {
+		return "", false
+	}
+	return C.GoStringN(p, C.int(slen)), true
+}
+
 func cgotestHasResultString(r unsafe.Pointer) bool {
 	var slen C.size_t
 	return C.cgotest_val_get_string((*C.wasmtime_component_val_t)(r), &slen) != nil
@@ -238,6 +249,8 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		15: b.dispatchFetch,
 		17: b.dispatchAwaitChild,
 		18: b.dispatchAwaitAllChildren,
+		26: b.dispatchPollChild,
+		27: b.dispatchAwaitAnyChild,
 		19: b.dispatchPluginCallStreaming,
 		20: b.dispatchChildWorkflowWithOptions,
 		22: b.dispatchAwaitPromise,

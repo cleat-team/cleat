@@ -556,6 +556,23 @@ class SignalResult:
     """
 
 
+def _parse_child_document(call: str, text: str) -> dict:
+    """Parse the JSON document a child call answered with.
+
+    A host error arrives as the host's plain-text message, because the WIT
+    function is typed ``-> string`` and has nowhere else to put one. Parsing it
+    raises ``ValueError`` (``JSONDecodeError`` is a subclass), which would
+    surface as a bare parse error and hide what the host said.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise RuntimeError(f"{call} failed: {text}") from None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{call} failed: expected a JSON object, got {text!r}")
+    return data
+
+
 @dataclass
 class ChildResult:
     """Result of a single child workflow from :meth:`HostCalls.await_all_children`."""
@@ -2327,12 +2344,27 @@ class HostCalls:
         """
         result_json = _import_cleat_await_any_child(json.dumps(run_ids))
         if not result_json:
+            # On a worker this is ALSO what a pending await looks like: the host
+            # has recorded the wait and is suspending the run, and the string-typed
+            # WIT function has no way to say so (cleat#3390). The suspension wins
+            # over this error, so the run waits rather than failing.
             raise RuntimeError(
                 f"await_any_child(run_ids={run_ids!r}) returned nothing. "
                 "The host writes the winning child's result here, so an empty "
                 "response means no child was awaited rather than that none won."
             )
-        return ChildResult(**json.loads(result_json))
+        data = _parse_child_document("await_any_child", result_json)
+        # A host error that is itself a JSON document: the host answers an
+        # unparseable run-ID list with {"error": "invalid runIDs: ..."} and no
+        # run_id. A WINNER that failed carries both, so the absence of run_id is
+        # what separates "the call failed" from "the child did".
+        if "run_id" not in data and data.get("error"):
+            raise RuntimeError(f"await_any_child failed: {data['error']}")
+        return ChildResult(
+            run_id=data.get("run_id", ""),
+            result=data.get("result", ""),
+            error=data.get("error") or None,
+        )
 
     def poll_child(self, run_id: str) -> ChildResult | None:
         """Check a child workflow without waiting.
@@ -2353,13 +2385,22 @@ class HostCalls:
         result_json = _import_cleat_poll_child(run_id)
         if not result_json:
             return None
-        data = json.loads(result_json)
+        data = _parse_child_document("poll_child", result_json)
         # The host reports a still-running child as a status document rather
         # than by writing nothing, so "not finished" has to be read out of the
         # payload rather than inferred from an empty string.
         if data.get("status") == "running":
             return None
-        return ChildResult(**data)
+        # The document is {"status": "completed"|"failed", "result", "error"}
+        # (engine/children.go pollResult): it has no run_id, and ChildResult has
+        # no status. This used to be ChildResult(**data), which raised TypeError
+        # for every finished child; the tests ran against LocalHost, which builds
+        # a ChildResult directly and never sees the host's document (cleat#3390).
+        return ChildResult(
+            run_id=run_id,
+            result=data.get("result", ""),
+            error=data.get("error") or None,
+        )
 
     # --------------------------------------------------------------------
     # 18. set_query_state — set queryable key-value state

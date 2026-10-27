@@ -598,6 +598,8 @@ const (
 	cbTypeChildWorkflow            // (string,string) -> string
 	cbTypeAwaitChild               // (string) -> string
 	cbTypeAwaitAllChildren         // (string) -> string
+	cbTypePollChild                // (string) -> string
+	cbTypeAwaitAnyChild            // (string) -> string
 	cbTypeChildWorkflowWithOptions // (string,string,u64,u64,string) -> string
 
 	// durable-promises interface
@@ -929,6 +931,10 @@ func goComponentCallback(
 		return entry.backend.dispatchAwaitChild(args, nargs, results, nresults)
 	case cbTypeAwaitAllChildren:
 		return entry.backend.dispatchAwaitAllChildren(args, nargs, results, nresults)
+	case cbTypePollChild:
+		return entry.backend.dispatchPollChild(args, nargs, results, nresults)
+	case cbTypeAwaitAnyChild:
+		return entry.backend.dispatchAwaitAnyChild(args, nargs, results, nresults)
 	case cbTypeChildWorkflowWithOptions:
 		return entry.backend.dispatchChildWorkflowWithOptions(args, nargs, results, nresults)
 	case cbTypeCreatePromise:

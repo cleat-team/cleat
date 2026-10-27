@@ -361,6 +361,63 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 	return nil
 }
 
+// extractChildAnswer is extractStringFromSimplePacked for the two child calls
+// that answer with a JSON document, PollChild and AwaitAnyChild.
+//
+// It exists for one packed word. AwaitAnyChild answers "no child has finished,
+// the run is suspending" with packAwaitChildResultSuspend (1<<62), whose length
+// field (bits 32-63) reads as 1<<30. extractStringFromSimplePacked clamps that
+// to the buffer and returns 64 KiB of zero bytes, which a guest would hand to a
+// JSON parser as if it were the winner's document. The empty string is what
+// the Python SDK already treats as "nothing came back".
+//
+// WIT declares both functions `-> string`, so neither a suspend nor a host
+// error (errCode in the low bits, the message in the buffer) can reach the
+// guest as anything but text. An error therefore arrives as the host's message
+// and fails the guest's JSON parse loudly, which is the most this signature
+// can do; carrying them as a case of the type is the redesign the
+// stop-correspondence guard records as reasonWitReturnsABareString.
+func extractChildAnswer(packed int64, buf []byte) string {
+	if packed == packAwaitChildResultSuspend() {
+		return ""
+	}
+	return extractStringFromSimplePacked(packed, buf)
+}
+
+// dispatchPollChild handles (string) -> string.
+func (b *wasmtimeBackend) dispatchPollChild(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
+	runID := readStrArg(args, 0, nargs)
+
+	buf := make([]byte, 65536)
+	packed := b.handler.PollChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+
+	setResultString(results, nresults, extractChildAnswer(packed, buf))
+	return nil
+}
+
+// dispatchAwaitAnyChild handles (string) -> string.
+func (b *wasmtimeBackend) dispatchAwaitAnyChild(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
+	runIDsJSON := readStrArg(args, 0, nargs)
+
+	buf := make([]byte, 65536)
+	packed := b.handler.AwaitAnyChild(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+
+	setResultString(results, nresults, extractChildAnswer(packed, buf))
+	return nil
+}
+
 // dispatchAwaitAllChildren handles (string) -> string.
 func (b *wasmtimeBackend) dispatchAwaitAllChildren(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
@@ -1097,6 +1154,8 @@ var witTypeMap = map[string]map[string]cbType{
 		"durable-child-workflow":              cbTypeChildWorkflow,
 		"durable-await-child":                 cbTypeAwaitChild,
 		"durable-await-all-children":          cbTypeAwaitAllChildren,
+		"durable-poll-child":                  cbTypePollChild,
+		"durable-await-any-child":             cbTypeAwaitAnyChild,
 		"durable-child-workflow-with-options": cbTypeChildWorkflowWithOptions,
 	},
 	"cleat:host-calls/durable-promises": {
