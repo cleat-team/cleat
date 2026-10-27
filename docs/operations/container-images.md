@@ -108,6 +108,18 @@ docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revis
   ghcr.io/cleat-team/cleat-worker:develop-34fec6ef7
 ```
 
+A release image (`cleat-worker:vX.Y.Z`) carries the same labels, plus
+`org.opencontainers.image.version`, from the first release published after
+cleat#3487. The version label drops the leading `v` (`0.5.1`), as GoReleaser's
+version and the Helm chart's `appVersion` do; only the image tag keeps it
+(`vX.Y.Z`). **v0.4.0 and v0.5.0 carry none** (`null` on both platforms): the
+release job set no `labels:` while the rc path did. Their tags are not
+re-published, since a released tag's digest should not change. For those two, the
+provenance is the digest the tag's own Release run exported (the `Publish the
+cleat-worker image` job's log), not a label. All three workflows that push the
+image take their labels from `scripts/oci_image_labels.py`, and `Release Dry Run`
+fails if a built image does not carry them.
+
 ## When a develop or rc tag is missing
 
 `develop-image.yml` runs once per push to `develop` and to a `release/**`

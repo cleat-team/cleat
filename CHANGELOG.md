@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Release images (`cleat-worker:vX.Y.Z`) now carry the OCI labels `source`, `revision`, `ref.name` and `version`. v0.4.0 and v0.5.0 were published with none, so a release image did not say what commit it was built from (cleat#3487). Those two tags are not re-published; v0.5.0's provenance is the digest its Release run exported. The labels come from one script shared with the develop and rc image workflows, and `Release Dry Run` now fails if a built image lacks them.
+
 ## [0.5.0] - 2026-10-27
 
 ### UPGRADE NOTES — breaking
