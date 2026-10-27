@@ -976,12 +976,18 @@ tier2:
            grant. cmd/cleat-worker/a_rotating_claim_serves_every_tenant_test.go runs the
            rotation end to end on SQL Server 2022 with the SHIPPED dbo.fn_tenant_filter
            (the test asserts it carries no cleat_admin admission, so the optional
-           cross_tenant_claim.sql is not in effect) and a principal that is not a member of
-           cleat_admin: every live tenant's runs were claimed exactly once, the suspended
-           tenant's were not, and no claim left its tenant. It passed on the author's
-           SQL Server and in Tier 1's log, with no skips. SCOPE OF THAT: the principal
-           tested is sa, not a least-privilege application login, and no workflow's WASM
-           was run. docs/reference/worker-config.md still says the opposite for SQL Server
+           cross_tenant_claim.sql is not in effect): every live tenant's runs were claimed
+           exactly once, the suspended tenant's were not, and no claim left its tenant. It
+           passed on the author's SQL Server and in Tier 1's log, with no skips. WHAT
+           CARRIES THE WEIGHT: the predicate-text assertion, and sa being subject to the
+           policy (with every tenant routed to the default tenant's store only that
+           tenant's 2 of 6 live runs were claimed, so sa does not bypass it). The test's
+           IS_ROLEMEMBER('cleat_admin') = 0 check is VACUOUS under sa: it maps to dbo, which
+           cannot be made a role member (ALTER ROLE ... ADD MEMBER dbo fails with Msg
+           15405, measured), so it returns 0 whatever the setup. SCOPE: so that no cross-tenant
+           admission is needed IS measured; what it leaves unmeasured is a least-privilege
+           application login's ordinary object grants (SELECT, DML, EXEC), and no
+           workflow's WASM was run. docs/reference/worker-config.md still says the opposite for SQL Server
            (two steps: apply the optional migration, add the principal to cleat_admin) and
            claims a single shared MySQL database works, which the TenantLister probe above
            contradicts; both predate cleat#1926 and are tracked in cleat#3447"
