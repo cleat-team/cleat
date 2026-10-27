@@ -210,6 +210,37 @@ cmd/cleat-worker/web/dist/
     index-*.css
 ```
 
+### The committed bundle must match its source
+
+`cmd/cleat-worker/web/dist` is committed, and CI's `Web Dashboard` job (a required
+check) rebuilds it and fails if the result differs (cleat#3468). That includes a
+dependency bump that never touches `web/src`: a new `vite` or `svelte` changes the
+hashed asset names.
+
+**A dependabot bump of `/web` therefore opens red whenever it changes the bundle.**
+Nothing rebuilds it for you. Someone with push access runs, on the dependabot branch:
+
+```bash
+gh pr checkout <PR-number>
+(cd web && npm ci && npm run build)
+git add cmd/cleat-worker/web/dist
+git commit -s -m "build(web): rebuild the dashboard bundle for this bump (cleat#3470)"
+git push
+```
+
+`-s` matters: the DCO check wants a `Signed-off-by` on every commit in the PR. The
+`Stream Trailer Check` does not apply, because it exempts a PR by its AUTHOR
+(`dependabot[bot]`), not by who pushed a commit onto it. Once a person has pushed to
+the branch, dependabot stops rebasing it, so merge `develop` in by hand if it falls
+behind, and do not `@dependabot recreate` (that discards the rebuild).
+
+**Why this is manual.** The obvious automation, a workflow that rebuilds and pushes, does
+not work with the repository's own token: a push made with `GITHUB_TOKEN` starts no
+workflows, so the pushed head would carry none of the required checks and could never
+merge. It needs a token that does trigger them (a GitHub App or a PAT owned by a
+maintainer), and the build step must not run with that token, because it executes code
+from the bumped packages. Both need an owner decision and are not done (cleat#3470).
+
 ### Preview production build
 
 ```bash

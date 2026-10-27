@@ -3101,6 +3101,8 @@ jobs:
             echo "The committed dashboard is not what this source produces. Run:"
             echo "    cd web && npm ci && npm run build"
             echo "and commit cmd/cleat-worker/web/dist/."
+            echo "On a dependabot PR, web/README.md ('The committed bundle must match its source')"
+            echo "has the exact steps; nothing rebuilds the bundle automatically (cleat#3470)."
             git status --porcelain cmd/cleat-worker/web/dist/
             exit 1
           fi
