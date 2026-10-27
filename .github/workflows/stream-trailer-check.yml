@@ -135,7 +135,11 @@ jobs:
           # started so the release-gate items that do not depend on the storage
           # split (cleat#3377, #3386, #3398) run in parallel with it. Landed by
           # the coordinator, same reason as above.
-          VALID='^(WS-1|WS-2|WS-3|WS-4|WS-cleat|WS-cleat-2|WS-clew|coordinator|cleat-review)$'
+          # WS-cleat-3 added 2026-10-26: a third cleat delivery stream the owner
+          # started for the correctness bugs filed in the 0.5.0 window (release
+          # gate G9: cleat#3383, #3393, #3409, #3390), in parallel with the
+          # storage split. Landed by the coordinator, same reason as above.
+          VALID='^(WS-1|WS-2|WS-3|WS-4|WS-cleat|WS-cleat-2|WS-cleat-3|WS-clew|coordinator|cleat-review)$'
           # The human-readable list is DERIVED from VALID, never repeated: two
           # lists drift, and the drift is silent in the direction that matters
           # (cleat#3372 review: a rejected author was told a list without the
