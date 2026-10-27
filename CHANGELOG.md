@@ -10,7 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-27
+
 ### UPGRADE NOTES — breaking
+
+- **0.5.0 requires a fresh database. There is no upgrade path from 0.4.0, and a 0.5.0 worker
+  refuses a 0.4.0 database rather than run on it.** cleat#3405, owner decision D18. 0.4.0 and
+  0.5.0 record migrations under the same version numbers for different files, so before this
+  release a 0.5.0 worker on a 0.4.0 database would have applied nothing and run against the
+  wrong schema. `schema_migrations` now records each applied file's name and SHA-256 (cleat#3431).
+  At `--migrate-only`, at a normal start and at `--migrate-on-start`, before it changes
+  anything, `cleat-worker` compares what the database recorded with what the binary ships. It
+  exits non-zero with an error containing `foreign migration chain`, which names up to five
+  mismatched versions and counts the rest. Every database migrated before 0.5.0 is refused,
+  including databases from earlier develop builds, because none carries the identity columns.
+  A refused database is left exactly as it was found. **What to do:** provision a fresh
+  database for 0.5.0, and run 0.4.0 and 0.5.0 side by side until 0.4.0 has drained. See
+  `docs/operations/upgrading.md`. In-place upgrade is the first candidate for 0.6.0.
+
+- **On PostgreSQL, `workflow_instances` is split: lease state lives in `workflow_leases` and
+  the large payloads in `workflow_payloads`.** cleat#3245 (B1 to B5b). **MySQL and SQL Server
+  are unchanged:** they keep the single `workflow_instances` table and have neither new table.
+  On PostgreSQL, `workflow_instances` is now five columns: `id`, `tenant_id`,
+  `parent_close_policy`, `event_count` and `history_swept_at`. The lease columns are written to
+  `workflow_leases` alone, and the lease row's own UPDATE is the fence. The `workflow_defs`
+  foreign key that guards against deleting a definition under a live run moved to
+  `workflow_payloads`. The retired `admin.claim_workflows` function is gone; cross-tenant
+  claiming has used per-tenant rotation since cleat#1926 (see `tiers.yaml`, cleat#3441).
+  **What to check, on PostgreSQL only:** anything outside cleat that reads `workflow_instances`
+  columns directly, such as dashboards, reports or ad hoc SQL, must read `workflow_leases` or
+  `workflow_payloads` instead.
 
 - **`plugin.Environment.Mux` is now `plugin.Dispatcher` (`ServeHTTP` only), not `ServeMux`
   (`*http.ServeMux`).** Closes cleat#2279 item 3. `env.Mux` let a plugin call
@@ -93,6 +122,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`scripts/dbos-pair-loc.sh`), recorded as "Corrected" entries in each pair's README.
 
 ### Fixed
+
+- **History compaction could lose events.** Closes cleat#3409 and cleat#3395. `CompactHistory`
+  deleted the old events, then took its generation fence, and committed whether or not the fence
+  held. If a reclaim moved the generation in between, the steps below `keepStep` were gone and no
+  snapshot covered them. Measured on all three dialects. It now takes the fence first, and a lost
+  fence rolls back and returns an error.
+
+- **A Python `run_detached` started nothing, and `defer_phase` never reached the host.** Closes
+  cleat#3428. On the component path both imports linked to a do-nothing fallback. Neither raised,
+  so `run_detached` completed without starting a workflow. Both now reach their host functions.
+
+- **A Python `poll_child` or `await_any_child` trapped on the component path.** Closes cleat#3390.
+  Both imports linked to the same fallback, and the guest trapped on a type mismatch. Both now
+  reach their host functions. `poll_child` also raised `TypeError` for every finished child: the
+  SDK mis-decoded the host's answer. That is fixed in the same change.
+
+- **A suspending `AwaitPromise` looked like a timeout.** Closes cleat#3383. A guest took its timeout
+  branch, so a side effect there ran before the run suspended. The engine now returns the stop, and
+  every SDK checks for it.
+
+- **`dagrun.TopologicalSort` ordered each level in Go map order.** Closes cleat#3393. The order
+  differed between a run and its replay, so a workflow that started one child per task in level
+  order could have replay pair recorded child runs with the wrong tasks. dagrun's own executor
+  was unaffected. Each level is now ordered by priority, then name.
 
 - **A component (Python) guest could make the host call a service, promise, signal, lock or
   workflow with a name the core-module path refuses.** Closes cleat#3436. The core-module host
@@ -288,6 +341,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RebindArgs` internally — have been removed. `Rebind` itself is kept as a shim for an
   out-of-tree plugin or a caller holding a raw driver handle; prefer `RebindArgs` directly, or
   `plugins/plugintest.ExecRebound`/`QueryRebound`/`QueryRowRebound` in a test.
+
+### Known issues
+
+- **Cross-tenant claiming is supported only on PostgreSQL and SQL Server (tier 2).** On MySQL,
+  and on a sharded worker, the worker cannot list tenants. It falls back to claiming for its own
+  tenant and logs that it cannot rotate. The MySQL case is measured by the end-to-end test in
+  cleat#3446; the sharded case is read from the code. See `tiers.yaml`.
+- **A 0.5.0 Python component cannot run on an older worker.** Two changes are in both the SDK and
+  the worker: the `failed` run outcome (cleat#3433, D28) and the result-typed
+  `durable-await-promise` (cleat#3425, D29). Upgrade the worker before, or together with, rebuilding
+  Python components.
+- **The upgrade-refusal check (cleat#3386) runs on PostgreSQL only.** The refusal is unit-tested on
+  all three dialects (cleat#3431); the end-to-end job seeds and refuses on PostgreSQL.
 
 ## [0.4.0] - 2026-10-06
 
