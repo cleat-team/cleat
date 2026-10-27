@@ -474,14 +474,20 @@ func tableCount(t *testing.T, db *sql.DB, dialect, table string) int {
 	return n
 }
 
+// insertVersionSQL records a version as a later chain's migration would, with a
+// name and checksum: since cleat#3405 a recorded version with no identity is a
+// foreign chain and refused, so an identity-less row would test that rule
+// instead of the AHEAD one.
 func insertVersionSQL(dialect string) string {
+	const id = `'999999_from_a_later_release.sql', '` +
+		`0000000000000000000000000000000000000000000000000000000000000000'`
 	switch dialect {
 	case "mysql":
-		return `INSERT INTO schema_migrations (version, applied_at) VALUES (?, NOW(6))`
+		return `INSERT INTO schema_migrations (version, applied_at, name, checksum) VALUES (?, NOW(6), ` + id + `)`
 	case "mssql":
-		return `INSERT INTO schema_migrations (version, applied_at) VALUES (@p1, SYSUTCDATETIME())`
+		return `INSERT INTO schema_migrations (version, applied_at, name, checksum) VALUES (@p1, SYSUTCDATETIME(), ` + id + `)`
 	}
-	return `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, now())`
+	return `INSERT INTO schema_migrations (version, applied_at, name, checksum) VALUES ($1, now(), ` + id + `)`
 }
 
 func deleteVersionSQL(dialect string) string {

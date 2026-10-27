@@ -73,6 +73,7 @@ cmd/cleat-worker	TestABootedWorkerMintsAnOAuthAPIKeyOnARealLogin	2
 cmd/cleat-worker	TestABootedWorkerSuspendsAnExpiredTrial	2
 cmd/cleat-worker	TestABootedWorkerSweepsAnAbandonedLogin	2
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
+cmd/cleat-worker	TestAForeignMigrationChainIsRefusedBeforeAnyChange	2
 cmd/cleat-worker	TestARealGoFixtureWorkflowValidatesStartInput	1
 cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
 cmd/cleat-worker	TestARealPythonFixtureWorkflowValidatesStartInput	1
@@ -282,6 +283,7 @@ engine/testutil	TestZZCrossProcessSetupOnlyWorker	1
 internal/pgclusterlock	requireDSN	1
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
 migration	TestConcurrentMigratorsAreSerialisedOnMySQLAndSQLServer	1
+migration	chainDialects	1
 migration	mssqlCredentials	2
 migration	mssqlDSNAs	1
 migration	mssqlDSNAsSA	1
