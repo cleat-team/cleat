@@ -422,6 +422,14 @@ func (d *DAG) validate() error {
 }
 
 // TopologicalSort returns tasks grouped by level (Kahn's algorithm).
+//
+// Within each level, tasks are ordered by priority (lower first), then by
+// name: the same order the executor starts ready tasks in. The order does not
+// depend on map iteration, so it is identical between a workflow run and its
+// replay. A workflow that starts one child per task in level order can rely on
+// that: replay hands back the recorded child run IDs in the original order,
+// and a level that came out in a different order would pair each run ID with
+// another task's name without reporting a divergence.
 func (d *DAG) TopologicalSort() ([][]*Task, error) {
 	inDegree := make(map[string]int)
 	children := make(map[string][]string)
@@ -445,6 +453,7 @@ func (d *DAG) TopologicalSort() ([][]*Task, error) {
 			queue = append(queue, d.tasks[name])
 		}
 	}
+	sortTasksByPriority(queue)
 
 	for len(queue) > 0 {
 		levels = append(levels, queue)
@@ -458,6 +467,7 @@ func (d *DAG) TopologicalSort() ([][]*Task, error) {
 				}
 			}
 		}
+		sortTasksByPriority(nextQueue)
 		queue = nextQueue
 	}
 
