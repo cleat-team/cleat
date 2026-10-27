@@ -187,6 +187,15 @@ try:
         durable_send as _import_cleat_send,
     )
     from wit_world.imports.durable_promises import (
+        AwaitOutcome_Rejected as _AwaitOutcomeRejected,
+    )
+    from wit_world.imports.durable_promises import (
+        AwaitOutcome_Resolved as _AwaitOutcomeResolved,
+    )
+    from wit_world.imports.durable_promises import (
+        AwaitOutcome_TimedOut as _AwaitOutcomeTimedOut,
+    )
+    from wit_world.imports.durable_promises import (
         durable_await_promise as _import_cleat_await_promise,
     )
     from wit_world.imports.durable_promises import (
@@ -236,15 +245,6 @@ try:
     )
     from wit_world.imports.durable_version import (
         durable_version as _import_cleat_version,
-    )
-    from wit_world.imports.durable_promises import (
-        AwaitOutcome_Rejected as _AwaitOutcomeRejected,
-    )
-    from wit_world.imports.durable_promises import (
-        AwaitOutcome_Resolved as _AwaitOutcomeResolved,
-    )
-    from wit_world.imports.durable_promises import (
-        AwaitOutcome_TimedOut as _AwaitOutcomeTimedOut,
     )
     from wit_world.imports.outcomes import (
         CallFailure_Suspended as _CallFailureSuspended,

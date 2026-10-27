@@ -26,7 +26,7 @@ def await_outcome(h: HostCalls, promise_id: str, timeout_ms: int) -> str:
         got = h.await_promise_ms(promise_id, timeout_ms)
     except SuspendSentinel:
         raise
-    except Exception as exc:  # noqa: BLE001 - the test asserts on what was raised
+    except Exception as exc:
         return json.dumps({"raised": type(exc).__name__, "message": str(exc)})
     h.call("after", "side_effect", {})
     return json.dumps(
