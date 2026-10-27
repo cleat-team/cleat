@@ -18,7 +18,7 @@ jobs:
   stale:
     name: Stale
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.1m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 0.1m over 30 successful runs (develop push sample only), 2026-10-27; cleat#3479
     steps:
       - uses: actions/stale@v11
         with:

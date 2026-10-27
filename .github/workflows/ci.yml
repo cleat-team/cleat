@@ -152,6 +152,19 @@ permissions:
 # ===========================================================================
 # JOBS
 # ===========================================================================
+#
+# JOB TIMEOUTS (cleat#3479). A job-level `timeout-minutes` is recorded as
+# CANCELLED, not as failure: measured on a probe run (a step-level one is
+# `failure`). Each cap was sized to at least 2.5x the job's observed maximum
+# over recent develop and pull_request runs, and the figure is in the comment
+# beside it, so a job stopped at its cap has almost always hung.
+#
+# BEFORE RE-RUNNING A CANCELLED JOB, compare how long it ran with its cap. About
+# equal means the cap fired: read the log for where the time went (the stalls
+# that motivated these caps were silent steps inside `apt-get update` and a
+# container pull) and re-run that one job. Well below the cap means something
+# else cancelled it. A cap that is too tight is raised from fresh durations,
+# not re-run until it passes.
 jobs:
   # -------------------------------------------------------------------------
   # Lint
@@ -159,7 +172,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 25  # max 8.2m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 25  # max 8.3m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # cleat#2895: every guard step's own failure is captured into this file
     # instead of failing the step (see "Aggregate guard results" at the end
     # of this job). A literal path, not an expression -- actionlint rejects
@@ -1552,7 +1565,7 @@ jobs:
           echo "OK: every guard step ran, and none failed."
   lint-go:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # max 3.2m over 30 successful runs; internal go test -timeout 5m, 2026-10-27; cleat#3479
+    timeout-minutes: 15  # max 3.4m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 5m, 2026-10-27; cleat#3479
     env:
       # CGO on, for the reason given on the Go vet step above: at 0, the eight
       # `//go:build cgo` files in ./engine/ are not part of the build, so
@@ -1732,7 +1745,7 @@ jobs:
   build-documented-examples:
     name: Documented example builds
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 2.4m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 2.5m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # Every `cleat build` an example README documents is run, and must succeed.
     # cleat#1814.
     #
@@ -1780,7 +1793,7 @@ jobs:
     # databases. cleat#2560.
     name: Order lifecycle scenario (${{ matrix.dialect }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 3.2m over 89 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 15  # max 4.2m over 167 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # `fail-fast: false` because the arms are independent, and a red PostgreSQL
     # arm must not cancel the MySQL and SQL Server ones. The whole value of a
     # dialect matrix is knowing WHICH dialect diverged, and a cancelled job
@@ -1874,7 +1887,7 @@ jobs:
     # databases. cleat#2560.
     name: Integration hub scenario (${{ matrix.dialect }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # max 4.8m over 90 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 15  # max 5.2m over 167 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # `fail-fast: false` so a red arm does not cancel the others -- the whole
     # value of a dialect matrix is knowing WHICH dialect diverged.
     #
@@ -1946,7 +1959,7 @@ jobs:
   integration-hub-tenant-sandbox-scenario:
     name: Integration hub tenant sandbox scenario
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 2.7m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 2.7m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling scenario jobs
     # above -- read integration-hub-scenario's comment before removing this
     # line. Not a required context (.github/required-checks.txt), so a
@@ -2028,7 +2041,7 @@ jobs:
   order-lifecycle-dbos-pair-scenario:
     name: Order lifecycle DBOS pair scenario
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 2.4m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 2.4m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the two jobs above --
     # read integration-hub-scenario's comment before removing this line. Not
     # a required context (.github/required-checks.txt), so a merge_group run
@@ -2111,7 +2124,7 @@ jobs:
   integration-hub-dbos-pair-scenario:
     name: Integration hub DBOS pair scenario
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 2.1m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 3.2m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling scenario
     # jobs -- read integration-hub-scenario's comment before removing this
     # line. Not a required context (.github/required-checks.txt), so a
@@ -2198,7 +2211,7 @@ jobs:
   b2b-saas-control-plane-dbos-pair-scenario:
     name: B2B SaaS control plane DBOS pair scenario
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 3.0m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 4.0m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling jobs above --
     # read integration-hub-scenario's comment before removing this line. Not a
     # required context (.github/required-checks.txt), so a merge_group run
@@ -2289,7 +2302,7 @@ jobs:
   ai-agent-platform-scenario:
     name: AI agent platform scenario
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 3.8m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 15  # max 4.3m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the two jobs above -- read
     # integration-hub-scenario's comment before removing this line. The short
     # form: this is not a required context, so a merge_group run would add a
@@ -2353,7 +2366,7 @@ jobs:
   b2b-saas-control-plane-scenario:
     name: B2B SaaS control plane scenario
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 3.5m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 3.6m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling scenario jobs
     # above -- read integration-hub-scenario's comment before removing this
     # line.
@@ -2396,7 +2409,7 @@ jobs:
   vulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.8m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 1.0m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 
@@ -2901,7 +2914,7 @@ jobs:
   test-python:
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.6m over 120 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 0.6m over 228 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # No continue-on-error. With it, this job could not fail the build, so the
     # Python SDK's own unit tests were advisory across all three versions -- and
     # they are the only thing that tests the SDK's Python-side behaviour at all.
@@ -2965,7 +2978,7 @@ jobs:
   test-java:
     name: Java Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 1.5m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 1.9m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # No continue-on-error. It was here, so this job could not fail the build,
     # and nobody had reason to look at it: measured 2026-08-06 on a clean
     # checkout, `gradle test` in crates/cleat-java runs 280 tests with 0
@@ -3002,7 +3015,7 @@ jobs:
     # PATH without it, which is why this cannot be reproduced by running npm
     # test alone in a checkout.
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.3m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 0.4m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 
@@ -3062,7 +3075,7 @@ jobs:
   test-web:
     name: Web Dashboard
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.5m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 0.7m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 
@@ -3141,7 +3154,7 @@ jobs:
   test-rust:
     name: Test Rust
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 1.1m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 1.1m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 
@@ -3178,7 +3191,7 @@ jobs:
   test-assemblyscript-wasm:
     name: AssemblyScript WASM Build
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.4m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 0.4m over 58 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # continue-on-error removed 2026-08-07. It was protecting nothing: measured on
     # develop run 31193028xxx, every one of this job's steps -- Install SDK
     # dependencies, Install example dependencies, Build example WASM, Verify WASM output
@@ -3242,7 +3255,7 @@ jobs:
   fuzz:
     name: Fuzz Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 2.7m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 3.5m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 
@@ -3389,7 +3402,7 @@ jobs:
     # step below needs to run on the same base the real release job pins to,
     # not whatever ubuntu-latest happens to mean this week.
     runs-on: ubuntu-26.04
-    timeout-minutes: 70  # max 26.4m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 70  # max 26.4m over 53 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 
@@ -3629,7 +3642,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 2.6m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 3.3m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 
@@ -3862,7 +3875,7 @@ jobs:
   cluster-tests:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 40  # max 14.7m over 29 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 40  # max 15.3m over 49 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     env:
       # A database of the tests' own -- and, as of cleat#2012, a SERVER of its
       # own too.

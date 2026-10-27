@@ -61,7 +61,7 @@ jobs:
   tla:
     name: TLA+ Model Checking
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 3.0m over 30 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 3.2m over 60 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
 

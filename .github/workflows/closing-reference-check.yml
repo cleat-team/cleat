@@ -115,7 +115,7 @@ jobs:
     # Actions' own per-run check-run, left informational on purpose.
     name: Closing References Runner
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.3m over 28 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 0.3m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
 
     steps:
       # cleat#2696. One target SHA, computed once, for both event shapes:
@@ -253,7 +253,7 @@ jobs:
   closing-reference-declared:
     name: Closing Reference Declared
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # max 0.3m over 19 successful runs, 2026-10-27; cleat#3479
+    timeout-minutes: 10  # max 0.3m over 38 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
 
     # cleat#1962. ADVISORY ONLY -- deliberately NOT in .github/required-checks.txt.
     # A separate job (see the header comment above) so this check-run cannot ride

@@ -121,7 +121,7 @@ jobs:
   test-layer1:
     name: Layer 1 — SDK (cleattest)
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # max 0.7m over 30 successful runs; internal go test -timeout 2m, 2026-10-27; cleat#3479
+    timeout-minutes: 15  # max 1.1m over 58 successful runs (develop push + pull_request samples); internal go test -timeout 2m, 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -173,7 +173,7 @@ jobs:
   test-layer2:
     name: Layer 2 — WASM Integration
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # max 2.8m over 30 successful runs; internal go test -timeout 10m, 2026-10-27; cleat#3479
+    timeout-minutes: 20  # max 3.3m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 10m, 2026-10-27; cleat#3479
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -386,7 +386,7 @@ jobs:
   test-multi-db:
     name: Layer 3 — Multi-DB
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # max 2.4m over 30 successful runs; internal go test -timeout 10m, 2026-10-27; cleat#3479
+    timeout-minutes: 20  # max 2.4m over 58 successful runs (develop push + pull_request samples); internal go test -timeout 10m, 2026-10-27; cleat#3479
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
@@ -515,7 +515,7 @@ jobs:
   test-blobstore-s3:
     name: Blobstore S3 Round-Trip
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # max 1.1m over 30 successful runs; internal go test -timeout 2m, 2026-10-27; cleat#3479
+    timeout-minutes: 15  # max 1.7m over 58 successful runs (develop push + pull_request samples); internal go test -timeout 2m, 2026-10-27; cleat#3479
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
