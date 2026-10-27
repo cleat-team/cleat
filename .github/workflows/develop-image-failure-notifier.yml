@@ -22,8 +22,11 @@
 # develop or release/**, whose conclusion is `failure` or `timed_out` (the
 # publish job has a 60-minute limit, and a hung arm64 build leaves the sha
 # without an image exactly as a red one does). It opens, or comments on, one
-# tracking issue per branch, naming the commit, the run, the tag that is now
-# missing, the jobs and steps that failed, and the recovery.
+# tracking issue per branch, naming the commit, the run, the jobs and steps that
+# failed, what that means for the develop-/rc- sha tags (both forms) and the
+# recovery. The tag statement follows the failed step: a failure in the step
+# that moves `:develop` happens after the sha tags are pushed, and is reported as
+# such rather than as a missing image.
 #
 # WHAT IT DELIBERATELY DOES NOT REPORT, and each is a decision:
 #   * a workflow_dispatch run. Someone is watching a dispatch: it is the repair
@@ -118,9 +121,13 @@ jobs:
 
             const sha = run.head_sha;
             // The tag prefix is decided by the branch alone, as it is in
-            // develop-image.yml's "Compute cleat-worker image tags" step.
+            // develop-image.yml's "Compute cleat-worker image tags" step. Both
+            // sha tags are named because both are published, and a consumer
+            // may pin either form (clew pins the full one).
             const prefix = branch === 'develop' ? 'develop' : 'rc';
-            const missingTag = `ghcr.io/cleat-team/cleat-worker:${prefix}-${sha.slice(0, 9)}`;
+            const image = 'ghcr.io/cleat-team/cleat-worker';
+            const shortTag = `${image}:${prefix}-${sha.slice(0, 9)}`;
+            const fullTag = `${image}:${prefix}-${sha}`;
 
             // run.html_url is identical across attempts of one run id
             // (cleat#2906), so the dedupe key folds the attempt in. Two
@@ -133,12 +140,30 @@ jobs:
               run_id: run.id,
               per_page: 100,
             });
+            const failedStepNames = [];
             const failedJobs = jobsResp.data.jobs
               .filter(j => j.conclusion === 'failure' || j.conclusion === 'timed_out')
               .map(j => {
                 const step = (j.steps || []).find(s => s.conclusion === 'failure' || s.conclusion === 'timed_out');
+                if (step) failedStepNames.push(step.name);
                 return step ? `${j.name} (step: ${step.name})` : j.name;
               });
+
+            // What the sha tags' state is depends on WHICH step failed, and
+            // saying "not published" about tags that were pushed would send a
+            // consumer looking for the wrong problem. develop-image.yml pushes
+            // the sha tags in "Build and push cleat-worker image", then moves
+            // `:develop` in a later step; a failure there leaves the sha tags
+            // in place and only the moving tag behind.
+            const onlyMovingTagFailed = failedStepNames.length > 0 &&
+              failedStepNames.every(n => n.startsWith('Move the develop tag'));
+            const tagState = onlyMovingTagFailed
+              ? `The failure was in the step that moves \`${image}:develop\`, which runs AFTER the sha ` +
+                `tags are pushed: \`${shortTag}\` and \`${fullTag}\` should exist, and only the moving ` +
+                '`develop` tag was left where it was. Pins by sha are unaffected.'
+              : `\`${shortTag}\` and \`${fullTag}\` should be treated as not published: the failure ` +
+                'was before or during the push, so a consumer pinning either will fail to pull it. ' +
+                `Check with \`docker buildx imagetools inspect ${fullTag}\`.`;
 
             const title = `[develop-image] image publish failed on ${branch}`;
             const body = [
@@ -148,7 +173,7 @@ jobs:
               '',
               `Failed jobs: ${failedJobs.join(', ') || '(none reported failure -- check the run directly)'}`,
               '',
-              `\`${missingTag}\` was not published, so a consumer pinning that tag will fail to pull it.`,
+              tagState,
               '',
               `Recovery: \`gh workflow run develop-image.yml --ref ${branch}\` publishes the CURRENT head ` +
                 'of that branch, which may be a later commit than the one above; if this commit is not ' +
