@@ -16,7 +16,7 @@ import (
 // error: steps 0-2 gone and nothing covering them, which a later replay cannot
 // recover from.
 //
-// Measured before the fix (PostgreSQL, 400 ms holder, events at steps 0-4,
+// Measured before the fix (PostgreSQL, holder transaction, events at steps 0-4,
 // compactionStep=3, keepStep=3):
 //
 //	control (holder changes nothing)   err=nil  events left 2  compaction_step 3
@@ -71,9 +71,38 @@ func compactionStepOf(t *testing.T, db *sql.DB, id string) sql.NullInt64 {
 	return step
 }
 
+// waitUntilBlockedBy returns once another backend is waiting on a lock the given
+// transaction holds, polling pg_blocking_pids rather than sleeping: the
+// goroutine that starts CompactHistory has no guaranteed progress in any fixed
+// interval, and a holder released before it reached its fence turns the reclaim
+// case into a call that simply sees the new generation (a red that means
+// nothing) and the lock-order case into one that cannot deadlock (a green that
+// means nothing).
+func waitUntilBlockedBy(t *testing.T, db *sql.DB, holder *sql.Tx) {
+	t.Helper()
+	ctx := context.Background()
+	var pid int
+	if err := holder.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatalf("holder pid: %v", err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, pid).Scan(&n); err != nil {
+			t.Fatalf("probe blocked backends: %v", err)
+		}
+		if n > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no backend became blocked on the holder within 20s: CompactHistory never waited on the row the holder locked")
+}
+
 // compactWhileHolderRuns runs CompactHistory(compactionStep=3, keepStep=3) with
-// a holder transaction that takes the lease row's lock first, lets the call
-// block on it for 400 ms, then commits (a reclaim) or rolls back (a bystander).
+// a holder transaction that takes the lease row's lock first, waits until the
+// call is blocked on it, then commits (a reclaim) or rolls back (a bystander).
 func compactWhileHolderRuns(t *testing.T, store *PostgresStore, db *sql.DB, id string, reclaim bool) error {
 	t.Helper()
 	ctx := context.Background()
@@ -94,10 +123,11 @@ func compactWhileHolderRuns(t *testing.T, store *PostgresStore, db *sql.DB, id s
 	go func() {
 		done <- store.CompactHistory(ctx, id, []byte(`{"version":1,"compacted_step":3,"events":[]}`), 3, 3)
 	}()
+	waitUntilBlockedBy(t, db, holder)
 	select {
 	case err := <-done:
 		t.Fatalf("CompactHistory returned (%v) while another transaction held the lease row -- it no longer waits on the lock that serializes it with a reclaim", err)
-	case <-time.After(400 * time.Millisecond):
+	default:
 	}
 	release := holder.Rollback
 	if reclaim {
@@ -179,10 +209,11 @@ func TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrder(t *testing.T) {
 	go func() {
 		compactDone <- store.CompactHistory(ctx, id, []byte(`{"version":1,"compacted_step":3,"events":[]}`), 3, 3)
 	}()
+	waitUntilBlockedBy(t, db, finalize)
 	select {
 	case err := <-compactDone:
 		t.Fatalf("CompactHistory returned (%v) while the lease row was held", err)
-	case <-time.After(400 * time.Millisecond):
+	default:
 	}
 
 	// finalize's second statement: delete the run's events. Under the old order

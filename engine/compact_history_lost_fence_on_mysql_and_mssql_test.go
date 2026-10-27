@@ -17,7 +17,7 @@ import (
 // the UPDATE matched. These run the same scenario as the PostgreSQL pin in
 // compact_history_with_a_lost_fence_keeps_the_events_test.go: events at steps
 // 0-4, compactionStep=3, keepStep=3, and a holder transaction that bumps the
-// generation and commits 400 ms into the call.
+// generation and commits once the call is blocked on it.
 //
 // The generation lives on workflow_instances on these two dialects (there is no
 // lease table), so the holder bumps that row.
@@ -30,6 +30,28 @@ type compactOnDialect struct {
 	begin func(ctx context.Context) (*sql.Tx, error)
 	// One id argument each. The placeholder syntax differs per dialect.
 	bump, lock, count, step string
+	// waitBlocked returns once another session is waiting on a lock holder
+	// holds. It polls the server rather than sleeping, for the reason
+	// waitUntilBlockedBy gives.
+	waitBlocked func(t *testing.T, holder *sql.Tx)
+}
+
+// pollUntil retries probe every 5 ms for up to 20 s and fails if it never
+// reports true.
+func pollUntil(t *testing.T, what string, probe func() (bool, error)) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		ok, err := probe()
+		if err != nil {
+			t.Fatalf("%s: probe: %v", what, err)
+		}
+		if ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s: nothing became blocked on the holder within 20s: CompactHistory never waited on the row the holder locked", what)
 }
 
 // compactDialects lists the arms by NAME so a subtest has one before it opens
@@ -55,6 +77,18 @@ var compactDialects = []struct {
 			lock:  `SELECT id FROM workflow_instances WHERE id = ? FOR UPDATE`,
 			count: `SELECT COUNT(*) FROM event_history WHERE workflow_id = ?`,
 			step:  `SELECT compaction_step FROM workflow_instances WHERE id = ?`,
+			// data_lock_waits has a row for every lock request that is waiting.
+			// information_schema.innodb_trx is NOT used: measured here, it listed
+			// only the holder while the compactor's FOR UPDATE sat in the
+			// processlist in state "statistics", so it never reported the wait.
+			// Not specific to the holder; the test database has no other writers.
+			waitBlocked: func(t *testing.T, _ *sql.Tx) {
+				pollUntil(t, "mysql", func() (bool, error) {
+					var n int
+					err := ms.db.QueryRow(`SELECT COUNT(*) FROM performance_schema.data_lock_waits`).Scan(&n)
+					return n > 0, err
+				})
+			},
 		}, teardown
 	}},
 	{"mssql_rcsi_on", true, func(t *testing.T) (compactOnDialect, func()) { return openMSSQLCompactArm(t, true) }},
@@ -90,6 +124,17 @@ func openMSSQLCompactArm(t *testing.T, rcsiOn bool) (compactOnDialect, func()) {
 		lock:  `SELECT id FROM workflow_instances WITH (UPDLOCK, ROWLOCK) WHERE id = @p1`,
 		count: `SELECT COUNT(*) FROM event_history WHERE workflow_id = @p1`,
 		step:  `SELECT compaction_step FROM workflow_instances WHERE id = @p1`,
+		waitBlocked: func(t *testing.T, holder *sql.Tx) {
+			var spid int
+			if err := holder.QueryRow(`SELECT @@SPID`).Scan(&spid); err != nil {
+				t.Fatalf("%s: holder session id: %v", name, err)
+			}
+			pollUntil(t, name, func() (bool, error) {
+				var n int
+				err := db.QueryRow(`SELECT COUNT(*) FROM sys.dm_exec_requests WHERE blocking_session_id = @p1`, spid).Scan(&n)
+				return n > 0, err
+			})
+		},
 	}, func() { _ = closer.Close() }
 }
 
@@ -126,7 +171,7 @@ func (d compactOnDialect) seed(t *testing.T, name string) string {
 }
 
 // compact runs CompactHistory(3, 3) with a holder that takes the generation row
-// first, lets the call block on it for 400 ms, then commits a bump (reclaim) or
+// first, waits until the call is blocked on it, then commits a bump (reclaim) or
 // rolls back (a bystander).
 func (d compactOnDialect) compact(t *testing.T, id string, reclaim bool) error {
 	t.Helper()
@@ -147,10 +192,11 @@ func (d compactOnDialect) compact(t *testing.T, id string, reclaim bool) error {
 	go func() {
 		done <- d.store.CompactHistory(ctx, id, []byte(`{"version":1,"compacted_step":3,"events":[]}`), 3, 3)
 	}()
+	d.waitBlocked(t, holder)
 	select {
 	case err := <-done:
 		t.Fatalf("%s: CompactHistory returned (%v) while the instance row was held -- it no longer waits on the row a reclaim updates", d.name, err)
-	case <-time.After(400 * time.Millisecond):
+	default:
 	}
 	release := holder.Rollback
 	if reclaim {
@@ -256,10 +302,11 @@ func TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrderOnMySQLAndMSSQL(t 
 			go func() {
 				compactDone <- d.store.CompactHistory(ctx, id, []byte(`{"version":1,"compacted_step":3,"events":[]}`), 3, 3)
 			}()
+			d.waitBlocked(t, finalize)
 			select {
 			case err := <-compactDone:
 				t.Fatalf("%s: CompactHistory returned (%v) while the instance row was held", d.name, err)
-			case <-time.After(400 * time.Millisecond):
+			default:
 			}
 
 			deleteEvents := `DELETE FROM event_history WHERE workflow_id = ?`
