@@ -87,13 +87,12 @@ docs/reference/workflow-lifecycle.md	038_defer_phase_marker.sql
 docs/reference/workflow-lifecycle.md	migration 101
 docs/reference/workflow-lifecycle.md	migrations/postgres/038
 docs/reference/workflow-lifecycle.md	migrations/postgres/040
-engine/a_child_workflow_creates_its_lease_and_payload_rows_test.go	migration 016
 engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go	migration 103
 engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go	migrations/mssql/077
 engine/a_dropped_tenants_rows_all_go_with_it_test.go	migration 056
 engine/a_dropped_tenants_rows_all_go_with_it_test.go	migration 097
+engine/a_finalize_updates_the_lease_and_payload_rows_test.go	migration 007
 engine/a_finalize_updates_the_lease_and_payload_rows_test.go	migration 017
-engine/a_migration_018_columns_test.go	migration 018
 engine/a_new_run_creates_its_lease_and_payload_rows_test.go	migration 018
 engine/a_plugin_callers_json_survives_the_column_test.go	migrations/mysql/070
 engine/a_plugin_statement_is_scoped_to_the_workflows_tenant_test.go	migration 077
@@ -129,9 +128,7 @@ engine/db_regression_test.go	migration 018
 engine/def_lookup_tenant_property_test.go	migration 035
 engine/deployment_secrets.go	migration 103
 engine/drop_tenant_test.go	032_drop_tenant_deletes_tenant_data.sql
-engine/drop_tenant_test.go	migration 016
 engine/fence_lost_integration_test.go	004_fix_finalize_workflow_status_fence.sql
-engine/fence_lost_unit_test.go	migration 018
 engine/finalize_retries_a_mysql_deadlock_on_event_count_test.go	071_the_finalize_procedure_stops_casting_the_result.sql
 engine/flush_dialect_test.go	migration 103
 engine/flush_rls_test.go	005_app_role.sql
@@ -176,6 +173,7 @@ engine/rls_gap_concurrency_and_update_requests_test.go	031_rls_gap_concurrency_a
 engine/routine_definition_drift_test.go	004_fix_finalize_workflow_status_fence.sql
 engine/routine_definition_drift_test.go	migrations/mssql/004
 engine/routine_definition_drift_test.go	migrations/mysql/004
+engine/routine_definition_drift_test.go	migrations/postgres/004
 engine/schedule_tenant_test.go	005_app_role.sql
 engine/schedules_retire_through_disabled_at_test.go	migration 089
 engine/schema_doc_matches_the_database_test.go	migration 040
@@ -215,7 +213,6 @@ engine/testutil/mysql_schema.go	migration 030
 engine/testutil/plugin_backend.go	migration 103
 engine/testutil/schema.go	migration 073
 engine/testutil/schema_source_guard_test.go	migration 030
-engine/testutil/workflow_seed.go	migrations/postgres/016
 engine/the_baseline_creates_the_cluster_scoped_objects_test.go	migration 077
 engine/the_documented_tenant_coverage_is_measured_test.go	008_operator_api_keys.sql
 engine/the_in_flight_query_runs_as_the_bypass_role_test.go	migration 073
@@ -256,7 +253,6 @@ migrations/mssql/optional/cross_tenant_claim.sql	migration 103
 migrations/mysql/002_defaults.sql	migrations/mysql/078
 migrations/postgres/001_schema.sql	migration 066
 migrations/postgres/002_defaults.sql	migration 064
-migrations/postgres/003_procedures.sql	migration 020
 plugin/crosstenant.go	migrations/postgres/063
 plugin/every_plugin_tenant_table_is_declared_tenant_scoped_test.go	migration 056
 plugin/migration.go	migration 012

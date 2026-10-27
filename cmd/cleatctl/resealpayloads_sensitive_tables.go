@@ -99,22 +99,13 @@ type tableSpec struct {
 //
 // and confirm against engine/sensitive_column_encryption_live_test.go's own
 // three test names, which exercise exactly these columns end to end.
+//
+// workflow_instances is not in the list: since cleat#3245 B5 it holds no
+// sensitive column on PostgreSQL, and this command is PostgreSQL only.
+// workflow_leases is not in it either, and it carries cancellation_reason
+// (cleat#3360 left the engine writing it only there); re-sealing that column is
+// cleat#3344's own gap and not this list's to close.
 var sensitiveTableSpecs = []tableSpec{
-	{
-		// cancellation_reason was dropped from workflow_instances by
-		// cleat#3360 -- CheckCancellation has read workflow_leases
-		// exclusively since piece D, and the one remaining writer
-		// (RequestCancellation) wrote only workflow_leases from the same
-		// change onward. workflow_leases is not in this list at all yet
-		// (cleat#3344's own gap); re-sealing cancellation_reason there is
-		// that issue's fix, not this one's.
-		name:   "workflow_instances",
-		pkCols: []string{"id"},
-		cols: []string{
-			"input", "result", "error_msg", "error_code", "error_op",
-			"query_state",
-		},
-	},
 	{
 		name:   "workflow_signals",
 		pkCols: []string{"id"},

@@ -44,17 +44,6 @@ import (
 // than a float64 holds -- 0.12345678901234567 comes back as
 // 0.12345678901234568 -- so integers are not a special case, they are the half
 // somebody happened to look at.
-// payloadColumnsTable names the table a dialect keeps workflow payload
-// columns in: workflow_payloads on PostgreSQL since cleat#3245 B1b,
-// workflow_instances on MySQL and SQL Server, which have no split. dialect is
-// a StoreBackend name.
-func payloadColumnsTable(dialect string) string {
-	if dialect == "postgres" {
-		return "workflow_payloads"
-	}
-	return "workflow_instances"
-}
-
 func TestAWorkflowResultSurvivesTheColumnOrDoesNot(t *testing.T) {
 	const tenant = "c1022000-1022-4022-8022-c10220001022"
 
@@ -290,4 +279,15 @@ func TestAFinalizedResultSurvivesTheColumn(t *testing.T) {
 			}
 		})
 	}
+}
+
+// payloadColumnsTable names the table a dialect keeps workflow payload
+// columns in: workflow_payloads on PostgreSQL since cleat#3245 B1b,
+// workflow_instances on MySQL and SQL Server, which have no split. dialect is
+// a StoreBackend name.
+func payloadColumnsTable(dialect string) string {
+	if dialect == "postgres" {
+		return "workflow_payloads"
+	}
+	return "workflow_instances"
 }
