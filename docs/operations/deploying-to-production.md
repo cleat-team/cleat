@@ -140,11 +140,16 @@ DETAIL:  Only roles with the BYPASSRLS attribute may create roles with the
          BYPASSRLS attribute.
 ```
 
-So `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` cannot
-create `cleat_dispatcher`. They now **say so and continue** rather than aborting
-the run: the functions are created owned by the migrating role, and the worker's
-startup check reports the claim as unavailable, naming the missing attribute
-rather than telling you to apply a file you cannot apply.
+So the baseline (`migrations/postgres/001_schema.sql`) cannot create
+`cleat_dispatcher`. It **says so with a NOTICE and continues** rather than
+aborting the run, and the functions that role would own keep the migrating role
+as their owner. The worker does not depend on that role to claim work or read
+due schedules: rotation needs no exemption, so `--claim-across-tenants` works
+without it, and the worker's startup log says
+`no database grant is required`. What the missing role does take away is only
+the cross-tenant visibility of `admin.in_flight_workflow_ids` (the plugin
+sweep), which still uses it. The NOTICE's advice to use `--claim-strategy=rotate`
+is out of date: that flag was removed and rotation is the only mechanism.
 
 | capability | on managed PostgreSQL |
 |---|---|

@@ -219,7 +219,9 @@ none** — with a known-positive, since a check for an absent string passes on a
 > The trap to know about, because it has caught two sessions: `migrations/mysql/077_…:20-22`
 > contains the word `DEFINER` in a comment reading *"There is no function to rebuild:
 > `admin.get_due_schedules()` is a PostgreSQL SECURITY DEFINER function serving the cross-tenant
-> read, and MySQL's cross-tenant path is a plain unscoped SELECT"*. It is an explicit denial. A
+> read, and MySQL's cross-tenant path is a plain unscoped SELECT"*. (Both halves of that sentence
+> are historical: the worker no longer calls that function, and MySQL has no cross-tenant path at
+> all -- its store cannot enumerate tenants, so a MySQL worker claims its own tenant only.) It is an explicit denial. A
 > `grep -c DEFINER` counts it and a reader may take the count as a finding — which is the
 > "an explicit denial, read as a confirmation" trap, in the one place the rule is easiest to apply
 > and easiest to forget.

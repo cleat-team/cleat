@@ -2011,11 +2011,14 @@ type Worker struct {
 	// poll the same set or it would see a different slice of the work.
 	taskQueues []string
 
-	// claimAcrossTenants makes the dispatch loop claim work for every tenant in
-	// one query instead of only its own. Off by default: it needs a mechanism
-	// the deployment has to grant (a BYPASSRLS owner on PostgreSQL, cleat_admin
-	// membership on SQL Server), and turning it on without that should be a
-	// deliberate act rather than an upgrade side effect.
+	// claimAcrossTenants makes the dispatch loop and the schedule loop serve
+	// every tenant rather than only the worker's own, by rotating through the
+	// tenant list and working under each tenant's own store (claimRotating,
+	// dueSchedulesByTenant). On by default (--claim-across-tenants) and it needs
+	// no database grant. It takes effect only where the worker can rotate: a
+	// store factory and a store that is an engine.TenantLister, which is
+	// PostgreSQL and SQL Server but not MySQL, and not a sharded worker.
+	// Otherwise each loop warns once and serves the worker's own tenant.
 	claimAcrossTenants bool
 
 	// claimTenantsPerTick bounds how many tenants one rotating tick polls.
@@ -5994,8 +5997,9 @@ func (w *Worker) scheduleLoop() {
 
 				// Everything below this line runs against the schedule's OWN
 				// tenant, not the worker's. That is the whole bargain of the
-				// cross-tenant read above: one widened query finds the due set,
-				// and the firing itself -- the definition lookup, the overlap
+				// cross-tenant read above: the due set is read tenant by tenant,
+				// each read under that tenant's own RLS context, and the firing
+				// itself -- the definition lookup, the overlap
 				// check, the run, the compare-and-swap -- is scoped again
 				// immediately. Nothing downstream of here sees another tenant.
 				tenantID := sch.TenantID
@@ -8026,29 +8030,30 @@ func (w *Worker) rotatingClaimAvailability() error {
 
 // dueSchedules reads the schedules that are ready to fire.
 //
-// With claimAcrossTenants set it reads for every tenant in one query rather
-// than polling each separately -- the same bargain claimGeneral makes, and the
-// half that makes a non-default tenant's cron actually fire. 023 lets the
-// dispatch loop CLAIM another tenant's workflow; without this, nothing ever
+// With claimAcrossTenants set it reads every tenant's due schedules, one tenant
+// at a time through a store scoped to that tenant (dueSchedulesByTenant) -- the
+// half that makes a non-default tenant's cron actually fire. The claim lets the
+// dispatch loop pick up another tenant's workflow; without this, nothing ever
 // enqueues one for it to claim, because the loop that would fire the schedule
 // cannot see the schedule.
 //
-// The widened view covers this read and nothing after it. scheduleLoop resolves
+// Each read happens under that tenant's own RLS context, so no tenant's
+// schedules are ever visible to another's, and scheduleLoop resolves
 // storeForTenant(sch.TenantID) before its first store call and runs the whole
 // firing through that.
 //
-// The provisioning gap is answered the same way as the claim's, and separately
-// from it: 024 is a different migration from 023, so a deployment can have one
-// and not the other. A store that cannot read across tenants warns once and
-// falls back to its own tenant's schedules -- the pre-existing behaviour --
-// rather than failing the loop, because a missing GRANT should narrow the
-// worker rather than stop it firing anything at all.
+// A worker that cannot rotate -- no store factory, or a store that cannot
+// enumerate tenants (MySQL, a sharded worker) -- warns once and falls back to
+// its own tenant's schedules, the pre-existing behaviour, rather than failing
+// the loop. This used to be a provisioning question (two migrations, two
+// grants, either of which could be missing); it is now a property of the
+// worker, so the answer is the same on every deployment of that shape.
 func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 	if w.claimAcrossTenants {
-		// The per-tenant read is tried FIRST, and is the default, for the same
-		// reason the rotating claim is: it needs no database-side grant, so a
-		// deployment that never applied 024 -- or cannot, because BYPASSRLS is
-		// ungrantable on managed PostgreSQL -- still fires every tenant's cron.
+		// The per-tenant read is tried FIRST, and is the only mechanism, for
+		// the same reason the rotating claim is: it needs no database-side
+		// grant, so managed PostgreSQL -- where BYPASSRLS is ungrantable --
+		// fires every tenant's cron like any other.
 		//
 		schedules, err := w.dueSchedulesByTenant()
 		if !errors.Is(err, errRotatingClaimUnavailable) {
@@ -8066,12 +8071,12 @@ func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 
 // claimGeneral claims the next batch of runnable work.
 //
-// With claimAcrossTenants set it claims for every tenant in one query rather
-// than polling each separately, which is the whole reason the cross-tenant path
-// exists: one round trip per tick regardless of how many tenants there are.
-// Each claimed workflow then executes against a store scoped to its OWN tenant
-// -- see storeForTenant -- so the widened view lasts exactly as long as the
-// claim.
+// With claimAcrossTenants set it claims across tenants by rotation
+// (claimRotating): one enumeration of the tenant list per tick, then up to
+// --claim-tenants-per-tick per-tenant claims, each through a store scoped to
+// that tenant. Each claimed workflow then executes against a store scoped to
+// its OWN tenant -- see storeForTenant -- so no claim or execution ever runs in
+// a tenant's context but its own.
 //
 // A worker that cannot rotate -- no store factory, or a store that cannot
 // enumerate tenants -- falls back rather than failing (errRotatingClaimUnavailable,
@@ -8095,9 +8100,9 @@ func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
 		// The rotating claim is tried FIRST, and is the default, because it
 		// needs no database-side grant: it enumerates tenants from
 		// admin.tenants -- which carries no RLS -- and then claims within each
-		// through that tenant's own store. A deployment that never applied 023
-		// still gets cross-tenant dispatch, and one that did gets a fair share
-		// per tenant instead of whoever has the oldest backlog.
+		// through that tenant's own store. Every deployment gets cross-tenant
+		// dispatch and a fair share per tenant, instead of whoever has the
+		// oldest backlog.
 		//
 		wfs, err := w.claimRotating(limit)
 		if !errors.Is(err, errRotatingClaimUnavailable) {
