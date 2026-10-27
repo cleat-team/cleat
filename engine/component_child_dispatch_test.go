@@ -46,8 +46,10 @@ func dispatchChildCall(t *testing.T, b *wasmtimeBackend, method int, arg string)
 }
 
 const (
-	dispatchPollChildMethod     = 26
-	dispatchAwaitAnyChildMethod = 27
+	dispatchAwaitChildMethod       = 17
+	dispatchAwaitAllChildrenMethod = 18
+	dispatchPollChildMethod        = 26
+	dispatchAwaitAnyChildMethod    = 27
 )
 
 func TestDispatchPollChildReturnsTheHostsDocument(t *testing.T) {
@@ -119,21 +121,58 @@ func TestDispatchAwaitAnyChildReturnsTheWinner(t *testing.T) {
 	}
 }
 
-// The pending case is the one packAwaitChildResultSuspend (1<<62) answers.
-// extractStringFromSimplePacked reads that word's length field as 1<<30,
-// clamps it to the buffer, and returns 64 KiB of zero bytes -- which is not
-// what a guest should be handed as a winner's document.
-func TestDispatchAwaitAnyChildPendingIsEmptyAndSuspends(t *testing.T) {
-	pending := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
-		return ChildOutcome{}, nil
-	}}
-	b, s := childDispatchSession(pending)
-	got := dispatchChildCall(t, b, dispatchAwaitAnyChildMethod, `["run-a"]`)
-	if got != "" {
-		t.Errorf("a pending await_any_child answered %d bytes (%q...), want the empty string", len(got), got[:min(len(got), 16)])
+// The pending case is the one packAwaitChildResultSuspend (1<<62) answers, and
+// all three child awaits answer it. extractStringFromSimplePacked reads that
+// word's length field as 1<<30, clamps it to the buffer, and returns 64 KiB of
+// zero bytes, which the guest then ran on with (cleat#3429). Outside a defer
+// the dispatcher now stops the guest by trapping, so the call returns an error
+// and writes no string; inside one it answers "" so the guest can finish its
+// cleanup.
+func TestPendingChildAwaitsStopTheGuestOrderlyInsideAnyDefer(t *testing.T) {
+	pending := func() *mockChildStore {
+		return &mockChildStore{getChildResultFn: func(context.Context, string) (ChildOutcome, error) {
+			return ChildOutcome{}, nil
+		}}
 	}
-	if s.suspendErr == nil {
-		t.Error("a pending await_any_child did not suspend the run; an empty answer alone would read as a result")
+	calls := []struct {
+		name   string
+		method int
+		arg    string
+	}{
+		{"await_child", dispatchAwaitChildMethod, "run-a"},
+		{"await_all_children", dispatchAwaitAllChildrenMethod, `["run-a"]`},
+		{"await_any_child", dispatchAwaitAnyChildMethod, `["run-a"]`},
+	}
+	for _, c := range calls {
+		t.Run(c.name+"/ordinary segment traps", func(t *testing.T) {
+			b, s := childDispatchSession(pending())
+			strPtr, _, free := cgotestMakeStrArgs(c.arg)
+			defer free()
+			err := b.cgotestDispatchStr(c.method, strPtr, 1, cgotestAllocResult())
+			if err == nil {
+				t.Fatalf("a pending %s returned normally; the guest would run on past a suspend", c.name)
+			}
+			if s.suspendErr == nil {
+				t.Errorf("a pending %s did not suspend the run", c.name)
+			}
+		})
+		t.Run(c.name+"/host defer segment answers empty", func(t *testing.T) {
+			b, s := childDispatchSession(pending())
+			b.deferPhase = true
+			if got := dispatchChildCall(t, b, c.method, c.arg); got != "" {
+				t.Errorf("answered %d bytes, want the empty string so the cleanup can finish", len(got))
+			}
+			if s.suspendErr == nil {
+				t.Errorf("a pending %s did not suspend the run", c.name)
+			}
+		})
+		t.Run(c.name+"/guests own defer drain answers empty", func(t *testing.T) {
+			b, s := childDispatchSession(pending())
+			s.SetDeferPhase(context.Background(), true)
+			if got := dispatchChildCall(t, b, c.method, c.arg); got != "" {
+				t.Errorf("answered %d bytes, want the empty string: a trap would end every defer queued after this one", len(got))
+			}
+		})
 	}
 }
 
