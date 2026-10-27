@@ -509,11 +509,44 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 	return packSimpleResult(writtenEC, written)
 }
 
+// sameRunIDSet reports whether two recorded AwaitAnyChild requests name the
+// same set of child run IDs, whatever order they were written in. A request
+// that does not parse is compared as text, so a malformed record never
+// matches a well-formed one.
+func sameRunIDSet(a, b string) bool {
+	var ia, ib []string
+	if json.Unmarshal([]byte(a), &ia) != nil || json.Unmarshal([]byte(b), &ib) != nil {
+		return a == b
+	}
+	if len(ia) != len(ib) {
+		return false
+	}
+	sort.Strings(ia)
+	sort.Strings(ib)
+	for i := range ia {
+		if ia[i] != ib[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
 	// resumedFromSuspend is set when this call replayed one or more empty
 	// (suspend) records and is now re-checking fresh. See the comment where the
 	// suspend would be recorded below.
 	resumedFromSuspend := false
+
+	// A segment that has already decided to suspend does not start another
+	// await. The guest keeps running after a suspend sentinel -- AssemblyScript
+	// gets a null back and Rust an Err it may ignore -- so a second, different
+	// AwaitAnyChild can arrive in the same segment, and without this it would
+	// record a second empty suspend row beside the first: [X empty, Y empty].
+	// Same guard, same reason as AwaitSignal (signaller.go).
+	if s.suspendErr != nil && !s.inDeferDrain {
+		return packAwaitChildResultSuspend()
+	}
+
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -532,17 +565,20 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				// non-deterministic fall-through to fresh where multiple children
 				// might show as completed on replay.
 				//
-				// ALL of the directly following EMPTY await_any_child records are
-				// skipped first, not only the first one (cleat#3391). Adjacent
-				// empty records can only be the same call polled again: a guest
-				// cannot reach a second AwaitAnyChild without a result from the
-				// first. Histories written before this fix hold two of them for a
-				// child that took more than one wake, and peeking at just the
-				// next record found the second empty one, concluded there was no
-				// cached result, and went fresh again on every wake.
+				// Every directly following EMPTY record of THIS call is skipped
+				// first, not only the first one (cleat#3391). Histories written
+				// before this fix hold two of them for a child that took more than
+				// one wake, and peeking at just the next record found the second
+				// empty one, concluded there was no cached result, and went fresh
+				// again on every wake.
+				//
+				// "Of this call" is the Request comparison below. Adjacent empties
+				// are NOT always the same call: the guest keeps running after a
+				// suspend, so one segment can record [X empty, Y empty], and
+				// replaying X across Y's records would hand Y's result to X.
 				for s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
-					if nextRec.EventType != EventTypeAwaitAnyChild {
+					if nextRec.EventType != EventTypeAwaitAnyChild || !sameRunIDSet(nextRec.Request, rec.Request) {
 						break
 					}
 					if !s.advanceReplayStep(ctx, &nextRec) {

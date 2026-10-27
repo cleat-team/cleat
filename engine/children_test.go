@@ -838,6 +838,76 @@ func TestAwaitAnyChild_ReplaySkipsEveryEmptySuspendBeforeTheResult(t *testing.T)
 	}
 }
 
+// TestAwaitAnyChild_ReplayDoesNotCrossIntoAnotherCallsRecords is the reviewer's
+// case on cleat#3423. After a suspend the guest keeps running, so one segment
+// can record two DIFFERENT calls' suspends back to back: [X empty, Y empty],
+// and later Y's result. Replaying X across Y's records would return Y's result
+// to X, at the head of the history.
+func TestAwaitAnyChild_ReplayDoesNotCrossIntoAnotherCallsRecords(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // X's child is still running
+	}}
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild, Request: `["x"]`},
+		{Step: 1, EventType: EventTypeAwaitAnyChild, Request: `["y"]`},
+		{Step: 2, EventType: EventTypeAwaitAnyChild, Request: `["y"]`, Response: `{"run_id":"y","result":"done"}`},
+	}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["x"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Fatalf("X was handed a result (%d) while its own child is still running: it crossed into Y's records", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1: only X's own suspend record is consumed", s.stepCount)
+	}
+}
+
+// TestAwaitAnyChild_ReplayMatchesTheSameChildrenInAnyOrder: dagrun builds its
+// run-ID list from a map range, so one call records a differently ordered
+// Request on each wake. Those records are the same call.
+func TestAwaitAnyChild_ReplayMatchesTheSameChildrenInAnyOrder(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild, Request: `["b","a"]`},
+		{Step: 1, EventType: EventTypeAwaitAnyChild, Request: `["a","b"]`},
+		{Step: 2, EventType: EventTypeAwaitAnyChild, Request: `["a","b"]`, Response: `{"run_id":"a","result":"done"}`},
+	}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["a","b"]`, 0, 0)
+
+	if errCode := uint32(result & 0xFFFFFFFF); errCode != 0 {
+		t.Errorf("expected errCode 0, got %d", errCode)
+	}
+	if s.stepCount != 3 || s.suspendErr != nil {
+		t.Errorf("stepCount = %d, suspendErr = %v; want 3 and nil: the recorded result was not reached", s.stepCount, s.suspendErr)
+	}
+}
+
+// TestAwaitAnyChild_ASecondAwaitAfterASuspendRecordsNothing: the guest keeps
+// running after a suspend sentinel, and a different AwaitAnyChild in the same
+// segment must not write a second empty suspend row beside the first.
+func TestAwaitAnyChild_ASecondAwaitAfterASuspendRecordsNothing(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil
+	}}
+	if got := s.AwaitAnyChild(context.Background(), nil, `["x"]`, 0, 0); got != packAwaitChildResultSuspend() {
+		t.Fatalf("first call: expected the suspend sentinel, got %d", got)
+	}
+	recorded := len(s.history)
+
+	if got := s.AwaitAnyChild(context.Background(), nil, `["y"]`, 0, 0); got != packAwaitChildResultSuspend() {
+		t.Fatalf("second call: expected the suspend sentinel, got %d", got)
+	}
+	if len(s.history) != recorded {
+		t.Errorf("history grew from %d to %d records on an await after the segment had already suspended", recorded, len(s.history))
+	}
+}
+
 // TestAwaitAnyChild_AStillRunningChildAddsNoRowOnALaterWake is the other half:
 // a wake that replays the call's suspend and finds the child still running has
 // nothing new to record.
