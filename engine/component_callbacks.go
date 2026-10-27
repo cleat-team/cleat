@@ -61,8 +61,14 @@ func (b *wasmtimeBackend) dispatchDurableCallString(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call", "svc")
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call", "op")
+	}
 	req := readStrArg(args, 2, nargs)
 
 	buf := make([]byte, 65536)
@@ -81,8 +87,14 @@ func (b *wasmtimeBackend) dispatchDurableCallRetry(
 	if int(nargs) < 8 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-retry", "svc")
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-retry", "op")
+	}
 	req := readStrArg(args, 2, nargs)
 	maxAttempts := int64(readU64Arg(args, 3, nargs))
 	initialInterval := int64(readU64Arg(args, 4, nargs))
@@ -107,8 +119,14 @@ func (b *wasmtimeBackend) dispatchDurableCallHeartbeat(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-heartbeat", "svc")
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-heartbeat", "op")
+	}
 	req := readStrArg(args, 2, nargs)
 	heartbeatInterval := int64(readU64Arg(args, 3, nargs))
 
@@ -294,7 +312,10 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-poll-signal", "name", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PollSignal(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
@@ -312,8 +333,14 @@ func (b *wasmtimeBackend) dispatchSignalWorkflow(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	target := readStrArg(args, 0, nargs)
-	sigName := readStrArg(args, 1, nargs)
+	target, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	sigName, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	payload := readStrArg(args, 2, nargs)
 	r := b.handler.SignalWorkflow(context.Background(), nil, target, sigName, payload)
 	setResultU64(results, nresults, uint64(r))
@@ -332,7 +359,10 @@ func (b *wasmtimeBackend) dispatchChildWorkflow(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow", "name")
+	}
 	input := readStrArg(args, 1, nargs)
 
 	buf := make([]byte, 65536)
@@ -351,7 +381,10 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	runID := readStrArg(args, 0, nargs)
+	runID, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-await-child", "runID", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
@@ -451,7 +484,10 @@ func (b *wasmtimeBackend) dispatchPollChild(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	runID := readStrArg(args, 0, nargs)
+	runID, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-poll-child", "runID", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PollChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
@@ -509,11 +545,17 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 	if int(nargs) < 5 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow-with-options", "name")
+	}
 	input := readStrArg(args, 1, nargs)
 	version := int64(readU64Arg(args, 2, nargs))
 	priority := int64(readU64Arg(args, 3, nargs))
-	policy := readStrArg(args, 4, nargs)
+	policy, ok := readOptionalNameArg(args, 4, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow-with-options", "policy")
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil,
@@ -537,7 +579,10 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-create-promise", "name", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.CreatePromise(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
@@ -573,7 +618,10 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	id := readStrArg(args, 0, nargs)
+	id, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-await-promise", "id")
+	}
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
 	buf := make([]byte, 65536)
@@ -619,7 +667,10 @@ func (b *wasmtimeBackend) dispatchResolvePromise(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	id := readStrArg(args, 0, nargs)
+	id, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	val := readStrArg(args, 1, nargs)
 	r := b.handler.ResolvePromise(context.Background(), nil, id, val)
 	setResultU64(results, nresults, uint64(r))
@@ -634,7 +685,10 @@ func (b *wasmtimeBackend) dispatchRejectPromise(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	id := readStrArg(args, 0, nargs)
+	id, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	errMsg := readStrArg(args, 1, nargs)
 	r := b.handler.RejectPromise(context.Background(), nil, id, errMsg)
 	setResultU64(results, nresults, uint64(r))
@@ -653,7 +707,10 @@ func (b *wasmtimeBackend) dispatchSetQueryState(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	key := readStrArg(args, 0, nargs)
+	key, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	val := readStrArg(args, 1, nargs)
 	r := b.handler.SetQueryState(context.Background(), nil, key, val)
 	setResultU64(results, nresults, uint64(r))
@@ -672,7 +729,10 @@ func (b *wasmtimeBackend) dispatchRegisterUpdateHandler(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.RegisterUpdateHandler(context.Background(), nil, name)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -686,7 +746,10 @@ func (b *wasmtimeBackend) dispatchRegisterQueryHandler(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.RegisterQueryHandler(context.Background(), nil, name)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -741,8 +804,14 @@ func (b *wasmtimeBackend) dispatchDurableSend(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	req := readStrArg(args, 2, nargs)
 	r := b.handler.DurableSend(context.Background(), nil, svc, op, req)
 	setResultU64(results, nresults, uint64(r))
@@ -757,8 +826,14 @@ func (b *wasmtimeBackend) dispatchScheduleInvoke(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	req := readStrArg(args, 2, nargs)
 	delayMs := int64(readU64Arg(args, 3, nargs))
 	r := b.handler.DurableScheduleInvoke(context.Background(), nil, svc, op, req, delayMs)
@@ -816,8 +891,14 @@ func (b *wasmtimeBackend) dispatchPluginCall(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	pluginName := readStrArg(args, 0, nargs)
-	funcName := readStrArg(args, 1, nargs)
+	pluginName, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call", "pluginName")
+	}
+	funcName, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call", "funcName")
+	}
 	input := readStrArg(args, 2, nargs)
 
 	buf := make([]byte, 65536)
@@ -836,8 +917,14 @@ func (b *wasmtimeBackend) dispatchPluginCallStreaming(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	pluginName := readStrArg(args, 0, nargs)
-	funcName := readStrArg(args, 1, nargs)
+	pluginName, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call-streaming", "pluginName")
+	}
+	funcName, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call-streaming", "funcName")
+	}
 	input := readStrArg(args, 2, nargs)
 
 	buf := make([]byte, 65536)
@@ -860,7 +947,10 @@ func (b *wasmtimeBackend) dispatchAcquireLock(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	key := readStrArg(args, 0, nargs)
+	key, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	ttlMs := int64(readU64Arg(args, 1, nargs))
 	r := b.handler.AcquireLock(context.Background(), nil, key, ttlMs)
 	setResultU64(results, nresults, uint64(r))
@@ -875,7 +965,10 @@ func (b *wasmtimeBackend) dispatchReleaseLock(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	key := readStrArg(args, 0, nargs)
+	key, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.ReleaseLock(context.Background(), nil, key)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -893,8 +986,14 @@ func (b *wasmtimeBackend) dispatchSetScope(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	objType := readStrArg(args, 0, nargs)
-	instKey := readStrArg(args, 1, nargs)
+	objType, ok := readOptionalNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("set-scope", "objType", results, nresults)
+	}
+	instKey, ok := readOptionalNameArg(args, 1, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("set-scope", "instKey", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.SetScope(ctxWithMem(context.Background(), buf), nil, objType, instKey, 0, 65536)
@@ -961,7 +1060,10 @@ func (b *wasmtimeBackend) dispatchRunDetached(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	input := readStrArg(args, 1, nargs)
 	r := b.handler.RunDetached(context.Background(), nil, name, input)
 	setResultU64(results, nresults, uint64(r))
@@ -1034,7 +1136,10 @@ func (b *wasmtimeBackend) dispatchFetch(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	method := readStrArg(args, 0, nargs)
+	method, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "fetch", "method")
+	}
 	url := readStrArg(args, 1, nargs)
 	headers := readStrArg(args, 2, nargs)
 	body := readStrArg(args, 3, nargs)
@@ -1084,7 +1189,10 @@ func (b *wasmtimeBackend) dispatchScheduleCron(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	workflowName := readStrArg(args, 0, nargs)
+	workflowName, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-schedule-cron", "workflowName")
+	}
 	cronExpr := readStrArg(args, 1, nargs)
 	timezone := readStrArg(args, 2, nargs)
 	input := readStrArg(args, 3, nargs)
@@ -1116,7 +1224,10 @@ func (b *wasmtimeBackend) dispatchDeleteCron(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	scheduleID := readStrArg(args, 0, nargs)
+	scheduleID, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-delete-cron", "scheduleID", results, nresults)
+	}
 	r := b.handler.DeleteCron(context.Background(), nil, scheduleID)
 	setResultU64(results, nresults, uint64(r))
 	return nil

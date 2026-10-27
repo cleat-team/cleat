@@ -937,6 +937,81 @@ func setResultCallOutcome(results *C.wasmtime_component_val_t, nresults C.size_t
 	}
 }
 
+// readNameArg returns the i-th string argument and whether it is a valid name:
+// the check the core-module path applies to the same parameters through
+// wasmtimeReadServiceName, and for the same reason -- a service, operation,
+// promise, signal, lock or workflow name reaches storage keys, event rows and
+// log lines, so it is restricted to [a-zA-Z0-9._-]+ and to MaxWasmStringLen.
+//
+// The component dispatchers called readStrArg for these and passed whatever the
+// guest sent straight to the handler (cleat#3436, measured on a Python guest:
+// "" and "bad name!" reached the service caller, the promise store and the
+// signal store), so a name the core path refuses was accepted here.
+func readNameArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) (string, bool) {
+	s := readStrArg(args, i, nargs)
+	return s, uint64(len(s)) <= uint64(MaxWasmStringLen) && validServiceName(s)
+}
+
+// readOptionalNameArg is readNameArg for a parameter where empty means "not
+// given" (wasmtimeReadOptionalServiceName on the core path): "" is valid,
+// anything else must be a valid name.
+func readOptionalNameArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) (string, bool) {
+	s := readStrArg(args, i, nargs)
+	if s == "" {
+		return s, true
+	}
+	return s, uint64(len(s)) <= uint64(MaxWasmStringLen) && validServiceName(s)
+}
+
+// invalidNameMessage is the text a guest sees when a dispatcher refuses a name.
+func invalidNameMessage(call, param string) string {
+	return "cleat: " + call + ": " + param + " is not a valid name (it must match [a-zA-Z0-9._-]+)"
+}
+
+// refuseNameWithCallFailure answers a `result<_, call-failure>` import with
+// err(failed) classified callErrorInvalidRequest -- the classification
+// badParamDurableCall gives the same refusal on the core path -- and returns nil,
+// so the guest raises a CallError it can branch on. No handler method runs, so
+// no event is recorded and replay sees nothing.
+func refuseNameWithCallFailure(
+	results *C.wasmtime_component_val_t, nresults C.size_t, call, param string,
+) *C.wasmtime_error_t {
+	setResultCallOutcome(results, nresults, callOutcome{
+		failed:  true,
+		code:    uint32(callErrorInvalidRequest),
+		payload: invalidNameMessage(call, param),
+	})
+	return nil
+}
+
+// refuseNameWithBadParam answers a u64/s64-returning import with errBadParam,
+// the word every core-path host function returns for the same refusal.
+func refuseNameWithBadParam(results *C.wasmtime_component_val_t, nresults C.size_t) *C.wasmtime_error_t {
+	setResultU64(results, nresults, errBadParam)
+	return nil
+}
+
+// refuseNameWithoutAResult refuses a name on an import whose WIT type has no
+// place for a failure: a bare `-> string`, or no result at all. Neither can
+// carry errBadParam as anything but text (the core path's answer), and an empty
+// string is a plausible answer, so the guest is stopped by TRAPPING -- the
+// reasoning stopAtPendingChildAwait gives for the same limitation.
+//
+// It answers "" instead in a defer segment or while the guest drains its own
+// defers, for the reason that function gives: a trap there loses the cleanup
+// the segment exists to run.
+func (b *wasmtimeBackend) refuseNameWithoutAResult(
+	call, param string, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if !b.deferPhase && !b.guestIsDrainingDefers() {
+		msg := C.CString(invalidNameMessage(call, param))
+		defer C.free(unsafe.Pointer(msg))
+		return C.wasmtime_error_new(msg)
+	}
+	setResultString(results, nresults, "")
+	return nil
+}
+
 // pre050AwaitPromiseMessage is what a Python component built before 0.5.0 gets
 // when it calls durable-await-promise. That import was `-> string` and is now
 // `-> result<await-outcome, call-failure>` (cleat#3425), so such a component
