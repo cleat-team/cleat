@@ -44,6 +44,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises, but the failure is reported as `wasm trap: ... not a run-outcome variant` with no
   exception message; upgrade the worker before, or together with, rebuilding Python components.
 
+- **A Python component built before 0.5.0 no longer runs: rebuild it with the 0.5.0 Python SDK.**
+  Closes cleat#3425 (owner decision D29). `durable-await-promise` in `python-sdk/wit/cleat.wit`
+  was `func(id, timeout-ms) -> string` and is now `-> result<await-outcome, call-failure>`,
+  where `await-outcome` is `resolved(string) | rejected(string) | timed-out`. The old type had
+  no place to say how a wait ended, so a Python guest could not tell the endings apart
+  (measured on a real component before the change): a **rejected** promise arrived as its
+  reason with `rejected=False`, as if it had resolved to it; a **genuine timeout** arrived as
+  `""` with `timed_out=False`, identical to a promise resolved with an empty value; a **host
+  error** (for example no promise store) arrived as its message, as the resolved value; and a
+  **fresh suspend** let the guest run on, making its next durable call, before the run
+  suspended. Now `await_promise` returns `PromiseResult(rejected=True)` with the reason,
+  `PromiseResult(timed_out=True)`, raises `CleatCallError` for a host error, and unwinds on a
+  stop. **A component built against the old signature is refused on its first
+  `await_promise` call**, before the host runs the await, with an error that names
+  `durable-await-promise` and says `Rebuild the workflow with the 0.5.0 Python SDK`; it does
+  not fall back to the old behaviour. **What to check:** rebuild and redeploy every Python
+  component that calls `await_promise`, and a Python workflow that treated `""` as "timed out"
+  or "rejected" must now test `timed_out` / `rejected`. Python components that never call
+  `await_promise` are unaffected. Components in other languages are unaffected: this is the
+  Python component world's WIT only; the core-module ABI that the other SDKs use is unchanged.
+
 ### Added
 
 - **`cleat-worker --enable-workflow-fetch` serves `cleat_fetch`.** Closes cleat#3377
@@ -72,6 +93,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`scripts/dbos-pair-loc.sh`), recorded as "Corrected" entries in each pair's README.
 
 ### Fixed
+
+- **A Python guest could not tell how a wait on a promise ended.** Closes cleat#3425. See the
+  upgrade note above for the behaviour change and what a pre-0.5.0 component now does. The
+  wait's four non-resolved endings (a rejection, a timeout, a host error, a stop) were all
+  flattened into one string by the component dispatcher, which read only the packed word's
+  length field. They are now the cases of the WIT type, and the stop-correspondence guard's
+  open-finding exemption for `AwaitPromise` is deleted: it is a `call-failure.suspended` like
+  every other result-returning function. Each ending is driven through a real componentized
+  guest, and each of six mutations (rejection treated as an error, the stop test removed, the
+  timed-out flag ignored, the old-component refusal removed, and two in the Python SDK) fails
+  exactly its own test.
 
 - **A Python workflow that raised reported success.** Closes cleat#3433. See the upgrade note
   above for the behaviour change and the skew between SDK and worker. The `{"error": ...}`

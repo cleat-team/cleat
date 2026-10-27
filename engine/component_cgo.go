@@ -230,6 +230,55 @@ package engine
 //     v->of.result.val = wasmtime_component_val_new(&inner);
 // }
 //
+// // 1 if the function's declared result is a WIT `result<...>`, 0 if it is
+// // anything else, -1 if it has no result at all. The type is the GUEST'S: a
+// // dynamically-typed host function is checked against the component that
+// // imports it only when it returns, so this is the one place a host can see
+// // which signature the component was built against (cleat#3425).
+// static int component_func_result_is_result(const wasmtime_component_func_type_t *ty) {
+//     wasmtime_component_valtype_t r;
+//     if (!wasmtime_component_func_type_result(ty, &r)) { return -1; }
+//     int is_result = (r.kind == WASMTIME_COMPONENT_VALTYPE_RESULT);
+//     wasmtime_component_valtype_delete(&r);
+//     return is_result;
+// }
+//
+// // ok(await-outcome): the three ways a wait on a promise ends (cleat#3425).
+// // `kind` 0 = resolved(s), 1 = rejected(s), 2 = timed-out (no payload).
+// //
+// // PRECONDITION on `s`: as component_val_set_call_ok's -- C-allocator storage,
+// // ownership passes to `v`, not copied here. Ignored for kind 2.
+// static void component_val_set_await_outcome(wasmtime_component_val_t *v,
+//                                             int kind,
+//                                             const char *s, size_t len) {
+//     static const char resolved_name[] = "resolved";
+//     static const char rejected_name[] = "rejected";
+//     static const char timed_out_name[] = "timed-out";
+//
+//     wasmtime_component_val_t variant;
+//     variant.kind = WASMTIME_COMPONENT_VARIANT;
+//     if (kind == 2) {
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(timed_out_name, sizeof(timed_out_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(timed_out_name) - 1;
+//         variant.of.variant.val = NULL;
+//     } else {
+//         const char *name = (kind == 1) ? rejected_name : resolved_name;
+//         size_t name_len = (kind == 1) ? sizeof(rejected_name) - 1
+//                                       : sizeof(resolved_name) - 1;
+//         wasmtime_component_val_t payload;
+//         payload.kind = WASMTIME_COMPONENT_STRING;
+//         payload.of.string.data = (char *)s;
+//         payload.of.string.size = len;
+//         variant.of.variant.discriminant.data = cleat_dup(name, name_len);
+//         variant.of.variant.discriminant.size = name_len;
+//         variant.of.variant.val = wasmtime_component_val_new(&payload);
+//     }
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = true;
+//     v->of.result.val = wasmtime_component_val_new(&variant);
+// }
+//
 // // err(call-failure.suspended) -- the defer-segment stop. No payload: there
 // // is nothing to say beyond "do not do this, unwind".
 // static void component_val_set_call_suspended(wasmtime_component_val_t *v) {
@@ -620,7 +669,7 @@ const (
 
 	// durable-promises interface
 	cbTypeCreatePromise  // (string[,u64]) -> string (WIT has ttl-ms, handler doesn't)
-	cbTypeAwaitPromise   // (string,u64) -> string
+	cbTypeAwaitPromise   // (string,u64) -> result<await-outcome, call-failure>
 	cbTypeResolvePromise // (string,string) -> u64
 	cbTypeRejectPromise  // (string,string) -> u64
 
@@ -888,6 +937,50 @@ func setResultCallOutcome(results *C.wasmtime_component_val_t, nresults C.size_t
 	}
 }
 
+// pre050AwaitPromiseMessage is what a Python component built before 0.5.0 gets
+// when it calls durable-await-promise. That import was `-> string` and is now
+// `-> result<await-outcome, call-failure>` (cleat#3425), so such a component
+// cannot be served: it has no way to receive a rejection, a timeout or a stop
+// as anything but a value. It is refused on the call, with the import named,
+// rather than left to wasmtime's "type mismatch: expected string, found
+// result", which names neither the import's meaning nor the remedy.
+const pre050AwaitPromiseMessage = "cleat: this component was built against the pre-0.5.0 signature of the " +
+	"durable-await-promise import (func(id: string, timeout-ms: u64) -> string), which this host no longer " +
+	"serves (it is now result<await-outcome, call-failure>). Rebuild the workflow with the 0.5.0 Python SDK."
+
+// refusePre050AwaitPromise returns a trap for a component whose
+// durable-await-promise does not return a `result`, nil otherwise. It runs
+// BEFORE the host call, so a refused component records no promise event.
+func refusePre050AwaitPromise(ty *C.wasmtime_component_func_type_t) *C.wasmtime_error_t {
+	if C.component_func_result_is_result(ty) == 1 {
+		return nil
+	}
+	msg := C.CString(pre050AwaitPromiseMessage)
+	defer C.free(unsafe.Pointer(msg))
+	return C.wasmtime_error_new(msg)
+}
+
+// awaitOutcomeKind is the case of the WIT `await-outcome` variant a settled
+// wait lands in. The values are the C helper's `kind` argument.
+type awaitOutcomeKind int
+
+const (
+	awaitResolved awaitOutcomeKind = 0
+	awaitRejected awaitOutcomeKind = 1
+	awaitTimedOut awaitOutcomeKind = 2
+)
+
+// setResultAwaitOutcome writes `ok(await-outcome.<kind>(payload))` into the
+// first result slot. The error cases of `result<await-outcome, call-failure>`
+// go through setResultCallOutcome, which builds the same err half.
+func setResultAwaitOutcome(results *C.wasmtime_component_val_t, nresults C.size_t, kind awaitOutcomeKind, payload string) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	C.component_val_set_await_outcome(r, C.int(kind), C.CString(payload), C.size_t(len(payload)))
+}
+
 // extractStringFromPacked decodes the output string from a handler's packed
 // return value. The packed format is:
 //
@@ -913,6 +1006,13 @@ func goComponentCallback(
 	entry := lookupCB(uintptr(env))
 	if entry.backend == nil || entry.backend.handler == nil {
 		return nil
+	}
+	// Before the switch, not in its arm: the stop-correspondence guard reads the
+	// arms as `case cbTypeX: return ...dispatchX(`, and this check needs `ty`.
+	if entry.typ == cbTypeAwaitPromise {
+		if err := refusePre050AwaitPromise(ty); err != nil {
+			return err
+		}
 	}
 	switch entry.typ {
 	case cbTypeDurableCallString:

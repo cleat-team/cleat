@@ -14,16 +14,51 @@ from componentize_py_types import Result, Ok, Err, Some
 
 
 
+@dataclass
+class AwaitOutcome_Resolved:
+    value: str
+
+
+@dataclass
+class AwaitOutcome_Rejected:
+    value: str
+
+
+@dataclass
+class AwaitOutcome_TimedOut:
+    pass
+
+
+AwaitOutcome = Union[AwaitOutcome_Resolved, AwaitOutcome_Rejected, AwaitOutcome_TimedOut]
+"""
+How a wait on a promise ended, when it ended in the promise's own terms.
+
+Typed `-> string` this import could not say any of it, and a Python
+guest could not tell the cases apart (cleat#3425, measured on a real
+component): a REJECTED promise arrived as the rejection text with
+``rejected=False``; a genuine TIMEOUT arrived as ``""``, exactly like a
+promise resolved with an empty value; a host error arrived as its own
+message, as if it were the resolved value.
+"""
+
+
+
 def durable_create_promise(name: str, ttl_ms: int) -> str:
     """
     Create a durable promise with the given name.
     Returns the generated promise ID string.
     """
     raise NotImplementedError
-def durable_await_promise(id: str, timeout_ms: int) -> str:
+def durable_await_promise(id: str, timeout_ms: int) -> AwaitOutcome:
     """
-    Wait for a durable promise to resolve, with a timeout.
-    Returns the resolved value string.
+    Wait for a durable promise to settle, with a timeout.
+    
+    ``err(call-failure.suspended)`` is the engine stopping the workflow: the
+    promise is still pending and the wait has been recorded, so the guest
+    must unwind. ``err(call-failure.failed)`` is a host error (for example
+    no promise store), not an outcome of the promise.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def durable_resolve_promise(id: str, value: str) -> int:

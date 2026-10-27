@@ -77,16 +77,6 @@ const (
 	// function the world DOES declare and declares wrongly -- keeping them
 	// separate is the point of these being constants.
 	reasonNotInTheComponentWorld exemptReason = "not-in-the-component-world"
-
-	// reasonWitReturnsABareString: an OPEN FINDING, and a third shape. The
-	// world DOES declare the function, and not with out-pointers, but its
-	// return type is a bare `string`, so the dispatcher flattens the packed
-	// word to the response text and drops the timed-out, error and stop fields
-	// together. Tracked in cleat#3425. Only the host-side half of cleat#3383 reaches a component
-	// guest: it cannot be refused, cannot see an error, and cannot tell a
-	// timeout from a resolved empty value. Distinct from the two above for the
-	// same reason they are distinct from each other.
-	reasonWitReturnsABareString exemptReason = "open-finding-wit-returns-a-bare-string"
 )
 
 // stopSurface declares, for one host stop site, which Go adapters and which WIT
@@ -276,18 +266,12 @@ var stopSurfaces = map[string]stopSurface{
 		// stopBeforeNewWork, so an await_promise in a defer segment is not
 		// refused -- only a suspending one is answered with the sentinel.
 		//
-		// The WIT function is declared and returns a bare `string`, which is
-		// the third shape: neither result<string, call-failure> nor a scalar.
-		// The component dispatcher (dispatchAwaitPromise) decodes the packed
-		// word with extractStringFromSimplePacked, which reads the length
-		// field and nothing else, so a Python component guest receives "" for
-		// a stop, for a real timeout and for an error alike, and the Python
-		// SDK returns timed_out=False for it (cleat#3425). Recorded as an open finding
-		// rather than papered over with a `py` entry: `py` substitutes for a
-		// guarantee a scalar return gives up, and there is no scalar here.
+		// The WIT function returns result<await-outcome, call-failure> since
+		// cleat#3425 (it was a bare `string`, which had no case for a stop, a
+		// timeout or an error). The stop is call-failure.suspended, like every
+		// other result-returning function here.
 		adapters: []string{"AwaitPromise"},
-		wit:      nil,
-		witWhy:   reasonWitReturnsABareString,
+		wit:      []string{"durable-await-promise"},
 	},
 	"WaitForEvent": {
 		// The claim/register/re-claim loop the application used to write by hand
