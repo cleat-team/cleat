@@ -91,7 +91,7 @@ func unwrapPythonResult(t *testing.T, result string) string {
 	return raw
 }
 
-func TestAPythonGuestPollsAndRacesChildrenThroughTheComponentBoundary(t *testing.T) {
+func TestPythonGuestPollsAndRacesChildrenThroughTheComponentBoundary(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping Python WASM integration test in short mode")
 	}
@@ -148,7 +148,7 @@ func TestAPythonGuestPollsAndRacesChildrenThroughTheComponentBoundary(t *testing
 // The pending case: no child has finished, the host records the wait and
 // suspends the run. The WIT function is a bare string, so the guest sees an
 // empty answer and raises; the suspension has to win over that error.
-func TestAPythonGuestAwaitingOnlyPendingChildrenSuspendsInsteadOfFailing(t *testing.T) {
+func TestPythonGuestAwaitingOnlyPendingChildrenSuspendsInsteadOfFailing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping Python WASM integration test in short mode")
 	}
