@@ -41,10 +41,12 @@ func missingFromWitTypeMap(imports map[string]map[string]string, typeMap map[str
 // a dispatcher fails the second half of the test below, so a fixed gap cannot
 // keep its exemption. Adding an entry needs an issue and a sentence; it is not
 // a way to make this test pass.
-var knownUndispatchedWitImports = map[string]string{
-	"cleat:host-calls/durable-extended-lifecycle/durable-run-detached": "cleat#3428: a Python run_detached links to the fallback and starts nothing",
-	"cleat:host-calls/durable-lifecycle/durable-defer-phase":           "cleat#3428: the component linker never registers cleat_defer_phase's equivalent",
-}
+//
+// It is EMPTY, and was not: it held durable-run-detached and durable-defer-phase
+// until cleat#3428 gave them dispatchers. The mechanism stays so the next gap has
+// somewhere honest to be recorded, and the stale-entry check below stays so it
+// cannot linger.
+var knownUndispatchedWitImports = map[string]string{}
 
 func TestEveryRegisteredWitImportHasADispatcher(t *testing.T) {
 	// Vacuity, per thing: a loop over an empty or renamed table passes whatever

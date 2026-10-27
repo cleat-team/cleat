@@ -837,6 +837,45 @@ func (b *wasmtimeBackend) dispatchUUID(
 // durable-extended-lifecycle interface
 // ---------------------------------------------------------------------------
 
+// dispatchRunDetached handles (string,string) -> u64.
+//
+// The WIT result is a u64, and the deprecated fallback also writes a u64, so
+// until cleat#3428 this call type-checked while starting nothing: no trap and no
+// error, a zero that reads as success. The word is returned untouched, so a stop
+// sentinel (bit 31) reaches the Python SDK's _raise_if_stopped the way it does
+// for durable-signal-workflow.
+func (b *wasmtimeBackend) dispatchRunDetached(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
+	name := readStrArg(args, 0, nargs)
+	input := readStrArg(args, 1, nargs)
+	r := b.handler.RunDetached(context.Background(), nil, name, input)
+	setResultU64(results, nresults, uint64(r))
+	return nil
+}
+
+// dispatchDeferPhase handles (bool) -> ().
+//
+// It reports that the guest has started (true) or finished (false) draining its
+// defer table, so the host can mark the events recorded in between. It records no
+// event and returns nothing, which is why the fallback was harmless in shape and
+// wrong in effect: nothing to type-check, and the mark never reached the host
+// (cleat#1155, cleat#1237, cleat#3428).
+func (b *wasmtimeBackend) dispatchDeferPhase(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
+	b.handler.SetDeferPhase(context.Background(), readBoolArg(args, 0, nargs))
+	return nil
+}
+
 // dispatchContinueAsNewVersioned handles (string,u32) -> u64.
 func (b *wasmtimeBackend) dispatchContinueAsNewVersioned(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
@@ -1144,6 +1183,7 @@ var witTypeMap = map[string]map[string]cbType{
 		"durable-defer":             cbTypeDurableDefer,
 		"durable-continue-as-new":   cbTypeContinueAsNew,
 		"durable-poll-cancellation": cbTypePollCancellation,
+		"durable-defer-phase":       cbTypeDeferPhase,
 	},
 	"cleat:host-calls/durable-signals": {
 		"durable-await-signals":   cbTypeAwaitSignals,
@@ -1197,6 +1237,7 @@ var witTypeMap = map[string]map[string]cbType{
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": cbTypeContinueAsNewVersioned,
 		"side-effect":               cbTypeSideEffect,
+		"durable-run-detached":      cbTypeRunDetached,
 	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": cbTypeFetch,

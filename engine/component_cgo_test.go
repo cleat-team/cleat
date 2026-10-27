@@ -98,7 +98,7 @@ func TestCbTypeConstants(t *testing.T) {
 		cbTypeVersion, cbTypeMinVersion, cbTypeDurableDefer, cbTypeContinueAsNew, cbTypePollCancellation,
 		cbTypeAwaitSignals, cbTypePollSignal, cbTypeSignalWorkflow,
 		cbTypeChildWorkflow, cbTypeAwaitChild, cbTypeAwaitAllChildren,
-		cbTypePollChild, cbTypeAwaitAnyChild,
+		cbTypePollChild, cbTypeAwaitAnyChild, cbTypeRunDetached, cbTypeDeferPhase,
 		cbTypeChildWorkflowWithOptions,
 		cbTypeCreatePromise, cbTypeAwaitPromise, cbTypeResolvePromise, cbTypeRejectPromise,
 		cbTypeSetQueryState, cbTypeRegisterUpdateHandler, cbTypeRegisterQueryHandler,
@@ -205,6 +205,8 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"AwaitAllChildren", true, 18, strPtr, 1},
 		{"PollChild", true, 26, strPtr, 1},
 		{"AwaitAnyChild", true, 27, strPtr, 1},
+		{"RunDetached", false, 26, strPtr, 2},
+		{"DeferPhase", false, 27, nil, 0},
 		{"PluginCallStreaming", true, 19, strPtr, 3},
 		{"ChildWorkflowWithOptions", true, 20, strPtr, 5},
 		{"AwaitPromise", true, 22, strPtr, 2},
@@ -295,6 +297,8 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"ContinueAsNewVersioned(0<2)", false, 22},
 		{"GetScope(0<4)", false, 23},
 		{"AwaitSignals(0<6)", false, 24},
+		{"RunDetached(0<2)", false, 26},
+		{"DeferPhase(0<1)", false, 27},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -59,6 +59,11 @@ package engine
 //     return 0;
 // }
 //
+// static bool component_val_get_bool(const wasmtime_component_val_t *v) {
+//     if (v->kind == WASMTIME_COMPONENT_BOOL) { return v->of.boolean; }
+//     return false;
+// }
+//
 // static uint32_t component_val_get_u32(const wasmtime_component_val_t *v) {
 //     if (v->kind == WASMTIME_COMPONENT_U32) { return v->of.u32; }
 //     if (v->kind == WASMTIME_COMPONENT_S32) { return (uint32_t)v->of.s32; }
@@ -583,6 +588,7 @@ const (
 	cbTypeDurableDefer     // (string) -> string
 	cbTypeContinueAsNew    // (string) -> u64
 	cbTypePollCancellation // () -> string
+	cbTypeDeferPhase       // (bool) -> ()
 
 	// durable-signals interface
 	cbTypeAwaitSignals // (string,u64,u32,u32,u32,u32) -> u64
@@ -643,6 +649,7 @@ const (
 	// durable-extended-lifecycle interface
 	cbTypeContinueAsNewVersioned // (string,u32) -> u64
 	cbTypeSideEffect             // (string) -> string
+	cbTypeRunDetached            // (string,string) -> u64
 
 	// durable-fetch interface
 	cbTypeFetch // (string,string,string,string) -> string
@@ -708,6 +715,17 @@ func readU64Arg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) uint64 
 	}
 	a := argPtr(args, i)
 	return uint64(C.component_val_get_u64(a))
+}
+
+// readBoolArg returns the i-th argument as a bool, or false if out of range or
+// not a bool. false is the safe default for the one call that reads it:
+// durable-defer-phase turning the phase OFF cannot make a defer body's call look
+// like the workflow body's, which is the error the other direction makes.
+func readBoolArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) bool {
+	if int(nargs) <= i {
+		return false
+	}
+	return bool(C.component_val_get_bool(argPtr(args, i)))
 }
 
 // readU32Arg returns the i-th argument as a uint32, or 0 if out of range.
@@ -981,6 +999,10 @@ func goComponentCallback(
 		return entry.backend.dispatchContinueAsNewVersioned(args, nargs, results, nresults)
 	case cbTypeSideEffect:
 		return entry.backend.dispatchSideEffect(args, nargs, results, nresults)
+	case cbTypeRunDetached:
+		return entry.backend.dispatchRunDetached(args, nargs, results, nresults)
+	case cbTypeDeferPhase:
+		return entry.backend.dispatchDeferPhase(args, nargs, results, nresults)
 	case cbTypeFetch:
 		return entry.backend.dispatchFetch(args, nargs, results, nresults)
 	case cbTypeScheduleCron:
