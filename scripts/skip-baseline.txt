@@ -210,6 +210,8 @@ engine	TestPythonAllHostCallsWorkflowCompiles	1
 engine	TestPythonComponentExecutionFence	1
 engine	TestPythonCronEndToEnd	1
 engine	TestPythonDeferSegmentRunsOnlyTheDefers	1
+engine	TestPythonGuestAwaitingOnlyPendingChildrenSuspendsInsteadOfFailing	1
+engine	TestPythonGuestPollsAndRacesChildrenThroughTheComponentBoundary	1
 engine	TestPythonOrdinarySegmentRunsTheBody	1
 engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
@@ -255,6 +257,7 @@ engine	mssqlDropTenantDB	2
 engine	mssqlTenantTestPool	2
 engine	mysqlDSNWithInterpolateParams	1
 engine	mysqlIntegrationStore	2
+engine	pythonChildPollEngine	1
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
 engine	requireDialectDSN	1
