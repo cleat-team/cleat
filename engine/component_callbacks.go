@@ -355,10 +355,69 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+	if packed == packAwaitChildResultSuspend() {
+		return b.stopAtPendingChildAwait("await_child", results, nresults)
+	}
 	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
 	return nil
+}
+
+// stopAtPendingChildAwait is what the three child awaits do when the host
+// answered "that child has not finished": it has recorded the wait and set
+// suspendErr, and the guest has to STOP, not run on.
+//
+// WIT types these calls `-> string`, so the suspend word cannot carry a stop.
+// Before cleat#3429 it was flattened to 65536 zero bytes (extractStringFromSimplePacked
+// reads the word's length field as 1<<30 and clamps it to the buffer) and the
+// guest ran on: past a pending await_child it made the next side effect, and
+// finished and drained its own defers, so a cleanup fired while the run was
+// only suspended. await_all_children looked safe only because json.loads raised
+// on the zeros.
+//
+// RETURNING "" IS NOT THE ANSWER outside the cases below, and was the issue's
+// first suggestion: the Python SDK reads an empty await_all_children answer as
+// [] (no children), so the guest would run on to its next side effect, and an
+// empty string is a plausible child result besides.
+//
+// So the guest is stopped by TRAPPING: returning an error from the callback
+// unwinds the guest at the call, the executor already lets a suspension win
+// over a call error when suspendErr is set (executor.go), and no WIT or ABI
+// changes, so components built against the old signatures keep linking.
+//
+// A trap kills the instance, and the host cannot then run `run-deferred`.
+// That is harmless for an ordinary suspension, which deliberately drains
+// nothing, and fatal in two places, where this answers "" instead:
+//
+//   - a DEFER SEGMENT (b.deferPhase): the workflow was terminated while it
+//     waited on a child and the host replays it to run its defers. Measured:
+//     the plain trap lost the cleanup (ops=[]) where today's code ran it.
+//   - the guest's OWN drain (the session's inDeferPhase, which the guest sets
+//     through durable-defer-phase, cleat#3428): a defer body that itself waits
+//     on a pending child. A trap there ends every defer queued after it.
+//
+// What a defer body that awaits a pending child therefore sees: await_child
+// returns "", await_all_children returns [] (Python's reading of ""), and
+// await_any_child raises (Python's reading of ""). TestPythonGuestsDeferBodyAwaitingPendingChildren
+// pins it. The run is still suspended: suspendErr was set by the host.
+func (b *wasmtimeBackend) stopAtPendingChildAwait(
+	call string, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if !b.deferPhase && !b.guestIsDrainingDefers() {
+		msg := C.CString("cleat: workflow suspended awaiting a child (" + call + ")")
+		defer C.free(unsafe.Pointer(msg))
+		return C.wasmtime_error_new(msg)
+	}
+	setResultString(results, nresults, "")
+	return nil
+}
+
+// guestIsDrainingDefers reports whether the handler's session says the guest is
+// running its own defer bodies. A handler with no session (a mock) says no.
+func (b *wasmtimeBackend) guestIsDrainingDefers() bool {
+	d, ok := b.handler.(interface{ guestIsDrainingDefers() bool })
+	return ok && d.guestIsDrainingDefers()
 }
 
 // extractChildAnswer is extractStringFromSimplePacked for the two child calls
@@ -413,6 +472,9 @@ func (b *wasmtimeBackend) dispatchAwaitAnyChild(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitAnyChild(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	if packed == packAwaitChildResultSuspend() {
+		return b.stopAtPendingChildAwait("await_any_child", results, nresults)
+	}
 
 	setResultString(results, nresults, extractChildAnswer(packed, buf))
 	return nil
@@ -430,6 +492,9 @@ func (b *wasmtimeBackend) dispatchAwaitAllChildren(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitAllChildren(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	if packed == packAwaitChildResultSuspend() {
+		return b.stopAtPendingChildAwait("await_all_children", results, nresults)
+	}
 	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)

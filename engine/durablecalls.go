@@ -1134,6 +1134,16 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 // reports the phase twice, or never reports the end because it trapped, leaves
 // the session in a state that only affects events recorded after it -- and a
 // trapped guest records nothing more.
+// guestIsDrainingDefers reports whether the guest has told the host it is
+// running its own defer bodies (SetDeferPhase). Read by the component
+// dispatchers for the child awaits, which must not stop a guest that is in the
+// middle of its cleanup (cleat#3429).
+func (s *execSession) guestIsDrainingDefers() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inDeferPhase
+}
+
 func (s *execSession) SetDeferPhase(_ context.Context, on bool) int64 {
 	s.mu.Lock()
 	s.inDeferPhase = on
