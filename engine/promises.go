@@ -84,6 +84,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 }
 
 func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64 {
+	s.setAwaitRejected(false)
 	// Set when this call is resuming an await already recorded in history,
 	// rather than beginning one. The deadline belongs to the ORIGINAL await.
 	var (
@@ -107,6 +108,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 					return 0
 				}
 				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseError, resultMaxLen)
+				s.setAwaitRejected(true)
 				return packAwaitPromiseResult(written, false, 1)
 			}
 			if rec.EventType == EventTypeAwaitPromise {
@@ -160,6 +162,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			}
 			s.recordEvent(rec)
 			written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
+			s.setAwaitRejected(true)
 			return packAwaitPromiseResult(written, false, 1)
 		}
 	}
@@ -196,7 +199,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				Reason: fmt.Sprintf("await_promise(%s)", promiseID),
 				Until:  time.Now().Add(time.Duration(timeoutMs) * time.Millisecond),
 			}
-			return packAwaitPromiseResult(0, true, 0)
+			return s.suspendingAwaitResult()
 		}
 		// time.Now(), not nowMs.Load(). The latter is a CACHED clock refreshed
 		// on poll cycles (UpdateNowMs), and a cached clock that lags the real
@@ -213,6 +216,11 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			// reaching this point decides the same way. Time only moves
 			// forward, which is the property that makes the outcome stable
 			// without a durable record of it.
+			//
+			// This is the one return in the function that IS a timeout, and
+			// it stays a timed-out word. The other three set suspendErr and
+			// return s.suspendingAwaitResult(): a suspending await must not
+			// hand the guest a word it reads as a timeout (cleat#3383).
 			return packAwaitPromiseResult(0, true, 0)
 		}
 		// Woke early -- something other than the deadline. Wait out the
@@ -222,7 +230,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			Reason: fmt.Sprintf("await_promise(%s)", promiseID),
 			Until:  time.UnixMilli(deadlineMs),
 		}
-		return packAwaitPromiseResult(0, true, 0)
+		return s.suspendingAwaitResult()
 	}
 
 	// First time: record the await and suspend.
@@ -242,7 +250,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
 	}
 
-	return packAwaitPromiseResult(0, true, 0)
+	return s.suspendingAwaitResult()
 }
 
 func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseID, value string) int64 {
@@ -317,4 +325,21 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 		return packSimpleResult(1, 0)
 	}
 	return 0
+}
+
+// setAwaitRejected records whether the AwaitPromise call in progress ended in a
+// rejection. The packed result word cannot say so -- a rejection and a host
+// error both carry errCode 1 -- and the component path's WIT type has a case for
+// each (cleat#3425). Read back through lastAwaitPromiseRejected.
+func (s *execSession) setAwaitRejected(rejected bool) {
+	s.mu.Lock()
+	s.awaitRejected = rejected
+	s.mu.Unlock()
+}
+
+// lastAwaitPromiseRejected implements awaitRejectionReporter.
+func (s *execSession) lastAwaitPromiseRejected() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.awaitRejected
 }

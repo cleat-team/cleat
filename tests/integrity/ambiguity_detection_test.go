@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 	_ "github.com/lib/pq"
 )
 
@@ -114,11 +115,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	defer db.Close()
 	store := engine.NewPostgresStore(db, suiteQueue)
 	runID := fmt.Sprintf("int-ambig-trunc-%d", time.Now().UnixNano())
-	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-	if err != nil {
-		t.Fatalf("create workflow: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)

@@ -575,8 +575,9 @@ type WorkflowStore interface {
 	DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
 
 	// ClearExpiredCompactionState clears compaction bookkeeping --
-	// compaction_state, compaction_step, compacted_at -- on terminal workflows
-	// older than the cutoff, and returns how many rows it cleared.
+	// compaction_state, compaction_step -- on terminal workflows older than
+	// the cutoff, and returns how many rows it cleared. (compacted_at was a
+	// third column here until cleat#3360 dropped it from workflow_instances.)
 	//
 	// Separate from DeleteExpiredEvents on purpose, though the two run
 	// together. THIS COMMENT USED TO SAY THAT FUNCTION "CAN NEVER MATCH"

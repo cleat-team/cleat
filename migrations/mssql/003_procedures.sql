@@ -202,50 +202,14 @@ IF OBJECT_ID(N'dbo.finalize_workflow_status', N'P') IS NOT NULL
     DROP PROCEDURE dbo.finalize_workflow_status;
 GO
 
--- finalize_workflow_status no longer has a 'failed' branch.
---
--- cleat#1973. No production code path ever calls this procedure with
--- @p_final_status = 'failed'. FinalizeWorkflowSegment's one production call
--- site (cmd/cleat-worker/setup.go) only ever passes 'done' or 'ready'; the
--- real failure path is store.FailWorkflow (engine/mssql_lifecycle.go), a
--- plain UPDATE that never calls this procedure at all. So the 'failed'
--- branch below -- including its event_history DELETE -- has never run in
--- production. See migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql
--- for the full reasoning; this is the same change on SQL Server.
---
--- A dormant delete is the risk, not a current bug: removing it is removing a
--- branch that one call-site change would silently reactivate, deleting a
--- failed workflow's replay history at finalize instead of leaving it for
--- --retention-days to sweep (cleat#1973's corrected behaviour).
---
--- NOTE ON 056'S OWN COMMENT. 056's header says the 'failed' branch's
--- idempotency_keys write is "untouched" and protects FailWorkflow and
--- MoveToDeadLetterQueue. That was wrong the same way this whole issue was:
--- neither of those call sites ever reaches this procedure. Both already
--- write idempotency_keys.error_msg themselves, directly
--- (engine/mssql_lifecycle.go), independent of this procedure. Removing the
--- branch here loses that update from exactly nowhere it was actually coming
--- from.
---
--- WHAT CHANGES, versus 056:
---   * The @p_final_status = 'failed' branch of the status IF/ELSE chain is
---     gone. A caller that passes 'failed' now hits the final ELSE and gets
---     the same "unknown final status" THROW any other unrecognized value
---     gets.
---   * The terminal-status IF narrows from
---     (@p_final_status = 'done' OR @p_final_status = 'failed') to
---     @p_final_status = 'done' alone.
---   * The idempotency_keys error_msg UPDATE that only ran for 'failed' is
---     removed with it, per the note above.
---   * The @p_final_status parameter comment drops 'failed' from its list.
---
--- WHAT DOES NOT CHANGE: the 'done' branch, byte for byte, and its DELETE FROM
--- dbo.event_history.
---
--- Everything else here is 056 verbatim, minus the 'failed' branch. Whole
--- redefinition rather than a patch: CREATE OR ALTER is idempotent, and
--- engine/store_backends_procedures_test.go re-applies every listed procedure
--- migration by name, so this file must be complete on its own.
+-- cleat#3171. See migrations/postgres/014 for the full rationale -- this is
+-- signal_seq's sibling (cleat#953) on the promise/update paths, on the SQL
+-- Server dialect. Only the 'ready' arm's CASE WHEN changes, adding one OR
+-- clause. Whole redefinition rather than a patch: CREATE OR ALTER is
+-- idempotent, and engine/store_backends_procedures_test.go re-applies every
+-- listed procedure migration by name, so this file must be complete on its
+-- own. Everything else here is the LAST finalize_workflow_status body on
+-- develop (migrations/mssql/003_procedures.sql), reproduced verbatim.
 
 CREATE OR ALTER PROCEDURE dbo.finalize_workflow_status
     @p_workflow_id      NVARCHAR(255),
@@ -288,6 +252,7 @@ BEGIN
                 next_wake_at = CASE
                                     WHEN signal_seq <> signal_seq_at_claim
                                       OR signal_consumed_seq <> signal_consumed_at_claim
+                                      OR promise_seq <> promise_seq_at_claim
                                     THEN SYSUTCDATETIME() ELSE @p_next_wake_at END,
                 query_state = @p_query_state
             WHERE id = @p_workflow_id

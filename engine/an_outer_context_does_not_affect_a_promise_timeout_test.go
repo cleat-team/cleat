@@ -80,16 +80,17 @@ func TestAnOuterContextDoesNotAffectAPromiseTimeout(t *testing.T) {
 		if suspended == nil {
 			t.Fatalf("expected the workflow to suspend awaiting a promise the store never resolves")
 		}
-		// NOT asserted here: that caller.calls is empty at this point. It is
-		// not -- the fresh pass's own AwaitPromise call reports timedOut=true
-		// unconditionally (engine/promises.go: a first suspend always packs
-		// timedOut=true, with no deadline check, into the guest's own copy of
-		// the call), so the fixture's Go code takes its "timed_out" branch and
-		// issues a real DurableCall on THIS pass too, before Execute's return
-		// value is discarded in favour of `suspended`. That is a property of
-		// the suspend protocol (this codebase's per-step idempotency is what
-		// makes a duplicate dispatch on replay safe), not a bug this test is
-		// about; asserting on it here would conflate two different questions.
+		// The fresh pass makes no call: its AwaitPromise suspends the run with
+		// the stop sentinel rather than a timeout-shaped word, so the fixture
+		// never reaches its "timed_out" branch until the deadline has really
+		// passed (cleat#3383; TestASuspendingAwaitPromiseStopsTheGuest...).
+		// Before that fix the fresh pass took the branch and issued a real
+		// DurableCall, and this comment recorded that as "a property of the
+		// suspend protocol".
+		if len(caller.calls) != 0 {
+			t.Fatalf("the fresh pass made %d call(s), want 0 -- the guest took its timeout branch "+
+				"on a wait that had not timed out: %+v", len(caller.calls), caller.calls)
+		}
 
 		// Past the fixture's 200ms timeout, measured against the real clock
 		// AwaitPromise's suspend/resume deadline check uses (time.Now(), per
@@ -151,13 +152,10 @@ func TestAnOuterContextDoesNotAffectAPromiseTimeout(t *testing.T) {
 	})
 }
 
-// assertAllReportTimedOut is deliberately loose on COUNT: the fresh Execute
-// pass and the resuming Replay pass each run the guest's own
-// "if timedOut { DurableCall(report, timed_out) }" branch once (see the
-// comment above the fresh-pass Execute call for why the fresh pass's call is
-// expected, not a bug), so two identical calls is the correct, measured
-// outcome here -- not one. What matters for this test is that they are all
-// report.timed_out, in both the live-ctx and cancelled-ctx runs alike.
+// assertAllReportTimedOut checks the calls the resuming Replay pass made: only
+// the genuine timeout reaches the guest's "if timedOut { DurableCall(report,
+// timed_out) }" branch, so there is one, and it is report.timed_out in both the
+// live-ctx and cancelled-ctx runs alike. The fresh pass makes none (cleat#3383).
 func assertAllReportTimedOut(t *testing.T, calls []CallRecord) {
 	t.Helper()
 	if len(calls) == 0 {

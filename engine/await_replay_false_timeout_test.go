@@ -81,29 +81,39 @@ func TestAnUnresolvedAwaitSuspendsRatherThanReportingATimeout(t *testing.T) {
 // TestBothPathsReturnTheSameWordAndOnlyOneSuspends is why this survived, stated
 // as a test so the next reader does not have to rediscover it.
 //
-// The fresh path also returns timedOut=true when no signal is available. It is
-// correct there only because it sets suspendErr first, so the segment ends and
-// the guest never observes the value. The returned word is not the contract;
-// suspendErr is.
-func TestBothPathsReturnTheSameWordAndOnlyOneSuspends(t *testing.T) {
+// Both suspending paths -- the fresh await, and a replay that reaches an
+// unexpired recorded await -- return callSuspendSentinel, and both suspend.
+//
+// This test used to be TestBothPathsReturnTheSameWordAndOnlyOneSuspends, and
+// asserted that both returned timedOut=true, on the reading that "the returned
+// word is not the contract; suspendErr is". cleat#3378 measured that reading
+// wrong: the guest DOES observe the word, runs its timeout branch, and a
+// PluginCall there executes before the run stops. The word is the contract.
+func TestBothSuspendingPathsReturnTheStopAndSuspend(t *testing.T) {
+	buf := make([]byte, 512)
+	call := func(s *execSession) int64 {
+		return s.DurableAwaitSignals(contextWithRawMemBuf(context.Background(), buf), nil, `["a","b"]`, 60000, 0, 200, 256, 200)
+	}
+
 	fresh := awaitReplaySession(t, &awaitProbeStore{deliveries: map[string]SignalDelivery{}}, nil)
 	fresh.isReplay = false
-	freshTimedOut := callAwait(t, fresh)
+	freshWord := call(fresh)
 
 	replay := awaitReplaySession(t, &awaitProbeStore{deliveries: map[string]SignalDelivery{}},
 		[]EventRecord{recordedAwait(60_000)})
-	replayTimedOut := callAwait(t, replay)
+	replayWord := call(replay)
 
-	if !freshTimedOut || !replayTimedOut {
-		t.Fatalf("expected both to return timedOut=true (fresh=%v replay=%v); the point "+
-			"is that the word is identical", freshTimedOut, replayTimedOut)
+	if freshWord != callSuspendSentinel || replayWord != callSuspendSentinel {
+		t.Fatalf("fresh=%016x replay=%016x, want callSuspendSentinel (%016x) from both: "+
+			"anything else decodes as an ordinary timeout, and the guest runs its timeout "+
+			"branch before the run suspends (cleat#3378)",
+			uint64(freshWord), uint64(replayWord), uint64(callSuspendSentinel))
 	}
 	if fresh.suspendErr == nil {
 		t.Error("the fresh path did not suspend")
 	}
 	if replay.suspendErr == nil {
-		t.Error("the replay path did not suspend, so the identical return word is " +
-			"observed by the guest in one case and discarded in the other")
+		t.Error("the replay path did not suspend")
 	}
 }
 

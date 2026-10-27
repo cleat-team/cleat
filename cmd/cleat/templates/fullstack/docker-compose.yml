@@ -23,7 +23,8 @@ services:
   # DDL needs it, and the schema baseline creates the lesser role below --
   # cleat_app -- so nothing else can connect before it has run.
   migrate:
-    # CLEAT_WORKER_IMAGE names a locally built image, for when the published one is not there yet:
+    # CLEAT_WORKER_IMAGE overrides the published image, to develop against a
+    # local build instead of ghcr.io/cleat-team/cleat-worker:latest:
     #   docker build -t cleat-worker:local <a cleat checkout>  &&  CLEAT_WORKER_IMAGE=cleat-worker:local make up
     image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
     command:
@@ -61,7 +62,8 @@ services:
     restart: "no"
 
   cleat-worker:
-    # CLEAT_WORKER_IMAGE names a locally built image, for when the published one is not there yet:
+    # CLEAT_WORKER_IMAGE overrides the published image, to develop against a
+    # local build instead of ghcr.io/cleat-team/cleat-worker:latest:
     #   docker build -t cleat-worker:local <a cleat checkout>  &&  CLEAT_WORKER_IMAGE=cleat-worker:local make up
     image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
     # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it cancels its runs

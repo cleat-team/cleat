@@ -365,6 +365,45 @@ func runResealPayloads(ctx context.Context, db *sql.DB, args []string) {
 	if *dryRun {
 		verb = "would re-seal"
 	}
+
+	fmt.Printf("event_history:\n")
+	printResealReport(st, verb)
+
+	// cleat#3241: the six tables cleat#2312 added encryption to --
+	// workflow_instances, workflow_signals, workflow_promises,
+	// workflow_update_requests, workflow_schedules, idempotency_keys. Run
+	// after event_history and reported separately, because a shortfall in
+	// one is not a shortfall in the other and an operator chasing an
+	// UNREADABLE line needs to know which table it is in.
+	tableResults, tableTotal, terr := resealSensitiveTables(ctx, db, enc, *dryRun, os.Stdout)
+	if terr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", terr)
+		osExit(1)
+		return
+	}
+	for _, r := range tableResults {
+		fmt.Printf("\n%s:\n", r.Table)
+		printResealReport(r.Stats, verb)
+	}
+	fmt.Printf("\nsensitive-tables total:\n")
+	printResealReport(tableTotal, verb)
+
+	// Non-zero while anything is left, so this can be looped on and its exit
+	// code trusted. A dry run that found work is also non-zero: it is a report
+	// that the database is not converted. Combined across event_history and
+	// the six tables above: a loop driving this to a clean exit needs one
+	// signal, not two to check separately.
+	if st.Unreadable > 0 || tableTotal.Unreadable > 0 ||
+		(*dryRun && (st.Older > 0 || tableTotal.Older > 0)) {
+		osExit(1)
+		return
+	}
+}
+
+// printResealReport prints one resealStats block in the shape this command
+// has always used, factored out so event_history and each of the six tables
+// cleat#3241 added print identically rather than by copied fmt.Printf calls.
+func printResealReport(st resealStats, verb string) {
 	fmt.Printf("rows examined:      %d\n", st.Rows)
 	fmt.Printf("values %-12s %d of %d in an older form\n", verb+":", st.Rewrote, st.Older)
 	fmt.Printf("already current:    %d\n", st.Current)
@@ -382,13 +421,5 @@ func runResealPayloads(ctx context.Context, db *sql.DB, args []string) {
 		fmt.Printf("  (a value reported unreadable is left untouched; the count also includes\n")
 		fmt.Printf("   plaintext that happens to be valid base64 and needs no re-sealing, so a\n")
 		fmt.Printf("   non-zero count is not itself a failed rotation)\n")
-	}
-
-	// Non-zero while anything is left, so this can be looped on and its exit
-	// code trusted. A dry run that found work is also non-zero: it is a report
-	// that the database is not converted.
-	if st.Unreadable > 0 || (*dryRun && st.Older > 0) {
-		osExit(1)
-		return
 	}
 }

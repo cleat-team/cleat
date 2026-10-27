@@ -12,6 +12,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // scaleStore returns a PostgresStore for scale tests.
@@ -55,14 +56,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("scale-test-addremove-%d", i)
 		EnsureDef(t, db, "scale-workflow", 1)
-		_, err := db.Exec(`
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'scale-workflow', 1, 'ready', '{}', 'default')
-			ON CONFLICT (id) DO NOTHING
-		`, id)
-		if err != nil {
-			t.Fatalf("Insert workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "scale-workflow"})
 		workflowIDs = append(workflowIDs, id)
 	}
 	defer func() {
@@ -170,14 +164,7 @@ func TestScaleUpWorkers(t *testing.T) {
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("scale-test-scaleup-%d", i)
 		EnsureDef(t, db, "scaleup-workflow", 1)
-		_, err := db.Exec(`
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'scaleup-workflow', 1, 'ready', '{}', 'default')
-			ON CONFLICT (id) DO NOTHING
-		`, id)
-		if err != nil {
-			t.Fatalf("Insert workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "scaleup-workflow"})
 		workflowIDs = append(workflowIDs, id)
 	}
 	defer func() {

@@ -512,6 +512,14 @@ var adapterDefs = map[string]adapterDef{
 			{"runIDs", "[]string"},
 		},
 		ResultStmts: []string{
+			// The same bit-62 sentinel AwaitChild and AwaitAnyChild test, and the
+			// engine's freshAwaitAllChildren returns it whenever a child is still
+			// running. Without this the 1<<62 below was read as a result length of
+			// 1<<30 over resultsBuf (cleat#3385).
+			"suspendSentinel := uint64(result)&(1<<62) != 0",
+			"if suspendSentinel {",
+			"	panic(cleat.ErrSuspend)",
+			"}",
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
@@ -741,7 +749,11 @@ var adapterDefs = map[string]adapterDef{
 			// which is also what the import's timeoutMs argument needs.
 			{"timeout", "time.Duration"},
 		},
-		ResultStmts: []string{
+		// withSuspendCheck since cleat#3383. A suspending await returns the stop
+		// sentinel, whose bit 31 lands inside the timed-out field read below, so
+		// without the check up front a suspend decoded as an ordinary timeout and
+		// the guest took its timeout branch before the run stopped.
+		ResultStmts: withSuspendCheck(
 			"resultLen := uint32(uint64(result) >> 32)",
 			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 			"errCode := uint32(result & 0xFFFF)",
@@ -749,7 +761,7 @@ var adapterDefs = map[string]adapterDef{
 			"return \"\", false, fmt.Errorf(\"cleat_await_promise: %s\", hostErrMessage(resultOutBuf[:], resultLen))",
 			"}",
 			"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
-		},
+		),
 	},
 	"RegisterUpdateHandler": {
 		FieldName: "RegisterUpdateHandler",

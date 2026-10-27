@@ -140,8 +140,15 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 				t.Errorf("the store logged %d per-field \"decrypt failed\" WARNs on the replay read, want 0\n--- worker log ---\n%s", n, wrong.output())
 			}
 			wrong.kill()
-			if _, err := db.Exec(`UPDATE workflow_instances SET status = 'ready', assigned_to = NULL, next_wake_at = now() WHERE id = $1`, wfID); err != nil {
-				t.Fatalf("returning the run to ready: %v", err)
+			// cleat#3245: the lease row is the only copy of the run's state
+			// written after insert (B3c-2), and ClaimWorkflows reads it. Without
+			// this, worker C's claim below cannot see the row as ready -- it is
+			// only rescued, slowly, by the background stale-lease reclaim sweep
+			// once the row's (unaffected) heartbeat_at ages out, which is a false
+			// green: the test still passes, just ~45s slower than the fast path
+			// it means to exercise.
+			if _, err := db.Exec(`UPDATE workflow_leases SET status = 'ready', assigned_to = NULL, next_wake_at = now() WHERE id = $1`, wfID); err != nil {
+				t.Fatalf("returning the run's lease row to ready: %v", err)
 			}
 
 			// Worker C holds key A and finishes it.
@@ -153,6 +160,13 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 					status, errMsg, right.output())
 			}
 			_, _, result = workflowOutcome(t, db, wfID)
+			// The positive half first: an empty result also contains no
+			// sentinel, so without it the check below passes when nothing was
+			// stored at all -- which it did for as long as this read
+			// workflow_instances after cleat#3245 B1b stopped writing there.
+			if result == "" {
+				t.Fatalf("the run ended done but stored no result")
+			}
 			if strings.Contains(result, "DECRYPTION_FAILED") {
 				t.Fatalf("result carries the decryption sentinel: %s", result)
 			}
@@ -190,7 +204,7 @@ func awaitReleaseNotTerminal(t *testing.T, db *sql.DB, id string, w *worker) {
 func workflowOutcome(t *testing.T, db *sql.DB, id string) (status, errMsg, result string) {
 	t.Helper()
 	var msg, res sql.NullString
-	if err := db.QueryRow(`SELECT status, error_msg, result::text FROM workflow_instances WHERE id = $1`, id).
+	if err := db.QueryRow(`SELECT w.status, p.error_msg, p.result::text FROM workflow_leases w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
 		Scan(&status, &msg, &res); err != nil {
 		t.Fatalf("reading %s: %v", id, err)
 	}
@@ -239,7 +253,7 @@ func requireAdminRefusals(t *testing.T, db *sql.DB, addr, id string, w *worker) 
 	// claim it while the calls are made.
 	parked := false
 	for i := 0; i < 80 && !parked; i++ {
-		res, err := db.Exec(`UPDATE workflow_instances SET next_wake_at = now() + interval '1 hour' WHERE id = $1 AND status = 'ready'`, id)
+		res, err := db.Exec(`UPDATE workflow_leases SET next_wake_at = now() + interval '1 hour' WHERE id = $1 AND status = 'ready'`, id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -253,7 +267,7 @@ func requireAdminRefusals(t *testing.T, db *sql.DB, addr, id string, w *worker) 
 		t.Fatalf("could not park the run\n--- worker log ---\n%s", w.output())
 	}
 	var generation int64
-	if err := db.QueryRow(`SELECT generation FROM workflow_instances WHERE id = $1`, id).Scan(&generation); err != nil {
+	if err := db.QueryRow(`SELECT generation FROM workflow_leases WHERE id = $1`, id).Scan(&generation); err != nil {
 		t.Fatal(err)
 	}
 	before := eventCount(t, db, id)
@@ -293,7 +307,7 @@ func requireAdminRefusals(t *testing.T, db *sql.DB, addr, id string, w *worker) 
 	}
 
 	// Then re-replay and resolve-step, which need a re-replayable run.
-	if _, err := db.Exec(`UPDATE workflow_instances SET status = 'failed' WHERE id = $1`, id); err != nil {
+	if _, err := db.Exec(`UPDATE workflow_leases SET status = 'failed' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct{ name, path, confirm, body string }{
@@ -324,6 +338,20 @@ func TestEnablingEncryptionMidRunDoesNotStrandTheRun(t *testing.T) {
 	// comment on payloadEncryptionMidRunDatabase.
 	db := ownerDBFor(t, payloadEncryptionMidRunDatabase)
 	defer db.Close()
+
+	// cleat#3210: payloadEncryptionMidRunDatabase is created once and never
+	// dropped, so without this, a SECOND local invocation of this exact test
+	// against the same long-lived Postgres container fails its own
+	// precondition below -- this test's own second worker, further down,
+	// already tripped payload_encryption_ever_enabled's one-way ratchet on a
+	// prior run, and nothing un-trips it. ownerDBFor has already applied
+	// migrations by this point, so the table is guaranteed to exist whether
+	// this database is brand new or reused. Safe to reset unconditionally:
+	// this database is this test's own, never shared (see
+	// harness_test.go's comment on the three dedicated databases).
+	if _, err := db.Exec(`DELETE FROM payload_encryption_ever_enabled`); err != nil {
+		t.Fatalf("resetting payload_encryption_ever_enabled: %v", err)
+	}
 
 	suffix := uniqueSuffix()
 	taskQueue := "queue-encrypt-midrun-" + suffix

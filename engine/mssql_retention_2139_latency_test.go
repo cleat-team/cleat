@@ -682,15 +682,47 @@ func assertAllMSSQL2139Sampled(t *testing.T, arm, phase string, latencies []time
 // So this harness has a confirmed blind spot for the mssqlInterleaveChunk
 // regression on these two arms. The escalated lock is real (per the DMV
 // counter) but does not manifest as materially higher writer latency in
-// this measurement -- plausibly because SQL Server's escalation fires very
-// late in an already-short transaction, leaving too narrow a blocking
-// window for a 200-sample writer to reliably catch relative to its own
-// per-sample noise floor; that is a hypothesis, not a second measurement,
-// and is recorded as one. TestMSSQLRetentionSweepsCauseNoLockEscalation
-// remains the authoritative regression guard for cleat#2060/mssqlInterleaveChunk;
-// this test's bound should be read as covering cleat#2138/mssqlEventRowChunk
-// only, confirmed for DeleteExpiredEvents, and not as a general contention
-// detector for all three arms.
+// this measurement. TWO FURTHER MEASUREMENTS, both against the exact
+// mutation above, settle WHY -- CLOSING this as the issue's conclusion
+// rather than leaving it a hypothesis (cleat#2139, 2026-10-08):
+//
+//   - ORDER-SWAP IS NOT A FIX, AND IS ITS OWN CONFOUND. Measuring treatment
+//     (concurrent with the sweep) FIRST and baseline (writer alone) SECOND
+//     reverses the comparison -- under the mutation, treatment P99 came in
+//     3.1-3.8x ABOVE baseline (e.g. DeleteDeadLetteredWorkflows: baseline
+//     14.9ms, treatment 46.6ms). That looks like a fix until the SAME swap
+//     is run as a negative control with mssqlInterleaveChunk left at 20:
+//     treatment P99 is STILL 2.4-2.5x above baseline (13.4ms vs 31.7ms) with
+//     no regression present at all. Whichever measurement runs SECOND in
+//     this harness benefits from a warm-up/ordering advantage of comparable
+//     size to the contention signal being hunted, in EITHER direction --
+//     original order hides the regression inside it, swapped order would
+//     manufacture a false one. Neither ordering is a reliable comparison.
+//   - THE SLOW WRITER SAMPLES ARE NOT ESCALATION-SPECIFIC. Polling
+//     sys.dm_exec_requests directly (3ms interval, a connection separate
+//     from the writer and the sweep) for blocking_session_id <> 0 across
+//     the whole sweep found ZERO blocking events in either case -- mutated
+//     (8.1s sweep, 6/200 writer samples over 20ms, max 86.6ms) or
+//     unmutated (4.4s sweep, 4/200 samples over 20ms, max 83.0ms). Within
+//     noise of each other, mutation or not. So the handful of slow writer
+//     samples any of these sweeps produces are not classic SQL Server lock
+//     blocking at all (the DMV would show it), and are not specific to the
+//     escalation this test is trying to catch -- they are a smaller,
+//     sweep-general perturbation (plausibly I/O or CPU contention from a
+//     multi-second DELETE competing with the writer, sharper under this
+//     host's amd64-on-arm64 emulation -- see WORKSTREAM.md) that a
+//     correctly-chunked sweep produces almost as much of as a broken one.
+//
+// CONCLUSION: the two-test split is the right final shape, not a stopgap.
+// TestMSSQLRetentionSweepsCauseNoLockEscalation measures the escalation
+// directly (a lock-promotion counter) and is the authoritative regression
+// guard for cleat#2060/mssqlInterleaveChunk on these two arms.
+// THIS test's writer-latency bound should be read as covering
+// cleat#2138/mssqlEventRowChunk only, confirmed for DeleteExpiredEvents --
+// not as a general contention detector for all three arms, because the
+// contention these two arms' regression causes is smaller than, and not
+// separable from, noise this same harness's own measurement order
+// introduces.
 
 // mssql2139RebuildSweepTargets re-creates the arm's sweep targets between measurement
 // attempts, so a retry measures the same scenario as the first attempt rather than an

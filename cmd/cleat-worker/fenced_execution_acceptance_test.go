@@ -83,11 +83,7 @@ func TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow(
 			// PostgresStore.ReapStaleInstances in engine/store_lifecycle.go,
 			// so it puts the row back exactly where that sweep would.
 			fenceOnce.Do(func() {
-				if _, err := db.ExecContext(ctx, `
-					UPDATE workflow_instances
-					SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
-					    generation = generation + 1, reclaim_count = reclaim_count + 1
-					WHERE id = $1`, wfID); err != nil {
+				if err := simulateCrashReclaim(ctx, db, wfID); err != nil {
 					t.Errorf("simulating the reclaim: %v", err)
 					return
 				}

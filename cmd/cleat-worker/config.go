@@ -80,12 +80,21 @@ var (
 		"Max stale instances the reaper reclaims per tick (0 = unbounded; see --help for why bounding matters)")
 	maxQueued         = flag.Int("max-queued", 0, "Max queued (ready) workflows before rejecting new starts (0 = unlimited)")
 	shutdownGrace     = flag.Duration("shutdown-grace", 20*time.Second, "How long SIGTERM/SIGINT waits for in-flight runs to finish before the worker cancels them. During the wait the worker stops claiming, keeps heartbeating, and reports /readyz 503 (draining); a run that ends in time is finalized normally, and any run cut off at the end is RELEASED for another worker to replay (at-least-once), never recorded as failed (cleat#2285). Keep it below the orchestrator's kill deadline (the chart sets terminationGracePeriodSeconds above it); a second signal cancels immediately.")
-	heartbeatInterval = flag.Duration("heartbeat", 5*time.Second, "How often a worker proves it is alive. This ALSO sets two expiry windows unless --reclaim-timeout overrides the first: a run is reclaimable after heartbeat + 3x the database-call deadline + the retry interval + 1s of slack (about 14.5s at the default), and a worker's membership lease expires on a related shape. Raising it to survive a longer database outage therefore also delays how quickly a genuinely dead worker's runs are picked up -- use --reclaim-timeout to separate those. It must stay below 150s: past that a stalled worker can be invisible to a secret writer and not know it (cleat#2167), so the worker refuses to start.")
-	reclaimTimeout    = flag.Duration("reclaim-timeout", 0, "How long a run may go without a heartbeat before another worker may claim it. 0 (the default) derives it as max(2x --heartbeat, 10s), which is the historical behaviour and changes nothing. Set it to decouple the two: the heartbeat is how often a live worker checks in, this is how long a DEAD one's work stays stranded, and a database outage stops the heartbeat without the worker being dead. Sizing it to a failover window (tens of seconds for streaming replication, longer for managed Multi-AZ) buys outage tolerance at the cost of that much extra delay before a crashed worker's runs are recovered. Refused if below 2x --heartbeat, which would reap runs whose workers are heartbeating normally. Does NOT move the worker-membership lease, which is a different question -- which workers exist, for shard distribution -- and still follows --heartbeat.")
+	heartbeatInterval = flag.Duration("heartbeat", 5*time.Second, "How often a worker proves it is alive. This ALSO sets two expiry windows unless --reclaim-timeout overrides the first: a run is reclaimable after heartbeat + a 30s tolerated-stall margin + 2x the database-call deadline + a fixed SQL Server reconnect allowance + the retry interval + 1s of slack (about 47s at the default -- raised from ~14.5s, cleat#3258, to actually cover a real multi-second database-network stall rather than only one up to one heartbeat interval long), and a worker's membership lease expires on a related shape. Raising --heartbeat to survive a longer database outage therefore also delays how quickly a genuinely dead worker's runs are picked up -- use --reclaim-timeout to separate those. It must stay below 150s: past that a stalled worker can be invisible to a secret writer and not know it (cleat#2167), so the worker refuses to start.")
+	reclaimTimeout    = flag.Duration("reclaim-timeout", 0, "How long a run may go without a heartbeat before another worker may claim it. 0 (the default) derives it from --heartbeat (about 47s at the 5s default; see --heartbeat's own help for the formula), which is the historical behaviour and changes nothing. Set it to decouple the two: the heartbeat is how often a live worker checks in, this is how long a DEAD one's work stays stranded, and a database outage stops the heartbeat without the worker being dead. Sizing it to a failover window (tens of seconds for streaming replication, longer for managed Multi-AZ) buys outage tolerance at the cost of that much extra delay before a crashed worker's runs are recovered. Refused if below the derived default for the current --heartbeat, which would reap runs whose workers are heartbeating normally. Does NOT move the worker-membership lease, which is a different question -- which workers exist, for shard distribution -- and still follows --heartbeat.")
 	pollInterval      = flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
 	notifyChannel     = flag.String("notify-channel", "cleat_dispatch", "PostgreSQL NOTIFY channel for dispatch wake-up (empty disables)")
 	apiAddr           = flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
-	pprofAddr         = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
+	// Off by default (empty) -- cleat#2345. A browser-based caller holding a
+	// tenant API key is a deployment choice with real risk (the key is
+	// readable by any script on that origin); the recommended default is
+	// the same-origin proxy pattern (#2344), not a CORS allowlist. See
+	// docs/reference/worker-config.md's note on this flag before enabling
+	// it. Comma-separated, exact origins only -- never "*" -- see
+	// newCORSMiddleware's own doc comment (cors.go) for why that is
+	// enforced by construction rather than validated here.
+	corsAllowedOrigins = flag.String("cors-allowed-origins", "", "Comma-separated list of exact origins (e.g. https://app.example.com) allowed to make cross-origin requests to this worker's HTTP API. Empty (default) disables CORS entirely -- no preflight handling, no Access-Control-* response headers. Never \"*\"; origins are matched by exact string equality. See docs/reference/worker-config.md before enabling this on a deployment that is not behind the recommended same-origin proxy (#2344)")
+	pprofAddr          = flag.String("pprof-addr", "", "Go pprof HTTP listen address (e.g., :6060)")
 	// workerServiceName names a headless Kubernetes Service (clusterIP: None)
 	// that selects this worker's pods, matching the pod spec's own
 	// spec.subdomain (see charts/cleat/templates/{service,deployment}.yaml).
@@ -122,6 +131,13 @@ var (
 	compactionThreshold = flag.Int("compaction-threshold", 100, "Number of events before history compaction triggers")
 	compactionInterval  = flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
 	retentionInterval   = flag.Duration("retention-interval", 24*time.Hour, "Interval between retention sweeps")
+	// cleat#2264: a database restored from an older backup, or rolled back, while
+	// workers are already running leaves /readyz answering 200 against a schema the
+	// binary does not expect -- the startup check (cleat#2117) only runs once, at
+	// boot. 5 minutes matches compactionInterval's scale: cheap enough to run
+	// unconditionally, frequent enough that a bad restore is noticed well before an
+	// operator would otherwise find out from a query failing on a missing column.
+	schemaCheckInterval = flag.Duration("schema-check-interval", 5*time.Minute, "Interval between runtime schema-version checks feeding /readyz's schema_behind reason (cleat#2264)")
 	// SEPARATE FROM THE REAPER'S STALE TIMEOUT ON PURPOSE, though they start
 	// from the same idea. The reaper asks "has this run missed enough
 	// heartbeats that I should take it back", and answers in seconds because
@@ -363,6 +379,25 @@ var (
 	dbCredentialPath              = flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	encryptionKeyFile             = flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode). Every new payload seal uses this key.")
 	encryptionKeyFilePrevious     = flag.String("encryption-key-file-previous", "", "Path to a PREVIOUS base64-encoded AES-256-GCM encryption key file, for a rolling key rotation (cleat#1992). Read-only: a payload sealed under this key still opens, but nothing new is ever sealed with it. Requires --encryption-key-file. There is no admin.workers-style gate for this the way tenant-secret rotation has -- a worker still on the old key alone cannot read a row a worker already on the new key wrote, until it restarts with this flag. See docs/how-to/rotate-payload-encryption-key.md.")
+	// encryptionKeyFileVersion[Previous][File]: cleat#3203. Give the payload
+	// ring the same file-sourced version-number mechanism
+	// CLEAT_SECRET_MASTER_KEY_VERSION[_FILE] already gives the secrets ring
+	// (engine.SecretKeyRingFromEnv) -- a SIGHUP can only ever ADD a version
+	// number the live ring never held, never reuse one under new bytes, and
+	// without this the payload side has no version to add: --encryption-key-
+	// file-version does not exist today, so every reload sees the same
+	// labels (2 and 1) no matter what the key FILES' bytes become (see
+	// sighup_reload.go's doc comment). Unset on both sides, these default to
+	// today's hardcoded 2/1 -- purely additive, no migration required.
+	//
+	// The "-file" sibling of each exists for the same reason the KEY path is
+	// a file and not an inline flag value: a CLI flag is fixed for the
+	// process's lifetime, so a version an operator wants a SIGHUP to pick up
+	// has to live somewhere editable, same as the key bytes it labels.
+	encryptionKeyFileVersion             = flag.String("encryption-key-file-version", "", "Version number for the key in --encryption-key-file (default 2, matching this flag's long-standing hardcoded value). Set directly or via --encryption-key-file-version-file; not both.")
+	encryptionKeyFileVersionFile         = flag.String("encryption-key-file-version-file", "", "Path to a file containing --encryption-key-file-version's value, re-read on every SIGHUP-triggered reload (cleat#3203). Mutually exclusive with --encryption-key-file-version.")
+	encryptionKeyFilePreviousVersion     = flag.String("encryption-key-file-previous-version", "", "Version number for the key in --encryption-key-file-previous (default 1, matching this flag's long-standing hardcoded value). Set directly or via --encryption-key-file-previous-version-file; not both.")
+	encryptionKeyFilePreviousVersionFile = flag.String("encryption-key-file-previous-version-file", "", "Path to a file containing --encryption-key-file-previous-version's value, re-read on every SIGHUP-triggered reload (cleat#3203). Mutually exclusive with --encryption-key-file-previous-version.")
 
 	// ROLE-PER-TENANT ISOLATION. cleat#1307.
 	//
@@ -472,6 +507,19 @@ var (
 			"cloud metadata endpoint is what this whole policy exists to refuse.\n"+
 			"Entry forms: an exact host as it appears in the endpoint URL. Matching is on "+
 			"the HOST, so \"localhost\" and \"127.0.0.1\" are different entries. cleat#1627")
+	enableWorkflowFetch = flag.Bool("enable-workflow-fetch", false,
+		"Serve cleat_fetch, the guest's direct outbound HTTP call. Off by default, and while off "+
+			"every cleat_fetch fails with an error that names this flag.\n"+
+			"Turning it on grants workflows the ability to ATTEMPT an outbound request from this "+
+			"worker; it grants no destination. The request goes through the same egress guard as "+
+			"DurableCall(\"http\", \"fetch\"): the floor (loopback, link-local, RFC1918) is always "+
+			"refused, --egress-allowlist narrows what this deployment may reach, and the "+
+			"requesting tenant's own list (cleatctl egress-allow) must permit the host -- an empty "+
+			"tenant list permits nothing. See docs/operations/egress-policy.md. cleat#3377")
+	workflowFetchMaxResponseBytes = flag.Int64("workflow-fetch-max-response-bytes", defaultWorkflowFetchMaxBody,
+		"Largest response body cleat_fetch will return. A larger response fails the call with an "+
+			"error that names this cap, rather than being cut. Only read when --enable-workflow-fetch "+
+			"is set. cleat#3377")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
 	migrationLockTimeout     = flag.Duration("migration-lock-timeout", migration.DefaultLockTimeout,
 		"How long a migration statement waits for a lock before failing. A migration needing ACCESS EXCLUSIVE "+
@@ -538,7 +586,9 @@ var (
 	claimAcrossTenants      = flag.Bool("claim-across-tenants", true, "Execute work for every tenant, not only this worker's own. "+
 		"DEFAULTS ON: the dispatch loop rotates through admin.tenants -- which carries no row-level "+
 		"security -- and then claims and reads due schedules under each tenant's OWN RLS context. "+
-		"Nothing is exempt from a policy and nothing has to be granted, on any dialect.\n"+
+		"Nothing is exempt from a policy and nothing has to be granted, on PostgreSQL or SQL Server. "+
+		"MySQL and sharded (--shards-file) workers cannot enumerate tenants: they warn once at startup "+
+		"and claim their own tenant only.\n"+
 		"It was off by default because the only mechanism used to be a widened admin.claim_workflows "+
 		"query, whose owner needed BYPASSRLS: a privilege only a superuser can grant, and one managed "+
 		"PostgreSQL cannot grant at all. Turning that on had to be a deliberate act. That mechanism, "+
@@ -547,7 +597,7 @@ var (
 		"tenant's work unexecuted by default stopped being caution and became a surprise.\n"+
 		"WITH ONE TENANT THIS COSTS ONE QUERY PER TICK -- the tenant list -- and nothing else changes.\n"+
 		"Set false to run this worker against its own tenant only. A worker reports on both loops at startup "+
-		"which mechanism it actually has, so a half-completed setup says so rather than running silently "+
+		"whether it can rotate, so a worker that cannot says so rather than running silently "+
 		"single-tenant.")
 	claimTenantsPerTick = flag.Int("claim-tenants-per-tick", defaultClaimTenantsPerTick,
 		"The most tenants one dispatch tick will poll when claiming across tenants. Unserved tenants are "+

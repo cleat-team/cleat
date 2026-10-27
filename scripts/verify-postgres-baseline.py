@@ -7,17 +7,17 @@ baseline, regenerates, and compares -- which works because its emitter is a pure
 function from the live catalogue to the three files: such a function is a **fixed
 point of its own input**, so self-application verifies it. `gen-postgres-baseline.py`
 is not that. It is a **one-shot transform from a `pg_dump` of the pre-rebaseline
-chain**, as its own docstring says, so regenerating from its own output is not
-defined -- it fails outright, at the partition anchor:
-
-    close = body.index("\\n);", decl)      # gen-postgres-baseline.py
-    ValueError: substring not found
-
-because a database built from the committed baseline already has a partitioned
-`event_history` and its dump closes `)\\nPARTITION BY HASH (tenant_id);`. So this
-mode verifies the artifact against **the thing it claims to come from**: it builds a
-database from the PRIOR REBASELINE's chain, dumps that, regenerates, and requires
-byte-identity. That is the acceptance procedure, automated.
+chain**, as its own docstring says. It used to fail outright on an already-partitioned
+dump, at the partition anchor (`close = body.index("\\n);", decl)` raised
+`ValueError: substring not found`); measured 2026-10-27, it no longer does, and drops the
+64 `event_history_pN` passthrough tables instead. That is not why this mode builds from
+a pinned tree. The committed baseline is the chain's end state PLUS whatever deliberate
+change was applied to it before the dump (`--prior-transform`; cleat#3245 B5 narrowed
+`workflow_instances` that way), and a dump of the committed baseline cannot rediscover
+a change that is no longer in it. So this mode verifies the artifact against **the thing
+it claims to come from**: it builds a database from the PRIOR REBASELINE's chain, applies
+the transform if one is given, dumps that, regenerates, and requires byte-identity. That
+is the acceptance procedure, automated.
 
 It exists because two guards in `engine/` were narrowed on the strength of the claim
 "this baseline is generated, so enumerating the policy list in it is not the
@@ -46,7 +46,8 @@ adds the fourth assertion: **if it names an RLS-scoped table, the mode starts de
 being run as a superuser**, passing here and failing wherever the DSN is an ordinary role.
 
     ./scripts/verify-postgres-baseline.py --dsn postgres://... \\
-        --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10
+        --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10 \\
+        [--prior-transform scripts/postgres-baseline-transforms/<file>.sql]
 
 Exit status carries three outcomes, not two, because "could not measure" and "the
 artifact is wrong" send you to different places (CLAUDE.md):
@@ -145,6 +146,12 @@ def main():
     ap.add_argument("--prior-rebaseline", required=True,
                     help="FULL 40-char SHA of the commit whose chain the committed "
                          "baseline was generated from; see the module docstring")
+    ap.add_argument("--prior-transform", default=None,
+                    help="a SQL file applied to the database built from the prior chain, "
+                         "BEFORE it is dumped. Use it when the baseline was regenerated "
+                         "from that chain with a deliberate change (cleat#3245 B5 narrowed "
+                         "workflow_instances); without it the committed files are compared "
+                         "against a dump that never had the change")
     ap.add_argument("--committed", default="migrations/postgres")
     ap.add_argument("--generator", default="scripts/gen-postgres-baseline.py")
     ap.add_argument("--schema", default="public",
@@ -175,6 +182,10 @@ def main():
     # whether the pin still names the right tree. An abbreviated SHA would not let
     # them look it up.
     print(f"prior rebaseline: {args.prior_rebaseline}")
+    if args.prior_transform:
+        if not os.path.exists(args.prior_transform):
+            fail(f"--prior-transform {args.prior_transform} does not exist", 2)
+        print(f"prior transform: {args.prior_transform}")
 
     # ---- pick a client ----------------------------------------------------
     container = args.pg_container or find_container()
@@ -267,9 +278,22 @@ def main():
             fail("could not extract migrations/postgres from the prior tree", 2)
         chain = sorted(x for x in os.listdir(os.path.join(old, "migrations", "postgres"))
                        if x.endswith(".sql"))
-        if len(chain) < 30:
-            fail(f"the prior tree yielded only {len(chain)} migration file(s); that is "
-                 "not a pre-rebaseline chain -- is --prior-rebaseline the right commit?", 2)
+        # cleat#3347: this used to be a hardcoded "< 30", tuned to cleat#2059's
+        # own ~87-file chain and never meant to survive a SECOND compaction.
+        # The invariant that actually matters is relative, not absolute: a
+        # prior-rebaseline chain must have had MORE files than the baseline it
+        # produced, or it is not a chain being compacted at all -- it is the
+        # committed baseline itself (or an earlier one), pointed at by mistake.
+        # A fixed floor would need re-tuning after every future compaction,
+        # the same "a count of a growing population drifts" trap this repo's
+        # own CLAUDE.md warns about; this does not, because it is checked
+        # against what IS committed rather than against a number frozen at
+        # the moment this script was written.
+        committed_count = len([x for x in os.listdir(args.committed) if x.endswith(".sql")])
+        if len(chain) <= committed_count:
+            fail(f"the prior tree yielded {len(chain)} migration file(s), not more than "
+                 f"the {committed_count} in --committed ({args.committed}); that is not a "
+                 "pre-rebaseline chain -- is --prior-rebaseline the right commit?", 2)
         # No abbreviated SHA here: the full one is printed once, above, and a short
         # form appearing a second time invites someone to copy that one.
         print(f"prior chain: {len(chain)} file(s)")
@@ -282,6 +306,14 @@ def main():
             if r.returncode != 0:
                 fail(f"applying {name} failed:\n{r.stderr.strip()}", 2)
         print(f"applied {len(chain)} file(s) (search_path = {args.schema}, pg_temp)")
+
+        if args.prior_transform:
+            with open(args.prior_transform) as fh:
+                r = psql(stdin=pin + fh.read())
+            if r.returncode != 0:
+                fail(f"applying the transform {args.prior_transform} failed:\n"
+                     f"{r.stderr.strip()}", 2)
+            print(f"applied the transform {args.prior_transform}")
 
         # ---- regenerate -----------------------------------------------------
         dump = os.path.join(tmp, "dump.sql")

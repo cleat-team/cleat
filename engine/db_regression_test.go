@@ -14,14 +14,16 @@ import (
 
 func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{
-			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid"}},
-		},
+		// ContinueAsNew inserts the successor's narrow instance row (RETURNing
+		// its id), then reads the task queue and the inherited parent
+		// separately -- nil here since this mock's "old-run" has no parent.
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{"new-run-uuid"}}},
+		{match: "SELECT COALESCE((SELECT task_queue FROM workflow_defs", data: [][]driver.Value{{"default"}}},
+		{match: "SELECT (SELECT parent_workflow_id FROM workflow_leases", data: [][]driver.Value{{nil}}},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
 		// ContinueAsNew to commit and return the new run ID.
-		{match: "SET status = 'done'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 	})
 	defer db.Close()
 
@@ -41,14 +43,16 @@ func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 
 func TestPostgresStore_ContinueAsNew_NoEvents(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{
-			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid"}},
-		},
+		// ContinueAsNew inserts the successor's narrow instance row (RETURNing
+		// its id), then reads the task queue and the inherited parent
+		// separately -- nil here since this mock's "old-run" has no parent.
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{"new-run-uuid"}}},
+		{match: "SELECT COALESCE((SELECT task_queue FROM workflow_defs", data: [][]driver.Value{{"default"}}},
+		{match: "SELECT (SELECT parent_workflow_id FROM workflow_leases", data: [][]driver.Value{{nil}}},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
 		// ContinueAsNew to commit and return the new run ID.
-		{match: "SET status = 'done'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 	})
 	defer db.Close()
 
@@ -147,7 +151,7 @@ func TestPostgresStore_FinalizeWorkflowSegment_UnknownStatus(t *testing.T) {
 func TestPostgresStore_StartChildWorkflowAtomic_ExplicitVersion(t *testing.T) {
 	childID := "child-uuuid-123"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "MAX(version)", data: [][]driver.Value{{int64(-1)}}},
+		{match: "MAX(version)", data: [][]driver.Value{{int64(-1), int64(1)}}}, // 2nd value: resolved def_version, now RETURNed alongside task_queue (migration 018)
 	}, nil)
 	defer db.Close()
 
@@ -164,7 +168,7 @@ func TestPostgresStore_StartChildWorkflowAtomic_ExplicitVersion(t *testing.T) {
 
 func TestPostgresStore_StartChildWorkflowAtomic_ResolveVersion(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "MAX(version)", data: [][]driver.Value{{int64(3)}}},
+		{match: "MAX(version)", data: [][]driver.Value{{int64(3), int64(3)}}}, // 2nd value: resolved def_version, now RETURNed alongside task_queue (migration 018)
 	}, nil)
 	defer db.Close()
 
@@ -182,7 +186,7 @@ func TestPostgresStore_StartChildWorkflowAtomic_ResolveVersion(t *testing.T) {
 func TestPostgresStore_StartChildWorkflowAtomic_WithChecksumChain(t *testing.T) {
 	prevCS := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "MAX(version)", data: [][]driver.Value{{int64(2)}}},
+		{match: "MAX(version)", data: [][]driver.Value{{int64(2), int64(2)}}}, // 2nd value: resolved def_version, now RETURNed alongside task_queue (migration 018)
 		{match: "COALESCE(checksum", data: [][]driver.Value{{prevCS}}},
 	}, nil)
 	defer db.Close()

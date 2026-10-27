@@ -27,13 +27,21 @@ var goFixtureExpectations = map[string]string{
 	// "" means analysis must report no threading errors.
 	"allhostcalls": "",
 	"autothread":   "",
-	"basic":        "",
+	// cleat#3383: CreatePromise -> AwaitPromise -> DurableCall on timeout, one
+	// entry point taking one struct. Must verify cleanly.
+	"awaitpromisebranch": "",
+	// cleat#3378: AwaitSignals -> PluginCall on timeout -> AwaitSignals, one
+	// entry point taking one struct. Must verify cleanly.
+	"awaittimeoutbranch": "",
+	"basic":              "",
 	// cleat#1065: the Go reader for tests/conformance/entry_point_binding_cases.json.
 	"bindingconformance": "",
 	"cancelpoll":         "",
 	"clew-lifecycle":     "",
 	"crashcall":          "",
 	"crosslang":          "",
+	// cleat#3408: one entry point, one string input, one DurableFetch. Must verify cleanly.
+	"fetchprobe": "",
 	// cleat#1617: its only host-call route is cleat/dagrun, whose needs are
 	// declared by a //cleat:require directive in that package rather than in
 	// this fixture. It must verify cleanly -- if it does not, the directive is
@@ -87,6 +95,13 @@ var goFixtureExpectations = map[string]string{
 	"signalworkflow": "",
 	"spin":           "",
 	"updatedispatch": "",
+	// cleat#3418: the one-call fixtures behind TestEachRewiredMethodWiresItsImport's
+	// SetScope, GetScope and RunDetached rows (wasm/hostcall_wiring_test.go).
+	// One entry point, one host call each, so they must verify cleanly. This
+	// table was missed when they were added, and the guard below is what said so.
+	"getscope":    "",
+	"rundetached": "",
+	"setscope":    "",
 	// cleat#2407: two entry points split across two files, used by
 	// TestWasmOutputName_CrossFileEntryPointsNameTheRightFile to prove
 	// wasmOutputName resolves the SELECTED entry point's own file rather

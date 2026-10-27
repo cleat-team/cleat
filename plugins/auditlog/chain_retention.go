@@ -45,8 +45,8 @@ func (p *Plugin) retainTenant(ctx context.Context, tenant uuid.UUID, cutoff time
 	// stall appends for no reason.
 	var headSeq, floorSeq int64
 	var headHash string
-	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(
-		`SELECT seq, hash, floor_seq FROM audit_chain_heads WHERE tenant_id = $1`, p.dialect), tenant),
+	err := plugin.ScanRow(p.db.QueryRow(ctx,
+		`SELECT seq, hash, floor_seq FROM audit_chain_heads WHERE tenant_id = $1`, tenant),
 		&headSeq, &headHash, &floorSeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p.retainUnchained(ctx, tenant, cutoffMicros)
@@ -68,12 +68,12 @@ func (p *Plugin) retainTenant(ctx context.Context, tenant uuid.UUID, cutoff time
 
 	// Under the lock, read again: an appender may have moved the head, and another
 	// worker's sweep may have moved the floor, since the look above.
-	if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(lockHeadSQL(p.dialect), p.dialect), tenant),
+	if err := plugin.ScanRow(tx.QueryRow(ctx, lockHeadSQL(p.dialect), tenant),
 		&headSeq, &headHash); err != nil {
 		return 0, fmt.Errorf("audit retention: lock head for tenant %s: %w", tenant, err)
 	}
-	if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(
-		`SELECT floor_seq FROM audit_chain_heads WHERE tenant_id = $1`, p.dialect), tenant), &floorSeq); err != nil {
+	if err := plugin.ScanRow(tx.QueryRow(ctx,
+		`SELECT floor_seq FROM audit_chain_heads WHERE tenant_id = $1`, tenant), &floorSeq); err != nil {
 		return 0, fmt.Errorf("audit retention: read floor for tenant %s: %w", tenant, err)
 	}
 	upTo, err := p.expiredPrefixEndOn(ctx, tx, tenant, floorSeq, headSeq, cutoffMicros)
@@ -91,9 +91,9 @@ func (p *Plugin) retainTenant(ctx context.Context, tenant uuid.UUID, cutoff time
 	// expired can be told apart from retention (see VerifyChain).
 	var floorHash string
 	var floorTS int64
-	if err := plugin.ScanRow(tx.QueryRow(ctx, plugin.Rebind(fmt.Sprintf(
+	if err := plugin.ScanRow(tx.QueryRow(ctx, fmt.Sprintf(
 		`SELECT row_hash, %s FROM audit_events WHERE tenant_id = $1 AND seq = $2`,
-		epochMicrosExpr(p.dialect, "timestamp")), p.dialect), tenant, upTo), &floorHash, &floorTS); err != nil {
+		epochMicrosExpr(p.dialect, "timestamp")), tenant, upTo), &floorHash, &floorTS); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			p.logger.Warn("audit-log: retention skipped a tenant whose chain has a missing row; run cleatctl audit verify",
 				"tenant", tenant, "seq", upTo)
@@ -108,8 +108,8 @@ func (p *Plugin) retainTenant(ctx context.Context, tenant uuid.UUID, cutoff time
 		return 0, nil
 	}
 
-	n, err := tx.Exec(ctx, plugin.Rebind(
-		`DELETE FROM audit_events WHERE tenant_id = $1 AND seq IS NOT NULL AND seq <= $2`, p.dialect), tenant, upTo)
+	n, err := tx.Exec(ctx,
+		`DELETE FROM audit_events WHERE tenant_id = $1 AND seq IS NOT NULL AND seq <= $2`, tenant, upTo)
 	if err != nil {
 		return 0, fmt.Errorf("audit retention: delete for tenant %s: %w", tenant, err)
 	}
@@ -122,8 +122,8 @@ func (p *Plugin) retainTenant(ctx context.Context, tenant uuid.UUID, cutoff time
 			"tenant", tenant, "expected_rows", want, "found_rows", n)
 		return 0, nil
 	}
-	if _, err := tx.Exec(ctx, plugin.Rebind(
-		`UPDATE audit_chain_heads SET floor_seq = $1, floor_hash = $2, floor_ts = $3 WHERE tenant_id = $4`, p.dialect),
+	if _, err := tx.Exec(ctx,
+		`UPDATE audit_chain_heads SET floor_seq = $1, floor_hash = $2, floor_ts = $3 WHERE tenant_id = $4`,
 		upTo, floorHash, floorTS, tenant); err != nil {
 		return 0, fmt.Errorf("audit retention: move the floor for tenant %s: %w", tenant, err)
 	}
@@ -150,10 +150,10 @@ func (p *Plugin) expiredPrefixEndOn(ctx context.Context, q rowQuerier, tenant uu
 	// The first row that is NOT expired ends the prefix. Rows are read in seq order and
 	// the read stops at the first match, so this touches only the expired rows.
 	var firstLive int64
-	err := plugin.ScanRow(q.QueryRow(ctx, plugin.Rebind(fmt.Sprintf(`
+	err := plugin.ScanRow(q.QueryRow(ctx, fmt.Sprintf(`
 		SELECT seq FROM audit_events
 		WHERE tenant_id = $1 AND seq IS NOT NULL AND seq > $2 AND %s >= $3
-		ORDER BY seq %s`, epochMicrosExpr(p.dialect, "timestamp"), plugin.LimitClause("1", p.dialect)), p.dialect),
+		ORDER BY seq %s`, epochMicrosExpr(p.dialect, "timestamp"), plugin.LimitClause("1", p.dialect)),
 		tenant, floorSeq, cutoffMicros), &firstLive)
 	upTo := headSeq
 	switch {
@@ -173,9 +173,9 @@ func (p *Plugin) expiredPrefixEndOn(ctx context.Context, q rowQuerier, tenant uu
 // retainUnchained removes expired rows that have no seq: written before the chain
 // existed. They are not part of any chain, so removing them moves no floor.
 func (p *Plugin) retainUnchained(ctx context.Context, tenant uuid.UUID, cutoffMicros int64) (int64, error) {
-	n, err := p.db.Exec(ctx, plugin.Rebind(fmt.Sprintf(
+	n, err := p.db.Exec(ctx, fmt.Sprintf(
 		`DELETE FROM audit_events WHERE tenant_id = $1 AND seq IS NULL AND %s < $2`,
-		epochMicrosExpr(p.dialect, "timestamp")), p.dialect), tenant, cutoffMicros)
+		epochMicrosExpr(p.dialect, "timestamp")), tenant, cutoffMicros)
 	if err != nil {
 		return 0, fmt.Errorf("audit retention: delete unchained rows for tenant %s: %w", tenant, err)
 	}

@@ -434,64 +434,73 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 		pr = pollResult{Status: "failed", Error: "no child workflow store"}
 	default:
 		out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
-		result := out.Result
-		completed := out.Completed
-		switch {
-		case err != nil:
-			pr = pollResult{Status: "failed", Error: err.Error()}
-		case out.Failed:
-			// A child that ran and failed. Before cleat#1115 this branch did
-			// not exist and the child fell through to "done" below, so a
-			// polling parent was told its failed child had succeeded -- the
-			// same defect as AwaitChild's, one status value away.
-			pr = pollResult{Status: "failed", Error: out.Error}
-		case !completed:
-			// Not complete now, so it was not complete at any earlier durable
+		if err != nil {
+			// The store could not answer. That says nothing about the child,
+			// so it is a HOST error, not a "failed" status: answering
+			// "failed" told a polling parent its child had failed when the
+			// database had blinked, and a Selector returned that child as a
+			// failed winner (cleat#3387 review).
+			written, _ := s.writeResult(ctx, m, resultPtr, "poll_child: "+err.Error(), resultMaxLen)
+			return int64(uint64(written)<<32 | 1)
+		}
+		if !out.Completed && !out.Failed {
+			// Not terminal now, so it was not terminal at any earlier durable
 			// time either. No second query needed.
 			pr = pollResult{Status: "running"}
+			break
+		}
+		// Terminal NOW -- completed OR failed. The replayable question is
+		// whether it was terminal as of the parent's durable time, and that
+		// applies to a failure exactly as to a success: a failed row has a
+		// completed_at too. Until the cleat#3387 review only "completed" was
+		// gated, so a child that failed after a parent's recorded wait read
+		// "failed" on the replay of the poll before that wait, and the parent
+		// branched differently from its own history.
+		completedAtMs, ok, cerr := s.engine.childWfStore.GetChildCompletedAtMs(context.Background(), runID)
+		switch {
+		case cerr != nil:
+			written, _ := s.writeResult(ctx, m, resultPtr, "poll_child: "+cerr.Error(), resultMaxLen)
+			return int64(uint64(written)<<32 | 1)
+		case !ok:
+			// Terminal but with no recorded instant. Fail closed rather
+			// than guessing: answering "completed" here would reintroduce
+			// exactly the non-replayable answer #847 is about, and it
+			// would do it silently.
+			//
+			// THERE IS A KNOWN POPULATION OF SUCH ROWS, so this is not a
+			// theoretical branch. Before #864 the first TERMINATE arm of
+			// enforceParentClosePolicy set status='failed' with no
+			// completed_at, in all three dialects. #864 fixed the write and
+			// touched no existing row, and every retention sweep gates on
+			// `completed_at IS NOT NULL` -- so those rows are never
+			// collected and the population never shrinks (#867).
+			//
+			// A child terminated that way is genuinely unanswerable here:
+			// its status is terminal and stable, but nothing on the row
+			// says WHEN it became terminal, so "was it complete at the
+			// parent's durable time" has no answer. Naming the cause beats
+			// a bare error, because the operator's next question is "which
+			// children?" and #867 has the enumeration.
+			pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp, so poll_child cannot answer deterministically; if this child was terminated by a parent close policy before the #864 fix, its completed_at is permanently NULL -- see #867"}
+		case completedAtMs > s.nowMs:
+			// Terminal, but AFTER the parent's durable clock. The original
+			// execution saw it running, so every replay must too.
+			pr = pollResult{Status: "running"}
+		case out.Failed:
+			// A child that ran and failed. Before cleat#1115 this branch did
+			// not exist and the child fell through to "completed", so a
+			// polling parent was told its failed child had succeeded.
+			pr = pollResult{Status: "failed", Error: out.Error}
 		default:
-			// Complete NOW. The replayable question is whether it was complete
-			// as of the parent's durable time.
-			completedAtMs, ok, cerr := s.engine.childWfStore.GetChildCompletedAtMs(context.Background(), runID)
-			switch {
-			case cerr != nil:
-				pr = pollResult{Status: "failed", Error: cerr.Error()}
-			case !ok:
-				// Complete but with no recorded instant. Fail closed rather
-				// than guessing: answering "completed" here would reintroduce
-				// exactly the non-replayable answer #847 is about, and it
-				// would do it silently.
-				//
-				// THERE IS A KNOWN POPULATION OF SUCH ROWS, so this is not a
-				// theoretical branch. Before #864 the first TERMINATE arm of
-				// enforceParentClosePolicy set status='failed' with no
-				// completed_at, in all three dialects. #864 fixed the write and
-				// touched no existing row, and every retention sweep gates on
-				// `completed_at IS NOT NULL` -- so those rows are never
-				// collected and the population never shrinks (#867).
-				//
-				// A child terminated that way is genuinely unanswerable here:
-				// its status is terminal and stable, but nothing on the row
-				// says WHEN it became terminal, so "was it complete at the
-				// parent's durable time" has no answer. Naming the cause beats
-				// a bare error, because the operator's next question is "which
-				// children?" and #867 has the enumeration.
-				pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp, so poll_child cannot answer deterministically; if this child was terminated by a parent close policy before the #864 fix, its completed_at is permanently NULL -- see #867"}
-			case completedAtMs > s.nowMs:
-				// Completed, but AFTER the parent's durable clock. The original
-				// execution saw it running, so every replay must too.
-				pr = pollResult{Status: "running"}
-			default:
-				// An empty result is NOT a failure. Until cleat#1115 this
-				// branch guessed -- "child workflow failed (empty result)" --
-				// because the store had no way to say whether the child had
-				// failed, and the guess is wrong in the other direction: a
-				// child that succeeds and returns nothing was reported as
-				// failed. `out.Failed` above answers it from the row, so the
-				// guess is gone rather than kept alongside an answer it can
-				// contradict.
-				pr = pollResult{Status: "completed", Result: result}
-			}
+			// An empty result is NOT a failure. Until cleat#1115 this
+			// branch guessed -- "child workflow failed (empty result)" --
+			// because the store had no way to say whether the child had
+			// failed, and the guess is wrong in the other direction: a
+			// child that succeeds and returns nothing was reported as
+			// failed. `out.Failed` above answers it from the row, so the
+			// guess is gone rather than kept alongside an answer it can
+			// contradict.
+			pr = pollResult{Status: "completed", Result: out.Result}
 		}
 	}
 
@@ -500,7 +509,44 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 	return packSimpleResult(writtenEC, written)
 }
 
+// sameRunIDSet reports whether two recorded AwaitAnyChild requests name the
+// same set of child run IDs, whatever order they were written in. A request
+// that does not parse is compared as text, so a malformed record never
+// matches a well-formed one.
+func sameRunIDSet(a, b string) bool {
+	var ia, ib []string
+	if json.Unmarshal([]byte(a), &ia) != nil || json.Unmarshal([]byte(b), &ib) != nil {
+		return a == b
+	}
+	if len(ia) != len(ib) {
+		return false
+	}
+	sort.Strings(ia)
+	sort.Strings(ib)
+	for i := range ia {
+		if ia[i] != ib[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
+	// resumedFromSuspend is set when this call replayed one or more empty
+	// (suspend) records and is now re-checking fresh. See the comment where the
+	// suspend would be recorded below.
+	resumedFromSuspend := false
+
+	// A segment that has already decided to suspend does not start another
+	// await. The guest keeps running after a suspend sentinel -- AssemblyScript
+	// gets a null back and Rust an Err it may ignore -- so a second, different
+	// AwaitAnyChild can arrive in the same segment, and without this it would
+	// record a second empty suspend row beside the first: [X empty, Y empty].
+	// Same guard, same reason as AwaitSignal (signaller.go).
+	if s.suspendErr != nil && !s.inDeferDrain {
+		return packAwaitChildResultSuspend()
+	}
+
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -513,22 +559,38 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 					return packSimpleResult(writtenEC, written)
 				}
 				// Empty response: this was a suspend (no child was done yet).
-				// Peek at the next event — if it is also an AwaitAnyChild with
-				// a non-empty response, that is the re-execution result. Consume
-				// both events and return the cached result. This avoids a
+				// Look at what follows it. If an await_any_child record with a
+				// non-empty response comes next, that is the re-execution result:
+				// consume it and return the cached result. This avoids a
 				// non-deterministic fall-through to fresh where multiple children
 				// might show as completed on replay.
-				if s.stepCount < len(s.history) {
+				//
+				// Every directly following EMPTY record of THIS call is skipped
+				// first, not only the first one (cleat#3391). Histories written
+				// before this fix hold two of them for a child that took more than
+				// one wake, and peeking at just the next record found the second
+				// empty one, concluded there was no cached result, and went fresh
+				// again on every wake.
+				//
+				// "Of this call" is the Request comparison below. Adjacent empties
+				// are NOT always the same call: the guest keeps running after a
+				// suspend, so one segment can record [X empty, Y empty], and
+				// replaying X across Y's records would hand Y's result to X.
+				for s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
-					if nextRec.EventType == EventTypeAwaitAnyChild && nextRec.Response != "" {
-						if !s.advanceReplayStep(ctx, &nextRec) {
-							return 0
-						}
+					if nextRec.EventType != EventTypeAwaitAnyChild || !sameRunIDSet(nextRec.Request, rec.Request) {
+						break
+					}
+					if !s.advanceReplayStep(ctx, &nextRec) {
+						return 0
+					}
+					if nextRec.Response != "" {
 						written, writtenEC := s.writeOut(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
 						return packSimpleResult(writtenEC, written)
 					}
 				}
 				// No cached re-execution result — fall through to fresh.
+				resumedFromSuspend = true
 				s.exitReplay()
 			} else {
 				// Event type mismatch — replay divergence.
@@ -595,12 +657,25 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 	}
 
 	// No child completed — suspend.
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeAwaitAnyChild,
-		Request:   runIDsJSON,
+	//
+	// A call that has already recorded its suspend does not record another
+	// one (cleat#3391). The first wake that finds the child still running
+	// writes the empty record; every later wake replays it and, with the child
+	// still running, has nothing new to say. Recording again put a second empty
+	// row at the next step, then hit the conflict clause that only reopens
+	// await_child, await_promise and await_all_children, so when the child did
+	// finish its result was dropped against that second row, and each following
+	// wake re-ran the parent from here: a StartChild after the await started a
+	// new child every time. Left unrecorded, the result lands at the next step
+	// as an ordinary insert, and a replay finds it after the one suspend record.
+	if !resumedFromSuspend {
+		rec := EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypeAwaitAnyChild,
+			Request:   runIDsJSON,
+		}
+		s.recordEvent(rec)
 	}
-	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("await_any_child(%s)", runIDsJSON),

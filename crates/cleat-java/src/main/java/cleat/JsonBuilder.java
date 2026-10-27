@@ -248,6 +248,33 @@ public class JsonBuilder {
         return this;
     }
 
+    /**
+     * Add a key whose value is embedded VERBATIM, already-serialized JSON
+     * text, rather than one of the typed {@code add}/{@code addObject}
+     * forms.
+     * <p>
+     * For exactly the case none of the other methods can express: a value
+     * whose shape the builder's caller does not control, such as a
+     * caller-supplied JSON Schema document for an LLM tool's parameters. The
+     * caller is responsible for {@code rawJson} being valid JSON -- this
+     * method does not parse or validate it, only splices it in.
+     *
+     * @param key     the JSON key (must not be null)
+     * @param rawJson already-serialized JSON text (must not be null; pass
+     *                {@code "null"} for a JSON null, not a Java {@code null})
+     * @return {@code this} for fluent chaining
+     */
+    public JsonBuilder addRawJson(String key, String rawJson) {
+        if (rawJson == null) {
+            throw new IllegalArgumentException(
+                "addRawJson(\"" + key + "\", ...) was given a Java null, not JSON text. "
+                    + "Pass the string \"null\" for a JSON null.");
+        }
+        appendKey(key);
+        sb.append(rawJson);
+        return this;
+    }
+
     // ========================================================================
     // build
     // ========================================================================

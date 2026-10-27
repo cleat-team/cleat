@@ -1,0 +1,238 @@
+# ---------------------------------------------------------------------------
+# Develop Image Failure Notifier
+#
+# develop-image.yml publishes ghcr.io/cleat-team/cleat-worker:develop-<sha> on
+# every push to develop, and rc-<sha> on every push to a release/** branch.
+# Consumers pin those tags (the clew-service port pins develop-<sha>; the 0.5.0
+# upgrade test and the clew slice re-run pin rc-<sha>). A run that fails leaves
+# that sha with no image, and until this file the first sign was a consumer's
+# failed `docker pull` -- cleat#3374, raised by cleat-review as a follow-up to
+# cleat#3373. tier1-push-failure-notifier.yml is the only other failure notifier
+# on develop pushes and watches Tier 1 Gate alone.
+#
+# A SEPARATE WORKFLOW rather than a second entry in that one's `workflows:`
+# list, because what it does after the trigger is Tier-1-specific: it downloads
+# the tier-gate log artifacts and builds the issue title and body out of
+# `--- FAIL:` lines. None of that exists for an image publish, so generalising
+# it means threading a second report shape through a working safety net, to save
+# a few lines of the part that is the same. Copied instead: the resolve step,
+# the filter and the dedupe, which are the parts worth keeping identical.
+#
+# WHAT IT REPORTS. A completed `Develop Image` run, triggered by a push to
+# develop or release/**, whose conclusion is `failure` or `timed_out` (the
+# publish job has a 60-minute limit, and a hung arm64 build leaves the sha
+# without an image exactly as a red one does). It opens, or comments on, one
+# tracking issue per branch, naming the commit, the run, the jobs and steps that
+# failed, what that means for the develop-/rc- sha tags (both forms) and the
+# recovery. The tag statement follows the failed step: a failure in the step
+# that moves `:develop` happens after the sha tags are pushed, and is reported as
+# such rather than as a missing image.
+#
+# WHAT IT DELIBERATELY DOES NOT REPORT, and each is a decision:
+#   * a workflow_dispatch run. Someone is watching a dispatch: it is the repair
+#     for a failed push run, and the person running it reads its result.
+#   * `cancelled`. develop-image.yml sets cancel-in-progress: false, so a
+#     cancellation is a person's act, not a defect.
+#   * a pull request. develop-image.yml has no pull_request trigger.
+#
+# The filter is evaluated once, in the first step, and a workflow_dispatch dry
+# run goes through the identical check: it supplies the run id a real
+# `workflow_run` completion would have supplied and nothing else, so testing it
+# against a green run proves the filter and not only the dry-run flag.
+#
+# Nothing gates on this workflow: no job `needs:` it, and it is in neither
+# .github/required-checks.txt nor tiers.yaml's required_contexts. It is a
+# read-only listener, so it can change without touching branch protection, and
+# its job name is chosen so as not to look like a required context.
+# ---------------------------------------------------------------------------
+name: Develop Image Failure Notifier
+
+on:
+  workflow_run:
+    workflows: ["Develop Image"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Develop Image run id to evaluate (for testing the notifier itself)"
+        required: true
+      dry_run:
+        description: "If true, compute and print the issue title/body but do not create or comment"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  # workflow_run fires once per completed run, so two live completions of the
+  # same run cannot race; this guards a manual dry-run dispatch against racing a
+  # live completion for the same run id. Never cancelled: a dropped
+  # notification is the failure this file exists to prevent.
+  group: ${{ github.workflow }}-${{ github.event.inputs.run_id || github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  # actions:read to list the run's jobs; issues:write to open or comment on the
+  # tracking issue. Nothing else -- no contents, no checkout step anywhere.
+  actions: read
+  issues: write
+
+jobs:
+  notify:
+    name: Report a failed develop image publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # One step, on purpose. Every value from the triggering run is data:
+      # head_branch on a workflow_run is the pushed ref's name, which a writer
+      # chooses, and it is never spliced into a `run:` script here (the lesson
+      # tier1-push-failure-notifier.yml records in its "Quiet on green" step).
+      # github-script reads it as a JavaScript string and nothing parses it as
+      # shell.
+      - name: Evaluate the run and open or update the tracking issue
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const isDispatch = context.eventName === 'workflow_dispatch';
+            const runId = isDispatch
+              ? Number(context.payload.inputs.run_id)
+              : context.payload.workflow_run.id;
+            const dryRun = isDispatch
+              ? String(context.payload.inputs.dry_run) !== 'false'
+              : false;
+
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+
+            const branch = run.head_branch || '';
+            const publishesFromHere = branch === 'develop' || branch.startsWith('release/');
+            const failed = run.conclusion === 'failure' || run.conclusion === 'timed_out';
+            const relevant = run.event === 'push' && publishesFromHere && failed;
+            core.notice(
+              `run=${run.id} attempt=${run.run_attempt} event=${run.event} branch=${branch} ` +
+              `conclusion=${run.conclusion} relevant=${relevant} dry_run=${dryRun}`
+            );
+            if (!relevant) {
+              core.notice('not a failed publish from a push to develop or release/**; nothing to report');
+              return;
+            }
+
+            const sha = run.head_sha;
+            // The tag prefix is decided by the branch alone, as it is in
+            // develop-image.yml's "Compute cleat-worker image tags" step. Both
+            // sha tags are named because both are published, and a consumer
+            // may pin either form (clew pins the full one).
+            const prefix = branch === 'develop' ? 'develop' : 'rc';
+            const image = 'ghcr.io/cleat-team/cleat-worker';
+            const shortTag = `${image}:${prefix}-${sha.slice(0, 9)}`;
+            const fullTag = `${image}:${prefix}-${sha}`;
+
+            // run.html_url is identical across attempts of one run id
+            // (cleat#2906), so the dedupe key folds the attempt in. Two
+            // attempts of a run can then never read as one report.
+            const reportKey = `${run.html_url} (attempt ${run.run_attempt})`;
+
+            const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: run.id,
+              per_page: 100,
+            });
+            const failedStepNames = [];
+            const failedJobs = jobsResp.data.jobs
+              .filter(j => j.conclusion === 'failure' || j.conclusion === 'timed_out')
+              .map(j => {
+                const step = (j.steps || []).find(s => s.conclusion === 'failure' || s.conclusion === 'timed_out');
+                if (step) failedStepNames.push(step.name);
+                return step ? `${j.name} (step: ${step.name})` : j.name;
+              });
+
+            // What the sha tags' state is depends on WHICH step failed, and
+            // saying "not published" about tags that were pushed would send a
+            // consumer looking for the wrong problem. develop-image.yml pushes
+            // the sha tags in "Build and push cleat-worker image", then moves
+            // `:develop` in a later step; a failure there leaves the sha tags
+            // in place and only the moving tag behind.
+            const onlyMovingTagFailed = failedStepNames.length > 0 &&
+              failedStepNames.every(n => n.startsWith('Move the develop tag'));
+            const tagState = onlyMovingTagFailed
+              ? `The failure was in the step that moves \`${image}:develop\`, which runs AFTER the sha ` +
+                `tags are pushed: \`${shortTag}\` and \`${fullTag}\` should exist, and only the moving ` +
+                '`develop` tag was left where it was. Pins by sha are unaffected.'
+              : `\`${shortTag}\` and \`${fullTag}\` should be treated as not published: the failure ` +
+                'was before or during the push, so a consumer pinning either will fail to pull it. ' +
+                `Check with \`docker buildx imagetools inspect ${fullTag}\`.`;
+
+            const title = `[develop-image] image publish failed on ${branch}`;
+            const body = [
+              `Run: ${reportKey}`,
+              `Commit: ${sha}`,
+              `Conclusion: ${run.conclusion}`,
+              '',
+              `Failed jobs: ${failedJobs.join(', ') || '(none reported failure -- check the run directly)'}`,
+              '',
+              tagState,
+              '',
+              `Recovery: \`gh workflow run develop-image.yml --ref ${branch}\` publishes the CURRENT head ` +
+                'of that branch, which may be a later commit than the one above; if this commit is not ' +
+                'the head, it stays without an image. See docs/operations/container-images.md, ' +
+                '"When a develop or rc tag is missing".',
+              '',
+              'cleat#3374: nothing else watches this workflow.',
+            ].join('\n');
+
+            if (dryRun) {
+              core.notice('DRY RUN -- not creating or commenting on any issue');
+              await core.summary
+                .addHeading('Develop Image Failure Notifier -- dry run')
+                .addRaw(`Title: ${title}\n\n`)
+                .addCodeBlock(body, 'text')
+                .write();
+              return;
+            }
+
+            const openIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'area/ci',
+              per_page: 100,
+            });
+            const existing = openIssues.data.find(i => i.title === title);
+
+            if (!existing) {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['area/ci'],
+              });
+              core.notice(`Opened issue #${created.data.number}`);
+              return;
+            }
+
+            // A redelivered completion of the same run+attempt must not
+            // double-post; a later failure on the same branch is a new report
+            // and gets a comment.
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existing.number,
+              per_page: 100,
+            });
+            const alreadyReported = comments.data.some(c => c.body && c.body.includes(reportKey))
+              || (existing.body && existing.body.includes(reportKey));
+            if (alreadyReported) {
+              core.notice(`Run ${reportKey} already reported on #${existing.number}, skipping`);
+              return;
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: existing.number,
+              body: `Failed again.\n\n${body}`,
+            });
+            core.notice(`Commented on existing issue #${existing.number}`);

@@ -9,12 +9,15 @@ import (
 
 // GetTenantSettings reads this store's tenant's row from dbo.tenant_settings.
 //
-// No explicit transaction, unlike the PostgreSQL path, and that is not a
-// weaker guarantee: MSSQLStore's pool uses a wrapped connector that runs
-// sp_set_session_context on every connection it hands out, so the session
-// context dbo.fn_tenant_filter reads is already set on a plain query. The
-// FILTER PREDICATE that 042_tenant_settings.sql installs therefore applies
-// here exactly as it would inside beginTxWithContext.
+// This used to run as a plain query on s.db, reasoning that MSSQLStore's pool
+// connector sets SESSION_CONTEXT on every connection it hands out, so the
+// session context dbo.fn_tenant_filter reads is already set. That reasoning
+// holds for a store obtained the ordinary way, but not for one re-scoped via
+// WithTenant after the fact: WithTenant only mutates s.tenantID and shares the
+// original pool, whose connections carry the ORIGINAL tenant's
+// SESSION_CONTEXT, not s.tenantID's. cleat#2210. beginTxWithContext sets it
+// explicitly on every transaction it opens, so this now agrees with s.tenantID
+// regardless of which tenant's pool the connection came from.
 //
 // A filter predicate hides rows rather than raising, so a policy that stopped
 // working would look like a tenant with no overrides -- the flag defaults,
@@ -23,8 +26,14 @@ import (
 // query text at all, so the policy is the only thing that can hide it, and it
 // checks the policy is enabled before believing the result.
 func (s *MSSQLStore) GetTenantSettings(ctx context.Context) (TenantSettings, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return TenantSettings{}, fmt.Errorf("get tenant settings for %s: begin: %w", s.tenantID, err)
+	}
+	defer tx.Rollback()
+
 	var instanceMs, wallClockMs, retryMs, maxWorkflowMs *int64
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT wasm_instance_timeout_ms, wasm_wall_clock_ceiling_ms, host_retry_budget_ms, max_workflow_duration_ms
 		FROM dbo.tenant_settings
 		WHERE tenant_id = @p1

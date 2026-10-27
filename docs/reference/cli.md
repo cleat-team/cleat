@@ -51,9 +51,15 @@ The `basic` template creates a single `main.go` with a `Hello` entry point.
 The `agent` template creates a multi-file AI agent project with
 `docker-compose.yml`.
 
+The `agent-workflow` template scaffolds the agent LOOP itself -- a deployable
+definition (`cleat/agentworkflow`, shipped once in the SDK), not a caller of
+one. `agent` is the client: it starts this as a child by name. Deploy it as
+`agent` regardless of the project's own name -- the README explains why.
+
 Example:
 
     cleat init --template agent my-agent
+    cleat init --template agent-workflow my-agent-workflow
     cleat init my-project
 
 ---

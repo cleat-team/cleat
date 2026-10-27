@@ -292,12 +292,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// 1. Ensure the tracking table exists.
-	if err := r.ensureMigrationsTable(ctx, session); err != nil {
-		return fmt.Errorf("create schema_migrations table: %w", err)
-	}
-
-	// 2. Read and sort migration files from disk.
+	// 1. Read and sort migration files from disk.
 	migrations, err := r.readMigrations()
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
@@ -305,6 +300,19 @@ func (r *Runner) Run(ctx context.Context) error {
 	if len(migrations) == 0 {
 		log.Println("[migration] no migration files found")
 		return nil
+	}
+
+	// 1a. Refuse a database built by a different migration chain, BEFORE the
+	//     first statement that changes anything -- including the CREATE and
+	//     ALTER in ensureMigrationsTable. A refused database is left exactly as
+	//     it was found. See chain_identity.go. cleat#3405.
+	if err := r.checkChain(ctx, session, migrations); err != nil {
+		return err
+	}
+
+	// 2. Ensure the tracking table exists, with its identity columns.
+	if err := r.ensureMigrationsTable(ctx, session); err != nil {
+		return fmt.Errorf("create schema_migrations table: %w", err)
 	}
 
 	// 3. Determine which versions have already been applied.
@@ -405,6 +413,12 @@ func (r *Runner) Verify(ctx context.Context) (SchemaState, error) {
 	if err != nil {
 		return st, fmt.Errorf("read migrations: %w", err)
 	}
+	// A foreign chain is refused before anything else is reported: "behind"
+	// and "ahead" are only meaningful between versions of one chain.
+	if err := r.checkChain(ctx, r.db, migrations); err != nil {
+		return st, err
+	}
+
 	st.Shipped = len(migrations)
 	shipped := make(map[int]bool, len(migrations))
 	for _, m := range migrations {
@@ -447,17 +461,22 @@ func (r *Runner) Verify(ctx context.Context) (SchemaState, error) {
 // failure (a permission error, a dead connection) and the latter is not reported
 // to an operator as an un-migrated database.
 func (r *Runner) trackingTableExists(ctx context.Context) (bool, error) {
+	return r.trackingTableExistsOn(ctx, r.db)
+}
+
+// trackingTableExistsOn is trackingTableExists on a given session, so Run can
+// ask on the connection that holds the migration lock.
+func (r *Runner) trackingTableExistsOn(ctx context.Context, q sqlSession) (bool, error) {
 	var n int
 	var err error
 	switch r.dialect {
 	case DialectPostgres:
-		err = r.db.QueryRowContext(ctx, "SELECT CASE WHEN to_regclass($1) IS NULL THEN 0 ELSE 1 END",
-			r.trackingTable()).Scan(&n)
+		n, err = queryInt(ctx, q, "SELECT CASE WHEN to_regclass($1) IS NULL THEN 0 ELSE 1 END", r.trackingTable())
 	case DialectMySQL:
-		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.tables "+
-			"WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'").Scan(&n)
+		n, err = queryInt(ctx, q, "SELECT count(*) FROM information_schema.tables "+
+			"WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'")
 	case DialectMSSQL:
-		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM sys.tables WHERE name = 'schema_migrations'").Scan(&n)
+		n, err = queryInt(ctx, q, "SELECT count(*) FROM sys.tables WHERE name = 'schema_migrations'")
 	default:
 		return false, fmt.Errorf("unsupported dialect: %s", r.dialect)
 	}
@@ -681,14 +700,18 @@ func (r *Runner) ensureMigrationsTable(ctx context.Context, session sqlSession) 
 		ddl = `
 		CREATE TABLE IF NOT EXISTS ` + r.trackingTable() + ` (
 			version    TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			name       TEXT,
+			checksum   TEXT
 		)
 		`
 	case DialectMySQL:
 		ddl = `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    VARCHAR(255) PRIMARY KEY,
-			applied_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
+			applied_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+			name       VARCHAR(255) NULL,
+			checksum   CHAR(64) NULL
 		)
 		`
 	case DialectMSSQL:
@@ -696,14 +719,48 @@ func (r *Runner) ensureMigrationsTable(ctx context.Context, session sqlSession) 
 		IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'schema_migrations')
 			CREATE TABLE schema_migrations (
 				version    NVARCHAR(255) PRIMARY KEY,
-				applied_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME()
+				applied_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+				name       NVARCHAR(255) NULL,
+				checksum   CHAR(64) NULL
 			)
 		`
 	default:
 		return fmt.Errorf("unsupported dialect: %s", r.dialect)
 	}
-	_, err := session.ExecContext(ctx, ddl)
-	return err
+	if _, err := session.ExecContext(ctx, ddl); err != nil {
+		return err
+	}
+	return r.addIdentityColumns(ctx, session)
+}
+
+// addIdentityColumns adds name and checksum to a schema_migrations table
+// created before they existed. Reached only past checkChain, so such a table
+// holds no rows: a table WITH rows and no identity columns is refused as a
+// foreign chain before this runs. One column at a time, each asked of the
+// catalog first, because MySQL 8 has no ADD COLUMN IF NOT EXISTS.
+func (r *Runner) addIdentityColumns(ctx context.Context, session sqlSession) error {
+	types := map[Dialect][2]string{
+		DialectPostgres: {"TEXT", "TEXT"},
+		DialectMySQL:    {"VARCHAR(255) NULL", "CHAR(64) NULL"},
+		DialectMSSQL:    {"NVARCHAR(255) NULL", "CHAR(64) NULL"},
+	}[r.dialect]
+	for i, col := range []string{"name", "checksum"} {
+		exists, err := r.trackingColumnExists(ctx, session, col)
+		if err != nil {
+			return fmt.Errorf("check for schema_migrations.%s: %w", col, err)
+		}
+		if exists {
+			continue
+		}
+		add := "ALTER TABLE " + r.trackingTable() + " ADD COLUMN " + col + " " + types[i]
+		if r.dialect == DialectMSSQL {
+			add = "ALTER TABLE schema_migrations ADD " + col + " " + types[i]
+		}
+		if _, err := session.ExecContext(ctx, add); err != nil {
+			return fmt.Errorf("add schema_migrations.%s: %w", col, err)
+		}
+	}
+	return nil
 }
 
 // readMigrations scans the dialect-specific subdirectory for .sql files
@@ -858,18 +915,19 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 	}
 
 	versionStr := strconv.Itoa(m.version)
+	id := identityOf(m)
 	var recordSQL string
 	var recordArgs []interface{}
 	switch r.dialect {
 	case DialectPostgres:
-		recordSQL = "INSERT INTO " + r.trackingTable() + " (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING"
-		recordArgs = []interface{}{versionStr, time.Now()}
+		recordSQL = "INSERT INTO " + r.trackingTable() + " (version, applied_at, name, checksum) VALUES ($1, $2, $3, $4) ON CONFLICT (version) DO NOTHING"
+		recordArgs = []interface{}{versionStr, time.Now(), id.name, id.checksum}
 	case DialectMySQL:
-		recordSQL = "INSERT IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)"
-		recordArgs = []interface{}{versionStr, time.Now()}
+		recordSQL = "INSERT IGNORE INTO schema_migrations (version, applied_at, name, checksum) VALUES (?, ?, ?, ?)"
+		recordArgs = []interface{}{versionStr, time.Now(), id.name, id.checksum}
 	case DialectMSSQL:
-		recordSQL = "IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = @p1) INSERT INTO schema_migrations (version, applied_at) VALUES (@p1, @p2)"
-		recordArgs = []interface{}{versionStr, time.Now()}
+		recordSQL = "IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = @p1) INSERT INTO schema_migrations (version, applied_at, name, checksum) VALUES (@p1, @p2, @p3, @p4)"
+		recordArgs = []interface{}{versionStr, time.Now(), id.name, id.checksum}
 	default:
 		return fmt.Errorf("unsupported dialect: %s", r.dialect)
 	}

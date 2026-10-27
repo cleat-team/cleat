@@ -18,6 +18,24 @@ import (
 // cleanly rather than retrying or surfacing it as a failure.
 var ErrFenceLost = errors.New("fence lost: workflow reassigned to another worker (generation mismatch)")
 
+// ErrSearchUnavailableUnderEncryption is returned by ListWorkflows when a
+// caller asks for InputContains or ErrorContains while
+// --encrypt-sensitive-payloads is on.
+//
+// cleat#2312. Both filters compile to a SQL LIKE against the input/error_msg
+// COLUMN, and an encrypted column holds ciphertext, not the plaintext a
+// substring search is written against -- so the search would not error, it
+// would silently return zero rows (or, once in an astronomically unlikely
+// while, a false match on ciphertext that happens to contain the substring).
+// A caller reading "no matching workflows" would have no way to tell that
+// apart from "I was right, there are none" -- the result LOOKS like an
+// answer. Refusing the call outright is the fail-loud alternative: it tells
+// the caller the filter cannot do what it says, rather than letting the
+// absence of an error stand in for a false "no".
+var ErrSearchUnavailableUnderEncryption = errors.New(
+	"input/error substring search is not available with --encrypt-sensitive-payloads: " +
+		"these columns are ciphertext on disk, so a LIKE search against them cannot find a match")
+
 // ErrorCode classifies errors for retry decisions.
 type ErrorCode int
 

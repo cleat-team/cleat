@@ -1,0 +1,10 @@
+{
+  "name": "cleat-test-agentclientas",
+  "version": "0.1.0",
+  "private": true,
+  "devDependencies": {
+    "assemblyscript": "^0.28.19",
+    "@cleat/sdk": "file:../../packages/cleat-as",
+    "@cleat/transform": "file:../../packages/cleat-as/transform"
+  }
+}

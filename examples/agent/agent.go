@@ -13,15 +13,21 @@
 //	cleat build -o /tmp/out ./examples/agent/
 //	cleat deploy --name agent /tmp/out/agent.wasm
 //
-// WHY THIS IS AN EXAMPLE RATHER THAN A TEMPLATE, which is where it is headed: a
-// scaffolded project resolves the SDK from the module proxy, exactly as an
-// external user's would, so a template cannot import an SDK package that no
-// published version carries yet. `TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds`
-// measures that -- it refused the first version of this change, which had the
-// template import agentworkflow, with "module ...@latest found (v0.3.2), but
-// does not contain package .../agentworkflow". An example in this repository
-// builds against the local module, so it is verifiable now and the template
-// form can follow the release that carries the package.
+// WHY THIS STAYS HERE TOO, now that cleat#2973 has added the scaffoldable
+// form at cmd/cleat/templates/agent-workflow/ (cleat init --template
+// agent-workflow): this copy is not a stale fork of that one, it is the one
+// tests/crash/agent_resume_test.go depends on building IN PLACE, against the
+// LOCAL cleat/agentworkflow -- which is what lets that test deploy and crash-
+// resume the agent loop as it exists on the CURRENT tree, not as it existed
+// in whichever release cleat/agentworkflow last shipped under. A scaffolded
+// project resolves the SDK from the module proxy, exactly as an external
+// user's would, and could not stand in for that. See buildWorkflowWASM's own
+// comment in that test file.
+//
+// The move cleat#2973 originally proposed -- delete this directory, keep only
+// the template -- would have broken that test silently on the next edit to
+// cleat/agentworkflow: the template path is copied into a fresh scaffold and
+// built against whatever version go.mod.txt resolves, not against HEAD.
 //
 // TOOLS ARE INPUT, not code. What an agent can do arrives in the run's input as
 // a list of {name, description, parameters, kind}, where kind is "service"

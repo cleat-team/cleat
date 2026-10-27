@@ -127,12 +127,57 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nu",
 		Reason: mysqlMustNotScope,
 	},
+
+	// The three entries below were invisible to this guard before cleat#3318
+	// widened the walk from engine/*.go to goFilesCarryingSQL(t) -- none of
+	// these three files is under engine/.
+	//
+	// auth/tenant_store.go:resolveAPIKeyStmt is the same statement as
+	// mysql_store.go:ResolveTenantFromAPIKey two entries up -- same table, same
+	// WHERE clause, same digest (443dc681a32d) -- written independently in the
+	// auth package's TenantStore path rather than shared with the engine
+	// package's direct-store path (MySQLStore.ResolveTenantFromAPIKey's own
+	// comment says so: "Mirrors auth.TenantStore.ResolveTenantFromAPIKey's
+	// expiry clause"). Same reason, for the same cause: tenant_id is the
+	// UNKNOWN this statement exists to resolve from a key hash, not something
+	// already known to scope by.
+	"tenant_store.go:resolveAPIKeyStmt#443dc681a32d": {
+		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nu",
+		Reason: mysqlMustNotScope,
+	},
+	// apikeycount.go:liveAPIKeyCountQuery runs at worker startup, before any
+	// request and therefore before any tenant is in scope, to decide whether
+	// to auto-generate a startup API key (cleat#2352). The count is read by
+	// nothing outside that one boolean decision and exposes no tenant's row
+	// content to any other tenant -- see the function's own doc comment.
+	"apikeycount.go:liveAPIKeyCountQuery#4fdf2678bced": {
+		SQL:    "select count(*) from tenant_api_keys where disabled_at is null and (expires_at",
+		Reason: mysqlNoTenantInScope,
+	},
+	// setup.go:expiredIdempotencyKeysSQL is a maintenance sweep keyed only on
+	// expires_at, a column every insert already writes from the store's
+	// configured TTL -- the function's own comment: "this statement, which has
+	// no tenant predicate and wants none". A row past its expiry is garbage
+	// for every tenant alike; the predicate that already decided that is
+	// expires_at, not tenant_id.
+	"setup.go:expiredIdempotencyKeysSQL#73d76cfe6f09": {
+		SQL:    "delete from idempotency_keys where expires_at < now(6)",
+		Reason: mysqlNoTenantInScope,
+	},
 }
 
 const (
 	mysqlScopedByCandidateQuery = "scoped by construction: the ids come from a candidate query " +
 		"in the same function carrying AND tenant_id = ?"
 	mysqlMustNotScope = "MUST NOT be scoped: it is how a request learns which tenant it is"
+	// Distinct from mysqlMustNotScope: that one is about resolving an
+	// identity. This is about there being no request at all -- a
+	// worker-startup decision, or a maintenance sweep keyed on something
+	// other than identity (e.g. expires_at) -- so there is no tenant to
+	// scope by, and nothing the statement touches exposes one tenant's row
+	// to another. See the comment at the site for which.
+	mysqlNoTenantInScope = "deliberately cross-tenant: no tenant is in scope by design, and " +
+		"nothing it touches exposes one tenant's row to another -- see the comment at the site"
 )
 
 func TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
@@ -157,14 +202,12 @@ func TestMySQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 
 	used := map[string]bool{}
 	var scanned int
-	paths, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
-	for _, path := range paths {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
+	// The same walk the MSSQL guard uses (goFilesCarryingSQL,
+	// engine/mssql_uuid_projection_test.go), and for the same reason it
+	// stopped globbing a single directory: a filename- or location-shaped
+	// scan is a confident green over the files it does not open. See
+	// cleat#3318.
+	for _, path := range goFilesCarryingSQL(t) {
 		src, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)

@@ -8,17 +8,24 @@ package migration_test
 // migration/catalogdiff. That comparison is the strongest evidence available
 // and it is STRUCTURALLY BLIND to three of the four things below:
 //
-//   * catalogdiff reads no MySQL triggers (acceptance 2026-09-26, section 0),
-//     so the baseline applying "cleanly" with the trigger absent -- which is
-//     exactly what the generator's first version did, because mysqldump wraps
-//     it in /*!50003 ... */ and the runner's splitSQL discards that whole
-//     statement -- produced an EMPTY diff. No signal existed.
+//   * catalogdiff read no MySQL triggers until cleat#2882 closed that gap
+//     (originally found: acceptance 2026-09-26, section 0). Until then, the
+//     baseline applying "cleanly" with the trigger absent -- which is exactly
+//     what the generator's first version did, because mysqldump wraps it in
+//     /*!50003 ... */ and the runner's splitSQL discards that whole statement
+//     -- produced an EMPTY diff. No signal existed at the time this test was
+//     written, which is why it asserts the shipped artifact directly rather
+//     than depending on the differential ever being re-run: that is a second,
+//     independent line of defense now, not the only one.
 //   * catalogdiff reads no rows, so a missing seed is invisible. Both seeds
 //     were missing on the first pass: the default org because its INSERT lived
 //     in a migration the compaction deleted, and the default tenant because
 //     INSERT IGNORE downgraded a foreign-key failure to a warning.
-//   * catalogdiff compares no collation on any dialect -- zero references --
-//     so nothing anywhere checks what decides case-sensitivity here.
+//   * catalogdiff compared no collation on any dialect until cleat#3121
+//     (cleat#2882) added exactly that comparison. This test stays independent
+//     of it regardless: catalogdiff only detects DRIFT between two catalogs,
+//     so two builds sharing the same wrong collation would still match each
+//     other. This test asserts a specific EXPECTED value instead (below).
 //
 // Every one of those was found by a person looking, not by a check. This is
 // the check.
@@ -93,7 +100,10 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 	}
 
 	// ---------------------------------------------------------------------
-	// 1. The trigger, which catalogdiff does not read.
+	// 1. The trigger. catalogdiff reads it too as of cleat#2882, but this
+	//    test is independent of whether that differential is ever actually
+	//    re-run against this baseline -- it asserts the shipped artifact
+	//    directly.
 	// ---------------------------------------------------------------------
 	t.Run("the trigger survives", func(t *testing.T) {
 		var n int
@@ -113,9 +123,10 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 		}
 		if n != 1 || name != "tenants_org_id_immutable" {
 			t.Fatalf("the baseline installed %d trigger(s), newest named %q; want exactly "+
-				"tenants_org_id_immutable.\n\ncatalogdiff reads no MySQL triggers, so this "+
-				"is the only thing that reports it -- and a baseline missing it applies "+
-				"cleanly and diffs EMPTY, which is how the first generator shipped it.",
+				"tenants_org_id_immutable.\n\nThis is a check on the SHIPPED artifact, "+
+				"independent of catalogdiff -- a baseline missing the trigger applied "+
+				"cleanly and diffed EMPTY before cleat#2882 taught catalogdiff to read "+
+				"MySQL triggers, which is how the first generator shipped it.",
 				n, name)
 		}
 	})
@@ -193,13 +204,12 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 	})
 
 	// ---------------------------------------------------------------------
-	// 4. Collation, which is compared NOWHERE in this project.
-	//
-	// cleat-review's GAP 1 on cleat#2435: catalogdiff has zero references to
-	// collation on any dialect, and its MySQL columns query has no
-	// COLLATION_NAME -- so the generator's stated reason for keeping the dump's
-	// COLLATE clause ("the differential would name it") was false, and the
-	// decision was unverified. This is the check that was missing.
+	// 4. Collation. cleat#3121 (cleat#2882) has since given catalogdiff its own
+	//    collation comparison, closing cleat-review's GAP 1 on cleat#2435 --
+	//    but that is DRIFT between two catalogs, not an assertion of a
+	//    specific value, so it cannot tell a shared wrong collation from a
+	//    correct one. This check stays independent for that reason: it
+	//    asserts against the EXPECTED value below, not against another build.
 	//
 	// It asserts against the CONSTANT above rather than against the baseline,
 	// because comparing the database to the file it came from would compare
@@ -261,8 +271,9 @@ func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
 		}
 		if len(wrong) > 0 {
 			t.Fatalf("%d of %d collated column(s) do not carry their intended collation:\n  %s\n\n"+
-				"Collation decides case-sensitivity on this dialect and catalogdiff compares "+
-				"it on NO dialect -- zero references -- so nothing else reports this.\n\n"+
+				"Collation decides case-sensitivity on this dialect. catalogdiff compares it "+
+				"too (cleat#3121), but only as drift between two catalogs -- it would not "+
+				"catch this alone if both sides shared the wrong value.\n\n"+
 				"If the SERVER default moved, the baseline is version-pinned and the fix is "+
 				"to regenerate on the pinned server. If a column is genuinely binary, add it "+
 				"to mysqlBaselineCollationExceptions WITH its reason, because an exception "+

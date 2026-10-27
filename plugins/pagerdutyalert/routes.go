@@ -109,10 +109,10 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), `
 			INSERT INTO pd_config (tenant_id, id, name, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, true, $4, $4)
-		`, p.dialect), tid, id, req.Name, now)
+		`, tid, id, req.Name, now)
 	if err != nil {
 		p.logger.Error("pagerduty: create config",
 			"error", err, "orphaned_secret", PagerdutyRoutingKeySecretName(id))
@@ -142,12 +142,12 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(r.Context(), `
 			SELECT id, name, enabled, created_at, updated_at
 			FROM pd_config
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
-		`, p.dialect), tid)
+		`, tid)
 	if err != nil {
 		p.logger.Error("pagerduty: list configs", "error", err)
 		p.writeError(w, 500, "failed to list configs")
@@ -195,11 +195,11 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c pdConfigJSON
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, name, enabled, created_at, updated_at
 			FROM pd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.Name, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.Name, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "config not found")
 		return
@@ -271,7 +271,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			WHERE id = $%d AND tenant_id = $%d
 		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Exec(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("pagerduty: update config", "error", err)
 		p.writeError(w, 500, "failed to update config")
@@ -294,11 +294,11 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated config.
 	var c pdConfigJSON
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, name, enabled, created_at, updated_at
 			FROM pd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &c.ID, &c.Name, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.Name, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("pagerduty: re-fetch config", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated config")
@@ -325,10 +325,10 @@ func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(r.Context(), `
 			DELETE FROM pd_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid)
+		`, id, tid)
 	if err != nil {
 		p.logger.Error("pagerduty: delete config", "error", err)
 		p.writeError(w, 500, "failed to delete config")

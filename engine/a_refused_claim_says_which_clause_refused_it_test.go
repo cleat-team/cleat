@@ -39,7 +39,7 @@ func describeUnclaimableRows(t *testing.T, store WorkflowStore) string {
 		db = s.db
 		q = `SELECT id, status, COALESCE(assigned_to,'<null>'), COALESCE(task_queue,'<null>'),
 		            COALESCE(next_wake_at::text,'<null>'), COALESCE(concurrency_key_hash,'<null>'), generation
-		     FROM workflow_instances ORDER BY id`
+		     FROM workflow_leases ORDER BY id`
 		nowQ = `SELECT now()::text`
 		keysQ = `SELECT key_hash, workflow_id, expires_at::text FROM concurrency_keys ORDER BY key_hash`
 	case *MySQLStore:

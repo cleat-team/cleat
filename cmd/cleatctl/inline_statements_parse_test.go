@@ -132,8 +132,8 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// and a row in the tenant database, and fails if the count comes back
 		// from the base one. A PREPARE here could only have told us the
 		// PostgreSQL form parses, which is the form that never had the bug.
-		"SELECT status, COUNT(*) AS cnt FROM %sworkflow_instances GROUP BY status ORDER BY status": "a format string: the database qualifier is substituted at the call site (empty off MySQL), so there is no statement here to parse. Exercised assembled by TestCheckDBCountsTheTenantsDatabaseOnMySQL",
-		"SELECT COUNT(*) FROM %sevent_history":                                                     "a format string, as the statement above; same substitution and same assembled coverage",
+		"SELECT status, COUNT(*) AS cnt FROM %s%s GROUP BY status ORDER BY status": "a format string: the database qualifier (empty off MySQL) and the table (workflow_leases on PostgreSQL since cleat#3245 B3a) are substituted at the call site, so there is no statement here to parse. Exercised assembled by TestCheckDBCountsTheTenantsDatabaseOnMySQL and TestCheckDBCountsStatusFromWorkflowLeases",
+		"SELECT COUNT(*) FROM %sevent_history":                                     "a format string, as the statement above; same substitution and same assembled coverage",
 
 		// reseal-payloads (cleat#1794) builds both of its statements by
 		// concatenating engine.EncryptedEventColumns, so what is in the source
@@ -149,6 +149,21 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// keep single.
 		"UPDATE event_history SET":                   "a prefix: the SET list is built from engine.EncryptedEventColumns, so there is no statement here to parse. Exercised assembled by TestResealBindsLegacyCiphertextAndPreservesThePlaintext",
 		"SELECT workflow_id, step, tenant_id::text,": "a prefix: the column list is built from engine.EncryptedEventColumns. Same coverage note as the UPDATE above",
+
+		// reseal-payloads's cleat#3241 extension (resealpayloads_sensitive_tables.go)
+		// walks six tables with six different primary keys, so unlike the
+		// event_history statement above, the table name itself is not a
+		// compile-time constant it can fold into one literal -- the first
+		// operand of the UPDATE's "+" chain is the bare verb, alone, and
+		// nothing after it. "SELECT " at the equivalent position in the same
+		// file is not pinned: a bare `SELECT` with no target list happens to
+		// be valid PostgreSQL (`PREPARE p AS SELECT;` succeeds), so only the
+		// UPDATE half has anything to pin.
+		//
+		// The coverage is not lost: TestResealSensitiveTablesConvertsEachOfTheSix
+		// issues the fully-assembled UPDATE, for every one of the six tables,
+		// against a real database with the schema applied.
+		"UPDATE": "a prefix: resealpayloads_sensitive_tables.go's resealTable builds the table name, SET list and WHERE clause from a tableSpec at runtime, so there is no statement here to parse. Exercised assembled by TestResealSensitiveTablesConvertsEachOfTheSix (cleat#3241)",
 
 		// Both are SQL Server-only, from drop-tenant's port in cleat#1635.
 		//

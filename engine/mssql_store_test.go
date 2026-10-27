@@ -2035,6 +2035,7 @@ func TestMSSQLStore_LoadCompactionState_NotFound(t *testing.T) {
 func TestMSSQLStore_CompactHistory_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "UPDLOCK", data: [][]driver.Value{{"wf-1"}}},
 	}, []mockExecResult{
 		{match: "sp_set_session_context"},
 		{match: "DELETE FROM event_history"},
@@ -2046,6 +2047,28 @@ func TestMSSQLStore_CompactHistory_Success(t *testing.T) {
 	err := store.CompactHistory(context.Background(), "wf-1", []byte(`{"version":1,"compacted_step":10,"events":[]}`), 10, 5)
 	if err != nil {
 		t.Fatalf("CompactHistory: %v", err)
+	}
+}
+
+// cleat#3409: with the fence finding no row, nothing has been deleted and the
+// call reports the lost fence. The DELETE and the UPDATE are registered to FAIL,
+// because the mock accepts an unregistered statement silently: a CompactHistory
+// that deleted before taking the fence would return the DELETE's error here.
+func TestMSSQLStore_CompactHistory_LostFenceDeletesNothing(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "UPDLOCK", data: [][]driver.Value{}},
+	}, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "DELETE FROM event_history", err: errors.New("DELETE ran before the fence was held")},
+		{match: "SET compaction_step", err: errors.New("UPDATE ran with the fence lost")},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.CompactHistory(context.Background(), "wf-1", []byte(`{"version":1,"compacted_step":10,"events":[]}`), 10, 5)
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("CompactHistory with a lost fence = %v, want ErrFenceLost", err)
 	}
 }
 

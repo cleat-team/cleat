@@ -59,6 +59,9 @@ var notYetPropagating = map[string]string{
 	"cleat/backendkit/client.go:StartWorkflow":            "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	"cleat/backendkit/client.go:StartWorkflowRaw":         "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	"cleat/backendkit/client.go:StartWorkflowWithOptions": "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
+	"cleat/backendkit/client.go:CancelWorkflow":           "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
+	"cleat/backendkit/client.go:UpdateWorkflow":           "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
+	"cleat/backendkit/stream.go:StreamWorkflow":           "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	// The reference scenarios' APPLICATION backends: clients OF cleat, the same
 	// shape as cleat/backendkit above and for the same reason.
 	//
@@ -69,9 +72,10 @@ var notYetPropagating = map[string]string{
 	// said the condition under which it should disappear, so it retired itself.
 	// (It is also why the entry had to be DELETED rather than left: a stale one
 	// silently covers whatever arrives at that name next.)
-	"examples/integration-hub/backend/main.go:deliverInbound": "an APPLICATION backend standing in for the CUSTOMER'S SYSTEM, POSTing to the auth-exempt ingest route. It is a client OF cleat, not a hop in a run's causal chain -- the trace it would carry belongs to its own process. It also could NOT use Client.PluginRoute even though that method now exists: PluginRoute rides the AUTHENTICATED client, and this request must NOT carry the API key, because the customer's system does not have one. The route is HMAC-verified instead, so a traceparent would be the one header on this request the sender did not sign.",
-	"plugin/index.go:DownloadWASM":                            "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
-	"plugin/index.go:fetchURL":                                "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
+	"examples/integration-hub/backend/main.go:deliverInbound":               "an APPLICATION backend standing in for the CUSTOMER'S SYSTEM, POSTing to the auth-exempt ingest route. It is a client OF cleat, not a hop in a run's causal chain -- the trace it would carry belongs to its own process. It also could NOT use Client.PluginRoute even though that method now exists: PluginRoute rides the AUTHENTICATED client, and this request must NOT carry the API key, because the customer's system does not have one. The route is HMAC-verified instead, so a traceparent would be the one header on this request the sender did not sign.",
+	"plugin/index.go:DownloadWASM":                                          "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
+	"plugin/index.go:fetchURL":                                              "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
+	"cmd/cleat-worker/plugin_exempt_routes.go:representativePatternRequest": "NEVER SENT ANYWHERE -- it builds a synthetic *http.Request purely to probe a throwaway, in-memory *http.ServeMux's own pattern matching (mux.Handler(req)), deciding whether a plugin route overlaps one of pluginAuthExemptPatterns (cleat#2279 item 1). The request has no RoundTrip, no Transport, and no network hop; it never leaves this process, so there is no downstream hop for a trace to reach.",
 
 	// --- stage 2: the plugin sweep. Each has a live caller trace to join. ---
 	"cleat/embedded/runner.go:handleHTTPFetch": "cleat#1596 stage 3, and it needs one " +
@@ -115,27 +119,6 @@ var notYetPropagating = map[string]string{
 		"batch -- is exactly stage 3's open design question (needsOrigination, above), and step " +
 		"4 is where that gets decided, not this PR, which builds the dial-out function but has " +
 		"no caller for it yet.",
-	"plugins/oauthprovider/routes.go:handleCallback": "an inbound HTTP HANDLER, not a workflow step. The trace it should join belongs to the " +
-		"browser or IdP that called it and arrives on the INBOUND request -- not to any run, and " +
-		"there is no CallContext here. Joining it means parsing the incoming traceparent on the " +
-		"plugin mux the way cmd/cleat-worker does on its own routes: a third mechanism, not this " +
-		"issue's propagation. cleat#1611.",
-	"plugins/oauthprovider/oidc.go:getJSON": "OIDC discovery and JWKS fetches (cleat#1582), reached ONLY from handleLogin and " +
-		"handleCallback -- so this is the same debt as the entry above it, for the same reason, " +
-		"and it should be paid at the same time by the same mechanism (cleat#1611). Checked " +
-		"rather than inherited: the only production site that sets a CallContext is execSession." +
-		"pluginCallContext (engine/plugin_call_context.go:72), which is a workflow host-call " +
-		"path, so plugin.CallContextFromContext returns nil on every HTTP handler and there is " +
-		"no TraceID to propagate. Fixing the sibling fixes this without touching oidc.go.",
-	"plugins/oauthprovider/identity.go:githubVerifiedEmail": "GET /user/emails (cleat#2340), reached ONLY from handleCallback " +
-		"(routes.go:652) -- the same debt as the two entries above it, for the same reason, and it " +
-		"should be paid at the same time by the same mechanism (cleat#1611). Checked rather than inherited, " +
-		"because the judgement is the one worth re-deriving: this is a NEW site and the default " +
-		"should be to propagate, not to declare. It cannot. plugin.SetTraceparentFromContext " +
-		"would be a no-op here, not a fix -- the function's own doc says a nil CallContext is an " +
-		"ordinary state, and on this path there is nothing to unwrap, so the line would go green " +
-		"while changing no bytes on the wire. That is a check that stops disagreeing, which is " +
-		"worse than a debt entry that says so.",
 }
 
 // TestEveryOutboundCallJoinsTheTrace fails when an outbound HTTP request is

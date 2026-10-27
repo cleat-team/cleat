@@ -33,7 +33,7 @@ func readAllowedSignalsColumn(t *testing.T, backend StoreBackend, admin *sql.DB,
 	var q string
 	switch backend.Name() {
 	case "postgres":
-		q = `SELECT allowed_signals::text FROM workflow_instances WHERE id = $1`
+		q = `SELECT allowed_signals::text FROM workflow_payloads WHERE id = $1` // cleat#3245 B1b
 	case "mysql":
 		q = `SELECT allowed_signals FROM workflow_instances WHERE id = ?`
 	case "mssql":

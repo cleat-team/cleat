@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -256,6 +257,56 @@ func TestRecordEventDifferentEventIDsAppendSeparately(t *testing.T) {
 		}
 		if rep.Checked != 2 || rep.HeadSeq != 2 {
 			t.Fatalf("verify: %+v, want 2 distinct rows for 2 distinct event_ids", rep)
+		}
+	})
+}
+
+// TestRecordEventDetectsACollidedDedupKey is the regression test cleat#2629 asked for.
+// recordEventStepID and recordEventDeterministicID are believed injective over their
+// inputs (cleat#2618/#2624's own verification), so forging an actual collision would
+// mean breaking that derivation -- instead this seeds a row directly under the id
+// recordEvent's own derivation WOULD produce for a given (tenant, workflow, step),
+// using appendChained directly (bypassing record_event's derivation entirely, as the
+// issue asks) with a path recordEvent never chose. The later recordEvent call for that
+// same (tenant, workflow, step) then derives that exact id itself -- the way a real
+// Step-stability regression would -- and must notice the row it is about to "dedup
+// onto" is not actually its own event, rather than reporting {"recorded":true} over a
+// silently dropped one.
+func TestRecordEventDetectsACollidedDedupKey(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		const workflowID = "wf-collision"
+		const step = 0
+
+		// recordEventCallCtx sets RunID = workflowID (matching the real engine, per its
+		// own doc comment), so this is the exact id recordEvent's default path will
+		// derive for (tenant, workflowID, step) below.
+		collidedID := recordEventStepID(tenant, workflowID, workflowID, step)
+		if err := p.appendChained(plugin.ForTenant(context.Background(), tenant), chainEvent{
+			tenantID: tenant, id: collidedID, retry: true,
+			method: workflowEventMethod, path: "tenant.suspended", userID: workflowID,
+		}); err != nil {
+			t.Fatalf("seeding the collided row: %v", err)
+		}
+
+		_, err := p.recordEvent(recordEventCallCtx(tenant, workflowID, step),
+			RecordEventInput{EventType: "tenant.plan_changed"})
+		if err == nil {
+			t.Fatal("recordEvent reported success over a collided dedup key, want an error")
+		}
+		if !errors.Is(err, errEventTypeMismatch) {
+			t.Fatalf("recordEvent error = %v, want errors.Is(err, errEventTypeMismatch)", err)
+		}
+
+		// The collided call must not have appended a second row: exactly the one
+		// seeded row should exist, still verifying clean.
+		rep := e.verify(tenant)
+		if !rep.OK() {
+			t.Fatalf("verify reported a break: %+v", rep.Break)
+		}
+		if rep.Checked != 1 || rep.HeadSeq != 1 {
+			t.Fatalf("verify: %+v, want exactly the ONE seeded row", rep)
 		}
 	})
 }

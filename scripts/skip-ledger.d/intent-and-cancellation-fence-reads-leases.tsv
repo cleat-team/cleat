@@ -1,0 +1,8 @@
+multi-db/mysql	1	^TestWriteCallIntentFenceReadsGenerationFromLeasesNotInstances$	cleat#3245 Phase 3 step 3 piece D's intent/cancellation fence regression tests: each opens a *PostgresStore directly via retryAndAdminLeaseTestStore (testutil.TestDB(t, testutil.DialectPostgres)), which skips on CLEAT_TEST_POSTGRES alone regardless of what else is set -- workflow_leases is PostgreSQL-only, same scoping as admin-miss-diagnostic-reads-leases.tsv's tests. multi-db/mysql sets CLEAT_TEST_MYSQL and not CLEAT_TEST_POSTGRES, so it skips here.
+multi-db/mysql	1	^TestCompleteCallIntentFenceReadsGenerationFromLeasesNotInstances$	same reason as the line above, same file.
+multi-db/mysql	1	^TestResolveCallIntentFenceReadsGenerationFromLeasesNotInstances$	same reason as the line above, same file.
+multi-db/mysql	1	^TestCheckCancellationReadsFromLeasesNotInstances$	same reason as the line above, same file.
+multi-db/mssql	1	^TestWriteCallIntentFenceReadsGenerationFromLeasesNotInstances$	same tests, same reason: multi-db/mssql sets CLEAT_TEST_MSSQL and not CLEAT_TEST_POSTGRES, so they skip here too -- see the multi-db/mysql lines above.
+multi-db/mssql	1	^TestCompleteCallIntentFenceReadsGenerationFromLeasesNotInstances$	same reason as the line above, same file.
+multi-db/mssql	1	^TestResolveCallIntentFenceReadsGenerationFromLeasesNotInstances$	same reason as the line above, same file.
+multi-db/mssql	1	^TestCheckCancellationReadsFromLeasesNotInstances$	same reason as the line above, same file.

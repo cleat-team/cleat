@@ -34,10 +34,11 @@ import (
 // Fake driver: records every statement executed against it and returns a
 // caller-controlled RowsAffected for whichever statement looks like the
 // primary generation-fenced UPDATE (identified by referencing both
-// "assigned_to =" and "generation =" on workflow_instances -- the one
-// pattern shared by CompleteWorkflow / FailWorkflow /
+// "assigned_to =" and "generation =" in an UPDATE of workflow_leases -- the
+// one pattern shared by CompleteWorkflow / FailWorkflow /
 // MoveToDeadLetterQueue / ContinueAsNew's fencing UPDATE, and by no other
-// statement those methods issue). All other statements succeed as a 1-row
+// statement those methods issue; since cleat#3245 B3c that UPDATE is on the
+// lease row, the only copy of these columns written). All other statements succeed as a 1-row
 // no-op so the surrounding transaction machinery behaves normally.
 // ---------------------------------------------------------------------
 
@@ -68,7 +69,7 @@ func (s *fenceFakeState) counts() (committed, rolledBack int) {
 }
 
 func isFencedWorkflowUpdate(query string) bool {
-	return strings.Contains(query, "workflow_instances") &&
+	return strings.Contains(query, "UPDATE workflow_leases") &&
 		strings.Contains(query, "assigned_to =") &&
 		strings.Contains(query, "generation =")
 }
@@ -118,19 +119,39 @@ func (c *fenceFakeConn) ExecContext(_ context.Context, query string, _ []driver.
 	return fenceFakeResult{rowsAffected: rows}, nil
 }
 
-// QueryContext handles the one QueryRowContext call these four methods (and
-// their nested calls) issue: ContinueAsNew's "INSERT ... RETURNING id" for
-// the new run. database/sql uses this directly (bypassing Prepare/Stmt)
-// because fenceFakeConn implements driver.QueryerContext.
+// QueryContext handles every QueryRowContext/QueryContext call these four
+// methods (and their nested calls, including the post-commit
+// enforceParentClosePolicy step that lists TERMINATE children) issue.
+// database/sql uses this directly (bypassing Prepare/Stmt) because
+// fenceFakeConn implements driver.QueryerContext.
+//
+// ContinueAsNew runs three queries for the new run, each matched by substring
+// and given one column: the instance INSERT ... RETURNING id, the task queue
+// read from workflow_defs, and the inherited parent_workflow_id read from
+// the lease row (nil here since this fake has no real parent chain). Every
+// other QueryContext call (e.g. childrenClosedByTerminate's
+// single-column workflow_id list) gets the original one-column shape:
+// widening every query to match broke that unrelated caller's Scan with
+// "expected N destination arguments ... not 1", surfaced only as a
+// best-effort WARN log rather than a test failure, which is why it needs
+// its own branch rather than a single hardcoded shape.
 func (c *fenceFakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.state.record(query)
-	return &fenceFakeRows{cols: []string{"id"}, val: "fake-new-run-id"}, nil
+	switch {
+	case strings.Contains(query, "INSERT INTO workflow_instances"):
+		return &fenceFakeRows{cols: []string{"id"}, vals: []driver.Value{"fake-new-run-id"}}, nil
+	case strings.Contains(query, "FROM workflow_defs"):
+		return &fenceFakeRows{cols: []string{"task_queue"}, vals: []driver.Value{"default"}}, nil
+	case strings.Contains(query, "parent_workflow_id FROM workflow_leases"):
+		return &fenceFakeRows{cols: []string{"parent_workflow_id"}, vals: []driver.Value{nil}}, nil
+	}
+	return &fenceFakeRows{cols: []string{"id"}, vals: []driver.Value{"fake-child-id"}}, nil
 }
 
-// fenceFakeRows is a single-row, single-column driver.Rows.
+// fenceFakeRows is a single-row driver.Rows, as many columns as vals.
 type fenceFakeRows struct {
 	cols []string
-	val  driver.Value
+	vals []driver.Value
 	done bool
 }
 
@@ -141,7 +162,7 @@ func (r *fenceFakeRows) Next(dest []driver.Value) error {
 		return io.EOF
 	}
 	r.done = true
-	dest[0] = r.val
+	copy(dest, r.vals)
 	return nil
 }
 

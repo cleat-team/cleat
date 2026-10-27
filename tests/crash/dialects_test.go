@@ -55,6 +55,7 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -472,14 +473,25 @@ func (tg *crashTarget) startWorker(t *testing.T, bin, taskQueue, svcURL string, 
 }
 
 // startWorkflowEntry queues one crashcall instance.
+//
+// workflow_leases and workflow_payloads are PostgreSQL-only, and the reclaim
+// path and the claim require a row in each there, for the same reason
+// harness_test.go's identically-named function does -- see its doc. SeedRun
+// writes all three on that target. MySQL and SQL Server keep the one wide
+// workflow_instances table and still reclaim from it directly.
 func (tg *crashTarget) startWorkflowEntry(t *testing.T, id, orderID, taskQueue, entry string) {
 	t.Helper()
 	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
-	q := `INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES (` + tg.placeholder(1) + `, 'crashcall', 1, 'ready', ` + tg.jsonArg(tg.placeholder(2)) + `, ` +
-		tg.placeholder(3) + `, ` + tg.placeholder(4) + `)`
-	if _, err := tg.db.Exec(tg.stmt(q), id, input, taskQueue, defaultTenant); err != nil {
-		t.Fatalf("queueing workflow %s on %s: %v", id, tg.name, err)
+	if tg.name == "postgres" {
+		testutil.SeedRun(t, tg.db, testutil.RunSeed{
+			ID: id, DefName: "crashcall", TenantID: defaultTenant, Input: input, TaskQueue: taskQueue})
+	} else {
+		q := `INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+			VALUES (` + tg.placeholder(1) + `, 'crashcall', 1, 'ready', ` + tg.jsonArg(tg.placeholder(2)) + `, ` +
+			tg.placeholder(3) + `, ` + tg.placeholder(4) + `)`
+		if _, err := tg.db.Exec(tg.stmt(q), id, input, taskQueue, defaultTenant); err != nil {
+			t.Fatalf("queueing workflow %s on %s: %v", id, tg.name, err)
+		}
 	}
 	t.Cleanup(func() {
 		_, _ = tg.db.Exec(tg.stmt(`DELETE FROM event_history WHERE workflow_id = `+tg.placeholder(1)), id)
@@ -491,9 +503,14 @@ func (tg *crashTarget) startWorkflowEntry(t *testing.T, id, orderID, taskQueue, 
 func (tg *crashTarget) runRow(t *testing.T, id string) (status, errMsg string) {
 	t.Helper()
 	var msg sql.NullString
-	if err := tg.db.QueryRow(
-		tg.stmt(`SELECT status, error_msg FROM workflow_instances WHERE id = `+tg.placeholder(1)),
-		id).Scan(&status, &msg); err != nil {
+	q := `SELECT status, error_msg FROM workflow_instances WHERE id = ` + tg.placeholder(1)
+	if tg.placeholder(1) == "$1" {
+		// error_msg is a workflow_payloads column on PostgreSQL since
+		// cleat#3245 B1b, and status a workflow_leases one since B3c-2.
+		q = `SELECT w.status, p.error_msg FROM workflow_leases w
+			JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`
+	}
+	if err := tg.db.QueryRow(tg.stmt(q), id).Scan(&status, &msg); err != nil {
 		t.Fatalf("reading %s on %s: %v", id, tg.name, err)
 	}
 	return status, msg.String

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cleat-sdk"
-version = "0.4.0"
+version = "0.5.0"
 description = "Python SDK for cleat — durable execution framework for AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -34,7 +34,7 @@ dependencies = []
 # resolved to whatever was newest, which is how a lint backlog went from 3 to
 # 260 without a line of Python changing. Bump this, `required-version`, and the
 # pin in .github/workflows/ci.yml together.
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.16,<0.17"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.16,<0.18"]
 langchain = ["langchain>=0.3.0", "langchain-openai>=0.2.0"]
 langgraph = ["langgraph>=0.2.0"]
 all = ["cleat-sdk[langchain,langgraph,dev]"]

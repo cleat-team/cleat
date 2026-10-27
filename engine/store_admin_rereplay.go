@@ -59,15 +59,26 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 	// Read the outcome BEFORE the statement that erases it, inside the same
 	// transaction. RETURNING cannot serve: it yields post-update values, which
 	// for these four columns is NULL -- the state being recorded. cleat#1185.
+	// Lock order: the instance row first, because the audit event below
+	// bumps workflow_instances.event_count after the lease UPDATE -- see
+	// adminForceResolve for why every path that writes both takes the
+	// instance row first. A missing row is left to the UPDATE's miss path.
+	if _, err := tx.ExecContext(ctx, `
+		SELECT id FROM workflow_instances WHERE id = $1 AND tenant_id = $2 FOR NO KEY UPDATE
+	`, workflowID, s.tenantID); err != nil {
+		return fmt.Errorf("admin %s: lock instance: %w", adminActionReReplay, err)
+	}
+
 	replaced, err := readReplacedOutcome(ctx, tx, s.dialect, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("admin %s: %w", adminActionReReplay, err)
 	}
 
+	// Since cleat#3245 B3c the lease row holds the only copy of these columns
+	// that is written, so its UPDATE carries the generation fence.
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
-		    completed_at = NULL, error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = now(), generation = generation + 1
 		WHERE id = $1 AND tenant_id = $2 AND generation = $3
 		  AND status = ANY($4)
@@ -80,10 +91,16 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 		return fmt.Errorf("admin %s: rows affected: %w", adminActionReReplay, err)
 	}
 	if n == 0 {
+		// cleat#3245 Phase 3 step 3 piece C: reads workflow_leases rather
+		// than workflow_instances -- same reasoning as adminResolveMiss
+		// (store_admin.go): a diagnostic read on the n==0 branch, no lock,
+		// and the mirror a few lines below (piece 4c) already keeps
+		// workflow_leases' status/generation in sync for every row this
+		// could be reached for.
 		var status string
 		var stored int64
 		err := tx.QueryRowContext(ctx,
-			`SELECT status, generation FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+			`SELECT status, generation FROM workflow_leases WHERE id = $1 AND tenant_id = $2`,
 			workflowID, s.tenantID).Scan(&status, &stored)
 		if errors.Is(err, sql.ErrNoRows) {
 			return adminReReplayMiss("", 0, generation, workflowID, false)
@@ -92,6 +109,12 @@ func (s *PostgresStore) AdminReReplay(ctx context.Context, workflowID string, ge
 			return fmt.Errorf("admin %s: resolve miss for workflow %s: %w", adminActionReReplay, workflowID, err)
 		}
 		return adminReReplayMiss(status, stored, generation, workflowID, true)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET error_msg = NULL, error_code = NULL, error_op = NULL, completed_at = NULL WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("admin %s: payload: %w", adminActionReReplay, err)
 	}
 
 	if err := s.adminAppendAudit(ctx, tx, workflowID, reReplayAudit(operator, replaced)); err != nil {

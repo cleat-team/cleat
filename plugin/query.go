@@ -21,38 +21,25 @@ var boolRE = regexp.MustCompile(`(?i)\b(true|false)\b`)
 //	now()     ->                   SYSUTCDATETIME()
 //	TRUE/FALSE ->                  1 / 0
 //
-// PostgreSQL is the source dialect, so Rebind is the identity there.
+// PostgreSQL is the source dialect, so Rebind is the identity there. For
+// MySQL it is ALSO the identity -- see RebindArgs's doc comment for why a
+// bare text rewrite of $N to ? is wrong there (cleat#2259).
 //
-// For MySQL, Rebind is ALSO the identity -- it leaves $N
-// untouched rather than rewriting it to ?. That is a deliberate change
-// (cleat#2259), not an oversight: MySQL's driver binds ? positionally, by
-// TEXT occurrence order, so rewriting $N to ? here -- before a caller's args
-// slice has been reordered to match -- is exactly the bug this issue closed.
-// The rewrite-and-reorder pair now lives together in RebindArgs, which is
-// the only thing that can do both without mis-binding a query whose $N
-// tokens are not already in ascending text order.
-//
-// Existing callers that pair Rebind with their own args (the ~150 sites
-// that already called Rebind before invoking a PluginDB method) are
-// unaffected: their own Rebind call is now a MySQL no-op, and the adapter's
-// internal RebindArgs call sees the intact $N text and does the real work.
-// Only a caller that bypasses PluginDB and hands Rebind's output straight to
-// a raw *sql.DB/*sql.Tx needs to switch to RebindArgs directly -- see
-// plugins/plugintest/arms.go and cmd/cleatctl/dialect.go for the pattern.
-// A future cleanup (tracked separately, sequenced after WS-2's #2232/#2247)
-// will route MSSQL through RebindArgs too and delete the redundant call
-// sites along with Rebind itself.
-//
-// Deliberately NOT a "// Deprecated:" doc comment: that marker tells
-// go vet/staticcheck to flag every remaining call, and Rebind is still the
-// correct, non-redundant function for MSSQL -- it does real rewriting
-// there -- and a legitimate no-op at each of the ~150 pre-PluginDB call
-// sites described above, none of which this change asks anyone to touch.
-// A blanket deprecation warning across all of them would be exactly the
-// kind of "fix" that isn't one: see scripts/check-no-raw-rebind.py for the
-// actual, narrowly-scoped rule (bans the RAW-handle and test-file shapes
-// only) that replaces what a real Go deprecation marker would have done
-// too bluntly here.
+// Deprecated: every plugin.PluginDB/PluginTx method already calls RebindArgs
+// internally (engine/plugindb_adapter.go), so a call site that pairs Rebind
+// with p.db.Exec/Query/QueryRow is translating the statement twice -- Rebind
+// idempotently, then RebindArgs for real. That used to be the only way to
+// get MSSQL's translation (RebindArgs delegated to Rebind for every
+// non-MySQL dialect), so ~150 call sites across plugins/** carried a
+// redundant-but-harmless Rebind wrapper. cleat#2270 finished the split:
+// RebindArgs now translates MSSQL itself, needs no help from Rebind, and
+// every one of those wrappers has been deleted (scripts/check-no-raw-rebind.py
+// keeps them from creeping back). Rebind itself is kept, not removed, as a
+// shim for an out-of-tree plugin or a caller holding a raw *sql.DB/*sql.Tx/
+// *sql.Conn that wants only the statement translated and will handle its own
+// MySQL arg reordering -- which almost nothing should: prefer RebindArgs
+// directly (cmd/cleatctl/dialect.go's rebindArgs is the production example)
+// or plugins/plugintest.ExecRebound/QueryRebound/QueryRowRebound in a test.
 //
 // MySQL needs no boolean rewrite: TRUE and FALSE are documented aliases for 1
 // and 0. T-SQL has no boolean type at all, which is why a bare `enabled = true`
@@ -95,13 +82,20 @@ func Rebind(query string, d Dialect) string {
 	if d != DialectMSSQL {
 		return query
 	}
+	return rebindMSSQL(query)
+}
+
+// rebindMSSQL is Rebind's and RebindArgs's shared MSSQL translation, so every
+// dialect is translated in exactly one place (cleat#2270) rather than
+// RebindArgs delegating to the public, now-deprecated Rebind for it.
+func rebindMSSQL(query string) string {
 	var b strings.Builder
 	b.Grow(len(query) + 16)
-	walkSQLSpans(query, d, func(span string, quoted bool) {
+	walkSQLSpans(query, DialectMSSQL, func(span string, quoted bool) {
 		if quoted {
 			b.WriteString(span)
 		} else {
-			b.WriteString(rebindSQL(span, d))
+			b.WriteString(rebindSQL(span, DialectMSSQL))
 		}
 	})
 	return b.String()
@@ -206,7 +200,9 @@ func rebindSQL(s string, d Dialect) string {
 // text and however many times it repeats, so the args slice a caller builds
 // (args[0] is $1's value, args[1] is $2's value, and so on -- the only
 // convention that makes sense to write against the primary dialect) is
-// already correct for them, and Rebind alone suffices.
+// already correct for them, so RebindArgs just translates the statement
+// (rebindMSSQL for SQL Server, the identity for PostgreSQL) and returns
+// args unchanged.
 //
 // MySQL's driver binds its ? placeholders POSITIONALLY: the Nth ? in the
 // rewritten text takes the Nth value in the args slice, regardless of which
@@ -244,10 +240,14 @@ func rebindSQL(s string, d Dialect) string {
 // it exists to fail loudly the first time one is written, not because one
 // is expected.
 func RebindArgs(query string, d Dialect, args []any) (string, []any, error) {
-	if d != DialectMySQL {
-		return Rebind(query, d), args, nil
+	switch d {
+	case DialectMySQL:
+		return rebindArgsMySQL(query, args)
+	case DialectMSSQL:
+		return rebindMSSQL(query), args, nil
+	default:
+		return query, args, nil
 	}
-	return rebindArgsMySQL(query, args)
 }
 
 // rebindArgsMySQL rewrites $N to ? and reorders args to match, in one walk

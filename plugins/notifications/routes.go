@@ -174,10 +174,10 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	// as plugins/webhookingest/routes.go's handleCreateSource -- found there
 	// first; this one was missed in the same PR and caught by cleat-review
 	// running POST /webhooks against real MySQL.
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err = p.db.Exec(r.Context(), `
 			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $7)
-		`, p.dialect), tid, id, req.URL, secretConfigured, string(eventsJSON), now, now)
+		`, tid, id, req.URL, secretConfigured, string(eventsJSON), now, now)
 	if err != nil {
 		p.logger.Error("notifications: create webhook", "error", err)
 		p.writeError(w, 500, "failed to create webhook")
@@ -186,8 +186,8 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 
 	if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
 		p.logger.Error("notifications: store webhook secret", "error", err)
-		if _, delErr := p.db.Exec(r.Context(), plugin.Rebind(
-			`DELETE FROM webhook_config WHERE id = $1`, p.dialect), id); delErr != nil {
+		if _, delErr := p.db.Exec(r.Context(),
+			`DELETE FROM webhook_config WHERE id = $1`, id); delErr != nil {
 			p.logger.Error("notifications: compensating delete after failed secret store",
 				"id", id, "error", delErr)
 		}
@@ -218,12 +218,12 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(r.Context(), `
 			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE tenant_id = $1 AND deleted_at IS NULL
 			ORDER BY created_at DESC
-		`, p.dialect), tid)
+		`, tid)
 	if err != nil {
 		p.logger.Error("notifications: list webhooks", "error", err)
 		p.writeError(w, 500, "failed to list webhooks")
@@ -273,11 +273,11 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -368,7 +368,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 			WHERE id = $%d AND tenant_id = $%d AND deleted_at IS NULL
 		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Exec(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("notifications: update webhook", "error", err)
 		p.writeError(w, 500, "failed to update webhook")
@@ -398,11 +398,11 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated webhook")
@@ -471,11 +471,11 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := tx.Exec(r.Context(), plugin.Rebind(`
+	rows, err := tx.Exec(r.Context(), `
 			UPDATE webhook_config
 			SET enabled = false, deleted_at = now()
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, p.dialect), id, tid)
+		`, id, tid)
 	if err != nil {
 		tx.Rollback()
 		p.logger.Error("notifications: delete webhook", "error", err)
@@ -488,11 +488,11 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
+	if _, err := tx.Exec(r.Context(), `
 			UPDATE webhook_delivery
 			SET status = 'cancelled'
 			WHERE webhook_id = $1 AND status IN ('pending', 'retrying')
-		`, p.dialect), id); err != nil {
+		`, id); err != nil {
 		tx.Rollback()
 		p.logger.Error("notifications: cancel pending deliveries after delete", "error", err, "id", id)
 		p.writeError(w, 500, "failed to delete webhook")
@@ -537,7 +537,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the webhook belongs to the tenant.
 	var exists bool
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(webhookExistsSQL(p.dialect), p.dialect),
+	err = p.db.QueryRow(r.Context(), webhookExistsSQL(p.dialect),
 		webhookID, tid).Scan(&exists)
 	if err != nil {
 		p.logger.Error("notifications: verify webhook", "error", err)
@@ -574,7 +574,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, 100)
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("notifications: list deliveries", "error", err)
 		p.writeError(w, 500, "failed to list deliveries")

@@ -67,11 +67,7 @@ func measureThroughput(t *testing.T, store *engine.PostgresStore, db *sql.DB, ct
 	var wfIDs []string
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("scale-tp-%d-%d", i, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 

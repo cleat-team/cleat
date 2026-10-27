@@ -48,6 +48,12 @@
 # ---------------------------------------------------------------------------
 name: Tier 2 Gate
 
+# cleat#3073: surfaces the triggering activity type in the run's display
+# title, so a PR body edit's run set is distinguishable from the one it
+# shares a SHA with. Full rationale in ci.yml, next to the same expression.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
 on:
   push:
     branches: [main, develop]
@@ -154,7 +160,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -168,7 +174,7 @@ jobs:
           --health-retries 5
 
       mysql:
-        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat

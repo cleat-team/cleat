@@ -49,10 +49,19 @@ func TestInjectWorkerCrashActuallyReleasesWorkflows(t *testing.T) {
 	db, tenant := faultInjectorTestDB(t)
 
 	const worker = "fi-worker-1"
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         "fi-wf-1",
+		TenantID:   tenant,
+		DefName:    "fi-def",
+		DefVersion: 1,
+		Status:     "running",
+		AssignedTo: worker,
+	})
+	// InjectWorkerCrash releases workflow_leases, the only copy of these
+	// columns written since cleat#3245 B3c.
 	if _, err := db.Exec(
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, assigned_to, heartbeat_at)
-		 VALUES ('fi-wf-1', 'fi-def', 1, 'running', '{}', $1, $2, now())`, tenant, worker); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
+		`UPDATE workflow_leases SET heartbeat_at = now() WHERE id = 'fi-wf-1'`); err != nil {
+		t.Fatalf("seed workflow_leases heartbeat_at: %v", err)
 	}
 
 	fi := NewFaultInjector(db)
@@ -63,9 +72,9 @@ func TestInjectWorkerCrashActuallyReleasesWorkflows(t *testing.T) {
 	var status string
 	var assigned sql.NullString
 	if err := db.QueryRow(
-		`SELECT status, assigned_to FROM workflow_instances WHERE id = 'fi-wf-1'`).
+		`SELECT status, assigned_to FROM workflow_leases WHERE id = 'fi-wf-1'`).
 		Scan(&status, &assigned); err != nil {
-		t.Fatalf("reading instance: %v", err)
+		t.Fatalf("reading lease: %v", err)
 	}
 	if status != "ready" || assigned.Valid {
 		t.Errorf("after InjectWorkerCrash: status=%q assigned_to=%v; want ready / NULL.\n\n"+
@@ -85,10 +94,18 @@ func TestInjectWorkerCrashActuallyReleasesWorkflows(t *testing.T) {
 func TestInjectClockSkewActuallyMovesHeartbeats(t *testing.T) {
 	db, tenant := faultInjectorTestDB(t)
 
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         "fi-wf-2",
+		TenantID:   tenant,
+		DefName:    "fi-def",
+		DefVersion: 1,
+		Status:     "running",
+	})
+	// InjectClockSkew moves workflow_leases.heartbeat_at, its only copy since
+	// cleat#3245 B2 and the one the reaper reads.
 	if _, err := db.Exec(
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, heartbeat_at)
-		 VALUES ('fi-wf-2', 'fi-def', 1, 'running', '{}', $1, now())`, tenant); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
+		`UPDATE workflow_leases SET heartbeat_at = now() WHERE id = 'fi-wf-2'`); err != nil {
+		t.Fatalf("seed workflow_leases heartbeat_at: %v", err)
 	}
 
 	fi := NewFaultInjector(db)
@@ -98,7 +115,7 @@ func TestInjectClockSkewActuallyMovesHeartbeats(t *testing.T) {
 
 	var ahead bool
 	if err := db.QueryRow(
-		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_instances WHERE id = 'fi-wf-2'`).
+		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_leases WHERE id = 'fi-wf-2'`).
 		Scan(&ahead); err != nil {
 		t.Fatalf("reading heartbeat: %v", err)
 	}
@@ -110,7 +127,7 @@ func TestInjectClockSkewActuallyMovesHeartbeats(t *testing.T) {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if err := db.QueryRow(
-		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_instances WHERE id = 'fi-wf-2'`).
+		`SELECT heartbeat_at > now() + interval '1 hour' FROM workflow_leases WHERE id = 'fi-wf-2'`).
 		Scan(&ahead); err != nil {
 		t.Fatalf("reading heartbeat after cleanup: %v", err)
 	}
@@ -162,10 +179,16 @@ func TestFailedInjectionIsReportedAndNotMarkedActive(t *testing.T) {
 func TestResetPropagatesCleanupError(t *testing.T) {
 	db, tenant := faultInjectorTestDB(t)
 
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         "fi-wf-reset",
+		TenantID:   tenant,
+		DefName:    "fi-def",
+		DefVersion: 1,
+		Status:     "running",
+	})
 	if _, err := db.Exec(
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, heartbeat_at)
-		 VALUES ('fi-wf-reset', 'fi-def', 1, 'running', '{}', $1, now())`, tenant); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
+		`UPDATE workflow_leases SET heartbeat_at = now() WHERE id = 'fi-wf-reset'`); err != nil {
+		t.Fatalf("seed workflow_leases heartbeat_at: %v", err)
 	}
 
 	fi := NewFaultInjector(db)

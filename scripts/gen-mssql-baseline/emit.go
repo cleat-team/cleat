@@ -59,6 +59,9 @@ func emit(ctx context.Context, db *sql.DB, out string) error {
 	if e.policies, err = e.readSecurityPolicies(); err != nil {
 		return err
 	}
+	if e.grants, err = e.readGrants(); err != nil {
+		return err
+	}
 
 	schema, err := e.schemaFile()
 	if err != nil {
@@ -76,9 +79,9 @@ func emit(ctx context.Context, db *sql.DB, out string) error {
 		return err
 	}
 
-	fmt.Printf("wrote %s and %s: %d tables, %d modules, %d security policies (%d predicates)\n",
+	fmt.Printf("wrote %s and %s: %d tables, %d modules, %d security policies (%d predicates), %d grants\n",
 		filepath.Join(out, "001_schema.sql"), filepath.Join(out, "003_procedures.sql"),
-		len(e.tables), len(e.modules), len(e.policies), e.predicateCount())
+		len(e.tables), len(e.modules), len(e.policies), e.predicateCount(), len(e.grants))
 	fmt.Println("002_defaults.sql is hand-assembled and was NOT written by this tool -- carry it over and re-read it")
 	return nil
 }
@@ -92,6 +95,19 @@ type emitter struct {
 	tables      []*tableInfo
 	modules     []moduleInfo
 	policies    []policyInfo
+	grants      []grantInfo
+}
+
+// grantInfo is one permission state on one securable, as the migrations left
+// it. isSchema distinguishes a SCHEMA::-scoped grant (class = 3) from an
+// object-level one (class = 1); object is empty for the former.
+type grantInfo struct {
+	grantee  string
+	isSchema bool
+	schema   string
+	object   string
+	perm     string
+	state    string // state_desc: "GRANT" or "DENY"
 }
 
 type tableInfo struct {
@@ -200,15 +216,16 @@ func (e *emitter) databaseCollation() (string, error) {
 //
 // is_fixed_role = 0 alone is not enough: `public` is not a fixed role and is
 // supplied by the server on every database, so emitting it would be writing a
-// server default into the baseline as if the schema created it. The same
-// reasoning as the object-grant exclusion in docs/contributor/migrations.md --
-// a catalogue comparison that includes server defaults compares the server to
-// itself.
+// server default into the baseline as if the schema created it. A catalogue
+// comparison that includes server defaults compares the server to itself.
 //
 // EXISTENCE only. Nothing in the tree grants a role a member -- that is a
 // deployment act (cmd/cleat-worker/setup.go, cmd/cleatctl/setsecret.go) -- so a
 // freshly-migrated database has cleat_admin with zero members, and a membership
-// check here would test nothing.
+// check here would test nothing. (This is a different question from readGrants
+// below, which DOES reproduce every GRANT/DENY a role holds -- membership in a
+// role and permissions held by it are orthogonal, and only the latter is a
+// migration fact.)
 func (e *emitter) readRoles() ([]string, error) {
 	rows, err := e.db.QueryContext(e.ctx, `
 		SELECT name FROM sys.database_principals
@@ -557,6 +574,53 @@ func (e *emitter) readSecurityPolicies() ([]policyInfo, error) {
 	return out, nil
 }
 
+// readGrants reproduces every object- and schema-level GRANT/DENY a role
+// holds. Found missing entirely during cleat#3349 (the SQL Server
+// re-compaction): this emitter never had a readGrants, so a prior -mode=emit
+// run would have dropped migrations/mssql/008_app_login.sql's whole
+// cleat_app_role security model -- 13 statements, none reproduced -- with
+// -mode=diff then catching exactly that as 13 differences, which is how this
+// was found rather than by reading the code.
+//
+// Query is deliberately the one catalogdiff/mssql.go uses (cleat#2446), not a
+// fresh one: that query was ALREADY corrected once, for the two things a
+// grant-only view misses on this dialect -- 008_app_login.sql's four GRANTs
+// are SCHEMA-scoped (class = 3, not class = 1, so a naive join to sys.objects
+// sees none of them), and its one DENY is state = 'D', which an state = 'G'-only
+// filter excludes outright. Reusing it means this emitter inherits that fix
+// instead of needing to rediscover it.
+func (e *emitter) readGrants() ([]grantInfo, error) {
+	rows, err := e.db.QueryContext(e.ctx, `
+		SELECT grantee_principal.name, 0, s.name, o.name, dp.permission_name, dp.state_desc
+		FROM sys.database_permissions dp
+		JOIN sys.objects o ON o.object_id = dp.major_id
+		JOIN sys.schemas s ON s.schema_id = o.schema_id
+		JOIN sys.database_principals grantee_principal ON grantee_principal.principal_id = dp.grantee_principal_id
+		WHERE dp.class = 1 AND dp.state IN ('G', 'D')
+		UNION ALL
+		SELECT grantee_principal.name, 1, sch.name, '', dp.permission_name, dp.state_desc
+		FROM sys.database_permissions dp
+		JOIN sys.schemas sch ON sch.schema_id = dp.major_id
+		JOIN sys.database_principals grantee_principal ON grantee_principal.principal_id = dp.grantee_principal_id
+		WHERE dp.class = 3 AND dp.state IN ('G', 'D')
+		ORDER BY 1, 2, 3, 4, 5`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []grantInfo
+	for rows.Next() {
+		var g grantInfo
+		var isSchema int
+		if err := rows.Scan(&g.grantee, &isSchema, &g.schema, &g.object, &g.perm, &g.state); err != nil {
+			return nil, err
+		}
+		g.isSchema = isSchema != 0
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // ---------------------------------------------------------------- rendering
 
 func q(n string) string { return "[" + strings.ReplaceAll(n, "]", "]]") + "]" }
@@ -707,6 +771,25 @@ func (e *emitter) schemaFile() ([]byte, error) {
 	for _, t := range e.tables {
 		for _, ix := range t.idxs {
 			e.writeIndex(&b, t, ix)
+		}
+	}
+
+	// Grants last: an object-level grant needs its table, a schema-level one
+	// needs the schema, and either needs the role -- all already emitted
+	// above. One statement per (grantee, securable, permission) rather than
+	// 008_app_login.sql's original comma-joined lists: correctness from a
+	// catalogue read matters more here than matching the hand-written style,
+	// and a verb-per-statement form cannot mis-join a permission onto the
+	// wrong securable.
+	for _, g := range e.grants {
+		verb := "GRANT"
+		if g.state == "DENY" {
+			verb = "DENY"
+		}
+		if g.isSchema {
+			fmt.Fprintf(&b, "%s %s ON SCHEMA::%s TO %s;\nGO\n\n", verb, g.perm, q(g.schema), q(g.grantee))
+		} else {
+			fmt.Fprintf(&b, "%s %s ON %s TO %s;\nGO\n\n", verb, g.perm, qw(g.schema, g.object), q(g.grantee))
 		}
 	}
 	return b.Bytes(), nil

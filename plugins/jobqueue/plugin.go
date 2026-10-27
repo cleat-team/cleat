@@ -7,7 +7,6 @@ package jobqueue
 import (
 	"context"
 	"log/slog"
-	"net/http"
 
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -31,7 +30,7 @@ func New() plugin.Plugin {
 // Plugin implements a standalone job queue with tenant isolation.
 type Plugin struct {
 	db      plugin.PluginDB
-	mux     *http.ServeMux
+	mux     plugin.Dispatcher
 	logger  *slog.Logger
 	env     *plugin.Environment
 	dialect plugin.Dialect

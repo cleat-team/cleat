@@ -117,11 +117,15 @@ export function exercise_host_call(h: HostCalls, input: string): string {
 
   if (call == "AwaitChild") {
     let r: DurableResult<string> = h.awaitChild("00000000-0000-0000-0000-000000000001");
+    // Reached only if the SDK let the guest run past the await. See
+    // TestASAwaitCallsUnwindThroughTheSuspendSentinel (cleat#3430).
+    h.sideEffect("PAST:AwaitChild");
     return r.error !== null ? bad(call, r.error!) : ok(call, r.value);
   }
 
   if (call == "AwaitAllChildren") {
     let r: string | null = h.awaitAllChildren('["00000000-0000-0000-0000-000000000001"]');
+    h.sideEffect("PAST:AwaitAllChildren");
     if (r === null) return nullErr(call, "awaitAllChildren");
     // Reports the host's raw JSON, NOT a count.
     //
@@ -141,6 +145,7 @@ export function exercise_host_call(h: HostCalls, input: string): string {
 
   if (call == "AwaitAnyChild") {
     let r: string | null = h.awaitAnyChild('["00000000-0000-0000-0000-000000000001"]');
+    h.sideEffect("PAST:AwaitAnyChild");
     if (r === null) return nullErr(call, "awaitAnyChild");
     return ok(call, r);
   }

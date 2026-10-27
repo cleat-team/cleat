@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/lib/pq"
 )
 
@@ -28,11 +29,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 	var wfIDs []string
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("upg-rolling-%d-%d", i, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, id)
 	}
 	defer func() {
@@ -159,7 +156,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 	}
 
 	var notDone int
-	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_leases
 		WHERE id = ANY($1) AND status <> 'done'`, pq.Array(wfIDs)).Scan(&notDone); err != nil {
 		t.Fatalf("count unfinished: %v", err)
 	}
@@ -189,11 +186,7 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 	var workflows []wfState
 	for i := 0; i < numWorkflows; i++ {
 		id := fmt.Sprintf("upg-nodup-%d-%d", i, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		workflows = append(workflows, wfState{id: id})
 	}
 	defer func() {

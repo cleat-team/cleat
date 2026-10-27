@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -34,7 +33,7 @@ func New() plugin.Plugin {
 type Plugin struct {
 	db      plugin.PluginDB
 	env     *plugin.Environment
-	mux     *http.ServeMux
+	mux     plugin.Dispatcher
 	logger  *slog.Logger
 	dialect plugin.Dialect
 }

@@ -1,0 +1,326 @@
+# ---------------------------------------------------------------------------
+# Develop image — publish cleat-worker on every push to develop, and an rc-*
+# image on every push to a release/** branch
+#
+# cleat#3370 (develop-*), cleat#3398 (rc-*). release.yml pushes ghcr.io/cleat-team/cleat-worker only on a v*
+# tag, so between releases the only way to run the worker at a develop sha was
+# `go build ./cmd/cleat-worker` with CGO on and wasmtime's headers present, on
+# every machine and in every CI job that wanted it. The first consumer is the
+# clew-service port, which by owner decision (2026-10-25) targets develop at a
+# PINNED sha rather than a release.
+#
+# Tags pushed, per develop commit:
+#
+#   develop-<first 9 hex of the sha>   what a consumer pins (`develop-34fec6ef7`)
+#   develop-<full 40-char sha>         the same manifest, unambiguous forever
+#   develop                            moving; a convenience, never a pin
+#
+# The image is built exactly as release.yml's `container-image` job builds the
+# release image -- same Dockerfile, same buildx, same two platforms -- so
+# Dockerfile's `RUN /cleat-worker --verify-backend` runs for each architecture
+# and a develop image cannot ship without the wasmtime backend either.
+#
+# A push to release/** publishes the same image under two tags and no moving one:
+#
+#   rc-<first 9 hex of the sha>        what a validation consumer pins
+#   rc-<full 40-char sha>              the same manifest, unambiguous forever
+#
+# That is the release candidate, for the two consumers the 0.5.0 gate has before
+# the tag: the upgrade test (cleat#3386) and the clew slice re-run at the RC.
+# Neither should have to build the worker with CGO from the branch. There is no
+# `rc` tag that moves: a release branch is re-pushed, and "the latest RC" is
+# exactly the kind of tag that gets pinned by accident. The job still refuses
+# any ref that is not develop or release/**.
+#
+# develop-* and rc-* tags carry NO compatibility promise: no migration path between two
+# develop images, no upgrade path to the next release. See
+# docs/operations/container-images.md.
+#
+# WHY release-image-dryrun-arm64.yml IS KEPT. This builds arm64 on every merge,
+# which covers what the dry run exists for only while something is merging.
+# The Dockerfile's inputs also change WITHOUT a commit (apt packages, the
+# bookworm-slim base), and develop has gone eleven days with no push
+# (2026-10-14 to 2026-10-25), so the weekly cron is the only thing that sees
+# those between merges.
+# ---------------------------------------------------------------------------
+name: Develop Image
+
+on:
+  push:
+    branches: [develop, "release/**"]
+
+  # For the first image after this lands, or a re-publish after a failed run.
+  # Dispatch on develop or a release/** branch: the job refuses any other ref
+  # before pushing.
+  #
+  # dry_run exists so the landed-sha gate below can be exercised without
+  # publishing anything, and without creating a release/** branch (the release
+  # ruleset forbids deleting one, so a test branch would stay). With dry_run the
+  # `landed` job judges check_branch@check_sha and `publish` is skipped. Dispatch
+  # it on develop.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only judge check_branch@check_sha with the landed-sha gate; publish nothing"
+        type: boolean
+        default: false
+      check_branch:
+        description: "dry_run only: the release branch to judge, e.g. release/v0.5.0"
+        type: string
+        default: ""
+      check_sha:
+        description: "dry_run only: the full 40-char commit sha to judge"
+        type: string
+        default: ""
+
+# Per-commit group, never cancelled: every develop commit should get its image,
+# and a shared group would let the next merge evict a queued run before it
+# starts (scripts/check-workflow-concurrency.sh). The ref is in the key as well,
+# because a release branch is cut AT develop's head: the same sha arrives twice,
+# once as develop-<sha> and once as rc-<sha>, and one group would let a third
+# run evict the pending one of the two.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # THE GATE ON WHAT IS PUBLISHED, as opposed to where it is published from. The
+  # protection probe in `publish` asks whether the BRANCH is covered by a rule;
+  # that is true of release/x however it was created, because the release/**
+  # ruleset has no `creation` rule and cannot usefully have one (every stream
+  # pushes as the owner). So this asks about the COMMIT the rc-<sha> tag names:
+  # see scripts/check-rc-sha-landed.py for the two arms, the first-parent walk
+  # and the exit statuses. "Landed" is a claim about the path (develop's merge
+  # queue, or a merged PR into this branch under the ruleset's required checks),
+  # not about a person reading it: the ruleset requires 0 approvals.
+  #
+  # WHAT THIS IS, AND IS NOT. It prevents an ACCIDENTAL rc image from a
+  # commit that did not land the sanctioned way. It is not an authorization
+  # control, because repository write access already implies the ability to
+  # publish packages: any branch a writer pushes can carry a workflow that grants
+  # itself `packages: write` and pushes to ghcr.io/cleat-team/cleat-worker under
+  # any tag, with or without this file. Separately, a push runs the workflow file AT THE PUSHED COMMIT, so a
+  # release/x created with this file edited would not run this job at all (GitHub's
+  # documented behaviour for push events; not tested here, since a test needs a
+  # real release/** branch that nobody can delete). The boundary is the
+  # repository's write list; consumers should trust release tags (vX.Y.Z) built
+  # by release.yml, and treat develop-* and rc-* as unpromised.
+  landed:
+    name: Verify the commit being published landed through develop or a pull request
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the gate script only
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/check-rc-sha-landed.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test the gate
+        run: python3 scripts/check-rc-sha-landed.py --self-test
+
+      - name: Judge the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          IN_BRANCH: ${{ inputs.check_branch }}
+          IN_SHA: ${{ inputs.check_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            branch="$IN_BRANCH"; sha="$IN_SHA"
+            case "$branch" in
+              release/*) ;;
+              *) echo "::error::UNMEASURED: dry_run needs check_branch to be a release/* branch, got '$branch'"; exit 2 ;;
+            esac
+          else
+            case "$GITHUB_REF" in
+              refs/heads/release/*) branch="$GITHUB_REF_NAME"; sha="$GITHUB_SHA" ;;
+              *)
+                # develop-* images come from the merge queue; nothing to judge.
+                echo "$GITHUB_REF is not a release branch; the landed-sha gate does not apply"
+                exit 0
+                ;;
+            esac
+          fi
+          python3 scripts/check-rc-sha-landed.py --repo "$GITHUB_REPOSITORY" --branch "$branch" --sha "$sha"
+
+  publish:
+    name: Publish cleat-worker image (linux/amd64, linux/arm64)
+    needs: landed
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-26.04
+    # arm64 under QEMU emulates the whole build: measured 18m56s for the
+    # amd64+arm64 pair on #2076 (see the comment in ci.yml's release dry run).
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # A dispatch on a feature branch would otherwise publish that branch's
+      # head under a develop-* or rc-* tag that no develop or release commit has.
+      - name: Refuse anything but develop and release/**
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/develop|refs/heads/release/*) ;;
+            *)
+              echo "::error::ref is '$GITHUB_REF'; develop-* images are published only from refs/heads/develop and rc-* images only from refs/heads/release/*"
+              exit 1
+              ;;
+          esac
+
+      # THE REASON RELEASE BRANCHES NEED THIS AND DEVELOP DOES NOT. Before rc-*,
+      # this workflow published only merge-queue develop. A release/** branch has
+      # no ruleset of its own (the one ruleset is develop's merge queue), so
+      # without this any writer could push release/x and publish unreviewed code
+      # as a public ghcr cleat-worker:rc-<sha> (cleat-review, cleat#3410).
+      #
+      # It fails CLOSED: a branch the API says is neither protected nor covered by
+      # a ruleset, or one it cannot read, publishes nothing. "Protected" is a
+      # weaker claim than "reviewed" -- a rule that only forbids force-push passes
+      # it -- so this is the floor, not the policy. The policy is a release/**
+      # ruleset requiring a pull request, which is the repository owner's to add.
+      # Both mechanisms are read because the repo uses both: develop has a ruleset
+      # and classic protection, main has classic protection only.
+      - name: Refuse a release branch that nothing protects
+        if: startsWith(github.ref, 'refs/heads/release/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          protected="$(gh api "repos/$GITHUB_REPOSITORY/branches/$BRANCH" --jq .protected)"
+          rules="$(gh api "repos/$GITHUB_REPOSITORY/rules/branches/$BRANCH" --jq 'length')"
+          echo "branch $BRANCH: protected=$protected, rules from rulesets=$rules"
+          if [ "$protected" != "true" ] && [ "$rules" = "0" ]; then
+            echo "::error::$BRANCH is not protected and no ruleset applies to it; refusing to publish an rc-* image from a branch anyone with write access can push. Ask the repository owner for a release/** ruleset."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Required, and per job: buildx fails on linux/arm64 without it.
+      - name: Set up QEMU for the arm64 image leg
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute cleat-worker image tags
+        id: worker_image
+        run: |
+          set -euo pipefail
+          if ! [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GITHUB_SHA '$GITHUB_SHA' is not a 40-char hex sha -- refusing to guess a tag from it"
+            exit 1
+          fi
+          IMAGE="ghcr.io/cleat-team/cleat-worker"
+          # The prefix is decided by the ref and nothing else. The moving tag
+          # exists for develop only: an rc-* image is never given one.
+          case "$GITHUB_REF" in
+            refs/heads/develop)    PREFIX=develop; MOVING="$IMAGE:develop" ;;
+            refs/heads/release/*)  PREFIX=rc;      MOVING="" ;;
+            *)
+              echo "::error::ref '$GITHUB_REF' is neither develop nor release/*; refusing to pick a tag prefix"
+              exit 1
+              ;;
+          esac
+          {
+            echo "short=$IMAGE:$PREFIX-${GITHUB_SHA:0:9}"
+            echo "full=$IMAGE:$PREFIX-$GITHUB_SHA"
+            echo "moving=$MOVING"
+          } >> "$GITHUB_OUTPUT"
+
+      # An rc-<full sha> tag is written once. A re-run of the same sha would
+      # rebuild and repoint it to a new digest (the build is not bit-for-bit
+      # reproducible), and the docs say that tag is unambiguous forever. So an
+      # existing one is left alone and the push is skipped. develop-* tags keep
+      # their re-publish behaviour: the docs describe a dispatch as the repair
+      # for a missing or failed one. To rebuild an rc image on purpose, delete
+      # the tag first.
+      - name: Is this rc image already published?
+        id: exists
+        env:
+          FULL: ${{ steps.worker_image.outputs.full }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/release/*)
+              # Three outcomes, not two. Only ": not found" means the tag is
+              # absent. A network error, a registry 5xx or an authorization
+              # failure says nothing about whether it exists, and reading it as
+              # "absent" would repoint an rc tag on a blip -- the thing this
+              # step is here to prevent. So anything else stops the job.
+              if out="$(docker buildx imagetools inspect "$FULL" 2>&1)"; then
+                echo "$FULL already exists; leaving it as it is (an rc tag is written once)"
+                echo "exists=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              case "$out" in
+                *": not found"*) ;;
+                *)
+                  echo "::error::could not tell whether $FULL exists; refusing to risk repointing it: $out"
+                  exit 1
+                  ;;
+              esac
+              ;;
+          esac
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+
+      # Only the sha tags here. `:develop` is moved separately below, so that a
+      # slower build of an older commit cannot finish last and drag it back.
+      - name: Build and push cleat-worker image (linux/amd64, linux/arm64)
+        if: steps.exists.outputs.exists != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.worker_image.outputs.short }}
+            ${{ steps.worker_image.outputs.full }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.ref.name=${{ github.ref_name }}
+
+      # Move `:develop` only if this commit is still develop's head. Two merges
+      # seconds apart run in separate groups (above), and the older one can
+      # finish second. This narrows that race to the interval between the
+      # ls-remote and the retag rather than closing it -- which is why the tag
+      # is documented as a convenience and the sha tags as the pin.
+      - name: Move the develop tag if this is still develop's head
+        # Never for an rc-* image: it has no moving tag, and MOVING is empty.
+        if: github.ref == 'refs/heads/develop'
+        env:
+          FULL: ${{ steps.worker_image.outputs.full }}
+          MOVING: ${{ steps.worker_image.outputs.moving }}
+        run: |
+          set -euo pipefail
+          head="$(git ls-remote origin refs/heads/develop | cut -f1)"
+          if [ -z "$head" ]; then
+            echo "::error::could not read develop's head from origin; not moving $MOVING"
+            exit 1
+          fi
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "develop is now at $head, not $GITHUB_SHA -- leaving $MOVING to that commit's run"
+            exit 0
+          fi
+          docker buildx imagetools create --tag "$MOVING" "$FULL"
+          echo "moved $MOVING -> $FULL"

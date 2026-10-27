@@ -52,9 +52,20 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 	// the LIMIT -- the same relationship the old count had to the old claim.
 	// A registered queue at capacity is not runnable, exactly as it is not
 	// claimable.
+	// cleat#3245 Phase 3 step 3 piece B: the candidate scan now reads
+	// workflow_leases, not workflow_instances -- migration 018 (folded into migrations/postgres/001_schema.sql by #3358) added
+	// concurrency_key/concurrency_key_hash there for exactly this. Mirrors
+	// ClaimWorkflows' own candidate subquery below; keep the two in sync.
+	//
+	// The two nested "is the holder's run still live" EXISTS checks
+	// deliberately stay on workflow_instances, not workflow_leases: each is
+	// a single indexed point lookup by primary key, not a scan, so there is
+	// no TOAST/heartbeat-churn reason to move it -- and moving it would
+	// break TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite's
+	// dialect parity, since MySQL/MSSQL have no workflow_leases to move to.
 	var n int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT count(*) FROM workflow_instances w
+		SELECT count(*) FROM workflow_leases w
 		LEFT JOIN queues q ON q.tenant_id = w.tenant_id
 		                  AND q.name = w.concurrency_key
 		                  AND q.disabled_at IS NULL
@@ -68,7 +79,7 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 		                      WHERE (ck.key_hash = w.concurrency_key_hash
 		                        AND ck.tenant_id = w.tenant_id
 		                        AND ck.workflow_id <> w.id)
-		                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                        AND EXISTS (SELECT 1 FROM workflow_leases wi
 		                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
 		                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
 		    ))
@@ -79,7 +90,7 @@ func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error)
 		          WHERE qh.tenant_id = w.tenant_id
 		            AND qh.queue_name = q.name
 		            AND qh.workflow_id <> w.id
-		            AND EXISTS (SELECT 1 FROM workflow_instances wi
+		            AND EXISTS (SELECT 1 FROM workflow_leases wi
 		                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
 		                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
 		      )
@@ -164,7 +175,24 @@ func logClaimKeyDecision(log *slog.Logger, c claimCandidate, admitted bool) {
 	)
 }
 
+// ClaimWorkflows retries on PostgreSQL's two rollback-guaranteed SQLSTATEs --
+// see withPostgresRollbackGuaranteedRetry's doc comment (postgres_retry.go)
+// for why the claim UPDATE below can now deadlock where it could not before
+// cleat#3245 Phase 3 step 3 piece B's candidate-scan cutover.
 func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	var claimed []*WorkflowInstance
+	err := withPostgresRollbackGuaranteedRetry(ctx, "claim workflows", postgresTxRetries, postgresTxRetryDelay, func() error {
+		var err error
+		claimed, err = s.claimWorkflowsOnce(ctx, workerID, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
+func (s *PostgresStore) claimWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: begin: %w", err)
@@ -195,12 +223,27 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	// mutex; a registered queue re-counts under the lock and inserts a
 	// queue_holders row only if the count admits it. Both arms handle the
 	// re-claim case -- a run re-claiming its own held key after a lost fence.
+	// cleat#3245 Phase 3 step 3 piece B: the candidate scan (and the
+	// FOR UPDATE SKIP LOCKED lock that serialises concurrent claimers
+	// against each other) now reads workflow_leases, not workflow_instances
+	// -- migration 018 added concurrency_key/concurrency_key_hash there for
+	// exactly this. Since cleat#3245 B3c the claim UPDATE below targets
+	// workflow_leases too, the only copy of these columns written.
+	//
+	// Moving the lock does not introduce a new race against ReapStaleInstances
+	// (piece A, also reading workflow_leases): a row eligible here has
+	// status IN ('ready','terminating'), and a row eligible for reaping has
+	// status='running' with a stale heartbeat -- disjoint, so the two never
+	// contend for the same row at the same logical moment, on either table.
+	//
+	// The nested "is the holder's run still live" EXISTS check below stays
+	// on workflow_instances -- see CountRunnableWorkflows' identical note.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT c.id, c.tenant_id, c.concurrency_key, c.concurrency_key_hash, c.registered
 		FROM (
 			SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
 			       q.name IS NOT NULL AS registered
-			FROM workflow_instances w
+			FROM workflow_leases w
 			LEFT JOIN queues q ON q.tenant_id = w.tenant_id
 			                  AND q.name = w.concurrency_key
 			                  AND q.disabled_at IS NULL
@@ -214,7 +257,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			                      WHERE (ck.key_hash = w.concurrency_key_hash
 			                        AND ck.tenant_id = w.tenant_id
 			                        AND ck.workflow_id <> w.id)
-			                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+			                        AND EXISTS (SELECT 1 FROM workflow_leases wi
 			                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
 			                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
 			    ))
@@ -225,7 +268,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			          WHERE qh.tenant_id = w.tenant_id
 			            AND qh.queue_name = q.name
 			            AND qh.workflow_id <> w.id
-			            AND EXISTS (SELECT 1 FROM workflow_instances wi
+			            AND EXISTS (SELECT 1 FROM workflow_leases wi
 			                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
 			                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
 			      )
@@ -286,18 +329,24 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 
 	// The UPDATE is the same as before, except the winners were already decided
 	// above, so the predicate is just membership in ids.
+	//
+	// cleat#3245 B1a: what the claim hands the worker -- input, def_name,
+	// def_version, error_code, error_op, trace_id -- is read from
+	// workflow_payloads, through claimPayloadJoinSQL. See its comment for why
+	// a LEFT JOIN among the FROM items rather than an inner join.
 	rows2, err := tx.QueryContext(ctx, `
-		UPDATE workflow_instances w
+		UPDATE workflow_leases w
 		SET status = 'running',
-		    signal_seq_at_claim = signal_seq,
-		    signal_consumed_at_claim = signal_consumed_seq,
-		    promise_seq_at_claim = promise_seq,
+		    signal_seq_at_claim = w.signal_seq,
+		    signal_consumed_at_claim = w.signal_consumed_seq,
+		    promise_seq_at_claim = w.promise_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
-		    started_at = COALESCE(started_at, now()),
-		    generation = generation + 1
-		WHERE w.id = ANY($2)
-		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id, COALESCE(w.pending_terminal_status, '') AS pending_terminal_status
+		    started_at = COALESCE(w.started_at, now()),
+		    generation = w.generation + 1
+		FROM unnest($2::text[]) AS c(id)`+claimPayloadJoinSQL+`
+		WHERE w.id = c.id
+		RETURNING w.id, p.def_name, p.def_version, w.status, p.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, p.error_code, p.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(p.trace_id, '') AS trace_id, COALESCE(w.pending_terminal_status, '') AS pending_terminal_status
 	`, workerID, pq.Array(ids))
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: update: %w", err)
@@ -318,6 +367,25 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
+
+// claimPayloadJoinSQL is the tail both claim UPDATEs append to their FROM item
+// (aliased c, carrying the claimed id) so RETURNING can read the
+// workflow_payloads columns the claim hands back -- cleat#3245 B1a.
+//
+// LEFT, deliberately. The FROM item already decides which rows are claimed;
+// this join must not change that. An inner join would make a run with no
+// workflow_payloads row silently unclaimable -- skipped by every poll, forever,
+// with nothing logged. A LEFT JOIN claims it and returns a NULL def_name,
+// which scanClaimedWorkflows (and claimStickyWorkflowsOnce's scan) cannot put
+// into a string, so the claim fails loudly and rolls back instead. Every run
+// gets its workflow_payloads row in the same transaction as its
+// workflow_instances row, so this only ever fires on a broken invariant.
+//
+// The SET clause qualifies its right-hand columns with w. because the FROM
+// list now carries workflow_payloads, and several names would otherwise be
+// ambiguous to a reader even where PostgreSQL could resolve them.
+const claimPayloadJoinSQL = `
+		LEFT JOIN workflow_payloads p ON p.id = c.id`
 
 // lockRegisteredQueueLimits locks, in sorted (name) order, the rows of the
 // registered non-disabled queues named by the candidates, and returns each
@@ -442,11 +510,16 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 	// A fresh admission, or a holder about to move to this worker. Either way,
 	// count OTHER holders: `<> $3` excludes this workflow's own row so a move
 	// (which changes no total) is not double-counted against the global cap.
+	// cleat#3245 Phase 3 step 3 piece B considered moving this liveness
+	// check to workflow_leases and did not: it is a single indexed point
+	// lookup, not the hot candidate scan piece B exists to move, and doing
+	// so would break TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite's
+	// dialect parity (MySQL/MSSQL have no workflow_leases).
 	var held int
 	err = tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM queue_holders qh
 		WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.workflow_id <> $3
-		  AND EXISTS (SELECT 1 FROM workflow_instances wi
+		  AND EXISTS (SELECT 1 FROM workflow_leases wi
 		               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
 		                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 	`, c.tenantID, *c.key, c.id).Scan(&held)
@@ -467,7 +540,7 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 		err = tx.QueryRowContext(ctx, `
 			SELECT count(*) FROM queue_holders qh
 			WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.worker_id = $3
-			  AND EXISTS (SELECT 1 FROM workflow_instances wi
+			  AND EXISTS (SELECT 1 FROM workflow_leases wi
 			               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
 			                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 		`, c.tenantID, *c.key, workerID).Scan(&workerHeld)
@@ -536,8 +609,26 @@ func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
 // that are sticky to this worker. Filters on sticky_worker_id to use the
 // idx_instances_sticky partial index for low-contention claiming.
-
+//
+// Retries on PostgreSQL's two rollback-guaranteed SQLSTATEs, same reason as
+// ClaimWorkflows above. Until cleat#3245 B3c the single CTE statement's
+// UPDATE acquired workflow_instances locks fresh, after the CTE's SKIP LOCKED
+// had moved onto workflow_leases; it now updates the lease rows the CTE
+// already locked, and the retry stays as insurance.
 func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	var claimed []*WorkflowInstance
+	err := withPostgresRollbackGuaranteedRetry(ctx, "claim sticky workflows", postgresTxRetries, postgresTxRetryDelay, func() error {
+		var err error
+		claimed, err = s.claimStickyWorkflowsOnce(ctx, workerID, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
+func (s *PostgresStore) claimStickyWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
@@ -547,37 +638,44 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	// CTE rather than an IN (SELECT ... LIMIT n) sublink, for consistency with
 	// ClaimWorkflows above -- see the note there, including why the
 	// EvalPlanQual explanation this comment used to give is wrong.
+	//
+	// cleat#3245 Phase 3 step 3 piece B: the candidate scan (and its
+	// FOR UPDATE SKIP LOCKED lock) now reads workflow_leases, not
+	// workflow_instances -- same reasoning as ClaimWorkflows above. Since
+	// cleat#3245 B3c the UPDATE below targets workflow_leases too, the only
+	// copy written, and the nested "is the holder's run still live" EXISTS
+	// reads it as well.
 	rows, err := tx.QueryContext(ctx, `
 		WITH candidates AS (
-			SELECT id FROM workflow_instances
+			SELECT id FROM workflow_leases
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
 			  AND sticky_worker_id = $1
 			  AND task_queue = ANY($2)
-  AND (workflow_instances.concurrency_key_hash IS NULL
+  AND (workflow_leases.concurrency_key_hash IS NULL
        OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
-                       WHERE (ck.key_hash = workflow_instances.concurrency_key_hash
-                         AND ck.tenant_id = workflow_instances.tenant_id
-                         AND ck.workflow_id <> workflow_instances.id)
-                         AND EXISTS (SELECT 1 FROM workflow_instances wi
+                       WHERE (ck.key_hash = workflow_leases.concurrency_key_hash
+                         AND ck.tenant_id = workflow_leases.tenant_id
+                         AND ck.workflow_id <> workflow_leases.id)
+                         AND EXISTS (SELECT 1 FROM workflow_leases wi
                                       WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
                                         AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))))
 			ORDER BY priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		UPDATE workflow_instances w
+		UPDATE workflow_leases w
 		SET status = 'running',
-		    signal_seq_at_claim = signal_seq,
-		    signal_consumed_at_claim = signal_consumed_seq,
-		    promise_seq_at_claim = promise_seq,
+		    signal_seq_at_claim = w.signal_seq,
+		    signal_consumed_at_claim = w.signal_consumed_seq,
+		    promise_seq_at_claim = w.promise_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
-		    started_at = COALESCE(started_at, now()),
-		    generation = generation + 1
-		FROM candidates c
+		    started_at = COALESCE(w.started_at, now()),
+		    generation = w.generation + 1
+		FROM candidates c`+claimPayloadJoinSQL+`
 		WHERE w.id = c.id
-		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
+		RETURNING w.id, p.def_name, p.def_version, w.status, p.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, p.error_code, p.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(p.trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -594,7 +692,10 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
-			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
+			// Scan assigns in column order, so id is set even when a later
+			// column fails -- a run with no workflow_payloads row fails on
+			// def_name, and naming it is what makes that diagnosable.
+			return nil, fmt.Errorf("claim sticky workflows scan (workflow %q): %w", wf.ID, err)
 		}
 
 		if nextWakeAt.Valid {
@@ -617,6 +718,15 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	if len(wfs) == 0 {
 		_ = tx.Rollback()
 		return nil, nil
+	}
+	// No separate "winning ids" slice exists here the way ClaimWorkflows has
+	// one -- the CTE decided membership and RETURNING already reported it,
+	// so wfs IS the winning set. Collecting ids from it rather than
+	// re-querying candidates keeps this agreeing with the UPDATE that just
+	// ran, by construction.
+	ids := make([]string, len(wfs))
+	for i, wf := range wfs {
+		ids[i] = wf.ID
 	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
 }
@@ -647,32 +757,75 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		return "", fmt.Errorf("continue as new: append events: %w", err)
 	}
 
+	// cleat#2312: the new run's own input is sensitive-at-rest, same as the
+	// old run's result and query_state below -- one derivation covers all
+	// three, since they belong to the same tenant and the same call.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return "", fmt.Errorf("continue as new: derive tenant key: %w", err)
+	}
+	sealedNewInput, err := encryptJSONColumnForStorage(string(newInput), tc)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: encrypt input: %w", err)
+	}
+
 	// Create the new workflow run.
 	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID string
+	var inheritedParentWorkflowID sql.NullString
+	// parent_workflow_id and parent_close_policy are INHERITED from the run
+	// being continued, not left NULL. A child that continues as new is
+	// still its parent's child: enforceParentClosePolicy selects on
+	// parent_workflow_id and NULL matches nothing, so a TERMINATE parent
+	// left every continued iteration running while reporting that it had
+	// stopped its child (cleat#955). Measured against a plain sibling
+	// child as a control -- that one WAS stopped by the same call, so the
+	// policy was working and only the link was missing.
+	// parent_workflow_id is read from the lease row; parent_close_policy
+	// stays on workflow_instances (cleat#3245).
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
-		-- parent_workflow_id and parent_close_policy are INHERITED from the run
-		-- being continued, not left NULL. A child that continues as new is
-		-- still its parent's child: enforceParentClosePolicy selects on
-		-- parent_workflow_id and NULL matches nothing, so a TERMINATE parent
-		-- left every continued iteration running while reporting that it had
-		-- stopped its child (cleat#955). Measured against a plain sibling
-		-- child as a control -- that one WAS stopped by the same call, so the
-		-- policy was working and only the link was missing.
-		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $4), 'default'),
-			$4, $5, now() - INTERVAL '1 millisecond', $6,
-			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $6),
-			(SELECT parent_close_policy FROM workflow_instances WHERE id = $6))
+		INSERT INTO workflow_instances (id, tenant_id, parent_close_policy)
+		VALUES (gen_random_uuid(), $1,
+			(SELECT parent_close_policy FROM workflow_instances WHERE id = $2))
 		RETURNING id
-		`, defName, defVersion, newInput, s.tenantID, priority, currentRunID).Scan(&newRunID)
+		`, s.tenantID, currentRunID).Scan(&newRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
+	}
+	resolvedTaskQueue, err := s.resolveRunTaskQueue(ctx, tx, defName, defVersion, s.tenantID)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: start new run: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT (SELECT parent_workflow_id FROM workflow_leases WHERE id = $1)`,
+		currentRunID).Scan(&inheritedParentWorkflowID); err != nil {
+		return "", fmt.Errorf("continue as new: read the inherited parent: %w", err)
+	}
+
+	// Create the new run's workflow_leases/workflow_payloads rows, as
+	// StartNewRun does. resolvedTaskQueue and the inherited parent_workflow_id
+	// were each read once, by the statements above, and are passed in rather
+	// than re-evaluated; until cleat#3245 B5 they came back through RETURNING
+	// on the workflow_instances INSERT, which no longer carries them.
+	// continued_from is currentRunID itself. concurrency_key and the run-limit
+	// overrides are not inherited by a continued run, so they are left unset.
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, newRunID, s.tenantID, resolvedTaskQueue, priority, sealedNewInput, leaseAndPayloadCols{
+		DefName: defName, DefVersion: defVersion,
+		ParentWorkflowID: inheritedParentWorkflowID.String, ContinuedFrom: currentRunID,
+	}); err != nil {
+		return "", fmt.Errorf("continue as new: %w", err)
 	}
 
 	// Complete the current run.
 	qsJSON := marshalQueryState(queryState)
+	sealedResult, err := encryptJSONColumnForStorage(resultJSON, tc)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: encrypt result: %w", err)
+	}
+	sealedQS, err := encryptJSONColumnForStorage(string(qsJSON), tc)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: encrypt query_state: %w", err)
+	}
 	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
 	//
 	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
@@ -691,24 +844,20 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// the same clause doing the same unnamed job in the finalize path, where a
 	// test named for the marker predicate stayed green with that predicate
 	// deleted. cleat#1175.
-	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
-		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, currentRunID, workerID, resultJSON, qsJSON, generation)
+	held, err := s.completeLeaseRow(ctx, tx, currentRunID, workerID, "done", generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return "", fmt.Errorf("continue as new: rows affected: %w", err)
-	}
-	if n == 0 {
+	if !held {
 		// Another worker now owns this workflow. Roll back rather than
 		// commit: this also discards the new run row we just inserted, so
 		// a lost fence leaves no orphaned, unreachable continuation run
 		// behind.
 		return "", ErrFenceLost
+	}
+
+	if err := s.writeResultPayload(ctx, tx, currentRunID, sealedResult, sealedQS); err != nil {
+		return "", fmt.Errorf("continue as new: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -762,10 +911,29 @@ func (s *PostgresStore) finalizeWorkflowSegmentInner(ctx context.Context, runID,
 	qsJSON := marshalQueryState(queryState)
 	resultJSON := coerceResultJSON(ctx, s.log(), runID, result)
 
+	// cleat#2312: result and query_state are the only two of this
+	// procedure's arguments it actually persists (finalize_workflow_status
+	// writes p_result and p_query_state; p_error_code/p_error_op are passed
+	// but unused for 'done'/'ready' -- a real failure never reaches this
+	// procedure at all, see this function's own doc comment), so those are
+	// the only two sealed here.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("finalize workflow: derive tenant key: %w", err)
+	}
+	sealedResult, err := encryptJSONColumnForStorage(resultJSON, tc)
+	if err != nil {
+		return fmt.Errorf("finalize workflow: encrypt result: %w", err)
+	}
+	sealedQS, err := encryptJSONColumnForStorage(string(qsJSON), tc)
+	if err != nil {
+		return fmt.Errorf("finalize workflow: encrypt query_state: %w", err)
+	}
+
 	var fenceHeld bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT finalize_workflow_status($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, runID, workerID, generation, finalStatus, resultJSON, errorCode, errorOp, string(qsJSON), nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
+	`, runID, workerID, generation, finalStatus, sealedResult, errorCode, errorOp, sealedQS, nextWakeAt, s.notifyChannel).Scan(&fenceHeld); err != nil {
 		return fmt.Errorf("finalize workflow: %w", err)
 	}
 
@@ -827,6 +995,21 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	defer tx.Rollback()
 
 	qsJSON := marshalQueryState(queryState)
+
+	// cleat#2312: result and query_state are both sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("complete workflow: derive tenant key: %w", err)
+	}
+	sealedResult, err := encryptJSONColumnForStorage(resultJSON, tc)
+	if err != nil {
+		return fmt.Errorf("complete workflow: encrypt result: %w", err)
+	}
+	sealedQS, err := encryptJSONColumnForStorage(string(qsJSON), tc)
+	if err != nil {
+		return fmt.Errorf("complete workflow: encrypt query_state: %w", err)
+	}
+
 	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
 	//
 	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
@@ -845,23 +1028,19 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	// the same clause doing the same unnamed job in the finalize path, where a
 	// test named for the marker predicate stayed green with that predicate
 	// deleted. cleat#1175.
-	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
-		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, workflowID, workerID, resultJSON, qsJSON, generation)
+	held, err := s.completeLeaseRow(ctx, tx, workflowID, workerID, "done", generation)
 	if err != nil {
-		return err
+		return fmt.Errorf("complete workflow: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("complete workflow: rows affected: %w", err)
-	}
-	if n == 0 {
+	if !held {
 		// Another worker now owns this workflow. Roll back rather than
 		// commit: the post-commit cleanup below is not safe to run on the
 		// new owner's behalf.
 		return ErrFenceLost
+	}
+
+	if err := s.writeResultPayload(ctx, tx, workflowID, sealedResult, sealedQS); err != nil {
+		return fmt.Errorf("complete workflow: %w", err)
 	}
 
 	// No idempotency write on the success path. idempotency_keys.result was
@@ -893,39 +1072,61 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	defer tx.Rollback()
 
 	qsParam := queryStateUpdateParam(queryState)
-	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'failed',
-		    error_msg = $3,
-		    error_code = $4,
-		    error_op = $5,
-		    completed_at = now(),
-		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = COALESCE($6::jsonb, query_state)
-		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsParam, generation)
+
+	// cleat#2312: error_msg, error_code, error_op and query_state are all
+	// sensitive-at-rest; one tenant cipher derivation covers all four (and
+	// the idempotency_keys.error_msg write below, which reuses the same
+	// ciphertext rather than sealing the message a second time).
+	tc, err := s.tenantCipherForWrite()
 	if err != nil {
-		return err
+		return fmt.Errorf("fail workflow: derive tenant key: %w", err)
 	}
-	n, err := res.RowsAffected()
+	sealedErrorMsg, err := encryptTextColumnForStorage(errorMsg, tc)
 	if err != nil {
-		return fmt.Errorf("fail workflow: rows affected: %w", err)
+		return fmt.Errorf("fail workflow: encrypt error_msg: %w", err)
 	}
-	if n == 0 {
+	sealedErrorCode, err := encryptTextColumnForStorage(errorCode, tc)
+	if err != nil {
+		return fmt.Errorf("fail workflow: encrypt error_code: %w", err)
+	}
+	sealedErrorOp, err := encryptTextColumnForStorage(errorOp, tc)
+	if err != nil {
+		return fmt.Errorf("fail workflow: encrypt error_op: %w", err)
+	}
+	if qs, ok := qsParam.(string); ok {
+		sealedQS, err := encryptJSONColumnForStorage(qs, tc)
+		if err != nil {
+			return fmt.Errorf("fail workflow: encrypt query_state: %w", err)
+		}
+		qsParam = sealedQS
+	}
+
+	held, err := s.completeLeaseRow(ctx, tx, workflowID, workerID, "failed", generation)
+	if err != nil {
+		return fmt.Errorf("fail workflow: %w", err)
+	}
+	if !held {
 		// Another worker now owns this workflow. Roll back rather than
 		// commit: the idempotency-key write and post-commit cleanup below
 		// are not safe to run on the new owner's behalf.
 		return ErrFenceLost
 	}
 
-	// Record idempotency error within the transaction (best-effort).
+	if err := s.writeErrorPayload(ctx, tx, workflowID, sealedErrorMsg, sealedErrorCode, sealedErrorOp, qsParam); err != nil {
+		return fmt.Errorf("fail workflow: %w", err)
+	}
+
+	// Record idempotency error within the transaction (best-effort). Reuses
+	// sealedErrorMsg rather than sealing errorMsg a second time -- both
+	// columns hold the same plaintext, and AES-GCM's random nonce means a
+	// second seal would produce different-looking ciphertext for no benefit.
 	//
 	// AND tenant_id = $3: see the identical comment on the sibling UPDATE in
 	// CompleteWorkflow. s.tenantID is already set on this tx by
 	// beginTxWithRLS.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
-		workflowID, errorMsg, s.tenantID); err != nil {
+		workflowID, sealedErrorMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -995,6 +1196,20 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		policy string
 		query  string
 		args   []any
+		// payloadQuery writes workflow_payloads for whichever of
+		// error_msg/error_op/error_code/completed_at this step writes,
+		// scoped by `id = ANY($1)` to the ids query RETURNED -- cleat#3245
+		// Phase 3 step 3 piece F. Re-selecting by query's own predicate would
+		// be wrong: by then query has changed the status it filters on.
+		// Found by its own test suite: GetWorkflowByID/ListWorkflows
+		// read these columns from workflow_payloads now, and this cascade
+		// never got a payloads mirror when it was still writing
+		// workflow_instances alone, so a TERMINATEd child's reason was
+		// visible nowhere a caller could read it. It takes $1 = the same
+		// ids and, where the step needs it, $2 = outcomeMsg -- see
+		// runParentClosePolicyStep's call below for how those line up with
+		// this step's own args.
+		payloadQuery string
 	}{
 		// Both arms fence the child out. `generation = generation + 1` and
 		// `assigned_to = NULL` are not bookkeeping: without them a child that a
@@ -1050,7 +1265,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		//
 		// 'cancelled' IS one of the five values in the NOT IN list two lines below
 		// -- CancelWorkflow (preemptivelySettle) writes it to
-		// workflow_instances.status, exactly as TerminateWorkflow writes
+		// workflow_leases.status, exactly as TerminateWorkflow writes
 		// 'terminated'. This comment claimed the opposite ("nothing writes it") for
 		// months, directly contradicted by the SQL it sat above and by
 		// CancelWorkflow's own doc comment in db.go -- found stale while building
@@ -1077,37 +1292,55 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 		// instruction on a row a reprocess could pick up, and one rule stated once
 		// is what stops the four-way split cleat#1227 is really about.
 		{"TERMINATE", `
-		UPDATE workflow_instances
-		SET status = 'terminated', error_msg = $2, error_op = 'parent_close', error_code = NULL,
+		UPDATE workflow_leases
+		SET status = 'terminated',
 		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
-		    completed_at = now(),
 		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
-		  AND parent_close_policy = 'TERMINATE'
+		  AND EXISTS (SELECT 1 FROM workflow_instances i
+		              WHERE i.id = workflow_leases.id AND i.parent_close_policy = 'TERMINATE')
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-		  AND NOT ` + deferPhaseOwedSQL + `
-	`, []any{parentWorkflowID, outcomeMsg}},
+		  AND NOT ` + deferPhaseOwedSQLPostgres + `
+		RETURNING id
+	`, []any{parentWorkflowID, outcomeMsg}, `
+		UPDATE workflow_payloads
+		SET error_msg = $2, error_op = 'parent_close', error_code = NULL, completed_at = now()
+		WHERE id = ANY($1)
+	`},
 		{"TERMINATE (defer phase)", `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET status = '` + statusTerminating + `',
 		    pending_terminal_status = 'terminated',
 		    defer_phase_deadline = ` + deferPhaseDeadlinePostgres + `,
-		    error_msg = $2, error_op = 'parent_close', error_code = NULL,
 		    next_wake_at = now(),
 		    assigned_to = NULL,
 		    generation = generation + 1
 		WHERE parent_workflow_id = $1
-		  AND parent_close_policy = 'TERMINATE'
+		  AND EXISTS (SELECT 1 FROM workflow_instances i
+		              WHERE i.id = workflow_leases.id AND i.parent_close_policy = 'TERMINATE')
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-		  AND ` + deferPhaseOwedSQL + `
-	`, []any{parentWorkflowID, outcomeMsg}},
+		  AND ` + deferPhaseOwedSQLPostgres + `
+		RETURNING id
+	`, []any{parentWorkflowID, outcomeMsg}, `
+		UPDATE workflow_payloads
+		SET error_msg = $2, error_op = 'parent_close', error_code = NULL
+		WHERE id = ANY($1)
+	`},
+		// cancellation_requested/cancellation_reason were dropped from
+		// workflow_instances (cleat#3360): CheckCancellation has read
+		// workflow_leases exclusively since piece D, so workflow_leases is
+		// the only copy left to set. Since cleat#3245 B3c this step is one
+		// UPDATE of those lease rows, filtered the same way as the other two
+		// steps and childrenClosedByTerminate.
 		{"REQUEST_CANCEL", `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
-		  AND parent_close_policy = 'REQUEST_CANCEL'
+		  AND EXISTS (SELECT 1 FROM workflow_instances i
+		              WHERE i.id = workflow_leases.id AND i.parent_close_policy = 'REQUEST_CANCEL')
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-	`, []any{parentWorkflowID}},
+		RETURNING id
+	`, []any{parentWorkflowID}, ""},
 	}
 
 	// Collected before the UPDATE: see releaseTerminatedChildren for why not
@@ -1119,7 +1352,7 @@ func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWo
 	}
 
 	for _, step := range steps {
-		if err := s.runParentClosePolicyStep(ctx, step.query, step.args...); err != nil {
+		if err := s.runParentClosePolicyStep(ctx, step.query, step.payloadQuery, step.args...); err != nil {
 			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a closed parent are unaffected by its close policy",
 				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
 			if step.policy == "TERMINATE" {
@@ -1159,11 +1392,12 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM workflow_instances
+		SELECT id FROM workflow_leases
 		WHERE parent_workflow_id = $1
-		  AND parent_close_policy = 'TERMINATE'
+		  AND EXISTS (SELECT 1 FROM workflow_instances i
+		              WHERE i.id = workflow_leases.id AND i.parent_close_policy = 'TERMINATE')
 		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-		  AND NOT `+deferPhaseOwedSQL+`
+		  AND NOT `+deferPhaseOwedSQLPostgres+`
 	`, parentWorkflowID)
 	if err != nil {
 		return nil, err
@@ -1171,15 +1405,39 @@ func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWor
 	return scanWorkflowIDs(rows)
 }
 
-func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query string, args ...any) error {
+// runParentClosePolicyStep runs query, which writes workflow_leases and must
+// RETURN id. Since cleat#3245 B3c the lease row is the only copy of these
+// columns that is written, so there is no second lease statement.
+//
+// payloadQuery writes the step's payload columns onto workflow_payloads
+// (added as a mirror in cleat#3245 Phase 3 step 3 piece F; since B1b it is
+// the only copy, and query writes none of them). It takes $1 = the same ids
+// and, for the TERMINATE arms, $2 = outcomeMsg -- args[1:] (everything after
+// the step's own parentWorkflowID). query itself takes only args[0].
+// payloadQuery == "" skips it.
+func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, payloadQuery string, args ...any) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+	// query takes only the parent id: since cleat#3245 B1b it writes no
+	// payload column, so the remaining args (the outcome message) belong to
+	// the workflow_payloads query alone.
+	rows, err := tx.QueryContext(ctx, query, args[0])
+	if err != nil {
 		return err
+	}
+	ids, err := scanWorkflowIDs(rows)
+	if err != nil {
+		return fmt.Errorf("scan touched ids: %w", err)
+	}
+	if payloadQuery != "" && len(ids) > 0 {
+		payloadArgs := append([]any{pq.Array(ids)}, args[1:]...)
+		if _, err := tx.ExecContext(ctx, payloadQuery, payloadArgs...); err != nil {
+			return fmt.Errorf("payload rows: %w", err)
+		}
 	}
 	return tx.Commit()
 }
@@ -1195,34 +1453,57 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	defer tx.Rollback()
 
 	qsParam := queryStateUpdateParam(queryState)
-	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
-		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL,
-		    query_state = COALESCE($6::jsonb, query_state)
-		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errMsg, errorCode, errorOp, qsParam, generation)
+
+	// cleat#2312: see the identical derivation in FailWorkflow.
+	tc, err := s.tenantCipherForWrite()
 	if err != nil {
-		return err
+		return fmt.Errorf("move to dead letter queue: derive tenant key: %w", err)
 	}
-	n, err := res.RowsAffected()
+	sealedErrMsg, err := encryptTextColumnForStorage(errMsg, tc)
 	if err != nil {
-		return fmt.Errorf("move to dead letter queue: rows affected: %w", err)
+		return fmt.Errorf("move to dead letter queue: encrypt error_msg: %w", err)
 	}
-	if n == 0 {
+	sealedErrorCode, err := encryptTextColumnForStorage(errorCode, tc)
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: encrypt error_code: %w", err)
+	}
+	sealedErrorOp, err := encryptTextColumnForStorage(errorOp, tc)
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: encrypt error_op: %w", err)
+	}
+	if qs, ok := qsParam.(string); ok {
+		sealedQS, err := encryptJSONColumnForStorage(qs, tc)
+		if err != nil {
+			return fmt.Errorf("move to dead letter queue: encrypt query_state: %w", err)
+		}
+		qsParam = sealedQS
+	}
+
+	held, err := s.completeLeaseRow(ctx, tx, workflowID, workerID, "dead_lettered", generation)
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: %w", err)
+	}
+	if !held {
 		// Another worker now owns this workflow. Roll back rather than
 		// commit: the idempotency-key write and post-commit cleanup below
 		// are not safe to run on the new owner's behalf.
 		return ErrFenceLost
 	}
-	// Record idempotency error within the transaction (best-effort).
+
+	if err := s.writeErrorPayload(ctx, tx, workflowID, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam); err != nil {
+		return fmt.Errorf("move to dead letter queue: %w", err)
+	}
+
+	// Record idempotency error within the transaction (best-effort). Reuses
+	// sealedErrMsg -- see the identical comment on FailWorkflow's sibling
+	// write.
 	//
 	// AND tenant_id = $3: see the identical comment on the sibling UPDATE in
 	// CompleteWorkflow. s.tenantID is already set on this tx by
 	// beginTxWithRLS.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
-		workflowID, errMsg, s.tenantID); err != nil {
+		workflowID, sealedErrMsg, s.tenantID); err != nil {
 		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
 	}
 
@@ -1247,16 +1528,26 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
-		    error_msg = NULL, error_code = NULL, error_op = NULL,
-		    next_wake_at = now()
+	// A no-op, nil-returning call on a non-dead_lettered or absent id. The
+	// row count only decides whether the payload's error columns are
+	// cleared, never the function's own return value. Since cleat#3245 B3c
+	// the lease row is the only copy of these columns that is written.
+	res, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL, next_wake_at = now()
 		WHERE id = $1 AND status = 'dead_lettered'
 	`, workflowID)
 	if err != nil {
-		return err
+		return fmt.Errorf("retry workflow: lease: %w", err)
 	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+		`, workflowID); err != nil {
+			return fmt.Errorf("retry workflow: payload: %w", err)
+		}
+	}
+
 	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }
@@ -1289,15 +1580,18 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	// 'terminating' status to make. Either status is claimable, so the phase
 	// runs again either way -- this is about the status telling the truth
 	// while it waits.
+	//
+	// Since cleat#3245 B3c this lease UPDATE is the fence: the
+	// workflow_instances copy of these columns is no longer written.
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
 		    assigned_to = NULL, next_wake_at = $3
 		WHERE id = $1 AND assigned_to = $2 AND generation = $4
 	`, workflowID, workerID, nextWakeAt, generation)
 	if err != nil {
-		return err
+		return fmt.Errorf("release workflow: update lease: %w", err)
 	}
 
 	// A zero-row update is a lost fence, not a failure and not a success.
@@ -1362,6 +1656,20 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	if runID == "" {
 		runID = uuid.New().String()
 	}
+
+	// cleat#2312: input is sensitive-at-rest. Sealed into a separate variable
+	// -- never input itself -- so IdempotencyInputDigest above and the
+	// ON CONFLICT re-read path below keep working against the plaintext;
+	// only the two INSERTs further down bind the sealed copy.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return "", false, fmt.Errorf("start new run: derive tenant key: %w", err)
+	}
+	sealedInput, err := encryptJSONColumnForStorage(string(input), tc)
+	if err != nil {
+		return "", false, fmt.Errorf("start new run: encrypt input: %w", err)
+	}
+
 	if idempotencyKey != "" {
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
 		inputDigest := IdempotencyInputDigest(input)
@@ -1518,15 +1826,22 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 		// It used to be set HERE, after the idempotency_keys work, and that
 		// ordering is the whole of cleat#1534.
 
-		// Insert the workflow instance.
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
-			VALUES ($1, $2, $3, 'ready', $4,
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond',
-			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
-		`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+		// Insert the workflow instance. Its row is id, tenant and the close
+		// policy; everything else about the run goes on the lease and payload
+		// rows below (cleat#3245 B5).
+		resolvedTaskQueue, err := s.resolveRunTaskQueue(ctx, tx, defName, defVersion, tenantID)
 		if err != nil {
+			return "", false, fmt.Errorf("start new run: %w", err)
+		}
+		if err := insertInstanceRow(ctx, tx, runID, tenantID, ""); err != nil {
+			return "", false, fmt.Errorf("start new run: %w", err)
+		}
+
+		if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
+			DefName: defName, DefVersion: defVersion, ConcurrencyKey: concurrencyKey,
+			RunWasmInstanceTimeoutMs: runInstanceMs, RunWasmWallClockCeilingMs: runWallClockMs,
+			RunHostRetryBudgetMs: runRetryMs, RunMaxWorkflowDurationMs: runMaxWorkflowMs,
+		}); err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
 
@@ -1541,18 +1856,189 @@ func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, 
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
-		VALUES ($1, $2, $3, 'ready', $4,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond',
-			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
-	`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
+	// Same two statements as the idempotency-key branch above.
+	resolvedTaskQueue, err := s.resolveRunTaskQueue(ctx, tx, defName, defVersion, tenantID)
 	if err != nil {
+		return "", false, fmt.Errorf("start new run: %w", err)
+	}
+	if err := insertInstanceRow(ctx, tx, runID, tenantID, ""); err != nil {
+		return "", false, fmt.Errorf("start new run: %w", err)
+	}
+	if err := s.insertLeaseAndPayloadRows(ctx, tx, runID, tenantID, resolvedTaskQueue, priority, sealedInput, leaseAndPayloadCols{
+		DefName: defName, DefVersion: defVersion, ConcurrencyKey: concurrencyKey,
+		RunWasmInstanceTimeoutMs: runInstanceMs, RunWasmWallClockCeilingMs: runWallClockMs,
+		RunHostRetryBudgetMs: runRetryMs, RunMaxWorkflowDurationMs: runMaxWorkflowMs,
+	}); err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return runID, false, tx.Commit()
+}
+
+// insertInstanceRow writes the workflow_instances row of a new run. Since
+// cleat#3245 B5 that row is id, tenant_id, parent_close_policy and the two
+// counters that default; everything else a run has lives on its
+// workflow_leases and workflow_payloads rows, which insertLeaseAndPayloadRows
+// writes next. An empty parentClosePolicy takes the column's own default,
+// ABANDON.
+func insertInstanceRow(ctx context.Context, tx *sql.Tx, id, tenantID, parentClosePolicy string) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_instances (id, tenant_id, parent_close_policy)
+		VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'ABANDON'))
+	`, id, tenantID, parentClosePolicy); err != nil {
+		return fmt.Errorf("insert instance row: %w", err)
+	}
+	return nil
+}
+
+// resolveRunTaskQueue is the task queue a run of defName@defVersion starts on:
+// the definition's own, or "default" when it names none. It used to ride on the
+// workflow_instances INSERT as a subquery and come back through RETURNING;
+// that row no longer has the column, so it is one statement of its own, read
+// once and passed to insertLeaseAndPayloadRows.
+func (s *PostgresStore) resolveRunTaskQueue(ctx context.Context, tx *sql.Tx, defName string, defVersion int, tenantID string) (string, error) {
+	var q string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3), 'default')
+	`, defName, defVersion, tenantID).Scan(&q); err != nil {
+		return "", fmt.Errorf("resolve task queue: %w", err)
+	}
+	return q, nil
+}
+
+// insertLeaseAndPayloadRows creates the workflow_leases and workflow_payloads
+// rows that go with a freshly inserted workflow_instances row, on the SAME
+// tx. Since cleat#3245 B5 those two rows are where a run's state lives, and
+// the instance row beside them is only its identity and close policy.
+// There is no backfill: a fresh database is required for 0.5.0, so no
+// supported upgrade path has a pre-existing run to catch up.
+//
+// next_wake_at is set explicitly to `now() - 1ms`, so a new run is claimable
+// at once; this column feeds claim ordering. created_at is NOT passed
+// explicitly: both tables default it to `now()`, and `now()` is the
+// TRANSACTION timestamp in PostgreSQL (constant across every statement in one
+// tx), so the two rows agree without having to say so.
+//
+// taskQueue is decided by the caller (resolveRunTaskQueue, or
+// resolveChildRun for a child) and passed in rather than re-evaluated here --
+// a second subquery risks reading a workflow_defs row that changed between
+// the two statements, and reusing the one already decided is safer than
+// silently using a drifted value. Until B5 it rode on the instance INSERT as
+// a subquery and came back through RETURNING.
+//
+// sealedPayloadInput is the input as the caller already sealed it
+// (ciphertext when encryption is on, per cleat#2312), stored as given rather
+// than re-sealed here.
+//
+// cols carries the fields an individual creation path may or may not set;
+// a caller that does not set one passes its zero value, rather than this
+// function guessing a default.
+func (s *PostgresStore) insertLeaseAndPayloadRows(ctx context.Context, tx *sql.Tx, id, tenantID, taskQueue string, priority int, sealedPayloadInput string, cols leaseAndPayloadCols) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_leases (
+			id, tenant_id, task_queue, priority, next_wake_at,
+			concurrency_key, concurrency_key_hash, parent_workflow_id, continued_from,
+			run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms,
+			run_host_retry_budget_ms, run_max_workflow_duration_ms
+		)
+		VALUES (
+			$1, $2, $3, $4, now() - INTERVAL '1 millisecond',
+			NULLIF($5, ''), CASE WHEN $5 = '' THEN NULL ELSE digest($5, 'sha256') END,
+			NULLIF($6, ''), NULLIF($7, ''),
+			$8, $9, $10, $11
+		)
+	`, id, tenantID, taskQueue, priority,
+		cols.ConcurrencyKey, cols.ParentWorkflowID, cols.ContinuedFrom,
+		cols.RunWasmInstanceTimeoutMs, cols.RunWasmWallClockCeilingMs,
+		cols.RunHostRetryBudgetMs, cols.RunMaxWorkflowDurationMs); err != nil {
+		return fmt.Errorf("insert lease row: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_payloads (id, tenant_id, input, def_name, def_version)
+		VALUES ($1, $2, $3, $4, $5)
+	`, id, tenantID, sealedPayloadInput, cols.DefName, cols.DefVersion); err != nil {
+		return fmt.Errorf("insert payload row: %w", err)
+	}
+	return nil
+}
+
+// leaseAndPayloadCols carries the per-run columns of the lease and payload
+// rows into insertLeaseAndPayloadRows. def_name/def_version are required on
+// every call: since cleat#3245 B5 workflow_payloads is their only home, and
+// workflow_payloads_def_fkey holds them to a deployed definition. The rest
+// are each NULL on whichever creation paths do not set them.
+type leaseAndPayloadCols struct {
+	DefName                   string
+	DefVersion                int
+	ConcurrencyKey            string
+	ParentWorkflowID          string
+	ContinuedFrom             string
+	RunWasmInstanceTimeoutMs  *int64
+	RunWasmWallClockCeilingMs *int64
+	RunHostRetryBudgetMs      *int64
+	RunMaxWorkflowDurationMs  *int64
+}
+
+// completeLeaseRow writes a terminal status transition (CompleteWorkflow,
+// FailWorkflow, MoveToDeadLetterQueue, ContinueAsNew's old run) to
+// workflow_leases, fenced on (assigned_to, generation), and reports whether
+// the fence held. Since cleat#3245 B3c this UPDATE IS the fence: the
+// workflow_instances copy of these columns is no longer written, so a row
+// count of zero is what tells the caller another worker owns the run.
+// `completed_by = assigned_to, assigned_to = NULL` is evaluated against the
+// lease row's own pre-update assigned_to (SQL SET clauses read the old row),
+// so it needs no value passed in beyond the new status.
+func (s *PostgresStore) completeLeaseRow(ctx context.Context, tx *sql.Tx, workflowID, workerID, status string, generation int64) (bool, error) {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET status = $3, completed_by = assigned_to, assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2 AND generation = $4
+	`, workflowID, workerID, status, generation)
+	if err != nil {
+		return false, fmt.Errorf("lease row: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("lease row: rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
+// writeResultPayload mirrors CompleteWorkflow's result/query_state write
+// onto workflow_payloads, on the same tx. Takes already-sealed values (per
+// cleat#2312) so the two tables carry identical ciphertext rather than two
+// independent encryptions of the same plaintext.
+//
+// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 (folded into migrations/postgres/001_schema.sql by #3358) --
+// covers CompleteWorkflow and ContinueAsNew's old-run completion, both of
+// which call this.
+func (s *PostgresStore) writeResultPayload(ctx context.Context, tx *sql.Tx, workflowID string, sealedResult, sealedQS any) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET result = $2, query_state = $3, completed_at = now() WHERE id = $1
+	`, workflowID, sealedResult, sealedQS); err != nil {
+		return fmt.Errorf("mirror payload row: %w", err)
+	}
+	return nil
+}
+
+// writeErrorPayload mirrors FailWorkflow/MoveToDeadLetterQueue's
+// error_msg/error_code/error_op/query_state write onto workflow_payloads, on
+// the same tx. qsParam is COALESCEd exactly as the workflow_instances UPDATE
+// did -- a nil qsParam (query state not supplied) leaves the column
+// unchanged rather than nulling it.
+//
+// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 --
+// covers both of this function's callers (FailWorkflow, MoveToDeadLetterQueue),
+// same as writeResultPayload above for the 'done' side.
+func (s *PostgresStore) writeErrorPayload(ctx context.Context, tx *sql.Tx, workflowID string, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam any) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads
+		SET error_msg = $2, error_code = $3, error_op = $4, query_state = COALESCE($5::jsonb, query_state), completed_at = now()
+		WHERE id = $1
+	`, workflowID, sealedErrMsg, sealedErrorCode, sealedErrorOp, qsParam); err != nil {
+		return fmt.Errorf("mirror payload row: %w", err)
+	}
+	return nil
 }
 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
@@ -1591,31 +2077,60 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	// why it is bounded at all. ORDER BY heartbeat_at reclaims the
 	// longest-stale first, so a bound that binds delays the freshest rather
 	// than picking arbitrarily.
-	result, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
+	//
+	// cleat#3245 Phase 3 step 3 piece A: the candidate scan now reads
+	// workflow_leases, not workflow_instances. Phase 2 (migration 015 (folded into migrations/postgres/001_schema.sql by #3358))
+	// dropped heartbeat_at from every workflow_instances index to make the
+	// heartbeat UPDATE HOT-eligible, so this scan has done a full table scan
+	// plus an in-memory sort of the whole 'running' set since -- the
+	// accepted regression that migration's own comment names (23x slower at
+	// 20k running, measured). workflow_leases carries idx_leases_stale
+	// (migration 016 (folded into migrations/postgres/001_schema.sql by
+	// #3358), status/heartbeat_at, never read from until now) for
+	// exactly this query.
+	// Since cleat#3245 B3c the lease row is the only copy written, and this
+	// one statement both picks and reclaims. The subquery only orders and
+	// limits. The staleness predicate is repeated on the outer row because
+	// a waiting UPDATE under READ COMMITTED re-checks only its own WHERE
+	// against the newly committed row, never the subquery: a heartbeat that
+	// commits while this waits must take its run out of the reap.
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE workflow_leases
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
-		    SELECT id FROM workflow_instances
-		    WHERE status = 'running'
-		      AND heartbeat_at < now() - $1::interval
-		    ORDER BY heartbeat_at
+		    SELECT l.id FROM workflow_leases l
+		    WHERE l.status = 'running'
+		      AND l.heartbeat_at < now() - $1::interval
+		    ORDER BY l.heartbeat_at
 		    LIMIT $2
 		)
+		  AND status = 'running'
+		  AND heartbeat_at < now() - $1::interval
+		RETURNING id
 	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	return int(n), tx.Commit()
+	reapedIDs, err := scanWorkflowIDs(rows)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances: scan: %w", err)
+	}
+	return len(reapedIDs), tx.Commit()
 }
 
 // ListStaleHolders satisfies StaleHolderReaper. Same RLS scoping and same
 // status='running'/heartbeat_at predicate as ReapStaleInstances, because it
 // has to report the same population -- see that method's doc and
 // StaleHolderReaper's doc for why the two are allowed to race.
+//
+// cleat#3245 Phase 3 step 3 piece A: reads workflow_leases rather than
+// workflow_instances, for the same idx_leases_stale reason as
+// ReapStaleInstances' candidate scan. id, generation and assigned_to all
+// exist on workflow_leases (migration 016), so this is a pure FROM-clause
+// change -- no join, no new columns.
 func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1624,7 +2139,7 @@ func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Durat
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, generation, assigned_to FROM workflow_instances
+		SELECT id, generation, assigned_to FROM workflow_leases
 		WHERE status = 'running'
 		  AND heartbeat_at < now() - $1::interval
 		ORDER BY heartbeat_at
@@ -1656,6 +2171,11 @@ func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Durat
 // against an empty exclude -- unnest of two empty arrays produces zero
 // rows, so NOT EXISTS is unconditionally true and every row ReapStaleInstances
 // would have reclaimed is still reclaimed.
+//
+// cleat#3245 Phase 3 step 3 piece A: same candidate-scan move as
+// ReapStaleInstances -- the inner SELECT and its NOT EXISTS correlation now
+// read workflow_leases, which carries id and generation same as
+// workflow_instances (both are 1:1 on id).
 func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1670,29 +2190,43 @@ func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout ti
 		excludeGenerations[i] = k.Generation
 	}
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
+	// One statement on the lease row, for the reasons ReapStaleInstances
+	// gives: the subquery orders and limits, and the outer WHERE repeats
+	// the whole predicate, exclusion included, so the re-check after a wait
+	// sees a heartbeat or a reclaim that committed meanwhile.
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE workflow_leases
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
 		                  THEN 'terminating' ELSE 'ready' END,
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
-		    SELECT id FROM workflow_instances
-		    WHERE status = 'running'
-		      AND heartbeat_at < now() - $1::interval
+		    SELECT l.id FROM workflow_leases l
+		    WHERE l.status = 'running'
+		      AND l.heartbeat_at < now() - $1::interval
 		      AND NOT EXISTS (
 		          SELECT 1 FROM unnest($3::text[], $4::bigint[]) AS ex(id, generation)
-		          WHERE ex.id = workflow_instances.id AND ex.generation = workflow_instances.generation
+		          WHERE ex.id = l.id AND ex.generation = l.generation
 		      )
-		    ORDER BY heartbeat_at
+		    ORDER BY l.heartbeat_at
 		    LIMIT $2
 		)
+		  AND status = 'running'
+		  AND heartbeat_at < now() - $1::interval
+		  AND NOT EXISTS (
+		      SELECT 1 FROM unnest($3::text[], $4::bigint[]) AS ex(id, generation)
+		      WHERE ex.id = workflow_leases.id AND ex.generation = workflow_leases.generation
+		  )
+		RETURNING id
 	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), excludeIDs, excludeGenerations)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances except: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	return int(n), tx.Commit()
+	reapedIDs, err := scanWorkflowIDs(rows)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: scan: %w", err)
+	}
+	return len(reapedIDs), tx.Commit()
 }
 
 // PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
@@ -1726,7 +2260,7 @@ func (s *PostgresStore) StaleSetShape(ctx context.Context, timeout, missedBeatTi
 		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $2::interval),
 		    (CASE WHEN MAX(heartbeat_at) < now() - $1::interval THEN true ELSE false END),
 		    COUNT(DISTINCT assigned_to)
-		FROM workflow_instances
+		FROM workflow_leases -- cleat#3245 B2: heartbeat_at's only copy
 		WHERE status = 'running'
 	`, fmt.Sprintf("%d milliseconds", missedBeatTimeout.Milliseconds()),
 		fmt.Sprintf("%d milliseconds", timeout.Milliseconds()),
@@ -1762,6 +2296,36 @@ func (s *PostgresStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID st
 				"worker_id", workerID, "workflow_id", wf.ID, "error", err)
 		}
 	}
+
+	// cleat#2312: input and error_code/error_op are sensitive-at-rest. This
+	// is the one chokepoint both ClaimWorkflows and ClaimStickyWorkflows
+	// funnel through, so decrypting here -- rather than in each scan loop --
+	// covers both. A decrypt failure is logged and the ciphertext is left in
+	// place rather than aborting the claim: the workflow has already been
+	// claimed in the database by this point, and handing back a claim this
+	// worker cannot read is better than silently losing the claim.
+	for _, wf := range keep {
+		decryptedInput, err := s.decryptPayloadJSON(string(wf.Input))
+		if err != nil {
+			s.log().WarnContext(ctx, "decrypt claimed workflow input failed",
+				"workflow_id", wf.ID, "error", err)
+		} else {
+			wf.Input = json.RawMessage(decryptedInput)
+		}
+		if decryptedCode, err := s.decryptTextColumnFromStorage(wf.ErrorCode, "error_code"); err != nil {
+			s.log().WarnContext(ctx, "decrypt claimed workflow error_code failed",
+				"workflow_id", wf.ID, "error", err)
+		} else {
+			wf.ErrorCode = decryptedCode
+		}
+		if decryptedOp, err := s.decryptTextColumnFromStorage(wf.ErrorOp, "error_op"); err != nil {
+			s.log().WarnContext(ctx, "decrypt claimed workflow error_op failed",
+				"workflow_id", wf.ID, "error", err)
+		} else {
+			wf.ErrorOp = decryptedOp
+		}
+	}
+
 	return keep, nil
 }
 
@@ -1843,7 +2407,8 @@ func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp,
 			&wf.Generation, &wf.Priority, &wf.TraceID, &wf.PendingTerminalStatus); err != nil {
-			return nil, fmt.Errorf("claim workflows scan: %w", err)
+			// As in ClaimStickyWorkflows: id is column 0 and already set.
+			return nil, fmt.Errorf("claim workflows scan (workflow %q): %w", wf.ID, err)
 		}
 
 		if nextWakeAt.Valid {

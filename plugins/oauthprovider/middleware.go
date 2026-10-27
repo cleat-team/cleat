@@ -101,11 +101,11 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		// token.
 		err := plugin.ScanRow(p.db.QueryRow(
 			plugin.AcrossAllTenants(r.Context(), "oauth middleware: resolving a session token to its tenant, which is the value being looked up"),
-			plugin.Rebind(`
+			`
 				SELECT id, tenant_id, user_email, expires_at
 				FROM oauth_sessions
 				WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
-			`, p.dialect), tokenHash), &sessionID, &tenantID, &userEmail, &expiresAt)
+			`, tokenHash), &sessionID, &tenantID, &userEmail, &expiresAt)
 		if err != nil {
 			// Reaching here means the token LOOKS like one of ours (see
 			// looksLikeSessionToken above) and is not a live session -- unknown,

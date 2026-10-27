@@ -185,9 +185,44 @@ func seedWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wf
 	case testutil.DialectMSSQL:
 		stmt = `INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
 		        VALUES (@p1, 'flush-dialect', 1, 'running', '{}', '` + DefaultTenantUUID + `')`
-	default:
-		stmt = `INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
-		        VALUES ($1, 'flush-dialect', 1, 'running', '{}', '` + DefaultTenantUUID + `')`
+	}
+
+	if dialect == testutil.DialectPostgres {
+		if _, err := db.Exec(defStmt); err != nil && !isDuplicateKey(err) {
+			t.Fatalf("seeding workflow_defs on %s: %v", dialect, err)
+		}
+		// SeedRun lays down the narrow workflow_instances row (cleat#3245)
+		// plus its workflow_leases and workflow_payloads rows; it Fatals on
+		// any error, including a duplicate key, so a row a previous local
+		// run left behind -- ordinary here, see the comment below -- is
+		// checked for first instead of relying on ON CONFLICT.
+		var exists bool
+		if err := db.QueryRow(`SELECT EXISTS (SELECT 1 FROM workflow_instances WHERE id = $1)`, wfID).Scan(&exists); err != nil {
+			t.Fatalf("checking for an existing workflow_instances row on %s: %v", dialect, err)
+		}
+		if !exists {
+			testutil.SeedRun(t, db, testutil.RunSeed{
+				ID: wfID, TenantID: DefaultTenantUUID, DefName: "flush-dialect",
+				DefVersion: 1, Status: "running",
+			})
+		}
+
+		// Start from a known state. These databases are long-lived locally,
+		// and the row survives between runs: leaving event_count as the
+		// previous run left it makes TestPerStepFlushDoesNotDoubleCountEvents
+		// pass or fail depending on history rather than on the code. Old
+		// event rows go for the same reason.
+		if _, err := db.Exec(deleteEventsSQL(dialect), wfID); err != nil {
+			t.Fatalf("clearing prior events on %s: %v", dialect, err)
+		}
+		if _, err := db.Exec(resetEventCountSQL(dialect), wfID); err != nil {
+			t.Fatalf("resetting event_count on %s: %v", dialect, err)
+		}
+
+		t.Cleanup(func() {
+			_, _ = db.Exec(deleteEventsSQL(dialect), wfID)
+		})
+		return
 	}
 
 	if dialect == testutil.DialectMSSQL {

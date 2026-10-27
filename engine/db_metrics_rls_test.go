@@ -56,11 +56,18 @@ func TestMetricsQueriesWorkUnderRLS(t *testing.T) {
 	}
 	stalled := time.Now().Add(-2 * time.Hour)
 	if _, err := adminDB.Exec(
-		`INSERT INTO workflow_instances
-		   (id, def_name, def_version, status, input, tenant_id, created_at, heartbeat_at)
-		 VALUES ('rls-metrics-wf', 'rls-metrics-def', 1, 'running', '{}', $1, $2, $2)`,
-		tenant, stalled); err != nil {
+		`INSERT INTO workflow_instances (id, tenant_id)
+		 VALUES ('rls-metrics-wf', $1)`,
+		tenant); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
+	}
+	// CountStalledWorkflows reads status, created_at and heartbeat_at from
+	// workflow_leases (heartbeat_at's only copy since cleat#3245 B2).
+	if _, err := adminDB.Exec(
+		`INSERT INTO workflow_leases (id, tenant_id, status, created_at, heartbeat_at)
+		 VALUES ('rls-metrics-wf', $1, 'running', $2, $2)`,
+		tenant, stalled); err != nil {
+		t.Fatalf("seed workflow_leases: %v", err)
 	}
 	if _, err := adminDB.Exec(
 		`INSERT INTO event_history (workflow_id, step, event_type, tenant_id)
@@ -82,7 +89,7 @@ func TestMetricsQueriesWorkUnderRLS(t *testing.T) {
 	// evaluated and this test passes against the unfixed code.
 	var truth int
 	if err := adminDB.QueryRow(
-		`SELECT COUNT(*) FROM workflow_instances WHERE status = 'running' AND tenant_id = $1`,
+		`SELECT COUNT(*) FROM workflow_leases WHERE status = 'running' AND tenant_id = $1`,
 		tenant).Scan(&truth); err != nil {
 		t.Fatalf("reading ground truth: %v", err)
 	}

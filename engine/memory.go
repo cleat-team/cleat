@@ -302,6 +302,22 @@ func (e *OutputTruncatedError) Error() string {
 // the identical call with the identical buffer fails identically.
 const errCodeOutputTruncated byte = 7
 
+// errCodeOutputWriteFailed is the errCode a host call returns when the guest's
+// output could not be written at all -- as opposed to errCodeOutputTruncated,
+// where a prefix landed (cleat#3207).
+//
+// 8, for the same reason 7 is: free in both the simple-result errCode byte and
+// cleat.CallErrorCode, so a guest recognises this failure without first having
+// to know which result layout it is decoding.
+//
+// Non-retryable: the underlying call may have genuinely run and recorded a
+// real effect (a child workflow created, a side effect persisted); only the
+// write-back failed, so re-issuing risks a duplicate of something that may
+// have already happened. That is a different reason than
+// errCodeOutputTruncated's (reissuing the identical call fails identically),
+// but the same conclusion.
+const errCodeOutputWriteFailed byte = 8
+
 // asTruncation reports whether err is an output-truncation error, and returns
 // the errCode to pack if so.
 //

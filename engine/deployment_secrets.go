@@ -64,19 +64,40 @@ const deploymentSecretInfo = "cleat-deployment-secret-v1"
 type DeploymentSecretStore struct {
 	db      *sql.DB
 	dialect string
-	ring    *KeyRing
+	ring    *ReloadableKeyRing
 }
 
 // NewDeploymentSecretStore builds a store around ring, which is the SAME ring
 // a caller builds for SecretStore -- see the type's doc comment for why. A
 // nil ring is valid and produces a store whose seal/open return
 // ErrNoSecretMasterKey, matching SecretStore's nil-ring convention.
+//
+// Wrapped in a PRIVATE, unshared *ReloadableKeyRing (cleat#2298): reloadable
+// in the sense that the type supports it, but nothing outside this function
+// holds the handle Reload would need, so this constructor behaves exactly
+// as it did before -- not reloadable at all. See
+// NewDeploymentSecretStoreWithReloadableRing for a caller that wants to
+// share a ring (with SecretStore, typically -- see this type's own doc
+// comment on why they are meant to) or call Reload directly.
 func NewDeploymentSecretStore(db *sql.DB, dialect string, ring *KeyRing) *DeploymentSecretStore {
+	return &DeploymentSecretStore{db: db, dialect: dialect, ring: NewReloadableKeyRing(ring)}
+}
+
+// NewDeploymentSecretStoreWithReloadableRing builds a store around a
+// *ReloadableKeyRing the caller already holds -- cleat#2298. Pass the SAME
+// instance given to NewSecretStoreWithReloadableRing to keep the two
+// stores' key material reloaded together, in one Reload call.
+func NewDeploymentSecretStoreWithReloadableRing(db *sql.DB, dialect string, ring *ReloadableKeyRing) *DeploymentSecretStore {
+	if ring == nil {
+		ring = NewReloadableKeyRing(nil)
+	}
 	return &DeploymentSecretStore{db: db, dialect: dialect, ring: ring}
 }
 
-// HasMasterKey reports whether deployment secrets can be used at all.
-func (s *DeploymentSecretStore) HasMasterKey() bool { return s != nil && s.ring != nil }
+// HasMasterKey checks the LOADED ring, not the wrapper -- see
+// SecretStore.HasMasterKey's doc comment for why the wrapper itself is
+// never nil once a store is constructed.
+func (s *DeploymentSecretStore) HasMasterKey() bool { return s != nil && s.ring.Load() != nil }
 
 // deploymentSecretKey derives this deployment's encryption key from one
 // master key. UNLIKE tenantKey, the HKDF salt is fixed (nil) rather than a
@@ -98,11 +119,14 @@ func deploymentSecretKey(master []byte) ([]byte, error) {
 // tenant secret's ciphertext copied here) fails to open rather than
 // decrypting to something. See tenant_secrets.go's seal for the same
 // construction with tenantID in the AAD role.
-func (s *DeploymentSecretStore) seal(name, plaintext string) (string, error) {
-	if s.ring == nil {
+// TAKES ring EXPLICITLY -- cleat#2298's S2, mirroring SecretStore.seal's doc
+// comment for why: every caller Loads once for its whole operation and
+// passes that one snapshot to every seal/open call it makes.
+func (s *DeploymentSecretStore) seal(ring *KeyRing, name, plaintext string) (string, error) {
+	if ring == nil {
 		return "", ErrNoSecretMasterKey
 	}
-	key, err := deploymentSecretKey(s.ring.current.Key)
+	key, err := deploymentSecretKey(ring.Current().Key)
 	if err != nil {
 		return "", err
 	}
@@ -124,13 +148,14 @@ func (s *DeploymentSecretStore) seal(name, plaintext string) (string, error) {
 
 // open decrypts a stored value with the key that carries the row's
 // key_version, authenticating against name exactly as seal does.
-func (s *DeploymentSecretStore) open(name, stored string, keyVersion int) (string, error) {
-	if s.ring == nil {
+// TAKES ring EXPLICITLY -- see seal's doc comment for why.
+func (s *DeploymentSecretStore) open(ring *KeyRing, name, stored string, keyVersion int) (string, error) {
+	if ring == nil {
 		return "", ErrNoSecretMasterKey
 	}
-	k, ok := s.ring.Key(keyVersion)
+	k, ok := ring.Key(keyVersion)
 	if !ok {
-		return "", &SecretKeyVersionError{Version: keyVersion, Configured: s.ring.Versions()}
+		return "", &SecretKeyVersionError{Version: keyVersion, Configured: ring.Versions()}
 	}
 	key, err := deploymentSecretKey(k.Key)
 	if err != nil {
@@ -193,11 +218,17 @@ func (s *DeploymentSecretStore) PutDeploymentSecret(ctx context.Context, name, v
 	if !validSecretName(name) {
 		return fmt.Errorf("deployment secret name %q must match [A-Za-z0-9_.-]{1,128}", name)
 	}
-	sealed, err := s.seal(name, value)
+	// ONE Load() for this call -- see SecretStore.PutSecret's doc comment
+	// for why the ciphertext and the version written beside it must come
+	// from the same snapshot.
+	ring := s.ring.Load()
+	sealed, err := s.seal(ring, name, value)
 	if err != nil {
 		return err
 	}
-	version := s.ring.current.Version
+	// ring is never nil here: seal already returned ErrNoSecretMasterKey
+	// above and this line was never reached, for exactly that case.
+	version := ring.Current().Version
 	res, err := s.db.ExecContext(ctx, putDeploymentSecretUpdateStmt(s.dialect), sealed, version, name)
 	if err != nil {
 		return err
@@ -229,7 +260,7 @@ func (s *DeploymentSecretStore) GetDeploymentSecret(ctx context.Context, name st
 	if err != nil {
 		return "", err
 	}
-	return s.open(name, sealed, keyVersion)
+	return s.open(s.ring.Load(), name, sealed, keyVersion)
 }
 
 // DeploymentSecretMeta reports whether a row exists and, if so, whether it is
@@ -376,10 +407,14 @@ func (s *DeploymentSecretStore) ResealDeploymentSecrets(ctx context.Context, dry
 	if s == nil || s.db == nil {
 		return res, ErrNoDeploymentSecretDB
 	}
-	if s.ring == nil {
+	// ONE Load() for the whole sweep -- see SecretStore.ResealSecrets' doc
+	// comment for why "cur" and the ring it came from must stay fixed
+	// together for one call.
+	ring := s.ring.Load()
+	if ring == nil {
 		return res, ErrNoSecretMasterKey
 	}
-	cur := s.ring.current.Version
+	cur := ring.Current().Version
 
 	type stored struct {
 		name       string
@@ -411,17 +446,17 @@ func (s *DeploymentSecretStore) ResealDeploymentSecrets(ctx context.Context, dry
 			res.Current++
 			continue
 		}
-		plaintext, err := s.open(r.name, r.ciphertext, r.keyVersion)
+		plaintext, err := s.open(ring, r.name, r.ciphertext, r.keyVersion)
 		if err != nil {
 			res.Unreadable = append(res.Unreadable,
 				UnreadableDeploymentSecret{Name: r.name, KeyVersion: r.keyVersion, Reason: err.Error()})
 			continue
 		}
-		next, err := s.seal(r.name, plaintext)
+		next, err := s.seal(ring, r.name, plaintext)
 		if err != nil {
 			return res, fmt.Errorf("re-seal %q: %w", r.name, err)
 		}
-		back, err := s.open(r.name, next, cur)
+		back, err := s.open(ring, r.name, next, cur)
 		if err != nil {
 			return res, fmt.Errorf("re-sealed %q does not open: %w", r.name, err)
 		}

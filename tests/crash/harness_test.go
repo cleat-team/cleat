@@ -35,6 +35,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -63,7 +64,19 @@ const (
 
 	// completeBudget is how long a single one-call workflow gets. Generous: the
 	// point of this suite is what happened, not how fast.
-	completeBudget = 90 * time.Second
+	//
+	// Several tests in this package kill a worker and wait for a SECOND worker
+	// to reclaim its run, which cannot happen faster than
+	// minimumReclaimAfter(heartbeat) (cmd/cleat-worker/setup.go) plus up to one
+	// reaper tick interval (max(heartbeat, 10s)) -- about 57s at the default 5s
+	// heartbeat since cleat#3258 ROUND 6 raised minimumReclaimAfter from ~14.5s
+	// to ~47s. 90s left only ~33s of margin over that, which measured green
+	// locally (~57s) but red in CI (two tests failing at ~97s, cleat#3258 PR
+	// #3276) -- CI's shared, loaded host runs slower than a local checkout, and
+	// 33s was not enough slack to absorb that. 240s was chosen the same way the
+	// comment above already asks for: generously, not by shaving the minimum
+	// needed to pass once.
+	completeBudget = 240 * time.Second
 )
 
 // ownerDSN is the migration/owner connection. Deliberately not defaulted to
@@ -765,15 +778,21 @@ func startWorkflow(t *testing.T, db *sql.DB, id, orderID, taskQueue string) {
 }
 
 // startWorkflowEntry queues one crashcall instance running the named entry point.
+//
+// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances/ReapStaleInstancesExcept
+// now read their candidate set from workflow_leases, not workflow_instances,
+// and ClaimWorkflows' own mirror write (claimLeaseRows) is a plain UPDATE --
+// silently a no-op against a row that was never inserted there. A workflow
+// queued only in workflow_instances claims normally (its own UPDATE matches),
+// but after a SIGKILL nothing in workflow_leases is 'running' or stale for
+// this id, so the reaper finds nothing to reclaim and the run is stranded
+// forever, not merely delayed. This is why every SIGKILL-based test in this
+// package hung at its full budget while every SIGTERM-based one (the worker
+// releases its own row on graceful shutdown, no reaper involved) passed.
 func startWorkflowEntry(t *testing.T, db *sql.DB, id, orderID, taskQueue, entry string) {
 	t.Helper()
 	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
-	if _, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES ($1, 'crashcall', 1, 'ready', $2::jsonb, $3, $4)`,
-		id, input, taskQueue, defaultTenant); err != nil {
-		t.Fatalf("queueing workflow %s: %v", id, err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "crashcall", TenantID: defaultTenant, Input: input, TaskQueue: taskQueue})
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
@@ -786,7 +805,9 @@ func awaitTerminal(t *testing.T, db *sql.DB, id string, budget time.Duration) (s
 	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		var msg sql.NullString
-		err := db.QueryRow(`SELECT status, error_msg FROM workflow_instances WHERE id = $1`, id).
+		// error_msg is a workflow_payloads column since cleat#3245 B1b.
+		err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_leases w
+			JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).
 			Scan(&status, &msg)
 		if err != nil {
 			t.Fatalf("polling %s: %v", id, err)

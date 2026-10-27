@@ -98,6 +98,43 @@ served at the root path.
 
 ---
 
+### --cors-allowed-origins
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Comma-separated list of exact origins (e.g. `https://app.example.com`) allowed to make cross-origin requests to this worker's HTTP API |
+
+**Off by default.** An empty value disables CORS entirely: no preflight
+handling, no `Access-Control-*` response headers, byte-identical behavior to
+a worker built without this flag. There is no implicit default-allow
+fallback.
+
+When set, each listed origin gets exact-match CORS support: preflight
+(`OPTIONS`) requests get the allowed methods and headers back, and ordinary
+requests get `Access-Control-Allow-Origin` set to the matched origin.
+Origins are matched by **exact string equality** — there is no wildcard
+matching, and `*` is never written to a response header, so the unsafe
+combination of a wildcard origin with a credentialed request has no code
+path that can produce it. A disallowed origin's preflight is refused (403);
+a disallowed origin's ordinary request reaches the worker normally (so a
+non-browser caller with an unrecognised `Origin` header is never
+server-side blocked) but gets no CORS headers, which is what makes the
+browser itself withhold the response from that origin's own JavaScript.
+
+**A browser holding a tenant API key is a deployment choice with real
+risk.** This worker's auth is a bearer token in the `Authorization`
+header — exactly the kind of credential a CORS allowlist exists to let a
+browser attach to a cross-origin request. If that token lives in
+JavaScript running in a browser, any script able to run on an allowed
+origin (a dependency, an XSS, a compromised build step) can read and
+exfiltrate it. **The recommended default is the same-origin proxy pattern
+(see `#2344`/the fullstack template)**, where the frontend never holds a
+cleat API key at all and the proxy injects it server-side. Reach for this
+flag only when a same-origin proxy genuinely isn't an option for your
+deployment, and treat the origins you list as holders of a real credential.
+
+---
+
 ### --health-check-interval
 
 | Type | Default | Description |
@@ -179,9 +216,11 @@ configured.
 | int | `200` | Maximum stale instances the reaper reclaims per tick (`0` = unbounded) |
 
 The reaper reclaims any instance whose heartbeat predates the **reclaim
-window** — derived from `--heartbeat` as
-`--heartbeat + 3 × the database-call deadline + the retry interval + 1s`, about
-**14.5s** at the default 5s heartbeat, or exactly `--reclaim-timeout` when that
+window** — derived from `--heartbeat` as `--heartbeat + a 30s tolerated-stall
+margin + 2 × the database-call deadline + a fixed SQL Server reconnect
+allowance + the retry interval + 1s`, about **47s** at the default 5s
+heartbeat (raised from ~14.5s, cleat#3258, to actually cover a real
+multi-second database-network stall), or exactly `--reclaim-timeout` when that
 is set. (This is *not* the membership lease, `max(2 × --heartbeat, 10s)`, which
 answers a different question and is swept separately.) **Any stall that outlasts
 that window ages every running instance past it at once**, because they all
@@ -254,7 +293,7 @@ without noticing.
 |------|---------|-------------|
 | duration | `0` | How long a run may go without a heartbeat before another worker may claim it (`0` = derive from `--heartbeat`) |
 
-`0` derives it as the window `--max-reclaim-per-tick` documents (about 14.5s at
+`0` derives it as the window `--max-reclaim-per-tick` documents (about 47s at
 the default heartbeat), which is the historical behaviour and changes nothing.
 Set it to decouple the two: the heartbeat is how often a **live** worker checks
 in, while this is how long a **dead** one's work stays stranded — and a database
@@ -500,30 +539,91 @@ for the rollout sequence a rolling rotation needs to stay safe.
 
 ---
 
+### --encryption-key-file-version
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Version number for the key in `--encryption-key-file` (default 2) |
+
+cleat#3203. Set directly, or leave unset and use
+`--encryption-key-file-version-file` instead — not both. Unset, this keeps
+the historical hardcoded default (2), so an existing deployment needs no
+change to keep its current behavior.
+
+---
+
+### --encryption-key-file-version-file
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Path to a file holding `--encryption-key-file-version`'s value |
+
+cleat#3203. Re-read fresh on every `SIGHUP`-triggered reload (see
+[`docs/how-to/rotate-payload-encryption-key.md`](../how-to/rotate-payload-encryption-key.md)'s
+SIGHUP section), the same way `--encryption-key-file` itself already is.
+Mutually exclusive with `--encryption-key-file-version`.
+
+---
+
+### --encryption-key-file-previous-version
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Version number for the key in `--encryption-key-file-previous` (default 1) |
+
+cleat#3203. Same contract as `--encryption-key-file-version` above, for the
+previous-key slot.
+
+---
+
+### --encryption-key-file-previous-version-file
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Path to a file holding `--encryption-key-file-previous-version`'s value |
+
+cleat#3203. Same contract as `--encryption-key-file-version-file` above,
+for the previous-key slot.
+
+---
+
 ### --encrypt-sensitive-payloads
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | Encrypt select `event_history` payload columns with AES-256-GCM |
+| bool | `false` | Encrypt sensitive payload and error columns with AES-256-GCM |
 
 PostgreSQL only -- refused at startup on any other `--driver`. When enabled, the
-worker encrypts these `event_history` columns before writing them: `request`,
-`response`, `error`, `signal_payload`, `child_input`, `new_input`,
-`plugin_input`, `plugin_output`, `promise_result`, `promise_error`, and
-`payload`. Encryption is per-tenant (AES-256-GCM, HKDF-derived key, tenant ID
-as AAD), using the key from `--encryption-key-file`, which must also be set.
+worker encrypts these columns before writing them:
 
-One event type is an exception: `child_workflow` events are written by a
-separate code path that does not encrypt `child_input` or `payload`, so a
-child workflow's input is plaintext in the parent's `event_history` regardless
-of this flag (cleat#2312).
+- `event_history`: `request`, `response`, `error`, `signal_payload`,
+  `child_input`, `new_input`, `plugin_input`, `plugin_output`,
+  `promise_result`, `promise_error`, and `payload` (including a
+  `child_workflow` event's `child_input`/`payload` -- a separate write path
+  that did not encrypt until cleat#2328).
+- `workflow_instances`: `input`, `result`, `error_msg`, `error_code`,
+  `error_op`, `cancellation_reason`, `query_state`.
+- `workflow_signals.payload`.
+- `workflow_promises.result`, `.error_msg`.
+- `workflow_update_requests.payload`, `.result`, `.error_msg`.
+- `workflow_schedules.input`.
+- `idempotency_keys.error_msg`.
 
-This flag does **not** cover most other places workflow data is stored --
-`workflow_instances.input`, `.result`, `.error_msg`, and `.query_state`;
-`workflow_signals.payload`; `workflow_promises.result`;
-`workflow_update_requests.payload` and `.result`; `workflow_schedules.input`;
-and `idempotency_keys.error_msg` are all plaintext whether or not this flag is
-set. See cleat#2312 for the full per-column measurement.
+Encryption is per-tenant (AES-256-GCM, HKDF-derived key, tenant ID as AAD),
+using the key from `--encryption-key-file`, which must also be set
+(cleat#2312; the owner's ruling on the issue is tracked there as "3A").
+
+`ListWorkflows`'s `InputContains` and `ErrorContains` filters are refused
+outright under this flag (`ErrSearchUnavailableUnderEncryption`), rather than
+silently running a substring search against ciphertext and reporting a false
+"no results" -- there is no supported way to search these columns while
+encryption is on.
+
+`cleatctl reseal-payloads` (key rotation) re-seals `event_history` and,
+since cleat#3241, the six tables above -- `workflow_instances`,
+`workflow_signals`, `workflow_promises`, `workflow_update_requests`,
+`workflow_schedules`, `idempotency_keys` -- reported as their own sections
+in the command's output.
 
 **A worker started without this flag refuses to start if this database has
 ever had it enabled (cleat#2324).** A sealed column carries no envelope or
@@ -1281,15 +1381,20 @@ being caution and became a surprise.
 nothing else changes. Set it to `false` to hold a worker to its own tenant.
 
 Their **schedules** are the other half, and this flag covers both. The firing
-loop reads due schedules through the same widened path, then re-scopes to the
-schedule's own tenant before starting the run and before advancing the schedule
--- so a non-default tenant's cron fires, and the run it starts is recorded under
-that tenant.
+loop reads due schedules tenant by tenant, each read under that tenant's own RLS
+context, and fires each schedule through a store scoped to the schedule's own
+tenant -- so a non-default tenant's cron fires, and the run it starts is recorded
+under that tenant.
 
-With this set, each claimed workflow still executes against a store scoped to
-its **own** tenant, so the widened view lasts exactly as long as the claim;
-everything downstream of it -- event history, state, child workflows, schedules
--- is tenant-scoped again immediately.
+With this set, nothing is ever read across tenants: the claim itself is made
+under the claimed tenant's context, and each claimed workflow executes against
+a store scoped to its **own** tenant. Event history, state, child workflows and
+schedules are tenant-scoped throughout.
+
+**Where rotation is not available**, the worker keeps claiming its own tenant
+and says so (see the warning below): on **MySQL**, whose store cannot enumerate
+tenants, and on a **sharded** worker (`--shards-file`), for the same reason. The
+flag is accepted there and does nothing.
 
 **It needs no grant for either half.** The table below is what the *retired*
 widened query required; the mechanism that replaced it requires none of it —
@@ -1301,16 +1406,18 @@ cleat_dispatcher`, the plugin sweep) still uses the same `cleat_dispatcher` role
 | dialect | what the deployment must do |
 |---------|-----------------------------|
 | PostgreSQL | **Nothing, for either half.** A fresh deployment needs neither migration: rotation reads the tenant list from `admin.tenants` (which carries no row-level security) and then does the per-tenant work under each tenant's own RLS context, granting nothing special. A deployment that already applied `023_cross_tenant_claim.sql` (creating `cleat_dispatcher`, `NOLOGIN BYPASSRLS`) keeps it, because `admin.in_flight_workflow_ids` (`migrations/postgres/001_schema.sql`'s `ALTER FUNCTION ... OWNER TO cleat_dispatcher`, the plugin sweep) still uses that role -- but the role is no longer required for the claim or the due-schedule read, and `024_cross_tenant_schedules.sql` is not required at all. |
-| SQL Server | **Two steps since cleat#1541, and the first one is new.** (1) Apply `migrations/mssql/optional/cross_tenant_claim.sql`, which is deliberately *not* in the auto-applied set. (2) Add the worker's principal to the `cleat_admin` role -- created empty by `migrations/mssql/001_schema.sql` (this file was named `012_admin_role.sql` before the SQL Server migration compaction folded it into the baseline). One grant then covers both the claim and the schedule read, because `fn_tenant_filter` is bound to every table involved. **Step 2 alone does nothing**: the shipped predicate no longer mentions `IS_ROLEMEMBER`, so a member reads `IS_ROLEMEMBER = 1` and still sees zero rows. |
-| MySQL | **Not supported on the default topology.** `MySQLStoreFactory` gives each tenant its own physical database (`cleat_<tenant_id>`), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. The worker warns once and claims its own tenant. A MySQL deployment pointed at a *single shared* database does work, since there isolation really is just a `tenant_id` predicate. |
+| SQL Server | **Nothing, for either half.** Rotation reads the tenant list from `admin.tenants` and then does the per-tenant work under each tenant's own session context, so it runs against the shipped `dbo.fn_tenant_filter`, which does not consult `cleat_admin`. Measured on SQL Server 2022 by `cmd/cleat-worker/a_rotating_claim_serves_every_tenant_test.go` (cleat#3446), connecting as `sa` (mapped to `dbo`), with the shipped predicate: every live tenant's runs were claimed once, a suspended tenant's were not, and no claim left its tenant. That the policy applies to that principal is a separate measurement, made directly by a subtest added in cleat#3452 (a tenant-B run is invisible under tenant A's session context and visible under B's); the claim results alone do not show it, because the SQL Server claim carries its own `tenant_id` predicate. That used to need `migrations/mssql/optional/cross_tenant_claim.sql` plus membership of `cleat_admin` (cleat#1541, before cleat#1926); it needs neither now, and [the optional migration](#why-sql-servers-opt-in-exists-and-what-it-still-does) is not a prerequisite. What this does not cover: a least-privilege application login's ordinary object grants (`SELECT`, DML, `EXEC`), which the test did not exercise. |
+| MySQL | **Not available: the worker claims its own tenant only.** `MySQLStore` cannot enumerate tenants (it does not implement `engine.TenantLister`), so rotation is unavailable on any MySQL worker, and the worker logs the warning below once and claims its own tenant. `MySQLStoreFactory` also gives each tenant its own physical database (`cleat_` plus the tenant id with its dashes turned into underscores), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. This row used to say that a MySQL deployment pointed at a *single shared* database works; it does not, for the first reason, whatever the topology. Pinned by `TestARotatingClaimOnMySQLFallsBackToTheWorkersOwnTenant`. |
 
-If the flag is set but the store cannot claim across tenants -- wrong dialect,
-wrong topology, or the grant was never made -- the worker logs one warning
-naming the reason and keeps claiming its own tenant. It does not stop claiming,
-and it does not fail to start: on a mixed fleet the flag says what the operator
-wants while the store says what is actually possible, and those can disagree.
+If the flag is set but the store cannot claim across tenants -- MySQL, a sharded
+worker, or no per-tenant store factory -- the worker logs one warning naming the
+reason and keeps claiming its own tenant. It does not stop claiming, and it does
+not fail to start: on a mixed fleet the flag says what the operator wants while
+the store says what is actually possible, and those can disagree.
 
-A missing grant therefore narrows a worker rather than stopping it.
+A worker that cannot rotate is therefore narrowed rather than stopped. No grant
+is involved on PostgreSQL or SQL Server, so a missing grant is no longer a
+reason for it.
 
 ### How cross-tenant work is served
 
@@ -1322,7 +1429,9 @@ tenant.
 
 **The dispatch claim** polls tenants in turn, each getting a bounded share of
 the batch, running the **same** single-statement `FOR UPDATE SKIP LOCKED` claim
-the single-tenant path runs, with a tenant predicate added.
+the single-tenant path runs, under that tenant's own context. Isolation is the
+row-level-security policy on PostgreSQL, and an explicit `tenant_id` predicate
+in the statement on SQL Server (which the policy backs up).
 
 **The due-schedule read covers every tenant on every tick**, and that difference
 is deliberate. Work that waits a tick is work that waits a tick; a cron schedule
@@ -1353,8 +1462,12 @@ the rest are reached on later ticks.
 > **Retired: `--claim-strategy`.** It selected between this and
 > `admin.claim_workflows`, the older single widened query behind a `BYPASSRLS`
 > role. That existed to keep the old mechanism reachable while this one proved
-> itself. The flag is gone, and so is the path it selected; the SQL functions
-> remain in the schema for now and nothing calls them.
+> itself. The flag is gone, and so is the path it selected. `admin.claim_workflows`
+> itself was dropped from the PostgreSQL schema (cleat#3444); `admin.get_due_schedules`
+> is still defined and nothing calls it. Re-derive:
+> `git grep -c 'admin\.claim_workflows' -- migrations/postgres/001_schema.sql` prints
+> nothing, and `git grep -n 'admin\.get_due_schedules' -- '*.go' ':!*_test.go'` finds
+> only comments.
 
 ### --claim-tenants-per-tick
 
@@ -1374,10 +1487,19 @@ The default sits above the batch sizes a dispatch tick usually asks for, so in
 the common case the limit fills before the ceiling is reached and the ceiling
 costs nothing. `0` uses the default.
 
-### Why SQL Server's opt-in exists, and what it costs to turn on
+### Why SQL Server's opt-in exists, and what it still does
 
-The `cleat_admin` bypass is a disjunction inside the row-level-security
-predicate:
+**The worker does not need this.** Rotation (above) runs against the shipped
+predicate, so applying `migrations/mssql/optional/cross_tenant_claim.sql` is not
+a step of enabling `--claim-across-tenants`. What it still does is make a member
+of `cleat_admin` exempt from the tenant filter, for an operator connection that
+should read across tenants -- `cleatctl`'s RLS check reports such a login as
+`exempt` once the optional migration has been applied, and as subject to the
+policy, with a note that membership grants nothing, before. It records which
+predicate is installed in `admin.rls_predicate_form` (`plain` or `admin`); that
+marker is read by `cleatctl`, not by the worker.
+
+The bypass is a disjunction inside the row-level-security predicate:
 
 ```sql
 WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)
@@ -1405,8 +1527,14 @@ claim scoped to one tenant.) Applying the opt-in accepts the scan cost on
 every tenant-scoped table, which is why it is a deliberate act rather than the
 default.
 
-To reverse it, re-apply `075_the_admin_bypass_is_opt_in.sql`. It is idempotent
-and restores both the plain predicate and the marker the worker reads.
+**Reversing it:** the file this section used to name for that,
+`075_the_admin_bypass_is_opt_in.sql`, no longer exists -- `migrations/mssql/`
+holds only `001`-`003` since the SQL Server migration compaction -- and the
+optional file's own header still cites it. No tested reversal script ships
+today, and the file's own text is wrong about it (cleat#3453). Do not improvise one against a production
+database: the policies carry BLOCK predicates as well as the filter one, and
+recreating the function without them silently drops cross-tenant write
+protection.
 
 **The worker says which mode it is in at startup**, before either loop ticks, so
 you do not have to infer it from silence:

@@ -279,7 +279,7 @@ func TestAdminOperationsRefuseAnUnreadableHistoryBeforeWriting(t *testing.T) {
 		return
 	}
 	status := func(s string) {
-		if _, err := db.Exec(`UPDATE workflow_instances SET status = $2 WHERE id = $1`, runID, s); err != nil {
+		if _, err := db.Exec(`UPDATE workflow_leases SET status = $2 WHERE id = $1`, runID, s); err != nil {
 			t.Fatalf("set status %s: %v", s, err)
 		}
 	}
@@ -307,7 +307,7 @@ func TestAdminOperationsRefuseAnUnreadableHistoryBeforeWriting(t *testing.T) {
 	status("failed")
 	check("re-replay", ReReplay(ctx, storeB, runID, 0, "op"))
 	var st string
-	_ = db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, runID).Scan(&st)
+	_ = db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, runID).Scan(&st)
 	if st != "failed" {
 		t.Errorf("re-replay changed the status to %q", st)
 	}
@@ -323,12 +323,12 @@ func TestAdminOperationsRefuseAnUnreadableHistoryBeforeWriting(t *testing.T) {
 	// rolled back with it. Both answered 200 in the first version of this fix.
 	status("ready")
 	var gen int64
-	if err := db.QueryRow(`SELECT generation FROM workflow_instances WHERE id = $1`, runID).Scan(&gen); err != nil {
+	if err := db.QueryRow(`SELECT generation FROM workflow_leases WHERE id = $1`, runID).Scan(&gen); err != nil {
 		t.Fatal(err)
 	}
 	check("force-complete", ForceComplete(ctx, storeB, runID, gen, "op", `{"done":true}`))
 	check("force-fail", ForceFail(ctx, storeB, runID, gen, "op", "boom", ErrUnknown.String()))
-	_ = db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, runID).Scan(&st)
+	_ = db.QueryRow(`SELECT status FROM workflow_leases WHERE id = $1`, runID).Scan(&st)
 	if st != "ready" {
 		t.Errorf("a refused force-resolve left the run %q; its status change must roll back with the audit event", st)
 	}

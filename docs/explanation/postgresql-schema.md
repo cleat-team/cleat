@@ -127,63 +127,33 @@ that prose yet — not that the column does not exist.
 
 ### workflow_instances
 
-Tracks individual workflow execution state. Serves as both state store and
-work queue.
+The identity row of a workflow run. It holds the columns that belong to the run
+itself, and almost nothing else: the state a run moves through lives on two
+tables that share its `id`.
+
+| Table | Holds |
+|-------|-------|
+| `workflow_instances` | `id`, `tenant_id`, `parent_close_policy`, `event_count`, `history_swept_at` |
+| `workflow_leases` | who holds the run and when it wakes: `status`, `assigned_to`, `generation`, `heartbeat_at`, `next_wake_at`, `task_queue`, `priority`, the claim counters, the run limits, `parent_workflow_id`, `continued_from` |
+| `workflow_payloads` | what the run read and wrote: `input`, `result`, `query_state`, `compaction_state`, the error columns, `trace_id`, `def_name`, `def_version`, `completed_at` |
+
+Every foreign key to a run points at `workflow_instances(id)`, so a run's two
+other rows go with it by `ON DELETE CASCADE`. The definition a run executes is
+recorded on `workflow_payloads`, and the foreign key to `workflow_defs` is there
+too, so a definition cannot be deleted while a run still uses it.
+
+This is the shape a fresh 0.5.0 database is built with. A database from 0.4.0 has
+the older, wide table and is refused rather than converted; see
+`docs/operations/upgrading.md`.
 
 ```sql
 CREATE TABLE workflow_instances (
     id TEXT NOT NULL,
-    def_name TEXT NOT NULL,
-    def_version INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ready',
-    input JSONB NOT NULL DEFAULT '{}',
-    assigned_to TEXT,
-    heartbeat_at TIMESTAMPTZ,
-    next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at TIMESTAMPTZ,
-    cancellation_requested BOOLEAN NOT NULL DEFAULT false,
-    cancellation_reason TEXT,
-    result JSONB,
-    error_msg TEXT,
-    error_code TEXT,
-    error_op TEXT,
-    parent_workflow_id TEXT,
     parent_close_policy TEXT DEFAULT 'ABANDON',
-    query_state JSONB DEFAULT '{}',
-    trace_id TEXT,
-    sticky_worker_id TEXT,
     tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-    task_queue TEXT NOT NULL DEFAULT 'default',
-    compaction_state JSONB,
-    compacted_at TIMESTAMPTZ,
-    compaction_step INTEGER,
-    plugin_vers JSONB NOT NULL DEFAULT '{}',
     event_count BIGINT NOT NULL DEFAULT 0,
-    allowed_signals JSONB,
-    priority INTEGER NOT NULL DEFAULT 0,
-    generation BIGINT NOT NULL DEFAULT 0,
-    pending_terminal_status TEXT,
-    defer_phase_deadline TIMESTAMPTZ,
-    continued_from TEXT,
-    signal_seq BIGINT NOT NULL DEFAULT 0,
-    signal_seq_at_claim BIGINT NOT NULL DEFAULT 0,
-    signal_consumed_seq BIGINT NOT NULL DEFAULT 0,
-    signal_consumed_at_claim BIGINT NOT NULL DEFAULT 0,
-    promise_seq BIGINT NOT NULL DEFAULT 0,
-    promise_seq_at_claim BIGINT NOT NULL DEFAULT 0,
-    reclaim_count BIGINT NOT NULL DEFAULT 0,
-    started_at TIMESTAMPTZ,
-    concurrency_key TEXT,
-    concurrency_key_hash BYTEA,
-    run_wasm_instance_timeout_ms BIGINT,
-    run_wasm_wall_clock_ceiling_ms BIGINT,
-    run_host_retry_budget_ms BIGINT,
-    run_max_workflow_duration_ms BIGINT,
-    completed_by TEXT,
     history_swept_at TIMESTAMPTZ,
-    PRIMARY KEY (id),
-    FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)
+    PRIMARY KEY (id)
 );
 ```
 
@@ -205,8 +175,6 @@ that prose yet — not that the column does not exist.
 | `next_wake_at` | TIMESTAMPTZ | When to retry (sleep/suspend/resume deadline) |
 | `result` | JSONB | Workflow result (if completed) |
 | `error_msg` | TEXT | Error message (if failed) |
-| `cancellation_requested` | BOOLEAN | Whether cancellation has been requested |
-| `cancellation_reason` | TEXT | Reason for cancellation |
 | `parent_workflow_id` | TEXT | Parent workflow for child workflows |
 | `query_state` | JSONB | Queryable workflow state |
 | `tenant_id` | UUID | The owning tenant. **This is how tenancy is stored** — there is no `namespace` column and never has been; the doc claimed one until cleat#1093. Row-level security policies key off this, and it is part of the foreign key into `workflow_defs`. |
@@ -226,10 +194,21 @@ that prose yet — not that the column does not exist.
   040: the claim now also picks up workflows running their defer phase
   (`docs/reference/workflow-lifecycle.md`), and a partial index is only usable
   when the query's predicate implies its filter.
-- `idx_instances_heartbeat` on `(assigned_to, heartbeat_at)` WHERE
-  `status = 'running'` -- enables monitoring and stale-assignment detection.
-- `idx_instances_stale` on `(status, heartbeat_at)` WHERE `status = 'running'` --
-  used by the reaper to reclaim instances with stale heartbeats.
+- `idx_instances_heartbeat` on `(assigned_to)` WHERE `status = 'running'` --
+  serves `HeartbeatBatchFenced`'s per-worker lookup. Carried `heartbeat_at`
+  too until migration 015 (folded into migrations/postgres/001_schema.sql by
+  #3358); that column was never read by any query this
+  index serves, and dropping it is one half of what makes a heartbeat
+  UPDATE eligible to be HOT (see `idx_instances_stale` below, and
+  cleat#3245/#3272/#3274 -- dropping only this one does nothing by itself).
+- `idx_instances_stale` on `(status)` WHERE `status = 'running'` -- the
+  reaper's `WHERE status='running' AND heartbeat_at < ...` predicate is a
+  heap scan plus an in-memory sort as of migration 015, not an index range
+  scan: `heartbeat_at` was deliberately dropped from this index too, as the
+  other half of the same HOT-eligibility fix, trading a bounded,
+  periodic reaper-sweep cost (tens of milliseconds, scales with the
+  concurrently-running population, measured on cleat#3272) for every
+  heartbeat avoiding two B-tree updates and a full-tuple WAL record.
 - `idx_instances_sticky` on `(sticky_worker_id)` WHERE `sticky_worker_id IS NOT
   NULL` -- sticky worker fast path.
 
@@ -579,11 +558,11 @@ rows of one workflow may share.
 
 | Index | Table | Purpose | Uniqueness |
 |-------|-------|---------|------------|
-| `idx_instances_claimable` | `workflow_instances` | Worker poll loop: find runnable instances (`ready` and `terminating`) | Non-unique, partial |
-| `idx_instances_heartbeat` | `workflow_instances` | Heartbeat monitoring | Non-unique, partial |
-| `idx_instances_stale` | `workflow_instances` | Reaper: stale heartbeat detection | Non-unique, partial |
-| `idx_instances_sticky` | `workflow_instances` | Sticky worker fast path | Non-unique, partial |
-| `idx_instances_concurrency_key` | `workflow_instances` | Claim path: skip a run whose concurrency key is held | Non-unique |
+| `idx_leases_claimable` | `workflow_leases` | Worker poll loop: find runnable instances (`ready` and `terminating`) | Non-unique, partial |
+| `idx_leases_heartbeat` | `workflow_leases` | Heartbeat monitoring | Non-unique, partial |
+| `idx_leases_stale` | `workflow_leases` | Reaper: stale heartbeat detection | Non-unique, partial |
+| `idx_leases_sticky` | `workflow_leases` | Sticky worker fast path | Non-unique, partial |
+| `idx_leases_concurrency_key` | `workflow_leases` | Claim path: skip a run whose concurrency key is held | Non-unique, partial |
 | `idx_defs_active` | `workflow_defs` | Latest-version lookup | Non-unique |
 | `idx_promises_status` | `workflow_promises` | Promise resolution lookup | Non-unique |
 | `idx_concurrency_keys_workflow` | `concurrency_keys` | Key-to-workflow lookup | Non-unique |

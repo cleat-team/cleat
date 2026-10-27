@@ -183,7 +183,7 @@ func (p *Plugin) sweepExpiredOAuthKeys(ctx context.Context) {
 func (p *Plugin) sweepExpiredSessions(ctx context.Context) {
 	n, err := p.db.Exec(
 		plugin.AcrossAllTenants(ctx, "oauth sweep: abandoned logins have no single tenant to scope by"),
-		plugin.Rebind(sweepExpiredSessionsQuery.For(p.dialect), p.dialect))
+		sweepExpiredSessionsQuery.For(p.dialect))
 	if err != nil {
 		p.logger.Error("oauth-provider: sweep expired sessions", "error", err)
 		return

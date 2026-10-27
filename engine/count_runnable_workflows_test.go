@@ -162,9 +162,21 @@ func TestCountRunnableWorkflowsIsBlindToOtherTaskQueues(t *testing.T) {
 				defer conn.Close()
 				exec = conn
 			}
-			res, err := exec.ExecContext(ctx, `UPDATE workflow_instances
+			// cleat#3245 Phase 3 step 3 piece B: CountRunnableWorkflows reads
+			// task_queue from workflow_leases on PostgreSQL, not
+			// workflow_instances, so that is the table the move has to land
+			// on there or the row still reads as being on this worker's
+			// queue and the count does not drop. MySQL and SQL Server keep
+			// the one wide table.
+			moveStmt := `UPDATE workflow_instances
 				SET task_queue = 'some-other-queue'
-				WHERE status IN ('ready','terminating')`)
+				WHERE status IN ('ready','terminating')`
+			if backend.name == "postgres" {
+				moveStmt = `UPDATE workflow_leases
+					SET task_queue = 'some-other-queue'
+					WHERE status IN ('ready','terminating')`
+			}
+			res, err := exec.ExecContext(ctx, moveStmt)
 			if err != nil {
 				t.Fatalf("moving rows to another queue: %v", err)
 			}

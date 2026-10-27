@@ -83,7 +83,7 @@ func (p *Plugin) cleanup(ctx context.Context) int64 {
 		return 0
 	}
 
-	result, err := p.db.Exec(ctx, plugin.Rebind(deleteEventsOlderThan.For(p.dialect), p.dialect),
+	result, err := p.db.Exec(ctx, deleteEventsOlderThan.For(p.dialect),
 		retentionDays,
 	)
 	if err != nil {

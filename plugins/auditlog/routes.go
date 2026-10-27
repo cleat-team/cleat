@@ -95,7 +95,7 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	query += plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("audit-log: query events", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to query audit events")

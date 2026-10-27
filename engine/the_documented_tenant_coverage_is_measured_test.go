@@ -210,3 +210,150 @@ func TestTheDocumentedTenantCoverageIsMeasured(t *testing.T) {
 			"migrations now contain %d. The backstop is no longer read-side only.", msBlocks)
 	}
 }
+
+// tenantCoverageRatioRe extracts PostgreSQL's "N of M" tenant-bearing-table
+// ratio from a sentence, anchored on the PHRASE rather than any one file's
+// wording of it -- cleat#3285. The tree asserts this fact in at least three
+// different phrasings ("forces RLS on N of M tenant-bearing tables",
+// "forces it on N of M tenant-bearing tables", "'s N of M is deliberate"),
+// and until this test only one of them -- the table cell
+// TestTheDocumentedTenantCoverageIsMeasured already checks -- was ever
+// verified. Bounded to [^.]{0,80} -- one sentence, not the whole document --
+// so an unrelated number elsewhere near the word "PostgreSQL" is never
+// mistaken for this claim.
+var tenantCoverageRatioRe = regexp.MustCompile(`(?i)PostgreSQL\b[^.]{0,80}?(\d+)\s+of\s+(\d+)`)
+
+// mssqlFilterCountRe extracts SQL Server's filter-predicate COUNT from a
+// sentence, the same way and for the same reason as tenantCoverageRatioRe --
+// cleat#3285. "binds read-only FILTER predicates to N" and "filters N" are
+// the two phrasings in the tree today; a third phrasing needs a third
+// alternative here, which is the cost phrase-anchoring accepts in exchange
+// for never needing a fourth watched FILE the next time someone writes a
+// fourth document.
+var mssqlFilterCountRe = regexp.MustCompile(`(?i)SQL Server\b[^.]{0,80}?(?:filters?|FILTER predicates\s+to)\s+(\d+)\b`)
+
+// stripBlockquotes blanks every line beginning with '>' (after leading
+// whitespace), preserving line count and byte layout otherwise -- cleat#3285.
+// multi-tenancy.md's own "Corrected 2026-09-17" blockquote is a dated
+// HISTORICAL record of what was once true (PostgreSQL forced RLS on 16
+// tables when that correction was written) and must not be read as a live
+// claim: rewriting it to the current number would misdate a past correction
+// rather than fix a stale one. A doc-wide scan for this phrase has to carry
+// this exemption, or it "fixes" a sentence that is already correct for what
+// it is dated to say.
+func stripBlockquotes(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), ">") {
+			lines[i] = ""
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// TestTheTenantCoverageRatioIsConsistentEverywhereItIsCited guards cleat#3285:
+// TestTheDocumentedTenantCoverageIsMeasured above checks exactly one file's
+// table cells. The same PostgreSQL "N of M" ratio and SQL Server filter
+// count are separately asserted in prose in SECURITY.md,
+// docs/contributor/plugins/plugin-contract.md, and multi-tenancy.md's OWN
+// prose (distinct from its table, which the test above already checks) --
+// and nothing checked any of the three until this test. Migration 016
+// (cleat#3245 Phase 3 step 1) moved PostgreSQL's ratio and only the table
+// was updated automatically; the other three were fixed by hand in #3280
+// because a human happened to grep for the old numbers while reviewing it,
+// which is the exact failure mode this test exists to remove.
+//
+// What this does NOT check: the "M" denominator (total tenant-bearing
+// tables) has no independent live derivation anywhere in this repo today --
+// only the "N" (RLS/filter COVERAGE) side does. This test compares each
+// citation's N against the same live-derived pgTables/msTables counts
+// TestTheDocumentedTenantCoverageIsMeasured computes, and leaves M as a
+// value trusted from multi-tenancy.md's own (already-checked) table cell,
+// not as a third independently-derived fact. Verifying M too would need its
+// own definition of "tenant-bearing" read out of the migrations and is a
+// separate, larger piece of work than this issue asked for.
+func TestTheTenantCoverageRatioIsConsistentEverywhereItIsCited(t *testing.T) {
+	root := repoRootForDoc(t)
+
+	// Live-derived truth, computed the same way and for the same reason as
+	// TestTheDocumentedTenantCoverageIsMeasured above -- re-derived here
+	// rather than shared via a package-level variable, so this test still
+	// fails on its own if that one is ever deleted or renamed.
+	pgTables := map[string]bool{}
+	for _, m := range pgRLSRe.FindAllStringSubmatch(readDialect(t, root, "postgres"), -1) {
+		pgTables[strings.ToLower(m[2])] = true
+	}
+	unfolded := make([]string, 0, len(pgTables))
+	for name := range pgTables {
+		if parent := partitionChildRe.ReplaceAllString(name, "$1"); parent != name && pgTables[parent] {
+			unfolded = append(unfolded, name)
+		}
+	}
+	for _, name := range unfolded {
+		delete(pgTables, name)
+	}
+	msSrc := readDialect(t, root, "mssql")
+	msTables := map[string]bool{}
+	for _, m := range msFilterRe.FindAllStringSubmatch(msSrc, -1) {
+		msTables[strings.ToLower(m[1])] = true
+	}
+	if len(pgTables) == 0 || len(msTables) == 0 {
+		t.Fatalf("UNMEASURED: the scanners found postgres=%d mssql=%d covered tables. "+
+			"Both are known non-zero, so this is a failure of the check.",
+			len(pgTables), len(msTables))
+	}
+
+	type citationDoc struct {
+		path            string
+		stripBlockquote bool
+	}
+	docs := []citationDoc{
+		{filepath.Join(root, "SECURITY.md"), false},
+		{filepath.Join(root, "docs", "contributor", "plugins", "plugin-contract.md"), false},
+		{filepath.Join(root, "docs", "reference", "multi-tenancy.md"), true},
+	}
+
+	totalPG, totalMS := 0, 0
+	for _, d := range docs {
+		raw, err := os.ReadFile(d.path)
+		if err != nil {
+			t.Fatalf("UNMEASURED: reading %s: %v", d.path, err)
+		}
+		text := string(raw)
+		if d.stripBlockquote {
+			text = stripBlockquotes(text)
+		}
+
+		for _, m := range tenantCoverageRatioRe.FindAllStringSubmatch(text, -1) {
+			n, _ := strconv.Atoi(m[1])
+			totalPG++
+			if n != len(pgTables) {
+				t.Errorf("%s cites PostgreSQL covering %d tables; the migrations enable RLS "+
+					"on %d. Update the citation.", d.path, n, len(pgTables))
+			}
+		}
+		for _, m := range mssqlFilterCountRe.FindAllStringSubmatch(text, -1) {
+			n, _ := strconv.Atoi(m[1])
+			totalMS++
+			if n != len(msTables) {
+				t.Errorf("%s cites SQL Server filtering %d tables; the migrations bind filter "+
+					"predicates to %d. Update the citation.", d.path, n, len(msTables))
+			}
+		}
+	}
+
+	// A scan that silently stops matching finds zero citations -- which
+	// reads exactly like "nothing to check" and exactly like success. All
+	// three documents are known, as of this test's own writing, to carry at
+	// least one of each citation (that is the whole premise of cleat#3285),
+	// so finding none is this test's own failure, not a clean tree.
+	if totalPG == 0 {
+		t.Fatalf("UNMEASURED: found zero PostgreSQL \"N of M\" citations across %d documents. "+
+			"cleat#3285 was filed because these exist; a scan that cannot find any of them "+
+			"has stopped matching, not run out of things to find.", len(docs))
+	}
+	if totalMS == 0 {
+		t.Fatalf("UNMEASURED: found zero SQL Server filter-count citations across %d documents.",
+			len(docs))
+	}
+}

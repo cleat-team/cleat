@@ -1,5 +1,11 @@
 name: Plugin Harness Tests
 
+# cleat#3073: surfaces the triggering activity type in the run's display
+# title, so a PR body edit's run set is distinguishable from the one it
+# shares a SHA with. Full rationale in ci.yml, next to the same expression.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
 # CGO on, everywhere in this file. It was "0" in all four jobs, which does not
 # skip a check -- NewWasmtimeBackend is behind //go:build cgo, so disabling CGO
 # removed the primary backend. The same defect 2.70 fixed in multi-db-ci.yml, in
@@ -318,8 +324,20 @@ jobs:
           # "a widened pattern that fixes one name can leave the next one out",
           # and -list is what shows it; -run answers only by implication and is
           # silent when the answer is "less than you think".
+          # TestGoAwaitCallsUnwind (cleat#3385) is its own term: it is not
+          # TestHostCalls* and not *TableCovers*, so none of the terms above
+          # select it. It reads the compiled Go guest's own recover() after each
+          # child await, which the TestHostCallsGo rows cannot do -- they assert
+          # "suspended", and the engine reports that whether the guest unwound or
+          # trapped. Confirm with
+          #   go test -list 'TestGoAwaitCallsUnwind' ./...    -> 1
+          #   (the CI test-selection guard names it if this term goes missing)
+          # TestASAwaitCallsHonour and TestJavaAwaitCallsHonour (cleat#3430) are the
+          # same check for AssemblyScript and Java, where the wrapper has to act on
+          # the sentinel rather than panic; neither is TestHostCalls* either.
+          #   go test -list 'TestASAwaitCallsHonour|TestJavaAwaitCallsHonour' ./...    -> 2
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestASBindingContract' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestASBindingContract|TestGoAwaitCallsUnwind|TestASAwaitCallsHonour|TestJavaAwaitCallsHonour' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
@@ -368,7 +386,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat
@@ -381,7 +399,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mysql:
-        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
@@ -496,7 +514,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_USER: cleat
           POSTGRES_PASSWORD: cleat

@@ -1908,9 +1908,10 @@ func TestAwaitPromiseReplayDivergence(t *testing.T) {
 		t.Error("expected isReplay to remain true (exitReplay not called on mismatch)")
 	}
 	// Fresh path suspends because the promise is pending.
-	expected := packAwaitPromiseResult(0, true, 0)
+	expected := callSuspendSentinel
 	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+		t.Errorf("expected the stop sentinel %#x (suspend), got %#x -- a suspend must not "+
+			"return a word the guest reads as a timeout (cleat#3383)", expected, result)
 	}
 	if s.suspendErr == nil {
 		t.Fatal("expected suspendErr non-nil")
@@ -1936,9 +1937,10 @@ func TestAwaitPromiseReplayPastEnd(t *testing.T) {
 		t.Error("expected replay to have ended")
 	}
 	// Fresh path suspends because the promise is pending.
-	expected := packAwaitPromiseResult(0, true, 0)
+	expected := callSuspendSentinel
 	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+		t.Errorf("expected the stop sentinel %#x (suspend), got %#x -- a suspend must not "+
+			"return a word the guest reads as a timeout (cleat#3383)", expected, result)
 	}
 }
 
@@ -2000,9 +2002,10 @@ func TestAwaitPromiseFreshPending(t *testing.T) {
 	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
 
 	// Pending -> suspends.
-	expected := packAwaitPromiseResult(0, true, 0)
+	expected := callSuspendSentinel
 	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+		t.Errorf("expected the stop sentinel %#x (suspend), got %#x -- a suspend must not "+
+			"return a word the guest reads as a timeout (cleat#3383)", expected, result)
 	}
 	if s.suspendErr == nil {
 		t.Fatal("expected suspendErr non-nil")
@@ -2029,9 +2032,10 @@ func TestAwaitPromiseFreshStoreError(t *testing.T) {
 	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
 
 	// Store error -> treated as pending, suspends.
-	expected := packAwaitPromiseResult(0, true, 0)
+	expected := callSuspendSentinel
 	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+		t.Errorf("expected the stop sentinel %#x (suspend), got %#x -- a suspend must not "+
+			"return a word the guest reads as a timeout (cleat#3383)", expected, result)
 	}
 	if s.suspendErr == nil {
 		t.Fatal("expected suspendErr non-nil")

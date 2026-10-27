@@ -14,7 +14,9 @@ version and nothing else states it:
      because the job name renders it and the job names are required status checks
      (.github/required-checks.txt). It must not be read by a setup-go step, which rule 2 already enforces.
   4. Every `FROM golang:` in a Dockerfile is `golang:<toolchain>-...`, the exact toolchain, not a floating
-     minor (`golang:1.26-bookworm` moved under the image whenever a patch shipped).
+     minor (`golang:1.26-bookworm` moved under the image whenever a patch shipped). A registry/path prefix
+     before `golang:` (e.g. `mirror.gcr.io/library/golang:...`, cleat#3290) is stripped before the tag is
+     read, so the check still sees through a mirror substitution.
 
 Exit status, and why there are three:
 
@@ -43,7 +45,7 @@ TOOLCHAIN = re.compile(r"^toolchain[ \t]+go(\d+\.\d+\.\d+)[ \t]*$", re.M)
 SETUP_GO = re.compile(r"^(\s*)-?\s*uses:\s*actions/setup-go@")
 VERSION_FILE = re.compile(r"^\s*go-version-file:\s*['\"]?(go\.mod|go\.work)['\"]?\s*$")
 VERSION_INPUT = re.compile(r"^\s*go-version:\s*(.*?)\s*$")
-FROM_GO = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?golang:(\S+)", re.I)
+FROM_GO = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?(?:\S+/)?golang:(\S+)", re.I)
 
 
 class Unmeasured(Exception):
@@ -267,6 +269,15 @@ def self_test():
     expect("a Dockerfile one patch behind",
            fixture(**{"Dockerfile": "FROM golang:1.27.0-bookworm\n"}),
            1, "golang:1.27.0-bookworm")
+    # cleat#3290: a registry-mirror prefix must not blind this check to a real
+    # version mismatch -- the known-positive the loosened regex has to still
+    # catch, not just a case where loosening it changes nothing observable.
+    expect("a mirrored Dockerfile FROM line one patch behind is still caught",
+           fixture(**{"Dockerfile": "FROM mirror.gcr.io/library/golang:1.27.0-bookworm AS builder\n"}),
+           1, "golang:1.27.0-bookworm")
+    expect("a mirrored Dockerfile FROM line at the right toolchain passes",
+           fixture(**{"Dockerfile": "FROM mirror.gcr.io/library/golang:1.27.1-bookworm@sha256:deadbeef AS builder\nFROM mirror.gcr.io/library/debian:bookworm-slim\n"}),
+           0, "OK, go1.27.1")
     # UNMEASURED: nothing to compare, nothing scanned.
     expect("no setup-go step at all is UNMEASURED, not a pass",
            fixture(**{".github/workflows/ci.yml": "name: ci\n", ".github/workflows/other.yml": "name: x\n"}),

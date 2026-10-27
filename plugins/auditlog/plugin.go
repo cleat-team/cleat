@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
@@ -52,7 +51,7 @@ type queuedAuditEvent struct {
 // Plugin implements audit trail recording and querying.
 type Plugin struct {
 	db      plugin.PluginDB
-	mux     *http.ServeMux
+	mux     plugin.Dispatcher
 	logger  *slog.Logger
 	config  Config
 	dialect plugin.Dialect

@@ -59,6 +59,11 @@ package engine
 //     return 0;
 // }
 //
+// static bool component_val_get_bool(const wasmtime_component_val_t *v) {
+//     if (v->kind == WASMTIME_COMPONENT_BOOL) { return v->of.boolean; }
+//     return false;
+// }
+//
 // static uint32_t component_val_get_u32(const wasmtime_component_val_t *v) {
 //     if (v->kind == WASMTIME_COMPONENT_U32) { return v->of.u32; }
 //     if (v->kind == WASMTIME_COMPONENT_S32) { return (uint32_t)v->of.s32; }
@@ -225,6 +230,55 @@ package engine
 //     v->of.result.val = wasmtime_component_val_new(&inner);
 // }
 //
+// // 1 if the function's declared result is a WIT `result<...>`, 0 if it is
+// // anything else, -1 if it has no result at all. The type is the GUEST'S: a
+// // dynamically-typed host function is checked against the component that
+// // imports it only when it returns, so this is the one place a host can see
+// // which signature the component was built against (cleat#3425).
+// static int component_func_result_is_result(const wasmtime_component_func_type_t *ty) {
+//     wasmtime_component_valtype_t r;
+//     if (!wasmtime_component_func_type_result(ty, &r)) { return -1; }
+//     int is_result = (r.kind == WASMTIME_COMPONENT_VALTYPE_RESULT);
+//     wasmtime_component_valtype_delete(&r);
+//     return is_result;
+// }
+//
+// // ok(await-outcome): the three ways a wait on a promise ends (cleat#3425).
+// // `kind` 0 = resolved(s), 1 = rejected(s), 2 = timed-out (no payload).
+// //
+// // PRECONDITION on `s`: as component_val_set_call_ok's -- C-allocator storage,
+// // ownership passes to `v`, not copied here. Ignored for kind 2.
+// static void component_val_set_await_outcome(wasmtime_component_val_t *v,
+//                                             int kind,
+//                                             const char *s, size_t len) {
+//     static const char resolved_name[] = "resolved";
+//     static const char rejected_name[] = "rejected";
+//     static const char timed_out_name[] = "timed-out";
+//
+//     wasmtime_component_val_t variant;
+//     variant.kind = WASMTIME_COMPONENT_VARIANT;
+//     if (kind == 2) {
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(timed_out_name, sizeof(timed_out_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(timed_out_name) - 1;
+//         variant.of.variant.val = NULL;
+//     } else {
+//         const char *name = (kind == 1) ? rejected_name : resolved_name;
+//         size_t name_len = (kind == 1) ? sizeof(rejected_name) - 1
+//                                       : sizeof(resolved_name) - 1;
+//         wasmtime_component_val_t payload;
+//         payload.kind = WASMTIME_COMPONENT_STRING;
+//         payload.of.string.data = (char *)s;
+//         payload.of.string.size = len;
+//         variant.of.variant.discriminant.data = cleat_dup(name, name_len);
+//         variant.of.variant.discriminant.size = name_len;
+//         variant.of.variant.val = wasmtime_component_val_new(&payload);
+//     }
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = true;
+//     v->of.result.val = wasmtime_component_val_new(&variant);
+// }
+//
 // // err(call-failure.suspended) -- the defer-segment stop. No payload: there
 // // is nothing to say beyond "do not do this, unwind".
 // static void component_val_set_call_suspended(wasmtime_component_val_t *v) {
@@ -280,8 +334,8 @@ package engine
 // }
 //
 // // Read a `run-outcome` the guest returned from its `run` export.
-// // Returns 0 completed / 1 suspended / -1 for anything else, and sets *out to
-// // the payload when the case carries one.
+// // Returns 0 completed / 1 suspended / 2 failed / -1 for anything else, and
+// // sets *out to the payload when the case carries one.
 // static int component_val_get_run_outcome(const wasmtime_component_val_t *v,
 //                                          const char **out, size_t *outlen) {
 //     *out = NULL;
@@ -296,6 +350,7 @@ package engine
 //     }
 //     if (dlen == 9 && memcmp(d, "completed", 9) == 0) { return 0; }
 //     if (dlen == 9 && memcmp(d, "suspended", 9) == 0) { return 1; }
+//     if (dlen == 6 && memcmp(d, "failed", 6) == 0) { return 2; }
 //     return -1;
 // }
 //
@@ -332,6 +387,7 @@ package engine
 import "C"
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"unsafe"
@@ -459,6 +515,10 @@ const (
 	runOutcomeCompleted runOutcomeKind = iota
 	runOutcomeSuspended
 	runOutcomeUnrecognised
+	// runOutcomeFailed is the guest's workflow body having raised (cleat#3433).
+	// Appended after runOutcomeUnrecognised rather than before it so no existing
+	// value moves.
+	runOutcomeFailed
 )
 
 // componentCallRun calls the world's `run` export and decodes its `run-outcome`.
@@ -513,6 +573,11 @@ func componentCallRun(
 		return runOutcomeCompleted, C.GoStringN(payload, C.int(payloadLen)), nil
 	case 1:
 		return runOutcomeSuspended, "", nil
+	case 2:
+		if payload == nil {
+			return runOutcomeFailed, "", nil
+		}
+		return runOutcomeFailed, C.GoStringN(payload, C.int(payloadLen)), nil
 	}
 	return runOutcomeUnrecognised, "", fmt.Errorf(
 		"the guest's run export returned a value that is not a run-outcome variant")
@@ -582,6 +647,7 @@ const (
 	cbTypeDurableDefer     // (string) -> string
 	cbTypeContinueAsNew    // (string) -> u64
 	cbTypePollCancellation // () -> string
+	cbTypeDeferPhase       // (bool) -> ()
 
 	// durable-signals interface
 	cbTypeAwaitSignals // (string,u64,u32,u32,u32,u32) -> u64
@@ -597,11 +663,13 @@ const (
 	cbTypeChildWorkflow            // (string,string) -> string
 	cbTypeAwaitChild               // (string) -> string
 	cbTypeAwaitAllChildren         // (string) -> string
+	cbTypePollChild                // (string) -> string
+	cbTypeAwaitAnyChild            // (string) -> string
 	cbTypeChildWorkflowWithOptions // (string,string,u64,u64,string) -> string
 
 	// durable-promises interface
 	cbTypeCreatePromise  // (string[,u64]) -> string (WIT has ttl-ms, handler doesn't)
-	cbTypeAwaitPromise   // (string,u64) -> string
+	cbTypeAwaitPromise   // (string,u64) -> result<await-outcome, call-failure>
 	cbTypeResolvePromise // (string,string) -> u64
 	cbTypeRejectPromise  // (string,string) -> u64
 
@@ -640,6 +708,7 @@ const (
 	// durable-extended-lifecycle interface
 	cbTypeContinueAsNewVersioned // (string,u32) -> u64
 	cbTypeSideEffect             // (string) -> string
+	cbTypeRunDetached            // (string,string) -> u64
 
 	// durable-fetch interface
 	cbTypeFetch // (string,string,string,string) -> string
@@ -705,6 +774,17 @@ func readU64Arg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) uint64 
 	}
 	a := argPtr(args, i)
 	return uint64(C.component_val_get_u64(a))
+}
+
+// readBoolArg returns the i-th argument as a bool, or false if out of range or
+// not a bool. false is the safe default for the one call that reads it:
+// durable-defer-phase turning the phase OFF cannot make a defer body's call look
+// like the workflow body's, which is the error the other direction makes.
+func readBoolArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) bool {
+	if int(nargs) <= i {
+		return false
+	}
+	return bool(C.component_val_get_bool(argPtr(args, i)))
 }
 
 // readU32Arg returns the i-th argument as a uint32, or 0 if out of range.
@@ -857,6 +937,131 @@ func setResultCallOutcome(results *C.wasmtime_component_val_t, nresults C.size_t
 	}
 }
 
+// readNameArg returns the i-th string argument and whether it is a valid name:
+// the check the core-module path applies to the same parameters through
+// wasmtimeReadServiceName, and for the same reason -- a service, operation,
+// promise, signal, lock or workflow name reaches storage keys, event rows and
+// log lines, so it is restricted to [a-zA-Z0-9._-]+ and to MaxWasmStringLen.
+//
+// The component dispatchers called readStrArg for these and passed whatever the
+// guest sent straight to the handler (cleat#3436, measured on a Python guest:
+// "" and "bad name!" reached the service caller, the promise store and the
+// signal store), so a name the core path refuses was accepted here.
+func readNameArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) (string, bool) {
+	s := readStrArg(args, i, nargs)
+	return s, uint64(len(s)) <= uint64(MaxWasmStringLen) && validServiceName(s)
+}
+
+// readOptionalNameArg is readNameArg for a parameter where empty means "not
+// given" (wasmtimeReadOptionalServiceName on the core path): "" is valid,
+// anything else must be a valid name.
+func readOptionalNameArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) (string, bool) {
+	s := readStrArg(args, i, nargs)
+	if s == "" {
+		return s, true
+	}
+	return s, uint64(len(s)) <= uint64(MaxWasmStringLen) && validServiceName(s)
+}
+
+// invalidNameMessage is the text a guest sees when a dispatcher refuses a name.
+func invalidNameMessage(call, param string) string {
+	return "cleat: " + call + ": " + param + " is not a valid name (it must match [a-zA-Z0-9._-]+)"
+}
+
+// refuseNameWithCallFailure answers a `result<_, call-failure>` import with
+// err(failed) classified callErrorInvalidRequest -- the classification
+// badParamDurableCall gives the same refusal on the core path -- and returns nil,
+// so the guest raises a CallError it can branch on. No handler method runs, so
+// no event is recorded and replay sees nothing.
+func refuseNameWithCallFailure(
+	results *C.wasmtime_component_val_t, nresults C.size_t, call, param string,
+) *C.wasmtime_error_t {
+	setResultCallOutcome(results, nresults, callOutcome{
+		failed:  true,
+		code:    uint32(callErrorInvalidRequest),
+		payload: invalidNameMessage(call, param),
+	})
+	return nil
+}
+
+// refuseNameWithBadParam answers a u64/s64-returning import with errBadParam,
+// the word every core-path host function returns for the same refusal.
+func refuseNameWithBadParam(results *C.wasmtime_component_val_t, nresults C.size_t) *C.wasmtime_error_t {
+	setResultU64(results, nresults, errBadParam)
+	return nil
+}
+
+// refuseNameWithoutAResult refuses a name on an import whose WIT type has no
+// place for a failure: a bare `-> string`, or no result at all. Neither can
+// carry errBadParam as anything but text (the core path's answer), and an empty
+// string is a plausible answer, so the guest is stopped by TRAPPING -- the
+// reasoning stopAtPendingChildAwait gives for the same limitation.
+//
+// It answers "" instead in a defer segment or while the guest drains its own
+// defers, for the reason that function gives: a trap there loses the cleanup
+// the segment exists to run.
+func (b *wasmtimeBackend) refuseNameWithoutAResult(
+	call, param string, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if !b.deferPhase && !b.guestIsDrainingDefers() {
+		msg := C.CString(invalidNameMessage(call, param))
+		defer C.free(unsafe.Pointer(msg))
+		return C.wasmtime_error_new(msg)
+	}
+	setResultString(results, nresults, "")
+	return nil
+}
+
+// pre050AwaitPromiseMessage is what a Python component built before 0.5.0 gets
+// when it calls durable-await-promise. That import was `-> string` and is now
+// `-> result<await-outcome, call-failure>` (cleat#3425), so such a component
+// cannot be served: it has no way to receive a rejection, a timeout or a stop
+// as anything but a value. It is refused on the call, with the import named,
+// rather than left to wasmtime's "type mismatch: expected string, found
+// result", which names neither the import's meaning nor the remedy.
+const pre050AwaitPromiseMessage = "cleat: this component was built against the pre-0.5.0 signature of the " +
+	"durable-await-promise import (func(id: string, timeout-ms: u64) -> string), which this host no longer " +
+	"serves (it is now result<await-outcome, call-failure>). Rebuild the workflow with the 0.5.0 Python SDK."
+
+// refusePre050AwaitPromise returns a trap for a component whose
+// durable-await-promise does not return a `result`, nil otherwise. It runs
+// BEFORE the host call, so a refused component records no promise event.
+func refusePre050AwaitPromise(ty *C.wasmtime_component_func_type_t) *C.wasmtime_error_t {
+	if C.component_func_result_is_result(ty) == 1 {
+		return nil
+	}
+	msg := C.CString(pre050AwaitPromiseMessage)
+	defer C.free(unsafe.Pointer(msg))
+	return C.wasmtime_error_new(msg)
+}
+
+// awaitOutcomeKind is the case of the WIT `await-outcome` variant a settled
+// wait lands in. The values are the C helper's `kind` argument.
+type awaitOutcomeKind int
+
+const (
+	awaitResolved awaitOutcomeKind = 0
+	awaitRejected awaitOutcomeKind = 1
+	awaitTimedOut awaitOutcomeKind = 2
+)
+
+// setResultAwaitOutcome writes `ok(await-outcome.<kind>(payload))` into the
+// first result slot. The error cases of `result<await-outcome, call-failure>`
+// go through setResultCallOutcome, which builds the same err half.
+func setResultAwaitOutcome(results *C.wasmtime_component_val_t, nresults C.size_t, kind awaitOutcomeKind, payload string) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	if kind == awaitTimedOut {
+		// timed-out carries no payload and the C helper ignores `s` for it, so a
+		// C.CString here would be allocated and never freed (found in review).
+		C.component_val_set_await_outcome(r, C.int(kind), nil, 0)
+		return
+	}
+	C.component_val_set_await_outcome(r, C.int(kind), C.CString(payload), C.size_t(len(payload)))
+}
+
 // extractStringFromPacked decodes the output string from a handler's packed
 // return value. The packed format is:
 //
@@ -882,6 +1087,13 @@ func goComponentCallback(
 	entry := lookupCB(uintptr(env))
 	if entry.backend == nil || entry.backend.handler == nil {
 		return nil
+	}
+	// Before the switch, not in its arm: the stop-correspondence guard reads the
+	// arms as `case cbTypeX: return ...dispatchX(`, and this check needs `ty`.
+	if entry.typ == cbTypeAwaitPromise {
+		if err := refusePre050AwaitPromise(ty); err != nil {
+			return err
+		}
 	}
 	switch entry.typ {
 	case cbTypeDurableCallString:
@@ -928,6 +1140,10 @@ func goComponentCallback(
 		return entry.backend.dispatchAwaitChild(args, nargs, results, nresults)
 	case cbTypeAwaitAllChildren:
 		return entry.backend.dispatchAwaitAllChildren(args, nargs, results, nresults)
+	case cbTypePollChild:
+		return entry.backend.dispatchPollChild(args, nargs, results, nresults)
+	case cbTypeAwaitAnyChild:
+		return entry.backend.dispatchAwaitAnyChild(args, nargs, results, nresults)
 	case cbTypeChildWorkflowWithOptions:
 		return entry.backend.dispatchChildWorkflowWithOptions(args, nargs, results, nresults)
 	case cbTypeCreatePromise:
@@ -974,6 +1190,10 @@ func goComponentCallback(
 		return entry.backend.dispatchContinueAsNewVersioned(args, nargs, results, nresults)
 	case cbTypeSideEffect:
 		return entry.backend.dispatchSideEffect(args, nargs, results, nresults)
+	case cbTypeRunDetached:
+		return entry.backend.dispatchRunDetached(args, nargs, results, nresults)
+	case cbTypeDeferPhase:
+		return entry.backend.dispatchDeferPhase(args, nargs, results, nresults)
 	case cbTypeFetch:
 		return entry.backend.dispatchFetch(args, nargs, results, nresults)
 	case cbTypeScheduleCron:
@@ -995,6 +1215,51 @@ func goComponentCallback(
 // ---------------------------------------------------------------------------
 // durable-call interface
 // ---------------------------------------------------------------------------
+// withCleatEntryKey returns input with a top-level "__cleat_entry__" field
+// set to entryPoint, for the component world's single "run" export
+// (componentRunExport) to hand to Python's own _dispatcher_run/_select
+// (entry.py), which is the only reader of that key. cleat#2937.
+//
+// map[string]json.RawMessage, not a generic map[string]any: every OTHER field
+// stays exactly the bytes it arrived as -- re-marshaling a decoded any would
+// reformat a number or reorder keys in a payload this function never needed
+// to touch except to add one.
+//
+// Empty/blank input is treated as `{}`, matching entry.py's own
+// `json.loads(args_str) if args_str else {}` -- an empty workflow start has
+// no parameters to carry, not no JSON object at all.
+//
+// INPUT THAT IS NOT A JSON OBJECT IS RETURNED UNCHANGED, not an error. Every
+// real Python workflow start sends an object -- that is entry.py's own
+// calling convention, not a Component Model requirement -- but this function
+// runs on EVERY component execution, including this package's own synthetic
+// WAT probes that lift a bare string through the ABI with no JSON inside it
+// at all (component_no_decomposition_test.go's componentWithNoImports, whose
+// `$lifted` function takes `(param "input" string)` directly). Those are
+// legitimate exercises of the SAME backend path for reasons that have
+// nothing to do with Python's dispatch convention, and forcing them into an
+// object would fail a `json: cannot unmarshal string into Go value of type
+// map[string]json.RawMessage` that is this function's own addition, not a
+// defect in what it is testing.
+func withCleatEntryKey(input []byte, entryPoint string) ([]byte, error) {
+	fields := map[string]json.RawMessage{}
+	if len(input) > 0 {
+		if err := json.Unmarshal(input, &fields); err != nil {
+			return input, nil
+		}
+	}
+	encodedEntry, err := json.Marshal(entryPoint)
+	if err != nil {
+		return nil, fmt.Errorf("encode entry point %q: %w", entryPoint, err)
+	}
+	fields["__cleat_entry__"] = encodedEntry
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("re-encode workflow input: %w", err)
+	}
+	return out, nil
+}
+
 // ExecuteComponentCGo runs a Component Model guest on wasmtime's own component
 // runtime.
 //
@@ -1085,12 +1350,17 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	cbRegistry.Unlock()
 	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), instance.store_id)
 
-	fn, err := componentGetFunc(instance, store, entryPoint)
+	fn, err := componentGetFunc(instance, store, componentRunExport)
 	if err != nil {
 		return nil, fmt.Errorf("component get func: %w", err)
 	}
 
-	outcome, resultStr, callErr := componentCallRun(fn, store, string(input))
+	dispatchInput, err := withCleatEntryKey(input, entryPoint)
+	if err != nil {
+		return nil, fmt.Errorf("component %s: %w", componentRunExport, err)
+	}
+
+	outcome, resultStr, callErr := componentCallRun(fn, store, string(dispatchInput))
 	if callErr != nil {
 		// Name the limit that stopped it, the same way the core-module and
 		// decomposition paths do. Without this an exhausted budget arrived as
@@ -1101,6 +1371,22 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 			return nil, fmt.Errorf("host: component export %q: %w", entryPoint, limitErr)
 		}
 		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
+	}
+
+	if outcome == runOutcomeFailed {
+		// The workflow body raised, and the guest's entry wrapper caught it and
+		// said so in the type (cleat#3433). It used to arrive as a completed
+		// {"error": ...} result, so a Python workflow that raised reported
+		// success.
+		//
+		// Marked as a failure the GUEST reported, like the core-module path
+		// marks one that came out through cleat_complete: the module did not
+		// fault, so the error must not be labelled "wasm trap", which sends a
+		// reader hunting a memory fault. The wrapper has already run the
+		// registered defers on its way out.
+		return nil, &GuestReturnedError{
+			Err: fmt.Errorf("host: component export %q failed: %s", entryPoint, resultStr),
+		}
 	}
 
 	if outcome == runOutcomeSuspended {

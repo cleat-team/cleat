@@ -119,10 +119,11 @@ func (fi *FaultInjector) InjectClockSkew(offset time.Duration) error {
 	defer fi.mu.Unlock()
 
 	// For positive offset (DB ahead), set heartbeat_at to a future time
-	// on all running instances.
+	// on all running instances. workflow_leases holds the only copy of
+	// heartbeat_at since cleat#3245 B2, and is what the reaper reads.
 	if offset > 0 && fi.db != nil {
 		if _, err := fi.db.ExecContext(context.Background(),
-			`UPDATE workflow_instances SET heartbeat_at = heartbeat_at + $1::interval WHERE status = 'running'`,
+			`UPDATE workflow_leases SET heartbeat_at = heartbeat_at + $1::interval WHERE status = 'running'`,
 			fmt.Sprintf("%d seconds", int(offset.Seconds()))); err != nil {
 			return fmt.Errorf("inject clock skew: %w", err)
 		}
@@ -146,8 +147,11 @@ func (fi *FaultInjector) InjectWorkerCrash(workerID string) error {
 	defer fi.mu.Unlock()
 
 	if fi.db != nil {
+		// The lease row only, as a real release writes it since cleat#3245
+		// B3c: claims and the reaper read workflow_leases, and it holds the
+		// only copy of these columns that is written.
 		if _, err := fi.db.ExecContext(context.Background(),
-			`UPDATE workflow_instances
+			`UPDATE workflow_leases
 			 SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
 			 WHERE status = 'running' AND assigned_to = $1`,
 			workerID); err != nil {
@@ -186,7 +190,7 @@ func (fi *FaultInjector) Cleanup() error {
 			// Restore normal heartbeat times.
 			if fi.db != nil {
 				if _, err := fi.db.ExecContext(context.Background(),
-					`UPDATE workflow_instances SET heartbeat_at = now() WHERE heartbeat_at > now() + interval '1 minute'`); err != nil && firstErr == nil {
+					`UPDATE workflow_leases SET heartbeat_at = now() WHERE heartbeat_at > now() + interval '1 minute'`); err != nil && firstErr == nil {
 					firstErr = fmt.Errorf("cleanup clock skew: %w", err)
 				}
 			}

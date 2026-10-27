@@ -155,8 +155,22 @@ type Plugin interface {
 
 // Environment provides plugins with access to cleat infrastructure.
 type Environment struct {
-	DB       PluginDB
-	Mux      ServeMux // *http.ServeMux on host, interface{} on TinyGo
+	DB PluginDB
+
+	// Mux lets a plugin dispatch an already-registered request directly,
+	// chiefly in its own tests (p.mux.ServeHTTP(rec, req), simulating a
+	// request without going through a real listener). It is Dispatcher, not
+	// *http.ServeMux/ServeMux, specifically so it offers no Handle/HandleFunc
+	// -- those would let a plugin register a NEW route directly on the
+	// host's real mux from Init, bypassing the body-size wrap every route
+	// registered through HasRoutes.RegisterRoutes(Router) gets (cleat#2232).
+	// *http.ServeMux satisfies Dispatcher structurally, so every host that
+	// previously set this to *http.ServeMux needs no change here; the field
+	// read env.Mux.(*http.ServeMux) no longer type-checks for in-tree
+	// plugins and needs plugin.Dispatcher as their own field's type instead
+	// (cleat#2279 item 3 -- breaking change, pre-authorized on that issue;
+	// 11 in-tree plugins updated in the same change).
+	Mux      Dispatcher
 	Config   []byte
 	Logger   *slog.Logger
 	TenantID string
@@ -663,19 +677,6 @@ type Migration struct {
 	// undo in the first place; this describes one that DOES write SQL and
 	// still cannot be undone.
 	Irreversible string
-}
-
-// HasCommands: plugin adds CLI subcommands.
-type HasCommands interface {
-	Plugin
-	RegisterCommands() []Command
-}
-
-// Command describes a CLI subcommand exposed by a plugin.
-type Command struct {
-	Name        string
-	Description string
-	Run         func(args []string) error
 }
 
 // HasBackground: plugin runs a background goroutine.

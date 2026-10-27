@@ -15,6 +15,20 @@
 // before the caller side is grepped; it is reported separately only so a
 // human reading the baseline can tell which type a method belongs to).
 //
+// ALSO EMITS one line per exported METHOD SIGNATURE inside an interface type,
+// with receiver "interface" rather than a concrete type name (cleat#3284).
+// These are not candidates to report as dead or test-only on their own — an
+// interface signature cannot be deleted or called independently of its
+// implementations — but check-dead-exports.sh needs their file:line the same
+// way it needs every implementation's: a one-interface/N-implementations
+// method spells its bare name once per implementation PLUS once in the
+// interface signature, and a grep cannot tell any of those N+1 declaration
+// lines apart from a genuine call expression. Excluding only the single
+// declaration under test (the pre-cleat#3284 behaviour) left the other N
+// declaration lines, including the interface's own signature, free to
+// satisfy the grep as if they were callers. See check-dead-exports.sh's
+// code_use_filter and the exclusion-set construction around it.
+//
 // This existed as a build-tagged throwaway rather than a package under
 // scripts/ so that `go build ./...` and `go vet ./...` never see it as part
 // of the module.
@@ -79,16 +93,42 @@ func main() {
 				return nil
 			}
 			for _, top := range f.Decls {
-				fn, ok := top.(*ast.FuncDecl)
-				if !ok || fn.Name == nil || !fn.Name.IsExported() {
-					continue
+				switch d := top.(type) {
+				case *ast.FuncDecl:
+					if d.Name == nil || !d.Name.IsExported() {
+						continue
+					}
+					recv := "-"
+					if d.Recv != nil && len(d.Recv.List) > 0 {
+						recv = recvTypeName(d.Recv.List[0].Type)
+					}
+					pos := fset.Position(d.Pos())
+					decls = append(decls, decl{file: path, line: pos.Line, recv: recv, name: d.Name.Name})
+				case *ast.GenDecl:
+					for _, spec := range d.Specs {
+						ts, ok := spec.(*ast.TypeSpec)
+						if !ok {
+							continue
+						}
+						iface, ok := ts.Type.(*ast.InterfaceType)
+						if !ok || iface.Methods == nil {
+							continue
+						}
+						for _, field := range iface.Methods.List {
+							// An embedded interface has no Names (it is
+							// itself a Type reference, not a method); only
+							// named methods are declaration sites for a
+							// method's own bare identifier.
+							for _, methodName := range field.Names {
+								if !methodName.IsExported() {
+									continue
+								}
+								pos := fset.Position(methodName.Pos())
+								decls = append(decls, decl{file: path, line: pos.Line, recv: "interface", name: methodName.Name})
+							}
+						}
+					}
 				}
-				recv := "-"
-				if fn.Recv != nil && len(fn.Recv.List) > 0 {
-					recv = recvTypeName(fn.Recv.List[0].Type)
-				}
-				pos := fset.Position(fn.Pos())
-				decls = append(decls, decl{file: path, line: pos.Line, recv: recv, name: fn.Name.Name})
 			}
 			return nil
 		})

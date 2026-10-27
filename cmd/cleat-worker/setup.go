@@ -30,6 +30,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/tenantctx"
+	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/wasm"
@@ -152,6 +153,22 @@ type dbServiceCaller struct {
 	store       engine.WorkflowStore
 	workerID    string
 	benchSvcURL string
+
+	// serviceCallTimeout is the HTTP client Timeout every per-call client this
+	// caller builds for a workflow-blocking request must use -- see
+	// durableCallClientTimeout's doc comment (cleat#3279). Set once at
+	// construction from the worker's own configured heartbeat
+	// (durableCallClientTimeout(w.heartbeatInterval)), not read live: a
+	// dbServiceCaller is built per workflow execution
+	// (executeWorkflow), so there is no live value to track and no benefit to
+	// re-deriving it per call.
+	//
+	// Zero in every test that constructs a bare &dbServiceCaller{} directly
+	// (most of this package's tests), which makes http.Client{Timeout: 0}
+	// -- unbounded, not zero-and-instant. That is correct for a test against
+	// an httptest.Server that always responds promptly; nothing in this
+	// package's test suite relies on these clients' Timeout value firing.
+	serviceCallTimeout time.Duration
 
 	// traceID is this run's W3C trace-id, propagated on guest-initiated
 	// fetches so the callee joins the caller's trace. cleat#1596.
@@ -368,7 +385,7 @@ func (c *dbServiceCaller) forwardToService(ctx context.Context, baseURL, service
 	// written as though it will -- this becomes a hot path and the answer is a
 	// pool PER TENANT, not a shared one.
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: c.serviceCallTimeout,
 		// THE ENDPOINT IN HAND, not c.benchSvcURL. This forwarder now serves
 		// every registered service, so exempting the bench URL would grant a
 		// host this call is not dialling and refuse the one it is: every
@@ -444,9 +461,11 @@ func (c *dbServiceCaller) ResolveCall(ctx context.Context, service, operation, i
 		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	// Same per-call, egress-guarded client as forwardToService -- see that
-	// method's comment for why this is not pooled.
+	// method's comment for why this is not pooled, and
+	// durableCallClientTimeout's doc for why the timeout is derived rather
+	// than its own literal.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   c.serviceCallTimeout,
 		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
 	}
 	resp, err := client.Do(req)
@@ -537,9 +556,10 @@ func (c *dbServiceCaller) ReplayUnderOriginalKey(ctx context.Context, service, o
 	}
 	// Same per-call, egress-guarded client as forwardToService and
 	// ResolveCall -- see forwardToService's comment for why this is not
-	// pooled.
+	// pooled, and durableCallClientTimeout's doc for why the timeout is
+	// derived rather than its own literal.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   c.serviceCallTimeout,
 		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
 	}
 	resp, err := client.Do(req)
@@ -649,11 +669,30 @@ func (c *dbServiceCaller) egressGuard(ctx context.Context) *engine.EgressGuard {
 	return g
 }
 
+// httpFetchMaxBody is the response-body cap on the DurableCall("http", "fetch")
+// path, which has always been 1 MiB and which truncates silently. cleat_fetch
+// takes its own cap (--workflow-fetch-max-response-bytes) and refuses an
+// oversized body instead.
+const httpFetchMaxBody = 1 << 20
+
 func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON, idempotencyKey string) (string, error) {
 	var req fetchRequest
 	if err := json.Unmarshal([]byte(requestJSON), &req); err != nil {
 		return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf("invalid request JSON: %w", err))
 	}
+	return c.guardedFetch(ctx, req, idempotencyKey, httpFetchMaxBody, false)
+}
+
+// guardedFetch performs one guest-named HTTP request through the egress guard.
+// It is the single implementation behind both DurableCall("http", "fetch") and
+// cleat_fetch (workflowFetcher), so the two cannot differ on what they refuse.
+//
+// maxBody bounds the response body. With overflowIsError false a larger body is
+// cut to maxBody and returned as if complete -- the original http.fetch
+// behaviour, kept as it was. With it true the call fails and the message names
+// the cap, because a guest that cannot tell its answer was cut is the
+// cleat#1312 defect again.
+func (c *dbServiceCaller) guardedFetch(ctx context.Context, req fetchRequest, idempotencyKey string, maxBody int64, overflowIsError bool) (string, error) {
 	if req.URL == "" {
 		return "", engine.NewPermanentError("http.fetch", "", errors.New("url is required"))
 	}
@@ -717,8 +756,13 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON, idem
 	// whole point: a stock client follows up to ten redirects and re-resolves
 	// each hop, so a check on the guest's URL says nothing about where the
 	// request finally goes. See engine.EgressGuard.
+	//
+	// Timeout derived, not a literal -- see durableCallClientTimeout's doc:
+	// http.fetch is a workflow step blocking on an arbitrary external call,
+	// the same category as forwardToService, just without a registered
+	// service name.
 	client := &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   c.serviceCallTimeout,
 		Transport: &http.Transport{DialContext: c.egressGuard(ctx).DialContext},
 	}
 	resp, err := client.Do(httpReq)
@@ -733,9 +777,20 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON, idem
 		return "", engine.NewTransientError("http.fetch", "", fmt.Errorf("request %s %q failed: %w", req.Method, req.URL, err))
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// One byte past the cap, so "exactly maxBody" and "more than maxBody" are
+	// distinguishable.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return "", engine.NewTransientError("http.fetch", "", fmt.Errorf("reading response: %w", err))
+	}
+	if int64(len(respBody)) > maxBody {
+		if overflowIsError {
+			// Permanent: the same URL answers with the same body next time.
+			return "", engine.NewPermanentError("http.fetch", "", fmt.Errorf(
+				"response body from %s %q is larger than the %d-byte cap (--workflow-fetch-max-response-bytes)",
+				req.Method, req.URL, maxBody))
+		}
+		respBody = respBody[:maxBody]
 	}
 	respHeaders := make(map[string]string)
 	for k := range resp.Header {
@@ -1523,14 +1578,80 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 // every new write and the previous key is read-only -- a value already
 // sealed under it still opens (via engine.PayloadFormPreviousKey), letting a
 // worker roll onto a new key while a sibling still on the old one keeps
-// writing readable rows. The version numbers (current=2, previous=1) match
+// writing readable rows. The version numbers (current=2, previous=1 by
+// default -- see payloadKeyVersions and cleat#3203) match
 // cmd/cleatctl/resealpayloads.go's ring, which is the only other place a
 // PayloadEncryption ring is built -- a previous key's version is never
 // persisted anywhere (see engine.PayloadEncryption's doc comment), so this
 // is a convention, not a compatibility requirement.
 //
-// Returns (nil, nil) when currentKeyFile is empty: encryption is off.
-func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.PayloadEncryption, error) {
+// Returns (nil, nil, nil) when currentKeyFile is empty: encryption is off.
+//
+// THE RETURNED *engine.ReloadableKeyRing IS THE SAME ONE pe IS BUILT
+// AROUND (cleat#2298, PR 2) -- nil exactly when pe is nil, non-nil only
+// when encryption is configured. A caller that wants to reload the key
+// later (the SIGHUP handler, main.go) holds onto this return value
+// directly rather than reaching inside pe, which has no exported accessor
+// for it.
+func loadPayloadEncryption(currentKeyFile, previousKeyFile string, versions payloadKeyVersions) (*engine.PayloadEncryption, *engine.ReloadableKeyRing, error) {
+	ring, err := loadPayloadKeyRing(currentKeyFile, previousKeyFile, versions)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ring == nil {
+		return nil, nil, nil
+	}
+	reloadable := engine.NewReloadableKeyRing(ring)
+	pe, err := engine.NewPayloadEncryptionWithReloadableRing(reloadable)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid encryption key ring: %w", err)
+	}
+	return pe, reloadable, nil
+}
+
+// payloadKeyVersions bundles cleat#3203's four --encryption-key-file-version
+// flags, so loadPayloadKeyRing's signature does not grow to six bare
+// strings where the current/previous and direct/file pairs are easy to
+// transpose by position. Each pair is resolved fresh on every call by
+// resolvePayloadKeyVersion, the same contract
+// engine.SecretKeyRingFromEnv's resolveSecretKeyInput uses for
+// CLEAT_SECRET_MASTER_KEY_VERSION[_FILE] -- direct and file are mutually
+// exclusive, and both empty means "use the default", which is today's
+// long-standing hardcoded 2 (current) / 1 (previous).
+//
+// A ZERO VALUE IS THE PRE-CLEAT#3203 BEHAVIOUR: every field empty resolves
+// to the defaults exactly as if these flags had never been added, which is
+// why existing callers (tests, cleatctl) can leave this unset rather than
+// needing to learn about it.
+type payloadKeyVersions struct {
+	current, currentFile   string
+	previous, previousFile string
+}
+
+// loadPayloadKeyRing reads --encryption-key-file and, optionally,
+// --encryption-key-file-previous plus the version flags versions bundles
+// (cleat#3203), and builds the *engine.KeyRing loadPayloadEncryption wraps
+// in a *engine.PayloadEncryption.
+//
+// EXTRACTED FROM loadPayloadEncryption (cleat#2298's PR 2), rather than
+// loadPayloadEncryption calling engine.NewPayloadEncryptionWithRing twice,
+// so that a SIGHUP reload can build the candidate ring on its own, without
+// constructing (and discarding) a *engine.PayloadEncryption it has no use
+// for -- the reload swaps the live PayloadEncryption's *engine.ReloadableKeyRing
+// directly, via its Reload method, not by replacing the PayloadEncryption
+// value itself. Both callers read the files fresh every time, INCLUDING
+// THE VERSION FILES: a boot call and a SIGHUP call are the same operation
+// at two different moments, which is the property that makes reload
+// meaningful at all (see engine.SecretKeyRingFromEnv's doc comment for the
+// file-vs-environment reasoning; the payload side has always read from
+// files, never env vars) -- and is exactly what makes a genuine rotation
+// possible now: each reload can introduce a version number the live ring
+// never held, the same way a secrets-side rotation always could.
+//
+// Returns (nil, nil) when currentKeyFile is empty: encryption is off. This
+// is the same "no master key configured" state engine.NewReloadableKeyRing
+// already treats as legal.
+func loadPayloadKeyRing(currentKeyFile, previousKeyFile string, versions payloadKeyVersions) (*engine.KeyRing, error) {
 	if currentKeyFile == "" {
 		if previousKeyFile != "" {
 			return nil, fmt.Errorf("--encryption-key-file-previous requires --encryption-key-file")
@@ -1545,12 +1666,16 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 	if err != nil {
 		return nil, fmt.Errorf("decode encryption key: %w", err)
 	}
+	currentVersion, err := resolvePayloadKeyVersion(versions.current, versions.currentFile, "encryption-key-file-version", 2)
+	if err != nil {
+		return nil, err
+	}
 	if previousKeyFile == "" {
-		pe, err := engine.NewPayloadEncryption(strings.TrimSpace(string(currentData)))
+		ring, err := engine.NewKeyRing(engine.VersionedKey{Version: currentVersion, Key: currentKey})
 		if err != nil {
 			return nil, fmt.Errorf("invalid encryption key — expected a base64-encoded 256-bit AES key: %w", err)
 		}
-		return pe, nil
+		return ring, nil
 	}
 	previousData, err := os.ReadFile(previousKeyFile)
 	if err != nil {
@@ -1560,18 +1685,46 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 	if err != nil {
 		return nil, fmt.Errorf("decode previous encryption key: %w", err)
 	}
+	previousVersion, err := resolvePayloadKeyVersion(versions.previous, versions.previousFile, "encryption-key-file-previous-version", 1)
+	if err != nil {
+		return nil, err
+	}
 	ring, err := engine.NewKeyRing(
-		engine.VersionedKey{Version: 2, Key: currentKey},
-		engine.VersionedKey{Version: 1, Key: previousKey},
+		engine.VersionedKey{Version: currentVersion, Key: currentKey},
+		engine.VersionedKey{Version: previousVersion, Key: previousKey},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build encryption key ring: %w", err)
 	}
-	pe, err := engine.NewPayloadEncryptionWithRing(ring)
-	if err != nil {
-		return nil, fmt.Errorf("invalid encryption key ring: %w", err)
+	return ring, nil
+}
+
+// resolvePayloadKeyVersion resolves one of payloadKeyVersions' two pairs:
+// direct is the flag's own value, file is its "-file" sibling, flagName is
+// used only in error messages (without the leading "--"), and def is what
+// an operator who sets neither still gets -- today's long-standing
+// hardcoded version for that slot (2 current, 1 previous).
+//
+// BOTH SET IS REFUSED, not resolved by precedence -- the same contract
+// engine.SecretKeyRingFromEnv's resolveSecretKeyInput uses for
+// CLEAT_SECRET_MASTER_KEY_VERSION[_FILE], and the same reasoning: an
+// operator who set both is most likely mid-migration from one form to the
+// other, and silently preferring one would hide exactly that ambiguity.
+func resolvePayloadKeyVersion(direct, file, flagName string, def int) (int, error) {
+	direct = strings.TrimSpace(direct)
+	file = strings.TrimSpace(file)
+	if direct != "" && file != "" {
+		return 0, fmt.Errorf("both --%s and --%s-file are set; set exactly one", flagName, flagName)
 	}
-	return pe, nil
+	val := direct
+	if file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return 0, fmt.Errorf("read --%s-file: %w", flagName, err)
+		}
+		val = strings.TrimSpace(string(data))
+	}
+	return engine.KeyVersionFromEnv(val, def, "--"+flagName)
 }
 
 // checkPayloadEncryptionState is cleat#2324's startup guard.
@@ -1858,11 +2011,14 @@ type Worker struct {
 	// poll the same set or it would see a different slice of the work.
 	taskQueues []string
 
-	// claimAcrossTenants makes the dispatch loop claim work for every tenant in
-	// one query instead of only its own. Off by default: it needs a mechanism
-	// the deployment has to grant (a BYPASSRLS owner on PostgreSQL, cleat_admin
-	// membership on SQL Server), and turning it on without that should be a
-	// deliberate act rather than an upgrade side effect.
+	// claimAcrossTenants makes the dispatch loop and the schedule loop serve
+	// every tenant rather than only the worker's own, by rotating through the
+	// tenant list and working under each tenant's own store (claimRotating,
+	// dueSchedulesByTenant). On by default (--claim-across-tenants) and it needs
+	// no database grant. It takes effect only where the worker can rotate: a
+	// store factory and a store that is an engine.TenantLister, which is
+	// PostgreSQL and SQL Server but not MySQL, and not a sharded worker.
+	// Otherwise each loop warns once and serves the worker's own tenant.
 	claimAcrossTenants bool
 
 	// claimTenantsPerTick bounds how many tenants one rotating tick polls.
@@ -1979,11 +2135,59 @@ type Worker struct {
 	// Egress needs both this and the tenant's permission. cleat#1565.
 	operatorEgress *engine.HostAllowlist
 
+	// workflowFetch is --enable-workflow-fetch: whether cleat_fetch is served at
+	// all. Off, the engine gets no Fetcher. workflowFetchMaxBody is its response
+	// cap; both are read only through workflowFetcherFor. cleat#3377.
+	workflowFetch        bool
+	workflowFetchMaxBody int64
+
 	// secrets resolves ${secret:name} in a DurableCall's request, on the way
 	// out to the service. Nil leaves references as literal text -- the same
 	// pass-through a worker started without CLEAT_SECRET_MASTER_KEY has always
 	// had for plugins.
 	secrets *engine.SecretStore
+
+	// deploymentSecrets, secretsRing and payloadRing are cleat#2298 PR 2's
+	// SIGHUP reload fields. deploymentSecrets is the counterpart to secrets
+	// above -- not resolved through the plugin call path at all, but needed
+	// here so reloadKeyRingsOnSIGHUP can run M4's candidate-opens-everything
+	// check against it too, the same way it does against secrets.
+	// secretsRing is the SAME *engine.ReloadableKeyRing secrets and
+	// deploymentSecrets are both built around (main.go); payloadRing is the
+	// one payloadEncryption is built around, or nil if payload encryption is
+	// not configured on this worker at all (see loadPayloadEncryption's doc
+	// comment: nil exactly when payloadEncryption is nil).
+	deploymentSecrets *engine.DeploymentSecretStore
+	secretsRing       *engine.ReloadableKeyRing
+	payloadRing       *engine.ReloadableKeyRing
+
+	// payloadKeyFile and payloadKeyFilePrevious are COPIES of
+	// --encryption-key-file and --encryption-key-file-previous, taken once
+	// at construction rather than read from the flags directly inside
+	// reloadKeyRingsOnSIGHUP -- the same reason w.concurrency and
+	// w.clusterConnectionBudget below are copies rather than *concurrency/
+	// *clusterConnectionBudgetFlag reads: a test can build a *Worker with
+	// whatever paths it wants, with no global flag to mutate and restore.
+	payloadKeyFile         string
+	payloadKeyFilePrevious string
+
+	// payloadKeyVersions is the same kind of boot-time copy as the two
+	// fields above, bundling cleat#3203's four --encryption-key-file-version
+	// flags so reloadKeyRingsOnSIGHUP can pass them to loadPayloadKeyRing
+	// unchanged on every call. Its zero value resolves to today's
+	// hardcoded 2/1 defaults (payloadKeyVersions' own doc comment), so a
+	// Worker built without setting this field -- every existing test --
+	// behaves exactly as before cleat#3203.
+	payloadKeyVersions payloadKeyVersions
+
+	// afterSecretsRingMovedForTest, when set, runs inside
+	// reloadKeyRingsOnSIGHUP's RegisterUnderKeyGate callback immediately
+	// after secretsRing.Reload succeeds, before the callback returns nil.
+	// It exists so a test can land a failure in RegisterUnderKeyGate's own
+	// post-callback work (its commit on postgres/mssql, its lock release on
+	// mysql) in the one window that matters: after the in-memory swap has
+	// already happened. Nil in production.
+	afterSecretsRingMovedForTest func()
 
 	// Worker membership, and this worker's slice of the cluster connection
 	// budget. cleat#1487.
@@ -2201,6 +2405,21 @@ type Worker struct {
 	metricsSweepInterval    time.Duration
 	keyExpiryWindow         time.Duration
 	deadLetterRetentionDays int
+
+	// schemaMigrator is the SAME *migration.Runner main() uses for the one-time
+	// startup check (cleat#2117) -- reused rather than rebuilt, so a periodic
+	// runtime recheck can never disagree with boot about what "current" means.
+	// Nil in a Worker built without the full main() setup (most unit tests),
+	// which schemaCheckLoop treats as "nothing to check" rather than a panic.
+	schemaMigrator      *migration.Runner
+	schemaCheckInterval time.Duration
+	// schemaBehind is read by healthReport() on every /readyz request without
+	// touching the database -- set only by schemaCheckLoop, matching dbReach's
+	// own "state already in memory" rule (see health.go's package doc).
+	schemaBehind    atomic.Bool
+	schemaStateMu   sync.Mutex
+	schemaLastCheck migration.SchemaState
+	schemaLastErr   error
 
 	// Version GC. versionGCInterval is the switch: 0 means the sweep never
 	// runs and GC is reachable only through cleatctl or the HTTP endpoint.
@@ -2566,6 +2785,10 @@ func (w *Worker) Run() {
 	// health tracker to expect a run. versionGCLoop registers itself once it
 	// knows it is actually going to keep running. cleat#2004.
 	w.initLoopCtxUnmonitored("version_gc")
+	// schema_check (cleat#2264) is the same shape: launched unconditionally,
+	// no-ops when w.schemaMigrator is nil (a Worker built without the full
+	// main() setup, which most unit tests are).
+	w.initLoopCtxUnmonitored("schema_check")
 	initLoopCtx("compaction")
 	if *metricsSweepInterval > 0 {
 		initLoopCtx("metrics_sweep")
@@ -2677,6 +2900,10 @@ func (w *Worker) Run() {
 	// Retention loop.
 	w.registerLoopFunc("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
 	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays, w.completedWorkflowRetentionDays, w.deadLetterRetentionDays) })
+
+	// Runtime schema-version recheck (cleat#2264).
+	w.registerLoopFunc("schema_check", w.schemaCheckLoop)
+	w.launchLoop("schema_check", w.schemaCheckLoop)
 
 	// Version GC. Separate loop rather than a fourth arm of retentionLoop:
 	// its interval is its own flag, it is off by default while --retention-days
@@ -3435,18 +3662,19 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// egressAllow is what makes http.fetch usable at all: without it the guard
 	// has no allowlist and refuses every destination. cleat#1565.
 	caller := &dbServiceCaller{
-		store:             execStore,
-		workerID:          w.id,
-		benchSvcURL:       *benchSvcURL,
-		serviceEndpoints:  w.serviceEndpoints,
-		ambiguityLookup:   w.ambiguityLookup,
-		idempotencyKeyOps: w.idempotencyKeyOps,
-		egressAllow:       w.egressAllow,
-		operatorEgress:    w.operatorEgress,
-		privateHosts:      w.privateHosts,
-		egress:            w.egress,
-		traceID:           traceID,
-		secrets:           w.secrets,
+		store:              execStore,
+		workerID:           w.id,
+		benchSvcURL:        *benchSvcURL,
+		serviceEndpoints:   w.serviceEndpoints,
+		ambiguityLookup:    w.ambiguityLookup,
+		idempotencyKeyOps:  w.idempotencyKeyOps,
+		egressAllow:        w.egressAllow,
+		operatorEgress:     w.operatorEgress,
+		privateHosts:       w.privateHosts,
+		egress:             w.egress,
+		traceID:            traceID,
+		secrets:            w.secrets,
+		serviceCallTimeout: durableCallClientTimeout(w.heartbeatInterval),
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
@@ -3722,6 +3950,14 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	deferPhase := wf.PendingTerminalStatus != ""
 	if deferPhase {
 		engineOpts = append(engineOpts, engine.WithDeferPhase())
+	}
+	if f := w.workflowFetcherFor(caller); f != nil {
+		engineOpts = append(engineOpts, engine.WithFetcher(f))
+		// The only runtime-visible trace that this execution got a Fetcher, and
+		// the reason it exists: TestExecuteWorkflowInstallsTheFetcherOnlyWhenTheFlagIsSet
+		// reads it, because a static reachability test passes with this block
+		// present and never run (cleat-review, cleat#3404).
+		w.logger.Debug("cleat_fetch is enabled for this execution", "workflow_id", wf.ID)
 	}
 	eng := engine.NewEngine(nil, caller, engineOpts...)
 	eng.Metrics = w.Metrics
@@ -4529,13 +4765,163 @@ func dbCallDeadlineFor(heartbeat time.Duration) time.Duration {
 // dbCallDeadline or retryInterval where a future reader would have to
 // re-derive why it is there.
 //
-// Changes the default --reclaim-timeout from ~13.5s (round 4) to ~14.5s at
-// the default --heartbeat (5s: 5 + 3*2.5 + min(5, 1) + 1). Worth noting in
-// the changelog: it is a wider window before a genuinely dead worker's run
-// is reclaimed, not a behaviour change anyone has to opt into.
+// Changed the default --reclaim-timeout from ~13.5s (round 4) to ~14.5s at
+// the default --heartbeat (5s: 5 + 3*2.5 + min(5, 1) + 1) -- was a wider
+// window before a genuinely dead worker's run is reclaimed, not a behaviour
+// change anyone had to opt into. ROUND 6 below changes this again,
+// substantially.
+//
+// ROUND 6 (cleat#3258): EVERYTHING ABOVE MODELS A STALL D NO LONGER THAN
+// heartbeat, AND SAYS SO NOWHERE. Round 5's own "zero slack" finding was
+// about margin AT that implicit D=heartbeat boundary; it did not ask
+// whether a real stall can exceed it. cleat#3254's multi-attempt sweep
+// (reaper_recovery_gate_multi_attempt_sweep_test.go) found it can: for
+// postgres, where lib/pq ignores ctx cancellation under a genuine stall so
+// a caught call always blocks for exactly the stall's own length D,
+// recovery(D) = heartbeat + D + retryInterval + deadline is EXACTLY the
+// model above plus (D - heartbeat) -- strictly increasing, no ceiling, safe
+// only up to D <= heartbeat + reclaimSlack and unsafe for every larger D
+// with no return to safety. Two real docker-pause reproductions already in
+// this file's own history exceed that boundary at the default heartbeat:
+// 25s (probeBoundedCall's doc, cleat#2007) and 11.7s (this function's own
+// round-4 doc above). Owner decision on cleat#3258, verbatim "3a": treat
+// this as live and fix the formula, not just document the limitation.
+//
+// WHAT "FIX" CAN MEAN, AND WHAT IT CANNOT. No finite reclaimAfter can be
+// safe for an unboundedly long D -- a worker stalled for an hour is, at
+// some point, indistinguishable from a dead one, and something has to
+// reclaim it eventually. "Fix the formula" means widen the stall length
+// this invariant is DELIBERATELY SIZED to tolerate, from the old implicit
+// (and un-stated) D<=heartbeat to an explicit, named, chosen target --
+// not make it infinite, which is impossible by construction.
+//
+// maxTolerableStall (below) is that target: 30s, chosen with margin over
+// the larger of the two real measured stalls (25s) -- a real network
+// partition or DB failover has its own duration, set by infrastructure,
+// not by --heartbeat (cleat#3258's own framing), so this is a fixed
+// constant, not scaled with heartbeat the way the old D<=heartbeat
+// assumption implicitly was.
+//
+// THE GENERALISED DERIVATION, covering all three driver shapes at once, not
+// just postgres's closed form. simulateRecovery's own loop (the sweep
+// test) tracks two running totals in the SAME clock: `offset` (wall-clock
+// elapsed since the stall began) and `remaining := D - offset` (how much of
+// the stall is still left). The loop exits the first tick `remaining` drops
+// to zero or below, i.e. the first tick `offset` reaches D. Each round's
+// `offset` increment is bounded above by one round's own worst-case
+// wall-clock cost -- for mssql, the worst of the three driver shapes,
+// that's `deadline + mssqlDrainSlack` (the capped, cancel-drain-bound call
+// duration) + `reconnect` (every failed attempt after the first pays a
+// fresh dial, not just the first retry) + `retryInterval` -- so `offset`
+// can OVERSHOOT D by at most that one round's cost, regardless of how many
+// rounds the stall spans. (This is also why the bound does not get worse
+// as D grows: the overshoot is capped by a single round's cost, not
+// multiplied by the round count, because `remaining` and `offset` are
+// measured on the SAME clock throughout.) Bounding that worst single-round
+// overshoot by reclaimSlack (its existing, documented role: the budget for
+// "a reconnect, the retry's own initial round trip, and ordinary
+// Timer/scheduler lateness" -- round 5's own words, unchanged here) gives,
+// for recovery(D) across all three modes:
+//
+//	recovery(D) <= heartbeat + D + 2*dbCallDeadlineFor(heartbeat) + mssqlDrainSlack + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
+//
+// (`2*deadline` is two SEPARATE terms folded into one coefficient: one
+// `deadline` from the overshoot round's own capped call duration, the
+// other from the final, ordinary, post-stall call's worst-case latency --
+// round 4's T4 term, unchanged in role, now summed with the first rather
+// than written as its own line). Substituting D = maxTolerableStall
+// gives this function's new return value -- safe for EVERY D in
+// [0, maxTolerableStall], not merely a swept grid, because the overshoot
+// argument above holds for any D, not just discrete sample points.
+//
+// WHERE THIS STOPS COVERING, AND WHY THAT IS A DELIBERATE, STATED LIMIT
+// RATHER THAN A SILENT ONE: maxTolerableStall is fixed at 30s regardless of
+// heartbeat, so at a heartbeat large enough that 2*heartbeat alone exceeds
+// 30s (30s and above, i.e. the sweep test's own "large" scale), a stall
+// longer than maxTolerableStall but still within [heartbeat, 2*heartbeat]
+// remains unsafe under this fix -- expected, and the reason
+// reaper_recovery_gate_multi_attempt_sweep_test.go's pinned unsafe counts
+// drop substantially rather than to zero. Re-derive both pinned counts with
+// that file's own command before trusting either literal.
+//
+// Changes the default --reclaim-timeout from ~14.5s to ~47s at the default
+// --heartbeat (5s: 5 + 30 + 2*2.5 + 5 + min(5,1) + 1). Every doc comment
+// elsewhere in this file, worker_membership.go and config.go that cites the
+// old ~14.5s figure or a value derived from it was re-derived and updated
+// in the same change that introduced this comment (cleat#3258) -- if you
+// find one that still says 14.5s, it was missed, not deliberately left.
 func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
-	return heartbeat + 3*dbCallDeadlineFor(heartbeat) + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
+	deadline := dbCallDeadlineFor(heartbeat)
+	return heartbeat + maxTolerableStall + 2*deadline + mssqlDrainSlack + heartbeatRetryIntervalFor(heartbeat) + reclaimSlack
 }
+
+// durableCallClientTimeout is the floor every HTTP client on the durable-call
+// path must use (cleat#3279). Four call sites in this file build a per-call
+// client for a request a workflow step is blocked on -- forwardToService,
+// ResolveCall, ReplayUnderOriginalKey, handleHTTPFetch -- and each one used to
+// hardcode `Timeout: 30 * time.Second`, independently of minimumReclaimAfter.
+// ROUND 6 (cleat#3258) widened minimumReclaimAfter well past 30s (47s at the
+// default heartbeat, and every heartbeat above 1s today, since
+// maxTolerableStall alone is 30s), so a legitimately slow call now fails at
+// the CLIENT, before the system's own reclaim logic -- the thing that
+// actually governs this window -- is ever consulted. The failure is silent
+// about which layer killed it: a transient-error, not a clean "reclaimed."
+//
+// EQUAL TO minimumReclaimAfter, NOT LARGER. minimumReclaimAfter already IS
+// this system's own definition of "how long a stall of this shape is
+// tolerated before the holder is considered dead" -- padding the client
+// beyond it would not make a call more likely to legitimately succeed, only
+// delay the point at which a resource (a goroutine, a connection) is finally
+// released on a workflow that is going to fail or be reclaimed either way.
+// A client bound below this value silently reopens the exact gap ROUND 6
+// widened past; TestDurableCallClientsDeriveTheirTimeoutFromTheReclaimWindow
+// (service_caller_errors_test.go) is the guard against that regression.
+//
+// NOT EVERY 30s SITE IN THIS FILE NEEDS THIS. askHolder (the reaper's own
+// veto call, cleat#2196) is part of the reclaim window's MECHANISM, not a
+// client that must survive it -- see its own doc comment for why a longer
+// timeout there would be the wrong direction entirely.
+func durableCallClientTimeout(heartbeat time.Duration) time.Duration {
+	return minimumReclaimAfter(heartbeat)
+}
+
+// maxTolerableStall is the longest single database/network stall
+// minimumReclaimAfter is deliberately sized to let a worker recover from
+// before being reclaimed as dead -- see that function's ROUND 6 doc for the
+// full derivation and why this number, not a formula, is what cleat#3258's
+// "fix the formula" meant. Fixed, not scaled with heartbeat: a real
+// infrastructure stall's length does not depend on an operator's
+// --heartbeat choice.
+//
+// A PACKAGE-LEVEL VAR, NOT A CONST, for the same reason dbCallDeadlineFloor
+// (above) is: ROUND 6 added this and mssqlDrainSlack below as FIXED
+// additions to minimumReclaimAfter, so every millisecond-scale timing test
+// in reaper_recovery_grace_period_test.go that used to discriminate between
+// small invariant values (700ms vs 1700ms, checked at a 600-800ms
+// real-wall-clock checkpoint) now computes a live reclaimTimeout around
+// 36.6s instead -- the checkpoint is never reached, so `age >= reclaimTimeout`
+// can never go true and the test passes unconditionally regardless of
+// whether the formula is correct. cleat-review caught this on cleat#3258
+// (gaps #2 and, independently re-derived here, a third uncaught instance:
+// TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack
+// stays green even with reclaimSlack removed from minimumReclaimAfter
+// entirely -- confirmed by falsifying it directly). Tests that need the
+// pre-ROUND-6 magnitude call withMaxTolerableStallAndMssqlDrainSlack to
+// substitute smaller values for their own duration, restored via
+// t.Cleanup -- never overridden by a test that is actually testing
+// maxTolerableStall or mssqlDrainSlack themselves (that is what
+// reaper_recovery_gate_multi_attempt_sweep_test.go's pinned constants are
+// for).
+var maxTolerableStall = 30 * time.Second
+
+// mssqlDrainSlack mirrors reaper_recovery_gate_multi_attempt_sweep_test.go's
+// own local constant of the same name and value -- go-mssqldb's
+// cancel-drain path (see minimumReclaimAfter's doc, round 5, for the
+// citation), promoted from test-only to production here because ROUND 6
+// needs it in the live formula, not only in the simulation that
+// characterizes it. A package-level var, not a const -- see
+// maxTolerableStall's doc immediately above for why.
+var mssqlDrainSlack = 5 * time.Second
 
 // reclaimSlack is fixed headroom on top of minimumReclaimAfter's modeled
 // worst case, added in round 5 on cleat#2005 because that model has ZERO
@@ -4545,8 +4931,23 @@ func minimumReclaimAfter(heartbeat time.Duration) time.Duration {
 // connection bad, so the retry pays a fresh dial, TLS handshake and login
 // that dbCallDeadlineFor was never meant to cover. Deliberately a constant,
 // not a function of heartbeat: it is not modeling a heartbeat-scaled
-// quantity, it is covering everything the model leaves out.
-const reclaimSlack = 1 * time.Second
+// quantity, it is covering everything the model leaves out. ROUND 6
+// (cleat#3258) reuses this exact constant, unchanged, as the same budget
+// for the overshoot round's reconnect cost in the generalised D-bound --
+// see minimumReclaimAfter's doc.
+//
+// A package-level var, not a const, for the same reason maxTolerableStall
+// and mssqlDrainSlack are (see that doc). Round 5 (cleat#2005) landed this
+// as a FIXED 1s addition, which already dwarfs
+// TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne's
+// own 600ms real-wall-clock checkpoint -- independently re-derived while
+// fixing cleat#3258's round-6 vacuity: that test has been silently
+// vacuous since ROUND 5 added this constant, a full round before ROUND 6's
+// own (separate) vacuity. Zeroed only by that one test, which predates
+// this constant and is not testing it; left real everywhere else,
+// including TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack,
+// which exists specifically to test that this constant is present.
+var reclaimSlack = 1 * time.Second
 
 // ---------------------------------------------------------------------------
 // Suspected database stall detection (cleat#2006)
@@ -4664,13 +5065,16 @@ type stallSuppressionDecision struct {
 // Lower bound: missedBeatThreshold (detection latency -- how long a stall
 // has to run before NoRecentHeartbeat can even become true) plus
 // reclaimAfter (the suppression window itself, evaluate's `reclaimAfter`
-// argument). At the 5s heartbeat default, 8.5s + 14.5s = 23s.
+// argument). At the 5s heartbeat default, 8.5s + 47s = 55.5s (cleat#3258
+// ROUND 6 raised reclaimAfter's own default from 14.5s; re-derive with
+// `missedBeatThreshold(5*time.Second) + minimumReclaimAfter(5*time.Second)`
+// before trusting this number again).
 //
 // Upper bound: the lower bound plus one full reaper tick interval
 // (max(heartbeat, 10s)) -- reapOnce only samples StaleSetShape once per
 // tick, so a stall that begins just after a tick fires is not observed,
 // and therefore not detected, until nearly a full interval later. At the
-// default, 23s + 10s = 33s.
+// default, 55.5s + 10s = 65.5s.
 //
 // A stall shorter than the lower bound is always protected; a stall
 // longer than the upper bound is never protected (BoundHit fires and
@@ -4698,7 +5102,8 @@ func stallProtectionUpper(heartbeat, reclaimAfter time.Duration) time.Duration {
 // full R because the row's own individual staleness only just crossed the
 // gate as the bound was reached, then one more reaper tick (interval,
 // floored at 10s) before the next reapOnce actually reclaims it. At the
-// heartbeat default this is 2*14.5s + 10s = 39s -- worse than the pre-#2006
+// heartbeat default this is 2*47s + 10s = 104s (cleat#3258 ROUND 6; was
+// 2*14.5s + 10s = 39s) -- worse than the pre-#2006
 // R alone, and deliberately so: the alternative is reclaiming a run that is
 // still alive, which #2166 exists to prevent.
 //
@@ -4823,6 +5228,16 @@ func (w *Worker) stallEpisodeFor(unitName string) *stallSuppressionEpisode {
 // invariant: a sane minimum wait even at a very low --heartbeat, where the
 // invariant itself might compute something smaller. It only ever raises the
 // value minimumReclaimAfter already guarantees is safe.
+//
+// ROUND 6 (cleat#3258): under today's constants this floor cannot bind at
+// all. maxTolerableStall (30s) plus mssqlDrainSlack (5s) alone already
+// exceed it, so minimumReclaimAfter(heartbeat) is bounded below by roughly
+// 40s for every heartbeat, not only large ones -- TestTheRegistryOutlivesTheWindowAReaperCanAskIn
+// found this directly (a_holder_that_answers_keeps_its_run_for_one_more_window_test.go)
+// when the lease/reclaim-window equality it used to assert at low
+// heartbeats stopped holding. Kept rather than removed: it is a backstop
+// for a smaller maxTolerableStall or mssqlDrainSlack than today's, not
+// dead code to delete just because today's constants never reach it.
 func reclaimWindow(reclaimTimeout, heartbeat time.Duration) time.Duration {
 	if reclaimTimeout > 0 {
 		return reclaimTimeout
@@ -5127,9 +5542,27 @@ func (w *Worker) askHolders(ctx context.Context, questions []holderQuestion, ask
 // reason, as forwardToService's client. See service_egress.go.
 func (w *Worker) askHolder(ctx context.Context, address, runID string, generation int64) bool {
 	client := &http.Client{
-		// A backstop only. The ask phase's own context (askHolders) is the real
-		// bound, at one dbCallDeadline for every holder together.
-		Timeout:   30 * time.Second,
+		// A backstop only, NOT derived from minimumReclaimAfter -- see
+		// durableCallClientTimeout's doc comment on why this site is the
+		// opposite direction from the other four: a longer timeout here would
+		// make the reaper wait longer before concluding a holder is gone,
+		// which is backwards for the window's own mechanism. The ask phase's
+		// own context (askHolders) is the real bound, at one dbCallDeadline
+		// for every holder together -- askHolders wraps ctx in exactly that
+		// (context.WithTimeout(ctx, w.dbCallDeadline())), so this backstop
+		// only has to outlast THAT, not minimumReclaimAfter.
+		//
+		// cleat#3279: a bare 30s literal here was WRONG, independent of
+		// ROUND 6's window widening -- dbCallDeadlineFor(heartbeat) is
+		// heartbeat/2 with a 2s floor, and the largest --heartbeat
+		// validateHeartbeat allows (150s, exclusive) makes it ~75s, past this
+		// backstop's old 30s. At any --heartbeat above ~60s the "backstop
+		// only" claim above was already false: THIS Timeout, not askCtx's,
+		// would have fired first. 2x keeps the backstop strictly above
+		// askCtx's own deadline at every valid heartbeat, by construction,
+		// rather than by a literal nobody will remember to re-check against
+		// validateHeartbeat's ceiling.
+		Timeout:   2 * w.dbCallDeadline(),
 		Transport: &http.Transport{DialContext: w.serviceEgressGuard(ctx, "http://"+address).DialContext},
 	}
 	held, _ := askInternalHolds(ctx, client, address, w.internalAuthSecret, runID, generation)
@@ -5564,8 +5997,9 @@ func (w *Worker) scheduleLoop() {
 
 				// Everything below this line runs against the schedule's OWN
 				// tenant, not the worker's. That is the whole bargain of the
-				// cross-tenant read above: one widened query finds the due set,
-				// and the firing itself -- the definition lookup, the overlap
+				// cross-tenant read above: the due set is read tenant by tenant,
+				// each read under that tenant's own RLS context, and the firing
+				// itself -- the definition lookup, the overlap
 				// check, the run, the compare-and-swap -- is scoped again
 				// immediately. Nothing downstream of here sees another tenant.
 				tenantID := sch.TenantID
@@ -6033,6 +6467,127 @@ func (w *Worker) retentionLoop(retentionDays, completedWorkflowRetentionDays, de
 			w.healthTracker.recordRun("retention")
 			w.runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
 		}
+	}
+}
+
+// schemaCheckDeadline bounds schemaCheckLoop's Verify call. Longer than
+// dbCallDeadline() on purpose: Verify issues several reads (the core
+// tracking table, plugin.VerifyMigrations' own per-plugin checks), not the
+// single bounded call that family of constants is sized for.
+const schemaCheckDeadline = 10 * time.Second
+
+// schemaCheckLoop periodically re-verifies the schema against this binary,
+// the same check main() runs once at boot (cleat#2117) -- cleat#2264: a
+// database restored from an older backup, or rolled back, while workers are
+// already running is otherwise never noticed, because nothing after boot
+// looks again. Feeds /readyz's schema_behind reason; does not affect
+// /livez, because a schema mismatch is a reason to stop sending this worker
+// traffic, not evidence the process itself is stuck.
+//
+// TICK-FIRST, not sweep-first, matching the loop registry's own house
+// style (see retentionLoop's comment) -- unlike retention, there is nothing
+// to gain from running at t=0: a worker that got this far already passed
+// the startup check this loop re-runs.
+func (w *Worker) schemaCheckLoop() {
+	defer w.wg.Done()
+	if w.schemaMigrator == nil {
+		// Built without the full main() setup (most unit tests, and any
+		// embedding that never configured one) -- nothing to check against.
+		//
+		// Registered with the health tracker HERE, not unconditionally at
+		// startup, for the same reason versionGCLoop's identical guard is
+		// (cleat#2004): initLoopCtxUnmonitored("schema_check") gives
+		// launchLoop a context to start this goroutine with regardless, but
+		// a Worker with no migrator must not be reported as a stale loop for
+		// a check that was never going to run.
+		return
+	}
+	interval := w.schemaCheckInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	w.healthTracker.registerLoop("schema_check")
+	w.healthTracker.setInterval("schema_check", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.getLoopCtx("schema_check").Done():
+			return
+		case <-ticker.C:
+			w.healthTracker.recordRun("schema_check")
+			w.runSchemaCheck()
+		}
+	}
+}
+
+// runSchemaCheck is schemaCheckLoop's single tick, split out so a test can
+// call it directly without waiting on a ticker.
+func (w *Worker) runSchemaCheck() {
+	ctx, cancel := context.WithTimeout(w.ctx, schemaCheckDeadline)
+	defer cancel()
+
+	err := verifySchema(ctx, w.schemaMigrator, w.db, plugin.Dialect(w.dbDialect), w.plugList, w.schemaName,
+		func(msg string, args ...any) {
+			w.logger.WarnContext(context.Background(), msg, append([]any{"worker_id", w.id}, args...)...)
+		})
+
+	var behindErr *migration.SchemaBehindError
+	var pluginBehindErr *plugin.PluginSchemaBehindError
+	switch {
+	case errors.As(err, &behindErr):
+		w.schemaStateMu.Lock()
+		w.schemaLastCheck = behindErr.State
+		w.schemaLastErr = err
+		w.schemaStateMu.Unlock()
+		w.schemaBehind.Store(true)
+		w.logger.ErrorContext(context.Background(), "readiness check: "+err.Error(), "worker_id", w.id)
+	case errors.As(err, &pluginBehindErr):
+		w.schemaStateMu.Lock()
+		w.schemaLastErr = err
+		w.schemaStateMu.Unlock()
+		w.schemaBehind.Store(true)
+		w.logger.ErrorContext(context.Background(), "readiness check: "+err.Error(), "worker_id", w.id)
+	case err != nil:
+		// Could not establish either way -- a connectivity blip, most likely,
+		// already covered by /readyz's own database_unreachable reason via
+		// dbReach. Leaving schemaBehind as it was avoids claiming a schema
+		// finding this tick did not actually make.
+		w.schemaStateMu.Lock()
+		w.schemaLastErr = err
+		w.schemaStateMu.Unlock()
+		w.logger.WarnContext(context.Background(), "could not re-verify the schema version", "worker_id", w.id, "error", err)
+	default:
+		// Current. schemaLastCheck is left at whatever the last BEHIND
+		// finding (if any) recorded -- verifySchema's happy path does not
+		// hand back a SchemaState, and this tick is not worth a second
+		// Verify call just to refresh an admin-route diagnostic nobody
+		// gates on. schemaLastErr clearing is what matters: it is what
+		// says the state below is current and good.
+		w.schemaStateMu.Lock()
+		w.schemaLastErr = nil
+		w.schemaStateMu.Unlock()
+		w.schemaBehind.Store(false)
+	}
+}
+
+// schemaSnapshot is runSchemaCheck's cached verdict, read by healthReport() on
+// every /readyz and /api/admin/health request without touching the database --
+// the same "state already in memory" rule dbReach.snapshot() follows.
+type schemaSnapshot struct {
+	Behind bool
+	Err    error
+	State  migration.SchemaState
+}
+
+func (w *Worker) schemaSnapshot() schemaSnapshot {
+	w.schemaStateMu.Lock()
+	defer w.schemaStateMu.Unlock()
+	return schemaSnapshot{
+		Behind: w.schemaBehind.Load(),
+		Err:    w.schemaLastErr,
+		State:  w.schemaLastCheck,
 	}
 }
 
@@ -7475,29 +8030,30 @@ func (w *Worker) rotatingClaimAvailability() error {
 
 // dueSchedules reads the schedules that are ready to fire.
 //
-// With claimAcrossTenants set it reads for every tenant in one query rather
-// than polling each separately -- the same bargain claimGeneral makes, and the
-// half that makes a non-default tenant's cron actually fire. 023 lets the
-// dispatch loop CLAIM another tenant's workflow; without this, nothing ever
+// With claimAcrossTenants set it reads every tenant's due schedules, one tenant
+// at a time through a store scoped to that tenant (dueSchedulesByTenant) -- the
+// half that makes a non-default tenant's cron actually fire. The claim lets the
+// dispatch loop pick up another tenant's workflow; without this, nothing ever
 // enqueues one for it to claim, because the loop that would fire the schedule
 // cannot see the schedule.
 //
-// The widened view covers this read and nothing after it. scheduleLoop resolves
+// Each read happens under that tenant's own RLS context, so no tenant's
+// schedules are ever visible to another's, and scheduleLoop resolves
 // storeForTenant(sch.TenantID) before its first store call and runs the whole
 // firing through that.
 //
-// The provisioning gap is answered the same way as the claim's, and separately
-// from it: 024 is a different migration from 023, so a deployment can have one
-// and not the other. A store that cannot read across tenants warns once and
-// falls back to its own tenant's schedules -- the pre-existing behaviour --
-// rather than failing the loop, because a missing GRANT should narrow the
-// worker rather than stop it firing anything at all.
+// A worker that cannot rotate -- no store factory, or a store that cannot
+// enumerate tenants (MySQL, a sharded worker) -- warns once and falls back to
+// its own tenant's schedules, the pre-existing behaviour, rather than failing
+// the loop. This used to be a provisioning question (two migrations, two
+// grants, either of which could be missing); it is now a property of the
+// worker, so the answer is the same on every deployment of that shape.
 func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 	if w.claimAcrossTenants {
-		// The per-tenant read is tried FIRST, and is the default, for the same
-		// reason the rotating claim is: it needs no database-side grant, so a
-		// deployment that never applied 024 -- or cannot, because BYPASSRLS is
-		// ungrantable on managed PostgreSQL -- still fires every tenant's cron.
+		// The per-tenant read is tried FIRST, and is the only mechanism, for
+		// the same reason the rotating claim is: it needs no database-side
+		// grant, so managed PostgreSQL -- where BYPASSRLS is ungrantable --
+		// fires every tenant's cron like any other.
 		//
 		schedules, err := w.dueSchedulesByTenant()
 		if !errors.Is(err, errRotatingClaimUnavailable) {
@@ -7515,12 +8071,12 @@ func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 
 // claimGeneral claims the next batch of runnable work.
 //
-// With claimAcrossTenants set it claims for every tenant in one query rather
-// than polling each separately, which is the whole reason the cross-tenant path
-// exists: one round trip per tick regardless of how many tenants there are.
-// Each claimed workflow then executes against a store scoped to its OWN tenant
-// -- see storeForTenant -- so the widened view lasts exactly as long as the
-// claim.
+// With claimAcrossTenants set it claims across tenants by rotation
+// (claimRotating): one enumeration of the tenant list per tick, then up to
+// --claim-tenants-per-tick per-tenant claims, each through a store scoped to
+// that tenant. Each claimed workflow then executes against a store scoped to
+// its OWN tenant -- see storeForTenant -- so no claim or execution ever runs in
+// a tenant's context but its own.
 //
 // A worker that cannot rotate -- no store factory, or a store that cannot
 // enumerate tenants -- falls back rather than failing (errRotatingClaimUnavailable,
@@ -7544,9 +8100,9 @@ func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
 		// The rotating claim is tried FIRST, and is the default, because it
 		// needs no database-side grant: it enumerates tenants from
 		// admin.tenants -- which carries no RLS -- and then claims within each
-		// through that tenant's own store. A deployment that never applied 023
-		// still gets cross-tenant dispatch, and one that did gets a fair share
-		// per tenant instead of whoever has the oldest backlog.
+		// through that tenant's own store. Every deployment gets cross-tenant
+		// dispatch and a fair share per tenant, instead of whoever has the
+		// oldest backlog.
 		//
 		wfs, err := w.claimRotating(limit)
 		if !errors.Is(err, errRotatingClaimUnavailable) {

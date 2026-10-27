@@ -1147,5 +1147,230 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE ingested_events DROP COLUMN dispatch_processed;
 			`,
 		},
+		{
+			// cleat#2652: every ORDER BY in this file that means "oldest
+			// first" sorted on received_at, which is NOW()/SYSUTCDATETIME()
+			// taken at transaction-START, not at commit. Two transactions
+			// that start in one order can commit in the other, and the
+			// later-committing one is then visible with the EARLIER
+			// timestamp -- a reader can observe it first even though it
+			// became visible second. This is the same gap workflow_signals
+			// already has a worked answer for: PollSignal (engine/
+			// store_signals.go) orders by the surrogate key alone --
+			// "ORDER BY id LIMIT 1 is the whole of the FIFO guarantee" -- not
+			// by any timestamp column. seq mirrors that idiom: a value
+			// assigned once, at the engine that executes the INSERT, in the
+			// order INSERT statements are issued -- not by a clock any two
+			// racing transactions can read out of commit order.
+			//
+			// This is INSERT order, not COMMIT order, and does not claim to
+			// be -- the issue itself names that gap and accepts it: two
+			// concurrent inserters can still commit in the opposite order
+			// their seq values would suggest. What it fixes is the
+			// WALL-CLOCK non-monotonicity above, which received_at cannot
+			// avoid at any isolation level because the clock read happens
+			// before either transaction's commit is ordered at all.
+			//
+			// Both ORDER BY received_at claim queries move onto seq here --
+			// queryOldestUnprocessedEventForClaim, which the issue names
+			// directly, and queryUnprocessedEvents, which orders the same
+			// table by the same broken column for the same reason and would
+			// otherwise be the "two queries differing in ordering, one fixed
+			// one not" trap this file's own Version 7/8 history exists to
+			// avoid repeating. Each query's backing index gets seq as its
+			// new trailing column, matching its own new ORDER BY --
+			// idx_ingested_events_claim and idx_ingested_events_dispatch.
+			// idx_ingested_events_unprocessed (Version 1) is NOT touched:
+			// cleat#2870 defers its removal, by the owner's own ruling, to
+			// ride with a different migration, and nothing added here
+			// depends on it changing.
+			//
+			// Existing rows get a seq value from this migration's own
+			// ALTER/backfill, assigned in whatever order the dialect visits
+			// rows while adding the column -- not necessarily received_at
+			// order. That is acceptable: the guarantee this column exists
+			// to provide is about ordering among rows inserted AFTER this
+			// migration runs, which is this issue's whole subject: it does
+			// not promise to retroactively fix the ordering of history.
+			Version: 9,
+			Up: `
+				CREATE SEQUENCE IF NOT EXISTS ingested_events_seq_seq;
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS seq BIGINT NOT NULL DEFAULT nextval('ingested_events_seq_seq');
+				ALTER SEQUENCE ingested_events_seq_seq OWNED BY ingested_events.seq;
+
+				DROP INDEX IF EXISTS idx_ingested_events_claim;
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, seq) WHERE NOT processed;
+
+				DROP INDEX IF EXISTS idx_ingested_events_dispatch;
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_dispatch ON ingested_events(dispatch_processed, seq) WHERE NOT dispatch_processed;
+			`,
+			// Idempotency via information_schema, the same discipline
+			// Version 6/7/8 established for this table: MySQL DDL is not
+			// transactional, so a migration that failed partway must be
+			// safe to re-run. AUTO_INCREMENT requires a key on the same
+			// ALTER TABLE that adds it -- the inline UNIQUE below satisfies
+			// that; MySQL creates the backing index itself.
+			UpMySQL: `
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'seq');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN seq BIGINT NOT NULL AUTO_INCREMENT UNIQUE', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_claim');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_claim ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_claim');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, processed, seq)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_dispatch');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_dispatch ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_dispatch');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, seq)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'seq')
+				ALTER TABLE ingested_events ADD seq BIGINT IDENTITY(1,1) NOT NULL;
+
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_claim' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_claim ON ingested_events;
+
+				-- EXEC(...), not a plain statement: seq may have just been
+				-- added by the conditional ALTER above, in the SAME BATCH,
+				-- on the runner (tests/plugin-harness) that does not split
+				-- on statement boundaries -- the same hazard Version 6/8's
+				-- own comments document at length: a plain reference
+				-- compiles against the catalog as it stood before the
+				-- batch started and fails "Invalid column name 'seq'".
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_claim' AND object_id = OBJECT_ID('ingested_events'))
+				EXEC('CREATE INDEX idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, seq) WHERE processed = 0');
+
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_dispatch ON ingested_events;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
+				EXEC('CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, seq) WHERE dispatch_processed = 0');
+			`,
+			// Reverses to the Version 8 shape. As with every other Down in
+			// this file, this is for a migration applied and immediately
+			// rolled back in development, not for undoing a deployment that
+			// has taken claim or dispatch traffic ordered by seq.
+			Down: `
+				DROP INDEX IF EXISTS idx_ingested_events_claim;
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at) WHERE NOT processed;
+
+				DROP INDEX IF EXISTS idx_ingested_events_dispatch;
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE NOT dispatch_processed;
+
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS seq;
+				DROP SEQUENCE IF EXISTS ingested_events_seq_seq;
+			`,
+			DownMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_claim');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_claim ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_claim');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, processed, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_dispatch');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_dispatch ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_dispatch');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'seq');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE ingested_events DROP COLUMN seq', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_claim' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_claim ON ingested_events;
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_claim' AND object_id = OBJECT_ID('ingested_events'))
+				CREATE INDEX idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at) WHERE processed = 0;
+
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_dispatch ON ingested_events;
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
+				CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE dispatch_processed = 0;
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'seq')
+				ALTER TABLE ingested_events DROP COLUMN seq;
+			`,
+		},
+		{
+			// cleat#2870: drops idx_ingested_events_unprocessed (Version 1,
+			// `(processed, received_at)`), which Version 8's own comment
+			// already established nothing depends on for correctness or
+			// performance -- see that comment, point 3, for the query-by-
+			// query accounting. This migration does not re-derive that; it
+			// only re-checks it, since the issue's own body asked for a
+			// re-check rather than a re-trust: a NEW query could have
+			// started depending on it between 2026-09-30 and whenever this
+			// runs.
+			//
+			// Re-checked directly against develop's tip rather than
+			// assumed: queryOldestUnprocessedEventForClaim's FORCE INDEX
+			// (queries.go) targets idx_ingested_events_claim, not this one;
+			// queryCandidateUnprocessedEventIDsMSSQL and
+			// queryClaimEventByIDMSSQL (the MSSQL claim path, cleat#2821/
+			// #2866) lead with tenant_id/event_type/key1/key2/key3 or target
+			// by primary key, neither of which this index serves;
+			// queryUnprocessedEvents reads dispatch_processed, served by
+			// idx_ingested_events_dispatch; and webhookingest's source-
+			// deletion cancellation (routes.go, cleat#2649) filters on
+			// tenant_id/key1/processed with no ORDER BY, which gains
+			// nothing from an index ordered by received_at. Still nothing
+			// depends on it.
+			//
+			// Owner ruling history, since this took three passes to settle
+			// (see cleat#2870's own comments for the verbatim record):
+			// 2026-09-30 said droppable but ONLY as a rider on a migration
+			// with its own reason to touch ingested_events, not standalone;
+			// 2026-10-09 reconciled a later "drop it" against that rider
+			// and the owner chose "2b" -- keep the rider; 2026-10-12 the
+			// owner waived the rider for this index specifically and said
+			// "do the standalone drop". This migration is that drop, and it
+			// has no reason of its own to touch this table beyond it --
+			// which is deliberate, per the final ruling, not an oversight
+			// of the earlier one.
+			Version: 10,
+			Up:      `DROP INDEX IF EXISTS idx_ingested_events_unprocessed;`,
+			// Idempotency via information_schema, the same discipline
+			// Version 6/7/8/9 established for this table: MySQL DDL is not
+			// transactional, so a migration that failed partway must be
+			// safe to re-run.
+			UpMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_unprocessed');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_unprocessed ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_unprocessed' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_unprocessed ON ingested_events;
+			`,
+			// Reverses to the Version 1 shape -- the exact per-dialect
+			// CREATE text Version 1 established for this index, unchanged
+			// since no migration between 1 and 9 ever touched it. As with
+			// every other Down in this file, this is for a migration
+			// applied and immediately rolled back in development, not for
+			// undoing a deployment that has run without this index.
+			Down: `CREATE INDEX IF NOT EXISTS idx_ingested_events_unprocessed ON ingested_events(processed, received_at) WHERE NOT processed;`,
+			DownMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_unprocessed');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_unprocessed ON ingested_events(processed, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_unprocessed' AND object_id = OBJECT_ID('ingested_events'))
+				CREATE INDEX idx_ingested_events_unprocessed ON ingested_events(processed, received_at) WHERE processed = 0;
+			`,
+		},
 	}
 }

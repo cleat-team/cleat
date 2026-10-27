@@ -121,6 +121,9 @@ func TestWorkflowClaimsAboutRequiredChecksAreTrue(t *testing.T) {
 		for _, m := range workflowNameRe.FindAllStringSubmatch(string(data), -1) {
 			candidateNames[strings.Trim(strings.TrimSpace(m[1]), `"'`)] = struct{}{}
 		}
+		for _, name := range collectStatusContexts(string(data)) {
+			candidateNames[name] = struct{}{}
+		}
 		for i, l := range strings.Split(string(data), "\n") {
 			if !strings.Contains(l, "#") {
 				continue
@@ -225,6 +228,55 @@ func TestWorkflowClaimsAboutRequiredChecksAreTrue(t *testing.T) {
 // four spaces and the workflow's own name at column zero. A claim about a check must
 // name one of these; anything else is a sentence that parsed as a name.
 var workflowNameRe = regexp.MustCompile(`(?m)^\s{0,4}name:\s*(\S.*?)\s*$`)
+
+// statusContextLineRe matches a `context=` argument on one line, quoted or not --
+// the same three-shape rule as scripts/check-workflow-guards.py's STATUS_CONTEXT_RE,
+// because a context name is a human-readable string and a bare \S+ class silently
+// truncates "Closing References" to "Closing" at the first space.
+var statusContextLineRe = regexp.MustCompile(`context=(?:"([^"]+)"|'([^']+)'|(\S+))`)
+
+// collectStatusContexts returns every context name posted via the classic Statuses
+// API in this file's text -- a SECOND, equally legitimate way a required context
+// resolves, alongside a job's own `name:` (cleat#2696).
+//
+// WHY A WINDOW, NOT A SINGLE-LINE MATCH. scripts/check-workflow-guards.py's Python
+// equivalent operates on one already-YAML-parsed `run:` string, so `/statuses/` and
+// `context=` can be required on the SAME string even though they land on different
+// physical lines inside it. This function works over raw file text one line at a
+// time instead (matching every other scan in this file), so a `/statuses/` line and
+// its `context=` argument are typically several lines apart -- `gh api
+// ".../statuses/$SHA"` on one line, `-f context="..."` a few lines later in the same
+// shell block. 12 lines is comfortably more than any step in this repo's workflows
+// takes to get from the API call to its last `-f` flag; anchoring on `/statuses/` at
+// all (rather than matching `context=` alone) is what keeps this from matching
+// unrelated shell text, the same reasoning the Python version gives for requiring
+// both.
+func collectStatusContexts(data string) []string {
+	lines := strings.Split(data, "\n")
+	var names []string
+	for i, l := range lines {
+		if !strings.Contains(l, "/statuses/") {
+			continue
+		}
+		end := i + 12
+		if end > len(lines) {
+			end = len(lines)
+		}
+		for _, w := range lines[i:end] {
+			m := statusContextLineRe.FindStringSubmatch(w)
+			if m == nil {
+				continue
+			}
+			for _, g := range m[1:] {
+				if g != "" {
+					names = append(names, g)
+					break
+				}
+			}
+		}
+	}
+	return names
+}
 
 // parseRequiredCheckClaim returns the check name a line claims, and whether the
 // claim is that it is NOT required. An empty name means the line is not a claim in

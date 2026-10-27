@@ -93,8 +93,9 @@ func membershipStaleAfter(heartbeat time.Duration) time.Duration {
 //
 // SWEEPING AT THE LEASE WOULD DELETE EXACTLY THE ADDRESS ABOUT TO BE NEEDED,
 // and this is not a margin problem, it is a certainty. At the default 5s
-// heartbeat the lease is 10s and reclaimAfter is 14.5s, so a holder's row is
-// gone 4.5s before its run is even eligible, and stays gone. More generally, at
+// heartbeat the lease is 10s and reclaimAfter is 47s (cleat#3258 ROUND 6;
+// was 14.5s), so a holder's row would be gone 37s before its run is even
+// eligible, and would stay gone. More generally, at
 // every heartbeat above 2s the derived reclaim window under reclaimWindow's
 // arithmetic is strictly longer than the lease; at 2s and below the two are
 // equal, because reclaimWindow's own 10s floor binds there -- and equal is not

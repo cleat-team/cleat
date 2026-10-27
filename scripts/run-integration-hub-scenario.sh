@@ -735,7 +735,23 @@ else
   # after a SIGKILL anyway.
   PRE_RESTART_ID="$(worker_container_id 2>/tmp/ih-pre-id.err)" || PRE_RESTART_ID=""
 
-  if ! "${COMPOSE[@]}" up -d --force-recreate cleat-worker >/tmp/ih-restart.log 2>&1; then
+  # cleat#2968: --no-deps, because without it `up -d` also re-runs
+  # cleat-worker's two `service_completed_successfully` dependencies --
+  # `migrate` and `app-role` -- even though they already completed once,
+  # earlier in this same scenario, well before the kill above touched them.
+  # Measured: ~16s of this step was that re-run, not the worker coming back.
+  #
+  # Skipping them here is a claim about THIS restart specifically, not about
+  # compose dependencies in general: cleat-worker does not trust "the
+  # dependency container exited 0" as its evidence that the schema is correct
+  # -- cmd/cleat-worker/main.go runs its own verifySchema against --migrate-db
+  # on every startup, re-run or not -- so there is nothing downstream of this
+  # restart whose correctness depends on migrate/app-role having just acted
+  # again. Confirmed locally: with --no-deps, migrate and app-role's container
+  # IDs are unchanged (they are not touched at all) and the worker starts,
+  # passes its own schema verification, and answers /healthz, identically to
+  # the with-deps path.
+  if ! "${COMPOSE[@]}" up -d --force-recreate --no-deps cleat-worker >/tmp/ih-restart.log 2>&1; then
     echo "FAIL: could not restart the worker" >&2
     cat /tmp/ih-restart.log >&2
     failures=$((failures + 1))

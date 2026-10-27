@@ -85,8 +85,15 @@ func TestAClaimDefersARunWhoseConcurrencyKeyIsHeld(t *testing.T) {
 			// row from a session with no tenant context, so an unpinned UPDATE
 			// matches zero rows and reports success. The RowsAffected check
 			// below is what turns that into a failure instead of a silent pass.
+			// On PostgreSQL both concurrency_key (the text) and
+			// concurrency_key_hash are written to workflow_leases, not
+			// workflow_instances -- ClaimWorkflows' candidate predicate has
+			// read them from workflow_leases exclusively since Phase 3 step 3
+			// piece B (cleat#3245), and cleat#3245 B4a narrowed this fixture's
+			// seed to match, which is also why its shape now matches the
+			// mssql arm below rather than standing apart from it.
 			seed := map[string]string{
-				"postgres": `UPDATE workflow_instances SET concurrency_key = $1,
+				"postgres": `UPDATE workflow_leases SET concurrency_key = $1,
 				        concurrency_key_hash = (SELECT key_hash FROM concurrency_keys WHERE key_text = $2)
 				  WHERE id = $3`,
 				"mysql": `UPDATE workflow_instances SET concurrency_key = ?,

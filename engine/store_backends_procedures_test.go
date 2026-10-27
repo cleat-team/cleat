@@ -45,30 +45,36 @@ import (
 // contradicted by a suite that still passes. That happened: the query_state
 // fix below was written, applied to a real database, verified over HTTP, and
 // its own engine test still failed, because the harness was running 004.
-// ONE entry since the cleat#2059 rebaseline, and that is the whole point of it.
-// The list used to run to ten files, each redefining the routine on top of the
-// last, and this test exists because a missing entry made the harness keep
-// running an older definition while every test still passed. 003 now carries the
-// FINAL body -- generated from a pg_dump of the fully-migrated database, so it is
-// the last definition by construction rather than by taking the last of ten by
-// hand. There is no longer a sequence to keep in order.
+//
+// This list was ONE entry after the cleat#3347 re-compaction, for the same
+// reason the MySQL list below is: 003 now carries the FINAL body, generated from a
+// pg_dump of a database built by the whole chain through 021, so it is the
+// last definition by construction rather than by replaying 014/017/019/021
+// on top of it. The list used to run to five files, each redefining the
+// routine on top of the last -- cleat#3347 is what finally folded them in
+// and deleted the files; TestProcedureMigrationListsAreComplete is what
+// caught the four stale entries this left behind the first time it ran
+// against the re-compacted tree.
 //
 // TestProcedureMigrationListsAreComplete still checks this against the
 // directory, so it stays honest: if a later migration defines the routine, the
-// list must name it.
+// list must name it. The list ran to three entries while cleat#3245 B1b (005)
+// and B3c (007) redefined finalize_workflow_status on top of 003; B5 folded both
+// into the regenerated 003 and deleted them, so it is one entry again.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
-	"014_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 }
 
-// Same shape as the Postgres list above, for the same reason: MySQL was
-// compacted in cleat#2433 and 003_procedures.sql is now generated from a
-// mysqldump of the fully-migrated database, so it carries the FINAL body by
-// construction. There is no longer a sequence to keep in order -- the nine
-// migrations this used to name are folded into it and deleted.
+// ONE entry since the cleat#3348 re-compaction, for the same reason the
+// Postgres list above has one: 003 now carries the FINAL body, generated
+// from a database built by the whole chain through 012, so it is the last
+// definition by construction rather than by replaying 011 on top of it.
+// MySQL's FIRST compaction (cleat#2433) left this list at two entries
+// because 011_a_promise_resolved_mid_segment_wakes_the_workflow.sql was
+// added to the chain afterward and redefined the routine without ever being
+// folded in -- cleat#3348 is what finally did that, and deleted the file.
 var mysqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"011_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 }
 
 // ONE entry since the cleat#2434 rebaseline, for the same reason the Postgres
@@ -77,9 +83,12 @@ var mysqlProcedureMigrations = []string{
 // than by taking the last of nine in filename order. applyMSSQLProcedures
 // applies only the final entry, so the entries that used to be here were being
 // replayed one after another to arrive at a body 003 already contains.
+//
+// Back to ONE entry again after cleat#3349's re-compaction: 013 (added by
+// cleat#3171, the brief second entry here) is now folded into the
+// regenerated 003_procedures.sql and no longer exists as a separate file.
 var mssqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"013_a_promise_resolved_mid_segment_wakes_the_workflow.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup

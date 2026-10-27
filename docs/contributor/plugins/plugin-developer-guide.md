@@ -95,7 +95,7 @@ its own field):
 ```go
 type Environment struct {
     DB            PluginDB               // scoped query interface -- not *sql.DB
-    Mux           ServeMux               // *http.ServeMux on the host; register HTTP routes
+    Mux           Dispatcher             // ServeHTTP only -- register routes via HasRoutes.RegisterRoutes(Router) instead
     Config        []byte                 // your plugin's config section (JSON/YAML/whatever)
     Logger        *slog.Logger           // structured logger
     TenantID      string                 // the tenant this call is scoped to
@@ -114,6 +114,14 @@ type Environment struct {
 > who it is serving and what SQL it may write, and `HTTPTransport` is not
 > optional -- a plugin that reaches the network by any other means bypasses
 > the egress guard. See cleat#2711.
+>
+> Corrected again 2026-10-09: `Mux` was `ServeMux` (a `*http.ServeMux` alias),
+> which let a plugin call `env.Mux.Handle(...)` to register a route directly
+> on the host's real mux from `Init`, bypassing the body-size limit every
+> route registered through `RegisterRoutes(Router)` gets. `Mux` is now
+> `Dispatcher` -- `ServeHTTP` only, for a plugin's own tests to dispatch an
+> already-registered request -- and registering routes is `RegisterRoutes`'s
+> job, same as before. Breaking change, pre-authorized; see cleat#2279 item 3.
 
 No wrappers, no abstractions for `DB`: it is a narrower interface
 (`Begin`/`Exec`/`Query`/`QueryRow`/`Ping`) scoped to your plugin's declared
@@ -332,21 +340,6 @@ exit is worse than a failed cleanup.
 Not called if the process is killed (`SIGKILL`, OOM), and **not called for a plugin whose `Init`
 failed** — the same rule `HasHealth` follows. If your `Init` returns an error it owns the cleanup of
 whatever it opened, because the worker cannot see what state it left you in.
-
-### HasCommands — CLI subcommands
-
-```go
-func (p *Plugin) RegisterCommands() []plugin.Command {
-    return []plugin.Command{{
-        Name:        "my-plugin-do-thing",
-        Description: "Do the thing from the command line",
-        Run: func(args []string) error {
-            // Do CLI work
-            return nil
-        },
-    }}
-}
-```
 
 ## Patterns Learned from the Blobstore Plugin
 

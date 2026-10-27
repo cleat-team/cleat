@@ -28,6 +28,7 @@ func TestScaffoldedGoFilesHaveNoBuildConstraint(t *testing.T) {
 		scaffold func(string)
 	}{
 		{"agent", scaffoldAgent},
+		{"agent-workflow", scaffoldAgentWorkflow},
 		{"workflow", scaffoldWorkflow},
 		{"basic", scaffoldBasic},
 		{"fullstack", scaffoldFullstack},
@@ -107,12 +108,13 @@ func TestEveryScaffoldIsCoveredByTheBuildConstraintTable(t *testing.T) {
 	// Kept in sync by hand ON PURPOSE: adding a name here is a deliberate act,
 	// which is the property the table above lacks.
 	covered := map[string]bool{
-		"scaffoldAgent":       true,
-		"scaffoldWorkflow":    true,
-		"scaffoldBasic":       true,
-		"scaffoldFullstack":   true,
-		"scaffoldAgentPython": true, // exempt: scaffolds Python, no Go files
-		"scaffoldBasicGoMod":  true, // exempt: returns a go.mod string, no Go source, no build tag
+		"scaffoldAgent":         true,
+		"scaffoldAgentWorkflow": true,
+		"scaffoldWorkflow":      true,
+		"scaffoldBasic":         true,
+		"scaffoldFullstack":     true,
+		"scaffoldAgentPython":   true, // exempt: scaffolds Python, no Go files
+		"scaffoldBasicGoMod":    true, // exempt: returns a go.mod string, no Go source, no build tag
 	}
 	for _, m := range declared {
 		if !covered[m[1]] {

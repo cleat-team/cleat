@@ -160,7 +160,7 @@ func (s *PostgresStore) successorOfRun(ctx context.Context, id string) (string, 
 	defer func() { _ = tx.Rollback() }()
 
 	return successorScan(tx.QueryRowContext(ctx,
-		`SELECT id FROM workflow_instances WHERE continued_from = $1 AND tenant_id = $2`,
+		`SELECT id FROM workflow_leases WHERE continued_from = $1 AND tenant_id = $2`,
 		id, s.tenantID))
 }
 
@@ -171,7 +171,16 @@ func (s *MySQLStore) successorOfRun(ctx context.Context, id string) (string, err
 }
 
 func (s *MSSQLStore) successorOfRun(ctx context.Context, id string) (string, error) {
-	return successorScan(s.db.QueryRowContext(ctx,
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return "", fmt.Errorf("continue-as-new successor lookup: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	return successorScan(tx.QueryRowContext(ctx,
 		`SELECT id FROM workflow_instances WHERE continued_from = @p1 AND tenant_id = @p2`,
 		id, s.tenantID))
 }

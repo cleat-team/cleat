@@ -40,13 +40,17 @@ func TestTheReaperDoesNotReclaimEverythingAtOnce(t *testing.T) {
 	ids := make([]string, total)
 	for i := range ids {
 		ids[i] = fmt.Sprintf("reap-bound-%d-%d", time.Now().UnixNano(), i)
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: ids[i], TenantID: store.tenantID, DefName: "test", DefVersion: 1,
+			Status: "running", AssignedTo: "dead-worker",
+		})
+		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate
+		// scan reads workflow_leases, not workflow_instances.
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-			                                assigned_to, heartbeat_at, tenant_id)
-			VALUES ($1, 'test', 1, 'running', '{}', 'dead-worker',
-			        now() - make_interval(secs => $2), $3)`,
-			ids[i], 3600-i, store.tenantID); err != nil {
-			t.Fatalf("seeding instance %d: %v", i, err)
+			UPDATE workflow_leases SET heartbeat_at = now() - make_interval(secs => $2)
+			WHERE id = $1`,
+			ids[i], 3600-i); err != nil {
+			t.Fatalf("seeding heartbeat %d: %v", i, err)
 		}
 	}
 	t.Cleanup(func() {
@@ -59,7 +63,7 @@ func TestTheReaperDoesNotReclaimEverythingAtOnce(t *testing.T) {
 		t.Helper()
 		var n int
 		if err := db.QueryRowContext(ctx,
-			`SELECT count(*) FROM workflow_instances WHERE id = ANY($1) AND status = 'running'`,
+			`SELECT count(*) FROM workflow_leases WHERE id = ANY($1) AND status = 'running'`,
 			pgTextArray(ids)).Scan(&n); err != nil {
 			t.Fatalf("counting running: %v", err)
 		}
@@ -93,7 +97,7 @@ func TestTheReaperDoesNotReclaimEverythingAtOnce(t *testing.T) {
 	for i := 0; i < limit; i++ {
 		var status string
 		if err := db.QueryRowContext(ctx,
-			`SELECT status FROM workflow_instances WHERE id = $1`, ids[i]).Scan(&status); err != nil {
+			`SELECT status FROM workflow_leases WHERE id = $1`, ids[i]).Scan(&status); err != nil {
 			t.Fatalf("reading status of instance %d: %v", i, err)
 		}
 		if status == "running" {
@@ -134,12 +138,16 @@ func TestAZeroReapLimitIsUnbounded(t *testing.T) {
 	ids := make([]string, total)
 	for i := range ids {
 		ids[i] = fmt.Sprintf("reap-unbounded-%d-%d", time.Now().UnixNano(), i)
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-			                                assigned_to, heartbeat_at, tenant_id)
-			VALUES ($1, 'test', 1, 'running', '{}', 'dead-worker',
-			        now() - interval '1 hour', $2)`, ids[i], store.tenantID); err != nil {
-			t.Fatalf("seeding instance %d: %v", i, err)
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: ids[i], TenantID: store.tenantID, DefName: "test", DefVersion: 1,
+			Status: "running", AssignedTo: "dead-worker",
+		})
+		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate
+		// scan reads workflow_leases, not workflow_instances.
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_leases SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`,
+			ids[i]); err != nil {
+			t.Fatalf("seeding heartbeat %d: %v", i, err)
 		}
 	}
 	t.Cleanup(func() {
@@ -183,9 +191,7 @@ func TestTheReapBoundBindsOnEveryDialect(t *testing.T) {
 	}{
 		{testutil.DialectPostgres, func(t *testing.T, db *sql.DB) {
 			testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-		}, `INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-		        assigned_to, heartbeat_at, tenant_id)
-		    VALUES ($1, 'reap-bound', 1, 'running', '{}', 'dead', now() - interval '1 hour', $2)`},
+		}, ""}, // unused for Postgres -- seeded via testutil.SeedRun below instead
 		{testutil.DialectMySQL, testutil.SetupMySQLFullSchema,
 			`INSERT INTO workflow_instances (id, def_name, def_version, status, input,
 		        assigned_to, heartbeat_at, tenant_id)
@@ -216,7 +222,24 @@ func TestTheReapBoundBindsOnEveryDialect(t *testing.T) {
 			const total, limit = 5, 2
 			prefix := fmt.Sprintf("reap-bound-%s-%d-", d.dialect, time.Now().UnixNano())
 			for i := 0; i < total; i++ {
-				if _, err := admin.Exec(d.insert, prefix+fmt.Sprint(i), DefaultTenantUUID); err != nil {
+				id := prefix + fmt.Sprint(i)
+				// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances'
+				// candidate scan reads workflow_leases on PostgreSQL only --
+				// the other two dialects have no such table, so only
+				// PostgreSQL is seeded through testutil.SeedRun.
+				if d.dialect == testutil.DialectPostgres {
+					testutil.SeedRun(t, admin, testutil.RunSeed{
+						ID: id, TenantID: DefaultTenantUUID, DefName: "reap-bound", DefVersion: 1,
+						Status: "running", AssignedTo: "dead",
+					})
+					if _, err := admin.Exec(
+						`UPDATE workflow_leases SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`,
+						id); err != nil {
+						t.Fatalf("seeding heartbeat %d on %s: %v", i, d.dialect, err)
+					}
+					continue
+				}
+				if _, err := admin.Exec(d.insert, id, DefaultTenantUUID); err != nil {
 					t.Fatalf("seeding instance %d on %s: %v", i, d.dialect, err)
 				}
 			}

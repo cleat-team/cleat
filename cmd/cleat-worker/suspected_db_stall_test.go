@@ -657,12 +657,13 @@ func TestSuspectedStallProtectionHoldsBelowTheDocumentedBound(t *testing.T) {
 	// Pinned rather than computed from minimumReclaimAfter, deliberately:
 	// this test's whole point is to notice if the protection bound moves,
 	// and computing R from the same model that produces the bound would
-	// let both drift together silently.
-	const reclaimAfter = 14500 * time.Millisecond
+	// let both drift together silently. Raised from 14.5s to 47s
+	// (cleat#3258 ROUND 6; re-derive with `minimumReclaimAfter(5*time.Second)`).
+	const reclaimAfter = 47 * time.Second
 	interval := max(heartbeat, 10*time.Second)
 	lower := stallProtectionLower(heartbeat, reclaimAfter)
-	if lower != 23*time.Second {
-		t.Fatalf("stallProtectionLower(5s, 14.5s) = %v, want 23s -- the documented default has drifted; update this test and the doc comment together", lower)
+	if lower != 55500*time.Millisecond {
+		t.Fatalf("stallProtectionLower(5s, 47s) = %v, want 55.5s -- the documented default has drifted; update this test and the doc comment together", lower)
 	}
 
 	rng := rand.New(rand.NewSource(1))
@@ -670,7 +671,14 @@ func TestSuspectedStallProtectionHoldsBelowTheDocumentedBound(t *testing.T) {
 	totalBelowBound := 0
 	wrongfulReclaims := 0
 
-	for dSeconds := 4; dSeconds <= 36; dSeconds += 2 {
+	// Swept to 76s, not the old 36s: the old range was chosen to sample both
+	// below AND through the OLD bound's own ~23-33s vicinity. ROUND 6 moved
+	// the bound to ~55.5-65.5s; keeping the old range would leave every
+	// sampled D safely below the NEW bound too, which still passes but stops
+	// sampling anywhere near the boundary this test exists to exercise -- a
+	// silent coverage loss, not a failure. 76 covers past the new upper
+	// bound (65.5s) the same way 36 covered past the old one (33s).
+	for dSeconds := 4; dSeconds <= 76; dSeconds += 2 {
 		D := time.Duration(dSeconds) * time.Second
 		belowBound := D < lower
 		for trial := 0; trial < trialsPerD; trial++ {
@@ -724,7 +732,9 @@ func TestSuspectedStallProtectionHoldsBelowTheDocumentedBound(t *testing.T) {
 // failure mode, and the test above would be vacuous.
 func TestSuspectedStallProtectionSweepDetectsAWrongfulReclaimWhenOneOccurs(t *testing.T) {
 	const heartbeat = 5 * time.Second
-	const reclaimAfter = 14500 * time.Millisecond
+	// Raised from 14.5s to 47s (cleat#3258 ROUND 6), matching the sibling
+	// test's own pinned value above -- see its comment for why pinned.
+	const reclaimAfter = 47 * time.Second
 	interval := max(heartbeat, 10*time.Second)
 	upper := stallProtectionUpper(heartbeat, reclaimAfter)
 

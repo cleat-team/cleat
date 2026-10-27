@@ -597,9 +597,9 @@ SUM:                             3              0              0             24
 Language                     files          blank        comment           code
 TypeScript                       1             12             99             54
 
-== DBOS-isolated: unit tests (isolated-wedge.test.ts -- its three behaviour functions are counted in the behaviour row below) ==
+== DBOS-isolated: unit tests (isolated-wedge.test.ts, minus its three behaviour functions AND its hand-rolled test driver -- cleat#3041) ==
 Language                     files          blank        comment           code
-TypeScript                       1             14            129             72
+TypeScript                       1             11            129             38
 
 == BEHAVIOUR ASSERTIONS, both sides -- SUMMED INTO BOTH APP TOTALS (cleat#2642) ==
 == cleat: behaviour assertions (the three behaviour blocks of the e2e harness) ==
@@ -621,6 +621,11 @@ Bourne Shell                     1             16            108            154
 Language                     files          blank        comment           code
 Bourne Shell                     1             10             39             42
 
+== DBOS-isolated: unit test driver (excluded, analogous to e2e harness machinery -- cleat#3041) ==
+Language                     files          blank        comment           code
+TypeScript                       3              3              0             34
+SUM:                              3              3              0             34
+
 == cleat: platform (own line -- never summed into the app total) ==
 Language                     files          blank        comment           code
 Go                               2             14            108            124
@@ -635,11 +640,12 @@ SELF_TEST_WEDGE_README_MATCHED = """
 |---|---:|---:|
 | tenant code | **55** | **24** |
 | host runner | **25** | **54** |
-| unit tests | **50** | **72** |
+| unit tests | **50** | **38** |
 | behaviour assertions | **85** | **50** |
-| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **200** |
+| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **166** |
 | platform (own line -- not summed above) | **124** | **0** |
 | e2e harness machinery (own line -- not summed above, see below) | **154** | **42** |
+| unit test driver (own line -- not summed above, see below -- cleat#3041) | **0** | **34** |
 """
 
 
@@ -746,17 +752,17 @@ def self_test():
         failures.append(f"  FALSE POSITIVE on the wedge's matched fixture: {problems}")
 
     wedge_stale_cleat = SELF_TEST_WEDGE_README_MATCHED.replace(
-        "| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **200** |",
-        "| **app total** (tenant + host + unit tests + behaviour assertions) | **209** | **200** |")
+        "| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **166** |",
+        "| **app total** (tenant + host + unit tests + behaviour assertions) | **209** | **166** |")
     problems, status = check_pair("integration-hub", wedge_stale_cleat, wedge_matched_runner)
     if status != "mismatch" or not any("209" in p and "215" in p for p in problems):
         failures.append(f"  MISSED: a cleat-side drift in the wedge's app total was not reported: {problems}")
 
     wedge_stale_dbos = SELF_TEST_WEDGE_README_MATCHED.replace(
-        "| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **200** |",
-        "| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **194** |")
+        "| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **166** |",
+        "| **app total** (tenant + host + unit tests + behaviour assertions) | **215** | **160** |")
     problems, status = check_pair("integration-hub", wedge_stale_dbos, wedge_matched_runner)
-    if status != "mismatch" or not any("194" in p and "200" in p for p in problems):
+    if status != "mismatch" or not any("160" in p and "166" in p for p in problems):
         failures.append(f"  MISSED: a DBOS-isolated-side drift in the wedge's app total was not reported: {problems}")
 
     # Known negative -- cleat-review on cleat#2749: two role rows drift by
@@ -772,21 +778,21 @@ def self_test():
         failures.append(f"  MISSED: compensating errors on two role rows (app total unaffected) "
                         f"were not reported: {problems}")
 
-    # cleat#2642 -- the row THIS PR adds must be guarded exactly as the
+    # cleat#2642 -- the row THAT PR added must be guarded exactly as the
     # three above are, or adding it would have widened the table without
     # widening the check that reads it. Compensating error between the
-    # DBOS-isolated unit-tests and behaviour-assertions rows: 72 -> 67 and
-    # 50 -> 55, so the app total (200) is unchanged and only the per-role
+    # DBOS-isolated unit-tests and behaviour-assertions rows: 38 -> 33 and
+    # 50 -> 55, so the app total (166) is unchanged and only the per-role
     # check can catch it. Verified to be a real negative by reverting
     # WEDGE_ROLE_ROW_RE/INTEGRATION_HUB_ROLE_NAMES to their pre-#2642
     # values: this case is then NOT reported (it is exactly the drift an
     # unguarded new row would hide).
     wedge_compensating_new_row = SELF_TEST_WEDGE_README_MATCHED.replace(
-        "| unit tests | **50** | **72** |", "| unit tests | **50** | **67** |").replace(
+        "| unit tests | **50** | **38** |", "| unit tests | **50** | **33** |").replace(
         "| behaviour assertions | **85** | **50** |", "| behaviour assertions | **85** | **55** |")
     problems, status = check_pair("integration-hub", wedge_compensating_new_row, wedge_matched_runner)
     if status != "mismatch" \
-            or not any("unit tests" in p and "67" in p and "72" in p for p in problems) \
+            or not any("unit tests" in p and "33" in p and "38" in p for p in problems) \
             or not any("behaviour assertions" in p and "55" in p and "50" in p for p in problems):
         failures.append(f"  MISSED: compensating errors on the NEW behaviour-assertions row "
                         f"(app total unaffected) were not reported: {problems}")

@@ -87,14 +87,36 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 			// it by hand keeps this test about retention rather than about the
 			// poll loop.
 			const workerID = "worker-1324"
-			if _, err := db.ExecContext(ctx,
-				`UPDATE workflow_instances SET assigned_to = `+d.ph(1)+` WHERE id = `+d.ph(2),
-				workerID, id); err != nil {
-				t.Fatalf("claim: %v", err)
+			// On PostgreSQL assigned_to lives on workflow_leases alone since
+			// cleat#3245 B3c, so the claim has nothing to do on
+			// workflow_instances there; MySQL still keeps the one wide
+			// table.
+			if d.dialect != testutil.DialectPostgres {
+				if _, err := db.ExecContext(ctx,
+					`UPDATE workflow_instances SET assigned_to = `+d.ph(1)+` WHERE id = `+d.ph(2),
+					workerID, id); err != nil {
+					t.Fatalf("claim: %v", err)
+				}
+			}
+			// MoveToDeadLetterQueue's workflow_leases mirror is fenced on the
+			// lease's own assigned_to, and the retention sweep reads status from
+			// workflow_leases since cleat#3245 B3a -- a claim made on
+			// workflow_instances alone would leave the lease 'ready' and the run
+			// invisible to the sweep.
+			if d.dialect == testutil.DialectPostgres {
+				if _, err := db.ExecContext(ctx,
+					`UPDATE workflow_leases SET assigned_to = $1 WHERE id = $2`, workerID, id); err != nil {
+					t.Fatalf("claim (workflow_leases): %v", err)
+				}
 			}
 			var generation int64
-			if err := db.QueryRowContext(ctx,
-				`SELECT generation FROM workflow_instances WHERE id = `+d.ph(1), id).Scan(&generation); err != nil {
+			// PostgreSQL writes generation and status to workflow_leases
+			// alone since cleat#3245 B3c.
+			genQ := `SELECT generation FROM workflow_instances WHERE id = ` + d.ph(1)
+			if d.ph(1) == "$1" {
+				genQ = `SELECT generation FROM workflow_leases WHERE id = $1`
+			}
+			if err := db.QueryRowContext(ctx, genQ, id).Scan(&generation); err != nil {
 				t.Fatalf("read generation: %v", err)
 			}
 			if err := store.MoveToDeadLetterQueue(ctx, id, workerID, generation,
@@ -104,9 +126,14 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 
 			var status string
 			var completedAt sql.NullTime
-			if err := db.QueryRowContext(ctx,
-				`SELECT status, completed_at FROM workflow_instances WHERE id = `+d.ph(1),
-				id).Scan(&status, &completedAt); err != nil {
+			// On PostgreSQL completed_at lives on workflow_payloads since
+			// cleat#3245 B1b, and status on workflow_leases since B3c.
+			q := `SELECT status, completed_at FROM workflow_instances WHERE id = ` + d.ph(1)
+			if d.ph(1) == "$1" {
+				q = `SELECT l.status, p.completed_at FROM workflow_leases l
+					JOIN workflow_payloads p ON p.id = l.id WHERE l.id = $1`
+			}
+			if err := db.QueryRowContext(ctx, q, id).Scan(&status, &completedAt); err != nil {
 				t.Fatalf("read status: %v", err)
 			}
 			if status != "dead_lettered" || !completedAt.Valid {

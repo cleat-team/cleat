@@ -1,14 +1,17 @@
 # Rotate the payload encryption key
 
-`--encryption-key-file` (with `--encrypt-sensitive-payloads`) encrypts
-`event_history`'s sensitive columns (`engine.EncryptedEventColumns` --
-`request`, `response`, `error`, `signal_payload`, `child_input`,
-`new_input`, `plugin_input`, `plugin_output`, `promise_result`,
-`promise_error`, `payload`) at rest, per tenant, on PostgreSQL. **It does
-not cover `workflow_instances.result`**, the workflow's final result,
-which is a different table this mechanism never touches -- see cleat#2312,
-open at this writing, on the doc's own former overstatement of this
-("workflow input, output and error" read as covering it, and did not).
+`--encryption-key-file` (with `--encrypt-sensitive-payloads`) encrypts, at
+rest, per tenant, on PostgreSQL: `event_history`'s sensitive columns
+(`engine.EncryptedEventColumns` -- `request`, `response`, `error`,
+`signal_payload`, `child_input`, `new_input`, `plugin_input`,
+`plugin_output`, `promise_result`, `promise_error`, `payload`), plus
+`workflow_instances` (`input`, `result`, `error_msg`, `error_code`,
+`error_op`, `cancellation_reason`, `query_state`), `workflow_signals.payload`,
+`workflow_promises.result`/`.error_msg`,
+`workflow_update_requests.payload`/`.result`/`.error_msg`,
+`workflow_schedules.input`, and `idempotency_keys.error_msg` (cleat#2312,
+closing the doc's own former overstatement of this -- "workflow input, output
+and error" read as covering all of these, and until cleat#2312 did not).
 This is a **different key from the
 per-tenant secrets master key** ([`use-secrets.md`](use-secrets.md),
 `CLEAT_SECRET_MASTER_KEY`) -- different table, different threat model
@@ -166,20 +169,76 @@ any worker starts writing it:
    `cmd/cleatctl/reseal_payloads_two_workers_test.go`,
    `TestPayloadKeyRotationAcrossTwoWorkers`.
 
+## SIGHUP can now execute the rolling rotation above, with the version flags
+
+Since cleat#2298 (PR 2), every worker that catches `SIGHUP` re-reads
+`--encryption-key-file`/`--encryption-key-file-previous` and tries to apply
+them, alongside the tenant-secrets reload `use-secrets.md` documents. Until
+cleat#3203, that reload could **never** actually change which bytes
+"current" and "previous" mean: `loadPayloadKeyRing` assigned the fixed
+labels "version 2" to whatever `--encryption-key-file` held and "version 1"
+to `--encryption-key-file-previous`'s, on every call, regardless of
+content -- so a SIGHUP that found either file's content changed was refused
+outright (`engine.ReloadableKeyRing.Reload` saw the same label carrying
+different bytes and treated it as the operator mistake that check exists to
+catch).
+
+**cleat#3203 added `--encryption-key-file-version[-file]` and
+`--encryption-key-file-previous-version[-file]`**, read fresh on every
+reload exactly the way the key files themselves already were -- the same
+file-sourced mechanism `CLEAT_SECRET_MASTER_KEY_VERSION_FILE` already gave
+the secrets side. An operator who sets these can now run **both phases of
+the Rolling rotation procedure above via SIGHUP instead of a restart**, by
+giving each phase's key an unused version number:
+
+1. **Phase 1 -- read-only rollout, via SIGHUP.** Write B to the path
+   `--encryption-key-file-previous` names, and give it a version number the
+   ring has never held (anything other than 1 and 2, if this worker has
+   never set these flags before). Set `--encryption-key-file-previous-version`
+   (or its `-file` form) to that number, leave `--encryption-key-file` and
+   `--encryption-key-file-version` pointing at A unchanged, and send
+   `SIGHUP`. Current stays A; B is now loaded as previous, with no restart.
+2. **Confirm phase 1 is complete fleet-wide**, exactly as the restart-based
+   procedure requires -- this sequencing requirement is unchanged by
+   cleat#3203, only the mechanism for applying each phase is new.
+3. **Phase 2 -- flip to current, via SIGHUP.** Swap which file
+   `--encryption-key-file` and `--encryption-key-file-previous` name (B
+   becomes current, A becomes previous), and swap `--encryption-key-file-
+   version`/`--encryption-key-file-previous-version` to match. **This step
+   needs no version number the ring has not already seen**: B is already
+   at its version from phase 1 and A is already at its own, and
+   `engine.ReloadableKeyRing.Reload`'s safety check compares version-to-bytes
+   pairs only, never which slot (current/previous) a version occupies -- so
+   moving two already-held, unchanged versions between slots can never be
+   refused. Measured directly in
+   `TestReloadKeyRingsOnSIGHUP_PayloadRotationViaNewVersionNumbersSucceeds`.
+4. Steps 5 and 6 of the Rolling rotation procedure (the `reseal-payloads`
+   sweep and dropping the previous-key flag) are unchanged -- they are
+   about ciphertext on disk and a worker's own flags, neither of which this
+   issue touches.
+
+**A SIGHUP sent fleet-wide for a tenant-secrets rotation remains harmless to
+a worker's payload key** that is not part of the change: its files and
+version flags are untouched, and an untouched configuration reloads as a
+clean no-op. **A worker that never adopts the new version flags keeps
+today's behavior exactly** -- the zero value of every new flag resolves to
+the historical hardcoded 2/1 labels, so a content change under those
+defaults is still safely refused, not silently rotated; see
+`TestReloadKeyRingsOnSIGHUP_PayloadChangedCurrentKeyIsSafelyRefused`.
+
 ## What is not covered, either way
 
 - **An external KMS.** The key is supplied directly, from a file.
 - **A plugin's own `Payloads`-sealed value, once one exists.**
-  `cleatctl reseal-payloads` only rewrites `event_history`'s own encrypted
-  columns (`engine.EncryptedEventColumns`) -- see `plugin.Payloads`'s own
-  doc comment. A plugin storing a long-lived sealed value elsewhere is
-  responsible for its own re-seal on rotation, the same way it is
-  responsible for its own storage.
+  `cleatctl reseal-payloads` rewrites `event_history`'s own encrypted columns
+  (`engine.EncryptedEventColumns`) and, since cleat#3241, the six tables
+  cleat#2312 added encryption to (`workflow_instances`, `workflow_signals`,
+  `workflow_promises`, `workflow_update_requests`, `workflow_schedules`,
+  `idempotency_keys`) -- see `plugin.Payloads`'s own doc comment. A plugin
+  storing a long-lived sealed value elsewhere is responsible for its own
+  re-seal on rotation, the same way it is responsible for its own storage.
 - **PostgreSQL only.** `--encrypt-sensitive-payloads` is refused unless
   `--driver=postgres`; the encrypting write path is Postgres-specific SQL.
-- **`workflow_instances.result`.** See the intro above and cleat#2312: it is
-  plaintext today regardless of any flag here, on every path (sharded or
-  not), rotated or not.
 
 ## See also
 

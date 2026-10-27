@@ -61,6 +61,23 @@ var latestMigrationSQL = plugin.Query{
 // the row-count branch, which prints a row count instead of a size.
 var errSizeEstimateNotPortable = errors.New("event history size estimate is PostgreSQL-only")
 
+// instanceStatusCountsSQL is check-db's count of workflow runs by status.
+// PostgreSQL reads status from workflow_leases since cleat#3245 B3a; MySQL and
+// SQL Server have no such table and read workflow_instances.
+func instanceStatusCountsSQL(d dialect, runtimeQual string) string {
+	table := "workflow_instances"
+	if d.query == plugin.DialectPostgres {
+		table = "workflow_leases"
+	}
+	//nolint:gosec // G201: the interpolated fragments are runtimeQual, which tenantRuntimeQualifier builds by backtick-quoting engine.MySQLTenantDatabaseName of a uuid.Parse'd tenant id and which is empty on every dialect but MySQL, and table, one of two constants above. Nothing caller-controlled reaches this: check-db takes no arguments but --verbose.
+	return fmt.Sprintf(`
+		SELECT status, COUNT(*) AS cnt
+		FROM %s%s
+		GROUP BY status
+		ORDER BY status
+	`, runtimeQual, table)
+}
+
 // runCheckDB verifies database connectivity and schema health.
 // It connects to the database, pings it, checks the schema migration version,
 // inspects workflow instance counts, and reports overall health status.
@@ -311,13 +328,7 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 		Status string
 		Count  int64
 	}
-	//nolint:gosec // G202: the only interpolated fragment is runtimeQual, which tenantRuntimeQualifier builds by backtick-quoting engine.MySQLTenantDatabaseName of a uuid.Parse'd tenant id, and which is empty on every dialect but MySQL. Nothing caller-controlled reaches this: check-db takes no arguments but --verbose.
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT status, COUNT(*) AS cnt
-		FROM %sworkflow_instances
-		GROUP BY status
-		ORDER BY status
-	`, runtimeQual))
+	rows, err := db.QueryContext(ctx, instanceStatusCountsSQL(d, runtimeQual))
 	if err == nil {
 		defer rows.Close()
 		var totalInstances int64

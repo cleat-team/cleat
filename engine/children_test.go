@@ -559,29 +559,87 @@ func TestPollChild_Running(t *testing.T) {
 	}
 }
 
-func TestPollChild_Failed(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
-		return ChildOutcome{}, fmt.Errorf("connection refused")
-	}}
-	s := newTestExecSession()
-	s.engine.childWfStore = mock
+// A store that cannot answer says nothing about the child: PollChild returns a
+// host error (a non-zero error code, which the guest adapter returns as an
+// error), not a "failed" status a caller would read as the child failing.
+// Both of its store reads. cleat#3387 review.
+func TestPollChild_StoreErrorIsAHostError(t *testing.T) {
+	for name, mock := range map[string]*mockChildStore{
+		"GetChildResult": {getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{}, fmt.Errorf("connection refused")
+		}},
+		"GetChildCompletedAtMs": {
+			getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+				return ChildOutcome{Completed: true, Failed: true, Error: "child blew up"}, nil
+			},
+			getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+				return 0, false, fmt.Errorf("connection refused")
+			},
+		},
+	} {
+		s := newTestExecSession()
+		s.engine.childWfStore = mock
 
+		buf := make([]byte, 256)
+		ctx := contextWithRawMemBuf(context.Background(), buf)
+		result := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+
+		if code := uint32(result); code == 0 {
+			t.Errorf("%s failing: PollChild answered %s with no error code; a store error "+
+				"must not read as a child status", name, buf[:result>>32])
+			continue
+		}
+		if msg := string(buf[:result>>32]); !strings.Contains(msg, "connection refused") {
+			t.Errorf("%s failing: host error %q does not carry the store's error", name, msg)
+		}
+	}
+}
+
+// pollFailedChild drives PollChild for a child that FAILED at failedAtMs,
+// with the parent's durable clock at nowMs.
+func pollFailedChild(t *testing.T, failedAtMs, nowMs int64) (string, string) {
+	t.Helper()
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Failed: true, Error: "child blew up"}, nil // failed NOW
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return failedAtMs, true, nil
+		},
+	}
+	s := newTestExecSession()
+	s.nowMs = nowMs
+	s.engine.childWfStore = mock
 	buf := make([]byte, 256)
 	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
-
+	res := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
 	var pr struct {
 		Status string `json:"status"`
 		Error  string `json:"error,omitempty"`
 	}
-	if err := json.Unmarshal(buf[:result>>32], &pr); err != nil {
+	if err := json.Unmarshal(buf[:res>>32], &pr); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if pr.Status != "failed" {
-		t.Errorf("expected status 'failed', got %q", pr.Status)
+	return pr.Status, pr.Error
+}
+
+// TestPollChildAnswersAFailureFromDurableTime is #847 for a FAILED child,
+// found in the cleat#3387 review. A Selector polls a running child, records a
+// wait and suspends; the child then fails. The resume replays the poll before
+// that wait, the store now says "failed", and answering from NOW returns the
+// child at the first poll where the history recorded a wait: divergence.
+// A failure, like a success, is visible only once the durable clock has
+// reached the instant it happened.
+func TestPollChildAnswersAFailureFromDurableTime(t *testing.T) {
+	if status, errMsg := pollFailedChild(t, 5_000, 1_000); status != "running" {
+		t.Fatalf("PollChild answered %q (%q) for a child that failed at 5000 when the parent's "+
+			"durable clock was 1000; the first execution saw it running, so a replay must too", status, errMsg)
 	}
-	if pr.Error != "connection refused" {
-		t.Errorf("expected error 'connection refused', got %q", pr.Error)
+	if status, _ := pollFailedChild(t, 5_000, 4_999); status != "running" {
+		t.Errorf("one ms before the failure must read running, got %q", status)
+	}
+	if status, errMsg := pollFailedChild(t, 5_000, 5_000); status != "failed" || errMsg != "child blew up" {
+		t.Errorf("at the failure's instant it must read failed with the child's error, got %q / %q", status, errMsg)
 	}
 }
 
@@ -746,6 +804,129 @@ func TestAwaitAnyChild_ReplayEmptyThenCached(t *testing.T) {
 	}
 	if !s.isReplay {
 		t.Error("expected isReplay to remain true")
+	}
+}
+
+// TestAwaitAnyChild_ReplaySkipsEveryEmptySuspendBeforeTheResult is cleat#3391's
+// second half: a history written BEFORE the fix. A child that took two wakes
+// left two empty await_any_child records and then the result. Peeking only at
+// the record after the first one found the second empty one, took that for "no
+// cached result", and re-ran the call fresh on every wake.
+func TestAwaitAnyChild_ReplaySkipsEveryEmptySuspendBeforeTheResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild},
+		{Step: 1, EventType: EventTypeAwaitAnyChild},
+		{Step: 2, EventType: EventTypeAwaitAnyChild, Response: `{"run_id":"run-1","result":"done"}`},
+		{Step: 3, EventType: EventTypeCall},
+	}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if errCode := uint32(result & 0xFFFFFFFF); errCode != 0 {
+		t.Errorf("expected errCode 0, got %d", errCode)
+	}
+	if s.stepCount != 3 {
+		t.Errorf("stepCount = %d, want 3: the two empty suspends and the result are all consumed", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("the session left replay although the recorded result was there to return")
+	}
+	if s.suspendErr != nil {
+		t.Errorf("the call suspended (%v) with a recorded result in the history", s.suspendErr.Reason)
+	}
+}
+
+// TestAwaitAnyChild_ReplayDoesNotCrossIntoAnotherCallsRecords is the reviewer's
+// case on cleat#3423. After a suspend the guest keeps running, so one segment
+// can record two DIFFERENT calls' suspends back to back: [X empty, Y empty],
+// and later Y's result. Replaying X across Y's records would return Y's result
+// to X, at the head of the history.
+func TestAwaitAnyChild_ReplayDoesNotCrossIntoAnotherCallsRecords(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // X's child is still running
+	}}
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild, Request: `["x"]`},
+		{Step: 1, EventType: EventTypeAwaitAnyChild, Request: `["y"]`},
+		{Step: 2, EventType: EventTypeAwaitAnyChild, Request: `["y"]`, Response: `{"run_id":"y","result":"done"}`},
+	}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["x"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Fatalf("X was handed a result (%d) while its own child is still running: it crossed into Y's records", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1: only X's own suspend record is consumed", s.stepCount)
+	}
+}
+
+// TestAwaitAnyChild_ReplayMatchesTheSameChildrenInAnyOrder: dagrun builds its
+// run-ID list from a map range, so one call records a differently ordered
+// Request on each wake. Those records are the same call.
+func TestAwaitAnyChild_ReplayMatchesTheSameChildrenInAnyOrder(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild, Request: `["b","a"]`},
+		{Step: 1, EventType: EventTypeAwaitAnyChild, Request: `["a","b"]`},
+		{Step: 2, EventType: EventTypeAwaitAnyChild, Request: `["a","b"]`, Response: `{"run_id":"a","result":"done"}`},
+	}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["a","b"]`, 0, 0)
+
+	if errCode := uint32(result & 0xFFFFFFFF); errCode != 0 {
+		t.Errorf("expected errCode 0, got %d", errCode)
+	}
+	if s.stepCount != 3 || s.suspendErr != nil {
+		t.Errorf("stepCount = %d, suspendErr = %v; want 3 and nil: the recorded result was not reached", s.stepCount, s.suspendErr)
+	}
+}
+
+// TestAwaitAnyChild_ASecondAwaitAfterASuspendRecordsNothing: the guest keeps
+// running after a suspend sentinel, and a different AwaitAnyChild in the same
+// segment must not write a second empty suspend row beside the first.
+func TestAwaitAnyChild_ASecondAwaitAfterASuspendRecordsNothing(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil
+	}}
+	if got := s.AwaitAnyChild(context.Background(), nil, `["x"]`, 0, 0); got != packAwaitChildResultSuspend() {
+		t.Fatalf("first call: expected the suspend sentinel, got %d", got)
+	}
+	recorded := len(s.history)
+
+	if got := s.AwaitAnyChild(context.Background(), nil, `["y"]`, 0, 0); got != packAwaitChildResultSuspend() {
+		t.Fatalf("second call: expected the suspend sentinel, got %d", got)
+	}
+	if len(s.history) != recorded {
+		t.Errorf("history grew from %d to %d records on an await after the segment had already suspended", recorded, len(s.history))
+	}
+}
+
+// TestAwaitAnyChild_AStillRunningChildAddsNoRowOnALaterWake is the other half:
+// a wake that replays the call's suspend and finds the child still running has
+// nothing new to record.
+func TestAwaitAnyChild_AStillRunningChildAddsNoRowOnALaterWake(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.childWfStore = &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // still running
+	}}
+	s.isReplay = true
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeAwaitAnyChild}}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Fatalf("expected the suspend sentinel, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Errorf("history has %d records, want the 1 it started with: a second empty suspend is what "+
+			"made the completed result unrecordable (cleat#3391)", len(s.history))
 	}
 }
 

@@ -448,13 +448,25 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 	// Run go mod tidy in the build directory to generate go.sum entries
 	// before compilation. The replace directive points directly to the
-	// project root.
+	// project root, so this module never needs the network or the checksum
+	// database -- but GONOSUMCHECK/GONOSUMDB/GOPRIVATE were a wildcard ("*")
+	// rather than scoped to that module, which does the same thing for it
+	// and ALSO, as a side effect nobody intended, forces every ordinary
+	// public dependency (e.g. gopkg.in/check.v1, pulled in transitively as a
+	// test dependency of gopkg.in/yaml.v3) to bypass the module proxy and
+	// resolve direct from its own vanity-import redirect instead -- a far
+	// less reliable path that produced a real, intermittent CI failure
+	// (cleat#3307: "go: ... gopkg.in/check.v1: unrecognized import path
+	// ...: reading https://gopkg.in/check.v1?go-get=1: 502 Proxy Error").
+	// Scoping to the actual local module path keeps the original intent
+	// (this module's own replace target never hits the network or sumdb
+	// regardless) while letting every other dependency use the proxy.
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = outDir
 	tidyCmd.Env = append(os.Environ(),
-		"GONOSUMCHECK=*",
-		"GONOSUMDB=*",
-		"GOPRIVATE=*",
+		"GONOSUMCHECK="+wasm.SDKModulePath,
+		"GONOSUMDB="+wasm.SDKModulePath,
+		"GOPRIVATE="+wasm.SDKModulePath,
 	)
 	if out, err := tidyCmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running go mod tidy in build directory: %v\n%s\n", err, out)
@@ -1925,6 +1937,20 @@ func getDBConnStr() string {
 }
 
 // runVersions lists all deployed versions of a workflow, latest first.
+//
+// TENANT SCOPE, cleat#3314. Until this fix, this query carried no tenant_id
+// predicate at all and never set cleat.tenant_id -- so on the cleat_app role
+// (the one `deploy`'s own cleat#2065 fix says "is the one deploy is supposed
+// to work under," since the worker refuses a superuser/BYPASSRLS
+// connection) it failed outright with "cleat.tenant_id is not set" rather
+// than listing anything, and on a superuser/BYPASSRLS connection -- which
+// RLS cannot filter at all -- it silently returned every tenant's versions
+// for the name, indistinguishably merged into one list. Resolved and bound
+// exactly as `rollback`/`rollback-clear` already do (resolveDeployTenant:
+// --tenant flag, then CLEAT_TENANT_ID, then the single-tenant default), and
+// set_config'd exactly as `deploy` already does, so this works under
+// cleat_app AND cannot leak under a connection RLS does not apply to --
+// matching both existing siblings instead of neither.
 func runVersions(name string) {
 	connStr := getDBConnStr()
 	if connStr == "" {
@@ -1944,7 +1970,21 @@ func runVersions(name string) {
 		os.Exit(1)
 	}
 
-	rows, err := db.Query("SELECT version FROM workflow_defs WHERE name = $1 ORDER BY version DESC", name)
+	tenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
+
+	tx, err := db.Begin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting transaction: %v\n", err)
+		os.Exit(1)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", tenantID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error setting tenant context: %v\n", err)
+		os.Exit(1)
+	}
+
+	rows, err := tx.Query("SELECT version FROM workflow_defs WHERE name = $1 AND tenant_id = $2 ORDER BY version DESC", name, tenantID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error querying versions: %v\n", err)
 		os.Exit(1)
@@ -2014,6 +2054,17 @@ func runRollback(name string, version int) {
 	}
 	defer tx.Rollback()
 
+	// cleat#3314, mirroring `deploy`'s cleat#2065 fix. Every query below is
+	// already explicitly tenant_id-scoped, which keeps it correct against a
+	// superuser/BYPASSRLS connection -- but workflow_defs/workflow_routing
+	// FORCE row-level security regardless, so on the cleat_app role this
+	// transaction failed outright with "cleat.tenant_id is not set" before
+	// this call existed, never reaching the explicit scoping below at all.
+	if _, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", tenantID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error setting tenant context: %v\n", err)
+		os.Exit(1)
+	}
+
 	var exists bool
 	err = tx.QueryRow(
 		"SELECT EXISTS(SELECT 1 FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3)",
@@ -2077,7 +2128,28 @@ func runRollbackClear(name string) {
 
 	tenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
 
-	res, err := db.Exec(
+	// cleat#3314, mirroring `deploy`'s cleat#2065 fix and `runRollback`'s own
+	// transaction above. workflow_routing FORCEs row-level security, so the
+	// DELETE below -- already explicitly tenant_id-scoped -- failed outright
+	// on the cleat_app role with "cleat.tenant_id is not set" before this
+	// transaction existed. set_config's third argument is_local=true scopes
+	// the setting to one transaction, which is why this needs db.Begin()
+	// rather than a bare db.Exec: two separate *sql.DB calls are not
+	// guaranteed the same underlying connection, so a session-scoped set on
+	// one could silently not apply to the other.
+	tx, err := db.Begin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting transaction: %v\n", err)
+		os.Exit(1)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", tenantID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error setting tenant context: %v\n", err)
+		os.Exit(1)
+	}
+
+	res, err := tx.Exec(
 		"DELETE FROM workflow_routing WHERE workflow_name = $1 AND tenant_id = $2",
 		name, tenantID)
 	if err != nil {
@@ -2085,6 +2157,12 @@ func runRollbackClear(name string) {
 		os.Exit(1)
 	}
 	n, _ := res.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error committing: %v\n", err)
+		os.Exit(1)
+	}
+
 	if n == 0 {
 		// Not an error: clearing an unpinned workflow is the state the caller
 		// asked for. Said plainly so it is not read as a silent success on a

@@ -618,6 +618,22 @@ func (s *MySQLStore) LoadCompactionState(ctx context.Context, workflowID string)
 // CompactHistory deletes old events and persists the compaction checkpoint
 // for a workflow. compactionStep records the step up to which events were
 // compacted; keepStep controls which events are deleted (step < keepStep).
+//
+// THE FENCE COMES FIRST, and a lost fence is an error (cleat#3409). It used to
+// delete the events and then run an UPDATE ... WHERE generation = ?, committing
+// without looking at what the UPDATE matched. Measured on MySQL 8.4 with events
+// at steps 0-4 and a 400 ms holder that bumped the generation:
+//
+//	before   err=nil  events left 2 of 5  compaction_step NULL
+//	after    err=ErrFenceLost  events left 5 of 5  compaction_step NULL
+//
+// Fence-first also fixes the lock order: finalize_workflow_status updates the
+// instance row and then deletes the run's events, and this deleted events then
+// updated the instance, so the two deadlocked (error 1213, reproduced on every
+// run by TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrderOnMySQLAndMSSQL).
+//
+// The fence is a locking read (FOR UPDATE), not the UPDATE's row count: MySQL
+// reports rows CHANGED, not rows MATCHED, so a count of 0 could mean either.
 func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -635,6 +651,23 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 		return fmt.Errorf("CompactHistory: get generation: %w", err)
 	}
 
+	// The fence: a locking read re-evaluates the predicate against the latest
+	// committed row after waiting on a concurrent writer, so a generation that
+	// moved under us matches nothing. Nothing has been written yet; returning
+	// rolls the transaction back.
+	var fenced string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE id = ? AND tenant_id = ? AND generation = ?
+		FOR UPDATE
+	`, workflowID, s.tenantID, gen).Scan(&fenced)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("CompactHistory: %w", ErrFenceLost)
+	}
+	if err != nil {
+		return fmt.Errorf("CompactHistory: fence: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = ? AND step < ? AND tenant_id = ?
 	`, workflowID, keepStep, s.tenantID)
@@ -645,8 +678,8 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = ?, compacted_at = NOW(6), compaction_step = ?
-		WHERE id = ? AND tenant_id = ? AND generation = ?
-	`, compactionState, compactionStep, workflowID, s.tenantID, gen)
+		WHERE id = ? AND tenant_id = ?
+	`, compactionState, compactionStep, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("CompactHistory: update: %w", err)
 	}
@@ -666,8 +699,8 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
-	applyWorkflowFilters(qb, d, filter)
-	applyWorkflowListPaging(qb, d, filter)
+	applyWorkflowFilters(qb, d, filter, "id")
+	applyWorkflowListPaging(qb, d, filter, "id")
 
 	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1521,8 +1554,13 @@ func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason,
 	var hasDefers, compacted bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT w.status,
+		       -- e.tenant_id = w.tenant_id added -- cleat#2059: event_history's
+		       -- primary key realigns to (tenant_id, workflow_id, step), so a
+		       -- predicate naming only workflow_id would lose its seek path.
+		       -- w.tenant_id is already bound by this query's own WHERE below.
 		       EXISTS(SELECT 1 FROM event_history e
-		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		              WHERE e.workflow_id = w.id AND e.tenant_id = w.tenant_id
+		                AND e.event_type = 'defer'),
 		       w.compaction_state IS NOT NULL
 		FROM workflow_instances w
 		WHERE w.id = ? AND w.tenant_id = ?

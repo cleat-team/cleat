@@ -242,8 +242,13 @@ var testCtx = context.Background()
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_Heartbeat_NotOwned(t *testing.T) {
+	// cleat#3245 B3b: the fenced workflow_leases UPDATE is the whole
+	// heartbeat, so it matching no row is what "not owned" means. The mock
+	// must say so explicitly: an unmatched exec reports rows affected.
+	var renewalTried bool
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 0},
+		{match: "UPDATE workflow_leases", affected: 0,
+			sideEffect: func(*[]mockRowsResult, *[]mockExecResult) { renewalTried = true }},
 	})
 	defer db.Close()
 
@@ -252,14 +257,17 @@ func TestPostgresStore_Heartbeat_NotOwned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
+	if !renewalTried {
+		t.Fatal("Heartbeat never issued the fenced workflow_leases UPDATE, so this test measured nothing")
+	}
 	if owned {
-		t.Error("expected owned=false when RowsAffected=0")
+		t.Error("expected owned=false when the fenced lease UPDATE matched no row")
 	}
 }
 
 func TestPostgresStore_Heartbeat_Owned(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 1},
+		{match: "UPDATE workflow_leases", affected: 1},
 	})
 	defer db.Close()
 
@@ -269,14 +277,15 @@ func TestPostgresStore_Heartbeat_Owned(t *testing.T) {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 	if !owned {
-		t.Error("expected owned=true when RowsAffected=1")
+		t.Error("expected owned=true when the fence matched")
 	}
 }
 
 func TestPostgresStore_ReapStaleInstances(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 3},
-	})
+	// One UPDATE workflow_leases ... RETURNING id since cleat#3245 B3c.
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "UPDATE workflow_leases", data: [][]driver.Value{{"wf-1"}, {"wf-2"}, {"wf-3"}}},
+	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -654,7 +663,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{{
 				"wf-1",                             // id
 				"test-wf",                          // def_name
@@ -785,7 +794,14 @@ func TestPostgresStore_LoadCompactionState_Present(t *testing.T) {
 
 func TestPostgresStore_StartChildWorkflow(t *testing.T) {
 	runID := "child-run-uuid"
+	// Three columns: StartChildWorkflow's INSERT now RETURNs task_queue and
+	// def_version alongside id -- task_queue for the insertLeaseAndPayloadRows
+	// mirror it added (cleat#3245 Phase 3 step 2 gap fix), def_version for
+	// migration 018 (folded into migrations/postgres/001_schema.sql by
+	// #3358)'s workflow_payloads.def_version mirror (same resolved-
+	// version-via-RETURNING reasoning as task_queue's own comment there).
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT CASE WHEN", data: [][]driver.Value{{int64(1), "default"}}},
 		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID}}},
 	}, nil)
 	defer db.Close()
@@ -803,6 +819,7 @@ func TestPostgresStore_StartChildWorkflow(t *testing.T) {
 func TestPostgresStore_StartChildWorkflow_ExplicitVersion(t *testing.T) {
 	runID := "child-run-uuid"
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT CASE WHEN", data: [][]driver.Value{{int64(3), "default"}}},
 		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{runID}}},
 	}, nil)
 	defer db.Close()
@@ -929,7 +946,7 @@ func TestPostgresStore_ListWorkflowDefs_NilPluginDeps(t *testing.T) {
 func TestPostgresStore_GetActiveInstanceCountsByVersion(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "FROM workflow_instances",
+			match: "FROM workflow_leases",
 			data: [][]driver.Value{
 				{"test-wf", int64(1), int64(5)},
 				{"other-wf", int64(2), int64(3)},
@@ -1074,19 +1091,24 @@ func TestPostgresStore_PurgeWorkflowDef_QueryError(t *testing.T) {
 	}
 }
 
+// The match used to be "FROM workflow_instances WHERE def_name", which stopped
+// matching when B1a joined workflow_payloads; the mock then returned no rows and
+// the test passed on that error instead of the injected one. errors.Is pins
+// which error came back.
 func TestPostgresStore_CountActiveInstances_QueryError(t *testing.T) {
+	injected := fmt.Errorf("simulated query error")
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "FROM workflow_instances WHERE def_name",
-			err:   fmt.Errorf("simulated query error"),
+			match: "FROM workflow_leases l",
+			err:   injected,
 		},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	_, err := store.CountActiveInstances(testCtx, "wf", 1)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if !errors.Is(err, injected) {
+		t.Fatalf("CountActiveInstances error = %v, want the injected query error", err)
 	}
 	if !strings.Contains(err.Error(), "count active instances") {
 		t.Errorf("expected error to contain 'count active instances', got: %v", err)
@@ -1094,18 +1116,19 @@ func TestPostgresStore_CountActiveInstances_QueryError(t *testing.T) {
 }
 
 func TestPostgresStore_GetActiveInstanceCountsByVersion_QueryError(t *testing.T) {
+	injected := fmt.Errorf("simulated query error")
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "FROM workflow_instances",
-			err:   fmt.Errorf("simulated query error"),
+			match: "FROM workflow_leases",
+			err:   injected,
 		},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	_, err := store.GetActiveInstanceCountsByVersion(testCtx)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if !errors.Is(err, injected) {
+		t.Fatalf("GetActiveInstanceCountsByVersion error = %v, want the injected query error", err)
 	}
 	if !strings.Contains(err.Error(), "get active instance counts") {
 		t.Errorf("expected error to contain 'get active instance counts', got: %v", err)
@@ -1154,7 +1177,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
@@ -1186,7 +1209,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
@@ -1453,7 +1476,7 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
@@ -1482,7 +1505,7 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
@@ -1507,7 +1530,7 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1", nil, nil, nil, int64(0), int64(0), ""},
 			},
@@ -1540,7 +1563,7 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
@@ -1653,11 +1676,10 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_StartNewRun_NoIdempotencyKey(t *testing.T) {
-	runID := "new-run-uuid"
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "INSERT INTO workflow_instances (id, def_name, def_version",
-			data:  [][]driver.Value{{runID}},
+			match: "SELECT COALESCE((SELECT task_queue FROM workflow_defs",
+			data:  [][]driver.Value{{"default"}},
 		},
 	}, nil)
 	defer db.Close()
@@ -1676,11 +1698,10 @@ func TestPostgresStore_StartNewRun_NoIdempotencyKey(t *testing.T) {
 }
 
 func TestPostgresStore_StartNewRun_WithIdempotencyKey_NewRun(t *testing.T) {
-	runID := "new-run-id"
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "INSERT INTO workflow_instances",
-			data:  [][]driver.Value{{runID}},
+			match: "SELECT COALESCE((SELECT task_queue FROM workflow_defs",
+			data:  [][]driver.Value{{"default"}},
 		},
 	}, []mockExecResult{
 		{match: "INSERT INTO idempotency_keys", affected: 1},
@@ -1827,7 +1848,7 @@ func TestPostgresStore_FailWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// logged but FailWorkflow still succeeds.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		// Main workflow status update succeeds (fence held).
-		{match: "SET status = 'failed'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 		// Idempotency update fails — logged but non-fatal.
 		{match: "UPDATE idempotency_keys SET error_msg =", err: sql.ErrConnDone},
 	})
@@ -1962,7 +1983,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 	createdAtNull := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT id, def_name, def_version",
+			match: "SELECT l.id, p.def_name, p.def_version",
 			data: [][]driver.Value{{
 				"wf-1",            // id
 				"test-wf",         // def_name
@@ -2288,6 +2309,7 @@ func TestPostgresStore_CompactHistory_GenerationError(t *testing.T) {
 func TestPostgresStore_CompactHistory_DeleteError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history", err: errors.New("delete failed")},
 	})
@@ -2306,6 +2328,7 @@ func TestPostgresStore_CompactHistory_DeleteError(t *testing.T) {
 func TestPostgresStore_CompactHistory_UpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history", affected: 10},
 		{match: "SET compaction_state", err: errors.New("update failed")},
@@ -2325,6 +2348,7 @@ func TestPostgresStore_CompactHistory_UpdateError(t *testing.T) {
 func TestPostgresStore_CompactHistory_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{{"wf-1"}}},
 	}, []mockExecResult{
 		{match: "DELETE FROM event_history", affected: 10},
 		{match: "SET compaction_state", affected: 1},
@@ -2335,6 +2359,28 @@ func TestPostgresStore_CompactHistory_Success(t *testing.T) {
 	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1,"compacted_step":100}`), 100, 50)
 	if err != nil {
 		t.Fatalf("CompactHistory: %v", err)
+	}
+}
+
+// cleat#3409: with the fence finding no row, nothing has been deleted and the
+// call reports the lost fence. The DELETE and the UPDATE are registered to FAIL,
+// because this mock accepts an unregistered statement silently: a CompactHistory
+// that deleted before taking the fence would return the DELETE's error here
+// instead of ErrFenceLost.
+func TestPostgresStore_CompactHistory_LostFenceDeletesNothing(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+		{match: "FOR NO KEY UPDATE", data: [][]driver.Value{}},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history", err: errors.New("DELETE ran before the fence was held")},
+		{match: "SET compaction_state", err: errors.New("UPDATE ran with the fence lost")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1}`), 100, 50)
+	if !errors.Is(err, ErrFenceLost) {
+		t.Fatalf("CompactHistory with a lost fence = %v, want ErrFenceLost", err)
 	}
 }
 
@@ -3212,11 +3258,16 @@ func TestPostgresStore_StreamEventHistory_SuccessWithPageSizeZero(t *testing.T) 
 
 func TestPostgresStore_ContinueAsNew_SuccessMock(t *testing.T) {
 	newRunID := "new-run-uuid"
+	// Three columns: ContinueAsNew's INSERT now RETURNs parent_workflow_id
+	// (migration 018) alongside id and task_queue -- nil here since this
+	// mock's "current-run" has no parent to inherit from.
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{newRunID}}},
+		{match: "SELECT COALESCE((SELECT task_queue FROM workflow_defs", data: [][]driver.Value{{"default"}}},
+		{match: "SELECT (SELECT parent_workflow_id FROM workflow_leases", data: [][]driver.Value{{nil}}},
 	}, []mockExecResult{
 		{match: "INSERT INTO event_history", affected: 1},
-		{match: "SET status = 'done'", affected: 1},
+		{match: "completed_by = assigned_to, assigned_to = NULL", affected: 1},
 	})
 	defer db.Close()
 
@@ -3435,11 +3486,17 @@ func TestPostgresStore_ListSchedules_BeginError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_StartChildWorkflowAtomic_Success(t *testing.T) {
-	childID := "child-uuid"
+	// The INSERT now RETURNs task_queue and def_version -- task_queue for
+	// the insertLeaseAndPayloadRows mirror it added (cleat#3245 Phase 3 step
+	// 2 gap fix), def_version for migration 018's workflow_payloads.def_version
+	// mirror. childID itself is already known in Go (passed in or generated
+	// above), so this query does not also RETURN id the way StartChildWorkflow's
+	// does.
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{childID}}},
+		{match: "SELECT CASE WHEN", data: [][]driver.Value{{int64(1), "default"}}},
 	}, []mockExecResult{
 		{match: "SELECT set_config"}, // from beginTxWithRLS
+		{match: "INSERT INTO workflow_instances", affected: 1},
 		{match: "INSERT INTO event_history", affected: 1},
 	})
 	defer db.Close()
@@ -3472,7 +3529,14 @@ func TestPostgresStore_StartChildWorkflowAtomic_BeginError(t *testing.T) {
 }
 
 func TestPostgresStore_StartChildWorkflowAtomic_InsertChildError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	// The child is resolved first (a Query), then inserted (an Exec). The
+	// error goes on the Exec, and the resolve is given a row, so the failure
+	// the test sees is this one and not the empty-rows fallback's
+	// sql.ErrNoRows, which would also produce an error and pass for the wrong
+	// reason.
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT CASE WHEN", data: [][]driver.Value{{int64(1), "default"}}},
+	}, []mockExecResult{
 		{match: "INSERT INTO workflow_instances", err: errors.New("insert child failed")},
 	})
 	defer db.Close()
@@ -3508,6 +3572,7 @@ func TestPostgresStore_CompactHistory_BeginError(t *testing.T) {
 
 func TestPostgresStore_StartChildWorkflow_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT CASE WHEN", data: [][]driver.Value{{int64(1), "default"}}},
 		{match: "INSERT INTO workflow_instances", err: errors.New("insert failed")},
 	}, nil)
 	defer db.Close()
@@ -3841,8 +3906,15 @@ func TestPostgresStore_AppendEventHistory_Success(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_TraceWorkflow_Success(t *testing.T) {
+	// The mock accepts any statement it has no entry for, so record which
+	// ones ran: since cleat#3245 B1b trace_id is written to workflow_payloads
+	// and never to workflow_instances.
+	var wrotePayload, wroteInstance bool
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET trace_id", affected: 1},
+		{match: "UPDATE workflow_payloads SET trace_id", affected: 1,
+			sideEffect: func(*[]mockRowsResult, *[]mockExecResult) { wrotePayload = true }},
+		{match: "UPDATE workflow_instances SET trace_id", affected: 1,
+			sideEffect: func(*[]mockRowsResult, *[]mockExecResult) { wroteInstance = true }},
 	})
 	defer db.Close()
 
@@ -3851,11 +3923,17 @@ func TestPostgresStore_TraceWorkflow_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TraceWorkflow: %v", err)
 	}
+	if !wrotePayload {
+		t.Error("TraceWorkflow did not write trace_id to workflow_payloads")
+	}
+	if wroteInstance {
+		t.Error("TraceWorkflow wrote trace_id to workflow_instances, which no reader reads")
+	}
 }
 
 func TestPostgresStore_TraceWorkflow_ExecError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET trace_id", err: errors.New("update failed")},
+		{match: "UPDATE workflow_payloads SET trace_id", err: errors.New("update failed")},
 	})
 	defer db.Close()
 
@@ -4002,7 +4080,7 @@ func TestPostgresStore_ResolvePromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_ResolvePromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_leases", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 
@@ -4061,7 +4139,7 @@ func TestPostgresStore_RejectPromise_PromiseUpdateError(t *testing.T) {
 func TestPostgresStore_RejectPromise_WakeUpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "UPDATE workflow_promises SET status", affected: 1},
-		{match: "UPDATE workflow_instances", err: errors.New("wake update failed")},
+		{match: "UPDATE workflow_leases", err: errors.New("wake update failed")},
 	})
 	defer db.Close()
 
@@ -4105,7 +4183,7 @@ func TestPostgresStore_UpdateStickyWorker_Success(t *testing.T) {
 
 func TestPostgresStore_UpdateStickyWorker_ExecError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances SET sticky_worker_id", err: errors.New("update failed")},
+		{match: "UPDATE workflow_leases SET sticky_worker_id", err: errors.New("update failed")},
 	})
 	defer db.Close()
 
@@ -4558,7 +4636,7 @@ func TestPostgresStore_DeliverSignal_InsertError(t *testing.T) {
 func TestPostgresStore_DeliverSignal_UpdateError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "INSERT INTO workflow_signals", affected: 1},
-		{match: "UPDATE workflow_instances", err: errors.New("update failed")},
+		{match: "UPDATE workflow_leases", err: errors.New("update failed")},
 	})
 	defer db.Close()
 
@@ -5314,7 +5392,7 @@ func TestPostgresStore_ClaimWorkflows_ScanError(t *testing.T) {
 			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
 		},
 		{
-			match: "UPDATE workflow_instances",
+			match: "UPDATE workflow_leases",
 			data: [][]driver.Value{
 				// Wrong type for def_version (string instead of int64) causes scan error
 				{"wf-1", "test-wf", "not-an-int", "running", []byte(`{}`), "worker-1", nil, nil, nil, nil, nil, int64(0), int64(0), ""},
@@ -5407,7 +5485,7 @@ func TestPostgresStore_DeliverSignal_ValidJSON(t *testing.T) {
 
 func TestPostgresStore_GetWorkflowByID_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT id, def_name, def_version", err: errors.New("query failed")},
+		{match: "SELECT l.id, p.def_name, p.def_version", err: errors.New("query failed")},
 	}, nil)
 	defer db.Close()
 
@@ -5422,12 +5500,17 @@ func TestPostgresStore_GetWorkflowByID_QueryError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Heartbeat — RowsAffected greater than 1
+// Heartbeat — ownership comes from the fence, not the lease write
 // ---------------------------------------------------------------------------
 
+// Pins RowsAffected > 0, not == 1, which is what this test was written for.
+// It used to pin that on the instance UPDATE. Since cleat#3245 B3b the fenced
+// workflow_leases UPDATE is the whole heartbeat, so it pins it there: any
+// matched row means the renewal landed. (Zero rows is
+// TestPostgresStore_Heartbeat_NotOwned.)
 func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET heartbeat_at", affected: 3},
+		{match: "SET heartbeat_at", affected: 2},
 	})
 	defer db.Close()
 
@@ -5437,7 +5520,7 @@ func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 		t.Fatalf("Heartbeat: %v", err)
 	}
 	if !owned {
-		t.Error("expected owned=true when RowsAffected=3")
+		t.Error("expected owned=true when the fenced lease UPDATE matched rows")
 	}
 }
 

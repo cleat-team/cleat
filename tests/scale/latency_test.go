@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestLatencyP50 measures the median (P50) latency for a single event append
@@ -27,11 +28,7 @@ func TestLatencyP50(t *testing.T) {
 	for i := 0; i < numSamples; i++ {
 		// Create a workflow instance for this sample.
 		id := fmt.Sprintf("scale-lat-p50-%d-%d", i, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 		defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 
@@ -97,12 +94,7 @@ func TestLatencyP99(t *testing.T) {
 			defer func() { <-sem }()
 
 			id := fmt.Sprintf("scale-lat-p99-%d-%d", idx, time.Now().UnixNano())
-			_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-				VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-			if err != nil {
-				t.Errorf("create workflow %d: %v", idx, err)
-				return
-			}
+			testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 			defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 			defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 
@@ -207,12 +199,7 @@ func TestLatencyUnderConcurrency(t *testing.T) {
 					defer wg.Done()
 
 					id := fmt.Sprintf("scale-lat-conc-%d-%d-%d", conc, idx, time.Now().UnixNano())
-					_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-						VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-					if err != nil {
-						t.Errorf("create workflow: %v", err)
-						return
-					}
+					testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 					defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 					defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 

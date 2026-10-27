@@ -143,8 +143,8 @@ func TestAnInputSurvivesTheColumnOrDoesNot(t *testing.T) {
 					t.Fatalf("%s: StartNewRun: %v", tc.name, err)
 				}
 				storedIn := readJSONColumn(t, ctx, db, backend.Name(), tenant,
-					"workflow_instances", "input", "id", runID, "")
-				checkPreserved(t, backend.Name(), "workflow_instances.input", tc.name,
+					payloadColumnsTable(backend.Name()), "input", "id", runID, "")
+				checkPreserved(t, backend.Name(), payloadColumnsTable(backend.Name())+".input", tc.name,
 					tc.payload, sent, storedIn)
 
 				// --- workflow_signals.payload, via DeliverSignal -------------

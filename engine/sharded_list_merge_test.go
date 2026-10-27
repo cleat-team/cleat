@@ -137,8 +137,11 @@ func twoShardsWithInterleavedRows(t *testing.T, ctx context.Context) (*ShardedSt
 			// makes "interleaved" true rather than hoped for.
 			seq++
 			at := base.Add(time.Duration(seq) * time.Second)
+			// ListWorkflows orders by workflow_leases.created_at, not
+			// workflow_instances' (cleat#3245 Phase 3 step 3 piece F), so the
+			// interleaved value this test depends on is set there.
 			if _, err := s.db.ExecContext(ctx,
-				`UPDATE workflow_instances SET created_at = $1 WHERE id = $2`, at, id); err != nil {
+				`UPDATE workflow_leases SET created_at = $1 WHERE id = $2`, at, id); err != nil {
 				t.Fatalf("set created_at for %s: %v", id, err)
 			}
 			newestFirst = append([]string{id}, newestFirst...)

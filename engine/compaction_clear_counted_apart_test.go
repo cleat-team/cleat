@@ -97,10 +97,17 @@ func setCompactionStateForTest(t *testing.T, store WorkflowStore, id string) {
 	t.Helper()
 	switch s := store.(type) {
 	case *PostgresStore:
+		// cleat#3360 dropped compacted_at from workflow_instances --
+		// nothing read it, on this table or workflow_payloads' copy, so
+		// there is no reason for this test's seed to write it either.
+		// compaction_state, compaction_step and completed_at themselves are
+		// workflow_payloads-only now: the sweep's predicate has read them
+		// there exclusively since cleat#3245 B1a, and workflow_instances'
+		// copies are soon-dropped, so this seed writes payloads alone.
 		if _, err := s.db.Exec(
-			`UPDATE workflow_instances SET compaction_state = $1, compaction_step = 1,
-			 compacted_at = now(), completed_at = now() WHERE id = $2`, `{}`, id); err != nil {
-			t.Fatalf("seed compaction state (postgres): %v", err)
+			`UPDATE workflow_payloads SET compaction_state = $1, compaction_step = 1,
+			 completed_at = now() WHERE id = $2`, `{}`, id); err != nil {
+			t.Fatalf("seed compaction state (postgres, payloads): %v", err)
 		}
 	case *MySQLStore:
 		if _, err := s.db.Exec(

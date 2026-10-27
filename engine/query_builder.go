@@ -127,11 +127,39 @@ func (d Dialect) batchLimit(limitPos int) string {
 	}
 }
 
+// postgresWorkflowListJoinColumns returns the column list PostgresStore's
+// ListWorkflows selects from its workflow_leases/workflow_payloads join
+// (cleat#3245 Phase 3 step 3 piece F). It is workflowInstanceColumns' column
+// SET, qualified onto whichever of the two tables each one actually lives on
+// -- l for workflow_leases, p for workflow_payloads -- in the same order, so
+// PostgresStore.ListWorkflows' Scan call did not need to change.
+//
+// MySQL and SQL Server are unaffected: they still read workflow_instances
+// whole through workflowInstanceColumns below, because the migration 016
+// (folded into migrations/postgres/001_schema.sql by #3358) split was
+// Postgres-only (see that migration's own comment on why, and
+// ARCHITECTURE.md's note on the three dialects carrying this split
+// unevenly).
+func postgresWorkflowListJoinColumns() string {
+	return "l.id, p.def_name, p.def_version, l.status, p.input, l.assigned_to, l.next_wake_at, " +
+		"p.error_code, p.error_op, p.error_msg, l.created_at, l.generation, " +
+		"COALESCE(l.priority, 0) AS priority, COALESCE(p.trace_id, '') AS trace_id, l.reclaim_count, " +
+		"COALESCE(l.cancellation_requested, false), COALESCE(l.completed_by, '')"
+}
+
 // workflowInstanceColumns returns the column list for SELECT queries that
 // return WorkflowInstance rows.
 //
-// Used by ListWorkflows on all three dialects and by nothing else -- the claim
-// path has its own list and its own scanner (scanWorkflowInstanceExtra). That
+// Used by ListWorkflows on MySQL and SQL Server. PostgresStore.ListWorkflows
+// used this too until cleat#3245 Phase 3 step 3 piece F moved it onto the
+// workflow_leases/workflow_payloads join above; the DialectPostgres case
+// below is kept rather than deleted because workflow_instances itself still
+// exists and is written at INSERT until the baseline regeneration (B5), and
+// the case is still correct for it -- it is just no longer this store's
+// ListWorkflows that calls it.
+//
+// The claim path has its own list and its own scanner
+// (scanWorkflowInstanceExtra). That
 // distinction is load-bearing: store_types.go argues against carrying
 // reclaim_count on "the hottest query in the system", and it means the CLAIM
 // query. This one is a user-facing list endpoint, so the argument does not

@@ -36,8 +36,9 @@
 # `backup_config` and `backup_history` are created by PLUGIN migrations
 # (plugin.RunMigrations), which run after the core chain and whose table set
 # depends on which plugins a deployment enables. PostgreSQL covers this with
-# `ALTER DEFAULT PRIVILEGES`; SQL Server's 008_app_login.sql covers it with a
-# schema-level GRANT; MySQL has neither mechanism, and a hardcoded list is
+# `ALTER DEFAULT PRIVILEGES`; SQL Server's 001_schema.sql (folded in from
+# 008_app_login.sql, cleat#3349) covers it with a schema-level GRANT; MySQL
+# has neither mechanism, and a hardcoded list is
 # exactly the growing-population census CLAUDE.md warns never stays correct.
 # Querying information_schema.tables at RUN time is the only form of this
 # that does not need updating every time a plugin adds a table -- the cost is

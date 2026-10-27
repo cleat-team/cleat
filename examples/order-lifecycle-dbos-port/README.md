@@ -160,8 +160,16 @@ at all, which is the gap the comparison is naming, not a feature.
 | **total** | | **439** |
 
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
-on the same date: **731**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
+on the same date: **723**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
+
+**Corrected 2026-10-26 (cleat#3368): cleat 731 → 723.** Eight code lines. The backend's private
+`authTransport`, a `RoundTripper` that set the worker API key, was replaced by
+`backendkit.Client.APIKey`, because the client now sends the key itself. DBOS is unchanged at
+**439**, so the app ratio goes from 1.67x to **1.65x**. The paragraphs below still quote the
+2026-10-03 figures (731, and 438 for the cleat scenario harness). Measured the same day as this
+correction, the harness is **469**, so with both harnesses counted the ratio is **1.97x**
+(`(723+469)/(439+165)`).
 
 **Both totals exclude each side's scenario harness, and the two harnesses are
 not the same size — a reader should be able to price that rather than assume
@@ -284,8 +292,11 @@ built, already executed and already in CI.** That belongs here, where the
 number is read, and not only in the other pairs' READMEs.
 
 On the **integration-hub** pair — the one that exercises the WASM sandbox, the
-differentiator #2597 names — the two sides' application code is all but equal:
-`app total` is cleat **215** against DBOS **200**, a ratio of **1.075x**. The
+differentiator #2597 names — the two sides' application code is close to
+parity: `app total` is cleat **215** against DBOS **166**, a ratio of
+**1.30x** (cleat#3041 corrected DBOS's side from 200 -- it had included 34
+lines of hand-rolled test-driver scaffolding cleat's side never pays, since
+Go's `testing` package supplies cleat's equivalent for free). The
 third pair (`b2b-saas-control-plane`) is 641 against 468, **1.37x**. cleat
 carries a one-off 124-line platform cost on the sandbox pair that DBOS carries
 nothing for, because DBOS has no primitive for tenant-supplied code at all. See

@@ -355,7 +355,7 @@ func newESPlugin(t *testing.T) (*Plugin, *esDB, *sql.DB) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{MaxEventSize: 1 * 1024 * 1024},
 	}
-	if err := p.RegisterRoutes(p.mux); err != nil {
+	if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 	return p, esdb, rawDB

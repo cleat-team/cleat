@@ -14,6 +14,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // requireDB is like testStore but skips if CLEAT_TEST_DB is unavailable.
@@ -51,14 +52,7 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		id := fmt.Sprintf("test-cluster-failover-%d", i)
 		q := []string{TestQueue1, TestQueue2, TestQueue3}[i%3]
 		EnsureDef(t, db, "failover-test", 1)
-		_, err := db.Exec(`
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'failover-test', 1, 'ready', '{}', $2)
-			ON CONFLICT (id) DO NOTHING
-		`, id, q)
-		if err != nil {
-			t.Fatalf("Insert workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "failover-test", TaskQueue: q})
 		workflowIDs = append(workflowIDs, id)
 	}
 	defer func() {
@@ -218,14 +212,7 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	// Create a workflow before the kill.
 	runID := "test-cluster-pg-restart"
 	EnsureDef(t, db, "pg-restart", 1)
-	_, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'pg-restart', 1, 'ready', '{}', $2)
-		ON CONFLICT (id) DO NOTHING
-	`, runID, TestQueue1)
-	if err != nil {
-		t.Fatalf("Insert workflow: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "pg-restart", TaskQueue: TestQueue1})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Kill postgres container.
@@ -291,14 +278,7 @@ func TestFullClusterRestart(t *testing.T) {
 	// Create workflows and process some of them.
 	runID := "test-cluster-restart"
 	EnsureDef(t, db, "restart-test", 1)
-	_, err := db.Exec(`
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'restart-test', 1, 'ready', '{}', $2)
-		ON CONFLICT (id) DO NOTHING
-	`, runID, TestQueue1)
-	if err != nil {
-		t.Fatalf("Insert workflow: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "restart-test", TaskQueue: TestQueue1})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow and append some events.

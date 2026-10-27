@@ -76,8 +76,17 @@ func (s *MSSQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 	if len(s.taskQueues) == 0 {
 		return 0, nil
 	}
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count runnable workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var n int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM workflow_instances w
 		LEFT JOIN queues q ON q.tenant_id = w.tenant_id AND q.name = w.concurrency_key AND q.disabled_at IS NULL
 		WHERE w.status IN ('ready', 'terminating')
@@ -142,10 +151,14 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 // claimWorkflowsOnce claims for THIS STORE'S TENANT ONLY.
 //
 // `AND tenant_id` in the candidate SELECT is the whole of that on SQL Server,
-// and it was missing (3.91). dbo.fn_tenant_filter is off for any dbo.cleat_admin
-// login (012_admin_role.sql), so nothing else on this connection would have
-// caught the omission -- this predicate is the only thing standing between a
-// dbo.cleat_admin pool and every tenant's ready work.
+// and it was missing (3.91). The shipped dbo.fn_tenant_filter has carried no
+// role-based exemption since cleat#1541 (dbo.cleat_admin is created in
+// 001_schema.sql; the predicate itself is in 003_procedures.sql) -- a
+// dbo.cleat_admin login is filtered by SESSION_CONTEXT like any other
+// connection unless a deployment has applied the optional, not-auto-applied
+// migrations/mssql/optional/cross_tenant_claim.sql. So this predicate is not
+// a backstop behind an admin exemption; on the shipped default it is the
+// whole of tenant isolation on this connection, admin or not.
 //
 // #1926 retired the mechanism this comment used to contrast against: a
 // separate cross-tenant claim query (claimWorkflowsAcrossTenantsOnce), gated
@@ -1138,14 +1151,24 @@ func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, 
 // another tenant has given up on is exactly the kind whose id has already been
 // pasted into a ticket.
 func (s *MSSQLStore) RetryWorkflow(ctx context.Context, workflowID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// CountRunnableWorkflows above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("retry workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = SYSUTCDATETIME()
 		WHERE id = @p1 AND status = 'dead_lettered' AND tenant_id = @p2
-	`, workflowID, s.tenantID)
-	return err
+	`, workflowID, s.tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReleaseWorkflow returns a workflow to the ready queue with a next wake time.
@@ -1849,7 +1872,15 @@ func (s *MSSQLStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkf
 // stay identical to that UPDATE's, or the two disagree about which children
 // were closed.
 func (s *MSSQLStore) childrenClosedByTerminate(ctx context.Context, parentWorkflowID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// CountRunnableWorkflows above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("children closed by terminate: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT id FROM workflow_instances
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'

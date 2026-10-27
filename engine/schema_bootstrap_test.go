@@ -439,40 +439,23 @@ func TestShippedSchema_IsIdempotent(t *testing.T) {
 			"the fence.", returnType)
 	}
 
-	// admin.claim_workflows had the same shape of pairing at one point -- a
-	// migration defining a 14-column version that could not claim a defer
-	// phase, replaced by a later one accepting 'terminating' and returning
-	// pending_terminal_status. Both are gone: the migrations that carried them
-	// (numbered as high as 040) have been consolidated, and
-	// admin.claim_workflows is now defined exactly once, in 001_schema.sql,
-	// already in the 'terminating'-accepting, pending_terminal_status-returning
-	// shape. cleat#2417.
-	//
-	// Asserted on the column count rather than on the predicate because the
-	// count is what the Go scan depends on: a database whose admin.claim_workflows
-	// regressed to the 14-column shape fails every cross-tenant claim with
-	// "expected 15 destination arguments in Scan, not 14", which is a loud
-	// failure, while a missing 'terminating' alone would be a silent one --
-	// defer phases never claimed, every terminate waiting out its deadline.
-	// That risk is why this stays a regression assertion rather than being
-	// deleted along with the stale pairing story above it.
-	var claimCols int
-	err = db.QueryRow(`
-		SELECT COALESCE(array_length(p.proallargtypes, 1), 0)
+	// admin.claim_workflows was deleted with the workflow_instances columns it
+	// read (cleat#3245 B5), and nothing has called it since the rotating claim
+	// replaced it. This used to assert its 18-column shape survived a
+	// re-apply; the shape is moot, and what matters now is that the function
+	// does not come back from a stale file.
+	var claimFns int
+	if err := db.QueryRow(`
+		SELECT count(*)
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
 		WHERE p.proname = 'claim_workflows' AND n.nspname = 'admin'
-	`).Scan(&claimCols)
-	if err != nil {
-		t.Fatalf("look up admin.claim_workflows shape after re-apply: %v", err)
+	`).Scan(&claimFns); err != nil {
+		t.Fatalf("look up admin.claim_workflows after re-apply: %v", err)
 	}
-	// proallargtypes counts IN plus OUT (the RETURNS TABLE columns): 3 in,
-	// 15 out.
-	if claimCols != 18 {
-		t.Errorf("after re-applying the migrations, admin.claim_workflows has %d "+
-			"arguments and result columns, want 18 (3 in + 15 out).\n"+
-			"A re-applied database has been left at 023's 14-column version, "+
-			"which cannot claim a defer phase.", claimCols)
+	if claimFns != 0 {
+		t.Errorf("after re-applying the migrations, admin.claim_workflows exists (%d); "+
+			"it was deleted with the instance columns it read", claimFns)
 	}
 }
 

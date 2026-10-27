@@ -98,6 +98,7 @@ func TestCbTypeConstants(t *testing.T) {
 		cbTypeVersion, cbTypeMinVersion, cbTypeDurableDefer, cbTypeContinueAsNew, cbTypePollCancellation,
 		cbTypeAwaitSignals, cbTypePollSignal, cbTypeSignalWorkflow,
 		cbTypeChildWorkflow, cbTypeAwaitChild, cbTypeAwaitAllChildren,
+		cbTypePollChild, cbTypeAwaitAnyChild, cbTypeRunDetached, cbTypeDeferPhase,
 		cbTypeChildWorkflowWithOptions,
 		cbTypeCreatePromise, cbTypeAwaitPromise, cbTypeResolvePromise, cbTypeRejectPromise,
 		cbTypeSetQueryState, cbTypeRegisterUpdateHandler, cbTypeRegisterQueryHandler,
@@ -202,6 +203,10 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"Fetch", true, 15, strPtr, 4},
 		{"AwaitChild", true, 17, strPtr, 1},
 		{"AwaitAllChildren", true, 18, strPtr, 1},
+		{"PollChild", true, 26, strPtr, 1},
+		{"AwaitAnyChild", true, 27, strPtr, 1},
+		{"RunDetached", false, 26, strPtr, 2},
+		{"DeferPhase", false, 27, nil, 0},
 		{"PluginCallStreaming", true, 19, strPtr, 3},
 		{"ChildWorkflowWithOptions", true, 20, strPtr, 5},
 		{"AwaitPromise", true, 22, strPtr, 2},
@@ -267,6 +272,8 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"SetScope(0<2)", true, 7},
 		{"AwaitChild(0<1)", true, 17},
 		{"AwaitAllChildren(0<1)", true, 18},
+		{"PollChild(0<1)", true, 26},
+		{"AwaitAnyChild(0<1)", true, 27},
 		{"PluginCallStreaming(0<3)", true, 19},
 		{"ChildWorkflowWithOptions(0<5)", true, 20},
 		{"AwaitPromise(0<2)", true, 22},
@@ -290,6 +297,8 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"ContinueAsNewVersioned(0<2)", false, 22},
 		{"GetScope(0<4)", false, 23},
 		{"AwaitSignals(0<6)", false, 24},
+		{"RunDetached(0<2)", false, 26},
+		{"DeferPhase(0<1)", false, 27},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -831,16 +840,51 @@ func TestDispatchChildWorkflowWithOptions(t *testing.T) {
 	wantCallOutcome(t, resultPtr, "ok", 20, 0)
 }
 
-func TestDispatchAwaitPromise(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("promise-id", uint64(1000))
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(22, argsPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
+// rejectingHandler is a mockHostHandler that reports its last AwaitPromise as a
+// rejection, the way *execSession does through awaitRejectionReporter.
+type rejectingHandler struct{ *mockHostHandler }
+
+func (rejectingHandler) lastAwaitPromiseRejected() bool { return true }
+
+// cleat#3425: durable-await-promise returns result<await-outcome, call-failure>,
+// and each packed word the host can answer with lands in its own case. Before,
+// every one of them was flattened to a string by extractStringFromSimplePacked.
+func TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		handler     HostHandler
+		wantKind    string
+		wantPayload int
+	}{
+		{"resolved", &mockHostHandler{ret: packAwaitPromiseResult(5, false, 0)}, "resolved", 5},
+		{"resolved with an empty value", &mockHostHandler{ret: packAwaitPromiseResult(0, false, 0)}, "resolved", 0},
+		{"timeout", &mockHostHandler{ret: packAwaitPromiseResult(0, true, 0)}, "timed-out", 0},
+		{"timeout inside a host defer drain", &mockHostHandler{ret: packAwaitSignalsResult(0, 0, true, 0)}, "timed-out", 0},
+		{"host error", &mockHostHandler{ret: packAwaitPromiseResult(7, false, 1)}, "failed", 7},
+		{"rejection", rejectingHandler{&mockHostHandler{ret: packAwaitPromiseResult(6, false, 1)}}, "rejected", 6},
+		// The stop sentinel is bit 31, which lands inside this layout's timed-out
+		// byte. Reading the fields first takes it for a timeout.
+		{"stop", &mockHostHandler{ret: callSuspendSentinel}, "suspended", 0},
+	} {
+		b := &wasmtimeBackend{handler: c.handler}
+		argsPtr, _, freeArgs := cgotestMakeMixedArgs("promise-id", uint64(1000))
+		resultPtr := cgotestAllocResult()
+		if err := b.cgotestDispatchStr(22, argsPtr, 2, resultPtr); err != nil {
+			freeArgs()
+			t.Fatalf("%s: unexpected error: %v", c.name, err)
+		}
+		freeArgs()
+		kind, payload, code := cgotestReadAwaitOutcome(resultPtr)
+		if kind != c.wantKind {
+			t.Errorf("%s: case = %q, want %q (an empty case means the dispatcher wrote something that is not a result<await-outcome, call-failure>)",
+				c.name, kind, c.wantKind)
+		}
+		if len(payload) != c.wantPayload {
+			t.Errorf("%s: payload is %d bytes, want %d", c.name, len(payload), c.wantPayload)
+		}
+		if code != 0 {
+			t.Errorf("%s: call-error code = %d, want 0 (the packed errCode here is this call's own, not the call-error taxonomy)", c.name, code)
+		}
 	}
 }
 

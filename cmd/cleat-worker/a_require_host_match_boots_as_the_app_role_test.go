@@ -257,7 +257,14 @@ var startupKeyRE = regexp.MustCompile(`cleat_sk_[A-Za-z0-9_-]+`)
 // startsHealthy's --require-auth=false would skip the check entirely), waits for /healthz, and runs probe
 // with the base URL and the startup API key the worker printed (this boot's, or one
 // remembered in *key from an earlier boot of the same database, since it is printed once). It reports whether the worker came up.
-func hostMatchServes(t *testing.T, bin string, args []string, key *string, probe func(base, key string)) (bool, string) {
+//
+// extraEnv is appended on top of this process's own environment -- optional,
+// and every existing call site omits it (a variadic trailing parameter is
+// backward compatible). cleat#2408 needs it to hand the spawned worker
+// SSL_CERT_FILE, which a package-var swap cannot reach from outside: that is
+// exactly why this is a process-spawn env var rather than anything settable
+// after cmd.Start.
+func hostMatchServes(t *testing.T, bin string, args []string, key *string, probe func(base, key string), extraEnv ...string) (bool, string) {
 	t.Helper()
 	// Boot on an ephemeral port and learn the real one from the worker's own
 	// "HTTP API listening" line, instead of pre-choosing a port with freePort and
@@ -267,7 +274,7 @@ func hostMatchServes(t *testing.T, bin string, args []string, key *string, probe
 	cmd := exec.Command(bin, args...)
 	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), extraEnv...)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

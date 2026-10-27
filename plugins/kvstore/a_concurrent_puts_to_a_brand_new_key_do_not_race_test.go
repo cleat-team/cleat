@@ -71,7 +71,7 @@ func TestConcurrentPutsToABrandNewKeyDoNotRace(t *testing.T) {
 			}
 			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect}
 			p.mux = http.NewServeMux()
-			if err := p.RegisterRoutes(p.mux); err != nil {
+			if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 				t.Fatalf("RegisterRoutes: %v", err)
 			}
 

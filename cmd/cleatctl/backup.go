@@ -74,9 +74,58 @@ var backupHistoryListByConfigSQL = plugin.Query{
 		FROM backup_history WHERE config_id = $1 ORDER BY started_at DESC OFFSET 0 ROWS FETCH NEXT $2 ROWS ONLY`,
 }
 
+// backupConfigTableExistsSQL resolves backup_config's presence the way the
+// CONNECTION would resolve the bare name -- to_regclass on PostgreSQL,
+// sys.tables on SQL Server -- rather than checkdb.go's coreTableExistsSQL
+// shape, which matches a fixed admin./dbo schema split scheduledbackup's
+// tables do not have (they carry no schema prefix at all,
+// plugins/scheduledbackup/migrations.go). MySQL still needs DATABASE():
+// information_schema spans every database on the server, not just the one
+// this DSN selected. Same per-dialect shape as
+// migration.Runner.trackingTableExists.
+//
+// A plugin.Query, not a switch on d.name with inline literals: the MySQL and
+// MSSQL arms there would otherwise be PREPAREd against PostgreSQL by
+// TestEveryInlineStatementParsesOnPostgres, which prunes by the MySQL/MSSQL
+// KEY in a composite literal like this one and has no way to recognise a
+// bare string switched on at runtime.
+var backupConfigTableExistsSQL = plugin.Query{
+	Default: `SELECT CASE WHEN to_regclass('backup_config') IS NULL THEN 0 ELSE 1 END`,
+	MySQL:   `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'backup_config'`,
+	MSSQL:   `SELECT COUNT(*) FROM sys.tables WHERE name = 'backup_config'`,
+}
+
+// requireBackupMigrations is cleat#2292 item 2. Every subcommand below hits
+// backup_config or backup_history directly, and a missing table surfaced as
+// the raw driver error (e.g. `pq: relation "backup_config" does not exist`)
+// rather than naming the fix. Checked once, before dispatch, rather than
+// wrapped around each of the six subcommands' own queries.
+//
+// Both of scheduledbackup's tables are created together in migration
+// version 1 (plugins/scheduledbackup/migrations.go), so checking for
+// backup_config alone stands for both.
+func requireBackupMigrations(ctx context.Context, db *sql.DB, d dialect) error {
+	var n int
+	if err := db.QueryRowContext(ctx, backupConfigTableExistsSQL.For(d.query)).Scan(&n); err != nil {
+		return fmt.Errorf("checking whether scheduledbackup's tables exist: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("backup_config does not exist: the scheduledbackup plugin's migrations have " +
+			"not been applied. Run the migrations as a deploy step:\n\n" +
+			"    cleat-worker --migrate-only --db <dsn> [--migrate-db <owner dsn>]\n\n" +
+			"and then retry this command")
+	}
+	return nil
+}
+
 func runBackup(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	if len(args) < 1 {
 		printBackupUsage()
+		osExit(1)
+		return
+	}
+	if err := requireBackupMigrations(ctx, db, d); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		osExit(1)
 		return
 	}
@@ -115,7 +164,8 @@ NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
   backup run (--id <uuid> | --name <name>)
                                   request an immediate backup: sets next_run_at to now.
                                   Picked up by the background loop within 60s -- this
-                                  does not run pg_dump itself.
+                                  does not run pg_dump itself. Refuses on a disabled
+                                  config, which the background loop never picks up.
   backup history [--id <uuid> | --name <name>] [--limit N]
                                   list backup attempts, newest first (default limit 50)
 `, scheduledbackup.ConfigNameRule)
@@ -565,8 +615,40 @@ func runBackupRun(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		osExit(1)
 		return
 	}
+
+	// cleat#2292 item 3. background.go's dueBackupsQuery only claims rows
+	// WHERE enabled = true, so advancing next_run_at on a disabled config and
+	// printing "picked up ... within 60s" below would be a promise the
+	// background loop never keeps, with nothing telling the operator why.
+	// backupConfigGetByIDSQL already selects enabled among its other columns
+	// and had no caller until this one -- reused rather than writing a
+	// narrower SELECT next to it.
+	var gotID uuid.UUID
+	var cfgName, cron string
+	var retentionDays int
+	var enabled bool
+	stmt, stmtArgs, err := d.rebindArgs(backupConfigGetByIDSQL, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebinding backup config lookup: %v\n", err)
+		osExit(1)
+		return
+	}
+	row := db.QueryRowContext(ctx, stmt, stmtArgs...)
+	if err := plugin.ScanRow(row, &gotID, &cfgName, &cron, &retentionDays, &enabled); err != nil {
+		fmt.Fprintf(os.Stderr, "checking whether config %s is enabled: %v\n", id, err)
+		osExit(1)
+		return
+	}
+	if !enabled {
+		fmt.Fprintf(os.Stderr, "backup config %s (%s) is disabled -- the background loop only picks up "+
+			"enabled configs, so this run would never happen. Run `backup config-update --id %s --enabled` "+
+			"first, or target a different config.\n", id, cfgName, id)
+		osExit(1)
+		return
+	}
+
 	now := time.Now().UTC()
-	stmt, stmtArgs, err := d.rebindArgs(backupConfigRequestRunSQL, now, now, id)
+	stmt, stmtArgs, err = d.rebindArgs(backupConfigRequestRunSQL, now, now, id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rebinding backup run request: %v\n", err)
 		osExit(1)

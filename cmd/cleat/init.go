@@ -18,6 +18,9 @@ var agentTemplates embed.FS
 //go:embed templates/agent-python/*
 var agentPythonTemplates embed.FS
 
+//go:embed templates/agent-workflow/*
+var agentWorkflowTemplates embed.FS
+
 //go:embed templates/workflow/*
 var workflowTemplates embed.FS
 
@@ -30,11 +33,11 @@ var fullstackTemplates embed.FS
 
 func runInit(args []string) {
 	flags := flag.NewFlagSet("init", flag.ExitOnError)
-	templateName := flags.String("template", "basic", "project template (basic, agent, agent-python, workflow, fullstack)")
+	templateName := flags.String("template", "basic", "project template (basic, agent, agent-python, agent-workflow, workflow, fullstack)")
 	_ = flags.Parse(args)
 
 	if flags.NArg() < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic|agent-python|workflow|fullstack] <project-name>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic|agent-python|agent-workflow|workflow|fullstack] <project-name>\n")
 		os.Exit(1)
 	}
 	projectName := flags.Arg(0)
@@ -46,12 +49,14 @@ func runInit(args []string) {
 		scaffoldBasic(projectName)
 	case "agent-python":
 		scaffoldAgentPython(projectName)
+	case "agent-workflow":
+		scaffoldAgentWorkflow(projectName)
 	case "workflow":
 		scaffoldWorkflow(projectName)
 	case "fullstack":
 		scaffoldFullstack(projectName)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent, agent-python, workflow, fullstack\n", *templateName)
+		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent, agent-python, agent-workflow, workflow, fullstack\n", *templateName)
 		os.Exit(1)
 	}
 }
@@ -178,6 +183,56 @@ func scaffoldAgentPython(projectName string) {
 	copyTemplate("requirements.txt", "requirements.txt")
 
 	fmt.Printf("Created Python agent project in %s/\n", dir)
+}
+
+// scaffoldAgentWorkflow scaffolds the agent LOOP itself -- a deployable
+// definition, not a caller of one. cleat#2973: gated until a release carried
+// `cleat/agentworkflow` (cleat/v0.4.0 does), because a scaffolded project
+// resolves the SDK from the module proxy exactly as an external user's would,
+// and could not import a package no published version carried yet. That is
+// also why this is a DISTINCT template from "agent": "agent" is the existing
+// client scaffold (it starts this as a child via h.ChildWorkflow/h.AwaitChild
+// and has never needed agentworkflow itself), and the two coexist rather than
+// one replacing the other.
+//
+// examples/agent/ carries the same definition and is NOT removed: see that
+// file's own doc comment for why (tests/crash/agent_resume_test.go builds it
+// against the LOCAL module, which a template -- resolved from the proxy --
+// cannot stand in for).
+func scaffoldAgentWorkflow(projectName string) {
+	dir := projectName
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	copyTemplate := func(name, dest string) {
+		data, err := agentWorkflowTemplates.ReadFile("templates/agent-workflow/" + name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading template %s: %v\n", name, err)
+			os.Exit(1)
+		}
+		if strings.HasSuffix(dest, ".go") {
+			data = stripScaffoldBuildTag(data)
+		}
+		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
+			os.Exit(1)
+		}
+	}
+
+	copyTemplate("workflow.go", "workflow.go")
+	copyTemplate("go.mod.txt", "go.mod")
+	copyTemplate("docker-compose.yml", "docker-compose.yml")
+	writeScaffoldTemplate(agentWorkflowTemplates, "templates/agent-workflow/README.md", dir, "README.md", projectName)
+	writeScaffoldTemplate(agentWorkflowTemplates, "templates/agent-workflow/Makefile", dir, "Makefile", projectName)
+
+	// Entry point "agent", not "{{entryPoint named after the project}}": the
+	// function is @cleatEntry(name="agent") in workflow.go, and cleat.yaml's
+	// entry_points must name what the module actually exports.
+	writeYAML(dir, projectName, "agent")
+	tidyScaffold(dir)
+	fmt.Printf("Created agent workflow project in %s/\n", dir)
 }
 
 func scaffoldWorkflow(projectName string) {

@@ -195,13 +195,14 @@ func TestEveryWorkerLaunchSiteSaysHowItsSchemaGetsMigrated(t *testing.T) {
 		// to one), so each now migrates through a separate one-shot
 		// `--migrate-only` service running as the superuser, and the serving
 		// worker only verifies.
-		"docker-compose.cluster.yml":                       "--migrate-only",
-		"charts/cleat/templates/migrate-job.yaml":          "--migrate-only",
-		"k8s/migrate-job.yaml":                             "--migrate-only",
-		"packaging/systemd/cleat-worker.service":           "--migrate-only",
-		"cmd/cleat/templates/agent/docker-compose.yml":     "--migrate-only",
-		"cmd/cleat/templates/fullstack/docker-compose.yml": "--migrate-only",
-		"cmd/cleat/templates/workflow/docker-compose.yml":  "--migrate-only",
+		"docker-compose.cluster.yml":                            "--migrate-only",
+		"charts/cleat/templates/migrate-job.yaml":               "--migrate-only",
+		"k8s/migrate-job.yaml":                                  "--migrate-only",
+		"packaging/systemd/cleat-worker.service":                "--migrate-only",
+		"cmd/cleat/templates/agent/docker-compose.yml":          "--migrate-only",
+		"cmd/cleat/templates/agent-workflow/docker-compose.yml": "--migrate-only",
+		"cmd/cleat/templates/fullstack/docker-compose.yml":      "--migrate-only",
+		"cmd/cleat/templates/workflow/docker-compose.yml":       "--migrate-only",
 		// cleat#2512. The reference scenario, same shape as the three
 		// scaffolds above and for the same reason: the serving worker
 		// connects as cleat_app, and a separate one-shot `--migrate-only`

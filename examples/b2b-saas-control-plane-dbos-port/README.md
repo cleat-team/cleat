@@ -156,16 +156,21 @@ Application lines, non-comment:
 
 | side | files | code |
 |---|---|---|
-| cleat: workflow, backend, tests | `provision.go`, `backend/main.go`, `provision_test.go` | 641 |
+| cleat: workflow, backend, tests | `provision.go`, `backend/main.go`, `provision_test.go` | 631 |
 | DBOS: workflow, backend, tests | `src/workflow.ts`, `src/server.ts`, `src/provision.test.ts` | 468 |
 | **total** | | **468** |
 
 Against cleat's side, `scripts/dbos-pair-loc.sh b2b-saas-control-plane`
-on the same date: **641**.
+on the same date: **631**.
 
 Re-derive both with that script rather than re-quoting these numbers — they are
 a census of files that will change, and `scripts/check-dbos-pair-loc.py` fails
 CI if this table and the script disagree.
+
+**Corrected 2026-10-26 (cleat#3368): cleat 641 → 631.** Ten code lines. The backend's private
+`authTransport`, a `RoundTripper` that set each tenant's API key, was replaced by
+`backendkit.New(url, backendkit.WithAPIKey(key))`, because `backendkit.Client` now sends the key
+itself. The DBOS side is unchanged.
 
 **Corrected 2026-10-02, in this PR's own review cycle: 458 → 468.** Ten code
 lines in two steps: nine when `src/server.ts` gained a rate limiter (the fourth

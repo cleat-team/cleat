@@ -142,10 +142,16 @@ func TestBackupConfigUpdateOnlyWarnsWhenEnabling(t *testing.T) {
 }
 
 // TestBackupRunWarnsWhenDSNSecretIsUnresolvable covers the third call site:
-// unlike config-create and config-update, "run" has no --enabled gate to
-// check first -- requesting an immediate run always warns if the secret it
-// will need within 60s is not resolvable, since by the time the background
-// loop tries to use it there is nowhere left to report the problem to.
+// requesting an immediate run warns if the secret it will need within 60s
+// is not resolvable, since by the time the background loop tries to use it
+// there is nowhere left to report the problem to.
+//
+// The config here must be ENABLED, unlike this file's other two tests --
+// cleat#2292 item 3 gave "run" its own --enabled gate, which refuses
+// outright and never reaches this warning at all. That refusal has its own
+// test, TestBackupRunRefusesADisabledConfig (backup_test.go); this one is
+// about the DSN check specifically, so a disabled config here would prove
+// nothing about it.
 func TestBackupRunWarnsWhenDSNSecretIsUnresolvable(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping a real database test in short mode")
@@ -163,7 +169,7 @@ func TestBackupRunWarnsWhenDSNSecretIsUnresolvable(t *testing.T) {
 	name := "run-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
 	withExitPanicOutput(t, func() {
 		runBackupConfigCreate(ctx, db, dialectPostgres, []string{
-			"--name", name, "--cron", "0 0 * * *", "--disabled",
+			"--name", name, "--cron", "0 0 * * *",
 		})
 	})
 	id, err := resolveConfigID(ctx, db, dialectPostgres, "", name)

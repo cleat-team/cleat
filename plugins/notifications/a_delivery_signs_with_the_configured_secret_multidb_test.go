@@ -258,6 +258,91 @@ func TestSendWebhookDeliversWithTheConfiguredSecret(t *testing.T) {
 			if deliveries[0]["status"] != "delivered" {
 				t.Errorf("delivery status in list: got %v, want %q", deliveries[0]["status"], "delivered")
 			}
+
+			// cleat#2219: the list assertion above only ever exercised a
+			// SUCCESSFUL delivery's fields. A failed/retrying delivery's
+			// response_body (the reason an operator would read through this
+			// same route to know WHY a delivery has not gone through) was
+			// covered only by cleat-review's own probe on #2198, never by a
+			// committed test -- so a regression that stopped carrying
+			// response_body through handleListDeliveries' scan (or through
+			// retryOrFail/markRetrying's own column) would ship unseen.
+			//
+			// A second webhook, pointed at a receiver that always answers
+			// 500: deliver() builds retryOrFail's reason as
+			// "HTTP %d: %s" (resp.StatusCode, respBody) (background.go), and
+			// with a fresh delivery's attempt_count at 0, retryOrFail's
+			// newCount (1) is below its ceiling (10), so this goes through
+			// markRetrying, not markFailed -- status "retrying", exercising
+			// the same column markRetrying's own clock fix (and this file's
+			// same-tick sweep) touches, not a dead-end "failed" path.
+			const failureBody = "simulated downstream failure"
+			failingReceiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.ReadAll(r.Body) //nolint:errcheck // test receiver, draining is enough
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(failureBody))
+			}))
+			defer failingReceiver.Close()
+
+			failCreateBody := fmt.Sprintf(`{"url":%q,"secret":%q,"events":["test.event"]}`, failingReceiver.URL, rawSecret)
+			failCreateReq := httptest.NewRequest("POST", "/webhooks", strings.NewReader(failCreateBody)).WithContext(tenantCtx)
+			failCreateRec := httptest.NewRecorder()
+			p.handleCreateWebhook(failCreateRec, failCreateReq)
+			if failCreateRec.Code != http.StatusCreated {
+				t.Fatalf("create failing webhook: want 201, got %d: %s", failCreateRec.Code, failCreateRec.Body.String())
+			}
+			var failCreated map[string]any
+			if err := json.Unmarshal(failCreateRec.Body.Bytes(), &failCreated); err != nil {
+				t.Fatalf("decode create response (failing webhook): %v", err)
+			}
+			failWebhookID := failCreated["id"].(string)
+
+			failInput := fmt.Sprintf(`{"webhook_id":%q,"event_type":"test.event","payload":%s}`, failWebhookID, payload)
+			if _, err := p.sendWebhook(sendCtx, failInput); err != nil {
+				t.Fatalf("sendWebhook (failing): %v", err)
+			}
+
+			// Same single-call sweep as above: both the due-delivery check
+			// and this one agree on the database clock, so the new delivery
+			// is already due.
+			attempted2, succeeded2, failed2, err := p.processDeliveries(sweepCtx, ctx)
+			if err != nil {
+				t.Fatalf("processDeliveries (failing): %v", err)
+			}
+			// processDeliveries' own switch (background.go) only increments
+			// succeeded on "delivered" and failed on "failed" -- "retrying"
+			// (this scenario's outcome, attempt_count 0 -> 1, below the
+			// ceiling of 10) increments neither.
+			if attempted2 != 1 || succeeded2 != 0 || failed2 != 0 {
+				t.Fatalf("expected the failing delivery to be attempted once and marked "+
+					"'retrying' (attempted=1 succeeded=0 failed=0; processDeliveries counts "+
+					"neither succeeded nor failed for a 'retrying' outcome): "+
+					"got attempted=%d succeeded=%d failed=%d",
+					attempted2, succeeded2, failed2)
+			}
+
+			failListReq := httptest.NewRequest("GET", "/webhooks/"+failWebhookID+"/deliveries", nil).WithContext(tenantCtx)
+			failListReq.SetPathValue("id", failWebhookID)
+			failListRec := httptest.NewRecorder()
+			p.handleListDeliveries(failListRec, failListReq)
+			if failListRec.Code != http.StatusOK {
+				t.Fatalf("list deliveries (failing): want 200, got %d: %s", failListRec.Code, failListRec.Body.String())
+			}
+			var failDeliveries []map[string]any
+			if err := json.Unmarshal(failListRec.Body.Bytes(), &failDeliveries); err != nil {
+				t.Fatalf("decode deliveries list (failing): %v", err)
+			}
+			if len(failDeliveries) != 1 {
+				t.Fatalf("deliveries list (failing): got %d entries, want 1: %s", len(failDeliveries), failListRec.Body.String())
+			}
+			if failDeliveries[0]["status"] != "retrying" {
+				t.Errorf("failing delivery status in list: got %v, want %q", failDeliveries[0]["status"], "retrying")
+			}
+			gotBody, _ := failDeliveries[0]["response_body"].(string)
+			if !strings.Contains(gotBody, "500") || !strings.Contains(gotBody, failureBody) {
+				t.Errorf("failing delivery response_body in list: got %q, want it to mention the "+
+					"500 status and %q (retryOrFail's reason = \"HTTP %%d: %%s\")", gotBody, failureBody)
+			}
 		})
 	}
 }

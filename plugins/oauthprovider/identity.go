@@ -173,6 +173,7 @@ func (p *Plugin) githubVerifiedEmail(ctx context.Context, accessToken, emailsURL
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
+	plugin.SetTraceparentFromContext(ctx, req)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -352,11 +353,11 @@ func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider st
 	// the only reliable one.
 	ctx = plugin.ForTenant(ctx, tid)
 
-	rows, err := p.db.Query(ctx, plugin.Rebind(`
+	rows, err := p.db.Query(ctx, `
 			SELECT identity_type, identity_value
 			FROM oauth_allowed_identities
 			WHERE tenant_id = $1 AND provider = $2
-		`, p.dialect), tid, provider)
+		`, tid, provider)
 	if err != nil {
 		return allowedIdentity{}, false, err
 	}

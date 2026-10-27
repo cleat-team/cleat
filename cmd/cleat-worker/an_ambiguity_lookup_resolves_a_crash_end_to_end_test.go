@@ -296,15 +296,11 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 	}
 
 	// Simulate the crash: put the row back the way a second worker's reclaim
-	// would find it. Same UPDATE as
+	// would find it. Same helper as
 	// TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow;
 	// worker A's own goroutine is left running against the hung handler and
 	// is never waited on again.
-	if _, err := db.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
-		    generation = generation + 1, reclaim_count = reclaim_count + 1
-		WHERE id = $1`, wfID); err != nil {
+	if err := simulateCrashReclaim(ctx, db, wfID); err != nil {
 		t.Fatalf("simulating the crash: %v", err)
 	}
 

@@ -90,7 +90,8 @@ func newReentryRig(t *testing.T, wasmBytes []byte, timeout time.Duration,
 
 	store := wasmtime.NewStore(b.engine)
 	t.Cleanup(func() { store.Close() })
-	if _, err := b.configureStore(ctx, store); err != nil {
+	armedTimeout, err := b.configureStore(ctx, store)
+	if err != nil {
 		t.Fatalf("configureStore: %v", err)
 	}
 
@@ -114,6 +115,32 @@ func newReentryRig(t *testing.T, wasmBytes []byte, timeout time.Duration,
 		needsWasi, module); err != nil {
 		t.Fatalf("registerAllImports: %v", err)
 	}
+
+	// Re-arm immediately before Instantiate, for exactly the reason
+	// Execute's own b.budget.arm() does the same thing in backend_wasmtime.go
+	// (cleat#1090 / IMPROVEMENT-PLAN 3.90): configureStore's deadline, set
+	// above, is BEFORE module compilation (wasmtime.NewModule) and import
+	// registration -- both measured at ~200-265ms on an otherwise idle
+	// machine (cleat#3255) -- so without this, that cost comes out of the
+	// guest's own execution budget rather than the harness's setup. On an
+	// unloaded machine that leaves ample margin and this never matters; on a
+	// loaded CI runner it can eat enough of a short timeout (these fixtures
+	// use 2s) that `_start` itself gets epoch-interrupted before the TinyGo
+	// runtime finishes its own init, which traps as
+	// "runtime: wasmexport function called before runtime initialization" --
+	// cleat#3255's exact symptom, reproduced directly here by shrinking
+	// armedTimeout to ~280ms, well below 2s but near the measured
+	// compile+register cost. Production's Execute was never exposed to this:
+	// its module cache makes compilation a one-time cost, and it re-arms via
+	// hostBudget.arm() at this exact point regardless. This test rig has no
+	// hostBudget (these tests make no host calls needing one), so the fix is
+	// the same primitive production's arm() ultimately calls, applied at the
+	// same point in the sequence.
+	ticks := uint64(armedTimeout / epochTickInterval)
+	if ticks == 0 {
+		ticks = 1
+	}
+	store.SetEpochDeadline(ticks)
 
 	instance, err := linker.Instantiate(store, module)
 	if err != nil {

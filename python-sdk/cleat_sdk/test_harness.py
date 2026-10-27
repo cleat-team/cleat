@@ -39,6 +39,7 @@ from .host_calls import (
     RetryPolicy,
     SignalResult,
     SuspendSentinel,
+    _decode_fetch_response,
 )
 
 # ---------------------------------------------------------------------------
@@ -557,9 +558,7 @@ class CleatTestHarness(HostCalls):
     ) -> tuple:
         # Delegate to call("http", "fetch", ...)
         request = {"url": url, "method": method, "headers": headers or {}, "body": body}
-        result = self.call("http", "fetch", request)
-        data = json.loads(result)
-        return data.get("body", ""), data.get("status", 200)
+        return _decode_fetch_response(self.call("http", "fetch", request))
 
     # ------------------------------------------------------------------
     # sleep

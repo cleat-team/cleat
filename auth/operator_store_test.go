@@ -53,10 +53,6 @@ func TestEveryOperatorStatementCarriesItsDialect(t *testing.T) {
 var (
 	createTableRE = regexp.MustCompile(`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.]+)`)
 	targetTableRE = regexp.MustCompile(`(?i)(?:INSERT\s+INTO|FROM|UPDATE)\s+([A-Za-z0-9_.]+)`)
-
-	sqlStringRE       = regexp.MustCompile(`'(?:[^']|'')*'`)
-	sqlBlockCommentRE = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	sqlLineCommentRE  = regexp.MustCompile(`(?m)--.*$`)
 )
 
 // stripLiteralsAndComments removes string literals and SQL comments from a
@@ -72,25 +68,72 @@ var (
 // the table name. It reported four statements targeting the wrong table on a
 // tree where every one of them was right.
 //
-// COMMENTS COME FIRST HERE, and that is a deliberate departure from CLAUDE.md's
-// ordering (strings, then comments), which exists so a `--` inside a string
-// literal cannot truncate a line and hide real code to its left. Applied to
-// these files it does the opposite: SQL migration prose is dense with possessive
-// apostrophes ("MySQL's application identity", "cleat's"), so a string-first
-// pass pairs the apostrophe in a COMMENT with the next one anywhere below it and
-// swallows everything between -- including the CREATE TABLE. Measured: the first
-// version of this function removed the statement and reported the file as having
-// zero of them.
+// USED TO BE three separate regex passes -- block comments, then line
+// comments, then strings -- run in that order deliberately, because SQL
+// migration prose is dense with possessive apostrophes ("MySQL's application
+// identity", "cleat's") and a strings-first pass pairs the apostrophe in a
+// COMMENT with the next one anywhere below it, swallowing everything between.
+// That ordering's own stated residual risk was "a literal containing a
+// comment marker, which would truncate its line... and if it ever did, the
+// count assertion below fails rather than passing quietly" -- which undersold
+// the blast radius. cleat#3347's consolidated 001_schema.sql folds in a
+// RAISE NOTICE message that contains the literal text "--claim-strategy=rotate"
+// (describing a CLI flag, not opening a comment); the line-comment regex ran
+// first, had no way to know it was inside an open string, and deleted
+// everything from there to end of line -- including that string's own closing
+// quote. The count assertion DID fail, loud as designed, but the damage was
+// not contained to that one truncated literal: every string match after it in
+// the file was now off by one quote, and the ones in between paired a real
+// string's closing quote with the NEXT real string's opening quote, reporting
+// the literal CODE between two unrelated strings -- including the CREATE TABLE
+// this guard was looking for -- as if it were string content. A single file
+// with the offending RAISE NOTICE never showed this: the corruption was
+// contained by the file boundary the compaction removed.
 //
-// The residual risk of the other order is a literal containing a comment marker,
-// which would truncate its line. It cannot hide the statement this guard looks
-// for -- a CREATE TABLE does not appear inside a string -- and if it ever did,
-// the count assertion below fails rather than passing quietly. The loud
-// direction, chosen on purpose.
+// A single pass that tracks comment/string context as it goes has no such
+// ordering dilemma -- a "--" seen while inside a string is just two ordinary
+// characters, and an apostrophe seen while inside a comment is too, because
+// each context's own scan does not look for the other's markers at all.
 func stripLiteralsAndComments(s string) string {
-	s = sqlBlockCommentRE.ReplaceAllString(s, " ")
-	s = sqlLineCommentRE.ReplaceAllString(s, "")
-	return sqlStringRE.ReplaceAllString(s, "''")
+	var out strings.Builder
+	i, n := 0, len(s)
+	for i < n {
+		switch {
+		case s[i] == '-' && i+1 < n && s[i+1] == '-':
+			for i < n && s[i] != '\n' {
+				i++
+			}
+		case s[i] == '/' && i+1 < n && s[i+1] == '*':
+			i += 2
+			for i+1 < n && !(s[i] == '*' && s[i+1] == '/') {
+				i++
+			}
+			if i+1 < n {
+				i += 2
+			} else {
+				i = n
+			}
+			out.WriteByte(' ')
+		case s[i] == '\'':
+			i++
+			for i < n {
+				if s[i] == '\'' {
+					if i+1 < n && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			out.WriteString("''")
+		default:
+			out.WriteByte(s[i])
+			i++
+		}
+	}
+	return out.String()
 }
 
 // bareTable drops a schema qualifier, because MySQL cannot express one.
@@ -116,9 +159,20 @@ func bareTable(name string) string {
 // name a table no migration creates.
 //
 // It reads the migration files rather than a list of names, so a table renamed
-// in the schema and not in the code fails here. That is also why it globs for
-// the file instead of hardcoding a number: a renumbered migration is not a
-// reason for a guard to stop covering the table.
+// in the schema and not in the code fails here.
+//
+// It used to glob for the file by name (*operator_api_keys.sql) rather than
+// hardcode a number, on the reasoning that "a renumbered migration is not a
+// reason for a guard to stop covering the table". That is true of a
+// renumbering and false of a compaction: cleat#3348 folded
+// migrations/mysql/008_operator_api_keys.sql into the generated
+// 001_schema.sql baseline and deleted it, so the glob found zero files and
+// this test failed outright rather than saying anything about the table.
+// Scanning every .sql file in the dialect's directory for a CREATE TABLE
+// naming operator_api_keys -- rather than a file whose NAME mentions it --
+// covers both a dedicated numbered file and a folded-into-the-baseline one,
+// so the next dialect to compact (postgres, mssql: cleat#3347, cleat#3349)
+// does not hit the same red.
 func TestTheOperatorStatementsNameTheTableTheMigrationsCreate(t *testing.T) {
 	for dialect, dir := range map[string]string{
 		DialectPostgres: "postgres",
@@ -126,34 +180,40 @@ func TestTheOperatorStatementsNameTheTableTheMigrationsCreate(t *testing.T) {
 		DialectMSSQL:    "mssql",
 	} {
 		t.Run(dialect, func(t *testing.T) {
-			matches, err := filepath.Glob(filepath.Join("..", "migrations", dir, "*operator_api_keys.sql"))
+			migDir := filepath.Join("..", "migrations", dir)
+			entries, err := os.ReadDir(migDir)
 			if err != nil {
-				t.Fatalf("globbing the %s migrations: %v", dialect, err)
-			}
-			if len(matches) != 1 {
-				t.Fatalf("found %d migration file(s) matching *operator_api_keys.sql in migrations/%s, want exactly 1: %v",
-					len(matches), dir, matches)
-			}
-			body, err := os.ReadFile(matches[0])
-			if err != nil {
-				t.Fatalf("reading %s: %v", matches[0], err)
+				t.Fatalf("reading %s: %v", migDir, err)
 			}
 
-			body = []byte(stripLiteralsAndComments(string(body)))
-
-			// Exactly one, not simply the first. A file that creates two tables
-			// would otherwise let this guard pass by reading whichever came
-			// first, which is a denominator that says nothing about the table
-			// the statements actually name.
-			created := createTableRE.FindAllSubmatch(body, -1)
-			if len(created) != 1 {
-				t.Fatalf("%s has %d CREATE TABLE statement(s) after comments are stripped, want exactly 1, "+
-					"so this guard cannot say which table it is comparing against", matches[0], len(created))
+			// Exactly one, across the whole directory, not simply the first
+			// file found. A table defined twice (a stale numbered file left
+			// behind by an incomplete compaction, say) would otherwise let
+			// this guard pass by reading whichever came first, which is a
+			// denominator that says nothing about the table the statements
+			// actually name.
+			var defFiles []string
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+					continue
+				}
+				path := filepath.Join(migDir, e.Name())
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("reading %s: %v", path, err)
+				}
+				stripped := stripLiteralsAndComments(string(body))
+				for _, m := range createTableRE.FindAllSubmatch([]byte(stripped), -1) {
+					if bareTable(string(m[1])) == "operator_api_keys" {
+						defFiles = append(defFiles, path)
+					}
+				}
 			}
-			want := bareTable(string(created[0][1]))
-			if want == "" {
-				t.Fatalf("%s: the CREATE TABLE regex captured an empty name", matches[0])
+			if len(defFiles) != 1 {
+				t.Fatalf("found %d CREATE TABLE statement(s) for operator_api_keys in migrations/%s, want exactly 1: %v",
+					len(defFiles), dir, defFiles)
 			}
+			want := "operator_api_keys"
 
 			for name, stmt := range operatorStatements(dialect) {
 				found := targetTableRE.FindStringSubmatch(stmt)
@@ -163,10 +223,10 @@ func TestTheOperatorStatementsNameTheTableTheMigrationsCreate(t *testing.T) {
 					continue
 				}
 				if got := bareTable(found[1]); got != want {
-					t.Errorf("%s(%q) targets %q but %s creates %q.\n\nA credential written to one and read from the other "+
+					t.Errorf("%s(%q) targets %q but %s defines %q.\n\nA credential written to one and read from the other "+
 						"cannot authenticate anything, and the failure looks like a wrong key rather than a wrong table: "+
 						"the row is present, unrevoked, and its hash matches. cleat#866.",
-						name, dialect, got, filepath.Base(matches[0]), want)
+						name, dialect, got, filepath.Base(defFiles[0]), want)
 				}
 			}
 		})

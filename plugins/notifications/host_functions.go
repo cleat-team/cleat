@@ -64,7 +64,7 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	// filters deleted_at IS NULL, so a soft-deleted webhook reads as not
 	// found here exactly as it does through the HTTP routes.
 	var exists bool
-	err := p.db.QueryRow(ctx, plugin.Rebind(webhookExistsSQL(p.dialect), p.dialect),
+	err := p.db.QueryRow(ctx, webhookExistsSQL(p.dialect),
 		input.WebhookID, cc.TenantID).Scan(&exists)
 	if err != nil {
 		return "", fmt.Errorf("notifications: verify webhook: %w", err)
@@ -143,11 +143,11 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	if p.dialect != plugin.DialectMSSQL {
 		existsGuard += " FOR SHARE"
 	}
-	rowsInserted, err := p.db.Exec(ctx, plugin.Rebind(fmt.Sprintf(`
+	rowsInserted, err := p.db.Exec(ctx, fmt.Sprintf(`
 			INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
 			SELECT $1, $2, $3, $4, 'pending', 0, %s, $5
 			WHERE EXISTS (%s)
-		`, nowSQLExpr(p.dialect), existsGuard), p.dialect),
+		`, nowSQLExpr(p.dialect), existsGuard),
 		deliveryID, input.WebhookID, input.EventType, string(input.Payload), now, input.WebhookID, cc.TenantID)
 	if err != nil {
 		return "", fmt.Errorf("notifications: create delivery: %w", err)

@@ -114,7 +114,7 @@ func readQueryStateColumn(t *testing.T, backend StoreBackend, workflowID string)
 	var q string
 	switch backend.Name() {
 	case "postgres":
-		q = `SELECT query_state::text FROM workflow_instances WHERE id = $1`
+		q = `SELECT query_state::text FROM workflow_payloads WHERE id = $1` // cleat#3245 B1b
 	case "mysql":
 		q = `SELECT CAST(query_state AS CHAR) FROM workflow_instances WHERE id = ?`
 	case "mssql":

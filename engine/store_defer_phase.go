@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/lib/pq"
 )
 
 // FinalizeDeferPhase applies the outcome recorded at mark time, after the defer
@@ -47,13 +49,17 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 		return fmt.Errorf("finalize defer phase: append events: %w", err)
 	}
 
+	// Since cleat#3245 B3c this lease UPDATE is the fence, and the lease row
+	// holds the only copy of these columns that is written.
+	// result/error_msg/error_code/error_op were already written at mark
+	// time, and this call only flips status -- the same reason
+	// adminForceMark's one-phase sibling needs no payload write here either.
 	var appliedStatus string
 	err = tx.QueryRowContext(ctx, `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
-		    completed_at = now(),
 		    assigned_to = NULL
 		WHERE id = $1
 		  AND assigned_to = $2
@@ -67,6 +73,19 @@ func (s *PostgresStore) FinalizeDeferPhase(ctx context.Context, runID, workerID 
 	if err != nil {
 		return fmt.Errorf("finalize defer phase: %w", err)
 	}
+
+	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration
+	// 020 (folded into migrations/postgres/001_schema.sql by #3358). This
+	// DOES need its own workflow_payloads write, unlike the status above:
+	// completed_at was never written at mark time (there is no completed_at
+	// concept yet at that point), so unlike result/error_msg/error_code/
+	// error_op, nothing else sets it.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET completed_at = now() WHERE id = $1
+	`, runID); err != nil {
+		return fmt.Errorf("finalize defer phase: payload: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("finalize defer phase commit: %w", err)
 	}
@@ -117,12 +136,14 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	}
 	defer tx.Rollback()
 
+	// Since cleat#3245 B3c the lease row holds the only copy of these
+	// columns that is written. The predicate is on the updated row itself,
+	// so a waiting UPDATE re-checks it against whatever committed meanwhile.
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE workflow_instances
+		UPDATE workflow_leases
 		SET status = pending_terminal_status,
 		    pending_terminal_status = NULL,
 		    defer_phase_deadline = NULL,
-		    completed_at = now(),
 		    assigned_to = NULL,
 		    generation = generation + 1
 		WHERE pending_terminal_status IS NOT NULL
@@ -136,6 +157,14 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("expire defer phases: scan: %w", err)
 	}
+
+	// generation bumps here, matching the instances UPDATE above: unlike
+	// FinalizeDeferPhase (a single claimed row with a live holder to fence
+	// out), this sweep is exactly the case that bump exists for.
+	if err := mirrorExpiredDeferPhasePayloads(ctx, tx, expired); err != nil {
+		return 0, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("expire defer phases commit: %w", err)
 	}
@@ -147,4 +176,25 @@ func (s *PostgresStore) ExpireDeferPhases(ctx context.Context) (int, error) {
 		s.enforceParentClosePolicy(context.Background(), wf.id, parentOutcomeMessage(wf.status))
 	}
 	return len(expired), nil
+}
+
+// mirrorExpiredDeferPhasePayloads mirrors ExpireDeferPhases' completed_at
+// write (migration 020, cleat#3245 Phase 3 step 3 piece F) onto
+// workflow_payloads for exactly the rows the lease UPDATE just touched: it
+// takes the ids that UPDATE returned rather than re-deriving the WHERE clause
+// against workflow_payloads, which by then no longer matches.
+func mirrorExpiredDeferPhasePayloads(ctx context.Context, tx *sql.Tx, expired []expiredDeferPhase) error {
+	if len(expired) == 0 {
+		return nil
+	}
+	ids := make([]string, len(expired))
+	for i, wf := range expired {
+		ids[i] = wf.id
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET completed_at = now() WHERE id = ANY($1)
+	`, pq.Array(ids)); err != nil {
+		return fmt.Errorf("expire defer phases: mirror payload: %w", err)
+	}
+	return nil
 }

@@ -109,10 +109,10 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), `
 			INSERT INTO feature_flags (tenant_id, id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		`, p.dialect), tid, id, req.Key, req.Name, req.Description, req.Enabled,
+		`, tid, id, req.Key, req.Name, req.Description, req.Enabled,
 		plugin.JSONColumn{Raw: rulesJSON}, rollout, now, now)
 	if err != nil {
 		p.logger.Error("feature-flags: create", "key", req.Key, "error", err)
@@ -150,12 +150,12 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(r.Context(), `
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC
-		`, p.dialect), tid)
+		`, tid)
 	if err != nil {
 		p.logger.Error("feature-flags: list", "error", err)
 		p.writeError(w, 500, "failed to list feature flags")
@@ -208,11 +208,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	var f flagJSON
 	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
 	var rules plugin.JSONColumn
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
+		`, id, tid), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")
@@ -297,7 +297,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" WHERE id = $%d AND tenant_id = $%d", argIdx, argIdx+1)
 	args = append(args, id, tid)
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Exec(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("feature-flags: update", "id", id, "error", err)
 		p.writeError(w, 500, "failed to update feature flag")
@@ -312,11 +312,11 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var f flagJSON
 	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
 	var rules plugin.JSONColumn
-	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
+		`, id, tid), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		p.logger.Error("feature-flags: re-fetch after update", "id", id, "error", err)
@@ -349,10 +349,10 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(r.Context(), `
 			DELETE FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid)
+		`, id, tid)
 	if err != nil {
 		p.logger.Error("feature-flags: delete", "id", id, "error", err)
 		p.writeError(w, 500, "failed to delete feature flag")
@@ -389,11 +389,11 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	var f flagJSON
 	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
 	var rules plugin.JSONColumn
-	err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(r.Context(), `
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
-		`, p.dialect), tid, req.Key), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
+		`, tid, req.Key), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")

@@ -7,14 +7,19 @@ import (
 	"time"
 )
 
-// cleat#1992: SIGHUP is reserved for a future config/key hot-reload (the ReloadableKeyRing work,
-// tracked separately as cleat#2298) that does not exist yet. Go's default action for SIGHUP is
-// TERMINATE, so without an explicit handler an operator sending `kill -HUP` to roll a worker onto
-// a new key -- the very thing this flag's docs describe as the eventual mechanism -- would kill
-// the worker instead. This test pins that a real worker process survives SIGHUP and logs that it
-// was ignored, rather than relying on log inspection of a mechanism that might not run at all
-// (the "wired to nothing" trap CLAUDE.md warns about for exactly this shape of feature).
-func TestSIGHUPIsLoggedAndIgnored(t *testing.T) {
+// cleat#2298: SIGHUP reloads the secret and payload key rings, with no restart. Go's default
+// action for SIGHUP is TERMINATE, so without the handler an operator sending `kill -HUP` to roll
+// a worker onto a new key would kill the worker instead. This test pins that a real worker
+// process survives SIGHUP and logs that a reload ran, for a worker started with NEITHER ring
+// configured -- the common case (an operator rotating one fleet-wide secret while most workers'
+// local files are untouched) and the shape that proves the handler is wired to something rather
+// than relying on log inspection of a mechanism that might not run at all (the "wired to nothing"
+// trap CLAUDE.md warns about for exactly this shape of feature). The reload's actual mechanics
+// (M4's candidate check, the republished secret_key_versions, the payload ring's safe-refusal) are
+// covered at the unit level in cmd/cleat-worker/a_sighup_reload_test.go, which can assert on the
+// database and the ring's own state directly; a subprocess test can only watch the log and that
+// the worker kept serving.
+func TestSIGHUPReloadsWithNoKeysConfiguredAndKeepsServing(t *testing.T) {
 	db := ownerDB(t)
 	defer db.Close()
 	suffix := uniqueSuffix()
@@ -35,12 +40,16 @@ func TestSIGHUPIsLoggedAndIgnored(t *testing.T) {
 	startWorkflow(t, db, "sighup-readiness-"+suffix, "order-"+suffix, taskQueue)
 	svc.awaitCount(t, w, "Reserve", 1, startBudget)
 
+	// Waits for the RELOAD to complete, not just the signal to arrive -- the
+	// handler logs "received SIGHUP" first and "key reload complete" once
+	// reloadKeyRingsOnSIGHUP actually returns, and only the second proves
+	// the mechanism ran rather than merely received the signal.
 	awaitSighupCount := func(n int) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
-		for strings.Count(w.output(), "received SIGHUP") < n {
+		for strings.Count(w.output(), "SIGHUP: key reload complete") < n {
 			if time.Now().After(deadline) {
-				t.Fatalf("worker had not logged %d SIGHUP(s) within 10s\n--- worker log ---\n%s", n, w.output())
+				t.Fatalf("worker had not completed %d SIGHUP reload(s) within 10s\n--- worker log ---\n%s", n, w.output())
 			}
 			time.Sleep(20 * time.Millisecond)
 		}

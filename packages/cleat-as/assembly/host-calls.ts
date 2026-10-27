@@ -2074,6 +2074,14 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // A fresh await that has to wait answers with the stop sentinel, not a
+    // timed-out word (cleat#3383). Ask before decoding: bit 31 lands inside
+    // this layout's timed-out field, so decoding first reads a suspend as a
+    // timeout. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new AwaitPromiseOutcome("", false, "cleat: await_promise stopped -- the workflow is suspending");
+    }
+
     let decoded = decodeAwaitPromiseResult(result);
 
     if (decoded.errCode !== 0) {
@@ -3202,6 +3210,16 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // The host answers a fan-in with the suspend sentinel while any child is
+    // still running, which is the normal case. Without this check its length
+    // field (bits 32-63) read as 1<<30 and the readString below ran off the end
+    // of linear memory, killing the guest instead of suspending it (cleat#3430).
+    // Same check as awaitAnyChild and awaitChild.
+    if ((result as u64) === (SUSPEND_SENTINEL as u64)) {
+      setWorkflowSuspended();
+      return null;
+    }
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0 || decoded.extra === 0) {

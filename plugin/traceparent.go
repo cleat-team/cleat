@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strings"
 )
 
 // TraceparentHeader is the W3C Trace Context header name. Lowercase, which is
@@ -151,17 +152,57 @@ func WithNewTrace(ctx context.Context) context.Context {
 	return context.WithValue(ctx, originatedTraceKey{}, hex.EncodeToString(id))
 }
 
+// inboundTraceKey carries a trace-id parsed from an INBOUND request's own
+// traceparent header, by a plugin HTTP handler that has no CallContext --
+// cleat#1611's Section B. Separate from both CallContext and
+// originatedTraceKey: it is neither a workflow call (CallContext's meaning)
+// nor a trace this process invented (WithNewTrace's), it is a real caller's
+// trace arriving through a door the engine never sees.
+type inboundTraceKey struct{}
+
+// WithInboundTraceparent returns a context carrying the trace-id parsed from
+// header, an inbound W3C `traceparent` value, for a plugin HTTP handler to
+// join rather than detach from. cleat#1611.
+//
+// THIS IS NOT WithNewTrace. A plugin route that receives a real request --
+// the oauth callback is the motivating case -- has an inbound trace to
+// CONTINUE, and inventing a fresh one instead would be the exact defect
+// cleat#1596 fixed, reintroduced at a different door (see this issue's own
+// first comment). WithNewTrace is for work with no caller at all: a
+// background sweep, a scheduled run. A plugin HTTP handler is never that.
+//
+// A MALFORMED OR ABSENT header returns ctx UNCHANGED, the same "no-op rather
+// than an invented trace" rule SetTraceparent already follows, for the same
+// reason: a syntactically-valid-looking header attached to a trace nobody is
+// actually in is worse than no header at all.
+func WithInboundTraceparent(ctx context.Context, header string) context.Context {
+	parts := strings.Split(header, "-")
+	if len(parts) < 2 || !validTraceID(parts[1]) {
+		return ctx
+	}
+	return context.WithValue(ctx, inboundTraceKey{}, parts[1])
+}
+
 // traceIDFor returns the trace this context is in: the engine's CallContext
-// trace first, then an originated one.
+// trace first, then an inbound one parsed off an HTTP request, then an
+// originated one.
 //
 // ORDER MATTERS AND THIS IS THE SAFE DIRECTION. A real caller trace always wins
 // over a manufactured one, so a path that acquires both -- a plugin host
 // function that also calls WithNewTrace by mistake -- still propagates the
 // customer's trace rather than a fabricated root that silently detaches the
-// chain.
+// chain. CallContext before inbound for the same reason one level up: a
+// workflow host call always has a CallContext and never an inbound header, so
+// the ordering between the two never actually matters in practice -- but
+// CallContext is the engine's own trace record, and that is the one allowed
+// to be authoritative over something parsed off a header this process does
+// not control.
 func traceIDFor(ctx context.Context) string {
 	if cc := CallContextFromContext(ctx); cc != nil && cc.TraceID != "" {
 		return cc.TraceID
+	}
+	if id, ok := ctx.Value(inboundTraceKey{}).(string); ok && id != "" {
+		return id
 	}
 	id, _ := ctx.Value(originatedTraceKey{}).(string)
 	return id

@@ -15,6 +15,22 @@ IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_admin'
     CREATE ROLE [cleat_admin];
 GO
 
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_app_role' AND type = 'R')
+    CREATE ROLE [cleat_app_role];
+GO
+
+-- admin.operator_api_keys
+CREATE TABLE admin.operator_api_keys (
+    key_id uniqueidentifier NOT NULL CONSTRAINT df_operator_api_keys_key_id DEFAULT (newid()),
+    key_hash varbinary(32) NOT NULL,
+    description nvarchar(max) NOT NULL CONSTRAINT df_operator_api_keys_description DEFAULT (''),
+    created_at datetimeoffset(7) NOT NULL CONSTRAINT df_operator_api_keys_created_at DEFAULT (sysutcdatetime()),
+    disabled_at datetimeoffset(7),
+    expires_at datetimeoffset(7),
+    updated_at datetimeoffset(7) NOT NULL CONSTRAINT df_operator_api_keys_updated_at DEFAULT (sysutcdatetime())
+);
+GO
+
 -- admin.orgs
 CREATE TABLE admin.orgs (
     org_id uniqueidentifier NOT NULL CONSTRAINT DF__orgs__org_id__2BC97F7C DEFAULT (newid()),
@@ -80,7 +96,8 @@ CREATE TABLE admin.tenants (
     display_name nvarchar(max) NOT NULL CONSTRAINT DF__tenants__display__3D5E1FD2 DEFAULT (''),
     created_at datetimeoffset(7) NOT NULL CONSTRAINT DF__tenants__created__3E52440B DEFAULT (sysutcdatetime()),
     suspended bit NOT NULL CONSTRAINT DF__tenants__suspend__3F466844 DEFAULT ((0)),
-    org_id uniqueidentifier NOT NULL CONSTRAINT df_tenants_org_id DEFAULT ('00000000-0000-0000-0000-000000000000')
+    org_id uniqueidentifier NOT NULL CONSTRAINT df_tenants_org_id DEFAULT ('00000000-0000-0000-0000-000000000000'),
+    allow_public_exposure bit NOT NULL CONSTRAINT df_admin_tenants_allow_public_exposure DEFAULT ((0))
 );
 GO
 
@@ -93,7 +110,8 @@ CREATE TABLE admin.workers (
     connection_budget int NOT NULL CONSTRAINT DF__workers__connect__756D6ECB DEFAULT ((0)),
     started_at datetimeoffset(7) NOT NULL CONSTRAINT DF__workers__started__76619304 DEFAULT (sysutcdatetime()),
     last_heartbeat_at datetimeoffset(7) NOT NULL CONSTRAINT DF__workers__last_he__7755B73D DEFAULT (sysutcdatetime()),
-    secret_key_versions nvarchar(255)
+    secret_key_versions nvarchar(255),
+    address nvarchar(255) NOT NULL CONSTRAINT df_workers_address DEFAULT ('')
 );
 GO
 
@@ -277,7 +295,10 @@ CREATE TABLE dbo.workflow_defs (
     plugin_deps nvarchar(max) NOT NULL CONSTRAINT DF__workflow___plugi__5441852A DEFAULT ('{}'),
     disabled_at datetimeoffset(7),
     gc_eligible bit NOT NULL CONSTRAINT DF__workflow___gc_el__5535A963 DEFAULT ((0)),
-    updated_at datetimeoffset(7) NOT NULL CONSTRAINT df_workflow_defs_updated_at DEFAULT (sysutcdatetime())
+    updated_at datetimeoffset(7) NOT NULL CONSTRAINT df_workflow_defs_updated_at DEFAULT (sysutcdatetime()),
+    exposure nvarchar(16) NOT NULL CONSTRAINT df_workflow_defs_exposure DEFAULT ('auth'),
+    entry_point_schemas nvarchar(max),
+    input_validation_disabled bit NOT NULL CONSTRAINT df_workflow_defs_input_validation_disabled DEFAULT ((0))
 );
 GO
 
@@ -330,7 +351,9 @@ CREATE TABLE dbo.workflow_instances (
     run_host_retry_budget_ms bigint,
     completed_by nvarchar(255),
     run_max_workflow_duration_ms bigint,
-    history_swept_at datetimeoffset(7)
+    history_swept_at datetimeoffset(7),
+    promise_seq bigint NOT NULL CONSTRAINT DF__workflow___promi__345EC57D DEFAULT ((0)),
+    promise_seq_at_claim bigint NOT NULL CONSTRAINT DF__workflow___promi__3552E9B6 DEFAULT ((0))
 );
 GO
 
@@ -446,6 +469,9 @@ CREATE TABLE dbo.workflow_update_requests (
 );
 GO
 
+ALTER TABLE admin.operator_api_keys ADD CONSTRAINT pk_admin_operator_api_keys PRIMARY KEY CLUSTERED (key_id);
+GO
+
 ALTER TABLE admin.orgs ADD CONSTRAINT pk_admin_orgs PRIMARY KEY CLUSTERED (org_id);
 GO
 
@@ -482,7 +508,7 @@ GO
 ALTER TABLE dbo.deployment_secrets ADD CONSTRAINT pk_deployment_secrets PRIMARY KEY CLUSTERED (name);
 GO
 
-ALTER TABLE dbo.event_history ADD CONSTRAINT pk_event_history PRIMARY KEY CLUSTERED (workflow_id, step);
+ALTER TABLE dbo.event_history ADD CONSTRAINT pk_event_history PRIMARY KEY CLUSTERED (tenant_id, workflow_id, step);
 GO
 
 ALTER TABLE dbo.idempotency_keys ADD CONSTRAINT pk_idempotency_keys PRIMARY KEY CLUSTERED (key_hash, tenant_id);
@@ -602,6 +628,12 @@ GO
 ALTER TABLE dbo.workflow_defs WITH NOCHECK ADD CONSTRAINT ck_workflow_defs_dag_spec CHECK ([dag_spec] IS NULL OR isjson([dag_spec])=(1));
 GO
 
+ALTER TABLE dbo.workflow_defs WITH NOCHECK ADD CONSTRAINT ck_workflow_defs_entry_point_schemas CHECK ([entry_point_schemas] IS NULL OR isjson([entry_point_schemas])=(1));
+GO
+
+ALTER TABLE dbo.workflow_defs ADD CONSTRAINT ck_workflow_defs_exposure CHECK ([exposure]='internal' OR [exposure]='auth' OR [exposure]='public');
+GO
+
 ALTER TABLE dbo.workflow_defs WITH NOCHECK ADD CONSTRAINT ck_workflow_defs_plugin_deps CHECK (isjson([plugin_deps])=(1));
 GO
 
@@ -719,6 +751,9 @@ GO
 ALTER TABLE dbo.workflow_update_requests ADD CONSTRAINT fk_update_requests_workflow FOREIGN KEY (workflow_id) REFERENCES dbo.workflow_instances (id) ON DELETE CASCADE;
 GO
 
+CREATE NONCLUSTERED INDEX idx_operator_api_keys_hash ON admin.operator_api_keys (key_hash) WHERE ([disabled_at] IS NULL);
+GO
+
 CREATE NONCLUSTERED INDEX idx_api_keys_hash ON admin.tenant_api_keys (key_hash) WHERE ([disabled_at] IS NULL);
 GO
 
@@ -734,7 +769,7 @@ GO
 CREATE NONCLUSTERED INDEX idx_event_history_pending ON dbo.event_history (workflow_id, step) WHERE ([intent_at] IS NOT NULL AND [checksum] IS NULL);
 GO
 
-CREATE NONCLUSTERED INDEX idx_event_history_tenant_wf ON dbo.event_history (tenant_id, workflow_id, step);
+CREATE NONCLUSTERED INDEX idx_event_history_workflow_fk ON dbo.event_history (workflow_id, step);
 GO
 
 CREATE NONCLUSTERED INDEX idx_idempotency_expires ON dbo.idempotency_keys (expires_at);
@@ -840,5 +875,44 @@ CREATE NONCLUSTERED INDEX idx_update_requests_pending ON dbo.workflow_update_req
 GO
 
 CREATE NONCLUSTERED INDEX idx_update_requests_pending_name ON dbo.workflow_update_requests (workflow_id, update_name, status);
+GO
+
+DENY DELETE ON [dbo].[deployment_secrets] TO [cleat_app_role];
+GO
+
+DENY INSERT ON [dbo].[deployment_secrets] TO [cleat_app_role];
+GO
+
+DENY UPDATE ON [dbo].[deployment_secrets] TO [cleat_app_role];
+GO
+
+GRANT DELETE ON SCHEMA::[admin] TO [cleat_app_role];
+GO
+
+GRANT EXECUTE ON SCHEMA::[admin] TO [cleat_app_role];
+GO
+
+GRANT INSERT ON SCHEMA::[admin] TO [cleat_app_role];
+GO
+
+GRANT SELECT ON SCHEMA::[admin] TO [cleat_app_role];
+GO
+
+GRANT UPDATE ON SCHEMA::[admin] TO [cleat_app_role];
+GO
+
+GRANT DELETE ON SCHEMA::[dbo] TO [cleat_app_role];
+GO
+
+GRANT EXECUTE ON SCHEMA::[dbo] TO [cleat_app_role];
+GO
+
+GRANT INSERT ON SCHEMA::[dbo] TO [cleat_app_role];
+GO
+
+GRANT SELECT ON SCHEMA::[dbo] TO [cleat_app_role];
+GO
+
+GRANT UPDATE ON SCHEMA::[dbo] TO [cleat_app_role];
 GO
 

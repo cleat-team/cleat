@@ -117,46 +117,60 @@ func TestApprovalTimeout(t *testing.T) {
     env := cleattest.NewTestEnv()
     h := env.H()
 
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount": 5000}`)
         if err == nil {
             t.Error("expected timeout error, got nil")
         }
     }()
 
+    // Wait for the goroutine to park in AwaitSignals before moving the clock.
+    // AdvanceTime moves a clock the deadline is measured FROM, not one it is
+    // measured AGAINST: an advance that lands first is included in the
+    // deadline rather than passing it, so the goroutine would park forever
+    // and <-done below would block forever with it.
+    env.WaitForParked(t)
+
     // Advance past the 24-hour approval window.
     env.AdvanceTime(25 * time.Hour)
+
+    // Wait for the workflow before the test returns -- see the note under
+    // TestApprovalWorkflow above for why this matters.
+    <-done
 }
 ```
 
-> **`TestApprovalTimeout` above and `TestApprovalWorkflow_Timeout` below are still
-> *not* joined, and the reason is now the SDK a reader resolves rather than the
-> harness** (cleat#3098). The missing piece exists: `env.WaitForParked(t)` landed
-> in **cleat#3091** and is on `develop`. But this page is written for someone
-> following the tutorial, who resolves the **published** SDK — `go get
-> github.com/cleat-team/cleat/cleat@latest` — and `WaitForParked` is not in the
-> current release (`git show v0.3.2:cleat/cleattest/cleattest.go | grep -c
-> WaitForParked` → `0`). A joined block here would therefore not compile for the
-> reader it is written for, and the snippet guard resolves the same `@latest`, so
-> it would fail there too once these pages are covered (cleat#3112). **These two
-> join when a release carrying `WaitForParked` is published.**
+> **Joined 2026-10-07 (cleat#3098), once v0.4.0 published `env.WaitForParked`.**
+> `TestApprovalTimeout` above and `TestApprovalWorkflow_Timeout` below were the
+> two blocks on this page that `WaitForParked` (cleat#3091) existed for but
+> could not yet join: the primitive landed on `develop` before it reached a
+> release, and this page resolves the **published** SDK a reader following the
+> tutorial gets — `go get github.com/cleat-team/cleat/cleat@latest` — which
+> still resolved `v0.3.2` (no `WaitForParked`) at the time. `v0.4.0` carries
+> it, so `@latest` now does too, and both blocks join like every other one on
+> this page.
 >
-> The mechanism behind that is worth knowing on its own, because it is what a
-> join alone runs into. `AdvanceTime` moves a clock that the deadline is measured
-> **from**, not one it is measured *against*: `AwaitSignals(…, 24*time.Hour)`
-> computes `deadline = now + 24h` at the instant the workflow reaches it, so an
-> advance that lands first is **included in** the deadline rather than passing
-> it — a `25h` advance leaves the deadline at `+49h`, nothing fires, and `<-done`
-> blocks forever. `WaitForParked` is the barrier that orders the park before the
-> advance, and with it the two blocks join and pass.
+> Verified rather than assumed: re-ran `go get .../cleat@latest` against the
+> live module proxy and grepped the actual downloaded module cache, not just
+> the release tag — `WaitForParked` is there, 6 occurrences, matching `develop`.
 >
-> Measured 2026-10-04, this block assembled as a real test: with `<-done` added and
-> no barrier it **hangs** — the goroutine parks in `durableAwaitSignalsImpl` and
-> nothing fires its deadline. Un-joined it passes, and it is **near-vacuous rather
-> than occasionally so**: instrumented, the workflow had not reached `AwaitSignals`
-> at the moment the test function returned in **9 of 10 runs**, and the test passed
-> all ten. The `t.Error` in the goroutine is therefore almost never reached — the
-> assertion is real code that the test does not run.
+> The mechanism this ran into while un-joined is worth keeping, because it is
+> what any attempt to join this kind of test runs into generally: `AdvanceTime`
+> moves a clock the deadline is measured **from**, not one it is measured
+> *against* — `AwaitSignals(…, 24*time.Hour)` computes `deadline = now + 24h`
+> at the instant the workflow reaches it, so an advance that lands first is
+> **included in** the deadline rather than passing it. `WaitForParked` is the
+> barrier that orders the park before the advance.
+>
+> And un-joined, this was not merely untested but **near-vacuous**: measured
+> 2026-10-04 with `<-done` added and no barrier, the block **hangs** — the
+> goroutine parks in `durableAwaitSignalsImpl` and nothing fires its deadline.
+> Without the join it passed instead, and instrumented, the workflow had not
+> reached `AwaitSignals` at the moment the test function returned in **9 of 10
+> runs** — the `t.Error` in the goroutine was almost never reached, so the
+> assertion was real code the test did not run.
 
 ## Testing timeouts with AdvanceTime
 
@@ -313,7 +327,9 @@ func TestApprovalWorkflow_Timeout(t *testing.T) {
 
     h := env.H()
 
+    done := make(chan struct{})
     go func() {
+        defer close(done)
         err := ApprovalWorkflow(h, `{"amount":5000,"requested_by":"user_42"}`)
         if err == nil {
             t.Error("expected timeout error")
@@ -322,8 +338,14 @@ func TestApprovalWorkflow_Timeout(t *testing.T) {
         }
     }()
 
+    // Wait for the goroutine to park before moving the clock -- see the note
+    // under TestApprovalTimeout above (cleat#3098).
+    env.WaitForParked(t)
+
     // Advance past the 24-hour approval window.
     env.AdvanceTime(25 * time.Hour)
+
+    <-done
 }
 
 func TestApprovalWorkflow_Rejected(t *testing.T) {
@@ -366,9 +388,9 @@ func TestApprovalWorkflow_Rejected(t *testing.T) {
 > plain `done` channel. The `time` import
 > stays: `TestApprovalWorkflow_Timeout` needs `time.Hour`.
 >
-> `TestApprovalWorkflow_Timeout` is the one test here that is **not** joined,
-> unlike the two around it: joining it hangs. See the note under
-> `TestApprovalTimeout` above (cleat#3098).
+> `TestApprovalWorkflow_Timeout` is joined like every other test on this page
+> now (cleat#3098) — see the note under `TestApprovalTimeout` above for why it
+> could not be until `v0.4.0` published `env.WaitForParked`.
 
 > Corrected 2026-10-04 (cleat#3027): this example imported `encoding/json` and
 > never used it, so it did not compile as published. Found by compiling the

@@ -342,7 +342,7 @@ func newFFPlugin(t *testing.T) (*Plugin, *ffDB, *sql.DB) {
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	p.RegisterRoutes(p.mux) // routes always registered
+	p.RegisterRoutes(p.mux.(*http.ServeMux)) // routes always registered
 	return p, fdb, rawDB
 }
 

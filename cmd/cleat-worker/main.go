@@ -395,6 +395,22 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 	return nil
 }
 
+// payloadKeyVersionsFromFlags reads cleat#3203's four --encryption-key-
+// file-version flags once into a payloadKeyVersions, so every
+// loadPayloadEncryption/loadPayloadKeyRing call site below builds the same
+// bundle from the same flags rather than repeating four field names at
+// each one -- a mismatch between two call sites here is exactly the
+// current/previous mix-up payloadKeyVersions' own doc comment exists to
+// rule out.
+func payloadKeyVersionsFromFlags() payloadKeyVersions {
+	return payloadKeyVersions{
+		current:      *encryptionKeyFileVersion,
+		currentFile:  *encryptionKeyFileVersionFile,
+		previous:     *encryptionKeyFilePreviousVersion,
+		previousFile: *encryptionKeyFilePreviousVersionFile,
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -849,6 +865,15 @@ func main() {
 
 	var factory engine.StoreFactory
 	var payloadEncryption *engine.PayloadEncryption
+	// payloadRing is the SAME *engine.ReloadableKeyRing payloadEncryption is
+	// built around, in whichever of the three branches below actually runs
+	// (cleat#2298, PR 2). Kept as its own variable, rather than reached
+	// through payloadEncryption, because the SIGHUP handler (main.go, later
+	// in this function) needs to call Reload on it directly even when
+	// --encryption-key-file is unset and payloadEncryption is nil -- a
+	// worker that boots with no payload key configured must still be able
+	// to pick one up on reload without a restart.
+	var payloadRing *engine.ReloadableKeyRing
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
@@ -881,12 +906,13 @@ func main() {
 		// gating the call on *encryptionKeyFile != "" meant that refusal
 		// never fired -- the previous-only flag was silently ignored
 		// (cleat-review, #2308).
-		pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+		pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious, payloadKeyVersionsFromFlags())
 		if perr != nil {
 			logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 			os.Exit(1)
 		}
 		payloadEncryption = pe
+		payloadRing = pring
 		if payloadEncryption != nil {
 			if *encryptionKeyFilePrevious != "" {
 				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
@@ -1062,6 +1088,38 @@ func main() {
 
 		sqlDriver := sqlDriverName(*driver)
 		dbDSN := dsnWithSchema(*dbURL, *schemaName, *driver)
+
+		// FOREIGN MIGRATION CHAIN, first pass (cleat#3405). Checked before the
+		// per-driver setup below, because on MySQL that setup opens the default
+		// tenant's database -- the heartbeat pool (OpenIsolatedStore) and
+		// OpenStore both run CREATE DATABASE IF NOT EXISTS -- which on a server
+		// with no such database creates one, so a refusal that came after it
+		// would not leave the server as it found it. On a pool of its own,
+		// opened on the DSN the migration uses, so a split --migrate-db
+		// deployment reads schema_migrations with the role that owns it. The
+		// full check, which also covers the MySQL tenant database and the
+		// sharded path, runs again where the migrator is built below.
+		{
+			chainDSN := dbDSN
+			if *migrateDBURL != "" {
+				chainDSN = dsnWithSchema(*migrateDBURL, *schemaName, *driver)
+			}
+			chainDB, cErr := sql.Open(sqlDriver, chainDSN)
+			if cErr != nil {
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", cErr)
+				os.Exit(1)
+			}
+			err := migration.NewRunner(chainDB, migration.Dialect(*driver), *migrationsDir).
+				WithFS(migrationsOverrideFS()).
+				WithLockTimeout(*migrationLockTimeout).
+				WithSchema(*schemaName).
+				CheckChain(ctx)
+			chainDB.Close()
+			if err != nil {
+				logger.ErrorContext(context.Background(), "refusing to start (database): "+err.Error(), "worker_id", workerID)
+				os.Exit(1)
+			}
+		}
 
 		var err error
 		switch *driver {
@@ -1288,7 +1346,12 @@ func main() {
 		// never fired -- the previous-only flag was silently ignored
 		// (cleat-review, #2308).
 		{
-			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+			// The ring return value is discarded here: this block's result is
+			// unconditionally overwritten by the duplicate block below before
+			// payloadRing is ever read, same as payloadEncryption would be if
+			// its own nil-check below did not read it first. Keeping both
+			// assignments made this one ineffectual (ineffassign/SA4006).
+			pe, _, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious, payloadKeyVersionsFromFlags())
 			if perr != nil {
 				logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 				os.Exit(1)
@@ -1325,11 +1388,12 @@ func main() {
 		// reason as the block above: gating on *encryptionKeyFile != ""
 		// silently ignored a previous-only flag (cleat-review, #2308).
 		{
-			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+			pe, pring, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious, payloadKeyVersionsFromFlags())
 			if perr != nil {
 				log.Fatalf("[worker %s] failed to load encryption key: %v", workerID, perr)
 			}
 			payloadEncryption = pe
+			payloadRing = pring
 			if payloadEncryption != nil {
 				if *encryptionKeyFilePrevious != "" {
 					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
@@ -1403,11 +1467,23 @@ func main() {
 			"worker_id", workerID, "current_key_version", secretRing.Current().Version,
 			"key_versions", secretRing.Versions())
 	}
-	secretStore := engine.NewSecretStoreWithRing(db, string(factory.Dialect()), secretRing)
+	// secretsRing is SHARED by secretStore and deploymentSecretStore
+	// (cleat#2298, PR 2) -- one Reload call on SIGHUP updates both stores at
+	// once, with no window in which they disagree about which key is
+	// current. Unlike payloadRing above, this is unconditionally non-nil:
+	// NewReloadableKeyRing(nil) is a legal "no master key configured" state
+	// a reload can still move out of later (an operator setting
+	// CLEAT_SECRET_MASTER_KEY_FILE for the first time), which is why this
+	// does not mirror payloadEncryption's == nil convention the way
+	// payloadRing does -- secretStore and deploymentSecretStore are already
+	// never nil themselves (see their own doc comments), only their master
+	// key is optional.
+	secretsRing := engine.NewReloadableKeyRing(secretRing)
+	secretStore := engine.NewSecretStoreWithReloadableRing(db, string(factory.Dialect()), secretsRing)
 	// deployment_secrets shares tenant secrets' ring (cleat#1992 part 1) --
 	// domain separation is carried by engine.DeploymentSecretStore's own HKDF
 	// info string and AAD, not a second master key.
-	deploymentSecretStore := engine.NewDeploymentSecretStore(db, string(factory.Dialect()), secretRing)
+	deploymentSecretStore := engine.NewDeploymentSecretStoreWithReloadableRing(db, string(factory.Dialect()), secretsRing)
 	// checkSecretsUsable runs AFTER the migrations below, not here: it reads
 	// tenant_secrets, which does not exist until migration 080 has applied, and a
 	// check that has to tolerate a missing table is a check that tolerates every
@@ -1665,6 +1741,46 @@ func main() {
 		WithLockTimeout(*migrationLockTimeout).
 		WithSchema(*schemaName)
 
+	// FOREIGN MIGRATION CHAIN (cleat#3405, owner decision D18). A database built
+	// by a different cleat version's migrations is refused here, at
+	// --migrate-only and at boot alike, before anything below changes it: before
+	// the core runner's own CREATE and ALTER, before plugin migrations, and
+	// before the MySQL tenant database is migrated. 0.5.0 does not convert such
+	// a database; the message says what to do instead. An unsharded worker has
+	// already checked the shared database once, before opening its stores; this pass
+	// repeats it for the sharded path and adds the tenant database. Runner.Run
+	// and Runner.Verify refuse the same way.
+	refuseForeignChain := func(where string, r *migration.Runner) {
+		if err := r.CheckChain(ctx); err != nil {
+			logger.ErrorContext(context.Background(), "refusing to start ("+where+"): "+err.Error(), "worker_id", workerID)
+			os.Exit(1)
+		}
+	}
+	refuseForeignChain("database", migrator)
+
+	// For MySQL, the factory creates a per-tenant database that needs its own
+	// copy of the schema, migrated or verified exactly as the shared one is.
+	// Its chain is checked here too, before the shared database is migrated, so
+	// a refusal leaves both as they were. Opened only after the shared check
+	// above, because TenantDB issues CREATE DATABASE IF NOT EXISTS: a no-op on
+	// an existing install, and a change on one that has no tenant database yet.
+	var tenantDB *sql.DB
+	var tenantMigrator *migration.Runner
+	if *driver == "mysql" {
+		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
+			var terr error
+			if tenantDB, terr = mf.TenantDB(ctx, defaultTenantID); terr != nil {
+				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
+				os.Exit(1)
+			}
+			tenantMigrator = migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
+				WithFS(migrationsOverrideFS()).
+				WithLockTimeout(*migrationLockTimeout).
+				WithSchema(*schemaName)
+			refuseForeignChain("tenant database", tenantMigrator)
+		}
+	}
+
 	// MIGRATE OR VERIFY (cleat#2117). Migration is a deploy step: `--migrate-only`
 	// applies it and exits; a normal start only VERIFIES that the schema is not
 	// behind this binary and refuses, with the remediation, if it is. The old
@@ -1692,39 +1808,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// For MySQL, the factory creates a per-tenant database that needs its own
-	// copy of the schema: migrated or verified exactly as the shared one is.
-	// (This block used to sit further down, after the row-level-security check;
-	// nothing there depends on it, and --migrate-only has to finish it before it
-	// exits.)
-	if *driver == "mysql" {
-		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
-			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
-			if terr != nil {
-				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
+	// The MySQL tenant database, migrated or verified exactly as the shared one
+	// is. (This block used to sit further down, after the row-level-security
+	// check; nothing there depends on it, and --migrate-only has to finish it
+	// before it exits.)
+	if tenantMigrator != nil {
+		var terr error
+		if migrating {
+			if terr = tenantMigrator.Run(ctx); terr != nil {
+				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
-			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
-				WithFS(migrationsOverrideFS()).
-				WithLockTimeout(*migrationLockTimeout).
-				WithSchema(*schemaName)
-			if migrating {
-				if terr = tm.Run(ctx); terr != nil {
-					logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
-					os.Exit(1)
-				}
-				if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
-					plugin.WithSchema(*schemaName)); terr != nil {
-					logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
-					os.Exit(1)
-				}
-			} else if terr = verifySchema(ctx, tm, tenantDB, plugin.Dialect(factory.Dialect()), plugList,
-				*schemaName, func(msg string, args ...any) {
-					logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
-				}); terr != nil {
-				logger.ErrorContext(context.Background(), "refusing to start (tenant database): "+terr.Error(), "worker_id", workerID)
+			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+				plugin.WithSchema(*schemaName)); terr != nil {
+				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
 				os.Exit(1)
 			}
+		} else if terr = verifySchema(ctx, tenantMigrator, tenantDB, plugin.Dialect(factory.Dialect()), plugList,
+			*schemaName, func(msg string, args ...any) {
+				logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
+			}); terr != nil {
+			logger.ErrorContext(context.Background(), "refusing to start (tenant database): "+terr.Error(), "worker_id", workerID)
+			os.Exit(1)
 		}
 	}
 
@@ -1920,6 +2025,7 @@ func main() {
 			continue
 		}
 		if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
+			pluginRouter.currentPlugin = lp.Plugin.Info().Name
 			if rerr := p.RegisterRoutes(pluginRouter); rerr != nil {
 				logger.ErrorContext(context.Background(), "refusing to start: plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
 				os.Exit(1)
@@ -2295,7 +2401,15 @@ func main() {
 		idempotencyKeyRetention:          *idempotencyKeyRetention,
 		egressAllow:                      egressAllow,
 		secrets:                          secretStore,
+		deploymentSecrets:                deploymentSecretStore,
+		secretsRing:                      secretsRing,
+		payloadRing:                      payloadRing,
+		payloadKeyFile:                   *encryptionKeyFile,
+		payloadKeyFilePrevious:           *encryptionKeyFilePrevious,
+		payloadKeyVersions:               payloadKeyVersionsFromFlags(),
 		operatorEgress:                   operatorEgress,
+		workflowFetch:                    *enableWorkflowFetch,
+		workflowFetchMaxBody:             *workflowFetchMaxResponseBytes,
 		workerRegistry:                   workerRegistry,
 		internalAuthSecret:               os.Getenv("CLEAT_INTERNAL_AUTH_KEY"),
 		connectionShare:                  share,
@@ -2315,6 +2429,8 @@ func main() {
 		metricsSweepInterval:             *metricsSweepInterval,
 		keyExpiryWindow:                  *keyExpiryWindow,
 		retentionInterval:                *retentionInterval,
+		schemaMigrator:                   migrator,
+		schemaCheckInterval:              *schemaCheckInterval,
 		versionGCInterval:                *versionGCInterval,
 		versionGCMinVersions:             *versionGCMinVersions,
 		versionGCMaxAge:                  *versionGCMaxAge,
@@ -2632,6 +2748,23 @@ func main() {
 			handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
 		}
 
+		// CORS allowlist -- cleat#2345. OUTERMOST: wraps every middleware
+		// above, including auth and rate limiting, not merely runs before
+		// them. See newCORSMiddleware's own doc comment (cors.go) for why --
+		// in short, a browser preflight must never reach auth, and an
+		// ordinary request's CORS response header must be set whether every
+		// inner layer succeeds or fails. Empty *corsAllowedOrigins (the
+		// default) makes this the identity middleware, so a deployment that
+		// never sets the flag gets byte-identical behavior to before this
+		// existed.
+		var corsOrigins []string
+		for _, o := range strings.Split(*corsAllowedOrigins, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				corsOrigins = append(corsOrigins, o)
+			}
+		}
+		handler = newCORSMiddleware(corsOrigins)(handler)
+
 		// No Addr field: this server is bound by the explicit net.Listen
 		// below, not by srv.ListenAndServe, so an Addr here would be read by
 		// nothing and would put *apiAddr in two places with only one of them
@@ -2794,20 +2927,21 @@ func main() {
 		}
 	}()
 
-	// SIGHUP is reserved for a future config/key reload (cleat#1992 part 2,
-	// the ReloadableKeyRing work, tracked separately as cleat#2298) -- not
-	// implemented yet. Log and ignore rather than leaving Go's default
-	// action in place, which for SIGHUP is TERMINATE: an operator sending
-	// `kill -HUP` to roll a worker onto a new key, before that reload
-	// exists, would kill the worker instead of doing nothing. A SEPARATE
-	// channel from sigCh above: SIGHUP must never enter the drain-then-
-	// cancel shutdown path SIGINT/SIGTERM do.
+	// SIGHUP reloads the secret and payload key rings, with no restart
+	// (cleat#2298, PR 2; the ReloadableKeyRing mechanism itself is PR 1,
+	// #3198). Go's default action for SIGHUP is TERMINATE, so this handler
+	// still has to exist even where a reload ends up being a no-op (neither
+	// ring configured) -- an operator sending `kill -HUP` must never find
+	// out the hard way that nothing was listening. A SEPARATE channel from
+	// sigCh above: SIGHUP must never enter the drain-then-cancel shutdown
+	// path SIGINT/SIGTERM do.
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 	go func() {
 		defer recoverBackgroundGoroutine(logger, workerID, "sighup-handler")
 		for range sighupCh {
-			logger.InfoContext(context.Background(), "received SIGHUP: config/key hot-reload is not implemented yet (cleat#1992), ignoring", "worker_id", workerID)
+			logger.InfoContext(context.Background(), "received SIGHUP: reloading secret and payload key rings", "worker_id", workerID)
+			w.reloadKeyRingsOnSIGHUP(context.Background())
 		}
 	}()
 

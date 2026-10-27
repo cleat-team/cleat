@@ -8,6 +8,353 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.0] - 2026-10-27
+
+### UPGRADE NOTES — breaking
+
+- **0.5.0 requires a fresh database. There is no upgrade path from 0.4.0, and a 0.5.0 worker
+  refuses a 0.4.0 database rather than run on it.** cleat#3405, owner decision D18. 0.4.0 and
+  0.5.0 record migrations under the same version numbers for different files, so before this
+  release a 0.5.0 worker on a 0.4.0 database would have applied nothing and run against the
+  wrong schema. `schema_migrations` now records each applied file's name and SHA-256 (cleat#3431).
+  At `--migrate-only`, at a normal start and at `--migrate-on-start`, before it changes
+  anything, `cleat-worker` compares what the database recorded with what the binary ships. It
+  exits non-zero with an error containing `foreign migration chain`, which names up to five
+  mismatched versions and counts the rest. Every database migrated before 0.5.0 is refused,
+  including databases from earlier develop builds, because none carries the identity columns.
+  A refused database is left exactly as it was found. **What to do:** provision a fresh
+  database for 0.5.0, and run 0.4.0 and 0.5.0 side by side until 0.4.0 has drained. See
+  `docs/operations/upgrading.md`. In-place upgrade is the first candidate for 0.6.0.
+
+- **On PostgreSQL, `workflow_instances` is split: lease state lives in `workflow_leases` and
+  the large payloads in `workflow_payloads`.** cleat#3245 (B1 to B5b). **MySQL and SQL Server
+  are unchanged:** they keep the single `workflow_instances` table and have neither new table.
+  On PostgreSQL, `workflow_instances` is now five columns: `id`, `tenant_id`,
+  `parent_close_policy`, `event_count` and `history_swept_at`. The lease columns are written to
+  `workflow_leases` alone, and the lease row's own UPDATE is the fence. The `workflow_defs`
+  foreign key that guards against deleting a definition under a live run moved to
+  `workflow_payloads`. The retired `admin.claim_workflows` function is gone; cross-tenant
+  claiming has used per-tenant rotation since cleat#1926 (see `tiers.yaml`, cleat#3441).
+  **What to check, on PostgreSQL only:** anything outside cleat that reads `workflow_instances`
+  columns directly, such as dashboards, reports or ad hoc SQL, must read `workflow_leases` or
+  `workflow_payloads` instead.
+
+- **`plugin.Environment.Mux` is now `plugin.Dispatcher` (`ServeHTTP` only), not `ServeMux`
+  (`*http.ServeMux`).** Closes cleat#2279 item 3. `env.Mux` let a plugin call
+  `Handle`/`HandleFunc` on it directly from `Init`, registering a route on the host's real mux
+  that bypassed the request-body-size limit every route registered through
+  `HasRoutes.RegisterRoutes(Router)` gets (cleat#2232). No in-tree plugin did this — all 11 that
+  stored `env.Mux` only used it afterward to serve an already-registered request, chiefly in
+  their own tests (`p.mux.ServeHTTP(rec, req)`), which `Dispatcher` still supports; their own
+  `mux` field's type changed from `*http.ServeMux` to `plugin.Dispatcher` in the same change, and
+  a handful of tests that also used the field as a `plugin.Router` or passed it somewhere typed
+  `*http.ServeMux` now assert it (`p.mux.(*http.ServeMux)`), which they can do safely because they
+  construct it as one directly. An out-of-tree plugin that called `env.Mux.Handle(...)` itself
+  will not compile until it registers through `RegisterRoutes` instead.
+
+- **A Python workflow that raises now FAILS the run; it used to complete.** Closes cleat#3433
+  (owner decision D28). The SDK's entry wrapper caught the exception and returned
+  `{"error": "<message>"}` as an ordinary completed result, so `Execute` returned no error and
+  the worker recorded a success: no retry, no dead-lettering, no failure alert, and a parent
+  awaiting the run as a child saw a result. Every other SDK already failed the run. The
+  `run-outcome` variant in `python-sdk/wit/cleat.wit` gained a `failed(string)` case, appended
+  after `suspended`, and a raise now arrives as a failure carrying the exception's type and message
+  (`ValueError: boom`; the type alone for an exception with no text, such as `KeyError()`).
+  **What to check:** anything that read the `{"error": ...}` output of a Python workflow that
+  raised must now read the run's failure instead, and a Python workflow that raises on purpose
+  to "return an error" will now be retried or dead-lettered like any failed run. A workflow that
+  *returns* a dictionary with an `error` key is unaffected: that is a result, and stays one.
+  **Skew, measured:** the change is in both the SDK and the worker, and a Python component only
+  gets the new behaviour when it is *rebuilt* with the new SDK. A component built with an older
+  SDK keeps returning `{"error": ...}` as a completed result on any worker. A component built
+  with the new SDK and run on a worker that predates this change still fails the run when it
+  raises, but the failure is reported as `wasm trap: ... not a run-outcome variant` with no
+  exception message; upgrade the worker before, or together with, rebuilding Python components.
+
+- **A Python component built before 0.5.0 no longer runs: rebuild it with the 0.5.0 Python SDK.**
+  Closes cleat#3425 (owner decision D29). `durable-await-promise` in `python-sdk/wit/cleat.wit`
+  was `func(id, timeout-ms) -> string` and is now `-> result<await-outcome, call-failure>`,
+  where `await-outcome` is `resolved(string) | rejected(string) | timed-out`. The old type had
+  no place to say how a wait ended, so a Python guest could not tell the endings apart
+  (measured on a real component before the change): a **rejected** promise arrived as its
+  reason with `rejected=False`, as if it had resolved to it; a **genuine timeout** arrived as
+  `""` with `timed_out=False`, identical to a promise resolved with an empty value; a **host
+  error** (for example no promise store) arrived as its message, as the resolved value; and a
+  **fresh suspend** let the guest run on, making its next durable call, before the run
+  suspended. Now `await_promise` returns `PromiseResult(rejected=True)` with the reason,
+  `PromiseResult(timed_out=True)`, raises `CleatCallError` for a host error, and unwinds on a
+  stop. **A component built against the old signature is refused on its first
+  `await_promise` call**, before the host runs the await, with an error that names
+  `durable-await-promise` and says `Rebuild the workflow with the 0.5.0 Python SDK`; it does
+  not fall back to the old behaviour. **What to check:** rebuild and redeploy every Python
+  component that calls `await_promise`, and a Python workflow that treated `""` as "timed out"
+  or "rejected" must now test `timed_out` / `rejected`. Python components that never call
+  `await_promise` are unaffected. Components in other languages are unaffected: this is the
+  Python component world's WIT only; the core-module ABI that the other SDKs use is unchanged.
+
+### Added
+
+- **`cleat-worker --enable-workflow-fetch` serves `cleat_fetch`.** Closes cleat#3377
+  (IMPROVEMENT-PLAN.d 3.317, option 2). Off by default; while off, `cleat_fetch` fails with an
+  error that names the flag instead of saying only that embedding is the way. On, the worker
+  installs a `Fetcher` that goes through the same egress guard as `DurableCall("http", "fetch")`:
+  the floor is always refused, `--egress-allowlist` narrows the deployment, and the requesting
+  tenant's own list (`cleatctl egress-allow`) must permit the host, so the flag grants no
+  destination by itself. A response larger than `--workflow-fetch-max-response-bytes` (default
+  1 MiB) fails the call with an error naming the cap. The `Idempotency-Key` header that
+  `http.fetch` sends is not sent, and `${secret:name}` references are not resolved. ABI.md 2.48 no longer calls `cleat_fetch` embedder-only.
+
+- **`backendkit.Client` gains `UpdateWorkflow`, `CancelWorkflow`, `StreamWorkflow` and an API key.**
+  Closes cleat#3368. Each wraps a route the worker already served:
+  `POST /api/workflows/{id}/update/{name}` (returns the update's promise id; a second update of
+  the same name in flight is the new sentinel `ErrUpdateAlreadyPending`),
+  `POST /api/workflows/{id}/cancel` (`CancelOptions{Reason, Preemptive}`; returns the worker's
+  `cancellation_requested` / `cancelled`), and `GET /api/workflows/{id}/stream` (server-sent events
+  to a callback, resumable with `StreamOptions.LastEventID`, and not cut off by `HTTPClient`'s
+  30 s request timeout). `Client.APIKey` / `New(url, WithAPIKey(key))` sends
+  `Authorization: Bearer <key>` on every request -- typed methods, `PluginRoute`, `Health` and the
+  stream. `New` takes variadic options, so existing calls compile unchanged. The four examples that
+  each carried a private `authTransport` (`order-lifecycle`, `ai-agent-platform`,
+  `integration-hub`, `b2b-saas-control-plane`) use the option instead. The DBOS-pair counts move
+  with them: order-lifecycle 731 → 723 and b2b-saas-control-plane 641 → 631
+  (`scripts/dbos-pair-loc.sh`), recorded as "Corrected" entries in each pair's README.
+
+### Fixed
+
+- **History compaction could lose events.** Closes cleat#3409 and cleat#3395. `CompactHistory`
+  deleted the old events, then took its generation fence, and committed whether or not the fence
+  held. If a reclaim moved the generation in between, the steps below `keepStep` were gone and no
+  snapshot covered them. Measured on all three dialects. It now takes the fence first, and a lost
+  fence rolls back and returns an error.
+
+- **A Python `run_detached` started nothing, and `defer_phase` never reached the host.** Closes
+  cleat#3428. On the component path both imports linked to a do-nothing fallback. Neither raised,
+  so `run_detached` completed without starting a workflow. Both now reach their host functions.
+
+- **A Python `poll_child` or `await_any_child` trapped on the component path.** Closes cleat#3390.
+  Both imports linked to the same fallback, and the guest trapped on a type mismatch. Both now
+  reach their host functions. `poll_child` also raised `TypeError` for every finished child: the
+  SDK mis-decoded the host's answer. That is fixed in the same change.
+
+- **A suspending `AwaitPromise` looked like a timeout.** Closes cleat#3383. A guest took its timeout
+  branch, so a side effect there ran before the run suspended. The engine now returns the stop, and
+  every SDK checks for it.
+
+- **`dagrun.TopologicalSort` ordered each level in Go map order.** Closes cleat#3393. The order
+  differed between a run and its replay, so a workflow that started one child per task in level
+  order could have replay pair recorded child runs with the wrong tasks. dagrun's own executor
+  was unaffected. Each level is now ordered by priority, then name.
+
+- **A component (Python) guest could make the host call a service, promise, signal, lock or
+  workflow with a name the core-module path refuses.** Closes cleat#3436. The core-module host
+  functions run `validServiceName` (`[a-zA-Z0-9._-]+`, non-empty) on those names before any
+  handler sees them; the component dispatchers read the same strings with `readStrArg` and
+  passed them on, so `""` and `"bad name!"` reached the service caller, the promise store and
+  the signal store while the SDK returned normally. The dispatchers now refuse as the core path
+  does, in the shape each import's WIT type allows: `result<_, call-failure>` imports return
+  `err(failed)` classified invalid-request (the SDK raises `CleatCallPermanentError`), `u64`/`s64`
+  imports return `errBadParam`, and a bare `-> string` (or no result) cannot carry a failure and
+  traps the guest, except in a defer segment, where it answers `""` so the cleanup still runs.
+  Nothing is recorded in the history for a refused call. A guard compares, for every import,
+  how many names the core host function and its dispatcher validate. 27 of 27 differ on the
+  previous tree, none do now.
+
+- **A Python guest could not tell how a wait on a promise ended.** Closes cleat#3425. See the
+  upgrade note above for the behaviour change and what a pre-0.5.0 component now does. The
+  wait's four non-resolved endings (a rejection, a timeout, a host error, a stop) were all
+  flattened into one string by the component dispatcher, which read only the packed word's
+  length field. They are now the cases of the WIT type, and the stop-correspondence guard's
+  open-finding exemption for `AwaitPromise` is deleted: it is a `call-failure.suspended` like
+  every other result-returning function. Each ending is driven through a real componentized
+  guest, and each of six mutations (rejection treated as an error, the stop test removed, the
+  timed-out flag ignored, the old-component refusal removed, and two in the Python SDK) fails
+  exactly its own test.
+
+- **A Python workflow that raised reported success.** Closes cleat#3433. See the upgrade note
+  above for the behaviour change and the skew between SDK and worker. The `{"error": ...}`
+  result was the entry wrapper catching the exception to keep it from crossing the ABI as a
+  trap, which is still why it catches; it now reports what it caught as the `failed` case of
+  `run-outcome` instead of as a completed result. The host marks it as a failure the guest
+  reported, so it is not labelled a wasm trap. Not a shape check on the result: a workflow may
+  legitimately return `{"error": ...}`, and a host that sniffed for it could not tell that
+  from a raise. A raising guest and an error-shaped return are both tested against a real
+  componentized guest.
+- **A parent whose `AwaitAnyChild` waited across two or more wakes re-ran everything after the await on every later wake, so a `StartChild` after it started a new child each time.** Closes cleat#3391. `Selector.Select` over children only is the same call and had the same effect. The first wake that found the child still running recorded an empty suspend, and each later wake recorded another one at the next step. When the child finished, its result was written against that second row, and the event upsert only reopens `await_child`, `await_promise` and `await_all_children` rows, so the result was dropped and every following wake found the child done again and carried on fresh. A wake that replays the call's suspend and finds the child still running now records nothing, so the result lands at the next step as an ordinary insert; and a replay skips every directly following empty `await_any_child` record of the same call (the same set of child run IDs, in any order, since `dagrun` lists them from a map) before looking for the result, which also reads histories written before the fix. A call that arrives after its segment has already suspended no longer records a second, different empty suspend beside the first, and a replay never carries one call across another call's records. A run already stuck by the bug (an empty record at the step its `StartChild` was later recorded) is not repaired. The regression test drives four wakes of a running child and five of a finished one against a real `event_history`, and the follow-up operation ran five times in five wakes before the fix.
+- **A Go workflow's `AwaitAllChildren` did not unwind when a child was still running.** Closes cleat#3385. The engine answers a fan-in with a suspend sentinel (`1<<62`) while any child is unfinished, which is the normal case, and the generated guest adapter for `AwaitAllChildren` never tested it: it read the sentinel as a result length of `1<<30` and parsed that much memory, where `AwaitChild` and `AwaitAnyChild` panic with `cleat.ErrSuspend`. The adapter now tests the same bit. The engine reported such a run as suspended either way, because a suspension wins over the trap that accompanied it, so the `AwaitAllChildren` row in the host-call harness stayed green throughout and could not have caught it; the new test reads the guest's own `recover()` instead. This fixes the Go guest adapter only; the other SDKs' decoders are not changed here.
+- **An AssemblyScript or Java workflow's `awaitAllChildren` did not honour the suspend sentinel while a child was still running.** cleat#3430, the AssemblyScript and Java halves (the Python half is cleat#3429). Neither wrapper tested the sentinel (`1<<62`) that the engine returns for an unfinished fan-in, as their `awaitChild` and `awaitAnyChild` do. Measured with a guest that records a side effect after each await: in AssemblyScript the sentinel was parsed as a length, the decode failed, and the guest died on the await; in Java the workflow was handed an `Ok` whose value was the whole 64 KiB output buffer, and ran on with it. Both now treat the sentinel like the other two awaits (AssemblyScript marks the workflow suspended and returns `null`; Java returns an `Err` saying the workflow must suspend). The engine reports a suspension whichever of the three happened, so the host-call harness rows stayed green throughout; the new tests read the guest's own record after the await, with `AwaitChild` and `AwaitAnyChild` as controls.
+- **The Python SDK's `fetch()` read an HTTP reply with no status as `200`.** Closes cleat#3413.
+  `HostCalls.fetch` and `CleatTestHarness.fetch` both returned `data.get("status", 200)`, so a
+  reply that was malformed, or used the old `status_code` key, looked like a success the host never
+  reported. They now read `status`, then `status_code`, and report `0` when neither is a number,
+  matching the Go and Java decoders for a well-formed reply (for a malformed one, such as `{"status":"200"}`, Go returns an unmarshal error where Python reports `0`). A guest that compared the status to `200` could not tell the
+  difference before; one that wrote `status >= 400` still cannot distinguish `0` from success, so
+  check for `200 <= status < 300` rather than for failure. The worker always sends `status`, so on
+  a stock worker this changes nothing; it matters for an embedder's own fetcher.
+
+- **The Go SDK's `DurableFetch` (and so `FetchGet`, `DurableFetchJSON`, `FetchGetJSON`) returned
+  status 0 for every response on a real worker, and so did the Java SDK's `cleatFetch`.** Closes
+  cleat#3408. Both decoded `{"status_code":N}`; the worker's `http.fetch` and the embedded runner
+  answer `{"status":N,"headers":{...},"body":"..."}`, which the Rust, Python and AssemblyScript SDKs
+  already read. The Go SDK's own tests stubbed the host with the key it read, so nothing noticed.
+  Both now read `status` and still accept `status_code` when `status` is absent, for an embedder's
+  `Fetcher` that chose the old key. A new test runs a real Go guest's `DurableFetch` through the
+  real worker handler. Four documents (the order-lifecycle playbook, the fullstack template README
+  and `main.go`, `examples/order-lifecycle`) also said `DurableCall("http","fetch")` was
+  embedder-only and could not run on a stock worker; it can, for hosts the tenant's egress
+  allowlist permits.
+
+- **`Selector.Select` races a pending child against its timers and signals.** Closes cleat#3369.
+  The children were checked with `AwaitChild`, which suspends on a running child, so a workflow
+  that added a child, a timer and a signal woke only when the child finished: the timer and the
+  signal could never win, which is the race `Selector` exists for. Children are now checked
+  with `PollChild` (answered as of the durable clock, so replay sees what the first run saw);
+  while a child is pending beside a timer or a signal, the wait is bounded by a child poll that
+  starts at 1 s and doubles to 30 s, so a completed child is seen within that and a long race
+  records a bounded number of durable waits. With only children added, `Select` uses
+  `AwaitAnyChild` and polls nothing. A child that failed now resolves its future: `Select`
+  returns its runID with `Err()` set (it never won before). The type and `AddChildWorkflow`
+  docs, which said child futures were unsupported and made `Select` return an error, now say
+  what it does. `Selector.Select`'s import list gains `cleat_poll_child` and
+  `cleat_await_any_child` and drops `cleat_await_child`, so a workflow using it must be rebuilt.
+  **`PollChild` answers a FAILED child as of the durable clock too:** only "completed" was gated
+  on the child's `completed_at` (#847), so a child that failed after a parent's recorded wait
+  read "failed" when the poll before that wait was replayed, and the parent branched off its own
+  history. A store read that errors is now a host error rather than a "failed" status, so a
+  database blip no longer reads as the child failing.
+
+- **A plugin route whose pattern overlapped one of the host's four always-anonymous routes
+  (`POST /ingest/{source_id}`, the two `/oauth/{provider}/...` routes, `POST /slack/interactive`),
+  but was not textually identical to it, was never recognized as auth-exempt, so
+  `plugin.MaxBodyFromConfig` on it was never refused.** Closes cleat#2279 item 1.
+  `isPluginAuthExemptPattern` (`cmd/cleat-worker/plugin_exempt_routes.go`) compared the registering
+  pattern against the hand-maintained exempt list by exact string equality; a differently-named
+  wildcard (`POST /ingest/{sid}`), a method-less pattern (`/ingest/{source_id}`, which matches
+  `POST` along with everything else), a subtree pattern (`POST /ingest/{source_id}/`) or a
+  host-qualified one (`POST example.com/ingest/{source_id}`) all serve the same anonymously-
+  reachable traffic but were missed. It now decides by overlap — could any single request match
+  both patterns, each considered alone — deliberately erring toward over-flagging (forcing
+  `plugin.MaxBody` instead of `MaxBodyFromConfig` on a route that is not actually exempt once
+  every other route is registered too, which costs nothing) rather than under-flagging. The
+  registration-time panic this triggers also now names which plugin's `RegisterRoutes` call
+  triggered it, not only the pattern.
+- **A plugin route's own tighter `plugin.MaxBody(n, h)` cap, when it was what actually bound
+  (`n` under `--plugin-max-body-size`), produced a 413 that named `--plugin-max-body-size` anyway
+  — a byte count that would not match the flag's own configured value.** Closes cleat#2279's nit.
+  The 413 now names the flag only when the flag is what bound, and this route's own declared
+  limit otherwise.
+
+### Changed
+
+- **Go toolchain bumped to go1.27.3.** Closes cleat#3375. `govulncheck` reported one new reachable
+  finding on every head, `GO-2026-6809` (`crypto/x509`, fixed in go1.27.3), reached from
+  `engine.wasmtimeBackend.Execute` and `dagrun.LoadFromJSON`; it turned the required
+  `Vulnerability Check` red on every open PR (first seen on #3373, against a base tree whose last
+  green run predated the advisory). Same shape as cleat#3251: the `toolchain` line in all 8 `go.mod`
+  files plus `go.work`, and the two `golang:` image pins (tag and digest together, as Lint requires).
+  No `go` directive moved, so `scripts/check-test-only-code.sh`'s go1.27.1 staticcheck override is
+  unchanged and its note says why.
+
+- **`workflow_instances`' two heartbeat indexes (`idx_instances_heartbeat`, `idx_instances_stale`)
+  no longer index `heartbeat_at`, and the table's `fillfactor` is now 70.** PostgreSQL only.
+  Closes cleat#3272 and cleat#3274 (cleat#3245 Phase 2, one combined PR per owner decision).
+  Measured before being built: landing either change alone produced **zero** observable
+  HOT-update or WAL benefit; only together did they, on a synthetic population (~44% HOT ratio
+  and ~37% WAL reduction on a fresh batch of heartbeats). `idx_instances_heartbeat`'s
+  `heartbeat_at` column was confirmed unused by its only consumer (`HeartbeatBatchFenced`'s
+  SELECT) and dropping it cost nothing. `idx_instances_stale`'s was genuinely load-bearing for
+  the reaper's stale-heartbeat sweep (`ReapStaleInstances`/`ListStaleHolders`); dropping it too
+  trades a bounded, periodic cost that scales with the concurrently-running population (tens of
+  milliseconds, measured up to 100,000 concurrently-running workflows) for the continuous
+  per-heartbeat win. `fillfactor` is not retroactive: an already-packed table sees no HOT
+  improvement until ordinary churn rewrites its pages, or an operator runs `VACUUM FULL`
+  during a maintenance window. MySQL and SQL Server are untouched (Phase 1's H5 finding was
+  inconclusive, and the owner scoped Phase 2 to PostgreSQL).
+
+- **Go toolchain bumped to go1.27.2; `golang.org/x/net` bumped to v0.60.0.** Closes cleat#3251.
+  `govulncheck` reported 12 real, reachable findings against this repo's code on every head whose
+  code reaches them: 7 stdlib (`net/http`, `html/template`, `crypto/tls`, `mime/multipart`,
+  `net/textproto`), fixed in go1.27.2, and 5 in `golang.org/x/net` (including an HTTP/2 HPACK
+  encoder race, `GO-2026-6617`), fixed in `x/net@v0.60.0`. Bumped the `toolchain` line in all 8
+  `go.mod` files plus `go.work`, `golang.org/x/net` in the 5 modules that declare it directly (the
+  other 3 picked up the same bump transitively via `go mod tidy`, through `go.sum` entries that
+  carry no reachable code), and the two `FROM golang:` Dockerfile pins to match. No CI workflow
+  edits: every `setup-go` step already reads `go-version-file`, so the version follows `go.mod`
+  automatically. Verified: `go build`/`go vet`/`go test -run='^$'` clean across all 8 modules,
+  `golangci-lint run ./...` 0 issues, `govulncheck ./...` reports 0 vulnerabilities your code calls
+  in every module (one pre-existing, unrelated, unfixable finding remains --
+  `golang.org/x/crypto/openpgp`'s `GO-2026-5932`, `Fixed in: N/A`, not reachable from this repo's
+  code and not part of this issue's scope), and the three toolchain-consistency guards
+  (`check-go-toolchain-pins.py`, `check-go-work-floor.sh`, `check-onboarding-go-version.sh`) all
+  pass.
+
+- **`cleatctl reseal-payloads` now re-seals the six tables cleat#2312 added encryption to, not
+  just `event_history`.** Closes cleat#3241. A key rotation could move `event_history`'s own
+  encrypted columns off a retired key, but rows already written to `workflow_instances`,
+  `workflow_signals`, `workflow_promises`, `workflow_update_requests`, `workflow_schedules` and
+  `idempotency_keys` stayed readable (the previous-key path still opens them) without ever being
+  rewritten onto the current key -- so a rotation meant to retire a key fleet-wide could not
+  complete for those tables. Generalized over each table's own primary key (a single bigint, a
+  single text column, two-column text pairs, a uuid+text pair that doubles as the tenant column,
+  and a bytea+uuid pair) by casting every key column to `::text` for both the read and the write,
+  since `resealValue`'s existing form-detection logic is already shape-driven rather than
+  type-driven and needed no changes. Reported as its own section per table in the command's
+  output, folded into the same combined exit-status rule as `event_history`. Verified with new
+  live-Postgres tests covering all six tables' legacy-ciphertext conversion, idempotency and
+  `--dry-run` behavior, plus a falsification (disabling the write step reproduces the exact
+  unconverted symptom on every table).
+- **`--encrypt-sensitive-payloads` now covers the columns it was documented, and believed, to
+  cover.** Closes cleat#2312. Measured by cleat-review during review of #2308: the flag's docs
+  said "workflow input, output and error [are] encrypted at rest", but only 11 `event_history`
+  columns were actually sealed. Per the owner's ruling on the issue ("3A"), this adds real
+  per-tenant AES-256-GCM encryption, on every write and read path, for
+  `workflow_instances` (`input`, `result`, `error_msg`, `error_code`, `error_op`,
+  `cancellation_reason`, `query_state`), `workflow_signals.payload`,
+  `workflow_promises.result`/`.error_msg`, `workflow_update_requests.payload`/`.result`/
+  `.error_msg`, `workflow_schedules.input`, and `idempotency_keys.error_msg`.
+  Found and fixed along the way: several read sites used PostgreSQL's `#>>'{}'` text-extraction
+  operator, which strips a JSON string's surrounding quotes at the SQL level — decrypting that
+  value with the jsonb-wire-format decoder silently judged it "never sealed" and returned
+  ciphertext as the decrypted value, with no error. `GetQueryState`'s `query_state ->> $2` SQL
+  lookup cannot index into an encrypted JSON-string-scalar column either, so it now routes
+  through `ListQueryState` and decrypts first. `ListWorkflows`'s `InputContains`/`ErrorContains`
+  filters are refused outright under encryption (`ErrSearchUnavailableUnderEncryption`) rather
+  than silently searching ciphertext and reporting a false "no results". `cleatctl
+  reseal-payloads` still rewrites only `event_history`; extending it to the six tables above is
+  tracked as a follow-up, cleat#3241.
+- **A Python workflow with more than one `@cleat_entry` function could not run at all.**
+  Closes cleat#2937. A Python guest compiles to a single Component Model export literally named
+  `run` (`python-sdk/wit/cleat.wit`), whatever its workflow's own logical entry-point names are —
+  unlike a core-module guest (Go, Rust, Java, AssemblyScript), which exports a function named
+  after the entry point itself. `ExecuteComponentCGo` was looking up the *logical* name as a
+  component export, so any start failed with `component export "PlaceOrder" not found` against a
+  component that exports `run` and nothing else by that name. It now always calls the `run`
+  export and carries the logical name into the input JSON as `__cleat_entry__` instead, which is
+  the key `entry.py`'s own dispatcher already reads to pick a wrapper when a module registers
+  more than one — that half of the mechanism was already correct and simply never fed.
+- **`plugin.Rebind` is deprecated.** (cleat#2270, finishing cleat#2259's split.) `plugin.RebindArgs`
+  now translates SQL Server itself rather than delegating to `Rebind`, so every dialect is
+  translated in exactly one place. The ~190 call sites across `plugins/**` that paired a redundant
+  `plugin.Rebind(query, dialect)` wrapper with a `plugin.PluginDB`/`plugin.PluginTx` method
+  (`p.db.Exec`/`Query`/`QueryRow`) — safe but doing nothing, since the adapter already calls
+  `RebindArgs` internally — have been removed. `Rebind` itself is kept as a shim for an
+  out-of-tree plugin or a caller holding a raw driver handle; prefer `RebindArgs` directly, or
+  `plugins/plugintest.ExecRebound`/`QueryRebound`/`QueryRowRebound` in a test.
+
+### Known issues
+
+- **Cross-tenant claiming is supported only on PostgreSQL and SQL Server (tier 2).** On MySQL,
+  and on a sharded worker, the worker cannot list tenants. It falls back to claiming for its own
+  tenant and logs that it cannot rotate. The MySQL case is measured by the end-to-end test in
+  cleat#3446; the sharded case is read from the code. See `tiers.yaml`.
+- **A 0.5.0 Python component cannot run on an older worker.** Two changes are in both the SDK and
+  the worker: the `failed` run outcome (cleat#3433, D28) and the result-typed
+  `durable-await-promise` (cleat#3425, D29). Upgrade the worker before, or together with, rebuilding
+  Python components.
+- **The upgrade-refusal check (cleat#3386) runs on PostgreSQL only.** The refusal is unit-tested on
+  all three dialects (cleat#3431); the end-to-end job seeds and refuses on PostgreSQL.
+
 ## [0.4.0] - 2026-10-06
 
 ### UPGRADE NOTES — breaking
@@ -1000,6 +1347,8 @@ and everything that changed in them is recorded here.
   `blobstore`'s `PUT /blobs/{key...}` uses
   `MaxBodyFromConfig` against its own `max_blob_size` setting (default 10 MiB);
   `slacknotify`'s `POST /slack/interactive` uses `MaxBody` against its fixed 1 MiB callback size.
+  **Concretely: a blob upload over 10 MiB, which used to be unbounded, now gets a 413 instead of
+  being accepted.** (cleat#2279)
 
 - **`plugin.Rebind` no longer rewrites `$N` placeholders to `?` for MySQL. A caller that pairs
   `Rebind`'s output with a raw `*sql.DB`/`*sql.Tx`/`*sql.Conn` (bypassing `plugin.PluginDB`) must

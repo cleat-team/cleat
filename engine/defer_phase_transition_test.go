@@ -94,8 +94,9 @@ func setDeferPhaseDeadline(t *testing.T, store WorkflowStore, wfID string, secon
 	t.Helper()
 	switch s := store.(type) {
 	case *PostgresStore:
+		// workflow_leases: the only copy written, and swept, since cleat#3245 B3c.
 		if _, err := s.db.Exec(
-			`UPDATE workflow_instances SET defer_phase_deadline = now() - ($1 * interval '1 second') WHERE id = $2`,
+			`UPDATE workflow_leases SET defer_phase_deadline = now() - ($1 * interval '1 second') WHERE id = $2`,
 			secondsAgo, wfID); err != nil {
 			t.Fatalf("setDeferPhaseDeadline (postgres): %v", err)
 		}
@@ -121,10 +122,14 @@ func backdateHeartbeat(t *testing.T, store WorkflowStore, wfID string, secondsAg
 	t.Helper()
 	switch s := store.(type) {
 	case *PostgresStore:
+		// heartbeat_at's only copy since cleat#3245 B2 -- ReapStaleInstances'/
+		// ListStaleHolders' candidate scan reads workflow_leases exclusively,
+		// not workflow_instances, so that is the only table this helper's
+		// whole point -- "look stale to ReapStaleInstances" -- needs to touch.
 		if _, err := s.db.Exec(
-			`UPDATE workflow_instances SET heartbeat_at = now() - ($1 * interval '1 second') WHERE id = $2`,
+			`UPDATE workflow_leases SET heartbeat_at = now() - ($1 * interval '1 second') WHERE id = $2`,
 			secondsAgo, wfID); err != nil {
-			t.Fatalf("backdateHeartbeat (postgres): %v", err)
+			t.Fatalf("backdateHeartbeat (postgres, lease): %v", err)
 		}
 	case *MySQLStore:
 		if _, err := s.db.Exec(

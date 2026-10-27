@@ -15,7 +15,16 @@ import (
 
 // LoadEventHistory returns all event records for a workflow, ordered by step.
 func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load history: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
@@ -133,7 +142,18 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				return
 			}
 
-			rows, err := s.db.QueryContext(ctx, `
+			// beginTxWithContext per page, not bare s.db -- cleat#2210, same
+			// reason as LoadEventHistory above. Each page is its own
+			// transaction: the goroutine can run for as long as the caller
+			// keeps reading eventCh, far longer than any one page fetch
+			// should hold a transaction open.
+			tx, err := s.beginTxWithContext(ctx)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			rows, err := tx.QueryContext(ctx, `
 				SELECT step, event_type, service, operation, request, response, error,
 				       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 				       defer_description, defer_id, child_name, child_input, run_id, new_input,
@@ -148,6 +168,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				OFFSET @p3 ROWS FETCH NEXT @p4 ROWS ONLY
 			`, workflowID, s.tenantID, offset, pageSize)
 			if err != nil {
+				tx.Rollback()
 				errCh <- err
 				return
 			}
@@ -177,6 +198,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					&promiseName, &promiseID, &promiseResult, &promiseError,
 					&createdAt); err != nil {
 					rows.Close()
+					tx.Rollback()
 					errCh <- err
 					return
 				}
@@ -272,6 +294,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				case eventCh <- rec:
 				case <-ctx.Done():
 					rows.Close()
+					tx.Rollback()
 					errCh <- ctx.Err()
 					return
 				}
@@ -279,9 +302,11 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 			rows.Close()
 
 			if err := rows.Err(); err != nil {
+				tx.Rollback()
 				errCh <- err
 				return
 			}
+			tx.Rollback()
 
 			if pageCount < pageSize {
 				return
@@ -303,7 +328,15 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		offset = 0
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// LoadEventHistory above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load history paginated: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
@@ -406,16 +439,32 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 
 // CountEventHistory returns the total number of events for a workflow.
 func (s *MSSQLStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// LoadEventHistory above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count event history: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = @p1 AND tenant_id = @p2`, workflowID, s.tenantID).Scan(&count)
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = @p1 AND tenant_id = @p2`, workflowID, s.tenantID).Scan(&count)
 	return count, err
 }
 
 // IsHistorySwept reports whether DeleteExpiredEvents has ever swept this
 // workflow's event_history. cleat#2038.
 func (s *MSSQLStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// LoadEventHistory above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return false, fmt.Errorf("is history swept: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var sweptAt sql.NullTime
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT history_swept_at FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
 		workflowID, s.tenantID).Scan(&sweptAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -569,9 +618,22 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		prevChecksum = checksum
 
 		_, err = tx.ExecContext(ctx, `
+			-- target.tenant_id = @p32 DIRECTLY, not via source.tenant_id --
+			-- cleat#2059. event_history's clustered key realigns to
+			-- (tenant_id, workflow_id, step), and this MERGE is the hottest
+			-- path this store has (every event write), so matching on
+			-- workflow_id/step alone would lose its seek path on every
+			-- single call. A column-to-column comparison through a USING
+			-- subquery (target.tenant_id = source.tenant_id) would restore
+			-- the seek path but reads, to TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate,
+			-- as a correlation rather than a restriction to the caller --
+			-- the same "d.tenant_id = w.tenant_id" shape that guard's own
+			-- doc comment warns about -- so the comparison is against the
+			-- parameter directly instead.
 			MERGE event_history WITH (HOLDLOCK) AS target
 			USING (SELECT @p1 AS workflow_id, @p2 AS step) AS source
 			ON target.workflow_id = source.workflow_id AND target.step = source.step
+			   AND target.tenant_id = @p32
 			WHEN NOT MATCHED THEN INSERT (
 				workflow_id, step, event_type, service, operation, request, response, error,
 				duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
@@ -626,12 +688,22 @@ func (s *MSSQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		return fmt.Errorf("verify events: load: %w", err)
 	}
 
+	// beginTxWithContext, not bare s.db -- cleat#2210/cleat#3281: a WithTenant
+	// copy must run under its own tenant's SESSION_CONTEXT, not whatever the
+	// pool's original connection happened to carry. Same pattern as
+	// LoadEventHistory above.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("verify events: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Load stored checksums from the DB.
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 		SELECT step, checksum FROM event_history
-		WHERE workflow_id = @p1
+		WHERE workflow_id = @p1 AND tenant_id = @p2
 		ORDER BY step
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		// Column does not exist yet — skip verification (pre-migration).
 		return nil

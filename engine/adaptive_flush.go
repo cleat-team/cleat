@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // batchEntry holds a pre-computed event to be persisted.
@@ -330,11 +332,10 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 
 	rows, qerr := tx.QueryContext(ctx, fmt.Sprintf(`
 		WITH claims(workflow_id, worker_id, generation) AS (VALUES %s)
-		UPDATE workflow_instances wi
-		SET heartbeat_at = now()
-		FROM claims c
-		WHERE wi.id = c.workflow_id AND wi.assigned_to = c.worker_id AND wi.generation = c.generation
-		RETURNING wi.id
+		SELECT wl.id
+		FROM workflow_leases wl
+		JOIN claims c ON wl.id = c.workflow_id AND wl.assigned_to = c.worker_id AND wl.generation = c.generation
+		FOR NO KEY UPDATE OF wl
 	`, strings.Join(valuesSQL, ", ")), args...)
 	if qerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: %w", qerr)
@@ -352,12 +353,34 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 	if rerr := rows.Err(); rerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check rows: %w", rerr)
 	}
-	// Commit, or the heartbeat_at renewal this statement performs rolls back
-	// with the transaction and the lease is not actually refreshed. rows must
-	// be drained first, which the loop above has done.
+	// cleat#3245 B2: the statement above only fences and locks; the renewal is
+	// the workflow_leases write below, and it must commit or the lease is not
+	// actually refreshed. rows must be drained first, which the loop above has
+	// done. The FOR NO KEY UPDATE locks hold until that commit, so a reclaim
+	// cannot land between the fence and the renewal. They are on
+	// workflow_leases since cleat#3245 B3b: a reclaim mirrors its generation
+	// bump onto that row in its own transaction, so it serializes on it, and
+	// the workflow_instances row is no longer locked by a flush at all.
 	if cerr := rows.Close(); cerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check close: %w", cerr)
 	}
+
+	// The renewal: workflow_leases.heartbeat_at for exactly the ids the fence
+	// above matched (fencedOK's keys). Since cleat#3245 B2 this is the only
+	// copy of heartbeat_at; it was added as a mirror when step 3 piece A found
+	// this batch path had never been given one.
+	if len(fencedOK) > 0 {
+		ids := make([]string, 0, len(fencedOK))
+		for id := range fencedOK {
+			ids = append(ids, id)
+		}
+		if _, merr := tx.ExecContext(ctx, `
+			UPDATE workflow_leases SET heartbeat_at = now() WHERE id = ANY($1)
+		`, pq.Array(ids)); merr != nil {
+			return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: mirror lease: %w", merr)
+		}
+	}
+
 	if cerr := tx.Commit(); cerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check commit: %w", cerr)
 	}

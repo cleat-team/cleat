@@ -77,6 +77,10 @@ var asCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCall", "PluginCall"},
 	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
+	// AwaitPromise is a stop site through suspendingAwaitResult rather than
+	// stopBeforeNewWork (cleat#3383): a fresh await that has to wait answers with
+	// the sentinel, and bit 31 lands inside this layout's timed-out field.
+	{"awaitPromiseMs", "AwaitPromise"},
 	{"waitForEventMs", "WaitForEvent"},
 	{"acquireLockMs", "AcquireLock"},
 	{"signalWorkflow", "SignalWorkflow"},
@@ -88,10 +92,11 @@ var asCallsTheHostCanRefuse = []sdkRefusableCall{
 	// for the host to refuse.
 	//
 	// Removing it does NOT weaken this guard, and that was checked rather
-	// than assumed. Of the three callees, only SignalWorkflow calls
-	// stopBeforeNewWork -- CreatePromise, AwaitPromise and ResolvePromise do
-	// not, which is why none of them was ever listed -- and signalWorkflow is
-	// on this list, so every refusable call the composite makes is covered by
+	// than assumed. Of the three callees, only SignalWorkflow called
+	// stopBeforeNewWork; AwaitPromise joined it as a stop site in cleat#3383,
+	// through suspendingAwaitResult, and is listed above as awaitPromiseMs.
+	// CreatePromise and ResolvePromise still refuse nothing, which is why they
+	// were never listed. Every refusable call the composite makes is covered by
 	// the entry that owns it.
 	//
 	//	for f in CreatePromise AwaitPromise ResolvePromise SignalWorkflow; do

@@ -116,7 +116,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	if storageBackend == "s3" {
 		s3Key = &sha256Hex
 	}
-	_, err := p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
+	_, err := p.db.Exec(r.Context(), upsertBlobContent.For(p.dialect),
 		hash[:], len(body), storageBackend, s3Key)
 	if err != nil {
 		p.logger.Error("blobstore: store content", "key", key, "error", err)
@@ -134,10 +134,10 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	// Insert or update blob_index.
 	if expiresAt != nil {
-		_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobIndexWithTTL.For(p.dialect), p.dialect),
+		_, err = p.db.Exec(r.Context(), upsertBlobIndexWithTTL.For(p.dialect),
 			key, tid, hash[:], len(body), contentType, tagsJSON, *expiresAt)
 	} else {
-		_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobIndex.For(p.dialect), p.dialect),
+		_, err = p.db.Exec(r.Context(), upsertBlobIndex.For(p.dialect),
 			key, tid, hash[:], len(body), contentType, tagsJSON)
 	}
 	if err != nil {
@@ -185,12 +185,12 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	// ("Incorrect syntax near the keyword 'key'" on MSSQL) -- the same bug
 	// kvstore and featureflags already carry the fix for. See
 	// plugin.QuoteIdent. cleat#2206.
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(fmt.Sprintf(`
+	err := p.db.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+	`, plugin.QuoteIdent("key", p.dialect)), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -244,12 +244,12 @@ func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
 	var expiresAt sql.NullTime
 
 	// plugin.QuoteIdent: see handleGet's identical comment above. cleat#2206.
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(fmt.Sprintf(`
+	err := p.db.QueryRow(r.Context(), fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+	`, plugin.QuoteIdent("key", p.dialect)), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -290,10 +290,10 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 	// to the TTL cleanup loop, which only removes bytes from S3 when no
 	// in-flight workflow references the blob.
 	// plugin.QuoteIdent: see handleGet's identical comment above. cleat#2206.
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(fmt.Sprintf(`
+	rows, err := p.db.Exec(r.Context(), fmt.Sprintf(`
 		UPDATE blob_index SET deleted_at = now()
 		WHERE %s = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid)
+	`, plugin.QuoteIdent("key", p.dialect)), key, tid)
 	if err != nil {
 		p.logger.Error("blobstore: soft delete", "key", key, "error", err)
 		p.writeError(w, 500, "failed to delete blob")
@@ -368,7 +368,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("blobstore: list", "error", err)
 		p.writeError(w, 500, "failed to list blobs")

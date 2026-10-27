@@ -344,8 +344,11 @@ func holdReclaimOpen(t *testing.T, ctx context.Context, store WorkflowStore, wor
 		if err != nil {
 			t.Fatalf("begin reclaim tx (postgres): %v", err)
 		}
+		// Since cleat#3245 B3c the Postgres reclaim writes only the lease
+		// row, so this is ReapStaleInstances' statement with its selection
+		// narrowed to the one id.
 		res, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances
+			UPDATE workflow_leases
 			SET status = CASE WHEN pending_terminal_status IS NOT NULL
 			                  THEN 'terminating' ELSE 'ready' END,
 			    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,

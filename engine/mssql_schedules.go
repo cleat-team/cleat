@@ -280,9 +280,35 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		      AND d.tenant_id = w.tenant_id
 		WHERE w.tenant_id = @p3
 		  AND w.status IN ('ready', 'running')
-		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id)
+		  -- e.tenant_id = @p3 DIRECTLY, not via w.tenant_id -- cleat#2059,
+		  -- same reasoning as d.tenant_id above but for a seek path rather
+		  -- than correctness: event_history's clustered key realigned to
+		  -- (tenant_id, workflow_id, step), so a predicate naming only
+		  -- workflow_id lost its seek path, and a column-to-column
+		  -- comparison to w.tenant_id would read as a correlation rather
+		  -- than a restriction to the caller under the distinction
+		  -- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate's doc
+		  -- comment draws (the same one the appendEventsInTxOpts MERGE fix
+		  -- is held to). That guard does NOT actually enforce either
+		  -- correlated subquery's own predicate below -- confirmed by
+		  -- falsifying each directly: removing either one alone, or both
+		  -- together, still passes. CORRECTED 2026-10-09 (cleat#3289): this
+		  -- used to say the guard "does not reach" the subqueries, which
+		  -- reads as blindness to their text and is not quite it. The
+		  -- guard's filterWindow runs from this WHERE to the next ORDER
+		  -- BY/GROUP BY/OPTION/WHEN with no awareness of a subquery
+		  -- boundary in between, so w.tenant_id = @p3 above and both
+		  -- e.tenant_id/e2.tenant_id comparisons below all land in ONE
+		  -- shared window; any one of the three alone is read as scoping
+		  -- the whole statement, which is why removing the two below
+		  -- changes nothing the guard can see. cleat#3289 tracks widening
+		  -- the scan to check a correlated subquery against its own
+		  -- predicate rather than the statement's as a whole. The
+		  -- seek-path reasoning above is why the predicate is here
+		  -- regardless.
+		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id AND e.tenant_id = @p3)
 		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
-		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id))
+		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id AND e2.tenant_id = @p3))
 		ORDER BY w.created_at
 		OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY
 	`, threshold, limit, s.tenantID)
@@ -327,7 +353,21 @@ func (s *MSSQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 }
 
 func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// beginTxWithContext, not bare s.db -- cleat#2210. Every statement below
+	// carries no tenant_id predicate of its own (the generation read is
+	// "optimistic locking", keyed only on id); they relied entirely on the
+	// RLS filter predicate's session context. A WithTenant copy sharing the
+	// pool's original connection without this would run every statement
+	// under the wrong tenant's context: the SELECT would find no row
+	// (ErrNoRows, read as "workflow no longer exists" and committed as
+	// success), or -- if the pool happened to hand back a connection some
+	// other call had stamped correctly -- the UPDATE/DELETE could silently
+	// affect 0 rows while still returning nil. Either way, compaction
+	// silently never happens, with no error surfaced anywhere. Found by the
+	// same audit that found deleteWorkflowsChunkOnceOnce/
+	// deleteEventHistoryChunkOnceOnce's identical bare-s.db.BeginTx shape;
+	// this is the one other method with it.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("compact history: begin tx: %w", err)
 	}
@@ -335,7 +375,8 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 
 	// Read current generation for optimistic locking.
 	var gen int64
-	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&gen)
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
+		workflowID, s.tenantID).Scan(&gen)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return tx.Commit() // Workflow no longer exists.
@@ -343,11 +384,43 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 		return fmt.Errorf("compact history: get generation: %w", err)
 	}
 
+	// THE FENCE COMES FIRST, and a lost fence is an error (cleat#3409). The delete
+	// used to run first and the UPDATE ... WHERE generation = @p4 after it, with the
+	// commit unconditional: a reclaim that landed in between left the events
+	// deleted, no snapshot written and a nil error. Measured on SQL Server 2022
+	// with READ_COMMITTED_SNAPSHOT on (where the plain generation read above does
+	// not wait for the reclaim, so the window exists), events at steps 0-4 and a
+	// 400 ms holder that bumped the generation:
+	//
+	//	before   err=nil  events left 2 of 5  compaction_step NULL
+	//	after    err=ErrFenceLost  events left 5 of 5  compaction_step NULL
+	//
+	// It also fixes the lock order: finalize_workflow_status updates the instance
+	// row and then deletes the run's events, and this deleted events then updated
+	// the instance, so the two deadlocked (error 1205, reproduced on every run, with
+	// the snapshot setting on and off, by
+	// TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrderOnMySQLAndMSSQL).
+	//
+	// UPDLOCK makes this a locking read even under READ_COMMITTED_SNAPSHOT, so it
+	// waits on a concurrent writer and then sees the latest committed generation.
+	var fenced string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_instances WITH (UPDLOCK, ROWLOCK)
+		WHERE id = @p1 AND generation = @p2 AND tenant_id = @p3
+	`, workflowID, gen, s.tenantID).Scan(&fenced)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing has been written; returning rolls the transaction back.
+		return fmt.Errorf("compact history: %w", ErrFenceLost)
+	}
+	if err != nil {
+		return fmt.Errorf("compact history: fence: %w", err)
+	}
+
 	// Delete events older than keepStep.
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history
-		WHERE workflow_id = @p1 AND step < @p2
-	`, workflowID, keepStep)
+		WHERE workflow_id = @p1 AND step < @p2 AND tenant_id = @p3
+	`, workflowID, keepStep, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("compact history: delete events: %w", err)
 	}
@@ -356,8 +429,8 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = @p2, compaction_step = @p3, compacted_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND generation = @p4
-	`, workflowID, string(compactionState), compactionStep, gen)
+		WHERE id = @p1 AND tenant_id = @p4
+	`, workflowID, string(compactionState), compactionStep, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("compact history: update state: %w", err)
 	}
@@ -600,7 +673,33 @@ const (
 var mssqlDeleteExpiredEventsQuery = fmt.Sprintf(`
 			DELETE TOP (%d) FROM event_history
 			OUTPUT deleted.workflow_id
-			WHERE workflow_id IN (
+			-- tenant_id = @p2 added directly, not only inside the subquery --
+			-- cleat#2059. The subquery already restricts the candidate
+			-- workflow ids to this tenant, so this is defense in depth
+			-- rather than a fix for a measured regression -- this
+			-- statement held at 0 lock escalations
+			-- (TestMSSQLRetentionSweepsCauseNoLockEscalation's
+			-- DeleteExpiredEvents arm) both before and after it was added.
+			--
+			-- CORRECTED 2026-10-09 (cleat#3289): this used to say the clause
+			-- below was "NOT caught by
+			-- TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate if
+			-- removed." Falsified directly rather than taken on claim:
+			-- removing ONLY this outer clause does not make the guard fail --
+			-- it still passes, because the subquery's own "AND tenant_id =
+			-- @p2" two lines
+			-- down is itself a comparison inside the SAME filterWindow (the
+			-- guard's window runs from this WHERE to the next ORDER BY/GROUP
+			-- BY/OPTION/WHEN, with no awareness of the subquery boundary in
+			-- between), so that pre-existing predicate alone keeps the whole
+			-- statement reading as scoped. Removing BOTH clauses together does
+			-- fail the guard, confirming the statement is not simply invisible
+			-- to it. So this clause is unprotected by any guard for the same
+			-- reason given above (seek-path, not correctness) -- just not
+			-- because the scan cannot trace a package-level fmt.Sprintf var;
+			-- it is because one window is shared between an outer clause and a
+			-- subquery nested inside it.
+			WHERE tenant_id = @p2 AND workflow_id IN (
 				SELECT id`+msExpiredEventsWorkflows+`
 				  AND tenant_id = @p2
 				ORDER BY id
@@ -873,14 +972,46 @@ var mssqlWorkflowChildTables = []string{
 // candidate is spelled out here, so the only text ever appended is the generated
 // placeholder list (@id0, @id1, ...) -- which also keeps gosec's G201 satisfied
 // without a #nosec, since there is no SQL string formatting left to audit.
+//
+// INVESTIGATED 2026-10-10 (cleat#3294). The ids deleteByWorkflowIDs is called
+// with ARE already tenant-scoped by the time they get here:
+// deleteWorkflowsBatchOnce's own SELECT that produces them carries
+// `AND tenant_id = @p2` (mssqlSelectCompletedBatch / mssqlSelectDeadLetteredBatch),
+// so every id in the chunk belongs to s.tenantID and deleting by a specific
+// workflow_id (a UUID, not reused across tenants) cannot reach another
+// tenant's row even with no predicate here at all -- the same scopedByCaller
+// shape this file's other allowlist entries document for backtick literals.
+// Five of these six tables are also ON DELETE CASCADE from workflow_instances
+// (mssqlWorkflowChildTables's comment), so a missing predicate here would at
+// worst be redundant with the cascade, not unguarded.
+//
+// Even so, each entry now ALSO carries tenant_id = @tenant directly (bound by
+// deleteByWorkflowIDs below exactly as mssqlDeleteEventHistoryTopPrefix's
+// sibling statement already is), as defence in depth rather than because the
+// scopedByCaller argument above is insufficient -- and because three of these
+// seven tables (idempotency_keys, concurrency_keys, workflow_update_requests)
+// have no SQL Server security-policy filter predicate at all
+// (mssqlTenantScopedTables derives its table set from
+// ADD FILTER PREDICATE bindings in the migrations, and none exists for these
+// three -- grep migrations/mssql/003_procedures.sql), so for them a Go-level
+// predicate is not a second layer, it is the only one. That gap in which
+// tables this guard can even see is tracked separately (cleat#3313); adding
+// the predicate here closes the practical exposure regardless of whether the
+// guard's table set ever grows to include them.
+//
+// Still double-quoted rather than backtick, and still invisible to
+// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate before cleat#3294
+// widened its extraction to see a SQL-shaped double-quoted literal too -- see
+// goStringLiterals. Confirmed now caught: reverting this comparison on any one
+// entry fails the guard (falsified per-table, not just once).
 var mssqlDeleteByWorkflowPrefix = map[string]string{
-	"event_history":            "DELETE FROM event_history WHERE workflow_id IN (",
-	"idempotency_keys":         "DELETE FROM idempotency_keys WHERE workflow_id IN (",
-	"concurrency_keys":         "DELETE FROM concurrency_keys WHERE workflow_id IN (",
-	"workflow_signals":         "DELETE FROM workflow_signals WHERE workflow_id IN (",
-	"workflow_promises":        "DELETE FROM workflow_promises WHERE workflow_id IN (",
-	"workflow_update_requests": "DELETE FROM workflow_update_requests WHERE workflow_id IN (",
-	"workflow_instances":       "DELETE FROM workflow_instances WHERE id IN (",
+	"event_history":            "DELETE FROM event_history WHERE tenant_id = @tenant AND workflow_id IN (",
+	"idempotency_keys":         "DELETE FROM idempotency_keys WHERE tenant_id = @tenant AND workflow_id IN (",
+	"concurrency_keys":         "DELETE FROM concurrency_keys WHERE tenant_id = @tenant AND workflow_id IN (",
+	"workflow_signals":         "DELETE FROM workflow_signals WHERE tenant_id = @tenant AND workflow_id IN (",
+	"workflow_promises":        "DELETE FROM workflow_promises WHERE tenant_id = @tenant AND workflow_id IN (",
+	"workflow_update_requests": "DELETE FROM workflow_update_requests WHERE tenant_id = @tenant AND workflow_id IN (",
+	"workflow_instances":       "DELETE FROM workflow_instances WHERE tenant_id = @tenant AND id IN (",
 }
 
 // mssqlDeleteEventHistoryTopPrefix is deleteEventHistoryRowBoundedCommitting's own head,
@@ -891,8 +1022,55 @@ var mssqlDeleteByWorkflowPrefix = map[string]string{
 // (Incorrect syntax near the keyword 'DELETE'), caught the first time this
 // path ran against a real database rather than in gofmt/go vet, which have
 // no way to know either string is SQL.
+//
+// AND tenant_id = @tenant -- cleat#2059/#2060. event_history's clustered key
+// realigned to (tenant_id, workflow_id, step), so a predicate naming only
+// workflow_id lost its seek path: SQL Server could no longer narrow to the
+// candidate rows by index seek, and TestMSSQLRetentionSweepsCauseNoLockEscalation
+// caught the regression directly -- DeleteCompletedWorkflows and
+// DeleteDeadLetteredWorkflows (both routed through this statement) started
+// escalating to a table lock sweeping the same 6000 rows that held at 0
+// promotions before the realignment; DeleteExpiredEvents, whose own
+// event_history delete already compared tenant_id to a parameter
+// (mssqlDeleteExpiredEventsQuery), was unaffected. @tenant is bound once per
+// chunk by deleteEventHistoryRowBoundedCommitting below, from s.tenantID.
+//
+// NOW CAUGHT (cleat#3294, landed) by
+// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate if this predicate
+// is removed -- falsified directly: reverting just this comparison, with the
+// fix below otherwise intact, fails the guard. It did NOT used to be, for two
+// independent reasons, both found auditing this statement rather than taken
+// on claim:
+//
+//  1. The scan's extraction (goStringLiterals, mssql_tenant_predicate_test.go)
+//     used to match only backtick-delimited spans; a plain Go string literal
+//     in double quotes was invisible to it regardless of what built or held
+//     it. This comment used to attribute that to the scan not tracing SQL
+//     assembled into a package-level var via fmt.Sprintf specifically --
+//     falsifying that directly (switching this literal from double quotes to
+//     backticks, fmt.Sprintf and the package-level var both left exactly as
+//     they are) showed the guard sees it immediately once it is a backtick
+//     literal, so the real mechanism was the quote character, not
+//     fmt.Sprintf or the var. Measuring the blast radius of THAT fact turned
+//     up mssqlDeleteByWorkflowPrefix above as a sibling case of the same
+//     gap -- its entries were also double-quoted and also invisible, so
+//     "this is the only one" would have been a second, narrower wrong claim.
+//  2. Even once visible, tenantComparedToAParameter only recognised @p<N>,
+//     $N and ? -- not the NAMED parameter @tenant this statement actually
+//     uses (sql.Named("tenant", ...), bound by
+//     deleteEventHistoryRowBoundedCommitting below). Checked against every
+//     other name sql.Named produces anywhere in engine/ before widening the
+//     regex: @tenant is the only non-@p<N> one, so the fix stays a narrow,
+//     checked addition rather than a blanket @\w+.
+//
+// cleat#3294 is not cleat#3289, which is about a different mechanism -- see
+// its own comment at GetCompactionCandidates and StartChildWorkflowAtomic.
+// The predicate here is what restores the seek path
+// TestMSSQLRetentionSweepsCauseNoLockEscalation measures, and -- as of
+// cleat#3294 -- is also now the thing this guard would refuse its removal
+// over, not merely a performance fix nothing else was watching.
 var mssqlDeleteEventHistoryTopPrefix = fmt.Sprintf(
-	"DELETE TOP (%d) FROM event_history WHERE workflow_id IN (", mssqlEventRowChunk)
+	"DELETE TOP (%d) FROM event_history WHERE tenant_id = @tenant AND workflow_id IN (", mssqlEventRowChunk)
 
 // deleteCompletedWorkflowsBatch deletes one batch, retrying the whole
 // transaction on a rollback-guaranteed failure.
@@ -950,13 +1128,29 @@ const mssqlSelectDeadLetteredBatch = `
 		OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY`
 
 func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, label string, olderThan time.Time) (int64, error) {
-	// Plain read, no transaction: RCSI (required in production, asserted by
-	// TestMSSQLRetentionSweepsCauseNoLockEscalation in test) gives this a
-	// versioned, non-blocking read, and nothing below depends on the
-	// candidate set being read inside the same transaction that deletes it.
-	rows, err := s.db.QueryContext(ctx, selectSQL,
+	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
+	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
+	// original connection happened to carry.
+	//
+	// Scoped to the SELECT alone, committed immediately below, and nothing
+	// after it: the chunked deletes that follow open their OWN transactions
+	// (deleteEventHistoryRowBoundedCommitting and the rest of this function),
+	// unchanged. This still gives the read the same short lifetime a plain
+	// autocommit QueryContext had -- RCSI (required in production, asserted
+	// by TestMSSQLRetentionSweepsCauseNoLockEscalation) still versions it
+	// rather than blocking, and nothing below depends on the candidate set
+	// being read inside the same transaction that deletes it. Verified
+	// empirically, not just by this reasoning -- see cleat#2210's PR for the
+	// trial count and result: this function's lock-escalation behavior has
+	// twice been wrong on inspection alone.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("%s: begin: %w", label, err)
+	}
+	rows, err := tx.QueryContext(ctx, selectSQL,
 		sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
 	if err != nil {
+		tx.Rollback()
 		return 0, fmt.Errorf("%s: select batch: %w", label, err)
 	}
 	var ids []string
@@ -964,15 +1158,20 @@ func (s *MSSQLStore) deleteWorkflowsBatchOnce(ctx context.Context, selectSQL, la
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
+			tx.Rollback()
 			return 0, fmt.Errorf("%s: scan: %w", label, err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
+		tx.Rollback()
 		return 0, fmt.Errorf("%s: rows: %w", label, err)
 	}
 	rows.Close()
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("%s: commit select: %w", label, err)
+	}
 
 	if len(ids) == 0 {
 		return 0, nil
@@ -1071,7 +1270,27 @@ func (s *MSSQLStore) deleteWorkflowsChunkOnce(ctx context.Context, chunk []strin
 // the caller as an ordinary error the retry wrapper needs to see, not one
 // this function should ever swallow unretried.
 func (s *MSSQLStore) deleteWorkflowsChunkOnceOnce(ctx context.Context, chunk []string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// beginTxWithContext, not bare s.db -- cleat#2210. deleteByWorkflowIDs's
+	// own tenant_id = @tenant predicate (cleat#3294) binds from s.tenantID
+	// directly, so it is correct regardless of SESSION_CONTEXT -- but four of
+	// these six tables (event_history, workflow_signals, workflow_promises,
+	// workflow_instances; see mssqlDeleteByWorkflowPrefix) also carry a SQL
+	// Server security-policy filter predicate keyed on SESSION_CONTEXT
+	// (migrations/mssql/003_procedures.sql's dbo.fn_tenant_filter), and THAT
+	// one still needs it. A WithTenant copy sharing the pool's original
+	// connection without this would run under the wrong tenant's SESSION_CONTEXT,
+	// so the security policy would filter the row out from under a DELETE whose
+	// own @tenant predicate was correct -- same observable failure as before
+	// (the DELETE affects 0 rows), by a different one of the two layers. And
+	// because deleteWorkflowsBatchOnce's outer loop counts a chunk as
+	// "deleted" by its length rather than by rows actually affected, the
+	// SELECT (already correctly scoped) would keep finding the same
+	// never-deleted row forever: an infinite loop, not merely a missed
+	// delete. Found exactly this way -- converting the SELECT alone and
+	// empirically re-testing caught it as a hang, which is the entire
+	// argument this function needed its own dedicated verification rather
+	// than a mechanical batch.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
@@ -1109,7 +1328,12 @@ func (s *MSSQLStore) deleteByWorkflowIDs(ctx context.Context, tx *sql.Tx, table 
 		}
 		part := ids[start:end]
 		placeholders := make([]string, len(part))
-		args := make([]any, 0, len(part))
+		// +1 for @tenant, bound the same way mssqlDeleteEventHistoryTopPrefix's
+		// sibling statement already binds it in
+		// deleteEventHistoryRowBoundedCommitting -- see mssqlDeleteByWorkflowPrefix's
+		// comment (cleat#3294).
+		args := make([]any, 0, len(part)+1)
+		args = append(args, sql.Named("tenant", s.tenantID))
 		for i, id := range part {
 			name := fmt.Sprintf("id%d", i)
 			placeholders[i] = "@" + name
@@ -1160,7 +1384,8 @@ func (s *MSSQLStore) deleteEventHistoryRowBoundedCommitting(ctx context.Context,
 		}
 		part := ids[start:end]
 		placeholders := make([]string, len(part))
-		args := make([]any, 0, len(part))
+		args := make([]any, 0, len(part)+1)
+		args = append(args, sql.Named("tenant", s.tenantID))
 		for i, id := range part {
 			name := fmt.Sprintf("id%d", i)
 			placeholders[i] = "@" + name
@@ -1205,7 +1430,12 @@ func (s *MSSQLStore) deleteEventHistoryChunkOnce(ctx context.Context, stmt strin
 // deleteWorkflowsChunkOnceOnce is; see that function's comment for why the
 // split exists (TestEveryMSSQLTransactionBoundaryIsRetried).
 func (s *MSSQLStore) deleteEventHistoryChunkOnceOnce(ctx context.Context, stmt string, args []any) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as
+	// deleteWorkflowsChunkOnceOnce: the RLS session context is the only
+	// thing that keeps the @tenant comparison in stmt (cleat#2059, cleat#2060)
+	// aligned with the caller's own tenant rather than one that merely looks
+	// bound -- s.beginTxWithContext is where that context gets set.
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin: %w", err)
 	}
@@ -1286,15 +1516,23 @@ func scheduleInputJSON(input json.RawMessage) string {
 // holds expectedNextRun. See the interface doc for why this is a CAS.
 //
 // `AND tenant_id` on this and the four statements above it is load-bearing
-// rather than defensive, and the reason is specific to SQL Server.
-// dbo.fn_tenant_filter admits any connection whose login is a member of
-// dbo.cleat_admin, regardless of SESSION_CONTEXT (012_admin_role.sql) -- and a
-// multi-tenant deployment must grant that role, because
-// GetDueSchedulesAcrossTenants and ClaimReadyAcrossTenants require it and
-// without them a non-default tenant's workflows never fire at all. WithTenant
-// copies the store and shares s.db, so on such a deployment every
-// tenant-scoped store is running unfiltered and a name-only predicate reaches
-// every tenant's rows.
+// rather than defensive, and the reason is specific to SQL Server. The
+// shipped dbo.fn_tenant_filter has carried no role-based exemption since
+// cleat#1541 -- a dbo.cleat_admin login is filtered by SESSION_CONTEXT like
+// any other connection unless a deployment has applied the optional,
+// not-auto-applied migrations/mssql/optional/cross_tenant_claim.sql. Nothing
+// in this engine's own dispatch loop needs that grant any more either: #1926
+// removed GetDueSchedulesAcrossTenants, ClaimReadyAcrossTenants and
+// requireCleatAdminMembership in favor of unconditional per-tenant rotation,
+// so a working multi-tenant worker runs with no admin membership at all.
+//
+// What still holds a dbo.cleat_admin login open is cleatctl and cross-tenant
+// test teardown (engine/testutil/mssql_admin.go). WithTenant copies the store
+// and shares s.db, so a tenant-scoped store built over one of those pools has
+// no app-level predicate standing between it and every tenant's rows -- these
+// five statements carrying their own `AND tenant_id` are what closes that,
+// and they are the whole of the closing, not a second layer behind an admin
+// exemption.
 //
 // PostgreSQL does not have this problem because its exemption is a separate
 // role owning a SECURITY DEFINER function; the application role keeps
@@ -1302,8 +1540,9 @@ func scheduleInputJSON(input json.RawMessage) string {
 // which statement is asking, so each statement has to say so itself.
 //
 // Measured in engine/mssql_admin_login_schedule_tenant_test.go: without these
-// predicates one tenant deletes, disables and reschedules another tenant's
-// cron schedules through the ordinary HTTP API.
+// predicates, a store built over a dbo.cleat_admin pool can delete, disable
+// and reschedule another tenant's cron schedules through the ordinary HTTP
+// API.
 func (s *MSSQLStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {

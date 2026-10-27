@@ -145,9 +145,14 @@ func statusAndCompletedAt(t *testing.T, store WorkflowStore, workflowID string) 
 
 	var status string
 	var completedAt *time.Time
-	err := db.QueryRow(
-		`SELECT status, completed_at FROM workflow_instances WHERE id = `+ph, workflowID,
-	).Scan(&status, &completedAt)
+	// On PostgreSQL completed_at lives on workflow_payloads since cleat#3245
+	// B1b, and status on workflow_leases since B3c.
+	q := `SELECT status, completed_at FROM workflow_instances WHERE id = ` + ph
+	if ph == "$1" {
+		q = `SELECT l.status, p.completed_at FROM workflow_leases l
+			JOIN workflow_payloads p ON p.id = l.id WHERE l.id = $1`
+	}
+	err := db.QueryRow(q, workflowID).Scan(&status, &completedAt)
 	if err == sql.ErrNoRows {
 		t.Fatalf("no workflow_instances row for %s", workflowID)
 	}

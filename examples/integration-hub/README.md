@@ -17,8 +17,9 @@ stub is the thing at the far end of it.
 **This is the difference worth comparing against
 [`examples/order-lifecycle`](../order-lifecycle/), and it is in this scenario's
 favour.** That one needed three `DurableSleep` placeholders, because a PSP, an
-inventory system and a 3PL have no bundled plugin and a durable call that
-resolves nowhere cannot serve a stock worker (`ABI.md` §2.48). Here the
+inventory system and a 3PL have no bundled plugin, so a durable call to one
+resolves nowhere, and the generic `DurableCall("http", "fetch", …)` would need
+the tenant's egress allowlist to name each of them. Here the
 dispatch resolves to `notifications`, which ships in the worker, so **there is
 no placeholder for the call itself** — only for the endpoint, which is the
 reader's to replace with their customer's system.

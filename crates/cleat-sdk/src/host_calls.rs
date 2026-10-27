@@ -910,6 +910,15 @@ impl HostCalls {
                 result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // A fresh await that has to wait answers with the stop sentinel, not a
+        // timed-out word (cleat#3383). Ask BEFORE decoding: bit 31 lands inside
+        // this layout's timed-out field, so decoding first reads a suspend as a
+        // timeout and the guest takes its timeout branch before the run stops.
+        // stop_requested marks the segment suspending, so a body that discards
+        // this tuple still ends it.
+        if stop_requested(result) {
+            return (String::new(), false, Some("cleat: await_promise stopped -- the workflow is suspending".to_string()));
+        }
         let (result_len, timed_out, err_code) = memory::decode_await_promise_result(result);
         if err_code != 0 {
             return (String::new(), timed_out, Some(memory::host_message_or(&result_buf, result_len, format!("await_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code))));
@@ -1072,17 +1081,14 @@ impl HostCalls {
                 signal_name, e
             )));
         }
-        // Returning an error on timed_out is correct even though await_promise
-        // reports timed_out = true for a SUSPENSION as well as for a real
-        // timeout. The host distinguishes them and this code does not have to:
-        // engine/promises.go sets session.suspendErr before returning, and
-        // engine/executor.go:264 treats a workflow error as a failure only when
-        // suspendErr is nil -- ":315 deliberately lets a suspension win over
-        // the error that accompanied it".
-        //
-        // Do not "fix" this into a suspension check. There is nothing in the
-        // returned triple to check: the engine signals suspension host-side,
-        // not through a sentinel, so the guest cannot tell the two apart.
+        // timed_out is a real timeout. Until cleat#3383 it was also true for a
+        // SUSPENSION, and this comment said the guest could not tell the two
+        // apart; a suspend now arrives as the stop sentinel, which
+        // await_promise_ms turns into `err` above (and marks the segment
+        // suspending). That Err is returned as a Failed here, which is still
+        // correct: engine/executor.go treats a workflow error as a failure only
+        // when suspendErr is nil, and the host set it, so the suspension wins
+        // over the error that accompanied it.
         if timed_out {
             return Err(CallError::Failed(format!(
                 "send_signal_and_wait: no reply to signal \"{}\" from workflow \"{}\" within {}ms",

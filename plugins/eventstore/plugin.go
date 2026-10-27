@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -35,7 +34,7 @@ func New() plugin.Plugin {
 // Plugin implements append-only event streams with tenant isolation.
 type Plugin struct {
 	db      plugin.PluginDB
-	mux     *http.ServeMux
+	mux     plugin.Dispatcher
 	logger  *slog.Logger
 	config  Config
 	dialect plugin.Dialect

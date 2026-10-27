@@ -61,6 +61,32 @@ func emit(o outcome) (string, error) {
 	return string(b), nil
 }
 
+// unwoundMarker is the SideEffect value recordUnwind writes. It is a recorded
+// event, which is the only thing about this guest the harness can read back:
+// a DurableLog here is not recorded in the history at all (measured).
+const unwoundMarker = "guest-recovered-the-suspend"
+
+// recordUnwind is deferred around the await calls, as
+//
+//	defer func() { recordUnwind(h, recover()) }()
+//
+// (recover must be called directly by the deferred function, hence the
+// argument). When the guest adapter honours the suspend sentinel it panics with
+// cleat.ErrSuspend, the guest's own recover() sees it, and this records a
+// side_effect AFTER the await record -- evidence from inside the guest that it
+// was unwound rather than killed. An adapter that ignores the sentinel reads
+// the sentinel as a result length; the guest then traps, which no recover()
+// can catch, and nothing is recorded. The engine reports a suspension either
+// way (its suspendErr wins over the trap), so the engine's own status cannot
+// tell the two apart; this can. See cleat#3385.
+func recordUnwind(h cleat.HostCalls, rv any) {
+	if rv == nil {
+		return
+	}
+	h.SideEffect(func() (string, error) { return unwoundMarker, nil })
+	panic(rv)
+}
+
 // ExerciseHostCall runs the one call named in the input.
 //
 // Entry point: exercise_host_call
@@ -88,6 +114,7 @@ func ExerciseHostCall(h cleat.HostCalls, input string) (string, error) {
 		return ok(req.Call, r)
 
 	case "AwaitChild":
+		defer func() { recordUnwind(h, recover()) }()
 		r, err := h.AwaitChild("00000000-0000-0000-0000-000000000001")
 		if err != nil {
 			return bad(req.Call, err)
@@ -103,6 +130,7 @@ func ExerciseHostCall(h cleat.HostCalls, input string) (string, error) {
 		// durable-wrong-answer branch. A count is 1 either way, so this row
 		// went green THROUGH the defect it was flagging. A summary statistic
 		// over a result is exactly where a wrong answer hides.
+		defer func() { recordUnwind(h, recover()) }()
 		rs, err := h.AwaitAllChildren([]string{"00000000-0000-0000-0000-000000000001"})
 		if err != nil {
 			return bad(req.Call, err)
@@ -114,6 +142,7 @@ func ExerciseHostCall(h cleat.HostCalls, input string) (string, error) {
 		return ok(req.Call, string(raw))
 
 	case "AwaitAnyChild":
+		defer func() { recordUnwind(h, recover()) }()
 		runID, r, err := h.AwaitAnyChild([]string{"00000000-0000-0000-0000-000000000001"})
 		if err != nil {
 			return bad(req.Call, err)

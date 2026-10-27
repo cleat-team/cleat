@@ -110,9 +110,9 @@ func (p *Plugin) expiredTenants(ctx context.Context, cutoff time.Time) ([]string
 		col = "CONVERT(varchar(36), tenant_id)"
 	}
 	ctx = plugin.AcrossAllTenants(ctx, "audit retention: list the tenants that have expired rows")
-	rows, err := p.db.Query(ctx, plugin.Rebind(fmt.Sprintf(
+	rows, err := p.db.Query(ctx, fmt.Sprintf(
 		`SELECT DISTINCT %s FROM audit_events WHERE %s < $1`,
-		col, epochMicrosExpr(p.dialect, "timestamp")), p.dialect), cutoff.UTC().UnixMicro())
+		col, epochMicrosExpr(p.dialect, "timestamp")), cutoff.UTC().UnixMicro())
 	if err != nil {
 		return nil, fmt.Errorf("list tenants with expired rows: %w", err)
 	}

@@ -63,6 +63,18 @@ const (
 	// both -- so a guest recognises this failure without first having to know
 	// which result layout it is decoding.
 	callErrorOutputTruncated byte = 7
+	// callErrorOutputWriteFailed is the classification for a call whose
+	// response could not be written into the guest's memory at all (cleat#3207)
+	// -- as opposed to callErrorOutputTruncated, where a prefix landed. The
+	// underlying call may have genuinely run and recorded a real effect; only
+	// the write-back failed, so this is non-retryable for the same reason a
+	// cancelled or presumed-lost run is: re-issuing risks a duplicate of
+	// something that may have already happened.
+	//
+	// 8 in this space and in the simple-result errCode byte, for the same
+	// reason 7 is: free in both, so recognising it needs no knowledge of which
+	// result layout is being decoded.
+	callErrorOutputWriteFailed byte = 8
 )
 
 // callFailureCode is the code reported for a call that the *service* failed
@@ -111,6 +123,7 @@ var guestCallErrorCodes = []GuestCallErrorCode{
 	{Name: "PermissionDenied", Code: 5, Retryable: false},
 	{Name: "RetryPolicyTooLong", Code: 6, Retryable: false},
 	{Name: "OutputTruncated", Code: 7, Retryable: false},
+	{Name: "OutputWriteFailed", Code: 8, Retryable: false},
 }
 
 // GuestCallErrorCodes returns the engine's copy of the guest SDK's
@@ -244,16 +257,24 @@ func recordedErrorClass(err error) string {
 	return ce.Code.String()
 }
 
-// truncClass maps a truncation errCode onto the durable-call classification
-// field, and 0 onto 0.
+// writeErrorClass maps a writeOut errCode -- truncated or write-failed --
+// onto the durable-call classification field, and 0 onto 0.
 //
 // The two fields are separate on purpose -- errCode says the call failed,
 // callErrorCode says what kind -- and a guest decoding a durable call builds
 // its CallError from the classification. Setting only the low byte would leave
 // the guest reporting CallErrorUnknown for a failure the host had classified.
-func truncClass(errCode byte) byte {
-	if errCode == errCodeOutputTruncated {
+//
+// Renamed from truncClass (cleat#3207) when a second writeOut errCode needed
+// the same treatment: a name describing only the first case it handled would
+// have been the stale-name trap the next reader pays for, one case later.
+func writeErrorClass(errCode byte) byte {
+	switch errCode {
+	case errCodeOutputTruncated:
 		return callErrorOutputTruncated
+	case errCodeOutputWriteFailed:
+		return callErrorOutputWriteFailed
+	default:
+		return 0
 	}
-	return 0
 }

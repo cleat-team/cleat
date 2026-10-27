@@ -31,7 +31,7 @@ func New() plugin.Plugin {
 // Plugin implements OAuth2/OIDC authentication with Google, GitHub, and Okta.
 type Plugin struct {
 	db         plugin.PluginDB
-	mux        *http.ServeMux
+	mux        plugin.Dispatcher
 	logger     *slog.Logger
 	httpClient *http.Client
 	dialect    plugin.Dialect

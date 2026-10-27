@@ -173,11 +173,11 @@ func (p *Plugin) awaitWebhook(ctx context.Context, input AwaitWebhookInput) (Awa
 	// so this reuses it rather than adding a second one for a single
 	// column.
 	var src webhookSourceJSON
-	err = plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(ctx, `
 		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, p.dialect), sourceID, cc.TenantID), &src.ID, &src.TenantID, &src.Name, &src.SourceType,
+	`, sourceID, cc.TenantID), &src.ID, &src.TenantID, &src.Name, &src.SourceType,
 		&src.SecretConfigured, &src.Enabled,
 		&src.CorrelationKeyField, &src.CreatedAt, &src.UpdatedAt)
 	switch {
@@ -234,7 +234,12 @@ func (p *Plugin) awaitWebhook(ctx context.Context, input AwaitWebhookInput) (Awa
 				Payload json.RawMessage `json:"payload"`
 			}
 			if err := json.Unmarshal(c.EventData, &envelope); err != nil {
-				return fmt.Errorf("webhook-ingest: unwrap event payload: %w", err)
+				// PoisonEvent, not a bare error -- cleat#2666. c.EventData is
+				// the only thing this unmarshal can fail on, and a
+				// corrupted row will fail identically on every future
+				// claim: deterministic, not transient. See
+				// eventtriggers.PoisonEvent's doc comment.
+				return eventtriggers.PoisonEvent(fmt.Errorf("webhook-ingest: unwrap event payload: %w", err))
 			}
 			out = AwaitWebhookOutput{
 				Found:      true,

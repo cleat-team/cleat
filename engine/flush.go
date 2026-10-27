@@ -78,21 +78,40 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 // one expression is that the next site added cannot get it subtly different.
 func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, val string, maxLen uint32) (uint32, byte) {
 	n, err := s.writeResult(ctx, m, ptr, val, maxLen)
-	code, ok := asTruncation(err)
-	if !ok {
+	if err == nil {
 		return n, 0
 	}
-	// The nil check is not defensive dressing. writeResult never touched
-	// s.engine, so a great many sessions in this package are constructed
-	// without one -- TestAwaitSignals_ReportsBytesWrittenNotPayloadLength builds
-	// an execSession directly and segfaulted here the moment writeOut started
-	// logging. Reaching through the session for a logger is a new dependency
-	// and it has to tolerate what the old code never needed.
-	if s.engine != nil {
-		s.engine.log().WarnContext(ctx, "host call output truncated",
-			"workflow_id", s.workflowID, "needed", len(val), "capacity", maxLen)
+	// The nil check on s.engine below is not defensive dressing. writeResult
+	// never touched s.engine, so a great many sessions in this package are
+	// constructed without one -- TestAwaitSignals_ReportsBytesWrittenNotPayloadLength
+	// builds an execSession directly and segfaulted here the moment writeOut
+	// started logging. Reaching through the session for a logger is a new
+	// dependency and it has to tolerate what the old code never needed.
+	if code, ok := asTruncation(err); ok {
+		if s.engine != nil {
+			s.engine.log().WarnContext(ctx, "host call output truncated",
+				"workflow_id", s.workflowID, "needed", len(val), "capacity", maxLen)
+		}
+		return n, code
 	}
-	return n, code
+	// ANY other write error means nothing usable was written (cleat#3207).
+	// Before this branch existed, every non-truncation error here fell through
+	// to `return n, 0` -- reporting errCode 0, SUCCESS, with whatever n
+	// writeResult happened to return (always 0 on every path that produces
+	// this kind of error, but forced here regardless rather than trusted).
+	// errCode 0 is indistinguishable from a legitimate empty result, so a call
+	// that genuinely ran on the host -- and, for a call like
+	// cleat_child_workflow, recorded a real side effect -- reported a
+	// successful empty response with no error anywhere. Found building the
+	// Java agent client (cleat#2978): a child workflow's run ID was correctly
+	// created and recorded, and the guest decoded an empty string with
+	// errCode 0 because its own linear memory had not yet grown far enough to
+	// cover the destination.
+	if s.engine != nil {
+		s.engine.log().ErrorContext(ctx, "host call output write failed",
+			"workflow_id", s.workflowID, "error", err)
+	}
+	return 0, errCodeOutputWriteFailed
 }
 
 // insertEventSQL is the shared INSERT statement for both fast and quota paths.
@@ -176,6 +195,18 @@ func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, va
 // READ COMMITTED's per-statement snapshot rule and sees the now-committed
 // assigned_to/generation -- so the fence correctly reports ErrFenceLost
 // instead of racing past it.
+//
+// The row it locks is the workflow_leases row since cleat#3245 B3b, not the
+// workflow_instances one. The argument carries over because every reclaim
+// mirrors its (assigned_to, generation) change onto workflow_leases in its own
+// transaction. A reclaim that has already written the lease row holds it, so
+// this read blocks and then sees the committed change, exactly as above. One
+// that has not written it yet must wait for this transaction to commit before
+// it can, so the write lands strictly BEFORE the reclaim -- a worker writing
+// just before it is reclaimed, which was always legitimate history. Neither
+// ordering lets a write land after a committed reclaim. event_history has no
+// foreign key to workflow_instances, so the insert takes no lock on that row
+// either.
 //
 // MySQL and SQL Server do not need the same fix here, and it was measured
 // rather than assumed why: PostgresStore is the only WorkflowStore that
@@ -364,7 +395,7 @@ const insertEventSQL = `
 		$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
 		$30, $34, $31, $35
 	WHERE ($32 = '' OR EXISTS (
-		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33 FOR SHARE
+		SELECT 1 FROM workflow_leases WHERE id = $1 AND assigned_to = $32 AND generation = $33 FOR SHARE
 	))
 	ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
 		promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,

@@ -366,7 +366,7 @@ func TestCrashWithWriteAheadIntentDoesNotRepeatTheCall(t *testing.T) {
 func workflowResult(t *testing.T, db *sql.DB, id string) string {
 	t.Helper()
 	var result sql.NullString
-	if err := db.QueryRow(`SELECT result::text FROM workflow_instances WHERE id = $1`, id).Scan(&result); err != nil {
+	if err := db.QueryRow(`SELECT result::text FROM workflow_payloads WHERE id = $1`, id).Scan(&result); err != nil {
 		t.Fatalf("reading result for %s: %v", id, err)
 	}
 	return result.String

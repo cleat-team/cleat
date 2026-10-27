@@ -40,6 +40,33 @@ IPv4-mapped IPv6 forms are covered: `::ffff:169.254.169.254` is tested as
 either list that resolves into private space is refused — that is the DNS
 rebinding case, not a grant.
 
+## `cleat_fetch` is off until you turn it on
+
+A workflow reaches an arbitrary URL in two ways. `DurableCall("http", "fetch")`
+is always available and goes through the layers above. `cleat_fetch`, the raw
+host import some SDKs bind directly, is **off by default** and is enabled per
+worker:
+
+```
+cleat-worker --enable-workflow-fetch
+```
+
+While it is off, every `cleat_fetch` fails and the error names this flag. The
+flag grants workflows the ability to *attempt* an outbound request from this
+worker. It grants no destination: the request is checked by the same floor,
+operator list and tenant list as `http.fetch`, so a tenant with an empty list
+still reaches nothing. Responses larger than
+`--workflow-fetch-max-response-bytes` (default 1 MiB) fail the call with an
+error that names the cap, rather than being cut.
+
+It differs from `http.fetch` in two more ways. It does not send the engine's
+`Idempotency-Key` header, so a destination that must deduplicate retried
+requests should be reached with `DurableCall("http", "fetch")`. And it does not
+resolve `${secret:name}` references: `DurableCall` substitutes them in the
+request on the way out, but a `cleat_fetch` URL, header or body carrying one
+is sent as the literal text. Use `DurableCall("http", "fetch")` for any request
+that needs a secret.
+
 ## Operator policy
 
 ```

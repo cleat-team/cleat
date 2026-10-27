@@ -241,14 +241,21 @@ func TestDeleteExpiredEventsDeletesOnlyTheCallersTenant(t *testing.T) {
 	}
 }
 
-// setAllowedSignals writes workflow_instances.allowed_signals directly. There
-// is no store method: see IMPROVEMENT-PLAN 3.15.
+// setAllowedSignals writes allowed_signals directly (workflow_payloads on
+// PostgreSQL, workflow_instances on MySQL/SQL Server). There is no store
+// method: see IMPROVEMENT-PLAN 3.15.
 func setAllowedSignals(t *testing.T, backend StoreBackend, admin *sql.DB, workflowID, jsonList string) {
 	t.Helper()
+	// PostgreSQL reads allowed_signals from workflow_payloads since cleat#3245
+	// B1a, so it is written there directly rather than onto workflow_instances.
+	if backend.Name() == "postgres" {
+		if _, err := admin.Exec(`UPDATE workflow_payloads SET allowed_signals = $2::jsonb WHERE id = $1`, workflowID, jsonList); err != nil {
+			t.Fatalf("set allowed_signals (postgres): %v", err)
+		}
+		return
+	}
 	var q string
 	switch backend.Name() {
-	case "postgres":
-		q = `UPDATE workflow_instances SET allowed_signals = $2::jsonb WHERE id = $1`
 	case "mysql":
 		q = `UPDATE workflow_instances SET allowed_signals = ? WHERE id = ?`
 	case "mssql":

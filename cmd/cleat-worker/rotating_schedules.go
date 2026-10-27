@@ -35,9 +35,11 @@ import (
 // The same asymmetry the rotating claim rests on: `admin.tenants` carries no
 // row-level security, so the tenant list is readable through the ordinary
 // connection, and each tenant's schedules are then read under that tenant's own
-// RLS context. 024's `admin.get_due_schedules` needs a BYPASSRLS owner, which
-// managed PostgreSQL cannot create -- so before this, a non-default tenant's
-// cron could not fire on RDS, Cloud SQL or Azure at all.
+// RLS context. The retired path read through `admin.get_due_schedules`, which
+// needed a BYPASSRLS owner that managed PostgreSQL cannot create -- so before
+// this, a non-default tenant's cron could not fire on RDS, Cloud SQL or Azure
+// at all. (That function is still defined in the baseline schema and nothing
+// calls it.)
 func (w *Worker) dueSchedulesByTenant() ([]engine.Schedule, error) {
 	if w.storeFactory == nil {
 		return nil, fmt.Errorf("%w: no store factory to open per-tenant stores with", errRotatingClaimUnavailable)

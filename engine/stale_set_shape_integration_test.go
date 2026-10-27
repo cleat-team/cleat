@@ -83,13 +83,17 @@ func TestStaleSetShapePostgresAgainstARealDatabase(t *testing.T) {
 		if i == 2 {
 			ageSeconds = 3600 // one stale row
 		}
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: ids[i], TenantID: store.tenantID, DefName: "stale-shape-def", DefVersion: 1,
+			Status: "running", AssignedTo: assignedTo,
+		})
+		// StaleSetShape reads workflow_leases, which holds heartbeat_at's
+		// only copy since cleat#3245 B2.
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-			                                assigned_to, heartbeat_at, tenant_id)
-			VALUES ($1, 'stale-shape-def', 1, 'running', '{}', $2,
-			        now() - make_interval(secs => $3), $4)`,
-			ids[i], assignedTo, ageSeconds, store.tenantID); err != nil {
-			t.Fatalf("seeding row %d: %v", i, err)
+			UPDATE workflow_leases SET heartbeat_at = now() - make_interval(secs => $2)
+			WHERE id = $1`,
+			ids[i], ageSeconds); err != nil {
+			t.Fatalf("seeding heartbeat for row %d: %v", i, err)
 		}
 	}
 	t.Cleanup(func() {
@@ -109,7 +113,7 @@ func TestStaleSetShapePostgresAgainstARealDatabase(t *testing.T) {
 	})
 
 	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET heartbeat_at = now() - interval '1 hour' WHERE id = ANY($1)`,
+		`UPDATE workflow_leases SET heartbeat_at = now() - interval '1 hour' WHERE id = ANY($1)`,
 		pgTextArray(ids)); err != nil {
 		t.Fatalf("age every row: %v", err)
 	}

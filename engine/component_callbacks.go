@@ -61,8 +61,14 @@ func (b *wasmtimeBackend) dispatchDurableCallString(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call", "svc")
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call", "op")
+	}
 	req := readStrArg(args, 2, nargs)
 
 	buf := make([]byte, 65536)
@@ -81,8 +87,14 @@ func (b *wasmtimeBackend) dispatchDurableCallRetry(
 	if int(nargs) < 8 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-retry", "svc")
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-retry", "op")
+	}
 	req := readStrArg(args, 2, nargs)
 	maxAttempts := int64(readU64Arg(args, 3, nargs))
 	initialInterval := int64(readU64Arg(args, 4, nargs))
@@ -107,8 +119,14 @@ func (b *wasmtimeBackend) dispatchDurableCallHeartbeat(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-heartbeat", "svc")
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-call-heartbeat", "op")
+	}
 	req := readStrArg(args, 2, nargs)
 	heartbeatInterval := int64(readU64Arg(args, 3, nargs))
 
@@ -294,7 +312,10 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-poll-signal", "name", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PollSignal(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
@@ -312,8 +333,14 @@ func (b *wasmtimeBackend) dispatchSignalWorkflow(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	target := readStrArg(args, 0, nargs)
-	sigName := readStrArg(args, 1, nargs)
+	target, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	sigName, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	payload := readStrArg(args, 2, nargs)
 	r := b.handler.SignalWorkflow(context.Background(), nil, target, sigName, payload)
 	setResultU64(results, nresults, uint64(r))
@@ -332,7 +359,10 @@ func (b *wasmtimeBackend) dispatchChildWorkflow(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow", "name")
+	}
 	input := readStrArg(args, 1, nargs)
 
 	buf := make([]byte, 65536)
@@ -351,13 +381,138 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	runID := readStrArg(args, 0, nargs)
+	runID, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-await-child", "runID", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+	if packed == packAwaitChildResultSuspend() {
+		return b.stopAtPendingChildAwait("await_child", results, nresults)
+	}
 	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
+	return nil
+}
+
+// stopAtPendingChildAwait is what the three child awaits do when the host
+// answered "that child has not finished": it has recorded the wait and set
+// suspendErr, and the guest has to STOP, not run on.
+//
+// WIT types these calls `-> string`, so the suspend word cannot carry a stop.
+// Before cleat#3429 it was flattened to 65536 zero bytes (extractStringFromSimplePacked
+// reads the word's length field as 1<<30 and clamps it to the buffer) and the
+// guest ran on: past a pending await_child it made the next side effect, and
+// finished and drained its own defers, so a cleanup fired while the run was
+// only suspended. await_all_children looked safe only because json.loads raised
+// on the zeros.
+//
+// RETURNING "" IS NOT THE ANSWER outside the cases below, and was the issue's
+// first suggestion: the Python SDK reads an empty await_all_children answer as
+// [] (no children), so the guest would run on to its next side effect, and an
+// empty string is a plausible child result besides.
+//
+// So the guest is stopped by TRAPPING: returning an error from the callback
+// unwinds the guest at the call, the executor already lets a suspension win
+// over a call error when suspendErr is set (executor.go), and no WIT or ABI
+// changes, so components built against the old signatures keep linking.
+//
+// A trap kills the instance, and the host cannot then run `run-deferred`.
+// That is harmless for an ordinary suspension, which deliberately drains
+// nothing, and fatal in two places, where this answers "" instead:
+//
+//   - a DEFER SEGMENT (b.deferPhase): the workflow was terminated while it
+//     waited on a child and the host replays it to run its defers. Measured:
+//     the plain trap lost the cleanup (ops=[]) where today's code ran it.
+//   - the guest's OWN drain (the session's inDeferPhase, which the guest sets
+//     through durable-defer-phase, cleat#3428): a defer body that itself waits
+//     on a pending child. A trap there ends every defer queued after it.
+//
+// What a defer body that awaits a pending child therefore sees: await_child
+// returns "", await_all_children returns [] (Python's reading of ""), and
+// await_any_child raises (Python's reading of ""). TestPythonGuestsDeferBodyAwaitingPendingChildren
+// pins it. The run is still suspended: suspendErr was set by the host.
+func (b *wasmtimeBackend) stopAtPendingChildAwait(
+	call string, results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if !b.deferPhase && !b.guestIsDrainingDefers() {
+		msg := C.CString("cleat: workflow suspended awaiting a child (" + call + ")")
+		defer C.free(unsafe.Pointer(msg))
+		return C.wasmtime_error_new(msg)
+	}
+	setResultString(results, nresults, "")
+	return nil
+}
+
+// guestIsDrainingDefers reports whether the handler's session says the guest is
+// running its own defer bodies. A handler with no session (a mock) says no.
+func (b *wasmtimeBackend) guestIsDrainingDefers() bool {
+	d, ok := b.handler.(interface{ guestIsDrainingDefers() bool })
+	return ok && d.guestIsDrainingDefers()
+}
+
+// extractChildAnswer is extractStringFromSimplePacked for the two child calls
+// that answer with a JSON document, PollChild and AwaitAnyChild.
+//
+// It exists for one packed word. AwaitAnyChild answers "no child has finished,
+// the run is suspending" with packAwaitChildResultSuspend (1<<62), whose length
+// field (bits 32-63) reads as 1<<30. extractStringFromSimplePacked clamps that
+// to the buffer and returns 64 KiB of zero bytes, which a guest would hand to a
+// JSON parser as if it were the winner's document. The empty string is what
+// the Python SDK already treats as "nothing came back".
+//
+// WIT declares both functions `-> string`, so neither a suspend nor a host
+// error (errCode in the low bits, the message in the buffer) can reach the
+// guest as anything but text. An error therefore arrives as the host's message
+// and fails the guest's JSON parse loudly, which is the most this signature
+// can do; carrying them as a case of the type is what cleat#3425 did for
+// durable-await-promise, and these two calls have not had it done.
+func extractChildAnswer(packed int64, buf []byte) string {
+	if packed == packAwaitChildResultSuspend() {
+		return ""
+	}
+	return extractStringFromSimplePacked(packed, buf)
+}
+
+// dispatchPollChild handles (string) -> string.
+func (b *wasmtimeBackend) dispatchPollChild(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
+	runID, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-poll-child", "runID", results, nresults)
+	}
+
+	buf := make([]byte, 65536)
+	packed := b.handler.PollChild(ctxWithMem(context.Background(), buf), nil, runID, 0, 65536)
+
+	setResultString(results, nresults, extractChildAnswer(packed, buf))
+	return nil
+}
+
+// dispatchAwaitAnyChild handles (string) -> string.
+func (b *wasmtimeBackend) dispatchAwaitAnyChild(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
+	runIDsJSON := readStrArg(args, 0, nargs)
+
+	buf := make([]byte, 65536)
+	packed := b.handler.AwaitAnyChild(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	if packed == packAwaitChildResultSuspend() {
+		return b.stopAtPendingChildAwait("await_any_child", results, nresults)
+	}
+
+	setResultString(results, nresults, extractChildAnswer(packed, buf))
 	return nil
 }
 
@@ -373,6 +528,9 @@ func (b *wasmtimeBackend) dispatchAwaitAllChildren(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitAllChildren(ctxWithMem(context.Background(), buf), nil, runIDsJSON, 0, 65536)
+	if packed == packAwaitChildResultSuspend() {
+		return b.stopAtPendingChildAwait("await_all_children", results, nresults)
+	}
 	response := extractStringFromSimplePacked(packed, buf)
 
 	setResultString(results, nresults, response)
@@ -387,11 +545,17 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 	if int(nargs) < 5 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow-with-options", "name")
+	}
 	input := readStrArg(args, 1, nargs)
 	version := int64(readU64Arg(args, 2, nargs))
 	priority := int64(readU64Arg(args, 3, nargs))
-	policy := readStrArg(args, 4, nargs)
+	policy, ok := readOptionalNameArg(args, 4, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-child-workflow-with-options", "policy")
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil,
@@ -415,7 +579,10 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-create-promise", "name", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.CreatePromise(ctxWithMem(context.Background(), buf), nil, name, 0, 65536)
@@ -425,7 +592,25 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 	return nil
 }
 
-// dispatchAwaitPromise handles (string,u64) -> string.
+// awaitRejectionReporter is implemented by the host handler that can say whether
+// the AwaitPromise call it just answered ended in a REJECTION.
+//
+// The packed word cannot: a rejected promise and a host error (no promise
+// store) both carry errCode 1 and a message, and five SDKs decode that word, so
+// it is not changed to add a case. The component path needs the distinction
+// because its WIT type has a case for each (cleat#3425). A handler that does
+// not implement this -- the test mocks -- reports every errCode as a host error.
+type awaitRejectionReporter interface {
+	lastAwaitPromiseRejected() bool
+}
+
+// dispatchAwaitPromise handles (string,u64) -> result<await-outcome, call-failure>.
+//
+// This was `-> string`, decoded with extractStringFromSimplePacked, which reads
+// the length field and nothing else (cleat#3425, measured on a real Python
+// guest): a rejection arrived as its reason with rejected=False, a host error as
+// its message, a genuine timeout as "" -- indistinguishable from a promise
+// resolved with an empty value -- and a stop as "" too.
 func (b *wasmtimeBackend) dispatchAwaitPromise(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
@@ -433,14 +618,44 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	id := readStrArg(args, 0, nargs)
+	id, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-await-promise", "id")
+	}
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitPromise(ctxWithMem(context.Background(), buf), nil, id, timeoutMs, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	// The stop is tested FIRST and by mask, for the reason decodeCallOutcome
+	// gives. In this layout bit 31 sits in the byte at bits 24-31 (the
+	// "rejected" flag the Python decoder documents) and the length field starts
+	// at bit 32, so a stop reads as an ordinary result of length 0: measured
+	// with the check removed, TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase
+	// reports the stop as "resolved" -- the same silent empty success this
+	// import produced before it could carry a stop at all.
+	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
+		setResultCallOutcome(results, nresults, callOutcome{suspended: true})
+		return nil
+	}
+
+	u := uint64(packed)
+	payload := extractStringFromSimplePacked(packed, buf)
+	if errCode := uint16(u & 0xFFFF); errCode != 0 {
+		if r, ok := b.handler.(awaitRejectionReporter); ok && r.lastAwaitPromiseRejected() {
+			setResultAwaitOutcome(results, nresults, awaitRejected, payload)
+			return nil
+		}
+		// code 0: the packed errCode here is this call's own ("1"), not the
+		// call-error taxonomy the guest maps to retryable/permanent classes.
+		setResultCallOutcome(results, nresults, callOutcome{failed: true, payload: payload})
+		return nil
+	}
+	if byte(u>>16) != 0 {
+		setResultAwaitOutcome(results, nresults, awaitTimedOut, "")
+		return nil
+	}
+	setResultAwaitOutcome(results, nresults, awaitResolved, payload)
 	return nil
 }
 
@@ -452,7 +667,10 @@ func (b *wasmtimeBackend) dispatchResolvePromise(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	id := readStrArg(args, 0, nargs)
+	id, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	val := readStrArg(args, 1, nargs)
 	r := b.handler.ResolvePromise(context.Background(), nil, id, val)
 	setResultU64(results, nresults, uint64(r))
@@ -467,7 +685,10 @@ func (b *wasmtimeBackend) dispatchRejectPromise(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	id := readStrArg(args, 0, nargs)
+	id, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	errMsg := readStrArg(args, 1, nargs)
 	r := b.handler.RejectPromise(context.Background(), nil, id, errMsg)
 	setResultU64(results, nresults, uint64(r))
@@ -486,7 +707,10 @@ func (b *wasmtimeBackend) dispatchSetQueryState(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	key := readStrArg(args, 0, nargs)
+	key, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	val := readStrArg(args, 1, nargs)
 	r := b.handler.SetQueryState(context.Background(), nil, key, val)
 	setResultU64(results, nresults, uint64(r))
@@ -505,7 +729,10 @@ func (b *wasmtimeBackend) dispatchRegisterUpdateHandler(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.RegisterUpdateHandler(context.Background(), nil, name)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -519,7 +746,10 @@ func (b *wasmtimeBackend) dispatchRegisterQueryHandler(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	name := readStrArg(args, 0, nargs)
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.RegisterQueryHandler(context.Background(), nil, name)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -574,8 +804,14 @@ func (b *wasmtimeBackend) dispatchDurableSend(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	req := readStrArg(args, 2, nargs)
 	r := b.handler.DurableSend(context.Background(), nil, svc, op, req)
 	setResultU64(results, nresults, uint64(r))
@@ -590,8 +826,14 @@ func (b *wasmtimeBackend) dispatchScheduleInvoke(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	svc := readStrArg(args, 0, nargs)
-	op := readStrArg(args, 1, nargs)
+	svc, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	op, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	req := readStrArg(args, 2, nargs)
 	delayMs := int64(readU64Arg(args, 3, nargs))
 	r := b.handler.DurableScheduleInvoke(context.Background(), nil, svc, op, req, delayMs)
@@ -649,8 +891,14 @@ func (b *wasmtimeBackend) dispatchPluginCall(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	pluginName := readStrArg(args, 0, nargs)
-	funcName := readStrArg(args, 1, nargs)
+	pluginName, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call", "pluginName")
+	}
+	funcName, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call", "funcName")
+	}
 	input := readStrArg(args, 2, nargs)
 
 	buf := make([]byte, 65536)
@@ -669,8 +917,14 @@ func (b *wasmtimeBackend) dispatchPluginCallStreaming(
 	if int(nargs) < 3 || b.handler == nil {
 		return nil
 	}
-	pluginName := readStrArg(args, 0, nargs)
-	funcName := readStrArg(args, 1, nargs)
+	pluginName, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call-streaming", "pluginName")
+	}
+	funcName, ok := readNameArg(args, 1, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "plugin-call-streaming", "funcName")
+	}
 	input := readStrArg(args, 2, nargs)
 
 	buf := make([]byte, 65536)
@@ -693,7 +947,10 @@ func (b *wasmtimeBackend) dispatchAcquireLock(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	key := readStrArg(args, 0, nargs)
+	key, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	ttlMs := int64(readU64Arg(args, 1, nargs))
 	r := b.handler.AcquireLock(context.Background(), nil, key, ttlMs)
 	setResultU64(results, nresults, uint64(r))
@@ -708,7 +965,10 @@ func (b *wasmtimeBackend) dispatchReleaseLock(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	key := readStrArg(args, 0, nargs)
+	key, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
 	r := b.handler.ReleaseLock(context.Background(), nil, key)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -726,8 +986,14 @@ func (b *wasmtimeBackend) dispatchSetScope(
 	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
-	objType := readStrArg(args, 0, nargs)
-	instKey := readStrArg(args, 1, nargs)
+	objType, ok := readOptionalNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("set-scope", "objType", results, nresults)
+	}
+	instKey, ok := readOptionalNameArg(args, 1, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("set-scope", "instKey", results, nresults)
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.SetScope(ctxWithMem(context.Background(), buf), nil, objType, instKey, 0, 65536)
@@ -780,6 +1046,48 @@ func (b *wasmtimeBackend) dispatchUUID(
 // durable-extended-lifecycle interface
 // ---------------------------------------------------------------------------
 
+// dispatchRunDetached handles (string,string) -> u64.
+//
+// The WIT result is a u64, and the deprecated fallback also writes a u64, so
+// until cleat#3428 this call type-checked while starting nothing: no trap and no
+// error, a zero that reads as success. The word is returned untouched, so a stop
+// sentinel (bit 31) reaches the Python SDK's _raise_if_stopped the way it does
+// for durable-signal-workflow.
+func (b *wasmtimeBackend) dispatchRunDetached(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
+	name, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithBadParam(results, nresults)
+	}
+	input := readStrArg(args, 1, nargs)
+	r := b.handler.RunDetached(context.Background(), nil, name, input)
+	setResultU64(results, nresults, uint64(r))
+	return nil
+}
+
+// dispatchDeferPhase handles (bool) -> ().
+//
+// It reports that the guest has started (true) or finished (false) draining its
+// defer table, so the host can mark the events recorded in between. It records no
+// event and returns nothing, which is why the fallback was harmless in shape and
+// wrong in effect: nothing to type-check, and the mark never reached the host
+// (cleat#1155, cleat#1237, cleat#3428).
+func (b *wasmtimeBackend) dispatchDeferPhase(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
+	b.handler.SetDeferPhase(context.Background(), readBoolArg(args, 0, nargs))
+	return nil
+}
+
 // dispatchContinueAsNewVersioned handles (string,u32) -> u64.
 func (b *wasmtimeBackend) dispatchContinueAsNewVersioned(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
@@ -828,7 +1136,10 @@ func (b *wasmtimeBackend) dispatchFetch(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	method := readStrArg(args, 0, nargs)
+	method, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "fetch", "method")
+	}
 	url := readStrArg(args, 1, nargs)
 	headers := readStrArg(args, 2, nargs)
 	body := readStrArg(args, 3, nargs)
@@ -878,7 +1189,10 @@ func (b *wasmtimeBackend) dispatchScheduleCron(
 	if int(nargs) < 4 || b.handler == nil {
 		return nil
 	}
-	workflowName := readStrArg(args, 0, nargs)
+	workflowName, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return refuseNameWithCallFailure(results, nresults, "durable-schedule-cron", "workflowName")
+	}
 	cronExpr := readStrArg(args, 1, nargs)
 	timezone := readStrArg(args, 2, nargs)
 	input := readStrArg(args, 3, nargs)
@@ -910,7 +1224,10 @@ func (b *wasmtimeBackend) dispatchDeleteCron(
 	if int(nargs) < 1 || b.handler == nil {
 		return nil
 	}
-	scheduleID := readStrArg(args, 0, nargs)
+	scheduleID, ok := readNameArg(args, 0, nargs)
+	if !ok {
+		return b.refuseNameWithoutAResult("durable-delete-cron", "scheduleID", results, nresults)
+	}
 	r := b.handler.DeleteCron(context.Background(), nil, scheduleID)
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -1087,6 +1404,7 @@ var witTypeMap = map[string]map[string]cbType{
 		"durable-defer":             cbTypeDurableDefer,
 		"durable-continue-as-new":   cbTypeContinueAsNew,
 		"durable-poll-cancellation": cbTypePollCancellation,
+		"durable-defer-phase":       cbTypeDeferPhase,
 	},
 	"cleat:host-calls/durable-signals": {
 		"durable-await-signals":   cbTypeAwaitSignals,
@@ -1097,6 +1415,8 @@ var witTypeMap = map[string]map[string]cbType{
 		"durable-child-workflow":              cbTypeChildWorkflow,
 		"durable-await-child":                 cbTypeAwaitChild,
 		"durable-await-all-children":          cbTypeAwaitAllChildren,
+		"durable-poll-child":                  cbTypePollChild,
+		"durable-await-any-child":             cbTypeAwaitAnyChild,
 		"durable-child-workflow-with-options": cbTypeChildWorkflowWithOptions,
 	},
 	"cleat:host-calls/durable-promises": {
@@ -1138,6 +1458,7 @@ var witTypeMap = map[string]map[string]cbType{
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": cbTypeContinueAsNewVersioned,
 		"side-effect":               cbTypeSideEffect,
+		"durable-run-detached":      cbTypeRunDetached,
 	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": cbTypeFetch,

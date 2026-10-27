@@ -54,10 +54,25 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, promiseID, result st
 	}
 	defer tx.Rollback()
 
+	// cleat#2312: result is sensitive-at-rest. Unlike CompleteWorkflow's
+	// resultJSON, this is NOT coerced first -- result reaches the database
+	// exactly as given either way, empty string included, so
+	// encryptJSONColumnForStorage's own empty-string pass-through (never
+	// seal, same as the uncoerced path) reproduces the pre-existing
+	// behaviour for an empty result rather than changing it.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("resolve promise: derive tenant key: %w", err)
+	}
+	sealedResult, err := encryptJSONColumnForStorage(result, tc)
+	if err != nil {
+		return fmt.Errorf("resolve promise: encrypt result: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = $2, result = $3, resolved_at = now()
 		WHERE promise_id = $1
-	`, promiseID, "resolved", result)
+	`, promiseID, "resolved", sealedResult)
 	if err != nil {
 		return err
 	}
@@ -76,13 +91,8 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, promiseID, result st
 	// claimed; finalize compares and schedules an immediate wake if it
 	// moved. Bumped unconditionally, in this transaction, so the counter and
 	// the resolution become visible together (cleat#3171).
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET promise_seq = promise_seq + 1,
-		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
-		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
-	`, promiseID)
-	if err != nil {
+	// Since cleat#3245 B3c the lease row holds the only copy written.
+	if err := bumpLeasePromiseSeqAndWakeByPromiseID(ctx, tx, promiseID); err != nil {
 		return err
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
@@ -100,10 +110,20 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, promiseID, errMsg str
 	}
 	defer tx.Rollback()
 
+	// cleat#2312: error_msg is sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("reject promise: derive tenant key: %w", err)
+	}
+	sealedErrMsg, err := encryptTextColumnForStorage(errMsg, tc)
+	if err != nil {
+		return fmt.Errorf("reject promise: encrypt error_msg: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = $2, error_msg = $3, resolved_at = now()
 		WHERE promise_id = $1
-	`, promiseID, "rejected", errMsg)
+	`, promiseID, "rejected", sealedErrMsg)
 	if err != nil {
 		return err
 	}
@@ -111,13 +131,8 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, promiseID, errMsg str
 		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
 	// promise_seq bump: see ResolvePromise's comment above (cleat#3171).
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET promise_seq = promise_seq + 1,
-		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
-		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
-	`, promiseID)
-	if err != nil {
+	// Since cleat#3245 B3c the lease row holds the only copy written.
+	if err := bumpLeasePromiseSeqAndWakeByPromiseID(ctx, tx, promiseID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -143,11 +158,29 @@ func (s *PostgresStore) GetPromise(ctx context.Context, workflowID, promiseID st
 	if err != nil {
 		return "", "", "", err
 	}
+	// cleat#2312: decrypt before compaction -- this feeds the guest's promise
+	// host calls, not only display. `result #>> '{}'` above TEXT-EXTRACTS the
+	// jsonb value, stripping a JSON string scalar's quotes -- so a sealed
+	// result arrives here as bare base64, decryptTextColumnFromStorage's
+	// shape, not decryptPayloadJSON's quoted one. See GetWorkflowByID's
+	// identical comment on its own `result #>> '{}'`.
 	if resultStr.Valid {
+		decrypted, derr := s.decryptTextColumnFromStorage(resultStr.String, "result")
+		if derr != nil {
+			return "", "", "", fmt.Errorf("get promise: %w", derr)
+		}
+		resultStr.String = decrypted
 		compacted := bytes.NewBuffer(nil)
 		if err := json.Compact(compacted, []byte(resultStr.String)); err == nil {
 			resultStr.String = compacted.String()
 		}
+	}
+	if errStr.Valid {
+		decrypted, derr := s.decryptTextColumnFromStorage(errStr.String, "error_msg")
+		if derr != nil {
+			return "", "", "", fmt.Errorf("get promise: %w", derr)
+		}
+		errStr.String = decrypted
 	}
 	return status, resultStr.String, errStr.String, tx.Commit()
 }
@@ -178,6 +211,19 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 		var resolvedAt sql.NullTime
 		if err := rows.Scan(&pi.PromiseID, &pi.PromiseName, &pi.Status, &pi.Result, &pi.ErrorMsg, &pi.CreatedAt, &resolvedAt); err != nil {
 			return nil, err
+		}
+		// cleat#2312: `result #>> '{}'` in the SELECT above text-extracts the
+		// jsonb value, stripping a JSON string scalar's quotes -- see
+		// GetWorkflowByID's identical comment.
+		if decrypted, derr := s.decryptTextColumnFromStorage(pi.Result, "result"); derr == nil {
+			pi.Result = decrypted
+		} else {
+			s.log().WarnContext(ctx, "decrypt listed promise result failed", "promise_id", pi.PromiseID, "error", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(pi.ErrorMsg, "error_msg"); derr == nil {
+			pi.ErrorMsg = decrypted
+		} else {
+			s.log().WarnContext(ctx, "decrypt listed promise error_msg failed", "promise_id", pi.PromiseID, "error", derr)
 		}
 		if len(pi.Result) > 0 {
 			compacted := bytes.NewBuffer(nil)
@@ -239,10 +285,22 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 		return err
 	}
 
+	// cleat#2312: payload is sensitive-at-rest. encodeJSONPayload guarantees
+	// non-empty valid JSON, same precondition encryptJSONColumnForStorage
+	// already assumes.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("create update request: derive tenant key: %w", err)
+	}
+	sealedPayload, err := encryptJSONColumnForStorage(encodeJSONPayload(payload), tc)
+	if err != nil {
+		return fmt.Errorf("create update request: encrypt payload: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload, promise_id, status, tenant_id)
 		VALUES ($1, $2, $3, $4, $5, 'pending', $6)
-	`, workflowID, requestID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	`, workflowID, requestID, updateName, sealedPayload, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -257,16 +315,48 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 	// and a suspended workflow reaches no dispatch point. Without this the
 	// request sits pending until something else happens to wake the workflow --
 	// which for a workflow waiting on a signal or a long sleep may be never.
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET promise_seq = promise_seq + 1,
-		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
-		WHERE id = $1
-	`, workflowID); err != nil {
+	// Since cleat#3245 B3c the lease row holds the only copy written.
+	if err := bumpLeasePromiseSeqAndWake(ctx, tx, workflowID); err != nil {
 		return err
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
+}
+
+// bumpLeasePromiseSeqAndWakeByPromiseID is ResolvePromise/RejectPromise's
+// promise_seq bump and conditional wake on workflow_leases, the only copy
+// written since cleat#3245 B3c. Keyed by promiseID through a subquery on
+// workflow_promises, rather than a workflowID the
+// caller does not have (ResolvePromise/RejectPromise take only a promiseID) --
+// a second round trip to resolve one first would be an extra statement this
+// mirror doesn't need.
+func bumpLeasePromiseSeqAndWakeByPromiseID(ctx context.Context, tx *sql.Tx, promiseID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = (SELECT workflow_id FROM workflow_promises WHERE promise_id = $1)
+	`, promiseID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// bumpLeasePromiseSeqAndWake is CreateUpdateRequest's promise_seq bump and
+// conditional wake on workflow_leases, the only copy written since cleat#3245
+// B3c. Keyed directly by workflowID, which
+// CreateUpdateRequest already has as a parameter (unlike ResolvePromise/
+// RejectPromise, which only have a promiseID).
+func bumpLeasePromiseSeqAndWake(ctx context.Context, tx *sql.Tx, workflowID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET promise_seq = promise_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
 }
 
 // GetPendingUpdateRequests returns all pending (not yet dispatched) update requests.
@@ -296,6 +386,26 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 		if err := rows.Scan(&r.WorkflowID, &r.RequestID, &r.UpdateName, &r.Payload, &r.PromiseID,
 			&r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
+		}
+		// cleat#2312: decrypt before compaction -- this feeds the guest's
+		// update-dispatch path, not only display. `payload #>> '{}'` and
+		// `result #>> '{}'` in the SELECT above text-extract the jsonb
+		// value, stripping a JSON string scalar's quotes -- see
+		// GetWorkflowByID's identical comment on its own `result #>> '{}'`.
+		if decrypted, derr := s.decryptTextColumnFromStorage(r.Payload, "payload"); derr == nil {
+			r.Payload = decrypted
+		} else {
+			return nil, fmt.Errorf("get pending update requests: %w", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(r.Result, "result"); derr == nil {
+			r.Result = decrypted
+		} else {
+			return nil, fmt.Errorf("get pending update requests: %w", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(r.ErrorMsg, "error_msg"); derr == nil {
+			r.ErrorMsg = decrypted
+		} else {
+			return nil, fmt.Errorf("get pending update requests: %w", derr)
 		}
 		if len(r.Payload) > 0 {
 			compacted := bytes.NewBuffer(nil)
@@ -368,11 +478,28 @@ func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, r
 	}
 	defer tx.Rollback()
 
+	// cleat#2312: result and error_msg are sensitive-at-rest. Both pass
+	// through their encrypt helper's own empty-string case unchanged when
+	// empty, so jsonOrNull(result) below still sees "" for an empty result
+	// and converts it to SQL NULL exactly as before.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("complete update request: derive tenant key: %w", err)
+	}
+	sealedResult, err := encryptJSONColumnForStorage(result, tc)
+	if err != nil {
+		return fmt.Errorf("complete update request: encrypt result: %w", err)
+	}
+	sealedErrMsg, err := encryptTextColumnForStorage(errMsg, tc)
+	if err != nil {
+		return fmt.Errorf("complete update request: encrypt error_msg: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = $3, error_msg = $4, completed_at = now()
 		WHERE workflow_id = $1 AND request_id = $2 AND tenant_id = $5 AND status = 'pending'
-	`, workflowID, requestID, jsonOrNull(result), errMsg, s.tenantID)
+	`, workflowID, requestID, jsonOrNull(sealedResult), sealedErrMsg, s.tenantID)
 	if err != nil {
 		return err
 	}

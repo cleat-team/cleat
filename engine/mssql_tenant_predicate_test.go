@@ -15,9 +15,9 @@ package engine
 // GetDueSchedulesAcrossTenants both called requireCleatAdminMembership. #1926
 // retired that mechanism in favor of unconditional per-tenant rotation, so no
 // entry in this allowlist names a Go-level gate today -- see
-// adminToolAcrossTenants and scopedByCompactionSweep below for what replaced
-// it. An allowlist whose reasons are not true is worse than no allowlist,
-// because it reads like it was checked.
+// adminToolAcrossTenants below for what replaced it. An allowlist whose
+// reasons are not true is worse than no allowlist, because it reads like
+// it was checked.
 //
 // WHY IT IS NOT A SUBSTRING CHECK, which is the lesson that produced it.
 // scripts/mssql-tenant-predicate-audit.py -- this guard's ancestor, deleted in
@@ -57,6 +57,37 @@ package engine
 // built by concatenation, and it reasons about text rather than about what the
 // server does with it.
 //
+// THE GUARD DOES NOT RECURSE INTO SUBQUERIES, AND THAT IS A DOCUMENTED LIMIT,
+// NOT AN OVERSIGHT (cleat#3289). filterWindows' own window runs from one
+// WHERE/ON/HAVING to the next ORDER BY/GROUP BY/OPTION/WHEN with no notion of
+// a subquery boundary in between, so a tenant_id comparison anywhere in that
+// shared window -- the outer clause's own, or a nested subquery's -- reads as
+// scoping everything inside it, including a tenant-scoped table the subquery
+// touches and the outer clause does not. StartChildWorkflowAtomic's own
+// `WHERE NOT EXISTS (SELECT 1 FROM event_history WHERE ... AND tenant_id =
+// @p9)` and GetCompactionCandidates's two correlated subqueries against
+// event_history are both missed this way on MSSQL.
+//
+// cleat#3289 built and measured a fix -- splitting each statement into its
+// outer shell plus every nested subquery, checking each piece's own window
+// independently -- and reverted it rather than ship it. Run for real against
+// this package (the scan is shared between dialects via tenantStatementsFor),
+// it surfaced 18 new failures on the MySQL guard alone, and spot-checking two
+// showed why: a subquery that CORRELATES to an already-scoped outer alias
+// (`ck.tenant_id = w.tenant_id` in CountRunnableWorkflows) or JOINS on a key
+// that ties its rows back to one (GetCompactionCandidates' MySQL derived-table
+// JOIN, which has no tenant_id at all) is exactly as safe as a direct
+// parameter comparison, but only because the alias it reaches back to is
+// itself already scoped -- and nothing about the text of the subquery alone
+// can tell that apart from a genuine leak like StartChildWorkflow's
+// ISNULL(...) above, which reaches back to nothing. Telling the two apart
+// needs to track which aliases are transitively tenant-scoped through however
+// many joins and parens separate them from the subquery in question -- real
+// SQL semantics, not a text pattern, and this guard is text-based by design
+// (the line above this one is why). Owner-approved on cleat#3289: leave the
+// limit as a known, written-down gap rather than build the hand-maintained
+// per-subquery allowlist that closing it properly would need.
+//
 // A stale entry fails the test too. An allowlisted function that no longer has
 // an unscoped statement means somebody fixed it, and the entry must go rather
 // than sit there granting permission nobody is using.
@@ -66,11 +97,13 @@ import (
 	"encoding/hex"
 	"go/ast"
 	"go/parser"
+	goscanner "go/scanner"
 	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -83,26 +116,10 @@ const (
 	// here only so the ratchet holds while it is fixed, and it must name where
 	// it is tracked.
 	openFinding = "OPEN FINDING, not a grant: IMPROVEMENT-PLAN 3.92"
-	// The compaction sweep, and NOT scopedByCaller -- whose second clause names
-	// storeFor, which nothing on this path calls.
-	//
-	// cmd/cleat-worker/setup.go:compactionLoop reads candidates with
-	// GetCompactionCandidates, which restricts on `WHERE w.tenant_id = @p3`
-	// from s.tenantID, then passes each id to CompactWorkflowHistory on THE
-	// SAME store -- w.store, whose tenant is w.storeTenantID. One store, one
-	// tenantID, so an id from the read cannot name another tenant's row on the
-	// write. Verified as the only production caller of CompactWorkflowHistory.
-	//
-	// Written as its own reason because the conclusion being right does not
-	// make the mechanism right, and the mechanism is what the next reader
-	// checks. Under a function-granularity key this could not be said at all:
-	// one string covered three statements and described none of them.
 	// cleatctl, and not by a cleat_admin membership check in Go -- that
 	// mechanism was the WORKER's gate, never something cleatctl ran, and #1926
 	// retired it entirely. Getting that distinction wrong would attach a
-	// true-sounding reason to a mechanism that does not exist on this path,
-	// which is the failure mode scopedByCompactionSweep below was written to
-	// avoid.
+	// true-sounding reason to a mechanism that does not exist on this path.
 	//
 	// cleatctl's gate is the CONNECTION. cmd/cleatctl/main.go requires a DSN
 	// naming a role that row-level security does not apply to -- a superuser or
@@ -117,9 +134,6 @@ const (
 	// belongs to, and is the post-incident tool for finding out (cleat#1316).
 	adminToolAcrossTenants = "deliberately cross-tenant: an operator-supplied id in cleatctl, " +
 		"whose DSN must name a BYPASSRLS role (cleat#1184)"
-
-	scopedByCompactionSweep = "scoped by the sweep that produced the id: GetCompactionCandidates " +
-		"restricts on s.tenantID and compactionLoop compacts on the same store"
 
 	// engine/testutil, not production code, and reached only at test-failure
 	// time (cleat#982's angle 4). statsDB there is the sa connection
@@ -163,38 +177,15 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set event_count = event_count + @p1 where id = @p2",
 		Reason: scopedByCaller,
 	},
-	// cleat#2333 rewrote this function's event_history write from
-	// INSERT...SELECT...WHERE NOT EXISTS to MERGE...WITH (HOLDLOCK)... (see
-	// the statement's own doc comment for why -- WHERE NOT EXISTS discarded a
-	// completing re-flush unconditionally). The digest changed with the SQL
-	// text, so this is a new key for the SAME statement the old
-	// INSERT...SELECT carried with no allowlist entry at all: neither form
-	// compares tenant_id to a parameter, and neither needs to, for the same
-	// reason the sibling entry immediately above does not -- workflow_id
-	// arrives here from a caller that already read it under a tenant
-	// predicate (ClaimWorkflow), and MSSQLStore is re-scoped per tenant by
-	// storeFor. The MERGE's WHEN MATCHED clause only matches on
-	// (workflow_id, step), which is event_history's actual primary key
-	// (migrations/mssql's event_history table has no tenant_id in its PK
-	// either) -- so there is no row this statement could touch that a
-	// tenant-scoped caller did not already name.
-	//
-	// The digest moved a SECOND time, from #0b59a5d77eeb to #2f9f711af184,
-	// when event_type joined the WHEN MATCHED ... THEN UPDATE SET list
-	// (cleat#2333's event_type-transition fix, added after this entry was
-	// first registered) -- the key digests the WHOLE statement, so a change
-	// to the SET clause moves it exactly like a change to the USING clause
-	// would. Re-derived from this guard's own error-message suggestion, not
-	// guessed. The reasoning above is unaffected: it is about the MERGE's
-	// join predicate, which event_type's addition does not touch.
-	"mssql_events.go:appendEventsInTxOpts#2f9f711af184": {
-		SQL:    "merge event_history with (holdlock) as target using (select @p1 as workflow_id",
-		Reason: scopedByCaller,
-	},
-	"mssql_events.go:VerifyWorkflowEvents#63b72d6f4db8": {
-		SQL:    "select step, checksum from event_history where workflow_id = @p1 order by step",
-		Reason: scopedByCaller,
-	},
+	// cleat#2059 realigned event_history's primary key to (tenant_id,
+	// workflow_id, step) and rewrote this MERGE's join predicate to compare
+	// target.tenant_id directly against @p32 (the caller's already-bound
+	// tenant parameter) instead of relying on workflow_id alone having
+	// arrived from a tenant-scoped caller. The statement now restricts
+	// itself to the caller's own tenant by construction, so the entry that
+	// used to grant it an exception on that basis (digest #2f9f711af184,
+	// previously #0b59a5d77eeb) no longer applies and has been removed
+	// rather than left to grant an exception nothing is using.
 	// cleat#2038: the swept ids come from deleteExpiredEventsOnce's own
 	// OUTPUT-clause read, which is itself restricted by
 	// msExpiredEventsWorkflows AND tenant_id = @p2 -- so an id in this list
@@ -290,18 +281,6 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select cast(compaction_state as nvarchar(max)) from workflow_instances where i",
 		Reason: scopedByCaller,
 	},
-	"mssql_schedules.go:compactHistoryOnce#8f47157eee66": {
-		SQL:    "select generation from workflow_instances where id = @p1",
-		Reason: scopedByCompactionSweep,
-	},
-	"mssql_schedules.go:compactHistoryOnce#cae7f5825d20": {
-		SQL:    "delete from event_history where workflow_id = @p1 and step < @p2",
-		Reason: scopedByCompactionSweep,
-	},
-	"mssql_schedules.go:compactHistoryOnce#a78ab9d633bc": {
-		SQL:    "update workflow_instances set compaction_state = @p2, compaction_step = @p3, c",
-		Reason: scopedByCompactionSweep,
-	},
 	"mssql_signals_promises.go:GetChildResult#18eaf4c5f15d": {
 		SQL:    "select isnull(result, '{}'), status, error_msg from workflow_instances where ",
 		Reason: scopedByCaller,
@@ -357,13 +336,85 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	//    as scopedByCaller after checking all four call sites, not assumed --
 	//    the first draft of this entry said openFinding.
 
+	// cleat#3313: idempotency_keys became visible to mssqlSchemaTenantIDTables
+	// (it has a tenant_id column but no security policy), surfacing this
+	// statement for the first time. cmd/cleat-worker/setup.go's own doc comment
+	// on expiredIdempotencyKeysSQL explains why it deliberately carries no
+	// predicate: it deletes by expires_at, a column with no tenant-dependent
+	// meaning, and runs on the raw *sql.DB pool rather than a tenant-scoped
+	// connection -- a single server-wide sweep, by design. Its MySQL sibling
+	// (same function, same file, `DELETE FROM idempotency_keys WHERE
+	// expires_at < NOW(6)`) has the identical shape and is NOT currently
+	// allowlisted on that dialect -- not because it is considered safe by a
+	// matching entry, but because the MySQL guard's own file walk
+	// (`filepath.Glob("*.go")` in engine/mysql_tenant_predicate_test.go) never
+	// reaches cmd/cleat-worker/setup.go at all, unlike this guard's broader
+	// goFilesCarryingSQL. A real, separate gap, filed rather than fixed here
+	// (cleat#3318) -- this entry is about THIS statement being correct, not
+	// about the MySQL guard's blind spot being acceptable. Adding
+	// tenant_id = @pN here would require restructuring this into a per-tenant
+	// loop the way PostgreSQL's sweepExpiredIdempotencyKeys had to, once
+	// migration 083 put a policy on that dialect's table -- the comment above
+	// says exactly that happened there and did not happen here.
+	"setup.go:expiredIdempotencyKeysSQL#d58fbbe9d58e": {
+		SQL:    "delete from idempotency_keys where expires_at < sysutcdatetime()",
+		Reason: mustNotScope,
+	},
+
+	// cleat#3317. admin.tenant_api_keys is unlike every other table this
+	// guard already scopes: those resolve a tenant's OWN data (which
+	// workflow, which schedule) and a missing predicate leaks one tenant's
+	// rows to another. This table is looked up FROM an API key hash to
+	// DISCOVER which tenant is asking, before any tenant is known -- adding
+	// tenant_id to the WHERE clause would require already holding the
+	// answer the statement exists to produce. See each function's own doc
+	// comment, which is the claim that must stay in sync with the code, not
+	// this table.
+	//
+	// tenant_store.go:resolveAPIKeyStmt and mssql_deployment.go's
+	// ResolveTenantFromAPIKey share one digest (7d4bb9b58ba1) because they
+	// are the same statement, written independently: auth/tenant_store.go's
+	// own comment on ResolveTenantFromAPIKey says "mirrors
+	// auth.TenantStore.ResolveTenantFromAPIKey's expiry clause" -- the
+	// MySQL side of this same pair (mysql_store.go:ResolveTenantFromAPIKey
+	// / tenant_store.go's MySQL branch) was verified and allowlisted the
+	// same way in cleat#3318/#3320.
+	"tenant_store.go:resolveAPIKeyStmt#7d4bb9b58ba1": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+		Reason: mustNotScope,
+	},
+	"mssql_deployment.go:ResolveTenantFromAPIKey#7d4bb9b58ba1": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+		Reason: mustNotScope,
+	},
+	// apikeycount.go:liveAPIKeyCountQuery runs at worker startup, before any
+	// request and therefore before any tenant is in scope, to decide
+	// whether to auto-generate a startup API key (cleat#2352) -- see that
+	// function's own doc comment. The count is read by nothing else and
+	// exposes no tenant's row to another.
+	"apikeycount.go:liveAPIKeyCountQuery#8235eadecc2f": {
+		SQL:    "select count(*) from admin.tenant_api_keys where disabled_at is null and (expi",
+		Reason: mustNotScope,
+	},
 }
 
 func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
-	tables := mssqlTenantScopedTables(t)
-	if len(tables) == 0 {
+	policyTables := mssqlTenantScopedTables(t)
+	if len(policyTables) == 0 {
 		t.Fatal("no tables bound to dbo.fn_tenant_filter found in migrations/mssql -- the " +
 			"parse is broken and this guard would pass no matter what the store did")
+	}
+	schemaTables := mssqlSchemaTenantIDTables(t)
+	if len(schemaTables) == 0 {
+		t.Fatal("no tenant_id column declarations found in migrations/mssql -- the parse is " +
+			"broken and this guard would pass no matter what the store did")
+	}
+	tables := map[string]bool{}
+	for tbl := range policyTables {
+		tables[tbl] = true
+	}
+	for tbl := range schemaTables {
+		tables[tbl] = true
 	}
 	// Sanity anchors. If the parse silently stops finding these, everything
 	// below becomes vacuous.
@@ -373,6 +424,33 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 				"parse is broken", want, sortedSet(tables))
 		}
 	}
+	// cleat#3313's own anchors: these three have a tenant_id column but no
+	// security policy, so they are present ONLY via mssqlSchemaTenantIDTables.
+	// If this regresses silently, the union collapsed back to the
+	// policy-only set and these three statements go uncovered again.
+	for _, want := range []string{"idempotency_keys", "concurrency_keys", "workflow_update_requests"} {
+		if !tables[want] {
+			t.Fatalf("%s is not among the parsed tenant-scoped tables %v -- "+
+				"mssqlSchemaTenantIDTables (cleat#3313) regressed", want, sortedSet(tables))
+		}
+		if policyTables[want] {
+			t.Fatalf("%s is now bound to a security policy -- if migrations/mssql/ added one, "+
+				"this anchor (and cleat#3313's premise) is stale and should be updated or removed, "+
+				"not left asserting a gap that has closed", want)
+		}
+	}
+
+	// cleat#3317: admin.tenant_api_keys, and ONLY that one admin-schema table.
+	// mssqlSchemaTenantIDTables anchors its own scan at dbo. deliberately
+	// (see its doc comment), because admin.tenants, admin.tenant_egress_allow
+	// and admin.tenant_roles also carry a tenant_id column and widening the
+	// anchor to admin.\* broadly would sweep all three into this guard
+	// unaudited -- "ask whether the answer is a sweep or a mechanism" in
+	// CLAUDE.md. Only tenant_api_keys has had its statements individually
+	// verified (the three allowlist entries below), so only its name is
+	// added, by hand, here -- not via a widened regex that would silently
+	// admit the other three the next time this file is read.
+	tables["tenant_api_keys"] = true
 
 	used := map[string]bool{}
 	var scanned int
@@ -461,6 +539,16 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 // mssqlTenantScopedTables reads the shipped migrations for the tables actually
 // bound to the security policy, rather than hardcoding a list that would go
 // stale the next time one is added.
+//
+// THIS IS NOT THE WHOLE TENANT-SCOPED SET (cleat#3313). It is every table
+// `dbo.fn_tenant_filter` covers, and three tables that carry a genuine
+// tenant_id column have no such policy at all: idempotency_keys,
+// concurrency_keys, workflow_update_requests (confirmed by grep against
+// every CREATE SECURITY POLICY in migrations/mssql/003_procedures.sql). For
+// those three a Go-level predicate is not defence in depth, it is the only
+// layer -- and this function alone cannot see that they need one. See
+// mssqlSchemaTenantIDTables, and the union of both at this function's call
+// site.
 func mssqlTenantScopedTables(t *testing.T) map[string]bool {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join("..", "migrations", "mssql", "*.sql"))
@@ -476,6 +564,85 @@ func mssqlTenantScopedTables(t *testing.T) map[string]bool {
 		}
 		for _, m := range bind.FindAllStringSubmatch(string(src), -1) {
 			out[strings.ToLower(m[1])] = true
+		}
+	}
+	return out
+}
+
+// mssqlSchemaTenantIDTables reads the shipped migrations for every table that
+// DECLARES a tenant_id column, independent of whether a security policy also
+// covers it -- the schema-presence definition mysqlTenantScopedTables already
+// uses for MySQL, which has no security-policy mechanism to derive from at
+// all. Deriving from the schema rather than from a security mechanism is the
+// weaker, more inclusive definition on purpose: a table that ought to carry
+// tenant_id and does not is invisible to this guard exactly as it is to the
+// database, but a table that DOES carry tenant_id and has no policy is
+// exactly the gap cleat#3313 is about, and mssqlTenantScopedTables's own
+// derivation cannot see it by construction (it reads policy bindings, and
+// there is no binding to read).
+//
+// A CREATE TABLE body can nest parens (CONSTRAINT ... CHECK (...), DEFAULT
+// (...)), so capturing "the whole body" with a regex risks matching the
+// wrong closing paren -- the same "bounded read fabricates a literal" shape
+// recorded elsewhere in this codebase. Avoided the way
+// mssqlUUIDColumns (engine/mssql_uuid_projection_test.go) already avoids it
+// for UNIQUEIDENTIFIER: find every CREATE/ALTER TABLE marker and every
+// tenant_id column declaration independently, then attribute each
+// declaration to the NEAREST PRECEDING marker by file position. No ALTER
+// TABLE ... ADD tenant_id form exists in migrations/mssql today (checked:
+// `grep -rn "ADD.*tenant_id" migrations/mssql/*.sql` finds only ADD
+// CONSTRAINT and the security-policy ADD FILTER/BLOCK PREDICATE forms, never
+// a column add) -- unlike MySQL's addCol case, every tenant_id column here
+// is declared directly in its CREATE TABLE.
+func mssqlSchemaTenantIDTables(t *testing.T) map[string]bool {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join("..", "migrations", "mssql", "*.sql"))
+	if err != nil {
+		t.Fatalf("glob migrations: %v", err)
+	}
+	// dbo. ONLY, matching mssqlTenantScopedTables's own schema scope exactly
+	// (its bind regex is anchored ON\s+dbo\.). admin.* tables -- confirmed by
+	// reading every CREATE TABLE in migrations/mssql/001_schema.sql, every
+	// one explicitly schema-qualified -- are a different category: they
+	// identify or administer tenants (admin.tenant_api_keys resolves a
+	// caller's tenant FROM an API key, admin.tenants is the tenant registry
+	// itself), so a statement against one is deliberately cross-tenant by
+	// construction, not a gap of the kind cleat#3313 is about. Widening
+	// this past dbo. surfaced exactly three such admin.tenant_api_keys call
+	// sites (resolveAPIKeyStmt, liveAPIKeyCountQuery, ResolveTenantFromAPIKey)
+	// -- a real, different finding, filed separately rather than adjudicated
+	// here (cleat#3317): see "ask whether the answer is a sweep or a
+	// mechanism" and "one PR, one thing" in CLAUDE.md.
+	tableRe := regexp.MustCompile(`(?i)\b(?:CREATE\s+TABLE|ALTER\s+TABLE)\s+dbo\.\[?(\w+)\]?`)
+	decl := regexp.MustCompile(`(?im)^\s*\[?tenant_id\]?\s+\w`)
+	out := map[string]bool{}
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		src := string(b)
+		type mark struct {
+			pos   int
+			table string
+		}
+		var marks []mark
+		for _, m := range tableRe.FindAllStringSubmatchIndex(src, -1) {
+			marks = append(marks, mark{pos: m[0], table: strings.ToLower(src[m[2]:m[3]])})
+		}
+		for _, m := range decl.FindAllStringIndex(src, -1) {
+			table := ""
+			for _, mk := range marks {
+				if mk.pos < m[0] {
+					table = mk.table
+				} else {
+					break
+				}
+			}
+			if table == "" {
+				continue
+			}
+			out[table] = true
 		}
 	}
 	return out
@@ -556,17 +723,98 @@ func mssqlTenantStatements(src, path string, tables map[string]bool) []tenantSta
 	return tenantStatementsFor(src, path, tables, looksLikeMSSQL)
 }
 
+// sqlShapedLiteral is one Go string literal token found by goStringLiterals:
+// its decoded content (escapes resolved for a double-quoted literal, raw text
+// for a backtick one), the source byte offset of its opening delimiter -- for
+// line/function attribution, exactly as sqlLiteralRe's match offsets were --
+// and whether it was backtick-delimited.
+type sqlShapedLiteral struct {
+	text   string
+	offset int
+	raw    bool
+}
+
+// goStringLiterals returns every Go string literal token in src, both
+// backtick (raw) and double-quoted (interpreted). cleat#3294: the scan used
+// to find only backtick literals via sqlLiteralRe, a regex pairing backtick
+// characters textually -- blind to a double-quoted Go string regardless of
+// what builds or holds it (a literal passed directly to a Context call,
+// built with fmt.Sprintf, or held in a package-level var/const/map). See the
+// file header and mssql_schedules.go's mssqlDeleteEventHistoryTopPrefix
+// comment for the measured blast radius.
+//
+// A SECOND regex for double-quoted spans, run directly over the raw source
+// text, was tried and rejected: a backtick SQL literal in this file
+// routinely contains a literal `"` of its own -- mssql_events.go's MERGE
+// comment quotes `"d.tenant_id = w.tenant_id"` INSIDE a backtick-delimited
+// SQL string, as a worked example of exactly the column-to-column-vs-
+// parameter distinction this guard exists to enforce -- and a
+// non-tokenizing regex cannot tell that embedded quote from the opening
+// delimiter of an unrelated double-quoted literal elsewhere in the file.
+// That is the same "bounded read fabricates a literal" failure CLAUDE.md
+// records for backtick-pairing under a length bound (cmd/cleatctl/replay.go,
+// where a rejected-for-length literal's closing backtick paired with an
+// unrelated SELECT's opening one and the regex returned Go source as if it
+// were a SQL string): here the bound is the absence of nesting-awareness
+// rather than a length cap, and the fabrication risk is the same shape.
+// go/scanner tokenizes the way the Go compiler does, so a quote character
+// embedded in one literal's content can never be misread as the start or end
+// of another.
+func goStringLiterals(src []byte) []sqlShapedLiteral {
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(src))
+	var sc goscanner.Scanner
+	sc.Init(file, src, nil, 0)
+	var out []sqlShapedLiteral
+	for {
+		pos, tok, lit := sc.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok != token.STRING || len(lit) < 2 {
+			continue
+		}
+		if lit[0] == '`' {
+			out = append(out, sqlShapedLiteral{text: lit[1 : len(lit)-1], offset: file.Offset(pos), raw: true})
+			continue
+		}
+		// An interpreted literal the scanner itself already lexed correctly;
+		// strconv.Unquote resolves its escapes to the string Go would hold at
+		// run time, rather than analysing the escaped source text. A literal
+		// the scanner emitted but Unquote rejects would mean the two stdlib
+		// packages disagree about what is valid Go -- say nothing rather than
+		// guess, the same failure mode enclosingFunc's own doc comment chose
+		// for unparseable input.
+		if u, err := strconv.Unquote(lit); err == nil {
+			out = append(out, sqlShapedLiteral{text: u, offset: file.Offset(pos), raw: false})
+		}
+	}
+	return out
+}
+
 func tenantStatementsFor(src, path string, tables map[string]bool, isDialect func(string, string) bool) []tenantStatement {
 	var out []tenantStatement
-	for _, lit := range sqlLiteralRe.FindAllStringSubmatchIndex(src, -1) {
+	for _, lit := range goStringLiterals([]byte(src)) {
 		// Comments first, and not as tidiness: the claim queries carry a long
 		// -- comment about UUID conversion that mentions tenant_id, which would
 		// otherwise satisfy this guard for a statement that has no predicate at
 		// all. The UUID guard next door records the mirror-image version of
 		// this same mistake.
-		sql := stripSQLComments(src[lit[2]:lit[3]])
+		sql := stripSQLComments(lit.text)
 		flat := strings.ToLower(strings.Join(strings.Fields(sql), " "))
 		if !regexp.MustCompile(`\b(select|insert|update|delete|merge)\b`).MatchString(flat) {
+			continue
+		}
+		// A double-quoted literal is SQL-shaped far less reliably than a
+		// backtick one: this codebase has orders of magnitude more
+		// double-quoted Go strings than backtick SQL, and a DML verb alone
+		// ("...select the correct tenant before retrying...") is prose, not a
+		// statement. Requiring a FROM/INTO/SET too (cleat#3294's own suggested
+		// filter) costs nothing on the backtick side -- every real
+		// SELECT/INSERT/UPDATE/DELETE/MERGE in this codebase already has one
+		// of the three -- so it is applied uniformly rather than only to the
+		// literals that need it.
+		if !regexp.MustCompile(`\b(from|into|set)\b`).MatchString(flat) {
 			continue
 		}
 		if !isDialect(path, sql) {
@@ -602,8 +850,8 @@ func tenantStatementsFor(src, path string, tables map[string]bool, isDialect fun
 			continue
 		}
 		out = append(out, tenantStatement{
-			fn:       enclosingFunc(src, lit[2]),
-			line:     strings.Count(src[:lit[2]], "\n") + 1,
+			fn:       enclosingFunc(src, lit.offset),
+			line:     strings.Count(src[:lit.offset], "\n") + 1,
 			isInsert: isInsert,
 			excerpt:  excerpt(flat),
 			norm:     flat,
@@ -637,9 +885,21 @@ func tenantStatementsFor(src, path string, tables map[string]bool, isDialect fun
 // So the requirement is a comparison against a PARAMETER -- @pN, ?, or $N --
 // which is the only form that can carry "the tenant the caller is asking as".
 // A column-to-column comparison cannot, whatever it is named.
+//
+// @tenant IS ALSO A PARAMETER, and was invisible to this regex before
+// cleat#3294 widened the extraction to see it at all:
+// mssqlDeleteEventHistoryTopPrefix's own `tenant_id = @tenant` binds via
+// sql.Named("tenant", s.tenantID) in deleteEventHistoryRowBoundedCommitting,
+// a genuine bound parameter, just named rather than positional. Checked
+// across the whole engine package (`grep -oP 'sql\.Named\("\w+"' engine/*.go`)
+// for every OTHER name sql.Named produces before adding it: @tenant is the
+// only one that is not @p<N>, so this stays the narrow, checked list the
+// file's own looksLikeMySQL comment asks for ("the marker set stays narrow
+// rather than greedy") rather than a blanket @\w+ that would also accept an
+// interpolated identifier never bound as anything.
 var tenantComparedToAParameter = regexp.MustCompile(
-	`(?i)tenant_id\s*(?:=|<>|!=|\bin\b)\s*\(?\s*(?:@p\d+|\$\d+|\?)` +
-		`|(?:@p\d+|\$\d+|\?)\s*(?:=|<>|!=)\s*[\w.]*tenant_id`)
+	`(?i)tenant_id\s*(?:=|<>|!=|\bin\b)\s*\(?\s*(?:@p\d+|@tenant\b|\$\d+|\?)` +
+		`|(?:@p\d+|@tenant\b|\$\d+|\?)\s*(?:=|<>|!=)\s*[\w.]*tenant_id`)
 
 // filterWindows returns the text of each WHERE, ON and HAVING clause.
 func filterWindows(flat string) []string {

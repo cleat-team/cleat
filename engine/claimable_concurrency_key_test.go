@@ -88,9 +88,10 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	space := regexp.MustCompile(`\s+`)
 
 	// The mutex arm names the workflow row `w.` at the count/claim sites (which
-	// LEFT JOIN queues and alias it) and `workflow_instances.` at the
-	// sticky sites (which do not). Normalise both to `w.` so the
-	// copies compare equal.
+	// LEFT JOIN queues and alias it) and `workflow_instances.` (MySQL/MSSQL,
+	// unmoved) or `workflow_leases.` (PostgreSQL, cleat#3245 Phase 3 step 3
+	// piece B) at the sticky sites, which alias neither table. Normalise all
+	// three spellings to `w.` so the copies compare equal.
 	//
 	// Grab from "concurrency_key_hash IS NULL OR NOT EXISTS" to the ")" that
 	// closes the NOT EXISTS arm. Requires the expires_at test, which is what
@@ -130,8 +131,17 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 	// "cancelled'))" that ends the run-state check. The alias (ck or qh) is
 	// normalised to H before comparing, since the two are genuinely different
 	// tables at different sites, not a divergence this guard should flag.
-	live := regexp.MustCompile(`(?s)EXISTS \(SELECT 1 FROM workflow_instances wi\s+WHERE wi\.id = \w+\.workflow_id AND wi\.tenant_id = \w+\.tenant_id\s+AND wi\.status NOT IN \([^)]+\)\)`)
+	//
+	// The table is normalised too, and then pinned per dialect (liveTable
+	// below): since cleat#3245 B3c PostgreSQL reads the run's status from
+	// workflow_leases, while MySQL and SQL Server have only workflow_instances.
+	// The alias stays `wi` on all three, so one shape still matches every copy.
+	live := regexp.MustCompile(`(?s)EXISTS \(SELECT 1 FROM workflow_(?:instances|leases) wi\s+WHERE wi\.id = \w+\.workflow_id AND wi\.tenant_id = \w+\.tenant_id\s+AND wi\.status NOT IN \([^)]+\)\)`)
 	aliasNorm := regexp.MustCompile(`\b(?:ck|qh)\.`)
+	// The registered arm's span contains a run-liveness subquery, so its copies
+	// differ by that table name too. The liveness check pins the table per
+	// dialect; every other comparison normalises it away.
+	tableNorm := regexp.MustCompile(`FROM workflow_(?:instances|leases) wi\b`)
 
 	var mutexCanon, regCanon, rateCanon, liveCanon, mutexFrom, regFrom, rateFrom, liveFrom string
 	mutexTotal, regTotal, rateTotal, liveTotal := 0, 0, 0, 0
@@ -141,7 +151,7 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		if err != nil {
 			t.Fatalf("read %s: %v", f.name, err)
 		}
-		src := strings.ReplaceAll(string(raw), "workflow_instances.", "w.")
+		src := strings.ReplaceAll(strings.ReplaceAll(string(raw), "workflow_instances.", "w."), "workflow_leases.", "w.")
 
 		mh := mutex.FindAllString(src, -1)
 		if len(mh) != f.mutexWant {
@@ -153,7 +163,7 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		}
 		mutexTotal += len(mh)
 		for i, h := range mh {
-			norm := space.ReplaceAllString(clock.ReplaceAllString(h, "<CLOCK>"), " ")
+			norm := space.ReplaceAllString(clock.ReplaceAllString(tableNorm.ReplaceAllString(h, "FROM TABLE wi"), "<CLOCK>"), " ")
 			if mutexCanon == "" {
 				mutexCanon, mutexFrom = norm, f.name
 				continue
@@ -174,7 +184,7 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		}
 		regTotal += len(rh)
 		for i, h := range rh {
-			norm := space.ReplaceAllString(clock.ReplaceAllString(h, "<CLOCK>"), " ")
+			norm := space.ReplaceAllString(clock.ReplaceAllString(tableNorm.ReplaceAllString(h, "FROM TABLE wi"), "<CLOCK>"), " ")
 			if regCanon == "" {
 				regCanon, regFrom = norm, f.name
 				continue
@@ -195,7 +205,7 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 		}
 		rateTotal += len(rateh)
 		for i, h := range rateh {
-			norm := space.ReplaceAllString(clock.ReplaceAllString(h, "<CLOCK>"), " ")
+			norm := space.ReplaceAllString(clock.ReplaceAllString(tableNorm.ReplaceAllString(h, "FROM TABLE wi"), "<CLOCK>"), " ")
 			if rateCanon == "" {
 				rateCanon, rateFrom = norm, f.name
 				continue
@@ -215,7 +225,18 @@ func TestTheClaimableConcurrencyKeyPredicateIsIdenticalAtEverySite(t *testing.T)
 			continue
 		}
 		liveTotal += len(liveh)
+		wantTable := "workflow_instances"
+		if strings.HasSuffix(f.name, "store_lifecycle.go") {
+			wantTable = "workflow_leases"
+		}
 		for i, h := range liveh {
+			if !strings.Contains(h, "FROM "+wantTable+" wi") {
+				t.Errorf("%s run-liveness copy %d reads the wrong table, want %s:\n  %s\n\n"+
+					"PostgreSQL's copies read workflow_leases since cleat#3245 B3c; a copy still on "+
+					"workflow_instances there judges liveness by a status nothing writes any more.",
+					f.name, i+1, wantTable, h)
+			}
+			h = strings.Replace(h, "FROM "+wantTable+" wi", "FROM TABLE wi", 1)
 			norm := space.ReplaceAllString(aliasNorm.ReplaceAllString(h, "H."), " ")
 			if liveCanon == "" {
 				liveCanon, liveFrom = norm, f.name

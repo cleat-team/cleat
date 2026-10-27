@@ -26,6 +26,14 @@ import (
 type pluginBodyLimitRouter struct {
 	mux          *http.ServeMux
 	defaultLimit int64
+
+	// currentPlugin names the plugin whose RegisterRoutes is calling Handle
+	// or HandleFunc right now, set by main.go before each call in its
+	// (sequential, one-plugin-at-a-time) registration loop -- so the panic
+	// below can name which plugin to go fix, the same way
+	// checkPluginRouteSignatures and the route-registration error a few
+	// lines up in main.go already do. cleat#2279 item 1.
+	currentPlugin string
 }
 
 // Handle registers handler for pattern on the underlying mux, wrapped so its
@@ -36,11 +44,15 @@ type pluginBodyLimitRouter struct {
 // on every request (plugin.MaxBodyLimit):
 //
 //   - plugin.MaxBody(n): a tighter cap under the flag. The effective limit is
-//     min(n, defaultLimit), and the 413 always names --plugin-max-body-size
-//     -- whichever of the two values actually bound, an operator can always
-//     turn the flag down and have it take effect here.
+//     min(n, defaultLimit). The 413 names --plugin-max-body-size when the
+//     flag is what bound (n >= defaultLimit, so lowering the flag is what
+//     would change the outcome), and names this route's own declared limit
+//     instead when n < defaultLimit is what actually bound -- cleat#2279's
+//     nit: naming the flag in that case previously left an operator unable
+//     to reconcile the byte count in the error against the flag's own
+//     configured value, which would not match it.
 //   - plugin.MaxBodyFromConfig(n, knob): n applies unconditionally, and the
-//     413 names knob -- REFUSED outright when pattern is one of
+//     413 names knob -- REFUSED outright when pattern overlaps one of
 //     pluginAuthExemptPatterns, reachable with no cleat credential at all.
 //     cleat#2273: the operator's global ceiling must always bound an
 //     anonymously-reachable route, and a plugin declaring otherwise there is
@@ -66,16 +78,22 @@ func (r *pluginBodyLimitRouter) Handle(pattern string, handler http.Handler) {
 				// call on cleat#2273 (a registration-time error, not a
 				// silent fallback, since the only way to reach it is a
 				// plugin bug).
+				pluginName := r.currentPlugin
+				if pluginName == "" {
+					pluginName = "(unknown -- currentPlugin was not set before this Handle call)"
+				}
 				panic(fmt.Sprintf(
-					"plugin.MaxBodyFromConfig registered on %q, which is an auth-exempt route "+
-						"(see pluginAuthExemptPatterns) -- an auth-exempt route must always stay "+
-						"bounded by --plugin-max-body-size, so a plugin's own config cannot claim an "+
-						"unconditional ceiling on it. Use plugin.MaxBody instead.", pattern))
+					"plugin %q: plugin.MaxBodyFromConfig registered on %q, which overlaps an "+
+						"auth-exempt route (see pluginAuthExemptPatterns) -- an auth-exempt route "+
+						"must always stay bounded by --plugin-max-body-size, so a plugin's own "+
+						"config cannot claim an unconditional ceiling on it. Use plugin.MaxBody "+
+						"instead.", pluginName, pattern))
 			}
 			limit = declared
 			knob = declaredKnob
 		} else if declared < limit {
 			limit = declared
+			knob = "this route's own request-body limit"
 		}
 	}
 

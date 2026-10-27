@@ -7,6 +7,7 @@ package auditlog
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,26 @@ import (
 // TestWorkflowEventMethodIsNotAValidHTTPMethodToken pins this against a raw
 // TCP connection, the same way it was found.
 const workflowEventMethod = "workflow:record_event"
+
+// selectStoredPathSQL reads back one row's path by id, so recordEvent can tell "my own
+// earlier attempt" apart from "a different event that collided onto my id" on the
+// errAlreadyRecorded path (cleat#2629). Scoped by tenant_id for the same reason every
+// other query here is -- id alone is not guaranteed unique across tenants, only within
+// one (chain_store.go's UNIQUE constraints are all (tenant_id, ...)).
+const selectStoredPathSQL = `SELECT path FROM audit_events WHERE tenant_id = $1 AND id = $2`
+
+// errEventTypeMismatch reports that record_event's dedup id -- derived from
+// (tenant, workflow, RunID, Step) by default, or from the caller's own EventID -- already
+// names a row whose stored path (event_type) differs from this call's. That should be
+// impossible: recordEventStepID and recordEventDeterministicID are believed injective
+// over the inputs that produce them (cleat#2618/#2624's own verification). This is the
+// tripwire for that belief going wrong -- if it ever does, two different logical events
+// would otherwise silently collapse into one, with the second reported as
+// {"recorded":true} while never actually written. For a hash-chained audit log that is
+// the worst failure mode this feature exists to prevent (cleat-review's finding on
+// #2624, filed as cleat#2629), so this returns an error rather than swallowing it the
+// way an ordinary retry-dedup hit does.
+var errEventTypeMismatch = errors.New("audit-log: record_event: a dedup id is already recorded under a different event_type")
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
 // function registry. The plugin name is implicit -- "audit-log" -- so
@@ -195,9 +216,37 @@ func (p *Plugin) recordEvent(ctx context.Context, input RecordEventInput) (Recor
 	if err := p.appendChained(ctx, ce); err != nil {
 		// Seeing a call's own earlier success again -- a crash-and-retry
 		// under the default step-based key, or a caller-supplied EventID
-		// repeated on purpose -- is not a failure. See recordEvent's own
-		// doc comment.
+		// repeated on purpose -- is not a failure, PROVIDED the existing row
+		// is actually this same logical event and not a different one that
+		// collided onto the same id (cleat#2629; see errEventTypeMismatch).
+		// See recordEvent's own doc comment for why a collision is not
+		// expected to happen at all.
 		if errors.Is(err, errAlreadyRecorded) {
+			// ce.path is still the raw, unsanitized input.EventType: appendChained
+			// took e by value, so its own sanitizeText/fitText pass on e.path never
+			// wrote back into ce. Apply the same transform here so the comparison is
+			// against what this call would itself have stored, not what it was given.
+			wantPath := fitText(sanitizeText(ce.path), maxPathRunes, maxPathUnits)
+
+			var storedPath string
+			switch scanErr := plugin.ScanRow(
+				p.db.QueryRow(ctx, selectStoredPathSQL, tenantID, ce.id.String()), &storedPath,
+			); {
+			case scanErr == nil:
+				if storedPath != wantPath {
+					return RecordEventOutput{}, fmt.Errorf(
+						"audit-log: record_event: id %s is already recorded with event_type %q, this call supplied %q: %w",
+						ce.id, storedPath, wantPath, errEventTypeMismatch)
+				}
+			case errors.Is(scanErr, sql.ErrNoRows):
+				// appendOnce found the row under the tenant's head lock a moment ago;
+				// nothing in this codebase deletes audit_events. Treat the dedup
+				// signal appendChained already gave us as authoritative rather than
+				// failing a call over a race this plugin cannot itself create.
+			default:
+				return RecordEventOutput{}, fmt.Errorf(
+					"audit-log: record_event: reading back id %s for the dedup check: %w", ce.id, scanErr)
+			}
 			return RecordEventOutput{Recorded: true}, nil
 		}
 		return RecordEventOutput{}, fmt.Errorf("audit-log: record_event: %w", err)

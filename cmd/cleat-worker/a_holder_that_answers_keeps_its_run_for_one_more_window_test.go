@@ -250,12 +250,11 @@ func TestTheRegistryOutlivesTheWindowAReaperCanAskIn(t *testing.T) {
 
 	// THE FINDING ITSELF, pinned at the DEFAULT heartbeat because it is a fact
 	// about these two windows rather than an invariant of their formulas: the
-	// lease is 10s and one reclaim window is 14.5s, so the old sweep deleted a
-	// holder's address 4.5s BEFORE its run was even eligible. (At a 1s heartbeat
-	// the reclaimed window's own 10s floor makes the two equal, which is why
-	// this is asserted here rather than in the loop above.) If it ever stops
-	// holding, workerRegistryRetention could collapse back to the lease -- and
-	// this, not a comment, is what would say so.
+	// lease is 10s and one reclaim window is 47s (cleat#3258 ROUND 6 raised
+	// this from 14.5s), so the old sweep deleted a holder's address 37s
+	// BEFORE its run was even eligible. If it ever stops holding,
+	// workerRegistryRetention could collapse back to the lease -- and this,
+	// not a comment, is what would say so.
 	lease := membershipStaleAfter(5 * time.Second)
 	reclaim := reclaimWindow(0, 5*time.Second)
 	if lease >= reclaim {
@@ -263,17 +262,24 @@ func TestTheRegistryOutlivesTheWindowAReaperCanAskIn(t *testing.T) {
 			"re-derive whether workerRegistryRetention still needs to differ from it", lease, reclaim)
 	}
 
-	// AND THE OTHER END OF THE BOUNDARY, which is not "less bad" but worse: at 2s
-	// and below, reclaimWindow's own 10s floor makes the lease and the reclaim
-	// window EQUAL, so a holder's row is swept at the very instant its run
-	// becomes eligible and there is no window to ask in at all. Both halves are
-	// asserted because the retention cannot be expressed as "the lease plus a
-	// bit" -- the relationship changes sign at this boundary, and it was found
-	// by this test rather than assumed.
+	// THE OLD "OTHER END OF THE BOUNDARY" NO LONGER EXISTS, AND THAT IS ITSELF
+	// WORTH ASSERTING RATHER THAN QUIETLY DROPPING. Before cleat#3258 ROUND 6,
+	// at 2s heartbeat and below, reclaimWindow's own 10s floor made the lease
+	// and the reclaim window EQUAL -- "equal is not better, it is worse", per
+	// this file's own prior finding, because a holder's row was then swept at
+	// the very instant its run became eligible. ROUND 6's maxTolerableStall
+	// (30s) plus mssqlDrainSlack (5s) alone already exceed reclaimWindow's 10s
+	// floor, so minimumReclaimAfter(heartbeat) is now BOUNDED BELOW by
+	// roughly 40s for every heartbeat, not just the default -- the 10s floor
+	// in reclaimWindow is dead code in practice under today's constants,
+	// kept as a backstop rather than removed (it would matter again if
+	// maxTolerableStall or mssqlDrainSlack were ever lowered). So the
+	// crossing point this test used to characterize is gone: lease < reclaim
+	// now holds at every heartbeat tested, with no equality case left.
 	for _, hb := range []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second} {
-		if got, want := membershipStaleAfter(hb), reclaimWindow(0, hb); got != want {
-			t.Errorf("at hb=%v the lease (%v) and the reclaim window (%v) are no longer equal; "+
-				"re-derive where the two windows cross", hb, got, want)
+		if got, limit := membershipStaleAfter(hb), reclaimWindow(0, hb); got >= limit {
+			t.Errorf("at hb=%v the lease (%v) is no longer shorter than the reclaim window (%v); "+
+				"the crossing point this test found (cleat#3258) may have returned -- re-derive", hb, got, limit)
 		}
 	}
 }

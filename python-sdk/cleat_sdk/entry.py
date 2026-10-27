@@ -32,7 +32,7 @@ from .defer import run_deferred
 from .host_calls import HostCalls, SuspendSentinel
 
 try:
-    from wit_world import RunOutcome_Completed, RunOutcome_Suspended
+    from wit_world import RunOutcome_Completed, RunOutcome_Failed, RunOutcome_Suspended
 except ImportError:  # not running in WASM -- see host_calls._USING_WASM
 
     class RunOutcome_Completed:  # type: ignore[no-redef]
@@ -43,6 +43,12 @@ except ImportError:  # not running in WASM -- see host_calls._USING_WASM
 
     class RunOutcome_Suspended:  # type: ignore[no-redef]
         """Stand-in for the generated binding outside the WASM runtime."""
+
+    class RunOutcome_Failed:  # type: ignore[no-redef]
+        """Stand-in for the generated binding outside the WASM runtime."""
+
+        def __init__(self, value: str) -> None:
+            self.value = value
 
 
 class _Suspended:
@@ -64,6 +70,32 @@ class _Suspended:
 
 
 SUSPENDED = _Suspended()
+
+
+class _WorkflowFailure(str):
+    """What the entry wrapper returns when the workflow body raised.
+
+    It IS the ``{"error": ...}`` JSON string the wrapper has always returned
+    for a raise -- a ``str`` subclass compares, parses and prints exactly like
+    one, so every caller that treats the wrapper's return as a JSON string (the
+    local test harness, ``json.loads`` in this package's own tests) is
+    unchanged. What it adds is the one fact a plain string cannot carry: that
+    this came from a raise and not from a workflow that RETURNED a dictionary
+    with an ``error`` key. ``_dispatcher_run`` is the only reader, and turns it
+    into the ``failed`` case of ``run-outcome`` (wit/cleat.wit).
+
+    A ``str`` subclass for the same reason ``_Suspended`` is an object:
+    ``json.dumps`` cannot produce one, so no value a workflow returns can be
+    mistaken for a failure. That is the property that makes a type, and not a
+    shape check, the right way to tell the two apart (cleat#3433).
+    """
+
+    message: str
+
+    def __new__(cls, payload: str, message: str) -> _WorkflowFailure:
+        obj = super().__new__(cls, payload)
+        obj.message = message
+        return obj
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +408,8 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
         out = _select(args_str)
         if out is SUSPENDED:
             return RunOutcome_Suspended()
+        if isinstance(out, _WorkflowFailure):
+            return RunOutcome_Failed(out.message)
         return RunOutcome_Completed(out)
 
     def _dispatcher_run_deferred() -> int:
@@ -639,8 +673,13 @@ def cleat_entry(name: str | None = None, expose: str | None = None) -> Callable:
 
             # Deliberate, and load-bearing: this is the workflow error
             # boundary. Everything the user's workflow body can raise has to
-            # become a JSON error payload here, or it crosses the WASM ABI as
-            # a trap and the engine sees a dead guest instead of a failed step.
+            # be caught here, or it crosses the WASM ABI as a trap and the
+            # engine sees a dead guest instead of a failed workflow.
+            #
+            # What leaves here is a _WorkflowFailure, which _dispatcher_run
+            # turns into the ``failed`` case of run-outcome so the run FAILS.
+            # It used to leave as a plain {"error": ...} string, which the host
+            # recorded as a completed result (cleat#3433).
             except Exception as exc:  # noqa: BLE001
                 # Any other exception is treated as a workflow error.
                 #
@@ -654,7 +693,14 @@ def cleat_entry(name: str | None = None, expose: str | None = None) -> Callable:
                     run_deferred()
                 except SuspendSentinel:
                     return SUSPENDED
-                return json.dumps({"error": str(exc)})
+                # The legacy payload keeps str(exc) exactly, for every direct
+                # caller. The failure's own message adds the exception's type,
+                # because str(exc) is EMPTY for ``raise KeyError()`` and several
+                # others, and a failed run with no message at all tells an
+                # operator nothing.
+                kind = type(exc).__name__
+                message = f"{kind}: {exc}" if str(exc) else kind
+                return _WorkflowFailure(json.dumps({"error": str(exc)}), message)
 
         # Mark the wrapper for introspection tooling.
         export_wrapper._is_cleat_entry = True  # type: ignore[attr-defined]

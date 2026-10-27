@@ -423,6 +423,17 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 			break // Don't retry non-deadlock errors.
 		}
 	}
+	// A lost fence is not a failure (cleat#3409). CompactHistory now returns
+	// ErrFenceLost, having rolled back, when a reclaim moved the generation under
+	// it; ErrFenceLost's own contract is that the workflow belongs to someone else
+	// now. Nothing was deleted, so the workflow stays a candidate and the next tick
+	// compacts it. Reported as an error it would be logged as one by the worker's
+	// loop every time the race is hit, for something that is expected.
+	if errors.Is(compactErr, ErrFenceLost) {
+		slog.InfoContext(ctx, "compact skipped: the workflow was reclaimed while compacting; nothing was deleted",
+			"workflow_id", workflowID, "events", len(events))
+		return nil
+	}
 	if compactErr != nil {
 		return fmt.Errorf("compact: store: %w", compactErr)
 	}

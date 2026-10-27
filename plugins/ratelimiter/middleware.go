@@ -245,10 +245,10 @@ func (p *Plugin) checkDBRateLimit(ctx context.Context, tid uuid.UUID, cfg rateLi
 	windowCutoff := now.Add(-time.Duration(windowSeconds) * time.Second)
 
 	// Step 1: Best-effort INSERT to create the row for this second if it doesn't exist.
-	q := plugin.Rebind(`
+	q := `
 		INSERT INTO rate_counter (tenant_id, limit_key, window_start, count)
 		VALUES ($1, $2, $3, 0)
-	`, p.dialect)
+	`
 	_, err = p.db.Exec(ctx, q, tid, cfg.key, windowStart)
 	if err != nil {
 		// Expected duplicate key error when row already exists.
@@ -258,10 +258,10 @@ func (p *Plugin) checkDBRateLimit(ctx context.Context, tid uuid.UUID, cfg rateLi
 	}
 
 	// Step 2: Read the total count across all buckets in the sliding window.
-	q = plugin.Rebind(`
+	q = `
 		SELECT COALESCE(SUM(count), 0) FROM rate_counter
 		WHERE tenant_id = $1 AND limit_key = $2 AND window_start > $3
-	`, p.dialect)
+	`
 	var currentCount int
 	row := p.db.QueryRow(ctx, q, tid, cfg.key, windowCutoff)
 	if err := row.Scan(&currentCount); err != nil {
@@ -278,10 +278,10 @@ func (p *Plugin) checkDBRateLimit(ctx context.Context, tid uuid.UUID, cfg rateLi
 	}
 
 	// Step 3: Increment the current second's counter.
-	q = plugin.Rebind(`
+	q = `
 		UPDATE rate_counter SET count = count + 1
 		WHERE tenant_id = $1 AND limit_key = $2 AND window_start = $3
-	`, p.dialect)
+	`
 	if _, err := p.db.Exec(ctx, q, tid, cfg.key, windowStart); err != nil {
 		return false, 0, err
 	}

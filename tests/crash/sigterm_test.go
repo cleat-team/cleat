@@ -44,7 +44,7 @@ func awaitExit(t *testing.T, ch <-chan error, budget time.Duration, w *worker) {
 func runRow(t *testing.T, db *sql.DB, id string) (status, errMsg string) {
 	t.Helper()
 	var msg sql.NullString
-	if err := db.QueryRow(`SELECT status, error_msg FROM workflow_instances WHERE id = $1`, id).Scan(&status, &msg); err != nil {
+	if err := db.QueryRow(`SELECT w.status, p.error_msg FROM workflow_leases w JOIN workflow_payloads p ON p.id = w.id WHERE w.id = $1`, id).Scan(&status, &msg); err != nil {
 		t.Fatalf("reading %s: %v", id, err)
 	}
 	return status, msg.String
@@ -218,8 +218,31 @@ func TestSIGTERM_h_AGenuineFailureDuringTheDrainIsStillRecorded(t *testing.T) {
 }
 
 // The draining worker must keep heartbeating, or another worker reclaims its run after the reclaim window
-// (max(2x heartbeat, 10s)) and re-executes the step while the first is still running it: the duplicate a
-// graceful shutdown exists to avoid. The service holds the call for longer than that window.
+// (reclaimAfter() = max(minimumReclaimAfter(heartbeat), 10s), cmd/cleat-worker/setup.go) and re-executes
+// the step while the first is still running it: the duplicate a graceful shutdown exists to avoid. The
+// service holds the call for longer than that window.
+//
+// PARTIALLY RE-CALIBRATED TO cleat#3258/#3279, NOT FULLY -- READ BEFORE RAISING THE SLEEP AGAIN.
+// minimumReclaimAfter(heartbeat) rose from ~14.5s to ~47s at the default heartbeat (cleat#3258 ROUND 6),
+// plus up to one reaper tick (max(heartbeat, 10s)) -- ~57s worst case, which is the window this test
+// actually needs to span to have discriminating power (see below). cleat#3279 derived the held call's own
+// HTTP client timeout from minimumReclaimAfter instead of a hardcoded 30s, which is necessary but, for
+// THIS test specifically, not sufficient: the derived timeout is EQUAL TO minimumReclaimAfter (47s) by
+// design -- that is the system's own definition of "how long a stall this size is tolerated," and padding
+// a client beyond it would not be principled, see durableCallClientTimeout's doc in setup.go -- so the
+// client's own ceiling (47s) sits BELOW the ~57s window this test needs, not above it. Measured directly
+// at this head: sleep=45s passes (comfortably under 47s); sleep=50s fails with the exact same
+// "context deadline exceeded" the pre-#3279 30s ceiling produced, just at the higher threshold. The gap
+// narrowed (57-30=27s before #3279, 57-47=10s after) but did not close, and by construction it CANNOT
+// close this way: any single held call that must survive minimumReclaimAfter+tick will always be bounded
+// below that by the correctly-derived client timeout, because that timeout's own correct value IS
+// minimumReclaimAfter. Closing the remaining 10s needs a harness redesign (several sub-window holds
+// rather than one long one) -- still out of scope here, same as before.
+//
+// 40s is chosen with real margin below the measured 47s ceiling (CI runs slower than this measurement),
+// and is a genuine improvement over the old 25s -- it now exceeds reclaimAfter()'s OLD ~24.5s value with
+// margin, so a regression in that range is caught again, which 25s (now far short of today's ~47s/57s)
+// could not. It does not reach the full ~57s worst case; that gap is disclosed, not silently closed.
 func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.T) {
 	db := ownerDB(t)
 	defer db.Close()
@@ -240,7 +263,7 @@ func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.
 	second := startWorker(t, bin, taskQueue, svc.srv.URL)
 
 	exited := first.term()
-	time.Sleep(25 * time.Second) // beyond the reclaim window with margin (measured 9.5-24.5s in review)
+	time.Sleep(40 * time.Second) // beyond the OLD reclaim window with margin; NOT the full current one -- see the file doc above
 	release()
 	awaitExit(t, exited, 30*time.Second, first)
 
@@ -253,8 +276,11 @@ func TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains(t *testing.
 	}
 }
 
-// lockRow holds a row lock on the run, from the owner connection, until unlock is called. Whatever the worker
-// writes to that row (finalize, continue-as-new, and the release that follows a cancelled one) waits behind it.
+// lockRow holds a lock on the run's lease row, from the owner connection, until unlock is called. Whatever the
+// worker writes to that row (finalize, continue-as-new, and the release that follows a cancelled one) waits
+// behind it. It is the lease row and not the workflow_instances row because since cleat#3245 B3c-2 the release
+// writes the lease row alone, so a lock on the instance row held the finalize (through its event_count bump)
+// but let the release land early.
 func lockRow(t *testing.T, db *sql.DB, id string) (unlock func()) {
 	t.Helper()
 	tx, err := db.Begin()
@@ -262,7 +288,7 @@ func lockRow(t *testing.T, db *sql.DB, id string) (unlock func()) {
 		t.Fatal(err)
 	}
 	var one int
-	if err := tx.QueryRow(`SELECT 1 FROM workflow_instances WHERE id = $1 FOR UPDATE`, id).Scan(&one); err != nil {
+	if err := tx.QueryRow(`SELECT 1 FROM workflow_leases WHERE id = $1 FOR UPDATE`, id).Scan(&one); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("locking %s: %v", id, err)
 	}
@@ -330,8 +356,8 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	release := svc.holdOperation("Reserve")
 	defer release()
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id IN (SELECT id FROM workflow_instances WHERE task_queue = $1)`, taskQueue)
-		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE task_queue = $1`, taskQueue)
+		_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id IN (SELECT id FROM workflow_leases WHERE task_queue = $1)`, taskQueue)
+		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id IN (SELECT id FROM workflow_leases WHERE task_queue = $1)`, taskQueue)
 	})
 
 	first := startWorker(t, bin, taskQueue, svc.srv.URL, "--shutdown-grace", "3s")
@@ -347,7 +373,7 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	// Non-vacuity: held behind the lock the continue-as-new cannot have committed, so the queue still holds only
 	// the original run. Without the lock there would already be two and this scenario would prove nothing.
 	var held int
-	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances WHERE task_queue = $1`, taskQueue).Scan(&held); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE task_queue = $1`, taskQueue).Scan(&held); err != nil {
 		t.Fatal(err)
 	}
 	if held != 1 {
@@ -366,7 +392,7 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	for {
 		var live, total, failed int
 		if err := db.QueryRow(`SELECT count(*) FILTER (WHERE status IN ('ready','running','terminating')),
-			count(*), count(*) FILTER (WHERE status = 'failed') FROM workflow_instances WHERE task_queue = $1`, taskQueue).
+			count(*), count(*) FILTER (WHERE status = 'failed') FROM workflow_leases WHERE task_queue = $1`, taskQueue).
 			Scan(&live, &total, &failed); err != nil {
 			t.Fatal(err)
 		}
@@ -474,7 +500,7 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 		var n int
 		var assigned sql.NullString
 		if err := db.QueryRow(`SELECT (SELECT count(*) FROM event_history WHERE workflow_id = $1 AND event_type = 'defer'), assigned_to
-			FROM workflow_instances WHERE id = $1`, wfID).Scan(&n, &assigned); err != nil {
+			FROM workflow_leases WHERE id = $1`, wfID).Scan(&n, &assigned); err != nil {
 			t.Fatal(err)
 		}
 		if n > 0 && !assigned.Valid {
@@ -488,9 +514,20 @@ func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsC
 
 	// Terminate it: phase 1 of the two-phase transition, as engine.preemptivelySettle writes it for a run that
 	// owes a defer phase. (The HTTP terminate route is the dead-letter queue's and does not reach this.)
-	if _, err := db.Exec(`UPDATE workflow_instances
+	//
+	// error_msg lives on workflow_payloads; status, pending_terminal_status,
+	// defer_phase_deadline, next_wake_at, assigned_to and generation are exactly
+	// what ClaimWorkflows' candidate scan reads from workflow_leases (the split
+	// of the run row from cleat#3245, folded into
+	// migrations/postgres/001_schema.sql by #3358). Without the lease write the defer phase this test drives is
+	// invisible to any claim: confirmed by falsification (reverting it reproduces
+	// "Cleanup was invoked 0 times within 1m0s, want 1").
+	if _, err := db.Exec(`UPDATE workflow_payloads SET error_msg = 'test terminate' WHERE id = $1`, wfID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_leases
 		SET status = 'terminating', pending_terminal_status = 'terminated',
-		    defer_phase_deadline = now() + interval '300 seconds', error_msg = 'test terminate',
+		    defer_phase_deadline = now() + interval '300 seconds',
 		    next_wake_at = now(), assigned_to = NULL, generation = generation + 1
 		WHERE id = $1`, wfID); err != nil {
 		t.Fatal(err)

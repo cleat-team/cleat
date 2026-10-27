@@ -106,11 +106,7 @@ func TestMigrationNoDataLoss(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 
 	runID := fmt.Sprintf("upg-mig-noloss-%d", time.Now().UnixNano())
-	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"key":"value"}', '`+suiteQueue+`')`, runID, defName)
-	if err != nil {
-		t.Fatalf("create instance: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, Input: "{\"key\":\"value\"}", TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -146,7 +142,7 @@ func TestMigrationNoDataLoss(t *testing.T) {
 	const wantInput = `{"key":"value"}`
 	var input string
 	var inputIntact bool
-	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_instances WHERE id = $1`,
+	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_payloads WHERE id = $1`,
 		runID, wantInput).Scan(&input, &inputIntact)
 	if err != nil {
 		t.Fatalf("read instance after migration: %v", err)
@@ -203,11 +199,7 @@ func TestMigrationRollback(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 
 	runID := fmt.Sprintf("upg-mig-roll-%d", time.Now().UnixNano())
-	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"preserved":true}', '`+suiteQueue+`')`, runID, defName)
-	if err != nil {
-		t.Fatalf("create instance: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, Input: "{\"preserved\":true}", TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -244,7 +236,7 @@ func TestMigrationRollback(t *testing.T) {
 	const wantInput = `{"preserved":true}`
 	var input string
 	var inputIntact bool
-	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_instances WHERE id = $1`,
+	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_payloads WHERE id = $1`,
 		runID, wantInput).Scan(&input, &inputIntact)
 	if err != nil {
 		t.Fatalf("read instance after rollback: %v", err)
@@ -285,11 +277,7 @@ func TestMigrationIdempotent(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 
 	runID := fmt.Sprintf("upg-mig-idem-%d", time.Now().UnixNano())
-	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, $2, 1, 'ready', '{"idempotent":true}', '`+suiteQueue+`')`, runID, defName)
-	if err != nil {
-		t.Fatalf("create instance: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: defName, Input: "{\"idempotent\":true}", TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -343,7 +331,7 @@ func TestMigrationIdempotent(t *testing.T) {
 	const wantInput = `{"idempotent":true}`
 	var input string
 	var inputIntact bool
-	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_instances WHERE id = $1`,
+	err = db.QueryRow(`SELECT input::text, input = $2::jsonb FROM workflow_payloads WHERE id = $1`,
 		runID, wantInput).Scan(&input, &inputIntact)
 	if err != nil {
 		t.Fatalf("read instance after second migration: %v", err)

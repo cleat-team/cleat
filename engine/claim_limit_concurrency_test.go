@@ -74,8 +74,14 @@ func TestClaimWorkflows_RespectsLimitUnderConcurrency(t *testing.T) {
 						return
 					default:
 					}
+					// workflow_leases, not workflow_instances: cleat#3245 Phase
+					// 3 step 3 piece B moved both the candidate scan's status
+					// predicate and the claim's own UPDATE onto
+					// workflow_leases, so the contention this sweep exists to
+					// create has to land on the same table ClaimWorkflows
+					// locks, or EvalPlanQual never sees it.
 					_, _ = ps.db.Exec(
-						`UPDATE workflow_instances SET heartbeat_at = now() WHERE status = 'ready'`)
+						`UPDATE workflow_leases SET heartbeat_at = now() WHERE status = 'ready'`)
 				}
 			}()
 			defer func() {
@@ -121,7 +127,7 @@ func TestClaimWorkflows_RespectsLimitUnderConcurrency(t *testing.T) {
 			// behaved.
 			var running int
 			if err := ps.db.QueryRow(
-				`SELECT count(*) FROM workflow_instances WHERE status = 'running'`).Scan(&running); err != nil {
+				`SELECT count(*) FROM workflow_leases WHERE status = 'running'`).Scan(&running); err != nil {
 				t.Fatalf("count running: %v", err)
 			}
 			if running != claimed {

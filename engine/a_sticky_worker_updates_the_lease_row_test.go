@@ -1,0 +1,116 @@
+package engine
+
+import (
+	"context"
+	"database/sql"
+	"testing"
+
+	"github.com/cleat-team/cleat/engine/testutil"
+)
+
+// cleat#3245 Phase 3 step 2, piece 6a: UpdateStickyWorker and
+// ClearStickyWorker now mirror sticky_worker_id onto workflow_leases, on the
+// same tx as the workflow_instances write.
+//
+// cleat#3360 considered dropping sticky_worker_id from workflow_instances --
+// claimStickyWorkflowsOnce's candidate scan has read workflow_leases
+// exclusively since piece B, so nothing reads this column there any more --
+// and did not: idx_instances_sticky (migrations/postgres/001_schema.sql) is
+// a partial index on this exact column, and 001 is byte-verified against a
+// frozen historical baseline (scripts/verify-postgres-baseline.py), so it
+// cannot be edited to drop the index alongside the column. Deferred to the
+// next baseline regeneration -- see engine/db.go's UpdateStickyWorker for
+// the full reasoning. Both tables still carry the column, but since
+// cleat#3245 B3c only workflow_leases is written, and this file no longer
+// compares the two.
+//
+// Seeds workflow_instances/workflow_leases/workflow_payloads directly via SQL
+// -- the same independent-testability pattern pieces 1-5b established --
+// rather than depending on any other piece's code.
+func stickyWorkerLeaseTestStore(t *testing.T) (*PostgresStore, *sql.DB) {
+	t.Helper()
+	db := testutil.TestDB(t, testutil.DialectPostgres)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	applyPostgresProcedures(t, db)
+	testutil.CleanupPostgresTestData(t, db)
+	t.Cleanup(func() {
+		testutil.CleanupPostgresTestData(t, db)
+		db.Close()
+	})
+	return NewPostgresStore(db), db
+}
+
+func seedStickyWorkerTriple(t *testing.T, store *PostgresStore, db *sql.DB, id, defName string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("DeployWorkflowDef: %v", err)
+	}
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         id,
+		TenantID:   DefaultTenantUUID,
+		DefName:    defName,
+		DefVersion: 1,
+		Input:      "{}",
+		TaskQueue:  "default",
+		Status:     "ready",
+	})
+}
+
+func readLeaseStickyWorker(t *testing.T, db *sql.DB, id string) sql.NullString {
+	t.Helper()
+	var v sql.NullString
+	if err := db.QueryRow(`SELECT sticky_worker_id FROM workflow_leases WHERE id = $1`, id).Scan(&v); err != nil {
+		t.Fatalf("read workflow_leases.sticky_worker_id for %s: %v", id, err)
+	}
+	return v
+}
+
+func TestUpdateStickyWorkerUpdatesTheLeaseRow(t *testing.T) {
+	store, db := stickyWorkerLeaseTestStore(t)
+	ctx := context.Background()
+
+	const id = "sticky-lease-update-1"
+	seedStickyWorkerTriple(t, store, db, id, "sticky-lease-update-def")
+
+	if err := store.UpdateStickyWorker(ctx, id, "worker-sticky-1"); err != nil {
+		t.Fatalf("UpdateStickyWorker: %v", err)
+	}
+
+	lease := readLeaseStickyWorker(t, db, id)
+	if !lease.Valid || lease.String != "worker-sticky-1" {
+		t.Errorf("workflow_leases.sticky_worker_id = %v, want %q", lease, "worker-sticky-1")
+	}
+}
+
+func TestClearStickyWorkerUpdatesTheLeaseRow(t *testing.T) {
+	store, db := stickyWorkerLeaseTestStore(t)
+	ctx := context.Background()
+
+	const id = "sticky-lease-clear-1"
+	seedStickyWorkerTriple(t, store, db, id, "sticky-lease-clear-def")
+
+	// Seeded directly via SQL on workflow_leases, not through
+	// UpdateStickyWorker -- otherwise this test cannot tell ClearStickyWorker's own mirror apart
+	// from UpdateStickyWorker's: a reverted ClearStickyWorker mirror would
+	// leave workflow_leases.sticky_worker_id at whatever UpdateStickyWorker's
+	// (also-reverted-in-that-scenario, but not here) mirror left it, and if
+	// that setup call's mirror never ran either, the row would already be
+	// NULL before ClearStickyWorker touches it, passing for the wrong
+	// reason. Falsified: confirmed this version fails when only
+	// ClearStickyWorker's own mirror is removed.
+	if _, err := db.ExecContext(ctx, `UPDATE workflow_leases SET sticky_worker_id = $2 WHERE id = $1`, id, "worker-sticky-2"); err != nil {
+		t.Fatalf("seed workflow_leases.sticky_worker_id: %v", err)
+	}
+
+	if err := store.ClearStickyWorker(ctx, id); err != nil {
+		t.Fatalf("ClearStickyWorker: %v", err)
+	}
+
+	lease := readLeaseStickyWorker(t, db, id)
+	if lease.Valid {
+		t.Errorf("workflow_leases.sticky_worker_id = %v, want NULL", lease)
+	}
+}

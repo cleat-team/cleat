@@ -10,17 +10,21 @@ import (
 
 // supplementary compares the classes catalogdiff cannot see.
 //
-// It is not a nicety. migration/catalogdiff/mssql.go compares a column's type
-// NAME but not its length, precision, scale or collation, and it compares an
-// index's key columns but not its INCLUDE list, its filter or its sort order.
-// So a diff of A against B can be empty while the baseline has lost every
-// column width and every filtered index. That is the class of regression a
+// It is not a nicety. Before cleat#2882, migration/catalogdiff/mssql.go
+// compared a column's type NAME but not its length, precision or scale, and
+// an index's key columns but not its INCLUDE list, its filter or its sort
+// order. So a diff of A against B could be empty while the baseline had lost
+// every column width and every filtered index -- the class of regression a
 // baseline generator is most likely to introduce and least likely to notice.
+// cleat#2882 closed that gap for width/precision/scale/identity and for
+// index filter/INCLUDE/sort-order; column shape's is_computed flag has no
+// catalogdiff home and remains a genuine gap, covered below.
 //
-// Security policies/predicates, schemas, database role existence and trigger
-// identity used to be gaps of exactly this shape -- they are compared in
-// catalogdiff itself now (cleat#2432) and are deliberately not repeated here;
-// see the comment on supplementaryChecks below.
+// Security policies/predicates, schemas, database role existence, trigger
+// identity, and index attributes used to be gaps of exactly this shape --
+// they are compared in catalogdiff itself now (cleat#2432, cleat#2882) and
+// are deliberately not repeated here; see the comment on supplementaryChecks
+// below.
 //
 // Each check returns a SET of rendered rows, sorted. Comparing sets rather than
 // counts is deliberate: a count answers "did this go up" and never "is anything
@@ -35,8 +39,16 @@ type check struct {
 }
 
 var supplementaryChecks = []check{
+	// Kept whole rather than narrowed when cleat#2882 ported
+	// max_length/precision/scale/is_identity into catalogdiff: is_computed
+	// has no catalogdiff home, and removing the now-redundant columns from
+	// this one query risks losing is_computed coverage along with them for
+	// a saving that is not needed (unlike "index attributes" below, this
+	// check is not FULLY subsumed, so it is not removed). collation_name and
+	// is_nullable were already duplicated with catalogdiff before this
+	// change -- that overlap predates cleat#2882 and is not new.
 	{
-		"column shape (width/precision/scale/collation/identity/nullability)",
+		"column shape (width/precision/scale/collation/identity/nullability/is_computed)",
 		`SELECT s.name, t.name, c.name, ty.name, c.max_length, c.precision, c.scale,
 		        COALESCE(c.collation_name, ''), c.is_nullable, c.is_identity, c.is_computed
 		 FROM sys.columns c
@@ -53,19 +65,19 @@ var supplementaryChecks = []check{
 		 JOIN sys.tables t ON t.object_id = ic.object_id
 		 JOIN sys.schemas s ON s.schema_id = t.schema_id`,
 	},
-	{
-		"index attributes (filter, INCLUDE, sort order, unique, type)",
-		`SELECT s.name, t.name, i.name, i.type_desc, i.is_unique, i.has_filter,
-		        COALESCE(i.filter_definition, ''), ic.is_included_column, ic.is_descending_key,
-		        ic.key_ordinal, c.name
-		 FROM sys.indexes i
-		 JOIN sys.tables t ON t.object_id = i.object_id
-		 JOIN sys.schemas s ON s.schema_id = t.schema_id
-		 JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-		 JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-		 WHERE i.name IS NOT NULL
-		   AND t.name NOT IN ('schema_migrations','plugin_migrations')`,
-	},
+	// Index attributes (filter, INCLUDE, sort order, unique, type) moved to
+	// migration/catalogdiff/mssql.go itself -- cleat#2882, the same move
+	// cleat#2432 made for security policies/schemas/roles/triggers below.
+	// Unlike "column shape" two checks up, this one is fully subsumed: every
+	// field this query read (type_desc, is_unique, has_filter,
+	// filter_definition, is_included_column, is_descending_key, key_ordinal,
+	// column name) now reaches catalogdiff's rendered Index.Definition line,
+	// so keeping the identical query here would be the same fact checked in
+	// two places with no guard keeping them in sync -- removed rather than
+	// left duplicated, matching the precedent below rather than "column
+	// shape"'s own (which keeps its query, since is_computed has no
+	// catalogdiff home).
+	//
 	// Security policies/predicates, schemas, database roles (existence) and
 	// trigger NAME/BODY/schema moved to migration/catalogdiff/mssql.go itself
 	// -- cleat#2432. That file's own header comment used to name this script

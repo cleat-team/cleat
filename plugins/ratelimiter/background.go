@@ -88,10 +88,10 @@ func (p *Plugin) reload(ctx context.Context) (int, error) {
 	// pollConfigs, where the reach is already real.
 	loadCtx := plugin.AcrossAllTenants(ctx, "rate-limiter: loading every tenant's limits into the shared bucket map")
 
-	rows, err := p.db.Query(loadCtx, plugin.Rebind(`
+	rows, err := p.db.Query(loadCtx, `
 		SELECT tenant_id, limit_key, max_requests, window_seconds
 		FROM rate_limits
-	`, p.dialect))
+	`)
 	if err != nil {
 		return 0, err
 	}
@@ -152,9 +152,9 @@ func (p *Plugin) pruneRateCounters(ctx context.Context) {
 	// the policy and leaving this bare are the same change.
 	pruneCtx := plugin.AcrossAllTenants(ctx, "rate-limiter: pruning expired counters, the window cutoff is global")
 
-	result, err := p.db.Exec(pruneCtx, plugin.Rebind(`
+	result, err := p.db.Exec(pruneCtx, `
 		DELETE FROM rate_counter WHERE window_start < $1
-	`, p.dialect), cutoff)
+	`, cutoff)
 	if err != nil {
 		p.logger.Error("rate-limiter: prune counters", "error", err)
 	} else if result > 0 {

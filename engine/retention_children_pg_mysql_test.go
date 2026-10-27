@@ -188,11 +188,27 @@ func seedRetentionFixture(t *testing.T, ctx context.Context, db *sql.DB, store r
 		t.Fatalf("deploy workflow def: %v", err)
 	}
 
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, completed_at)
-		 VALUES (`+ph(1)+`, `+ph(2)+`, 1, `+ph(3)+`, '{}', `+ph(4)+`, `+ph(5)+`)`,
-		wfID, defName, status, DefaultTenantUUID, completedAt); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
+	// PostgreSQL's retention predicates read status from workflow_leases and
+	// completed_at from workflow_payloads (cleat#3245 B1a/B3a), and B4a
+	// narrowed workflow_instances itself, so the Postgres row goes in through
+	// SeedRun rather than the wide INSERT MySQL still uses below.
+	if ph(1) == "$1" {
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: wfID, TenantID: DefaultTenantUUID, DefName: defName, DefVersion: 1,
+			Status: status,
+		})
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_payloads SET completed_at = $1 WHERE id = $2`,
+			completedAt, wfID); err != nil {
+			t.Fatalf("set workflow_payloads.completed_at: %v", err)
+		}
+	} else {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, completed_at)
+			 VALUES (`+ph(1)+`, `+ph(2)+`, 1, `+ph(3)+`, '{}', `+ph(4)+`, `+ph(5)+`)`,
+			wfID, defName, status, DefaultTenantUUID, completedAt); err != nil {
+			t.Fatalf("seed workflow_instances: %v", err)
+		}
 	}
 
 	expires := time.Now().UTC().Add(7 * 24 * time.Hour)

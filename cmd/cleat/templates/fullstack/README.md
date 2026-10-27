@@ -38,9 +38,9 @@ Two things that can differ on your machine:
   `CLEAT_API_PORT=8081 make up`) and use the same values for every `make` target,
   `make web` included (it forwards to that port; `CLEAT_WEB_PORT` moves the page off 3000).
 - **The worker image.** `docker-compose.yml` uses
-  `ghcr.io/cleat-team/cleat-worker:latest`, which is published with each release.
-  If `docker pull` says `denied`, no release has published it yet: build it from a
-  cleat checkout and point compose at it,
+  `ghcr.io/cleat-team/cleat-worker:latest`, which is published with each release
+  and public -- no login needed to pull it. To develop against a local build
+  instead, build it from a cleat checkout and point compose at it,
   `docker build -t cleat-worker:local . && CLEAT_WORKER_IMAGE=cleat-worker:local make up`.
 
 ## What is wired, and why
@@ -151,22 +151,34 @@ plugin that wants a key of the same name.
 ## Next steps
 
 - Replace the placeholder in `main.go`. The `DurableSleepMs(3000)` after
-  `charging` stands in for your payment provider; swap it for a durable call, which
-  is recorded once and not repeated if the worker dies after it:
+  `charging` stands in for your payment provider, and reaching a real one from
+  here takes more than swapping the line for a durable call.
 
-  ```go
-  resp, err := h.DurableCall("http", "fetch",
-      `{"url":"https://payments.example.com/charge","method":"POST","body":"..."}`)
-  if err != nil {
-      h.SetQueryState("status", "rejected")
-      return "", err // ends the run `failed`; a call that exhausts its retries dead-letters
-  }
+  **`h.DurableCall("http", "fetch", …)` works on the worker this template
+  deploys, but only for hosts your tenant has allowed.** A tenant's egress
+  allowlist is empty by default and an empty list permits nothing, so the first
+  call to a real provider fails with `no egress allowlist is configured for this
+  tenant, and an empty list permits nothing`. Allow the host and try again:
+
+  ```bash
+  cleatctl egress-allow add <tenant-uuid> api.your-provider.example
   ```
 
-  Outbound requests must pass cleat's egress policy, which refuses loopback,
-  private (RFC 1918) and cloud-metadata addresses, so call a publicly reachable
-  endpoint, and stub the call in
-  `main_test.go` with `env.OnCall("http", "fetch", nil).Return(...)`.
+  The floor (loopback, link-local, private ranges) is refused whatever is
+  listed. See `docs/operations/egress-policy.md`. The raw `cleat_fetch` import,
+  which the Java and AssemblyScript SDKs call directly, is a different path and
+  is off unless the worker starts with `--enable-workflow-fetch`.
+
+  Or **write a plugin.** A bundled plugin's host function is how a workflow
+  reaches a provider with its own client, credentials and retry rules —
+  `DurableCall` resolving by name to a plugin you write. See
+  `plugins/slacknotify` for the shape and `plugin/plugin.go` for the interface.
+  This is the better path for a provider this template does not already
+  integrate and that you will call from many workflows.
+
+  Whichever path you take, record the charge's own idempotency key downstream:
+  cleat's `Idempotency-Key` protects the START of this workflow, not your
+  provider's charge endpoint.
 - Add a compensation path — `cleat.NewSaga` declares forward and undo steps and
   unwinds them for you.
 - Put `oauth-provider` in front for per-user login.

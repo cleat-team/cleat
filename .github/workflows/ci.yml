@@ -25,11 +25,26 @@
 #   test-java         — gradle test (TeaVM + JUnit 5)
 #   test-assemblyscript — npm test (as-pect)
 #   fuzz              — fuzz tests on wasm/... (60s per fuzz func)
-#   benchmarks        — push to main only; stores result + trend artifact
+#   benchmarks        — push to main only; uploads a 90-day artifact, no
+#                       trend/comparison store (cleat#2487: the step that did
+#                       that, benchmark-action's trend tracking, was removed
+#                       for good — see the job's own comment)
 #   cluster-tests     — docker-compose cluster, integration tests, tear-down
 #   build             — Go bin, Python SDK, Java, AssemblyScript, examples
 # ---------------------------------------------------------------------------
 name: CI/CD Pipeline
+
+# cleat#3073: a PR body edit gives the run its own concurrency group (see
+# below) rather than cancelling the run it followed, so the SAME head SHA
+# can carry two run sets of this workflow with the same check names and
+# different outcomes -- and nothing on either run recorded which activity
+# produced it. `gh api .../runs/<id> --jq .display_title` was the field
+# someone reached for to tell them apart, and it was identical on both
+# (GitHub derives it from the PR title or head commit, not the activity
+# type). This appends the activity type cheaply, from a value the
+# concurrency expression below already computes.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
 
 on:
   push:
@@ -272,6 +287,18 @@ jobs:
           bash -e <<'LINT_GUARD_EOF' || echo "Go toolchain pins guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-go-toolchain-pins.py --self-test
           python3 scripts/check-go-toolchain-pins.py
+          LINT_GUARD_EOF
+
+      # The landed-sha gate for rc-* images. It runs in develop-image.yml on a
+      # release push, where nothing exercises it until the first cut, so the
+      # self-test runs here on every PR. --self-test asserts the TEXT of each
+      # refusal, not only the exit status: a refusal and an UNMEASURED (exit 2)
+      # must not be able to stand in for each other.
+      - name: RC landed-sha guard self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "RC landed-sha guard self-test" >> "$LINT_FAILURES_FILE"
+          python3 scripts/check-rc-sha-landed.py --self-test
           LINT_GUARD_EOF
 
       # Secret scanning. Nothing in this repo looked for credentials until
@@ -891,6 +918,40 @@ jobs:
           bash -e <<'LINT_GUARD_EOF' || echo "Playbook interface, build and body-claim checks" >> "$LINT_FAILURES_FILE"
           scripts/check-playbook-claims.py --self-test
           scripts/check-playbook-claims.py
+          LINT_GUARD_EOF
+
+      # cleat#3295: three routing-hygiene misses in one night, all on streams
+      # following the ROUTED-comment convention by hand -- a stale comment
+      # left after a push, a route sent by cross-session message with no
+      # comment ever posted, and a ROUTED comment whose cited sha was
+      # mistyped past its first 8 characters and resolved to no commit at
+      # all. This step is what would have caught all three automatically,
+      # on synchronize/edited, rather than needing a peer to notice.
+      #
+      # Lenient by design, not strict: a PR's FIRST ROUTED comment is posted
+      # by a stream after the PR already exists and CI has already started,
+      # so requiring one to exist (--require-routed) would fail every PR on
+      # `opened`, before anyone has had the chance to post one. Without that
+      # flag, no ROUTED comment at all is a pass (nothing to check yet); an
+      # EXISTING one that is stale or mistyped is the finding.
+      #
+      # pull_request only: there is no PR, and nothing to check, on a push to
+      # develop or a merge-group run.
+      #
+      # This file is WS-3's zone, and this step edits it under the zone's
+      # documented exception -- another stream may add here when leaving the
+      # mechanism unwired would be worse. That is exactly the case: the only
+      # alternative is a checker script with no step running it, which is the
+      # defect class CLAUDE.md names -- "a mechanism that exists and is wired
+      # to nothing reads as done".
+      - name: ROUTED comment names the current head
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "ROUTED comment names the current head" >> "$LINT_FAILURES_FILE"
+          scripts/check-pr-routed-sha.py --self-test
+          scripts/check-pr-routed-sha.py "$GITHUB_REPOSITORY" "${{ github.event.pull_request.number }}"
           LINT_GUARD_EOF
 
       # cleat#3111: a workflow that runs a repo file BY PATH needs the execute
@@ -1900,7 +1961,7 @@ jobs:
     # so it needs no container image build.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: sandbox
         ports:
@@ -1970,7 +2031,7 @@ jobs:
     # there is no second dialect on this side to diverge on.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -2056,7 +2117,7 @@ jobs:
     # property under test belongs to the language runtime, not to SQL.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: sandbox
         ports:
@@ -2151,7 +2212,7 @@ jobs:
     # ensureSchema() AFTER launch() rather than before.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -2405,7 +2466,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: cleat
@@ -2638,6 +2699,46 @@ jobs:
         if: matrix.package.name == 'commands'
         uses: gradle/actions/setup-gradle@v6
 
+      # The Rust, Java and AssemblyScript agent clients, for cleat#2978's
+      # extension of cleat#1983's acceptance to those three SDKs (it already
+      # ran Go and Python). Same reasoning as the Python toolchain below, and
+      # the same reason the 'commands' steps above cannot be reused: those
+      # are scoped to cleat#2146/#2145's entry-point-resolution tests under
+      # ./cmd/..., a different matrix leg, and widening their condition would
+      # conflate two independent reasons a toolchain is needed. A skip here
+      # is not a pass wearing a different colour -- see the Python comment
+      # below, which applies identically to these three.
+      #
+      # NOTE (WS-1 -> WS-3): .github/workflows/ is WS-3's under WORKSTREAM.md's
+      # shared-files table. Added here rather than left unwired, for the same
+      # reason the Python steps below give. Move or restructure it freely.
+      #
+      # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
+      # compiles for the former (cmd/cleat/build_rust.go), same as the
+      # 'commands' leg's identically-targeted step above.
+      - name: Setup Rust + wasm32-unknown-unknown for the crash agent client
+        if: matrix.package.name == 'crash'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node for the crash agent client (AssemblyScript build path)
+        if: matrix.package.name == 'crash'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Setup Java for the crash agent client
+        if: matrix.package.name == 'crash'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle for the crash agent client
+        if: matrix.package.name == 'crash'
+        uses: gradle/actions/setup-gradle@v6
+
       # The Python agent client, for cleat#1983's acceptance. That test runs the
       # shipped agent workflow from BOTH SDKs, and a Python workflow is a
       # Component Model binary, which only `componentize-py` produces -- so
@@ -2707,7 +2808,7 @@ jobs:
         id: locate-pg
         if: matrix.package.name == 'commands'
         run: |
-          id=$(docker ps -q --filter "ancestor=postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
+          id=$(docker ps -q --filter "ancestor=mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
           count=$(echo "$id" | wc -w)
           if [ "$count" -eq 1 ]; then
             echo "container_id=$id" >> "$GITHUB_OUTPUT"
@@ -3337,8 +3438,9 @@ jobs:
       # `RUN /cleat-worker --verify-backend` (see Dockerfile and
       # scripts/verify-release-worker.sh) passes -- the same assertion, on
       # the architecture this runner is native on. The arm64 leg is proven
-      # weekly instead, in release-image-dryrun-arm64.yml, and for real on
-      # every tag by release.yml itself.
+      # on every push to develop by develop-image.yml (cleat#3370), weekly by
+      # release-image-dryrun-arm64.yml, and for real on every tag by
+      # release.yml itself.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -3618,7 +3720,7 @@ jobs:
     # connections. Same job, opposite conclusions per package.
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: cleat
@@ -3791,7 +3893,7 @@ jobs:
             -e POSTGRES_PASSWORD=cleat \
             -e POSTGRES_DB=cleat_tests \
             -p 5433:5432 \
-            postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+            mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
 
       - name: Wait for the dedicated Postgres to be ready
         shell: bash

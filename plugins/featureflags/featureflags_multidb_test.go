@@ -79,7 +79,7 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 			p.mux = http.NewServeMux()
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-			if err := p.RegisterRoutes(p.mux); err != nil {
+			if err := p.RegisterRoutes(p.mux.(*http.ServeMux)); err != nil {
 				t.Fatalf("RegisterRoutes: %v", err)
 			}
 
@@ -88,25 +88,25 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 			// Evaluate non-existent flag.
 			t.Run("EvaluateNotFound", func(t *testing.T) {
 				cleanupFeatureFlags(t, p)
-				backendEvaluateNotFound(t, p.mux)
+				backendEvaluateNotFound(t, p.mux.(*http.ServeMux))
 			})
 
 			// List flags when none exist — expects [] not null.
 			t.Run("ListEmpty", func(t *testing.T) {
 				cleanupFeatureFlags(t, p)
-				backendListEmpty(t, p.mux)
+				backendListEmpty(t, p.mux.(*http.ServeMux))
 			})
 
 			// Full CRUD lifecycle — create, list, get, update, delete, verify.
 			t.Run("CRUDFullLifecycle", func(t *testing.T) {
 				cleanupFeatureFlags(t, p)
-				backendCRUDFullLifecycle(t, p.mux)
+				backendCRUDFullLifecycle(t, p.mux.(*http.ServeMux))
 			})
 
 			// List multiple flags.
 			t.Run("ListMultiple", func(t *testing.T) {
 				cleanupFeatureFlags(t, p)
-				backendListMultiple(t, p.mux)
+				backendListMultiple(t, p.mux.(*http.ServeMux))
 			})
 		})
 	}

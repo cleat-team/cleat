@@ -16,7 +16,7 @@ func newMetricsStore(t *testing.T, rows []mockRowsResult) *PostgresStore {
 
 func TestPostgresStore_CountStalledWorkflows_Success(t *testing.T) {
 	store := newMetricsStore(t, []mockRowsResult{
-		{match: "COUNT(*) FROM workflow_instances", data: [][]driver.Value{{int64(5)}}},
+		{match: "COUNT(*) FROM workflow_leases", data: [][]driver.Value{{int64(5)}}},
 	})
 
 	count, err := store.CountStalledWorkflows(context.Background(), 5*time.Minute)
@@ -31,12 +31,14 @@ func TestPostgresStore_CountStalledWorkflows_Success(t *testing.T) {
 func TestPostgresStore_CountStalledWorkflows_Error(t *testing.T) {
 	queryErr := errors.New("connection refused")
 	store := newMetricsStore(t, []mockRowsResult{
-		{match: "COUNT(*) FROM workflow_instances", err: queryErr},
+		{match: "COUNT(*) FROM workflow_leases", err: queryErr},
 	})
 
 	_, err := store.CountStalledWorkflows(context.Background(), 5*time.Minute)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	// errors.Is, not err != nil: a mock that matches no statement returns no
+	// rows, and "no rows in result set" is an error too.
+	if !errors.Is(err, queryErr) {
+		t.Fatalf("got %v, want the injected %v", err, queryErr)
 	}
 }
 

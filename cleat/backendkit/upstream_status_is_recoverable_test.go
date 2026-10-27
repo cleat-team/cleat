@@ -120,10 +120,10 @@ func TestWriteUpstreamError(t *testing.T) {
 			wantStatus: http.StatusConflict,
 		},
 		{
-			// cleat-review, cleat#2810 R1: every example backend injects its OWN
-			// worker key server-side and strips whatever the browser sent
-			// (authTransport, order-lifecycle/backend/main.go:318-328 and the
-			// same shape in the other two backends) -- so a 401 or 403 from the
+			// cleat-review, cleat#2810 R1: every example backend sends its OWN
+			// worker key server-side (Client.APIKey, set in
+			// order-lifecycle/backend/main.go and the same way in the others),
+			// and Client never forwards a browser's headers -- so a 401 or 403 from the
 			// worker is the BACKEND's credential failing, never the browser
 			// caller's, which sent none. Passing it through would tell an
 			// unauthenticated browser its credentials were rejected.

@@ -113,7 +113,8 @@ func TestOnlyAwaitsAreGatedAfterASuspend(t *testing.T) {
 
 // TestTheFirstSuspendingCallStillWorks is the control. The fix must gate what
 // comes AFTER a suspend, not the call that causes it -- gating too early would
-// stop a workflow suspending at all.
+// stop a workflow suspending at all. The call that causes it records its
+// await and suspends, and tells the guest so.
 func TestTheFirstSuspendingCallStillWorks(t *testing.T) {
 	s := freshSuspendSession(t)
 
@@ -126,9 +127,13 @@ func TestTheFirstSuspendingCallStillWorks(t *testing.T) {
 		t.Errorf("the first await recorded %d events, want 1: it must still write its "+
 			"await_signals", len(s.history))
 	}
-	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
-		t.Error("the suspending call itself returned the stop sentinel; only calls after " +
-			"it should")
+	// This used to assert the OPPOSITE -- "the suspending call itself returned
+	// the stop sentinel; only calls after it should" -- which pinned
+	// cleat#3378 in place: the suspending await returned an ordinary timeout,
+	// and the guest acted on it before the run stopped.
+	if packed != callSuspendSentinel {
+		t.Errorf("the suspending await returned %016x, want callSuspendSentinel: any "+
+			"other word reads as a timeout the guest will act on (cleat#3378)", uint64(packed))
 	}
 }
 
@@ -166,5 +171,45 @@ func TestADeliveryStillSatisfiesTheFirstAwait(t *testing.T) {
 	}
 	if s.suspendErr != nil {
 		t.Error("suspended even though a delivery was available")
+	}
+}
+
+// TestASuspendingAwaitInsideTheHostRunDeferDrainKeepsTheTimeoutWord pins the
+// one exemption in suspendingAwaitResult (cleat#3378). Inside the drain the
+// host runs itself -- runGuestDefersAfterSuspend, bracketed by setDeferDrain --
+// _cleatRunDeferred has already taken the whole defer table, so a stop raised
+// from one defer body would consume the cleanup after it rather than skip it.
+// The run still suspends; only the word differs.
+//
+// The control half is an ordinary segment, which must get the stop. Without it, this would pass against a suspendingAwaitResult that
+// had stopped returning the sentinel anywhere.
+//
+// Not covered here, deliberately: the GUEST-drained defers at a
+// continue-as-new boundary. ContinueAsNew sets suspendErr before it returns
+// to the guest, so an await in those defers is answered by the cleat#933
+// guard (TestASecondAwaitAfterASuspendRecordsNothing) before it can reach
+// suspendingAwaitResult at all.
+func TestASuspendingAwaitInsideTheHostRunDeferDrainKeepsTheTimeoutWord(t *testing.T) {
+	for _, drain := range []bool{true, false} {
+		s := freshSuspendSession(t)
+		// The drain only exists inside a defer segment; the control is an
+		// ordinary segment (a defer segment outside the bracket refuses the
+		// await outright via stopBeforeNewWork and never suspends).
+		s.engine.deferPhase = drain
+		s.inDeferDrain = drain
+
+		packed := awaitOnce(s)
+
+		if s.suspendErr == nil {
+			t.Fatalf("drain=%v: the await did not suspend", drain)
+		}
+		switch {
+		case drain && packed != packAwaitSignalsResult(0, 0, true, 0):
+			t.Errorf("inside the host-run drain the await returned %016x, want the timed-out "+
+				"word: a stop here would abandon the cleanup after this defer body", uint64(packed))
+		case !drain && packed != callSuspendSentinel:
+			t.Errorf("in an ordinary segment the await returned %016x, want "+
+				"callSuspendSentinel", uint64(packed))
+		}
 	}
 }

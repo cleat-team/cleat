@@ -2,9 +2,11 @@
 // coverage for cleat#2189: ReapStaleInstances truncated its reclaim timeout
 // to whole seconds on all three dialects (PG: "%d seconds" over
 // int(timeout.Seconds()); MySQL: INTERVAL ? SECOND over int(...); MSSQL:
-// DATEADD(SECOND, ...) over int(...)), which halves #2166's 1s
-// reclaimSlack at the default 14.5s reclaim-after and leaves 0.1s of slack
-// at --heartbeat 2.9s. #2180 fixed the same truncation in StaleSetShape
+// DATEADD(SECOND, ...) over int(...)), which halved #2166's 1s
+// reclaimSlack at that era's 14.5s default reclaim-after (cleat#3258 ROUND 6
+// later raised the default to ~47s; this test's own fixed 14.9s/14.1s/15.9s
+// values are independent of that default and are unaffected either way) and
+// left 0.1s of slack at --heartbeat 2.9s. #2180 fixed the same truncation in StaleSetShape
 // only, so the stall detector's Stale count (ms-precise) and the reap
 // statement (second-truncated) disagreed about which rows were
 // reclaimable.
@@ -70,7 +72,13 @@ func assertReapFractionalStatuses(t *testing.T, dialect string, db *sql.DB, ctx 
 	t.Helper()
 	statusOf := func(id string) string {
 		var status string
-		q := fmt.Sprintf("SELECT status FROM workflow_instances WHERE id = %s", placeholder(1))
+		// PostgreSQL writes status to workflow_leases alone since
+		// cleat#3245 B3c; the other two dialects keep one table.
+		table := "workflow_instances"
+		if dialect == "postgres" {
+			table = "workflow_leases"
+		}
+		q := fmt.Sprintf("SELECT status FROM %s WHERE id = %s", table, placeholder(1))
 		if err := db.QueryRowContext(ctx, q, id).Scan(&status); err != nil {
 			t.Fatalf("%s: reading status of %s: %v", dialect, id, err)
 		}
@@ -100,13 +108,18 @@ func TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnPostgres(t *testing.T)
 	insideID := fmt.Sprintf("reap-fractional-pg-inside-%d", time.Now().UnixNano())
 	pastID := fmt.Sprintf("reap-fractional-pg-past-%d", time.Now().UnixNano())
 	seed := func(id string, age time.Duration) {
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: id, TenantID: store.tenantID, DefName: "reap-fractional-def", DefVersion: 1,
+			Status: "running", AssignedTo: "reap-fractional-worker",
+		})
+		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate
+		// scan reads workflow_leases, not workflow_instances, so the
+		// fractional heartbeat_at this test depends on is set there.
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-			                                assigned_to, heartbeat_at, tenant_id)
-			VALUES ($1, 'reap-fractional-def', 1, 'running', '{}', 'reap-fractional-worker',
-			        now() - make_interval(secs => $2::float8), $3)`,
-			id, age.Seconds(), store.tenantID); err != nil {
-			t.Fatalf("seeding %s: %v", id, err)
+			UPDATE workflow_leases SET heartbeat_at = now() - make_interval(secs => $2::float8)
+			WHERE id = $1`,
+			id, age.Seconds()); err != nil {
+			t.Fatalf("seeding heartbeat for %s: %v", id, err)
 		}
 	}
 	seed(insideID, reapFractionalInsideR)

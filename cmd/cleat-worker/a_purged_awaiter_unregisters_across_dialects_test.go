@@ -213,11 +213,27 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 				// selects: status IN ('done','failed','terminated','cancelled')
 				// AND completed_at IS NOT NULL AND completed_at < cutoff.
 				completedAt := time.Now().Add(-1 * time.Hour)
-				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-					`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status, completed_at) `+
-						`VALUES ($1, $2, $3, $4, 'terminated', $5)`,
-					runID, defName, 1, tenant.String(), completedAt); err != nil {
-					t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
+				if be.Name == "postgres" {
+					// PostgreSQL's retention predicate reads completed_at from
+					// workflow_payloads (cleat#3245 B1a) and status from
+					// workflow_leases (B3a); SeedRun writes the run across
+					// all three tables, and completed_at is set where it is read.
+					testutil.SeedRun(t, fixtureDB, testutil.RunSeed{
+						ID: runID, DefName: defName, TenantID: tenant.String(), Status: "terminated",
+					})
+					if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+						`UPDATE workflow_payloads SET completed_at = $2 WHERE id = $1`,
+						runID, completedAt); err != nil {
+						t.Fatalf("set completed_at on %s: %v", be.Name, err)
+					}
+				} else {
+					// MySQL and SQL Server keep one wide workflow_instances table.
+					if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+						`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status, completed_at) `+
+							`VALUES ($1, $2, $3, $4, 'terminated', $5)`,
+						runID, defName, 1, tenant.String(), completedAt); err != nil {
+						t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
+					}
 				}
 
 				// id is supplied explicitly rather than left to a column

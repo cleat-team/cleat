@@ -67,6 +67,12 @@
 # ---------------------------------------------------------------------------
 name: Multi-DB CI
 
+# cleat#3073: surfaces the triggering activity type in the run's display
+# title, so a PR body edit's run set is distinguishable from the one it
+# shares a SHA with. Full rationale in ci.yml, next to the same expression.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
 on:
   push:
     branches: [main, develop]
@@ -193,7 +199,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
@@ -308,7 +314,24 @@ jobs:
       - name: Run tests
         run: |
           set -o pipefail
-          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+          # -timeout=1800s, raised from 900s 2026-10-27 (cleat#3458). Six passing runs
+          # that day took 590.6-863.6s in ./engine alone, leaving as little as 36s (4%),
+          # and a docs-only PR's merge group was killed at 900.138s with no failing test
+          # (the cleat#472 shape). 1800s is ~2x the slowest passing run, the same
+          # reasoning as ci.yml's 300s -> 900s note. It does not decide whether this job
+          # should run the whole engine suite; that belongs to whoever owns the job.
+          go test -count=1 -p 1 -timeout=1800s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+
+      # cleat#3348: found while re-compacting migrations/mysql/ that this
+      # script -- the known-positives for what migration/catalogdiff is
+      # structurally blind to on MySQL (a dropped trigger, a missing seed row,
+      # seed-insert order, column collation, a descending index silently
+      # becoming ascending, a dropped auto_increment) -- had zero callers
+      # anywhere in the tree. A condition with no verdict reads as done; this
+      # gives it one. Needs the real migrations/mysql/*.sql on disk and a live
+      # MySQL, which only this job has.
+      - name: MySQL baseline supplementary known-positives
+        run: scripts/check-mysql-baseline-positives.sh
 
       - name: Skip budget
         if: always()
@@ -435,7 +458,13 @@ jobs:
       - name: Run tests
         run: |
           set -o pipefail
-          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+          # -timeout=1800s, raised from 900s 2026-10-27 (cleat#3458). Six passing runs
+          # that day took 590.6-863.6s in ./engine alone, leaving as little as 36s (4%),
+          # and a docs-only PR's merge group was killed at 900.138s with no failing test
+          # (the cleat#472 shape). 1800s is ~2x the slowest passing run, the same
+          # reasoning as ci.yml's 300s -> 900s note. It does not decide whether this job
+          # should run the whole engine suite; that belongs to whoever owns the job.
+          go test -count=1 -p 1 -timeout=1800s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
 
       - name: Skip budget
         if: always()
@@ -471,7 +500,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
         # Required, and the only service here that was missing it. A job
         # running directly on the runner does not share the service
         # network, so without a published port the container is simply
@@ -491,7 +520,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       mysql:
-        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
@@ -543,16 +572,20 @@ jobs:
       # the strength of that claim, so a hand-edit to 001_schema.sql or
       # 003_procedures.sql would have gone unnoticed while they rested on it.
       #
-      # NOT SHAPED LIKE THE MSSQL MODE, and it cannot be. The MSSQL emitter is a pure
-      # function from the live catalogue to the files, so it is a fixed point of its
-      # own input and self-application verifies it. gen-postgres-baseline.py is a
-      # one-shot transform from a dump of the PRE-REBASELINE chain -- regenerating
-      # from its own output is not defined and fails at the partition anchor. So this
-      # checks the artifact against the tree it claims to come from.
+      # NOT SHAPED LIKE THE MSSQL MODE. The MSSQL emitter is a pure function from the
+      # live catalogue to the files, so self-application verifies it. The PostgreSQL
+      # baseline is not only an emit: cleat#3245 B5 narrowed workflow_instances by a
+      # deliberate change to the chain's end state, and that change is a committed
+      # file, not something a dump of the committed baseline can rediscover. So this
+      # checks the artifact against the tree it claims to come from, plus that file.
+      # (The generator did fail on an already-partitioned dump when this was first
+      # written; it no longer does, measured 2026-10-27. That is not why the pin is
+      # still here.)
       #
       # --prior-rebaseline IS THE PROVENANCE PIN: the commit whose chain produced the
       # committed baseline. It moves when, and only when, the baseline is regenerated
-      # from a different tree. The mode prints it in full on every run, including a
+      # from a different tree. --prior-transform is the SQL applied to that chain's
+      # database before it is dumped; it moves with the pin. The mode prints it in full on every run, including a
       # passing one, so the evidence says what it was measured against. It must be a
       # FULL 40-char SHA: `git fetch --depth 1 origin 8f91b43a` fails with
       # `couldn't find remote ref` -- an exact-string miss, not a prefix resolve.
@@ -583,7 +616,8 @@ jobs:
           python3 scripts/verify-postgres-baseline.py \
             --dsn 'postgres://postgres:postgres@127.0.0.1:5432/cleat_baseline_verify?sslmode=disable' \
             --pg-container "$CONTAINER" \
-            --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10 \
+            --prior-rebaseline a4d75bd682e100901259c6d88d124691ad466c3e \
+            --prior-transform scripts/postgres-baseline-transforms/b5-narrow-workflow-instances.sql \
             --committed migrations/postgres
 
       - name: Create cleat database on MSSQL
@@ -715,7 +749,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mysql:
-        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat

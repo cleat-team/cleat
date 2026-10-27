@@ -427,6 +427,15 @@ var knownUnreadableStatements = map[string]string{
 	"DeploymentSecretStore.RetireDeploymentSecret: s.db.ExecContext(ctx, retireDeploymentSecretStmt(s.dialect), name)":                                           "retireDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
 	"DeploymentSecretStore.ResealDeploymentSecrets: s.db.QueryContext(ctx, listDeploymentSecretsForResealStmt(s.dialect))":                                       "listDeploymentSecretsForResealStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
 	"DeploymentSecretStore.ResealDeploymentSecrets: s.db.ExecContext(ctx, resealDeploymentSecretStmt(s.dialect), next, cur, r.name, r.keyVersion, r.ciphertext)": "resealDeploymentSecretStmt(s.dialect): UPDATE deployment_secrets, no tenant_id column, not an RLS table",
+
+	// deployment_secrets_rotation.go (cleat#2298's M4): CheckKeyRingCandidate is the
+	// same shape as the seven above -- its query text lives in
+	// deploymentSecretKeyVersionCountsStmt, called as the query argument to
+	// s.db.QueryContext directly, with no dialect branching at all (the statement is
+	// identical on all three). Its target table is deployment_secrets, verifiable by
+	// reading the named helper function, which carries no tenant_id column and no RLS
+	// policy for the same reason the other seven are exempt.
+	"DeploymentSecretStore.CheckKeyRingCandidate: s.db.QueryContext(ctx, deploymentSecretKeyVersionCountsStmt(s.dialect))": "deploymentSecretKeyVersionCountsStmt(s.dialect): SELECT FROM deployment_secrets, no tenant_id column, not an RLS table",
 }
 
 // receiversWithoutRLS are store types whose backends have no row-level

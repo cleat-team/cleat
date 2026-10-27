@@ -306,17 +306,50 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	// it is exactly what a second TerminateWorkflow does, and the alternative
 	// -- restarting the phase clock on every operator action -- is the one
 	// deferPhaseOwed's comment rejects.
-	var curStatus string
-	var hasDefers, compacted bool
+	//
+	// cleat#3245 Phase 3 step 3 piece C kept this read on workflow_instances,
+	// for two reasons: compaction_state was not a workflow_leases column, and
+	// this FOR UPDATE's lock is reused by the workflow_instances UPDATE later in
+	// this same transaction (adminForceMark's or the inline one-phase arm's).
+	// Moving the lock to workflow_leases while that later write stays on
+	// workflow_instances would reintroduce exactly the two-table-lock deadlock
+	// class piece B's ClaimWorkflows cutover had to add postgres_retry.go for
+	// (see that file's doc comment).
+	//
+	// B3a moved only the status read, and the second reason is why the lock did
+	// not move with it: the row lock stays on workflow_instances, and status is
+	// read from workflow_leases afterwards, in its own statement -- see
+	// pgRunStateUnderLock for why a read inside the locking statement could be
+	// stale. compaction_state comes from workflow_payloads since B1a.
+	// Lock order: the instance row, then the lease row. Since cleat#3245 B3c
+	// this path writes the lease row and payloads, and its audit event bumps
+	// workflow_instances.event_count. Every other path that writes both
+	// (ContinueAsNew, FinalizeWorkflowSegment, FinalizeDeferPhase) appends
+	// its events first and so takes the instance row first; taking the
+	// lease row first here would let a force against a run its worker is
+	// finalizing deadlock. FOR NO KEY UPDATE is the lock the event_count
+	// UPDATE takes anyway. The lease row's FOR UPDATE is what serializes
+	// this with the fences, and the state is read after both.
+	var locked string
 	err = tx.QueryRowContext(ctx, `
-		SELECT w.status,
-		       EXISTS(SELECT 1 FROM event_history e
-		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
-		       w.compaction_state IS NOT NULL
-		FROM workflow_instances w
-		WHERE w.id = $1 AND w.tenant_id = $2
-		FOR UPDATE
-	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+		SELECT id FROM workflow_instances WHERE id = $1 AND tenant_id = $2 FOR NO KEY UPDATE
+	`, workflowID, s.tenantID).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: lock instance: %w", a.action, err)
+	}
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_leases WHERE id = $1 AND tenant_id = $2 FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: lock: %w", a.action, err)
+	}
+	curStatus, hasDefers, compacted, err := pgRunStateUnderLock(ctx, tx, workflowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return adminNotFound(a.action, workflowID)
 	}
@@ -340,24 +373,24 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		return s.adminForceMark(ctx, tx, workflowID, generation, a)
 	}
 
+	// Since cleat#3245 B3c the lease row holds the only copy of these columns
+	// that is written, so its UPDATE carries the generation fence.
 	var res sql.Result
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'done', result = $3, completed_at = now(),
-			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			UPDATE workflow_leases
+			SET status = 'done',
 			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
-			WHERE id = $1 AND tenant_id = $2 AND generation = $4
-		`, workflowID, s.tenantID, a.result, generation)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation)
 	} else {
 		res, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = 'failed', error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
-			    completed_at = now(), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			UPDATE workflow_leases
+			SET status = 'failed', completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
 			    pending_terminal_status = NULL, defer_phase_deadline = NULL
-			WHERE id = $1 AND tenant_id = $2 AND generation = $5
-		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation)
 	}
 	if err != nil {
 		return fmt.Errorf("admin %s: %w", a.action, err)
@@ -368,6 +401,20 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 	}
 	if n == 0 {
 		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
+	}
+
+	if a.action == adminActionForceComplete {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL, completed_at = now() WHERE id = $1
+		`, workflowID, a.result); err != nil {
+			return fmt.Errorf("admin %s: payload: %w", a.action, err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = $2, error_code = $3, error_op = 'admin_force_fail', completed_at = now() WHERE id = $1
+		`, workflowID, a.errorMsg, a.errorCode); err != nil {
+			return fmt.Errorf("admin %s: payload: %w", a.action, err)
+		}
 	}
 
 	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
@@ -412,26 +459,26 @@ func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflow
 	// column, or the next caller of this one inherits a raw string and a
 	// database syntax error naming the driver instead of the missing call.
 	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+	// Since cleat#3245 B3c the lease row holds the only copy of these columns
+	// that is written, so its UPDATE carries the generation fence.
 	if a.action == adminActionForceComplete {
 		res, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = $5, pending_terminal_status = 'done', result = $3,
-			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    defer_phase_deadline = now() + ($6 * interval '1 second'),
+			UPDATE workflow_leases
+			SET status = $4, pending_terminal_status = 'done',
+			    defer_phase_deadline = now() + ($5 * interval '1 second'),
 			    next_wake_at = now(), assigned_to = NULL,
 			    generation = generation + 1
-			WHERE id = $1 AND tenant_id = $2 AND generation = $4
-		`, workflowID, s.tenantID, a.result, generation, statusTerminating, deadline)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation, statusTerminating, deadline)
 	} else {
 		res, err = tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = $6, pending_terminal_status = 'failed',
-			    error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
-			    defer_phase_deadline = now() + ($7 * interval '1 second'),
+			UPDATE workflow_leases
+			SET status = $4, pending_terminal_status = 'failed',
+			    defer_phase_deadline = now() + ($5 * interval '1 second'),
 			    next_wake_at = now(), assigned_to = NULL,
 			    generation = generation + 1
-			WHERE id = $1 AND tenant_id = $2 AND generation = $5
-		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation, statusTerminating, deadline)
+			WHERE id = $1 AND tenant_id = $2 AND generation = $3
+		`, workflowID, s.tenantID, generation, statusTerminating, deadline)
 	}
 	if err != nil {
 		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)
@@ -443,6 +490,21 @@ func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflow
 	if n == 0 {
 		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
 	}
+
+	if a.action == adminActionForceComplete {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET result = $2, error_msg = NULL, error_code = NULL, error_op = NULL WHERE id = $1
+		`, workflowID, a.result); err != nil {
+			return fmt.Errorf("admin %s: payload: %w", a.action, err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = $2, error_code = $3, error_op = 'admin_force_fail' WHERE id = $1
+		`, workflowID, a.errorMsg, a.errorCode); err != nil {
+			return fmt.Errorf("admin %s: payload: %w", a.action, err)
+		}
+	}
+
 	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
 		return err
 	}
@@ -456,10 +518,18 @@ func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflow
 // The lookup is tenant-scoped, so another tenant's workflow reads as absent
 // rather than as a generation mismatch -- the same "no oracle for valid IDs"
 // stance callerOwnsTarget takes at the HTTP layer.
+//
+// cleat#3245 Phase 3 step 3 piece C: reads workflow_leases rather than
+// workflow_instances. This is a pure diagnostic read on the n==0 branch of a
+// fenced UPDATE -- it takes no lock and nothing here depends on one, so
+// moving it carries none of piece B's two-table-lock deadlock risk. Safe
+// because every write path that reaches here (adminForceResolve's one-phase
+// arm, piece 4c; adminForceMark's two-phase arm, piece 6c) already mirrors
+// generation onto workflow_leases before this function can be called.
 func (s *PostgresStore) adminResolveMiss(ctx context.Context, tx *sql.Tx, workflowID string, requested int64, action string) error {
 	var stored int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT generation FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+		`SELECT generation FROM workflow_leases WHERE id = $1 AND tenant_id = $2`,
 		workflowID, s.tenantID).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return adminNotFound(action, workflowID)

@@ -471,15 +471,30 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
+	// cleat#3245 B2 moved heartbeat_at to workflow_leases, and B3b moved the
+	// fence there too: this one UPDATE is the whole heartbeat. It takes the
+	// lease row's lock, and a reclaim mirrors its generation bump onto that
+	// row in its own transaction, so the two serialize on it. A reclaim that
+	// commits first leaves the predicate matching nothing -- an UPDATE that
+	// waited on the row re-checks its WHERE against the row's new version --
+	// and one that comes second waits for this commit. The workflow_instances
+	// row is neither read nor locked.
+	res, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
 		SET heartbeat_at = now()
 		WHERE id = $1 AND assigned_to = $2 AND generation = $3
 	`, workflowID, workerID, generation)
 	if err != nil {
-		return false, fmt.Errorf("heartbeat: %w", err)
+		return false, fmt.Errorf("heartbeat: lease: %w", err)
 	}
-	n, _ := result.RowsAffected()
+	// The lease row is the only copy of heartbeat_at, so a renewal that
+	// matched no lease row renewed nothing the reaper reads. Report it as a
+	// lost fence rather than let the caller believe it still holds the run.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("heartbeat: lease rows affected: %w", err)
+	}
+
 	return n > 0, tx.Commit()
 }
 
@@ -508,7 +523,7 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 	// transaction -- a reclaim landing between a check and a separate update
 	// statement is exactly the race this exists to close, not reopen.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, generation FROM workflow_instances
+		SELECT id, generation FROM workflow_leases
 		WHERE assigned_to = $1 AND status = 'running' AND id = ANY($2)
 		FOR UPDATE
 	`, workerID, pq.Array(ids))
@@ -542,10 +557,15 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 	}
 
 	if len(eligible) > 0 {
+		// cleat#3245 B2: workflow_leases only -- heartbeat_at is no longer
+		// written to workflow_instances. "eligible" was fenced against the
+		// leases' live (id, generation) above (B3b moved that fence off
+		// workflow_instances), and the FOR UPDATE still holds those rows, so
+		// no separate fence check is needed here.
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances SET heartbeat_at = now() WHERE id = ANY($1)
+			UPDATE workflow_leases SET heartbeat_at = now() WHERE id = ANY($1)
 		`, pq.Array(eligible)); err != nil {
-			return nil, fmt.Errorf("heartbeat batch fenced: update: %w", err)
+			return nil, fmt.Errorf("heartbeat batch fenced: lease update: %w", err)
 		}
 	}
 	return lost, tx.Commit()
@@ -553,6 +573,23 @@ func (s *PostgresStore) HeartbeatBatchFenced(ctx context.Context, workerID strin
 
 // CompleteWorkflow marks a workflow as done.
 func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
+	// cleat#2312: `->>` indexes INTO a jsonb OBJECT, and an encrypted
+	// query_state column no longer holds one -- it holds EncryptJSON's
+	// output, a JSON STRING literal wrapping base64 ciphertext. `->>` on a
+	// scalar string returns SQL NULL rather than an error, so this would
+	// silently answer "" for every key, for every workflow, the moment
+	// --encrypt-sensitive-payloads is on. ListQueryState already reads the
+	// whole column and decrypts it; routing through that and picking the one
+	// key out of its map costs one extra round trip through Go, only when
+	// encryption is actually enabled.
+	if s.encryption != nil && s.encryptSensitivePayloads {
+		all, err := s.ListQueryState(ctx, workflowID)
+		if err != nil {
+			return "", err
+		}
+		return all[key], nil
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get query state: begin: %w", err)
@@ -561,7 +598,7 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 
 	var value sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT query_state ->> $2 FROM workflow_instances WHERE id = $1
+		SELECT query_state ->> $2 FROM workflow_payloads WHERE id = $1
 	`, workflowID, key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", tx.Commit()
@@ -589,12 +626,22 @@ func (s *PostgresStore) ListQueryState(ctx context.Context, workflowID string) (
 
 	var raw sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT query_state FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
+		`SELECT query_state FROM workflow_payloads WHERE id = $1`, workflowID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return map[string]string{}, tx.Commit()
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list query state: %w", err)
+	}
+	// cleat#2312: decrypt before decodeQueryState, which is shared across all
+	// four stores and expects an already-plaintext JSON object -- MySQL and
+	// SQL Server never encrypt this column at all.
+	if raw.Valid {
+		decrypted, derr := s.decryptPayloadJSON(raw.String)
+		if derr != nil {
+			return nil, fmt.Errorf("list query state: %w", derr)
+		}
+		raw.String = decrypted
 	}
 	out, derr := decodeQueryState(raw)
 	if derr != nil {
@@ -607,6 +654,12 @@ func (s *PostgresStore) ListQueryState(ctx context.Context, workflowID string) (
 // ordered by creation time DESC. Supports search by input content, error message,
 // and combined full-text search, as well as pagination via Offset/Limit.
 func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	// cleat#2312: see ErrSearchUnavailableUnderEncryption's own doc comment.
+	if (filter.InputContains != "" || filter.ErrorContains != "") &&
+		s.encryption != nil && s.encryptSensitivePayloads {
+		return nil, ErrSearchUnavailableUnderEncryption
+	}
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: begin: %w", err)
@@ -614,12 +667,15 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	defer tx.Rollback()
 
 	d := s.dialect
+	// cleat#3245 Phase 3 step 3 piece F: workflow_leases JOIN workflow_payloads,
+	// not workflow_instances -- see postgresWorkflowListJoinColumns' doc
+	// comment for which column lives on which side.
 	qb := NewQueryBuilder(d,
-		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
+		"SELECT "+postgresWorkflowListJoinColumns()+" FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id WHERE 1=1",
 	)
 
-	applyWorkflowFilters(qb, d, filter)
-	applyWorkflowListPaging(qb, d, filter)
+	applyWorkflowFilters(qb, d, filter, "l.id")
+	applyWorkflowListPaging(qb, d, filter, "l.id")
 
 	query, args := qb.SQL()
 	rows, err := tx.QueryContext(ctx, query, args...)
@@ -645,9 +701,33 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 			wf.CreatedAt = createdAt.Time
 		}
 		wf.AssignedTo = assignedTo.String
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
-		wf.Error = errorMsg.String
+		// cleat#2312: decrypt what this listing reads. The guard above
+		// already refuses InputContains/ErrorContains under encryption, so
+		// this is purely for display -- there is no search result whose
+		// correctness depends on these values.
+		if decryptedInput, derr := s.decryptPayloadJSON(string(wf.Input)); derr == nil {
+			wf.Input = json.RawMessage(decryptedInput)
+		} else {
+			s.log().WarnContext(ctx, "decrypt listed workflow input failed", "workflow_id", wf.ID, "error", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(errorCode.String, "error_code"); derr == nil {
+			wf.ErrorCode = decrypted
+		} else {
+			wf.ErrorCode = errorCode.String
+			s.log().WarnContext(ctx, "decrypt listed workflow error_code failed", "workflow_id", wf.ID, "error", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(errorOp.String, "error_op"); derr == nil {
+			wf.ErrorOp = decrypted
+		} else {
+			wf.ErrorOp = errorOp.String
+			s.log().WarnContext(ctx, "decrypt listed workflow error_op failed", "workflow_id", wf.ID, "error", derr)
+		}
+		if decrypted, derr := s.decryptTextColumnFromStorage(errorMsg.String, "error_msg"); derr == nil {
+			wf.Error = decrypted
+		} else {
+			wf.Error = errorMsg.String
+			s.log().WarnContext(ctx, "decrypt listed workflow error_msg failed", "workflow_id", wf.ID, "error", derr)
+		}
 		workflows = append(workflows, wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -699,15 +779,23 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	var continuedFrom, parentWorkflowID sql.NullString
 	var inputRaw json.RawMessage
 
+	// cleat#3245 Phase 3 step 3 piece F: workflow_leases JOIN workflow_payloads,
+	// not workflow_instances. def_name, def_version, input, result, error_msg,
+	// error_code, error_op, trace_id and completed_at are on l's payloads side
+	// (trace_id and completed_at since migration 020 (folded into migrations/postgres/001_schema.sql by #3358)); every other column
+	// below is leases-only. id and tenant_id exist on both and are qualified
+	// to l's copy -- the join predicate makes them equal, RLS makes both
+	// sides' tenant_id the caller's own.
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at, result #>> '{}', error_msg, error_code, error_op,
-		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
-		       created_at, COALESCE(pending_terminal_status, ''),
-		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, ''),
-		       COALESCE(completed_by, '')
-		FROM workflow_instances WHERE id = $1 AND tenant_id = $2
+		SELECT l.id, p.def_name, p.def_version, l.status, p.input,
+		       l.assigned_to, l.heartbeat_at, l.next_wake_at, p.completed_at, l.started_at, p.result #>> '{}', p.error_msg, p.error_code, p.error_op,
+		       l.generation, COALESCE(l.priority, 0) AS priority,
+		       COALESCE(p.trace_id, ''), l.tenant_id, l.continued_from, l.reclaim_count, l.parent_workflow_id,
+		       l.created_at, COALESCE(l.pending_terminal_status, ''),
+		       COALESCE(l.cancellation_requested, false), COALESCE(l.cancellation_reason, ''),
+		       COALESCE(l.completed_by, '')
+		FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id
+		WHERE l.id = $1 AND l.tenant_id = $2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
@@ -720,6 +808,44 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	if err != nil {
 		return nil, fmt.Errorf("get workflow: %w", err)
 	}
+
+	// cleat#2312: decrypt every sensitive-at-rest column this query reads.
+	// The first failure is returned (matching decryptAndRedactEventRecord's
+	// own "report the first, keep going so the rest of the record is still
+	// populated" contract), but every field is still processed so a caller
+	// that ignores the error still gets a fully-attempted record.
+	var firstDecryptErr error
+	keepJSON := func(v string, err error) string {
+		if err != nil && firstDecryptErr == nil {
+			firstDecryptErr = err
+		}
+		return v
+	}
+	keepText := func(v string, err error) string {
+		if err != nil && firstDecryptErr == nil {
+			firstDecryptErr = err
+		}
+		return v
+	}
+	inputRaw = json.RawMessage(keepJSON(s.decryptPayloadJSON(string(inputRaw))))
+	if result.Valid {
+		// result #>> '{}' above TEXT-EXTRACTS the jsonb value, which for a
+		// JSON STRING scalar strips the surrounding quotes -- so a sealed
+		// result (EncryptJSON's "<base64>" JSON-string-literal wire format)
+		// arrives here as the BARE base64, not the quoted form
+		// decryptPayloadJSON expects. decryptTextColumnFromStorage is the
+		// one that reads bare base64 -- the same shape '#>>' leaves any
+		// other sealed jsonb column in. Measured by this package's own
+		// live test after the wrong call here returned ciphertext unchanged
+		// with no error (sealedShape saw a quoted form that was never
+		// there and judged it "never sealed").
+		result.String = keepText(s.decryptTextColumnFromStorage(result.String, "result"))
+	}
+	errorMsg.String = keepText(s.decryptTextColumnFromStorage(errorMsg.String, "error_msg"))
+	errorCode.String = keepText(s.decryptTextColumnFromStorage(errorCode.String, "error_code"))
+	errorOp.String = keepText(s.decryptTextColumnFromStorage(errorOp.String, "error_op"))
+	wf.CancellationReason = keepText(s.decryptTextColumnFromStorage(wf.CancellationReason, "cancellation_reason"))
+
 	wf.Input = inputRaw
 	wf.AssignedTo = assignedTo.String
 	if result.Valid {
@@ -744,6 +870,9 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	}
 	if parentWorkflowID.Valid {
 		wf.ParentWorkflowID = &parentWorkflowID.String
+	}
+	if firstDecryptErr != nil {
+		return &wf, fmt.Errorf("get workflow: %w", firstDecryptErr)
 	}
 	return &wf, tx.Commit()
 }
@@ -786,10 +915,24 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 		return fmt.Errorf("create schedule: savepoint: %w", err)
 	}
 
+	// cleat#2312: input is sensitive-at-rest. Sealed into a separate
+	// variable, after digest (above) was already computed from the
+	// plaintext sch.Input -- the digest must stay comparable to a future
+	// retry's own plaintext digest, which scheduleRequestDigest computes the
+	// same way every time.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("create schedule: derive tenant key: %w", err)
+	}
+	sealedInput, err := encryptJSONColumnForStorage(string(scheduleInputOrDefault(sch.Input)), tc)
+	if err != nil {
+		return fmt.Errorf("create schedule: encrypt input: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputOrDefault(sch.Input), sch.DisabledAt, sch.NextRunAt, s.tenantID,
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sealedInput, sch.DisabledAt, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
 		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy),
 		key, digest)
@@ -859,6 +1002,12 @@ func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		}
 		if lastRunAt.Valid {
 			sch.LastRunAt = &lastRunAt.Time
+		}
+		// cleat#2312.
+		if decrypted, derr := s.decryptPayloadJSON(string(sch.Input)); derr == nil {
+			sch.Input = json.RawMessage(decrypted)
+		} else {
+			s.log().WarnContext(ctx, "decrypt listed schedule input failed", "schedule", sch.Name, "error", derr)
 		}
 		schedules = append(schedules, sch)
 	}
@@ -952,10 +1101,40 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	if err != nil {
 		return nil, err
 	}
+	// cleat#2312: decrypt before anything downstream uses Input -- this
+	// feeds the cron dispatcher's own start-new-run call, not only display.
+	for i := range schedules {
+		decrypted, derr := s.decryptPayloadJSON(string(schedules[i].Input))
+		if derr != nil {
+			return nil, fmt.Errorf("get due schedules: decrypt input: %w", derr)
+		}
+		schedules[i].Input = json.RawMessage(decrypted)
+	}
 	return schedules, tx.Commit()
 }
 
 // CompactHistory deletes old events and saves compaction state for a workflow.
+//
+// THE FENCE COMES FIRST, and a lost fence is an error. It used to delete the
+// events, then take the fence, then COMMIT whether or not the fence held
+// (cleat#3409): when a reclaim moved the generation in between, the delete
+// committed, no snapshot was written and the call returned nil -- steps below
+// keepStep gone with nothing covering them. Measured on PostgreSQL with events
+// at steps 0-4 and a 400 ms holder that bumped the generation:
+//
+//	before   err=nil  events left 2 of 5  compaction_step NULL
+//	after    err=ErrFenceLost  events left 5 of 5  compaction_step NULL
+//
+// Fence-first also fixes the lock order. finalize_workflow_status (migration
+// 007) takes the lease row and THEN deletes the run's events; this took events
+// then lease, so the two deadlocked (40P01, reproduced 3 of 3 runs by
+// TestCompactHistoryAndFinalizeTakeTheirLocksInTheSameOrder). It now takes the
+// lease row first, in finalize's order.
+//
+// The generation compared here is read in this same transaction, not supplied by
+// the caller, so the fence only catches a reclaim that lands between the read
+// and the lock. It does not establish that the caller still owns the run; that
+// is a separate question (see cleat#3409).
 func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -965,12 +1144,34 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 
 	// Read current generation for optimistic locking.
 	var gen int64
-	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = $1`, workflowID).Scan(&gen)
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_leases WHERE id = $1`, workflowID).Scan(&gen)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return tx.Commit() // Workflow no longer exists.
 		}
 		return fmt.Errorf("compact history: get generation: %w", err)
+	}
+
+	// cleat#3360: compacted_at had no reader anywhere -- not even the
+	// payloads mirror this table was never given -- so it was dropped from
+	// workflow_instances rather than kept write-only.
+	// cleat#3245 B1b: compaction_state/compaction_step are written to
+	// workflow_payloads only. The generation fence is on workflow_leases since
+	// B3b, which every reclaim updates in its own transaction: FOR NO KEY
+	// UPDATE re-checks generation after waiting on a concurrent writer, so a
+	// generation that moved under us matches nothing.
+	var fenced string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM workflow_leases
+		WHERE id = $1 AND generation = $2
+		FOR NO KEY UPDATE
+	`, workflowID, gen).Scan(&fenced)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing has been written; returning rolls the transaction back.
+		return fmt.Errorf("compact history: %w", ErrFenceLost)
+	}
+	if err != nil {
+		return fmt.Errorf("compact history: fence: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
@@ -980,12 +1181,11 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 		return fmt.Errorf("compact history: delete: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET compaction_state = $1, compacted_at = now(), compaction_step = $2
-		WHERE id = $3 AND generation = $4
-	`, compactionState, compactionStep, workflowID, gen)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads
+		SET compaction_state = $1, compaction_step = $2
+		WHERE id = $3
+	`, compactionState, compactionStep, workflowID); err != nil {
 		return fmt.Errorf("compact history: update: %w", err)
 	}
 
@@ -1003,6 +1203,9 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 	rows, err := tx.QueryContext(ctx, `
 		SELECT w.id
 		FROM workflow_instances w
+		-- cleat#3245 B1a: def_name/def_version/compaction_step are
+		-- workflow_payloads columns; read them there.
+		JOIN workflow_payloads p ON p.id = w.id
 		JOIN (
 			SELECT workflow_id, COUNT(*) AS cnt
 			FROM event_history
@@ -1013,11 +1216,11 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		-- compaction entirely. With d NULL, NULLIF(NULL,0) is NULL and COALESCE
 		-- falls through to $1, which is exactly the behaviour before cleat#889.
 		LEFT JOIN workflow_defs d
-		       ON d.name = w.def_name AND d.version = w.def_version
+		       ON d.name = p.def_name AND d.version = p.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), $1)
-		  AND (w.compaction_step IS NULL
-		       OR w.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), $1))
+		  AND (p.compaction_step IS NULL
+		       OR p.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), $1))
 		ORDER BY e.cnt DESC
 		LIMIT $2
 	`, threshold, limit)
@@ -1050,7 +1253,7 @@ func (s *PostgresStore) LoadCompactionState(ctx context.Context, workflowID stri
 
 	var rawJSON []byte
 	err = tx.QueryRowContext(ctx, `
-		SELECT compaction_state FROM workflow_instances
+		SELECT compaction_state FROM workflow_payloads
 		WHERE id = $1
 	`, workflowID).Scan(&rawJSON)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1177,9 +1380,9 @@ func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, 
 		WHERE ck.tenant_id = $1
 		  AND (
 		    ck.expires_at < now()
-		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
-		                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
-		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		    OR NOT EXISTS (SELECT 1 FROM workflow_leases wl
+		                     WHERE wl.id = ck.workflow_id AND wl.tenant_id = ck.tenant_id
+		                       AND wl.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 		  )
 	`, s.tenantID)
 	if err != nil {
@@ -1195,9 +1398,9 @@ func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, 
 		WHERE qh.tenant_id = $1
 		  AND (
 		    qh.expires_at < now()
-		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
-		                     WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
-		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		    OR NOT EXISTS (SELECT 1 FROM workflow_leases wl
+		                     WHERE wl.id = qh.workflow_id AND wl.tenant_id = qh.tenant_id
+		                       AND wl.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
 		  )
 	`, s.tenantID)
 	if err != nil {
@@ -1272,23 +1475,25 @@ func (s *PostgresStore) UpdateStickyWorker(ctx context.Context, workflowID, work
 	// MySQL's copies carry the predicate and Postgres's do not,
 	// which is cleat#1012's exact shape -- a statement tenant-scoped on one
 	// dialect of three -- and it has been half-filed as a defect at least once.
-	// It is not one. workflow_instances has
+	// It is not one. workflow_leases has
 	//
-	//   CREATE POLICY tenant_isolation_instances ON workflow_instances
-	//       FOR ALL USING (tenant_id = cleat.assert_tenant_set());
+	//   CREATE POLICY tenant_isolation_leases ON workflow_leases
+	//       USING (tenant_id = cleat.assert_tenant_set());
 	//
-	// and FOR ALL covers UPDATE, so the row this statement can reach is already
-	// bounded to the session's tenant. SQL Server has session-context policies
-	// doing the same job. MySQL has no row-level security, which is precisely
-	// why its copy states the predicate in SQL.
+	// and a policy with no FOR clause applies to every command, UPDATE
+	// included, so the row this statement can reach is already bounded to
+	// the session's tenant. SQL Server has session-context policies doing the
+	// same job. MySQL has no row-level security, which is precisely why its
+	// copy states the predicate in SQL.
 	//
 	// The asymmetry IS the design. Before filing one of these, check which
 	// layer holds the property up: the answer is in the migration, not in the
-	// Go, and `FOR ALL` is the word that decides it.
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET sticky_worker_id = $2 WHERE id = $1
-	`, workflowID, workerID)
-	if err != nil {
+	// Go. Since cleat#3245 B3c the lease row holds the only copy of
+	// sticky_worker_id that is written; the workflow_instances column goes
+	// with the baseline regeneration (B5).
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases SET sticky_worker_id = $2 WHERE id = $1
+	`, workflowID, workerID); err != nil {
 		return fmt.Errorf("update sticky worker: %w", err)
 	}
 	return tx.Commit()
@@ -1302,12 +1507,11 @@ func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		-- No AND tenant_id, deliberately: RLS bounds this. See the note on
 		-- UpdateStickyWorker above.
-		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = $1
-	`, workflowID)
-	if err != nil {
+		UPDATE workflow_leases SET sticky_worker_id = NULL WHERE id = $1
+	`, workflowID); err != nil {
 		return fmt.Errorf("clear sticky worker: %w", err)
 	}
 	return tx.Commit()
@@ -1436,7 +1640,7 @@ func (s *PostgresStore) QueueDepth(ctx context.Context) (int64, error) {
 
 	var count int64
 	err = tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM workflow_instances WHERE status = 'ready' AND task_queue = ANY($1)`,
+		`SELECT COUNT(*) FROM workflow_leases WHERE status = 'ready' AND task_queue = ANY($1)`,
 		pq.Array(s.taskQueues)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("queue depth: %w", err)
@@ -1575,8 +1779,9 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 // NOT change what --retention-days deletes -- same predicate, same rows --
 // it adds bookkeeping alongside the delete.
 //
-// The third loop clears compaction_state/compaction_step/compacted_at for the
-// same workflows. Those columns are on workflow_instances, which finalize does
+// The third loop clears compaction_state/compaction_step for the same
+// workflows (compacted_at too, until cleat#3360 dropped it -- see
+// ClearExpiredCompactionState). Those columns are on workflow_instances, which finalize does
 // not touch, so this half is live -- and its RowsAffected is deliberately NOT
 // added to the return value. Summing them would make the metric count two
 // different things in one number: deleted event_history rows and updated
@@ -1670,8 +1875,10 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 	return totalDeleted, nil
 }
 
-// ClearExpiredCompactionState clears compaction bookkeeping -- compaction_state,
-// compaction_step, compacted_at -- on terminal workflows older than the cutoff.
+// ClearExpiredCompactionState clears compaction bookkeeping -- compaction_state
+// and compaction_step -- on terminal workflows older than the cutoff.
+// compacted_at was a third column here until cleat#3360 dropped it from
+// workflow_instances: nothing ever read it, on this table or anywhere else.
 //
 // SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
 // tidiness. It used to be a second loop inside that function whose RowsAffected
@@ -1702,9 +1909,18 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 		if err != nil {
 			return totalCleared, fmt.Errorf("delete expired events: begin compaction: %w", err)
 		}
-		result, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
+		// cleat#3245 B1b: workflow_payloads only. compaction_state is no
+		// longer written to workflow_instances, so there is no instance-side
+		// copy to clear. Only payload rows are locked here -- the instance read
+		// in the predicate takes no lock -- so the lock-ORDER inversion against
+		// deleteCompletedWorkflowsBatch (instance row, then the payload row
+		// through the ON DELETE CASCADE) that B1a's two-table version had is
+		// gone. Two batches over overlapping rows can still deadlock on ROW
+		// order, as any two batched writers can; that ends in 40P01, this
+		// transaction rolls back, and the sweep tries again next tick.
+		res, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads
+			SET compaction_state = NULL, compaction_step = NULL
 			WHERE id IN (
 				SELECT id`+pgExpiredCompactionState+`
 				LIMIT 10000
@@ -1714,10 +1930,14 @@ func (s *PostgresStore) ClearExpiredCompactionState(ctx context.Context, olderTh
 			_ = tx.Rollback()
 			break
 		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			_ = tx.Rollback()
+			break
+		}
 		if err := tx.Commit(); err != nil {
 			break
 		}
-		n, _ := result.RowsAffected()
 		totalCleared += n
 		if n == 0 {
 			break
@@ -1788,6 +2008,36 @@ func (s *PostgresStore) CancelWorkflow(ctx context.Context, workflowID, reason s
 	return s.preemptivelySettle(ctx, workflowID, reason, statusCancelled)
 }
 
+// pgRunStateUnderLock reads a run's status and its defer-phase inputs, for a
+// caller that has ALREADY locked the run's workflow_leases row in tx (the
+// instance row until cleat#3245 B3c).
+//
+// It is a separate statement on purpose (cleat-review on #3399). Under READ
+// COMMITTED, one `SELECT ... FOR UPDATE OF w` that waits on w's lock re-checks
+// only w's NEW version after the wait (EvalPlanQual). A joined
+// workflow_leases row and every subquery keep the statement's original
+// snapshot, so a status read there could predate a writer that committed while
+// the lock was awaited -- measured by
+// TestALockedStatusReadSeesAWriterThatCommittedWhileItWaited. A new statement
+// takes a new snapshot, which sees that writer. And with the lease row held,
+// no later writer can change its status before this transaction commits,
+// because every writer of status updates the lease row.
+//
+// The two EXISTS reads gain the same freshness. They were snapshot-stale in the
+// single locking statement before status moved too.
+func pgRunStateUnderLock(ctx context.Context, tx *sql.Tx, workflowID string) (status string, hasDefers, compacted bool, err error) {
+	err = tx.QueryRowContext(ctx, `
+		SELECT l.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = l.id AND e.event_type = 'defer'),
+		       EXISTS(SELECT 1 FROM workflow_payloads p
+		              WHERE p.id = l.id AND p.compaction_state IS NOT NULL)
+		FROM workflow_leases l
+		WHERE l.id = $1
+	`, workflowID).Scan(&status, &hasDefers, &compacted)
+	return status, hasDefers, compacted, err
+}
+
 // preemptivelySettle is the shared body: mark-then-finalize when the workflow
 // owes a defer phase, one terminal write when it does not.
 //
@@ -1805,19 +2055,22 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 
 	// Does this workflow owe a defer phase? See deferPhaseOwed for why a
 	// compacted workflow answers yes on a weaker basis than an uncompacted
-	// one. FOR UPDATE holds the row for the UPDATE that follows, so the
-	// status this reads is the status that gets marked.
-	var curStatus string
-	var hasDefers, compacted bool
+	// one. FOR UPDATE holds the lease row for the UPDATE that follows, so the
+	// status this reads is the status that gets marked -- read AFTER the lock,
+	// in its own statement; see pgRunStateUnderLock for why. Since cleat#3245
+	// B3c this locks the lease row, not the instance row: every write below
+	// lands on workflow_leases or workflow_payloads.
+	var locked string
 	err = tx.QueryRowContext(ctx, `
-		SELECT w.status,
-		       EXISTS(SELECT 1 FROM event_history e
-		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
-		       w.compaction_state IS NOT NULL
-		FROM workflow_instances w
-		WHERE w.id = $1
-		FOR UPDATE
-	`, workflowID).Scan(&curStatus, &hasDefers, &compacted)
+		SELECT id FROM workflow_leases WHERE id = $1 FOR UPDATE
+	`, workflowID).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("%s workflow: lock: %w", finalStatus, err)
+	}
+	curStatus, hasDefers, compacted, err := pgRunStateUnderLock(ctx, tx, workflowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrWorkflowNotFound
 	}
@@ -1848,19 +2101,26 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 		// generation is still bumped, and assigned_to still cleared, for the
 		// same reason the one-phase transition did it: whatever worker held
 		// this workflow is fenced out, and its own finalize now loses.
+		// No fence: this path is protected by the FOR UPDATE row lock and
+		// the isSettledStatus check already done, not by a generation match.
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET status = $3,
-			    pending_terminal_status = $5,
-			    defer_phase_deadline = now() + ($4 * interval '1 second'),
-			    error_msg = $2,
+			UPDATE workflow_leases
+			SET status = $2,
+			    pending_terminal_status = $4,
+			    defer_phase_deadline = now() + ($3 * interval '1 second'),
 			    next_wake_at = now(),
 			    assigned_to = NULL,
 			    generation = generation + 1
 			WHERE id = $1
-		`, workflowID, reason, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
+		`, workflowID, statusTerminating, int(deferPhaseTimeout.Seconds()), finalStatus); err != nil {
 			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
 		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_payloads SET error_msg = $2 WHERE id = $1
+		`, workflowID, reason); err != nil {
+			return fmt.Errorf("%s workflow: payload: %w", finalStatus, err)
+		}
+
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 		}
@@ -1874,16 +2134,11 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	}
 
 	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = $3,
-		    error_msg = $2,
-		    completed_at = now(),
-		    completed_by = assigned_to, assigned_to = NULL,
-		    generation = generation + 1,
-		    pending_terminal_status = NULL,
-		    defer_phase_deadline = NULL
+		UPDATE workflow_leases
+		SET status = $2, completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL
 		WHERE id = $1
-	`, workflowID, reason, finalStatus)
+	`, workflowID, finalStatus)
 	if err != nil {
 		return fmt.Errorf("%s workflow: %w", finalStatus, err)
 	}
@@ -1894,6 +2149,13 @@ func (s *PostgresStore) preemptivelySettle(ctx context.Context, workflowID, reas
 	if n == 0 {
 		return ErrWorkflowNotFound
 	}
+	// completed_at = now() -- cleat#3245 Phase 3 step 3 piece F, migration 020 (folded into migrations/postgres/001_schema.sql by #3358).
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET error_msg = $2, completed_at = now() WHERE id = $1
+	`, workflowID, reason); err != nil {
+		return fmt.Errorf("%s workflow: payload: %w", finalStatus, err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 	}

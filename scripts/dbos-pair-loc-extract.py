@@ -290,6 +290,72 @@ def ts_func(path, func_name):
     return '\n'.join(lines[start:end + 1]) + '\n'
 
 
+def ts_if_block(path, start_regex):
+    """A nested block in TS source (e.g. an `if` statement inside a function)
+    bounded by a closing brace at the SAME indentation as its own opening
+    line -- cleat#3041.
+
+    Deliberately NOT brace-counted, for ts_func's own reason: a line inside
+    the block may carry a backtick template literal with `${...}`
+    interpolation, whose braces must not be confused with the block's
+    structural ones (isolated-wedge.test.ts's own sentinel-write branch does
+    exactly this). Indentation stands in for brace-counting instead: a
+    deeper-nested block's closing brace is indented further than the target
+    block's own, so it cannot end the match early, and this needs no model
+    of strings at all.
+    """
+    lines = open(path).read().split('\n')
+    pat = re.compile(start_regex)
+    start = None
+    indent = None
+    for i, l in enumerate(lines):
+        if pat.search(l):
+            start = i
+            indent = len(l) - len(l.lstrip(' '))
+            break
+    if start is None:
+        fail(f"no line in {path} matches {start_regex!r}")
+    close_pat = re.compile(r'^' + ' ' * indent + r'\}\s*$')
+    end = None
+    for i in range(start + 1, len(lines)):
+        if close_pat.match(lines[i]):
+            end = i
+            break
+    if end is None:
+        fail(f"indented block starting at {path}:{start + 1} never reaches a closing brace at indent {indent}")
+    return '\n'.join(lines[start:end + 1]) + '\n'
+
+
+def ts_trailing_call(path, start_regex):
+    """A column-0 statement in TS source (e.g. `main().catch((e) => {...});`)
+    from its start line through the next column-0 line that is nothing but
+    closing punctuation -- cleat#3041.
+
+    Not brace-counted, for the same reason ts_if_block and ts_func are not:
+    a line in between may carry a template literal. The closing line for
+    this shape is `});`, not the bare `}` ts_func's column-0 functions
+    close on, so the two cannot share one implementation.
+    """
+    lines = open(path).read().split('\n')
+    pat = re.compile(start_regex)
+    start = None
+    for i, l in enumerate(lines):
+        if pat.match(l):
+            start = i
+            break
+    if start is None:
+        fail(f"no line in {path} matches {start_regex!r}")
+    close_pat = re.compile(r'^[\)\}\;]+$')
+    end = None
+    for i in range(start + 1, len(lines)):
+        if close_pat.match(lines[i]):
+            end = i
+            break
+    if end is None:
+        fail(f"trailing call starting at {path}:{start + 1} never reaches a column-0 closing-punctuation line")
+    return '\n'.join(lines[start:end + 1]) + '\n'
+
+
 def _write(path, text):
     with open(path, 'w') as fh:
         fh.write(text)
@@ -415,11 +481,57 @@ def self_test():
     check("ts-func", lambda: ts_func(p, "testSomething"), "assertEqual(1, 1);")
     check_fails("ts-func (marker missing)", lambda: ts_func(p, "testNope"))
 
+    # ts-if-block -- the fixture mirrors the real target's shape: an outer
+    # block at indent 2 containing a deeper-nested block (indent 4/6) whose
+    # OWN closing braces must not end the match early, plus a backtick
+    # template literal with `${...}` interpolation, which ts_func's own
+    # comment says a brace-counter would mishandle.
+    p = f"{tmpdir}/ifblock.ts"
+    _write(
+        p,
+        "function main() {\n"
+        "  if (outer) {\n"
+        "    doThing(`interpolated ${x}`);\n"
+        "    if (inner) {\n"
+        "      try {\n"
+        "        innerThing();\n"
+        "      } catch (e) {\n"
+        "        console.error(`err ${e}`);\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "  afterBlock();\n"
+        "}\n",
+    )
+    result = ts_if_block(p, r'if \(outer\)')
+    check("ts-if-block", lambda: result, "innerThing();")
+    if 'afterBlock' in result:
+        failures.append("ts-if-block: the outer block's own closing brace did not stop the match "
+                        "-- it ran past into the enclosing function")
+    check_fails("ts-if-block (marker missing)", lambda: ts_if_block(p, r'if \(nope\)'))
+    unclosed = f"{tmpdir}/ifblock_unclosed.ts"
+    _write(unclosed, "function main() {\n  if (outer) {\n    doThing();\n")
+    check_fails("ts-if-block (never closes)", lambda: ts_if_block(unclosed, r'if \(outer\)'))
+
+    # ts-trailing-call -- the real target (`main().catch((e) => {...});`)
+    # closes on `});`, not the bare `}` ts_func's column-0 functions close
+    # on, which is why the two need separate implementations.
+    p = f"{tmpdir}/trailing.ts"
+    _write(p, "main().catch((e) => {\n  console.error('crashed', e);\n  process.exit(2);\n});\n")
+    check("ts-trailing-call", lambda: ts_trailing_call(p, r'^main\(\)\.catch'), "process.exit(2);")
+    check_fails("ts-trailing-call (marker missing)",
+                lambda: ts_trailing_call(p, r'^nope\(\)\.catch'))
+    unclosed = f"{tmpdir}/trailing_unclosed.ts"
+    _write(unclosed, "main().catch((e) => {\n  console.error('crashed', e);\n")
+    check_fails("ts-trailing-call (never closes)",
+                lambda: ts_trailing_call(unclosed, r'^main\(\)\.catch'))
+
     # FileNotFoundError -> UNMEASURED (2), for every mode, not a traceback
     for mode, arg in [
         ('go-brace-block', 'x'), ('go-func', 'x'),
         ('ts-const-template', 'x'), ('go-struct-field', 'x'), ('go-line', 'x'),
         ('sh-banner-block', '^# ---- x'), ('ts-func', 'x'),
+        ('ts-if-block', 'x'), ('ts-trailing-call', '^x'),
     ]:
         try:
             run_mode(mode, f"{tmpdir}/does-not-exist.go", arg)
@@ -455,6 +567,10 @@ def run_mode(mode, path, arg):
             return sh_banner_block(path, arg)
         elif mode == 'ts-func':
             return ts_func(path, arg)
+        elif mode == 'ts-if-block':
+            return ts_if_block(path, arg)
+        elif mode == 'ts-trailing-call':
+            return ts_trailing_call(path, arg)
         print(f"unknown mode {mode!r}", file=sys.stderr)
         sys.exit(2)
     except FileNotFoundError:
@@ -466,7 +582,7 @@ def main():
         sys.exit(self_test())
     if len(sys.argv) != 4:
         print(
-            f"usage: {sys.argv[0]} go-brace-block|go-func|ts-const-template|go-struct-field|go-line|sh-banner-block|ts-func <file> <name-or-regex>",
+            f"usage: {sys.argv[0]} go-brace-block|go-func|ts-const-template|go-struct-field|go-line|sh-banner-block|ts-func|ts-if-block|ts-trailing-call <file> <name-or-regex>",
             file=sys.stderr,
         )
         sys.exit(2)

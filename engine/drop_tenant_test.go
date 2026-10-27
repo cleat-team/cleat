@@ -341,11 +341,10 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 		tenant, "tenant-"+tag); err != nil {
 		t.Fatalf("seed admin.tenants(%s): %v", tag, err)
 	}
-	if _, err := adminDB.ExecContext(ctx,
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, tenant_id) VALUES ($1, $2, 1, 'ready', $3)`,
-		wfID, defName, tenant); err != nil {
-		t.Fatalf("seed workflow_instances(%s): %v", tag, err)
-	}
+	// SeedRun writes the instance, lease and payload rows. The payload row
+	// carries the definition foreign key, so the tenant's definition cannot be
+	// dropped before its runs.
+	testutil.SeedRun(t, adminDB, testutil.RunSeed{ID: wfID, TenantID: tenant, DefName: defName})
 	if _, err := adminDB.ExecContext(ctx,
 		`INSERT INTO event_history (workflow_id, step, tenant_id) VALUES ($1, 0, $2)`,
 		wfID, tenant); err != nil {
@@ -371,6 +370,11 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 		tenant, "q-"+tag, wfID); err != nil {
 		t.Fatalf("seed queue_holders(%s): %v", tag, err)
 	}
+	// workflow_leases and workflow_payloads reach the tenant by ON DELETE
+	// CASCADE from workflow_instances, like concurrency_keys and queue_holders
+	// above, rather than by a DELETE admin.drop_tenant names. SeedRun wrote
+	// both rows; the property under test is that they went away, not which
+	// mechanism removed them.
 	if _, err := adminDB.ExecContext(ctx,
 		// request_id is NOT NULL as of cleat#1416; the tag makes it unique per
 		// row, which is all this seed needs.

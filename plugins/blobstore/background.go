@@ -146,13 +146,13 @@ func (p *Plugin) cleanupExpired(ctx, baseCtx context.Context) (staleRefs, expire
 		// expiry predicate, so it MUST run first: with the DELETE first its
 		// subquery finds nothing, the join is empty, and ref_count is never
 		// decremented at all (cleat#1148).
-		affected, err = p.db.Exec(ctx, plugin.Rebind(deleteChunksReturning.For(p.dialect), p.dialect))
+		affected, err = p.db.Exec(ctx, deleteChunksReturning.For(p.dialect))
 		if err != nil {
 			return staleRefs, expiredEntries, orphanedBlobs, err
 		}
-		_, err = p.db.Exec(ctx, plugin.Rebind(deleteBlobIndexExpired.For(p.dialect), p.dialect))
+		_, err = p.db.Exec(ctx, deleteBlobIndexExpired.For(p.dialect))
 	} else {
-		affected, err = p.db.Exec(ctx, plugin.Rebind(deleteChunksReturning.For(p.dialect), p.dialect))
+		affected, err = p.db.Exec(ctx, deleteChunksReturning.For(p.dialect))
 	}
 	if err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, err
@@ -165,7 +165,7 @@ func (p *Plugin) cleanupExpired(ctx, baseCtx context.Context) (staleRefs, expire
 	// Phase 2b: reconcile ref_count against reality. Must run after the
 	// deletes above (so this sweep's own newly-expired rows are already gone
 	// and correctly excluded) and before phase 3 (which trusts ref_count).
-	if _, err := p.db.Exec(ctx, plugin.Rebind(reconcileRefCounts.For(p.dialect), p.dialect)); err != nil {
+	if _, err := p.db.Exec(ctx, reconcileRefCounts.For(p.dialect)); err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, fmt.Errorf("reconcile ref_count: %w", err)
 	}
 
@@ -174,9 +174,9 @@ func (p *Plugin) cleanupExpired(ctx, baseCtx context.Context) (staleRefs, expire
 	var orphanRows plugin.Rows
 	if p.dialect == plugin.DialectMySQL {
 		// MySQL: SELECT first (no DELETE..RETURNING)
-		orphanRows, err = p.db.Query(ctx, plugin.Rebind(deleteBlobReturning.For(p.dialect), p.dialect))
+		orphanRows, err = p.db.Query(ctx, deleteBlobReturning.For(p.dialect))
 	} else {
-		orphanRows, err = p.db.Query(ctx, plugin.Rebind(deleteBlobReturning.For(p.dialect), p.dialect))
+		orphanRows, err = p.db.Query(ctx, deleteBlobReturning.For(p.dialect))
 	}
 	if err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, err
@@ -206,7 +206,7 @@ func (p *Plugin) cleanupExpired(ctx, baseCtx context.Context) (staleRefs, expire
 
 	// MySQL: the SELECT above did not delete, so clean up explicitly.
 	if p.dialect == plugin.DialectMySQL && orphaned > 0 {
-		_, _ = p.db.Exec(ctx, plugin.Rebind(deleteOrphanBlobs.For(p.dialect), p.dialect))
+		_, _ = p.db.Exec(ctx, deleteOrphanBlobs.For(p.dialect))
 	}
 
 	return staleRefs, expiredEntries, orphanedBlobs, nil
@@ -221,7 +221,7 @@ func (p *Plugin) sweepStaleWorkflowRefs(ctx, baseCtx context.Context) (int64, er
 	if p.dialect == plugin.DialectMSSQL {
 		return p.sweepStaleWorkflowRefsMSSQL(baseCtx)
 	}
-	return p.db.Exec(ctx, plugin.Rebind(staleWorkflowRefs.For(p.dialect), p.dialect))
+	return p.db.Exec(ctx, staleWorkflowRefs.For(p.dialect))
 }
 
 // sweepStaleWorkflowRefsMSSQL is SQL Server's half of cleat#2125.

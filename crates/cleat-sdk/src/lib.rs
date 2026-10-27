@@ -3,6 +3,7 @@
 //! Provides the [`HostCalls`] struct for making cleat API calls from WASM
 //! workflows, and memory helpers for the cleat ABI.
 
+pub mod agent;
 pub mod defer;
 pub mod host_calls;
 pub mod memory;

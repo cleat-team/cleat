@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestConcurrentEventAppends verifies that multiple goroutines appending events
@@ -19,11 +20,7 @@ func TestConcurrentEventAppends(t *testing.T) {
 	store := engine.NewPostgresStore(db, suiteQueue)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-conc-append-%d", time.Now().UnixNano())
-	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-	if err != nil {
-		t.Fatalf("create workflow: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -104,11 +101,7 @@ func TestConcurrentClaimAndHeartbeat(t *testing.T) {
 	// Create a workflow for each contention scenario.
 	makeWorkflow := func(suffix string) string {
 		id := fmt.Sprintf("int-conc-claim-%s-%d", suffix, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, id)
-		if err != nil {
-			t.Fatalf("create workflow %s: %v", suffix, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: suiteQueue})
 		t.Cleanup(func() {
 			db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 		})
@@ -188,11 +181,7 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 	var wfIDs []string
 	for i := 0; i < numWorkflows; i++ {
 		runID := fmt.Sprintf("int-conc-status-%d-%d", i, time.Now().UnixNano())
-		_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES ($1, 'test', 1, 'ready', '{}', '`+suiteQueue+`') ON CONFLICT DO NOTHING`, runID)
-		if err != nil {
-			t.Fatalf("create workflow %d: %v", i, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", TaskQueue: suiteQueue})
 		wfIDs = append(wfIDs, runID)
 	}
 	defer func() {

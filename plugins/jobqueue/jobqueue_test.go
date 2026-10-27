@@ -149,31 +149,3 @@ func TestHandleCancelJobInvalidJobID(t *testing.T) {
 		t.Errorf("expected 400 for invalid job id, got %d", rec.Code)
 	}
 }
-
-// ---- RegisterCommands tests ----
-
-func TestRegisterCommandsMissingArgs(t *testing.T) {
-	p := &Plugin{}
-	cmds := p.RegisterCommands()
-	if len(cmds) != 1 {
-		t.Fatalf("expected 1 command, got %d", len(cmds))
-	}
-	err := cmds[0].Run([]string{})
-	if err == nil {
-		t.Fatal("expected error for missing tenant and queue arguments")
-	}
-}
-
-func TestRegisterCommandsCommandMetadata(t *testing.T) {
-	p := &Plugin{}
-	cmds := p.RegisterCommands()
-	if len(cmds) != 1 {
-		t.Fatalf("expected 1 command, got %d", len(cmds))
-	}
-	if cmds[0].Name != "jobqueue-enqueue" {
-		t.Errorf("expected name 'jobqueue-enqueue', got %q", cmds[0].Name)
-	}
-	if cmds[0].Description == "" {
-		t.Error("expected non-empty description")
-	}
-}

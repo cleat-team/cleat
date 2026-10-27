@@ -160,15 +160,26 @@ func TestStaleWorkflowRefs_SparesAnInFlightWorkflow_MultiBackend(t *testing.T) {
 				t.Fatalf("insert workflow_defs on %s: %v", be.Name, err)
 			}
 
-			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-				`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, $3, $4, 'running')`,
-				liveRunID, defName, 1, tenant); err != nil {
-				t.Fatalf("insert live workflow_instances on %s: %v", be.Name, err)
-			}
-			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-				`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, $3, $4, 'done')`,
-				doneRunID, defName, 1, tenant); err != nil {
-				t.Fatalf("insert done workflow_instances on %s: %v", be.Name, err)
+			// workflow_leases and workflow_payloads are PostgreSQL-only, and
+			// B5 narrows workflow_instances there; SeedRun writes the run
+			// across all of them. MySQL and SQL Server keep the one wide
+			// workflow_instances table, so they insert it directly.
+			if be.Dialect == testutil.DialectPostgres {
+				testutil.SeedRun(t, fixtureDB, testutil.RunSeed{
+					ID: liveRunID, DefName: defName, TenantID: tenant.String(), Status: "running"})
+				testutil.SeedRun(t, fixtureDB, testutil.RunSeed{
+					ID: doneRunID, DefName: defName, TenantID: tenant.String(), Status: "done"})
+			} else {
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+					`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, $3, $4, 'running')`,
+					liveRunID, defName, 1, tenant); err != nil {
+					t.Fatalf("insert live workflow_instances on %s: %v", be.Name, err)
+				}
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+					`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, $3, $4, 'done')`,
+					doneRunID, defName, 1, tenant); err != nil {
+					t.Fatalf("insert done workflow_instances on %s: %v", be.Name, err)
+				}
 			}
 
 			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,

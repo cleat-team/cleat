@@ -70,13 +70,13 @@ public class HostCallFixture {
             return result(call, h.childWorkflowWithOptions("child-workflow", "{}", 0, ""));
         }
         if (call.equals("AwaitChild")) {
-            return result(call, h.awaitChild(CHILD_RUN_ID));
+            return afterAwait(h, call, h.awaitChild(CHILD_RUN_ID));
         }
         if (call.equals("AwaitAllChildren")) {
-            return result(call, h.awaitAllChildren(new String[] { CHILD_RUN_ID }));
+            return afterAwait(h, call, h.awaitAllChildren(new String[] { CHILD_RUN_ID }));
         }
         if (call.equals("AwaitAnyChild")) {
-            return result(call, h.awaitAnyChild(new String[] { CHILD_RUN_ID }));
+            return afterAwait(h, call, h.awaitAnyChild(new String[] { CHILD_RUN_ID }));
         }
         if (call.equals("PollChild")) {
             return result(call, h.pollChild(CHILD_RUN_ID));
@@ -226,6 +226,29 @@ public class HostCallFixture {
     }
 
     /** Renders a CleatResult as an outcome, preserving the host's error text. */
+    /**
+     * Reports what the guest was handed by a child await, to the one party that
+     * can say: the guest. A child that has not finished makes the host answer
+     * with the suspend sentinel, and the SDK must turn that into an Err; a
+     * wrapper that skips the check reads the sentinel as a length and hands the
+     * workflow an Ok carrying a buffer of garbage (cleat#3430).
+     *
+     * The harness's own status cannot see the difference: the engine reports a
+     * suspension whichever result the guest was given. So this records a
+     * side_effect once the call has returned, and a SECOND one only if the
+     * result was Ok. The history is then [await, side_effect] for a correct
+     * wrapper and [await, side_effect, side_effect] for one that continued.
+     * History carries event types, not payloads, which is why the information
+     * is in the count.
+     */
+    private static String afterAwait(HostCalls h, String call, CleatResult<String> r) {
+        h.sideEffect("PAST:" + call);
+        if (r.isOk()) {
+            h.sideEffect("OK:" + call);
+        }
+        return result(call, r);
+    }
+
     private static <T> String result(String call, CleatResult<T> r) {
         if (r.isErr()) {
             return emit(call, "error", r.getError());

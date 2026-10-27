@@ -178,17 +178,21 @@ type routineDefinition struct {
 // routineEndRe marks where a routine's definition text stops, per dialect, read
 // off the migrations rather than assumed:
 //
-//	postgres  $$ LANGUAGE plpgsql;   (migrations/postgres/004:146)
+//	postgres  $$ LANGUAGE plpgsql;   (migrations/postgres/004_fix_finalize_workflow_status_fence.sql:146)
 //	mysql     END //                 (migrations/mysql/004_fix_finalize_workflow_status_fence.sql:134)
 //	mssql     END;                   (migrations/mssql/004_fix_finalize_workflow_status_fence.sql:153)
 //
-// Both of those were cleat#1986's own finding: 004_fix_finalize_workflow_status_fence.sql
+// All three were cleat#1986's own finding: 004_fix_finalize_workflow_status_fence.sql
 // is long retired (docs/contributor/migrations.md's "compaction" section), and the bare
 // "migrations/mysql/004" / "migrations/mssql/004" form this comment used to cite is a
 // NUMBER, not a file -- so cleat#1986's new, unrelated 004_workflow_defs_exposure_class.sql
 // at that same number silently satisfied scripts/check-postgres-migration-citations.py's
 // is_real() check by coincidence, with this comment still describing a file that does not
-// exist. Naming the retired filename explicitly is what keeps the citation correctly
+// exist. The postgres line above had the identical defect, uncaught until cleat#3360's own
+// 004_drop_now_redundant_workflow_instances_columns.sql repeated the collision -- the bare
+// "migrations/postgres/004" this comment cited was satisfied a SECOND time, by coincidence,
+// by a migration with nothing to do with finalize_workflow_status. Naming the retired
+// filename explicitly, on every dialect's line, is what keeps the citation correctly
 // dangling (and correctly baselined as historical) regardless of what a later migration
 // happens to be numbered.
 //
@@ -623,10 +627,41 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 					}
 				}
 
-				if len(discriminators) == 0 && len(newLines) == 0 && len(removedLines) == 0 {
+				// The fourth discriminator: adjacent line PAIRS the latest
+				// version has and no earlier one does. Exists because a change
+				// can add nothing the first three arms can see: 019 mirrors an
+				// existing statement (the "wake parent" UPDATE) onto a second
+				// table (workflow_leases), by copying lines that already occur
+				// elsewhere in this same body -- a bare `UPDATE workflow_leases`
+				// and a bare `SET next_wake_at = now()` are both already present
+				// from the 'done'/'ready' mirrors and the workflow_instances
+				// wake above it, so neither is a new line and no new identifier
+				// is introduced either. What IS new is the SEQUENCE: this is the
+				// first definition where `UPDATE workflow_leases` is immediately
+				// followed by `SET next_wake_at = now()`. Single-line and
+				// identifier sets are blind to order; a bigram of normalised
+				// lines is not. Measured 2026-10-11 on exactly this migration.
+				earlierPairs := map[string]bool{}
+				for _, prev := range defList[:len(defList)-1] {
+					lines := normalizedLines(routineBody(prev.body))
+					for i := 0; i+1 < len(lines); i++ {
+						earlierPairs[lines[i]+"\x00"+lines[i+1]] = true
+					}
+				}
+				latestBodyLines := normalizedLines(routineBody(latest.body))
+				var newPairs []string
+				for i := 0; i+1 < len(latestBodyLines); i++ {
+					pair := latestBodyLines[i] + "\x00" + latestBodyLines[i+1]
+					if !earlierPairs[pair] {
+						newPairs = append(newPairs, pair)
+					}
+				}
+
+				if len(discriminators) == 0 && len(newLines) == 0 && len(removedLines) == 0 && len(newPairs) == 0 {
 					t.Errorf("%s is defined in %d migrations (latest %s) and the latest "+
-						"introduces neither a new identifier nor a new body line, and "+
-						"removes none, so nothing here can tell the versions apart.\n\n"+
+						"introduces neither a new identifier, a new body line, nor a new "+
+						"adjacent line pair, and removes none, so nothing here can tell "+
+						"the versions apart.\n\n"+
 						"That is a hole in this test, not a property of the schema: it "+
 						"means a stale database would pass. Widen the discriminator "+
 						"rather than skipping the routine.", name, len(defList), latest.migration)
@@ -634,8 +669,13 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 				}
 
 				dbLines := map[string]bool{}
-				for _, ln := range normalizedLines(text) {
+				dbLinesOrdered := normalizedLines(text)
+				for _, ln := range dbLinesOrdered {
 					dbLines[ln] = true
+				}
+				dbPairs := map[string]bool{}
+				for i := 0; i+1 < len(dbLinesOrdered); i++ {
+					dbPairs[dbLinesOrdered[i]+"\x00"+dbLinesOrdered[i+1]] = true
 				}
 				lower := strings.ToLower(text)
 
@@ -659,6 +699,16 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 					}
 				}
 
+				// Pair evidence: same "any one is enough" logic as lineEvidence,
+				// over the fourth discriminator.
+				pairEvidence := len(newPairs) == 0
+				for _, p := range newPairs {
+					if dbPairs[p] {
+						pairEvidence = true
+						break
+					}
+				}
+
 				// Removal evidence: a line the latest version deleted must not
 				// still be in the database. Unlike the additive arm this is ALL
 				// or nothing in the other direction -- any surviving removed
@@ -673,11 +723,12 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 				}
 
 				checkedDiscriminators++
-				if len(absent) > 0 || !lineEvidence || len(stillPresent) > 0 {
+				if len(absent) > 0 || !lineEvidence || !pairEvidence || len(stillPresent) > 0 {
 					t.Errorf("the database's %s is not the definition %s ships.\n\n"+
 						"%s is the latest of %d migrations defining it. New identifiers "+
 						"%v (missing from the database: %v); new body lines %d, of which "+
-						"the database has %v; lines the latest version removed that the "+
+						"the database has %v; new adjacent line pairs %d, of which the "+
+						"database has %v; lines the latest version removed that the "+
 						"database still has: %v.\n\n"+
 						"Almost certainly a test database that predates that migration: "+
 						"CREATE TABLE IF NOT EXISTS never adds a column and a stale "+
@@ -686,7 +737,8 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 						"store_backends_procedures_test.go's hardcoded list will NOT "+
 						"repair this -- it applies %v and nothing else.",
 						name, d.dir, latest.migration, len(defList),
-						discriminators, absent, len(newLines), lineEvidence, stillPresent,
+						discriminators, absent, len(newLines), lineEvidence,
+						len(newPairs), pairEvidence, stillPresent,
 						procedureMigrationsFor(d.dialect))
 				}
 			}

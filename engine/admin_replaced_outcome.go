@@ -69,10 +69,20 @@ type rowQueryer interface {
 // A missing row is not an error. The UPDATE that follows will match nothing and
 // the caller's existing zero-row path resolves it into the right message; this
 // returning nil keeps that one place in charge of saying so.
+//
+// PostgreSQL reads the error_* and completed_at columns from workflow_payloads,
+// where they live since cleat#3245's split (B1a moved this reader), and status
+// from workflow_leases (B3a). The row lock this tx already holds stays on
+// workflow_instances; this read takes no lock on either table.
 func readReplacedOutcome(ctx context.Context, q rowQueryer, d Dialect, workflowID, tenantID string) (*AdminReplacedOutcome, error) {
 	query := fmt.Sprintf(
 		"SELECT status, error_msg, error_code, error_op, completed_at FROM workflow_instances WHERE id = %s AND tenant_id = %s",
 		d.placeholder(1), d.placeholder(2))
+	if d == DialectPostgres {
+		query = "SELECT l.status, p.error_msg, p.error_code, p.error_op, p.completed_at" +
+			" FROM workflow_leases l JOIN workflow_payloads p ON p.id = l.id" +
+			" WHERE l.id = $1 AND l.tenant_id = $2"
+	}
 
 	var status string
 	var msg, code, op sql.NullString

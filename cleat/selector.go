@@ -1,6 +1,7 @@
 package cleat
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -30,16 +31,23 @@ const SelectorError = "__selector_error__"
 //	    // handle timeout, timerFired is true
 //	}
 //
-// Note: AddChildWorkflow support requires host-side infrastructure
-// (non-blocking child poll). Without it, child workflow futures are
-// not supported and will cause Select to return an error immediately.
+// Child workflows race the same way (AddChildWorkflow): a child that is
+// still running does not stop a timer or a signal from winning. See Select
+// for how a pending child is waited on.
 type Selector struct {
-	h            HostCalls
-	signals      []signalFuture
-	children     []childFuture
-	timers       []timerFuture
-	pollInterval time.Duration
-	err          error
+	h        HostCalls
+	signals  []signalFuture
+	children []childFuture
+	timers   []timerFuture
+	err      error
+
+	// While a child is pending alongside a timer or a signal, Select polls it
+	// (PollChild) between durable waits: the first wait is minChildPoll, each
+	// one after doubles, up to maxChildPoll. A child's completion does not
+	// wake a signal wait, so this bounds how late a completed child is seen;
+	// the doubling bounds how many durable waits a long race records.
+	minChildPoll time.Duration
+	maxChildPoll time.Duration
 }
 
 type signalFuture struct {
@@ -61,7 +69,8 @@ type timerFuture struct {
 func NewSelector(h HostCalls) *Selector {
 	return &Selector{
 		h:            h,
-		pollInterval: 100 * time.Millisecond,
+		minChildPoll: time.Second,
+		maxChildPoll: 30 * time.Second,
 	}
 }
 
@@ -74,11 +83,8 @@ func (s *Selector) AddSignal(name string, dest *string) {
 
 // AddChildWorkflow adds a child workflow future. When the child completes
 // before Select returns, *dest is populated with the result and Select
-// returns the runID.
-//
-// IMPORTANT: Requires host-side non-blocking child poll support. Without it,
-// child futures cause Select to return an error. For now, prefer signals
-// and timers.
+// returns the runID. A child that FAILED also resolves its future: Select
+// returns its runID, *dest is left alone, and Err() reports the failure.
 func (s *Selector) AddChildWorkflow(runID string, dest *string) {
 	s.children = append(s.children, childFuture{runID: runID, dest: dest})
 }
@@ -126,14 +132,27 @@ func (s *Selector) Err() error {
 }
 
 // Select blocks until one future resolves. It returns the signal name,
-// the child workflow runID, SelectorTimer, or SelectorError. The
-// corresponding destination pointer is populated before Select returns.
+// the child workflow runID, SelectorTimer, or "" with a non-nil Err() when
+// the host reports an error. The corresponding destination pointer is
+// populated before Select returns.
 //
-// Note: child workflow futures use AwaitChild which suspends the workflow
-// if the child has not yet completed. When mixed with signals, signals
-// are polled non-blocking first; children are checked via AwaitChild
-// which will suspend if no child has completed yet.
+// Every future is checked without blocking -- signals with PollSignal,
+// children with PollChild, timers against the durable clock -- and only then
+// does Select wait, so whichever resolves first wins:
+//
+//   - signals pending: AwaitSignals until the earliest timer, or until the
+//     next child poll if a child is pending;
+//   - no signals, a timer or a pending child to wait out: DurableSleep for
+//     the same bound;
+//   - only children: AwaitAnyChild, which suspends until one completes and
+//     needs no polling.
+//
+// Until cleat#3369 the children were checked with AwaitChild, which suspends
+// on a running child: the workflow then woke only for that child, and a
+// timer or signal added beside it could never win.
 func (s *Selector) Select() string {
+	s.err = nil
+	poll := s.minChildPoll
 	for {
 		// Check signals non-blocking.
 		for i := range s.signals {
@@ -147,51 +166,82 @@ func (s *Selector) Select() string {
 			}
 		}
 
-		// Check children. Uses AwaitChild which returns immediately if
-		// the child has completed (cached from replay or fresh from store),
-		// or suspends the workflow if the child is still running.
+		// Check children non-blocking. PollChild answers as of the durable
+		// clock, so a replay sees the same "running" the first run did.
+		var pending []string
 		for i := range s.children {
 			cf := &s.children[i]
-			result, err := s.h.AwaitChild(cf.runID)
-			if err == nil {
+			status, result, err := s.h.PollChild(cf.runID)
+			switch status {
+			case "completed":
 				if cf.dest != nil {
 					*cf.dest = result
 				}
 				return cf.runID
+			case "failed":
+				s.err = fmt.Errorf("child workflow %s failed: %v", cf.runID, err)
+				return cf.runID
+			case "running":
+				pending = append(pending, cf.runID)
+			default:
+				s.err = fmt.Errorf("polling child workflow %s: status %q: %v", cf.runID, status, err)
+				return ""
 			}
 		}
 
 		// Check timers. The earliest deadline wins, so a caller racing a
 		// short deadline against a long one is woken by the short one.
-		if i := s.earliestTimer(); i >= 0 {
-			if !s.h.Now().Before(s.timers[i].deadline) {
-				if s.timers[i].fired != nil {
-					*s.timers[i].fired = true
+		timer := s.earliestTimer()
+		if timer >= 0 && !s.h.Now().Before(s.timers[timer].deadline) {
+			if s.timers[timer].fired != nil {
+				*s.timers[timer].fired = true
+			}
+			return SelectorTimer
+		}
+
+		// Only children left to wait for: AwaitAnyChild suspends until one
+		// completes, with nothing to poll.
+		if len(s.signals) == 0 && timer < 0 && len(pending) > 0 {
+			runID, result, err := s.h.AwaitAnyChild(pending)
+			for i := range s.children {
+				cf := &s.children[i]
+				if cf.runID != runID {
+					continue
 				}
-				return SelectorTimer
+				if err != nil {
+					s.err = fmt.Errorf("child workflow %s failed: %v", runID, err)
+				} else if cf.dest != nil {
+					*cf.dest = result
+				}
+				return runID
+			}
+			s.err = fmt.Errorf("awaiting child workflows %v: %v", pending, err)
+			return ""
+		}
+
+		// How long the next wait may last: until the earliest deadline, and
+		// no longer than the next child poll while a child is pending.
+		wait := time.Duration(-1)
+		if timer >= 0 {
+			wait = s.timers[timer].deadline.Sub(s.h.Now())
+		}
+		toDeadline := timer >= 0
+		if len(pending) > 0 && (wait < 0 || poll < wait) {
+			wait, toDeadline = poll, false
+			if poll *= 2; poll > s.maxChildPoll {
+				poll = s.maxChildPoll
 			}
 		}
 
-		// If we have signals to wait for, use AwaitSignals with a timeout
-		// set to the nearest deadline.
 		if len(s.signals) > 0 {
 			names := make([]string, len(s.signals))
 			for i, sf := range s.signals {
 				names[i] = sf.name
 			}
-
-			timeout := 24 * time.Hour // effectively no timeout
-			if i := s.earliestTimer(); i >= 0 {
-				remaining := s.timers[i].deadline.Sub(s.h.Now())
-				if remaining < timeout {
-					timeout = remaining
-				}
-				if timeout < 0 {
-					timeout = 0
-				}
+			if wait < 0 {
+				wait = 24 * time.Hour // effectively no timeout
 			}
-
-			result := s.h.AwaitSignals(names, timeout)
+			result := s.h.AwaitSignals(names, wait)
 			if result.Err != nil {
 				// RECORD IT. This returned result.Name and nothing else, and
 				// on the error path result.Name is "" -- so a caller switching
@@ -216,26 +266,28 @@ func (s *Selector) Select() string {
 					}
 				}
 			}
-			// Timed out — loop back. The timer check at the top of the
-			// loop will fire if the deadline has passed.
+			// Timed out -- loop back. A timed-out wait is not proof the
+			// deadline passed (the clock decides that at the top of the
+			// loop), and a pending child is polled again.
 			continue
 		}
 
-		// No signals to wait for -- sleep until the EARLIEST deadline.
-		// Sleeping to the last-added one instead is the same defect as the
-		// discard it replaced, arriving late rather than never.
-		if i := s.earliestTimer(); i >= 0 {
-			remaining := s.timers[i].deadline.Sub(s.h.Now())
-			if remaining > 0 {
-				s.h.DurableSleep(remaining)
-			}
-			if s.timers[i].fired != nil {
-				*s.timers[i].fired = true
+		if wait < 0 {
+			// Nothing to wait for.
+			return ""
+		}
+		// No signals -- sleep until the EARLIEST deadline, or the next child
+		// poll. Sleeping to the last-added deadline instead is the same
+		// defect as the discard it replaced, arriving late rather than never.
+		if wait > 0 {
+			s.h.DurableSleep(wait)
+		}
+		if toDeadline {
+			if s.timers[timer].fired != nil {
+				*s.timers[timer].fired = true
 			}
 			return SelectorTimer
 		}
-
-		// Nothing to wait for.
-		return ""
+		// Woken to poll a pending child: check everything again.
 	}
 }

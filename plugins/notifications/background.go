@@ -218,9 +218,9 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	// matters if either of those has a bug or a race admits a delivery for a
 	// webhook that has since been soft-deleted.
 	var cfg webhookConfigRow
-	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1 AND deleted_at IS NULL
-		`, p.dialect), d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured)
+		`, d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured)
 	if err != nil {
 		return "", fmt.Errorf("lookup webhook config: %w", err)
 	}
@@ -317,7 +317,7 @@ func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, 
 	// attempt that was already under way when the delete committed the
 	// row's status to 'cancelled' would overwrite that back to 'delivered'
 	// afterward, resurrecting a delivery the tenant asked to stop.
-	_, err := p.db.Exec(ctx, plugin.Rebind(`
+	_, err := p.db.Exec(ctx, `
 			UPDATE webhook_delivery
 			SET status = 'delivered',
 			    attempt_count = $1,
@@ -326,7 +326,7 @@ func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, 
 			    response_code = $2,
 			    response_body = $3
 			WHERE id = $4 AND status IN ('pending', 'retrying')
-		`, p.dialect), attemptCount, statusCode, responseBody, id)
+		`, attemptCount, statusCode, responseBody, id)
 	if err != nil {
 		return fmt.Errorf("mark delivered: %w", err)
 	}
@@ -359,7 +359,7 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 			    response_body = $3
 			WHERE id = $4 AND status IN ('pending', 'retrying')
 		`, nowSQLExpr(p.dialect), nowPlusSecondsSQLExpr(p.dialect, "$2"))
-	_, err := p.db.Exec(ctx, plugin.Rebind(query, p.dialect), attemptCount, backoffSeconds, reason, id)
+	_, err := p.db.Exec(ctx, query, attemptCount, backoffSeconds, reason, id)
 	if err != nil {
 		return fmt.Errorf("mark retrying: %w", err)
 	}
@@ -373,14 +373,14 @@ func (p *Plugin) markFailed(ctx context.Context, id uuid.UUID, attemptCount int,
 	// AND status IN ('pending', 'retrying'): see markDelivered's comment --
 	// the same guard against resurrecting a delivery a concurrent delete
 	// already cancelled.
-	_, err := p.db.Exec(ctx, plugin.Rebind(`
+	_, err := p.db.Exec(ctx, `
 			UPDATE webhook_delivery
 			SET status = 'failed',
 			    attempt_count = $1,
 			    last_attempt_at = now(),
 			    response_body = $2
 			WHERE id = $3 AND status IN ('pending', 'retrying')
-		`, p.dialect), attemptCount, reason, id)
+		`, attemptCount, reason, id)
 	if err != nil {
 		return fmt.Errorf("mark failed: %w", err)
 	}

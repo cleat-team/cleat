@@ -357,8 +357,100 @@ linters:
       # else catches it. That is a gap worth closing separately; it is not a
       # reason to keep 140 findings that are all the test suite being a test
       # suite.
+      #
+      # A SECOND, DIFFERENT COST FROM THE OTHER DIRECTION (cleat#3239, cleat#3236):
+      # this filters the REPORT for test files, but gosec's taint rules
+      # (G701-G706) are evaluated PACKAGE-WIDE, before this exclusion ever
+      # applies -- so a taint SOURCE in a _test.go file still participates in
+      # the package's analysis, and the finding gosec reports can land on an
+      # unrelated PRODUCTION line that is not excluded. Measured on cleat#3236:
+      # a test file's `fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s", ...)`
+      # (textbook G701 taint) produced a G701 report on
+      # engine/mssql_deployment.go:174, in code the test file never touched,
+      # which read as a real injection in production until isolated. If you
+      # see a surprise gosec finding on a line that looks clean, check whether
+      # a _test.go file in the SAME PACKAGE has dynamic SQL/exec/path
+      # construction before trusting the reported line -- it may be yours, or
+      # it may belong to this exclusion's blind spot.
+      #
+      # THE DIAGNOSTIC THAT FOUND IT, kept here because it generalises past
+      # this one instance: isolate file-at-a-time in a throwaway worktree at
+      # the branch's base commit, adding files back one at a time, and re-run
+      # the exact command `lint-go` runs until the finding appears --
+      # whichever file's addition makes it appear is the one actually
+      # generating it, regardless of which line the report names.
+      #
+      #   git worktree add /tmp/gosec-iso <base-sha>
+      #   cd /tmp/gosec-iso && git checkout <branch> -- <file1>
+      #   golangci-lint run --timeout=20m -c .golangci.yml --enable-only gosec ./<pkg>/...
+      #   # repeat, adding one more file per run, until the finding appears
+      #
+      # No GOTOOLCHAIN override needed with the repo's current pins
+      # (golangci-lint 2.14.0, go.work's own toolchain directive) -- verified
+      # 2026-10-09 running this literally. See cleat#3266 for why an older,
+      # similar-looking recipe elsewhere in this repo asserts one that is no
+      # longer real.
+      #
+      # NOT YET WORTH BUILDING: a future gosec release may report the taint
+      # SOURCE's location rather than (or in addition to) the sink's -- if it
+      # ever does, this exclusion would then correctly hide a test-only
+      # finding instead of letting it misattribute to production, and the
+      # cost above would need re-reading. Check this when gosec's own version
+      # next bumps rather than guessing now.
       - path: '_test\.go'
         linters: [gosec]
+
+      # A THIRD, SEPARATE gosec taint hazard (cleat#3247, follow-up to cleat#3246):
+      # a G701/G706 finding can flip between present and absent across otherwise-
+      # identical runs of golangci-lint, on byte-identical source, with no code
+      # change and no config change. This is not a flaky TEST; it is gosec's own
+      # analysis producing a different verdict on the same input.
+      #
+      # ROOT CAUSE (confirmed by direct source reading of gosec v2.29.0, the
+      # version golangci-lint v2.14.0 currently embeds, plus an in-process
+      # reproduction that holds the built *ssa.Program fixed and only re-runs
+      # call-graph construction -- see scripts/gosec-taint-cha-nondeterminism-repro.go):
+      # gosec's taint/taint.go caps how many of a function's CALLERS it will
+      # examine for taint (`maxCallerEdges = 32`, to bound CHA's interface-call
+      # over-approximation), and the order it examines them in comes from
+      # golang.org/x/tools/go/callgraph/cha.CallGraph, which iterates a Go MAP
+      # (`ssautil.AllFunctions(prog)`) to decide which edges to record first.
+      # Go randomizes map iteration order per process, so on any function with
+      # more than 32 callers -- measured on this repo's engine/ package
+      # (including _test.go files, since gosec analyzes those too, per the
+      # exclusion block above): 6597 of 69040 call-graph nodes qualify -- WHICH
+      # 32 callers gosec actually looks at changes from run to run, even though
+      # the full caller set never does.
+      #
+      # This is already a known, upstream, FIXED-BUT-UNRELEASED gosec defect:
+      # securego/gosec#1711 / #1712, fixed on gosec's `master` by PR #1733
+      # (merged 2026-09-04: sorts callers deterministically and raises the cap
+      # to 1024). v2.29.0 (2026-08-26, what golangci-lint v2.14.0 embeds)
+      # predates that fix by nine days, and as of 2026-10-09 gosec has cut no
+      # new tag since -- `master` is 31 commits ahead of v2.29.0 with the fix
+      # unreleased. There is nothing to upgrade to yet.
+      #
+      # THE COST: any dynamically-built query/command/path reached through a
+      # widely-called helper (QueryBuilder is exactly this shape) can trigger
+      # this on an otherwise-correct PR, costing a merge-queue cycle, or get
+      # "fixed" by a change that did nothing (the finding was never about that
+      # commit). cleat#3246/PR #3248 hit this on MSSQLStore.ListWorkflows and
+      # suppressed that ONE instance with a reasoned //nolint:gosec; it will
+      # recur on a different line, not because the new line is unsafe, but
+      # because its underlying helper also has a wide caller set.
+      #
+      # WHAT TO DO ABOUT A NEW INSTANCE: do not add a blanket gosec exclusion
+      # for this -- it would hide real G701 findings too. Do what cleat#3246
+      # did: read every call site of the dynamically-built value by hand (not
+      # by rerunning the linter, which cannot distinguish a real finding from
+      # this hazard), confirm no caller-supplied value is concatenated, and
+      # suppress that one line with a //nolint:gosec documenting the read,
+      # same as engine/mssql_deployment.go's ListWorkflows.
+      #
+      # CHECK THIS WHEN gosec'S VERSION NEXT BUMPS: re-run
+      # scripts/gosec-taint-cha-nondeterminism-repro.go's logic (or just watch
+      # whether this class of finding stops flipping) once golangci-lint
+      # embeds a gosec release that includes PR #1733.
 
       # ---- gosec rules v1's gosec did not have (cleat#2216) --------------------------------------------
       # Each is scoped to the files it was read in. A NEW finding of the same rule anywhere else is reported.

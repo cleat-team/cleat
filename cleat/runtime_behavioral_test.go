@@ -1469,13 +1469,15 @@ func TestSelectorErrorPreserved(t *testing.T) {
 	_ = winner
 }
 
-func TestSelectorAddChildReturnsError(t *testing.T) {
+// A child future is polled (cleat#3369); a host that cannot answer the poll
+// is an error the caller can see, not a hang and not a winner.
+func TestSelectorChildPollErrorIsReported(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		PollSignal: func(name string) (string, bool, error) {
 			return "", false, nil
 		},
-		AwaitChild: func(runID string) (string, error) {
-			return "", errors.New("child not ready")
+		PollChild: func(runID string) (string, string, error) {
+			return "", "", errors.New("store unavailable")
 		},
 		Now: func() int64 {
 			return 1000
@@ -1483,7 +1485,9 @@ func TestSelectorAddChildReturnsError(t *testing.T) {
 	})
 	s := NewSelector(h)
 	s.AddChildWorkflow("child-run", new(string))
-	_ = s.Select()
+	if winner := s.Select(); winner != "" || s.Err() == nil {
+		t.Errorf("winner %q, err %v; want \"\" and the poll error", winner, s.Err())
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1722,7 +1726,7 @@ func TestHostCallsImpl_DurableFetchDelegation(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		DurableCall: func(svc, op, req string) (string, error) {
 			captured = true
-			return `{"status_code":200,"body":"ok"}`, nil
+			return `{"status":200,"headers":{},"body":"ok"}`, nil
 		},
 	})
 	resp, code, err := h.DurableFetch("http://example.com", "GET", nil, "")
@@ -1740,10 +1744,42 @@ func TestHostCallsImpl_DurableFetchDelegation(t *testing.T) {
 	}
 }
 
+// cleat#3408. The stubs in this file answered {"status_code":...} for as long as
+// DurableFetch read that key, which is why it returned 0 for every response on a
+// real worker without a test noticing. The worker, and the embedded runner, answer
+// {"status":N,"headers":{...},"body":"..."}; the stubs above now say the same.
+// cmd/cleat-worker/durablefetch_decodes_the_workers_response_test.go runs the
+// decoder against the real handler. This pins the key handling itself.
+func TestHostCallsImpl_DurableFetchStatusKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, resp string
+		want       int
+	}{
+		{"the worker's key", `{"status":418,"headers":{},"body":"x"}`, 418},
+		{"the old key, from an embedder's Fetcher", `{"status_code":201,"body":"x"}`, 201},
+		{"both: status wins", `{"status":404,"status_code":200,"body":"x"}`, 404},
+		{"a present status of 0 is not replaced by the old key", `{"status":0,"status_code":200,"body":"x"}`, 0},
+		{"neither", `{"body":"x"}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHostCalls(HostCallsOptions{
+				DurableCall: func(svc, op, req string) (string, error) { return tc.resp, nil },
+			})
+			body, code, err := h.DurableFetch("http://example.com", "GET", nil, "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if body != "x" || code != tc.want {
+				t.Errorf("got (%q, %d), want (\"x\", %d)", body, code, tc.want)
+			}
+		})
+	}
+}
+
 func TestHostCallsImpl_DurableFetchJSONDelegation(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		DurableCall: func(svc, op, req string) (string, error) {
-			return `{"status_code":200,"body":"{\"result\":\"ok\"}"}`, nil
+			return `{"status":200,"headers":{},"body":"{\"result\":\"ok\"}"}`, nil
 		},
 	})
 	var result struct {
@@ -1763,7 +1799,7 @@ func TestHostCallsImpl_FetchGetDelegation(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		DurableCall: func(svc, op, req string) (string, error) {
 			captured = true
-			return `{"status_code":200,"body":"get-result"}`, nil
+			return `{"status":200,"headers":{},"body":"get-result"}`, nil
 		},
 	})
 	resp, code, err := h.FetchGet("http://example.com")
@@ -1784,7 +1820,7 @@ func TestHostCallsImpl_FetchGetDelegation(t *testing.T) {
 func TestHostCallsImpl_FetchGetJSONDelegation(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		DurableCall: func(svc, op, req string) (string, error) {
-			return `{"status_code":200,"body":"{\"val\":42}"}`, nil
+			return `{"status":200,"headers":{},"body":"{\"val\":42}"}`, nil
 		},
 	})
 	var result struct {

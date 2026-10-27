@@ -25,14 +25,14 @@ func TestASecretRoundTripsUnderItsOwnTenantKey(t *testing.T) {
 	const tenant = "11111111-1111-1111-1111-111111111111"
 	const value = `sk-live-abc123 with "quotes" and \a backslash`
 
-	sealed, err := s.seal(tenant, value)
+	sealed, err := s.seal(s.ring.Load(), tenant, value)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	if strings.Contains(sealed, "sk-live") {
 		t.Fatal("the sealed form contains the plaintext")
 	}
-	got, err := s.open(tenant, sealed, 1)
+	got, err := s.open(s.ring.Load(), tenant, sealed, 1)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -49,11 +49,11 @@ func TestASecretDoesNotOpenUnderAnotherTenant(t *testing.T) {
 	const a = "11111111-1111-1111-1111-111111111111"
 	const b = "22222222-2222-2222-2222-222222222222"
 
-	sealed, err := s.seal(a, "tenant-a-key")
+	sealed, err := s.seal(s.ring.Load(), a, "tenant-a-key")
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if _, err := s.open(b, sealed, 1); err == nil {
+	if _, err := s.open(s.ring.Load(), b, sealed, 1); err == nil {
 		t.Fatal("tenant B opened tenant A's ciphertext")
 	}
 }
@@ -64,11 +64,11 @@ func TestASecretDoesNotOpenUnderAnotherMasterKey(t *testing.T) {
 	other, _ := MasterKeyFromEnv(base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210")))
 	s2, _ := NewSecretStore(nil, "postgres", other)
 
-	sealed, err := s1.seal(tenant, "value")
+	sealed, err := s1.seal(s1.ring.Load(), tenant, "value")
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if _, err := s2.open(tenant, sealed, 1); err == nil {
+	if _, err := s2.open(s2.ring.Load(), tenant, sealed, 1); err == nil {
 		t.Fatal("a different deployment key opened the ciphertext")
 	}
 }

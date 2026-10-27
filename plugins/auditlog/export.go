@@ -127,8 +127,8 @@ func ExportTenant(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialec
 	var headSeq, floorSeq int64
 	var headHash, floorHash string
 	bound := int64(math.MaxInt64)
-	err = plugin.ScanRow(db.QueryRow(ctx, plugin.Rebind(
-		`SELECT seq, hash, floor_seq, floor_hash FROM audit_chain_heads WHERE tenant_id = $1`, dialect), tenant),
+	err = plugin.ScanRow(db.QueryRow(ctx,
+		`SELECT seq, hash, floor_seq, floor_hash FROM audit_chain_heads WHERE tenant_id = $1`, tenant),
 		&headSeq, &headHash, &floorSeq, &floorHash)
 	switch {
 	case err == nil:
@@ -256,12 +256,12 @@ func exportPage(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 	}
 	limit := next(exportPageSize)
 
-	query := plugin.Rebind(fmt.Sprintf(`
+	query := fmt.Sprintf(`
 		SELECT id, seq, %s, method, path, status_code, user_id, ip_address, user_agent, duration_ms, metadata,
 		       prev_hash, row_hash
 		FROM audit_events
 		WHERE %s
-		ORDER BY %s %s`, ts, strings.Join(where, " AND "), order, plugin.LimitClause(limit, dialect)), dialect)
+		ORDER BY %s %s`, ts, strings.Join(where, " AND "), order, plugin.LimitClause(limit, dialect))
 
 	// A deadlock victim (SQL Server picks a reader against a retention sweep) is repeated:
 	// nothing of this page has been emitted yet.

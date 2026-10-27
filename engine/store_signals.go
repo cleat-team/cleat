@@ -19,12 +19,22 @@ func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, rea
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET cancellation_requested = true, cancellation_reason = $2
-		WHERE id = $1
-	`, workflowID, reason)
+	// cleat#2312: cancellation_reason is sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
 	if err != nil {
+		return fmt.Errorf("request cancellation: derive tenant key: %w", err)
+	}
+	sealedReason, err := encryptTextColumnForStorage(reason, tc)
+	if err != nil {
+		return fmt.Errorf("request cancellation: encrypt reason: %w", err)
+	}
+
+	// cleat#3245 Phase 3 step 2 piece 5a wrote this to workflow_instances
+	// first and mirrored it onto workflow_leases. cleat#3360 dropped
+	// cancellation_requested/cancellation_reason from workflow_instances --
+	// CheckCancellation has read workflow_leases exclusively since piece D,
+	// so workflow_leases is the only copy left to write.
+	if err := setLeaseCancellation(ctx, tx, workflowID, sealedReason); err != nil {
 		return err
 	}
 
@@ -42,14 +52,25 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 
 	var cancelled bool
 	var reason sql.NullString
+	// cleat#3245 Phase 3 step 3 piece D: reads workflow_leases rather than
+	// workflow_instances. cancellation_requested/cancellation_reason are
+	// grouped with the other lease columns by migration 016 (folded into migrations/postgres/001_schema.sql by #3358)'s own design
+	// note (checked on the hot resume/heartbeat path), and every writer
+	// (RequestCancellation, via setLeaseCancellation) writes them there,
+	// step 2 piece 5a.
 	err = tx.QueryRowContext(ctx, `
 		SELECT cancellation_requested, cancellation_reason
-		FROM workflow_instances WHERE id = $1
+		FROM workflow_leases WHERE id = $1
 	`, workflowID).Scan(&cancelled, &reason)
 	if err != nil {
 		return false, "", err
 	}
-	return cancelled, reason.String, tx.Commit()
+	// cleat#2312.
+	decrypted, decErr := s.decryptTextColumnFromStorage(reason.String, "cancellation_reason")
+	if decErr != nil {
+		return cancelled, decrypted, fmt.Errorf("check cancellation: %w", decErr)
+	}
+	return cancelled, decrypted, tx.Commit()
 }
 
 // ConsumeSignal satisfies the SignalStore interface.
@@ -88,11 +109,9 @@ func (s *PostgresStore) ConsumeSignal(ctx context.Context, workflowID string, id
 	`, id, workflowID); err != nil {
 		return fmt.Errorf("consume signal: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
-		WHERE id = $1
-	`, workflowID); err != nil {
-		return fmt.Errorf("consume signal: bump consumed counter: %w", err)
+	// Since cleat#3245 B3c the lease row holds the only copy written.
+	if err := bumpLeaseSignalConsumedSeq(ctx, tx, workflowID); err != nil {
+		return fmt.Errorf("consume signal: %w", err)
 	}
 	return tx.Commit()
 }
@@ -209,7 +228,12 @@ func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID,
 		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
 	}
 
-	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
+	// cleat#2312: signal payload is sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: derive tenant key: %w", err)
+	}
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
 		return false, err
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
@@ -247,7 +271,12 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 		return fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
-	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
+	// cleat#2312: signal payload is sensitive-at-rest.
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("deliver signal: derive tenant key: %w", err)
+	}
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload, tc); err != nil {
 		return err
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
@@ -260,8 +289,16 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 // copy of these two writes is exactly the shape this repo keeps paying for --
 // GetChildResult and GetChildCount held two definitions of "terminal" forty
 // lines apart, and only one of them decided anything (cleat#1213).
-func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, signalName, payload string) error {
+func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, signalName, payload string, tc *tenantCipher) error {
 	payload = encodeJSONPayload(payload)
+	// cleat#2312. encodeJSONPayload above guarantees non-empty valid JSON,
+	// so encryptJSONColumnForStorage's one empty-string special case never
+	// applies here.
+	sealedPayload, err := encryptJSONColumnForStorage(payload, tc)
+	if err != nil {
+		return fmt.Errorf("deliver signal: encrypt payload: %w", err)
+	}
+	payload = sealedPayload
 	// It carried ON CONFLICT (workflow_id, signal_name) DO UPDATE until 3.215,
 	// which discarded the earlier payload with no error -- so a workflow
 	// collecting one approval per reviewer saw only the last. The conflict is
@@ -361,12 +398,10 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
 	// DeliverSignalNonexistentID cases; IMPROVEMENT-PLAN 3.86/3.215;
 	// cleat#2218, cleat#2227.)
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET signal_seq = signal_seq + 1,
-		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
-		WHERE id = $1
-	`, workflowID); err != nil {
+	// Since cleat#3245 B3c the lease row holds the only copy written. A free
+	// function, like deliverSignalTx itself, which DeliverSignal and
+	// DeliverSignalIdempotent share.
+	if err := bumpLeaseSignalSeqAndWake(ctx, tx, workflowID); err != nil {
 		return err
 	}
 	return nil
@@ -411,9 +446,15 @@ func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName s
 	if err != nil {
 		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
+	// cleat#2312: decrypt before decodeJSONPayload -- this feeds the guest's
+	// PollSignal host call, not only display.
+	decrypted, derr := s.decryptPayloadJSON(payload)
+	if derr != nil {
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", derr)
+	}
 	return SignalDelivery{
 		ID:            id,
-		Payload:       decodeJSONPayload(payload),
+		Payload:       decodeJSONPayload(decrypted),
 		DeliveredAtMs: deliveredAt.UnixMilli(),
 	}, true, tx.Commit()
 }
@@ -441,7 +482,7 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 
 	var raw sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT allowed_signals FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+		`SELECT allowed_signals FROM workflow_payloads WHERE id = $1 AND tenant_id = $2`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		if cerr := tx.Commit(); cerr != nil {
@@ -557,11 +598,14 @@ func (s *PostgresStore) SetAllowedSignalCallers(ctx context.Context, workflowID 
 	}
 	defer tx.Rollback()
 
+	// allowed_signals is a workflow_payloads column, written only there since
+	// cleat#3245 B1b.
+	//
 	// tenant_id in the predicate as well as RLS underneath it. On PostgreSQL
 	// the policy would be enough; carrying it here keeps the three dialects'
 	// statements the same shape, and MySQL has no policy to fall back on.
 	res, err := tx.ExecContext(ctx,
-		`UPDATE workflow_instances SET allowed_signals = $1 WHERE id = $2 AND tenant_id = $3`,
+		`UPDATE workflow_payloads SET allowed_signals = $1 WHERE id = $2 AND tenant_id = $3`,
 		encoded, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("set allowed signal callers: %w", err)
@@ -596,6 +640,52 @@ func encodeAllowedSignals(callers []string) (sql.NullString, error) {
 		return sql.NullString{}, fmt.Errorf("encode allowed signals: %w", err)
 	}
 	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+// bumpLeaseSignalSeqAndWake is deliverSignalTx's signal_seq bump and
+// conditional wake on workflow_leases, the only copy written since cleat#3245
+// B3c, on the same tx -- cleat#3245 Phase 3
+// step 2, piece 5a. Free function, not a *PostgresStore method: deliverSignalTx
+// itself has no store receiver (shared by DeliverSignal and
+// DeliverSignalIdempotent), and this mirror needs nothing from the store
+// beyond the transaction.
+func bumpLeaseSignalSeqAndWake(ctx context.Context, tx *sql.Tx, workflowID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET signal_seq = signal_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// bumpLeaseSignalConsumedSeq is ConsumeSignal's signal_consumed_seq bump on
+// workflow_leases, the only copy written since cleat#3245 B3c.
+func bumpLeaseSignalConsumedSeq(ctx context.Context, tx *sql.Tx, workflowID string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases SET signal_consumed_seq = signal_consumed_seq + 1
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
+}
+
+// setLeaseCancellation mirrors RequestCancellation's write onto
+// workflow_leases, on the same tx -- cleat#3245 Phase 3 step 2, piece 5a.
+// sealedReason is whatever RequestCancellation already encrypted (cleat#2312),
+// reused rather than re-sealed, so the two tables carry identical ciphertext.
+func setLeaseCancellation(ctx context.Context, tx *sql.Tx, workflowID string, sealedReason any) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_leases
+		SET cancellation_requested = true, cancellation_reason = $2
+		WHERE id = $1
+	`, workflowID, sealedReason); err != nil {
+		return fmt.Errorf("mirror lease row: %w", err)
+	}
+	return nil
 }
 
 // GetQueryState returns the value for a key in the workflow's query_state JSONB.

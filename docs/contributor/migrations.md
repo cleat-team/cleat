@@ -162,19 +162,29 @@ else:
   check on a freshly-migrated database would therefore test nothing. Assert the role exists; do
   not assert who is in it.
 - **SQL Server's object grants used to be entirely the server's, and that stopped being true at
-  `migrations/mssql/008_app_login.sql` (cleat#2203).** A `sys.database_permissions` read returns
-  **229 rows even in a brand-new empty database** (dbo 1, `public` 2 database-level, `public` 226
+  `migrations/mssql/008_app_login.sql` (cleat#2203), now folded into `001_schema.sql`
+  (cleat#3349's re-compaction) — and the generator had to gain a `readGrants` to carry it, having
+  shipped with none.** A `sys.database_permissions` read returns
+  **229 rows even in a brand-new empty database** (a handful database-level, the rest
   object-level), all on server-supplied objects like `sys.dm_pdw_nodes_os_tasks` — this part still
-  holds, and is why `migration/catalogdiff/mssql.go`'s own grant query filters to `dp.class = 1`
-  (object-level) joined against `sys.objects`, rather than dumping the view raw. **That filter is
-  also, incidentally, why cleat_app's own grants do not show up in it**: they are schema-level
-  (`GRANT ... ON SCHEMA::dbo`, `class = 3`) and the one object-level statement is a `DENY`
-  (`state = 'D'`), not a `GRANT` (`state = 'G'`) — so the comparator's existing "compare server
-  defaults to server defaults" property survives by not modeling either kind, not because neither
-  kind exists any more. A generator that *dumps* `sys.database_permissions` raw would still write
-  229 server defaults into the baseline as if they were schema, and would now also need to decide
-  what to do with real ones. Filter to what the migrations created, as today — or emit none at all,
-  the same choice this note gave before cleat_app existed.
+  holds, and is why `migration/catalogdiff/mssql.go`'s own grant query joins against `sys.objects`
+  and `sys.schemas` rather than dumping the view raw: both views exclude `is_ms_shipped` objects by
+  their own definition, so a join against either is a safe filter regardless of which `class`/
+  `state` values the query selects for.
+  **That property is what makes the fix below safe, and it is also why the gap below went
+  unnoticed for as long as it did: the safe filter and the narrow one looked like the same
+  filter.** `migrate#2446` found that `cleat_app`'s own grants were *also* invisible: they are
+  schema-level (`GRANT ... ON SCHEMA::dbo`, `class = 3`) and the one object-level statement is a
+  `DENY` (`state = 'D'`), not a `GRANT` (`state = 'G'`) — and the query used to filter to
+  `class = 1 AND state = 'G'` only. Measured before the fix: `Snapshot`'s `Grants` was empty for a
+  role carrying thirteen live `GRANT`/`DENY` rows, and `-mode=diff` reported 0 differences between a
+  database with the full `cleat_app_role` security model and a second one with every one of those
+  thirteen permissions explicitly revoked. **Fixed by widening the filter to `class IN (1, 3)` and
+  `state IN ('G', 'D')`, not by dumping the view raw** — the `sys.objects`/`sys.schemas` join still
+  does the real filtering, so the widened query reports 0 grants on a brand-new empty database (the
+  same negative control this note describes) and exactly the thirteen real ones on a chain-built
+  database. `state IN ('G','D')` only, not `'W'` (`GRANT ... WITH GRANT OPTION`): nothing in this
+  chain uses it, so adding it would compare a class of statement nobody issues.
 - **MySQL's grants are real and the per-database diff can see them, but the obvious query embeds
   the one thing that is never the same twice.** `information_schema.table_privileges.table_schema`
   *is* the database name on MySQL — there is no narrower schema underneath it — so a grant string
@@ -209,7 +219,9 @@ none** — with a known-positive, since a check for an absent string passes on a
 > The trap to know about, because it has caught two sessions: `migrations/mysql/077_…:20-22`
 > contains the word `DEFINER` in a comment reading *"There is no function to rebuild:
 > `admin.get_due_schedules()` is a PostgreSQL SECURITY DEFINER function serving the cross-tenant
-> read, and MySQL's cross-tenant path is a plain unscoped SELECT"*. It is an explicit denial. A
+> read, and MySQL's cross-tenant path is a plain unscoped SELECT"*. (Both halves of that sentence
+> are historical: the worker no longer calls that function, and MySQL has no cross-tenant path at
+> all -- its store cannot enumerate tenants, so a MySQL worker claims its own tenant only.) It is an explicit denial. A
 > `grep -c DEFINER` counts it and a reader may take the count as a finding — which is the
 > "an explicit denial, read as a confirmation" trap, in the one place the rule is easiest to apply
 > and easiest to forget.

@@ -389,8 +389,11 @@ func (m *workloadMetrics) errorRate() float64 {
 // claim, append its event mix, complete, and -- on a sample -- verify the
 // checksum chain. It returns the first error the store returned.
 func runOne(ctx context.Context, store *engine.PostgresStore, db *sql.DB, workerID string, wt workflowType, id string, verify bool) error {
-	if _, err := db.ExecContext(ctx, `INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES ($1, 'test', 1, 'ready', '{}', $2)`, id, soakQueue); err != nil {
+	// SeedRunErr rather than SeedRun: this runs in worker goroutines and
+	// returns each error to the sampler instead of failing the test. It writes
+	// the run's workflow_instances, workflow_leases and workflow_payloads rows,
+	// which ClaimWorkflow's candidate scan reads (cleat#3245).
+	if err := testutil.SeedRunErr(ctx, db, testutil.RunSeed{ID: id, DefName: "test", TaskQueue: soakQueue}); err != nil {
 		return fmt.Errorf("insert %s: %w", id, err)
 	}
 
@@ -635,7 +638,7 @@ sampling:
 	// having executed nothing at all. Rows in 'done' cannot be faked that
 	// way; only CompleteWorkflow puts them there.
 	var done int64
-	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances WHERE id LIKE 'soak-%' AND status = 'done'`).Scan(&done); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_leases WHERE id LIKE 'soak-%' AND status = 'done'`).Scan(&done); err != nil {
 		t.Fatalf("count completed workflows: %v", err)
 	}
 	t.Logf("  Reached 'done' in the database: %d", done)

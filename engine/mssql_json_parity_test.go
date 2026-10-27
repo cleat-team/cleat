@@ -94,7 +94,12 @@ func TestMSSQLValidatesEveryPostgresJSONBColumn(t *testing.T) {
 		t.Errorf("PostgreSQL declares these JSONB, but SQL Server has no ISJSON check:\n  %s\n\n"+
 			"(%d JSONB columns checked.) Add a CHECK in a new migrations/mssql file, "+
 			"WITH NOCHECK and tolerating NULL where the PostgreSQL column is nullable -- see "+
-			"migrations/mssql/037_json_column_checks.sql. If a column genuinely should not be "+
+			"ck_workflow_defs_dag_spec or ck_workflow_defs_entry_point_schemas, both in "+
+			"migrations/mssql/001_schema.sql, for the shape (the latter was itself a standalone "+
+			"migrations/mssql/015_*.sql once, cleat#3355, folded into the baseline by cleat#3349's "+
+			"re-compaction -- this message cited that file by name for exactly as long as it existed "+
+			"on its own, the same way it once cited the now-folded 037_json_column_checks.sql, "+
+			"cleat#2434). If a column genuinely should not be "+
 			"constrained, the fix is to stop declaring it JSONB on PostgreSQL, because that "+
 			"declaration is the claim this guard enforces.",
 			strings.Join(missing, "\n  "), checked)

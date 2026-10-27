@@ -179,8 +179,8 @@ type chainHead struct {
 
 func readHead(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect, tenant uuid.UUID) (chainHead, bool, error) {
 	var h chainHead
-	err := plugin.ScanRow(db.QueryRow(ctx, plugin.Rebind(
-		`SELECT seq, hash, floor_seq, floor_hash, floor_ts FROM audit_chain_heads WHERE tenant_id = $1`, dialect), tenant),
+	err := plugin.ScanRow(db.QueryRow(ctx,
+		`SELECT seq, hash, floor_seq, floor_hash, floor_ts FROM audit_chain_heads WHERE tenant_id = $1`, tenant),
 		&h.seq, &h.hash, &h.floorSeq, &h.floorHash, &h.floorTS)
 	switch {
 	case err == nil:
@@ -202,8 +202,8 @@ func verifyOnce(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 	rep.HeadSeq, rep.FloorSeq = head.seq, head.floorSeq
 	rep.HeadHash, rep.FloorHash = head.hash, head.floorHash
 
-	if err := db.QueryRow(ctx, plugin.Rebind(
-		`SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND seq IS NULL`, dialect), tenant).Scan(&rep.Unchained); err != nil {
+	if err := db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND seq IS NULL`, tenant).Scan(&rep.Unchained); err != nil {
 		return rep, fmt.Errorf("audit verify: count unchained rows: %w", err)
 	}
 
@@ -218,8 +218,8 @@ func verifyOnce(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 	if haveHead && head.floorSeq > 0 {
 		var below int64
 		var lowest sql.NullInt64
-		if err := db.QueryRow(ctx, plugin.Rebind(
-			`SELECT COUNT(*), MIN(seq) FROM audit_events WHERE tenant_id = $1 AND seq IS NOT NULL AND seq <= $2`, dialect),
+		if err := db.QueryRow(ctx,
+			`SELECT COUNT(*), MIN(seq) FROM audit_events WHERE tenant_id = $1 AND seq IS NOT NULL AND seq <= $2`,
 			tenant, head.floorSeq).Scan(&below, &lowest); err != nil {
 			return rep, fmt.Errorf("audit verify: look for rows below the floor: %w", err)
 		}
@@ -266,12 +266,12 @@ func verifyOnce(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect,
 	var lastSeq int64
 	var lastHash string
 
-	query := plugin.Rebind(fmt.Sprintf(`
+	query := fmt.Sprintf(`
 		SELECT seq, id, %s, method, path, status_code, user_id, ip_address, user_agent, duration_ms, metadata,
 		       prev_hash, row_hash
 		FROM audit_events
 		WHERE tenant_id = $1 AND seq IS NOT NULL AND seq > $2 AND seq <= $3
-		ORDER BY seq %s`, epochMicrosExpr(dialect, "timestamp"), plugin.LimitClause("$4", dialect)), dialect)
+		ORDER BY seq %s`, epochMicrosExpr(dialect, "timestamp"), plugin.LimitClause("$4", dialect))
 
 scan:
 	for {
@@ -324,8 +324,8 @@ scan:
 	// append as extra rows.
 	var maxBeyond sql.NullInt64
 	if haveHead {
-		if err := db.QueryRow(ctx, plugin.Rebind(
-			`SELECT MAX(seq) FROM audit_events WHERE tenant_id = $1 AND seq > $2`, dialect), tenant, head.seq).Scan(&maxBeyond); err != nil {
+		if err := db.QueryRow(ctx,
+			`SELECT MAX(seq) FROM audit_events WHERE tenant_id = $1 AND seq > $2`, tenant, head.seq).Scan(&maxBeyond); err != nil {
 			return rep, fmt.Errorf("audit verify: look for rows beyond the head: %w", err)
 		}
 	}

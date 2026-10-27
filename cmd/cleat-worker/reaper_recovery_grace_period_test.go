@@ -60,6 +60,41 @@ func withDBCallDeadlineFloor(t *testing.T, floor time.Duration) {
 	t.Cleanup(func() { dbCallDeadlineFloor = old })
 }
 
+// withMaxTolerableStallAndMssqlDrainSlack substitutes maxTolerableStall and
+// mssqlDrainSlack for the remainder of the calling test (restored via
+// t.Cleanup), the same pattern withDBCallDeadlineFloor uses above and for
+// the same reason: ROUND 6 (cleat#3258) added both as FIXED terms to
+// minimumReclaimAfter, so at millisecond-scale heartbeat intervals the live
+// reclaimTimeout jumped from ~700ms-1700ms to ~36.6s, past every fixed
+// real-wall-clock checkpoint these timing tests were built around -- see
+// maxTolerableStall's own doc for the measured vacuity this caused (three
+// tests, not just the two cleat-review's first pass found). Never call this
+// from a test that is actually about either constant itself.
+func withMaxTolerableStallAndMssqlDrainSlack(t *testing.T, stall, drain time.Duration) {
+	t.Helper()
+	oldStall, oldDrain := maxTolerableStall, mssqlDrainSlack
+	maxTolerableStall, mssqlDrainSlack = stall, drain
+	t.Cleanup(func() { maxTolerableStall, mssqlDrainSlack = oldStall, oldDrain })
+}
+
+// withReclaimSlack substitutes reclaimSlack for the remainder of the calling
+// test, same pattern as withDBCallDeadlineFloor and
+// withMaxTolerableStallAndMssqlDrainSlack above. Separate from that helper
+// because reclaimSlack has the OPPOSITE need here: most tests in this file
+// want it real (several, like
+// TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack,
+// exist specifically to test its presence), and only
+// TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne
+// -- which predates round 5 and checks a different term entirely -- needs
+// it zeroed. See reclaimSlack's own doc for why that one test has been
+// silently vacuous since round 5, independent of round 6.
+func withReclaimSlack(t *testing.T, slack time.Duration) {
+	t.Helper()
+	old := reclaimSlack
+	reclaimSlack = slack
+	t.Cleanup(func() { reclaimSlack = old })
+}
+
 // pingingMockStore adds a controllable DBPinger to mockStore. mockStore
 // itself deliberately does NOT implement DBPinger -- see DBPinger's doc for
 // why that has to stay true for every other test in this package -- so this
@@ -473,6 +508,10 @@ func testIdleWorkerDoesNotReclaimAcrossStall(t *testing.T, stallDuration time.Du
 // invariant, it must not.
 func TestASlowHeartbeatCycleDoesNotOpenAGapWiderThanReclaimAfterAllows(t *testing.T) {
 	withDBCallDeadlineFloor(t, time.Millisecond)
+	// Neutralizes ROUND 6's two fixed additions so the live
+	// minimumReclaimAfter stays at the millisecond scale this test's own
+	// checkpoints were built around -- see that function's doc.
+	withMaxTolerableStallAndMssqlDrainSlack(t, 0, 0)
 	const heartbeatInterval = 200 * time.Millisecond // dbCallDeadline() = 100ms
 
 	run := func(reclaimTimeout time.Duration) (sawStale bool, maxGap time.Duration) {
@@ -595,6 +634,16 @@ func TestASlowHeartbeatCycleDoesNotOpenAGapWiderThanReclaimAfterAllows(t *testin
 // falsification note at the end of this function.
 func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNewOne(t *testing.T) {
 	withDBCallDeadlineFloor(t, time.Millisecond)
+	// Neutralizes ROUND 6's two fixed additions so the live
+	// minimumReclaimAfter stays at the millisecond scale this test's own
+	// checkpoint (600ms) was built around -- see that function's doc.
+	withMaxTolerableStallAndMssqlDrainSlack(t, 0, 0)
+	// This test predates round 5's reclaimSlack too, and -- independently
+	// re-derived while fixing the above -- that 1s fixed addition alone
+	// already swamps this test's 600ms checkpoint regardless of the
+	// retryInterval term this test actually exists to check. See
+	// reclaimSlack's own doc.
+	withReclaimSlack(t, 0)
 	const heartbeatInterval = 200 * time.Millisecond
 	reclaimTimeout := minimumReclaimAfter(heartbeatInterval) // 700ms today
 
@@ -662,12 +711,28 @@ func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNew
 	// The discriminating instant: past 340ms (150+190, when the stall
 	// clears and the failing call's error lands) but short of the holder's
 	// actual recovery (~635ms: the retry starts at 340+heartbeatRetryInterval
-	// and itself takes ~95ms). 600ms sits with a 100ms margin on both
-	// sides of the two invariants it discriminates between -- comfortably
-	// past round 3's own 500ms floor (heartbeat + 3*dbCallDeadline, with no
-	// term for the retry's own wait) and comfortably short of the round-4
-	// corrected 700ms one (+ heartbeatRetryInterval).
-	const checkAt = 600 * time.Millisecond
+	// and itself takes ~95ms).
+	//
+	// age is measured from t0 (rowHeartbeatAt's initial seed, test start),
+	// NOT from a pre-stall write -- the holder's first real heartbeat
+	// attempt lands around t=heartbeatInterval=200ms, already inside the
+	// stall (which starts at 150ms), so there is never a successful write
+	// before recovery. age(t) therefore tracks t itself up to recovery.
+	//
+	// 500ms sits with a 100ms margin on both sides of the two invariants
+	// this test discriminates between under the overrides above (stall=0,
+	// drain=0, slack=0): heartbeat + 2*dbCallDeadline, with no retry term at
+	// all (400ms, what a dropped heartbeatRetryIntervalFor term would
+	// produce) and heartbeat + 2*dbCallDeadline + heartbeatRetryIntervalFor
+	// (600ms, today's correct value once the two round-6 terms and
+	// reclaimSlack are zeroed). round 6 restructured the formula from
+	// 3*deadline to 2*deadline+maxTolerableStall+mssqlDrainSlack, so these
+	// numbers are smaller by one deadline term (100ms) than round 3/4's own
+	// 500ms/700ms -- re-verified by falsifying this test's own
+	// heartbeatRetryIntervalFor term and confirming it fails at checkAt=500ms
+	// (age≈500ms >= 400ms), then confirming it passes once restored
+	// (age≈500ms < 600ms).
+	const checkAt = 500 * time.Millisecond
 	if remaining := checkAt - 150*time.Millisecond - 190*time.Millisecond; remaining > 0 {
 		time.Sleep(remaining)
 	}
@@ -726,6 +791,14 @@ func TestASingleFailedHeartbeatRetryCanOutlastTheOldReclaimInvariantButNotTheNew
 // -- see the falsification note at the end of this function.
 func TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack(t *testing.T) {
 	withDBCallDeadlineFloor(t, time.Millisecond)
+	// Neutralizes ROUND 6's two fixed additions so the live
+	// minimumReclaimAfter stays at the millisecond scale this test's own
+	// checkpoint (800ms) was built around -- see that function's doc.
+	// Independently re-derived (not just cleat-review's own two): without
+	// this, the test stays green even with reclaimSlack removed from
+	// minimumReclaimAfter entirely, which is the exact vacuity this whole
+	// file's doc comment on maxTolerableStall describes.
+	withMaxTolerableStallAndMssqlDrainSlack(t, 0, 0)
 	const heartbeatInterval = 200 * time.Millisecond
 	const reconnectDelay = 250 * time.Millisecond
 	reclaimTimeout := minimumReclaimAfter(heartbeatInterval) // 1700ms today

@@ -210,14 +210,17 @@ for everything except their background sweeps.
 
 **Background sweeps stay genuinely cross-tenant and need the opposite treatment** — an explicit,
 named bypass rather than an accidental one. The codebase already has the pattern: the engine's own
-cross-tenant reads go through `admin.claim_workflows`, a `SECURITY DEFINER` function owned by a
-`BYPASSRLS` role, so the widening is a deliberate grant rather than a missing predicate. Plugin
-sweeps should go through something of the same shape.
+cross-tenant reads went through `admin.claim_workflows`, a `SECURITY DEFINER` function owned by a
+`BYPASSRLS` role, so the widening was a deliberate grant rather than a missing predicate. (The engine's
+claim no longer works that way -- it enumerates `admin.tenants` and claims under each tenant's own
+context, and `admin.claim_workflows` is gone from the schema -- but the plugin sweeps below are a
+different case and the argument about them stands.) Plugin sweeps should go through something of
+the same shape.
 
 > **Decided, and this last sentence is where it diverged.** The explicit named bypass shipped as
 > `plugin.AcrossAllTenants(ctx, reason)` plus `cleat.tenant_row_is_visible` in
-> `migrations/postgres/063`. It is *not* of the same shape as `admin.claim_workflows`, and working
-> out why is the substance of the decision.
+> `migrations/postgres/063`. It is *not* of the same shape as `admin.claim_workflows` (since retired for the engine's own
+> claim, see above), and working out why is the substance of the decision.
 >
 > The engine's construction is bounded by two fixed function bodies. A plugin's cross-tenant
 > statements are arbitrary SQL written by the plugin author, so the only faithful translation is a

@@ -442,7 +442,19 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload, payload_encoding)
 		SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11
 		WHERE NOT EXISTS (
-			SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2
+			-- tenant_id added -- cleat#2059: event_history's clustered key
+			-- realigns to (tenant_id, workflow_id, step), so a predicate
+			-- naming only workflow_id/step would lose its seek path. @p9
+			-- is s.tenantID, already bound below.
+			--
+			-- NOT caught by TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate
+			-- if removed, despite comparing directly to a parameter -- that
+			-- guard's static scan does not descend into a nested subquery
+			-- (this WHERE NOT EXISTS) the way it does a MERGE's own ON
+			-- clause (confirmed by cleat-review; cleat#3289 tracks widening
+			-- it to recognize this shape). The predicate is here for the
+			-- seek-path reason above, not because any guard enforces it.
+			SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2 AND tenant_id = @p9
 		)
 	`, parentID, event.Step, string(event.EventType),
 		nullStr(event.ChildName), nullStr(stored.ChildInput), nullStr(childID),
@@ -530,11 +542,13 @@ func (s *MSSQLStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID s
 	// BOTH a tenant-scoped transaction AND an explicit tenant predicate, and
 	// the predicate is the load-bearing half here.
 	//
-	// dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection
-	// (migrations/mssql/012_admin_role.sql), which is what a multi-tenant
-	// deployment must use -- so on this dialect the WHERE clause is the whole
-	// of the isolation, not defence in depth behind it. Written without the
-	// predicate first and caught by
+	// dbo.fn_tenant_filter has no bypass at all by default -- since cleat#1541
+	// the shipped predicate checks SESSION_CONTEXT('tenant_id') and nothing
+	// else, so even a dbo.cleat_admin connection is filtered unless a
+	// deployment has separately applied the optional
+	// migrations/mssql/optional/cross_tenant_claim.sql. So on this dialect the
+	// WHERE clause is the whole of the isolation, not defence in depth behind
+	// it. Written without the predicate first and caught by
 	// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate.
 	//
 	// The transaction still matters for the single-tenant deployments where the

@@ -73,11 +73,13 @@ func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID s
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET trace_id = $2 WHERE id = $1
-	`, workflowID, traceID)
-	if err != nil {
-		return err
+	// trace_id is written exactly once, here. It was mirrored onto
+	// workflow_payloads in cleat#3245 Phase 3 step 3 piece F; since B1b it is
+	// written to workflow_payloads only, which is where every reader reads it.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_payloads SET trace_id = $2 WHERE id = $1
+	`, workflowID, traceID); err != nil {
+		return fmt.Errorf("trace workflow: %w", err)
 	}
 	return tx.Commit()
 }
@@ -214,8 +216,9 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 		pluginDepsJSON = []byte("{}")
 	}
 
-	// entry_point_schemas is nullable with no default (migrations/postgres/006),
-	// unlike plugin_deps above: "no schema was computed" is a real state, and a
+	// entry_point_schemas is nullable with no default
+	// (migrations/postgres/001_schema.sql; it arrived in the retired
+	// 006_entry_point_schemas.sql, folded in by #3358), unlike plugin_deps above: "no schema was computed" is a real state, and a
 	// nil []byte parameter binds to SQL NULL rather than the literal `null`
 	// json.Marshal(nil map) would produce -- so, unlike pluginDepsJSON, nothing
 	// here needs to fold an empty/erroring marshal into a placeholder value.
@@ -430,9 +433,10 @@ func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, v
 
 	var count int
 	err = tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM workflow_instances
-		WHERE def_name = $1 AND def_version = $2
-		  AND status IN ('ready', 'running')
+		SELECT COUNT(*) FROM workflow_leases l
+		JOIN workflow_payloads p ON p.id = l.id
+		WHERE p.def_name = $1 AND p.def_version = $2
+		  AND l.status IN ('ready', 'running')
 	`, name, version).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
@@ -450,10 +454,11 @@ func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (m
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT def_name, def_version, COUNT(*) as cnt
-		FROM workflow_instances
-		WHERE status IN ('ready', 'running')
-		GROUP BY def_name, def_version
+		SELECT p.def_name, p.def_version, COUNT(*) as cnt
+		FROM workflow_leases l
+		JOIN workflow_payloads p ON p.id = l.id
+		WHERE l.status IN ('ready', 'running')
+		GROUP BY p.def_name, p.def_version
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("get active instance counts: %w", err)
