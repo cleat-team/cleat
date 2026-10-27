@@ -978,6 +978,12 @@ func setResultAwaitOutcome(results *C.wasmtime_component_val_t, nresults C.size_
 		return
 	}
 	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	if kind == awaitTimedOut {
+		// timed-out carries no payload and the C helper ignores `s` for it, so a
+		// C.CString here would be allocated and never freed (found in review).
+		C.component_val_set_await_outcome(r, C.int(kind), nil, 0)
+		return
+	}
 	C.component_val_set_await_outcome(r, C.int(kind), C.CString(payload), C.size_t(len(payload)))
 }
 
