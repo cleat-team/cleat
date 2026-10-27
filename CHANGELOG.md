@@ -361,8 +361,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tree. It differs from the re-pointed tag `8f9a59b4` only in `cmd/cleat-worker/web/dist/`, a
   dashboard bundle built from the same source by an older toolchain. With `GOPROXY=direct` and the
   checksum database on, `go` stops with "verifying module: checksum mismatch … SECURITY ERROR".
-  Fetch v0.5.0 through the proxy. The binaries, image, Homebrew formula and Helm chart are built
-  from `8f9a59b4`. The `cleat/v0.5.0` module is unaffected.
+  Fetch v0.5.0 through the proxy. The two hashes are expected: the proxy's tree is
+  `h1:d14Li81arnskubHoHeQa4QxoS91dOR+3mSBHKyccLkw=`, and the re-pointed tag's tree is
+  `h1:+CPzCpD2346iAGAmzIHcJZeadwPKdR5deZ0jp6mTW2Q=`. If a `go.sum` holds the second (for example,
+  written on a machine that fetched directly), a proxy user fails the same way. Replace that line
+  with the first. Any other hash is not this issue. The binaries, image, Homebrew formula and Helm
+  chart are built from `8f9a59b4`. The `cleat/v0.5.0` module is tagged only after this re-point,
+  so it is not affected.
 
 ## [0.4.0] - 2026-10-06
 
