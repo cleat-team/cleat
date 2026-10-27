@@ -115,6 +115,9 @@ cmd/cleat-worker	TestWorkerMigratesFromOutsideTheRepo	2
 cmd/cleat-worker	TestWorkerRefusesToBootWithAMisconfiguredIdempotencyKeyOp	2
 cmd/cleat-worker	TestWorkerRefusesToBootWithAnUndeclaredAmbiguityLookupOp	2
 cmd/cleat-worker	containerForDSN	1
+cmd/cleat-worker	newMSSQLRotationRig	1
+cmd/cleat-worker	newMySQLRotationRig	1
+cmd/cleat-worker	newPostgresRotationRig	1
 cmd/cleat-worker	newSignalAuthStore	1
 cmd/cleat-worker	requireShutdownTestDB	1
 cmd/cleatctl	TestAPythonFixtureWorkflowDeploysWithASchema	2
