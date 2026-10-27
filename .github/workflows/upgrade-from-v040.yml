@@ -111,8 +111,9 @@ jobs:
 
       # include-hidden-files: STATE_DIR is `.upgrade-state`, a hidden directory,
       # and upload-artifact skips hidden files by default. Until cleat#3461 this
-      # step found nothing on every run and, with if-no-files-found: ignore,
-      # said so nowhere. `warn` and not `error`: when an early step fails there
+      # step found nothing on every run; its log said so at info level, and with
+      # if-no-files-found: ignore no warning annotation marked the step.
+      # `warn` and not `error`: when an early step fails there
       # is legitimately no state directory, and a second failure would bury the
       # first.
       - name: Upload worker logs
