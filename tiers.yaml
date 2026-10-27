@@ -883,128 +883,174 @@ tier2:
            binary contains the durable-cron import names where a baseline build contains
            none. Guarded by wasm.TestEveryImportedWitFunctionHasAnEnvMapping"
         - "rust and java SDKs declare no cron surface at all"
-        - "a non-default tenant's schedules fire ONLY with --claim-across-tenants set and
-           the database-side grants made. By default the worker opens exactly one
-           default-tenant store and GetDueSchedules reads through it, so those schedules
-           are stored, listed and never fired -- the default-topology behaviour recorded
-           in engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules, which still passes
-           because the RLS it asserts is unchanged. Both halves are now behind that one
-           flag: cross-tenant-claim below executes the runs, cross-tenant-schedules
-           enqueues them"
+        - "a non-default tenant's schedules fire only while --claim-across-tenants is on
+           (it defaults to ON) AND the worker can rotate: PostgreSQL or SQL Server, not
+           sharded. With the flag off, or on MySQL or a sharded worker, the worker reads
+           only its own tenant's schedules through its one store, so the others are stored,
+           listed and never fired -- the behaviour recorded in
+           engine.TestScheduleLoop_OnlySeesItsOwnTenantsSchedules. No database grant is
+           involved any more; this item said there was one until 2026-10-27 (cleat#3441).
+           cross-tenant-claim below executes the runs, cross-tenant-schedules enqueues them"
 
     - id: cross-tenant-claim
-      status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
+      status: SUPPORTED on postgres and mssql, by per-tenant rotation that needs no database grant — NOT on mysql, and not on a sharded worker
       why: |
-        Added 2026-08-09. `--claim-across-tenants` makes a worker's dispatch loop claim
-        runnable work for every tenant in one query instead of only its own, so the cost
-        of a tick is one round trip rather than one per tenant. Each claimed workflow then
-        executes against a store scoped to its OWN tenant (cmd/cleat-worker's
-        storeForTenant), so the widened view lasts exactly as long as the claim.
+        Rewritten 2026-10-27 (cleat#3441, owner decision D30). This entry described the
+        mechanism cleat#1926 retired -- a SECURITY DEFINER function, a BYPASSRLS owner,
+        migrations 023 and 024, a deployment grant, default OFF -- and none of that is how
+        the worker claims work now.
 
-        Tier 2 and not tier 1 because it cannot be green on every dialect, which is what
-        tier 1 requires:
+        WHAT HAPPENS. `--claim-across-tenants` (default TRUE, cmd/cleat-worker/config.go)
+        makes the dispatch loop claim work for every tenant rather than only its own. The
+        loop calls claimGeneral, which tries claimRotating first
+        (cmd/cleat-worker/rotating_claim.go):
 
-          postgres — works. admin.claim_workflows, a SECURITY DEFINER function owned by a
-            BYPASSRLS role (migrations/postgres/023_cross_tenant_claim.sql). FORCE ROW
-            LEVEL SECURITY subjects even the table owner to RLS, so SECURITY DEFINER alone
-            is not enough; the BYPASSRLS attribute is the exemption, and the migration
-            sets it rather than leaving it to a deployment step. A missing BYPASSRLS
-            fails loudly, not silently — measured 2026-08-09, both functions raise
-            "cleat.tenant_id is not set" (P0001), because 001_schema.sql's policies are
-            fail-closed through assert_tenant_set() rather than COALESCE-ing to a
-            default. An earlier version of this entry claimed the opposite; the startup
-            check reports the attribute by name, since P0001 does not.
-          mssql — works. dbo.fn_tenant_filter admits on
-            `IS_ROLEMEMBER(N'cleat_admin') = 1` once
-            migrations/mssql/optional/cross_tenant_claim.sql has switched the predicate to
-            that form (the shipped predicate, migrations/mssql/003_procedures.sql, has no
-            such admission since cleat#1541), so the exemption is in the predicate rather
-            than in a role attribute. The role (migrations/mssql/001_schema.sql) ships with
-            NO MEMBERS; granting it is a deployment decision.
-          mysql — does NOT work, and cannot without a different mechanism. MySQLStoreFactory
-            gives each tenant its own physical database (cleat_<tenant_id>), so there is no
-            predicate to drop: the other tenants' rows are not filtered out, they are in
-            another database. The store returns ErrCrossTenantClaimUnsupported and the
-            worker falls back to the per-tenant claim with one WARN line.
+          1. list tenants: engine.TenantLister.ListTenantIDs reads `admin.tenants`, which
+             carries no row-level security, so this needs no exemption. Suspended tenants
+             are not listed -- that is where suspension is enforced, and it stops new
+             claims, not a run already executing.
+          2. choose up to `--claim-tenants-per-tick` tenants (default 16) in rotation order,
+             from a worker-local cursor that resumes where the last tick stopped.
+          3. for each chosen tenant, `storeForTenant(t).ClaimWorkflows` -- the same
+             single-statement claim the one-tenant path runs, through a store scoped to
+             that tenant, so every claim executes under that tenant's OWN RLS context.
+             Each claimed run then executes against that same tenant's store.
 
-            The code path also functions against ONE shared MySQL database, and the tests
-            cover that shape — but read it as test scaffolding, not a supported
-            deployment. multi-tenancy-mysql is NOT SUPPORTED regardless of topology: the
-            objection is the absence of RLS, not the arrangement of databases. Sharing one
-            database would put every tenant behind an application-level predicate with no
-            backstop, which is exactly what that policy refuses.
+        Nothing is exempt from a policy and nothing has to be granted. That is the point
+        of the change and the thing the old text got backwards: the widened view this
+        entry used to describe, "a deliberate step outside RLS", no longer exists. The one
+        read that is not tenant-scoped is the tenant list itself, which returns tenant ids;
+        every claim of work is scoped to the tenant it is claiming for. That "nothing has to
+        be granted" is read from the code and from the flag's own help text; on SQL Server
+        it has NOT been run end to end (see the first open item).
 
-        OFF BY DEFAULT, and that is deliberate. Every path needs a grant the deployment
-        has to make, and both grants ship unmade. A worker that is told to claim across
-        tenants but cannot warns once and claims its own tenant — it does not fail
-        dispatch, because a missing GRANT should narrow the worker rather than stop it.
+        WHEN IT DOES NOT ROTATE. claimRotating returns errRotatingClaimUnavailable, and
+        claimGeneral falls back to claiming the worker's own tenant only, warning once per
+        loop (the claim and the schedule read each warn once), when the worker has no store
+        factory or its store is not an engine.TenantLister.
+        Measured 2026-10-27 by asserting the same interface the worker asserts, with
+        PostgresStore and MSSQLStore as positive controls:
 
-        WHAT THIS BUYS AND WHAT IT COSTS. It is a deliberate step outside RLS: for the
-        duration of one query the claim sees every tenant's ready rows. That is the point
-        — the alternative is polling N tenants per tick — but it means a bug in the claim
-        path has a blast radius of every tenant rather than one. It is confined to a single
-        statement that reads and writes only workflow_instances' claim columns, and
-        nothing downstream of it runs unscoped.
+          PostgresStore  implements TenantLister = true
+          MSSQLStore     implements TenantLister = true
+          MySQLStore     implements TenantLister = false
+          ShardedStore   implements TenantLister = false
+
+        So MySQL falls back, as it did before, and so does a SHARDED worker on any
+        dialect: the worker's store is then an engine.ShardedStore, which cannot enumerate
+        tenants. The old entry did not mention sharding. A worker that falls back says so
+        at startup (reportCrossTenantCapability) rather than running silently
+        single-tenant.
+
+        Tier 2 and not tier 1, unchanged: it cannot be green on every dialect (MySQL), and
+        the rotation as a whole has no end-to-end test against a real multi-tenant
+        database yet -- see open_items and cleat#3442. The claim stays at PostgreSQL and
+        SQL Server because those are the dialects whose store can rotate, and it is
+        widened only by a test that passes on the dialect (owner decision D30).
+
+        MYSQL. multi-tenancy-mysql is NOT SUPPORTED, so there is no multi-tenant MySQL
+        deployment for this to serve; the store not being a TenantLister is consistent with
+        that policy and not an open engineering item.
+
+        THE RETIRED MECHANISM IS STILL IN THE SCHEMA, UNCALLED. `admin.claim_workflows`
+        and `admin.get_due_schedules` are still defined in migrations/postgres/001_schema.sql
+        (the re-baselined schema; 023 and 024 no longer exist as files) and nothing calls
+        them. cleat#3245's B5b deletes them. Re-derive both facts:
+
+          git grep -n 'admin\.claim_workflows\|admin\.get_due_schedules' -- '*.go' ':!*_test.go'
+            # only comments and the flag's help text -- no call
+          git grep -n -i 'FUNCTION admin\.claim_workflows' -- migrations
+
+        SQL Server's migrations/mssql/optional/cross_tenant_claim.sql is NOT a prerequisite
+        for claiming: its own header says the per-tenant rotation needs no grant to claim
+        and states what it still affects. This entry used to name it as the SQL Server
+        mechanism, which it no longer is.
       open_items:
-        - "sticky claims stay tenant-scoped (ClaimStickyWorkflows), so another tenant's
-           sticky workflow is claimed by the general path instead and loses its worker
-           affinity. Correctness is unaffected — it is still claimed exactly once"
-        - "RESOLVED 2026-08-09: the worker now reports at startup, in both directions,
-           whether each cross-tenant path is actually available, and names the cause when
-           it is not. A report and not a gate, deliberately -- refusing to start would
-           contradict the degradation the feature is built on. See
-           engine.CrossTenantCapabilityChecker"
-        - "mysql is NOT a gap here, and this item used to say it was. multi-tenancy-mysql
-           records the policy: no multi-tenancy on a database without row-level security,
-           because isolation would be application-layer only with no backstop behind a
-           missed tenant_id filter — 'a documented product boundary, not an open
-           engineering item'. So there is nothing to implement for MySQL, and the store
-           refusing with ErrCrossTenantClaimUnsupported is the correct terminal behaviour
-           rather than a placeholder. Corrected 2026-08-09 after the framing was
-           questioned"
+        - "UNMEASURED on SQL Server (2026-10-27): that rotation needs no grant there. It is
+           read from claimRotating, which issues no cross-tenant statement, from the flag's
+           help text, and from the header of migrations/mssql/optional/cross_tenant_claim.sql.
+           docs/reference/worker-config.md still says the opposite for SQL Server (two steps:
+           apply that optional migration, then add the worker principal to cleat_admin),
+           and its MySQL row still says a single shared MySQL database works -- which the
+           TenantLister probe above contradicts. That doc predates cleat#1926 on both
+           points. Of the two statements about SQL Server one is wrong, and cleat#3442
+           running on SQL Server is what decides it; this entry sides with the code until
+           then"
+        - "COVERAGE, stated exactly (2026-10-27). Real-PostgreSQL tests cover the pieces:
+           the tenant list under RLS (TestATenantListNeedsNoRLSExemption), a suspended
+           tenant not being enumerated (TestASuspendedTenantIsNotEnumerated), and the
+           claim itself. The rotation logic -- fair share, resuming the cursor, one broken
+           tenant not stopping the tick, the fallbacks -- is tested only with MOCK stores
+           (cmd/cleat-worker/the_rotating_claim_shares_the_batch_test.go). SQL Server's
+           ListTenantIDs has no test of its own that I could find. No test runs
+           claimRotating end to end against a real multi-tenant database with a real
+           per-tenant factory; that is cleat#3442, and it is what a wider claim should
+           rest on"
+        - "a sharded worker cannot rotate and serves its own tenant only (ShardedStore is
+           not a TenantLister; measured above). Not tested end to end, and no fix is
+           planned here -- recorded because the previous text implied the flag worked on
+           every PostgreSQL and SQL Server topology"
+        - "sticky claims stay tenant-scoped: the dispatch loop calls ClaimStickyWorkflows on
+           the worker's OWN store before claimGeneral, so worker affinity is applied to the
+           worker's own tenant's workflows and another tenant's workflow arrives through
+           the rotation. Read, not run"
+        - "the dashboard was not re-checked for this rewrite. The 2026-08-09 text said it
+           shows a non-default tenant's schedule as enabled whether or not the deployment
+           can fire it; whether that still holds with rotation as the default has not been
+           measured"
 
     - id: cross-tenant-schedules
-      status: SUPPORTED on postgres and mssql, both behind a deployment grant — NOT on mysql
+      status: SUPPORTED on postgres and mssql, by the same per-tenant rotation and with no database grant — NOT on mysql, and not on a sharded worker
       why: |
-        Added 2026-08-09, and it is the other half of cross-tenant-claim rather than a
-        feature in its own right. That one lets a worker CLAIM another tenant's runnable
-        workflow; this one is what ever enqueues one. Without it a non-default tenant's
-        cron schedule is stored, listed in the dashboard, shown as enabled with a
-        next_run_at, and never fires — so the claim had nothing to find.
+        Rewritten 2026-10-27 (cleat#3441, owner decision D30); the previous text described
+        migration 024 and `admin.get_due_schedules`, which the worker no longer uses.
 
-        Same flag (--claim-across-tenants), same three-dialect story, same tier and for
-        the same reason: it cannot be green on MySQL's shipped topology. See
-        cross-tenant-claim for the mechanism per dialect; the differences are:
+        The other half of cross-tenant-claim: that one lets a worker CLAIM another tenant's
+        runnable workflow, this one is what ever enqueues one. Without it a non-default
+        tenant's cron schedule is stored, listed, shown as enabled with a next_run_at, and
+        never fires.
 
-          postgres — a SECOND migration, 024_cross_tenant_schedules.sql, granting
-            EXECUTE on admin.get_due_schedules. Deliberately separate from 023: a
-            deployment can have one and not the other, and each failure names its own
-            file so an operator is not told to apply a migration they already have.
-          mssql — no new migration. 012's dbo.cleat_admin role is bound to every table
-            fn_tenant_filter covers, and workflow_schedules is one of them.
-          mysql — refuses with ErrCrossTenantClaimUnsupported on the factory topology,
-            exactly as the claim does.
+        SCHEDULES DO GO THROUGH ROTATION. scheduleLoop calls dueSchedules, which with
+        `--claim-across-tenants` on tries dueSchedulesByTenant first
+        (cmd/cleat-worker/rotating_schedules.go): list tenants through the same
+        ListTenantIDs, then `storeForTenant(t).GetDueSchedules` for each, under that
+        tenant's own RLS. The fallback is the worker's own store's GetDueSchedules, taken
+        with one warning when the worker cannot rotate -- the same conditions, and so the
+        same dialects, as cross-tenant-claim, including MySQL and a sharded worker.
 
-        THE EXEMPTION HERE IS NARROWER THAN 023's, and deliberately: SELECT on one table,
-        no UPDATE. 023's function must read and write in one statement because a
-        non-atomic claim hands the same workflow to two workers. This one only reads —
-        the advance is still ClaimDueSchedule, a compare-and-swap through the caller's
-        own tenant-scoped store, under RLS. That also means no FOR UPDATE SKIP LOCKED
-        (PostgreSQL requires UPDATE privilege for it), which costs a wasted round trip
-        when two workers race and changes no outcome: the CAS decides, as it always did.
+        THE ONE DIFFERENCE FROM THE CLAIM, and it is deliberate: the claim serves a
+        bounded share of tenants per tick (`--claim-tenants-per-tick`), because work that
+        waits a tick only waits a tick. Cron cannot take that bargain -- a due schedule
+        that fires on a later tick turns a minutely cron into an every-few-minutes one,
+        silently -- so the schedule read visits EVERY tenant on every tick. That is a real
+        ceiling: with very many tenants on one worker the pass takes a noticeable share of
+        each tick, and the answer at that size is more workers with fewer tenants each.
+        One tenant whose store will not open does not stop the others' cron; an error is
+        returned only when no tenant could be read, so an outage does not read as an
+        empty, healthy tick.
 
-        AT-LEAST-ONCE IS UNCHANGED. Nothing here touches the delivery guarantee — the
-        same CAS and the same cron:<tenant>:<schedule>:<instant> idempotency key decide
-        it, and both run scoped to the schedule's own tenant.
+        FIRING STAYS SCOPED. The read happens per tenant, and scheduleLoop then resolves
+        storeForTenant for the schedule's own tenant before its first store call and runs
+        the whole firing through it (asserted by
+        TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore).
+
+        AT-LEAST-ONCE IS UNCHANGED. Nothing here touches the delivery guarantee: the
+        ClaimDueSchedule compare-and-swap and the cron:<tenant>:<schedule>:<instant>
+        idempotency key decide it, both run scoped to the schedule's own tenant.
+
+        Same tier, for the same reason as cross-tenant-claim. Re-derive that nothing reads
+        schedules through the retired function:
+
+          git grep -n 'admin\.get_due_schedules' -- '*.go' ':!*_test.go'
+            # comments only
       open_items:
-        - "the widened read is only as safe as the re-scoping after it. Asserted by
-           cmd/cleat-worker's TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore,
-           which fails if the firing runs through the worker's own store"
-        - "RESOLVED 2026-08-09 alongside cross-tenant-claim's: the startup report answers
-           the two capabilities separately, so a deployment with 023 and not 024 is told
-           that workflows execute and cron does not, rather than one summary verdict"
-        - "the dashboard still shows a non-default tenant's schedule as enabled whether
-           or not the deployment can fire it; nothing surfaces which mode a worker is in"
+        - "COVERAGE, stated exactly (2026-10-27): the per-tenant read is tested with mock
+           stores (cmd/cleat-worker/the_due_schedule_read_covers_every_tenant_test.go) and
+           the firing scope by TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore.
+           cleat#3442 is the end-to-end test of claimRotating; it does not cover the
+           schedule read, so this half has no end-to-end test planned yet"
+        - "the dashboard was not re-checked for this rewrite; see cross-tenant-claim's
+           last open item"
 
     - id: runtime-wazero
       # Renamed from `backend-wazero` 2026-09-06. Nothing consumes these ids
