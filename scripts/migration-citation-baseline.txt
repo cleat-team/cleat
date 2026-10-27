@@ -305,7 +305,6 @@ scripts/skip-ledger.d/a-deleted-row-and-an-invisible-row-are-told-apart.tsv	migr
 scripts/skip-ledger.d/a-finalized-result-survives-the-column.tsv	migrations/mysql/070
 scripts/skip-ledger.d/a-secret-never-crosses-tenants-at-the-store.tsv	migration 038
 scripts/skip-ledger.d/a-tenant-can-be-dropped-on-sql-server.tsv	migrations/mssql/074
-scripts/skip-ledger.d/migration-018-columns.tsv	migration 018
 scripts/skip-ledger.d/mssql-block-predicates-are-asserted-live.tsv	migration 103
 scripts/skip-ledger.d/seed-workflow-lease.tsv	migration 016
 scripts/skip-ledger.tsv	migration 101
