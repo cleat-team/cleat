@@ -39,7 +39,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 		        CASE WHEN $3 > 0 THEN $3 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND disabled_at IS NULL AND tenant_id = $5) END,
 		        'ready', $2,
 		        COALESCE(NULLIF($4, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $2), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_leases WHERE id = $2), 'default'),
 			$5, $6)
 		RETURNING id, task_queue, def_version
 	`, defName, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID, &resolvedTaskQueue, &resolvedDefVersion)
@@ -127,7 +127,7 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND disabled_at IS NULL AND tenant_id = $6) END,
 		        'ready', $3,
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_leases WHERE id = $3), 'default'),
 			$6, $7)
 		RETURNING task_queue, def_version
 	`, childID, defName, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&resolvedTaskQueue, &resolvedDefVersion)

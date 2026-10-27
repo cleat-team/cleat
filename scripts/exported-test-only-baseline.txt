@@ -79,6 +79,7 @@ engine/testutil/schema.go	func CleanupAllTestData
 engine/testutil/schema.go	func CleanupTestData
 engine/testutil/schema.go	func OpenPostgresRLSTestDB
 engine/testutil/schema.go	func SetupFullSchema
+engine/testutil/workflow_seed.go	func SeedRun
 engine/testutil/workflow_seed.go	func SeedWorkflowLease
 engine/testutil/workflow_seed.go	func SyncWorkflowLease
 engine/testutil/workflow_seed.go	func SyncWorkflowPayload

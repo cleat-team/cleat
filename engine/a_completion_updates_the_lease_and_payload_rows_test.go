@@ -39,23 +39,21 @@ func completionLeaseTestStore(t *testing.T) (*PostgresStore, *sql.DB) {
 func seedClaimedTriple(t *testing.T, db *sql.DB, id, defName, workerID string, generation int64) {
 	t.Helper()
 	ctx := context.Background()
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         id,
+		TenantID:   DefaultTenantUUID,
+		DefName:    defName,
+		DefVersion: 1,
+		Input:      "{}",
+		TaskQueue:  "default",
+		Status:     "running",
+		AssignedTo: workerID,
+		Generation: generation,
+	})
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, assigned_to, generation, next_wake_at, heartbeat_at, started_at)
-		VALUES ($1, $2, 1, 'running', '{}', 'default', $3, $4, $5, now(), now(), now())
-	`, id, defName, DefaultTenantUUID, workerID, generation); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_leases (id, tenant_id, task_queue, status, assigned_to, generation, heartbeat_at, started_at)
-		VALUES ($1, $2, 'default', 'running', $3, $4, now(), now())
-	`, id, DefaultTenantUUID, workerID, generation); err != nil {
-		t.Fatalf("seed workflow_leases: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_payloads (id, tenant_id, input)
-		VALUES ($1, $2, '{}')
-	`, id, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_payloads: %v", err)
+		UPDATE workflow_leases SET next_wake_at = now(), heartbeat_at = now(), started_at = now() WHERE id = $1
+	`, id); err != nil {
+		t.Fatalf("set workflow_leases claim fields: %v", err)
 	}
 }
 

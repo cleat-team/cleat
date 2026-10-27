@@ -108,22 +108,18 @@ func TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnPostgres(t *testing.T)
 	insideID := fmt.Sprintf("reap-fractional-pg-inside-%d", time.Now().UnixNano())
 	pastID := fmt.Sprintf("reap-fractional-pg-past-%d", time.Now().UnixNano())
 	seed := func(id string, age time.Duration) {
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input,
-			                                assigned_to, heartbeat_at, tenant_id)
-			VALUES ($1, 'reap-fractional-def', 1, 'running', '{}', 'reap-fractional-worker',
-			        now() - make_interval(secs => $2::float8), $3)`,
-			id, age.Seconds(), store.tenantID); err != nil {
-			t.Fatalf("seeding %s: %v", id, err)
-		}
+		testutil.SeedRun(t, db, testutil.RunSeed{
+			ID: id, TenantID: store.tenantID, DefName: "reap-fractional-def", DefVersion: 1,
+			Status: "running", AssignedTo: "reap-fractional-worker",
+		})
 		// cleat#3245 Phase 3 step 3 piece A: ReapStaleInstances' candidate
-		// scan now reads workflow_leases, not workflow_instances.
+		// scan reads workflow_leases, not workflow_instances, so the
+		// fractional heartbeat_at this test depends on is set there.
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_leases (id, tenant_id, status, assigned_to, heartbeat_at)
-			VALUES ($1, $3, 'running', 'reap-fractional-worker',
-			        now() - make_interval(secs => $2::float8))`,
-			id, age.Seconds(), store.tenantID); err != nil {
-			t.Fatalf("seeding lease %s: %v", id, err)
+			UPDATE workflow_leases SET heartbeat_at = now() - make_interval(secs => $2::float8)
+			WHERE id = $1`,
+			id, age.Seconds()); err != nil {
+			t.Fatalf("seeding heartbeat for %s: %v", id, err)
 		}
 	}
 	seed(insideID, reapFractionalInsideR)

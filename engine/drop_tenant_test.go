@@ -342,7 +342,7 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 		t.Fatalf("seed admin.tenants(%s): %v", tag, err)
 	}
 	if _, err := adminDB.ExecContext(ctx,
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, tenant_id) VALUES ($1, $2, 1, 'ready', $3)`,
+		`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id) VALUES ($1, $2, 1, $3)`,
 		wfID, defName, tenant); err != nil {
 		t.Fatalf("seed workflow_instances(%s): %v", tag, err)
 	}

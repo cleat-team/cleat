@@ -101,13 +101,15 @@ func TestAWorkflowResultContractIsTheIntersection(t *testing.T) {
 			seedWorkflowInstance(t, db, d.dialect, wfID)
 			admin := testutil.AdminDB(t, db, d.dialect)
 
+			// On PostgreSQL, result has lived on workflow_payloads since
+			// cleat#3245; MySQL and SQL Server keep the one wide table.
 			set := map[testutil.Dialect]string{
-				testutil.DialectPostgres: `UPDATE workflow_instances SET result = $1 WHERE id = $2`,
+				testutil.DialectPostgres: `UPDATE workflow_payloads SET result = $1 WHERE id = $2`,
 				testutil.DialectMySQL:    "UPDATE workflow_instances SET result = ? WHERE id = ?",
 				testutil.DialectMSSQL:    `UPDATE workflow_instances SET result = @p1 WHERE id = @p2`,
 			}[d.dialect]
 			read := map[testutil.Dialect]string{
-				testutil.DialectPostgres: `SELECT result::text FROM workflow_instances WHERE id = $1`,
+				testutil.DialectPostgres: `SELECT result::text FROM workflow_payloads WHERE id = $1`,
 				testutil.DialectMySQL:    "SELECT CAST(result AS CHAR) FROM workflow_instances WHERE id = ?",
 				testutil.DialectMSSQL:    `SELECT CAST(result AS NVARCHAR(MAX)) FROM workflow_instances WHERE id = @p1`,
 			}[d.dialect]

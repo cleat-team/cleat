@@ -69,10 +69,23 @@ func ageConcurrencyKey(t *testing.T, ctx context.Context, db *sql.DB, dialect, t
 // that died between the terminal commit and its separate release call.
 func forceWorkflowTerminalWithoutRelease(t *testing.T, ctx context.Context, db *sql.DB, dialect, tenantID, workflowID string) {
 	t.Helper()
+	if dialect == "postgres" {
+		// The reaper reads status from workflow_leases and completed_at from
+		// workflow_payloads on PostgreSQL since cleat#3245 B3a/B1a, so the
+		// forced terminal state is written there directly rather than onto
+		// workflow_instances.
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_leases SET status = 'done' WHERE tenant_id = $1 AND id = $2`, tenantID, workflowID); err != nil {
+			t.Fatalf("force workflow terminal (workflow_leases): %v", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_payloads SET completed_at = now() WHERE tenant_id = $1 AND id = $2`, tenantID, workflowID); err != nil {
+			t.Fatalf("force workflow terminal (workflow_payloads): %v", err)
+		}
+		return
+	}
 	var q string
 	switch dialect {
-	case "postgres":
-		q = `UPDATE workflow_instances SET status = 'done', completed_at = now() WHERE tenant_id = $1 AND id = $2`
 	case "mysql":
 		q = `UPDATE workflow_instances SET status = 'done', completed_at = NOW(6) WHERE tenant_id = ? AND id = ?`
 	case "mssql":
@@ -82,14 +95,6 @@ func forceWorkflowTerminalWithoutRelease(t *testing.T, ctx context.Context, db *
 	}
 	if _, err := db.ExecContext(ctx, q, tenantID, workflowID); err != nil {
 		t.Fatalf("force workflow terminal: %v", err)
-	}
-	// The reaper reads status from workflow_leases on PostgreSQL since
-	// cleat#3245 B3a, so the forced terminal state goes onto that copy too.
-	if dialect == "postgres" {
-		if _, err := db.ExecContext(ctx,
-			`UPDATE workflow_leases SET status = 'done' WHERE tenant_id = $1 AND id = $2`, tenantID, workflowID); err != nil {
-			t.Fatalf("force workflow terminal (workflow_leases): %v", err)
-		}
 	}
 }
 

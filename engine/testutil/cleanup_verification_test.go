@@ -75,12 +75,10 @@ func TestNonEmptyTablesReportsEveryOffender(t *testing.T) {
 		 VALUES ('cleanup-multi-fixture', 1, '\x00', $1)`, tenant); err != nil {
 		t.Fatalf("seeding workflow_defs: %v", err)
 	}
-	if _, err := db.Exec(
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
-		 VALUES ('cleanup-multi-wf', 'cleanup-multi-fixture', 1, 'ready', '{}', $1)`,
-		tenant); err != nil {
-		t.Fatalf("seeding workflow_instances: %v", err)
-	}
+	SeedRun(t, db, RunSeed{
+		ID: "cleanup-multi-wf", TenantID: tenant, DefName: "cleanup-multi-fixture", DefVersion: 1,
+		Status: "ready",
+	})
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id = 'cleanup-multi-wf'`)
 		_, _ = db.Exec(`DELETE FROM workflow_defs WHERE name = 'cleanup-multi-fixture'`)

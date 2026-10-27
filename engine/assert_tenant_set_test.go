@@ -54,11 +54,9 @@ func TestAssertTenantSetRejectsEmptyStringLikeNull(t *testing.T) {
 		 VALUES ('ats-def', 1, '\x0061736d', 1, 1, $1)`, tenant); err != nil {
 		t.Fatalf("seed workflow_defs: %v", err)
 	}
-	if _, err := adminDB.Exec(
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
-		 VALUES ('ats-wf', 'ats-def', 1, 'ready', '{}', $1)`, tenant); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
+	testutil.SeedRun(t, adminDB, testutil.RunSeed{
+		ID: "ats-wf", TenantID: tenant, DefName: "ats-def", DefVersion: 1,
+	})
 
 	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
 	defer appDB.Close()

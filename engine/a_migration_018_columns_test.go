@@ -231,7 +231,7 @@ func TestContinueAsNewMirrorsContinuedFromAndInheritedParentOntoLeases(t *testin
 	seedClaimedTriple(t, db, grandparentID, defName, worker, 1)
 	seedClaimedTriple(t, db, firstRunID, defName, worker, 1)
 	if _, err := db.ExecContext(ctx,
-		`UPDATE workflow_instances SET parent_workflow_id = $1 WHERE id = $2`,
+		`UPDATE workflow_leases SET parent_workflow_id = $1 WHERE id = $2`,
 		grandparentID, firstRunID); err != nil {
 		t.Fatalf("set parent_workflow_id on the run being continued: %v", err)
 	}

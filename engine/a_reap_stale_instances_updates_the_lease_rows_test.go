@@ -50,23 +50,22 @@ func seedStaleRunningTriple(t *testing.T, store *PostgresStore, db *sql.DB, id, 
 	if pendingTerminal != "" {
 		pendingArg = pendingTerminal
 	}
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         id,
+		TenantID:   DefaultTenantUUID,
+		DefName:    defName,
+		DefVersion: 1,
+		Input:      "{}",
+		TaskQueue:  "default",
+		Status:     "running",
+		AssignedTo: workerID,
+		Generation: 1,
+	})
 	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, assigned_to, generation, heartbeat_at, started_at, pending_terminal_status)
-		VALUES ($1, $2, 1, 'running', '{}', 'default', $3, $4, 1, now() - $5::interval, now(), $6)
-	`, id, defName, DefaultTenantUUID, workerID, fmt.Sprintf("%d milliseconds", staleAge.Milliseconds()), pendingArg); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_leases (id, tenant_id, task_queue, status, assigned_to, generation, heartbeat_at, started_at, pending_terminal_status)
-		VALUES ($1, $2, 'default', 'running', $3, 1, now() - $4::interval, now(), $5)
-	`, id, DefaultTenantUUID, workerID, fmt.Sprintf("%d milliseconds", staleAge.Milliseconds()), pendingArg); err != nil {
-		t.Fatalf("seed workflow_leases: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_payloads (id, tenant_id, input)
-		VALUES ($1, $2, '{}')
-	`, id, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_payloads: %v", err)
+		UPDATE workflow_leases SET heartbeat_at = now() - $2::interval, started_at = now(), pending_terminal_status = $3
+		WHERE id = $1
+	`, id, fmt.Sprintf("%d milliseconds", staleAge.Milliseconds()), pendingArg); err != nil {
+		t.Fatalf("set workflow_leases stale-running fields: %v", err)
 	}
 }
 

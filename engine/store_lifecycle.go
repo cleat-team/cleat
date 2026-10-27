@@ -783,10 +783,12 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		-- stopped its child (cleat#955). Measured against a plain sibling
 		-- child as a control -- that one WAS stopped by the same call, so the
 		-- policy was working and only the link was missing.
+		-- parent_workflow_id is read from the lease row, which B5 keeps;
+		-- parent_close_policy stays on workflow_instances (cleat#3245).
 		VALUES (gen_random_uuid(), $1, $2, 'ready',
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3), 'default'),
 			$3, $4, now() - INTERVAL '1 millisecond', $5,
-			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $5),
+			(SELECT parent_workflow_id FROM workflow_leases WHERE id = $5),
 			(SELECT parent_close_policy FROM workflow_instances WHERE id = $5))
 		RETURNING id, task_queue, parent_workflow_id
 		`, defName, defVersion, s.tenantID, priority, currentRunID).Scan(&newRunID, &resolvedTaskQueue, &inheritedParentWorkflowID)

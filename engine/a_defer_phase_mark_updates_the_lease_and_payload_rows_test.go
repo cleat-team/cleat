@@ -159,8 +159,9 @@ func TestTerminateWorkflowWithADeferOwedMarksTheLeaseAndPayloadRows(t *testing.T
 // already set -- what adminForceMark/preemptivelySettle's two-phase arm,
 // now mirrored above, produce) released to workflow_leases.status='ready'
 // while workflow_instances went to 'terminating'. Seeds the precondition
-// directly via SQL on both tables, as if piece 6c's own mark side had
-// already run, rather than depending on it.
+// directly via SQL on workflow_leases (the column's only copy since
+// cleat#3245 B4a), as if piece 6c's own mark side had already run, rather
+// than depending on it.
 func TestReleaseWorkflowWithAPendingTerminalStatusGoesToTerminatingNotReady(t *testing.T) {
 	store, db := retryAndAdminLeaseTestStore(t)
 	ctx := context.Background()
@@ -175,9 +176,8 @@ func TestReleaseWorkflowWithAPendingTerminalStatusGoesToTerminatingNotReady(t *t
 	const id = "release-pending-terminal-wf-1"
 	const worker = "worker-release-pending-1"
 	seedClaimedTriple(t, db, id, defName, worker, 1)
-	if _, err := db.ExecContext(ctx, `UPDATE workflow_instances SET pending_terminal_status = 'done' WHERE id = $1`, id); err != nil {
-		t.Fatalf("seed workflow_instances.pending_terminal_status: %v", err)
-	}
+	// pending_terminal_status lives on workflow_leases alone since cleat#3245
+	// B4a narrowed workflow_instances; only that copy needs seeding.
 	if _, err := db.ExecContext(ctx, `UPDATE workflow_leases SET pending_terminal_status = 'done' WHERE id = $1`, id); err != nil {
 		t.Fatalf("seed workflow_leases.pending_terminal_status: %v", err)
 	}

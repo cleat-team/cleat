@@ -28,15 +28,7 @@ func appendChainWorkflow(t *testing.T, store *PostgresStore) string {
 	deployFaultTestDef(t, store)
 	runID := fmt.Sprintf("chain-%d", time.Now().UnixNano())
 	db := store.db
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
-	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflow's candidate scan now
-	// reads workflow_leases, not workflow_instances -- without this, every
-	// caller of appendChainWorkflow that goes on to claim the row (e.g.
-	// sensitive_column_encryption_live_test.go) finds nothing.
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", DefVersion: 1, Status: "ready"})
 	t.Cleanup(func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)

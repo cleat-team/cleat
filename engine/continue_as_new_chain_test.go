@@ -35,7 +35,13 @@ func continuedFrom(t *testing.T, store WorkflowStore, runID string) (string, boo
 	t.Helper()
 	d := dialectOf(t, store)
 	var v sql.NullString
-	q := "SELECT continued_from FROM workflow_instances WHERE id = " + d.placeholder(1)
+	// PostgreSQL keeps continued_from on workflow_leases alone after
+	// cleat#3245's B5; the instance copy is written once and then dropped.
+	table := "workflow_instances"
+	if d.placeholder(1) == "$1" {
+		table = "workflow_leases"
+	}
+	q := "SELECT continued_from FROM " + table + " WHERE id = " + d.placeholder(1)
 	if err := rawDBOf(t, store).QueryRow(q, runID).Scan(&v); err != nil {
 		t.Fatalf("reading continued_from for %s: %v", runID, err)
 	}
@@ -132,7 +138,11 @@ func TestContinueAsNewRecordsThePredecessorItCameFrom(t *testing.T) {
 			// forward walk would satisfy every assertion above and still leave
 			// #826 open.
 			d := dialectOf(t, store)
-			q := "SELECT id FROM workflow_instances WHERE continued_from = " + d.placeholder(1)
+			table := "workflow_instances"
+			if d.placeholder(1) == "$1" {
+				table = "workflow_leases" // see continuedFrom
+			}
+			q := "SELECT id FROM " + table + " WHERE continued_from = " + d.placeholder(1)
 			cur := chain[0]
 			hops := 0
 			for {

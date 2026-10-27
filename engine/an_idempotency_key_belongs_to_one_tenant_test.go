@@ -410,11 +410,9 @@ func TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet(t *testing.T) {
 			"conflicting insert. Nothing below was measured.")
 	}
 
-	if _, err := winner.ExecContext(ctx,
-		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
-		 VALUES ($1, $2, 1, 'ready', '{}', $3)`, winnerID, def, tenant); err != nil {
-		t.Fatalf("competitor workflow row: %v", err)
-	}
+	testutil.SeedRun(t, winner, testutil.RunSeed{
+		ID: winnerID, TenantID: tenant, DefName: def, DefVersion: 1,
+	})
 	if err := winner.Commit(); err != nil {
 		t.Fatalf("competitor commit: %v", err)
 	}

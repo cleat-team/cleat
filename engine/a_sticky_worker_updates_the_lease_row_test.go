@@ -48,24 +48,15 @@ func seedStickyWorkerTriple(t *testing.T, store *PostgresStore, db *sql.DB, id, 
 	}); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES ($1, $2, 1, 'ready', '{}', 'default', $3)
-	`, id, defName, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_instances: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_leases (id, tenant_id, task_queue, status)
-		VALUES ($1, $2, 'default', 'ready')
-	`, id, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_leases: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_payloads (id, tenant_id, input)
-		VALUES ($1, $2, '{}')
-	`, id, DefaultTenantUUID); err != nil {
-		t.Fatalf("seed workflow_payloads: %v", err)
-	}
+	testutil.SeedRun(t, db, testutil.RunSeed{
+		ID:         id,
+		TenantID:   DefaultTenantUUID,
+		DefName:    defName,
+		DefVersion: 1,
+		Input:      "{}",
+		TaskQueue:  "default",
+		Status:     "ready",
+	})
 }
 
 func readLeaseStickyWorker(t *testing.T, db *sql.DB, id string) sql.NullString {
@@ -101,8 +92,8 @@ func TestClearStickyWorkerUpdatesTheLeaseRow(t *testing.T) {
 	const id = "sticky-lease-clear-1"
 	seedStickyWorkerTriple(t, store, db, id, "sticky-lease-clear-def")
 
-	// Seeded directly via SQL on BOTH tables, not through UpdateStickyWorker
-	// -- otherwise this test cannot tell ClearStickyWorker's own mirror apart
+	// Seeded directly via SQL on workflow_leases, not through
+	// UpdateStickyWorker -- otherwise this test cannot tell ClearStickyWorker's own mirror apart
 	// from UpdateStickyWorker's: a reverted ClearStickyWorker mirror would
 	// leave workflow_leases.sticky_worker_id at whatever UpdateStickyWorker's
 	// (also-reverted-in-that-scenario, but not here) mirror left it, and if
@@ -110,9 +101,6 @@ func TestClearStickyWorkerUpdatesTheLeaseRow(t *testing.T) {
 	// NULL before ClearStickyWorker touches it, passing for the wrong
 	// reason. Falsified: confirmed this version fails when only
 	// ClearStickyWorker's own mirror is removed.
-	if _, err := db.ExecContext(ctx, `UPDATE workflow_instances SET sticky_worker_id = $2 WHERE id = $1`, id, "worker-sticky-2"); err != nil {
-		t.Fatalf("seed workflow_instances.sticky_worker_id: %v", err)
-	}
 	if _, err := db.ExecContext(ctx, `UPDATE workflow_leases SET sticky_worker_id = $2 WHERE id = $1`, id, "worker-sticky-2"); err != nil {
 		t.Fatalf("seed workflow_leases.sticky_worker_id: %v", err)
 	}

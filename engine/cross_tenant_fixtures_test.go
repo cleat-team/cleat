@@ -196,13 +196,15 @@ func seedWorkflow(t *testing.T, adminDB *sql.DB, o seedWorkflowOpts) string {
 	}
 
 	id := xtcNextID("xtc")
+	// workflow_instances carries only what cleat#3245's baseline
+	// regeneration leaves there (id, tenant_id, parent_close_policy,
+	// event_count, history_swept_at) plus def_name/def_version, which stay
+	// NOT NULL on it until B5 -- everything else this fixture controls is
+	// written straight to its owning table below.
 	if _, err := adminDB.Exec(`
-		INSERT INTO workflow_instances
-			(id, def_name, def_version, status, input, tenant_id, task_queue,
-			 next_wake_at, created_at, error_code, error_op, priority, generation, trace_id)
-		VALUES ($1, $2, $3, 'ready', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-	`, id, xtcDefName, xtcDefVersion, o.input, o.tenantID, o.taskQueue,
-		o.nextWakeAt, o.createdAt, o.errorCode, o.errorOp, o.priority, o.generation, o.traceID); err != nil {
+		INSERT INTO workflow_instances (id, def_name, def_version, tenant_id)
+		VALUES ($1, $2, $3, $4)
+	`, id, xtcDefName, xtcDefVersion, o.tenantID); err != nil {
 		t.Fatalf("seed workflow: %v", err)
 	}
 	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflows' candidate scan now

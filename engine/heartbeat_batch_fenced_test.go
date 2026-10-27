@@ -152,10 +152,19 @@ func TestHeartbeatBatchFencedReportsEveryPairLostWhenTheWorkerDoesNotOwnAnyOfThe
 func bumpGeneration(t *testing.T, ctx context.Context, dialect string, store WorkflowStore, workflowID string) {
 	t.Helper()
 	sqlDB := queueClaimTestDB(t, store)
+	if dialect == "postgres" {
+		// workflow_leases is the only copy of generation written on
+		// PostgreSQL since cleat#3245 B3b/B3c -- this mirrors the reaper's
+		// own generation bump, and is where the batch fence reads it.
+		if _, err := sqlDB.ExecContext(ctx,
+			`UPDATE workflow_leases SET generation = generation + 1 WHERE tenant_id = $1 AND id = $2`,
+			DefaultTenantUUID, workflowID); err != nil {
+			t.Fatalf("bump generation (workflow_leases): %v", err)
+		}
+		return
+	}
 	var q string
 	switch dialect {
-	case "postgres":
-		q = `UPDATE workflow_instances SET generation = generation + 1 WHERE tenant_id = $1 AND id = $2`
 	case "mysql":
 		q = `UPDATE workflow_instances SET generation = generation + 1 WHERE tenant_id = ? AND id = ?`
 	case "mssql":
@@ -165,16 +174,6 @@ func bumpGeneration(t *testing.T, ctx context.Context, dialect string, store Wor
 	}
 	if _, err := sqlDB.ExecContext(ctx, q, DefaultTenantUUID, workflowID); err != nil {
 		t.Fatalf("bump generation: %v", err)
-	}
-	// The reaper mirrors its generation bump onto workflow_leases, and on
-	// PostgreSQL that row is where the batch fence reads it since
-	// cleat#3245 B3b.
-	if dialect == "postgres" {
-		if _, err := sqlDB.ExecContext(ctx,
-			`UPDATE workflow_leases SET generation = generation + 1 WHERE tenant_id = $1 AND id = $2`,
-			DefaultTenantUUID, workflowID); err != nil {
-			t.Fatalf("bump generation (workflow_leases): %v", err)
-		}
 	}
 }
 

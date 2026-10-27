@@ -22,14 +22,10 @@ func TestFaultNetworkPartition(t *testing.T) {
 	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-network-partition-%d", time.Now().UnixNano())
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
 	// cleat#3245 Phase 3 step 3 piece B: ClaimWorkflow's candidate scan (and
-	// the FOR UPDATE SKIP LOCKED lock below) now reads workflow_leases, not
+	// the FOR UPDATE SKIP LOCKED lock below) reads workflow_leases, not
 	// workflow_instances.
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", DefVersion: 1, Status: "ready"})
 	defer func() {
 		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
@@ -99,11 +95,7 @@ func TestFaultSlowNetwork(t *testing.T) {
 	deployFaultTestDef(t, store)
 
 	runID := fmt.Sprintf("test-slow-network-%d", time.Now().UnixNano())
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID); err != nil {
-		t.Fatalf("insert test instance: %v", err)
-	}
-	testutil.SeedWorkflowLease(t, db, runID, testutil.WorkflowLeaseSeed{})
+	testutil.SeedRun(t, db, testutil.RunSeed{ID: runID, DefName: "test", DefVersion: 1, Status: "ready"})
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow first.
