@@ -42,6 +42,10 @@ func TestMigrationsHonourANonDefaultSchema(t *testing.T) {
 	}{
 		{"default", "", "public"},
 		{"non-default", "cleat_prod", "cleat_prod"},
+		// Interpolated unquoted, so PostgreSQL folds it: the tables land in
+		// reviewcase. Anything that looks the schema up by the raw string
+		// instead finds nothing there.
+		{"mixed-case", "ReviewCase", "reviewcase"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newScratchDB(t, "cleat_schema_"+strings.ReplaceAll(tc.name, "-", "_"))

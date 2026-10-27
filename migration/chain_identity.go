@@ -202,9 +202,13 @@ func (r *Runner) trackingColumnExists(ctx context.Context, q sqlSession, col str
 	var args []any
 	switch r.dialect {
 	case DialectPostgres:
-		query = `SELECT count(*) FROM information_schema.columns
-			WHERE table_schema = $1 AND table_name = 'schema_migrations' AND column_name = $2`
-		args = []any{r.schemaIdent(), col}
+		// Resolved through to_regclass, like trackingTableExistsOn, so the
+		// schema name folds exactly as it does where it is interpolated.
+		// Comparing information_schema.table_schema to the raw --schema value
+		// misses a mixed-case name, which PostgreSQL stores lowercased.
+		query = `SELECT count(*) FROM pg_attribute
+			WHERE attrelid = to_regclass($1) AND attname = $2 AND NOT attisdropped`
+		args = []any{r.trackingTable(), col}
 	case DialectMySQL:
 		query = `SELECT count(*) FROM information_schema.columns
 			WHERE table_schema = DATABASE() AND table_name = 'schema_migrations' AND column_name = ?`
