@@ -921,8 +921,9 @@ tier2:
         entry used to describe, "a deliberate step outside RLS", no longer exists. The one
         read that is not tenant-scoped is the tenant list itself, which returns tenant ids;
         every claim of work is scoped to the tenant it is claiming for. That "nothing has to
-        be granted" is read from the code and from the flag's own help text; on SQL Server
-        it has NOT been run end to end (see the first open item).
+        be granted" is read from the code and from the flag's own help text and, since
+        cleat#3446, measured end to end on PostgreSQL and SQL Server (see the first open
+        item).
 
         WHEN IT DOES NOT ROTATE. claimRotating returns errRotatingClaimUnavailable, and
         claimGeneral falls back to claiming the worker's own tenant only, warning once per
@@ -943,54 +944,70 @@ tier2:
         single-tenant.
 
         Tier 2 and not tier 1, unchanged: it cannot be green on every dialect (MySQL), and
-        the rotation as a whole has no end-to-end test against a real multi-tenant
-        database yet -- see open_items and cleat#3442. The claim stays at PostgreSQL and
-        SQL Server because those are the dialects whose store can rotate, and it is
-        widened only by a test that passes on the dialect (owner decision D30).
+        the rotation's end-to-end test (cleat#3446) runs on PostgreSQL and SQL Server only
+        -- its MySQL arm pins the fallback, which is not rotation -- and not on a sharded
+        worker; see open_items. The claim stays at PostgreSQL and SQL Server because those
+        are the dialects whose store can rotate, and it is widened only by a test that
+        passes on the dialect (owner decision D30).
 
         MYSQL. multi-tenancy-mysql is NOT SUPPORTED, so there is no multi-tenant MySQL
         deployment for this to serve; the store not being a TenantLister is consistent with
         that policy and not an open engineering item.
 
-        THE RETIRED MECHANISM IS STILL IN THE SCHEMA, UNCALLED. `admin.claim_workflows`
-        and `admin.get_due_schedules` are still defined in migrations/postgres/001_schema.sql
-        (the re-baselined schema; the two grant migrations no longer exist as files) and nothing calls
-        them. B5b of cleat#3245 (PR #3444, still open on 2026-10-27) removes
-        `admin.claim_workflows` from that file -- measured: 0 references there against 4 on
-        develop -- but its 001_schema.sql still defines `admin.get_due_schedules` (4
-        references, as on develop), so that one stays, uncalled, after B5b. An earlier
-        version of this paragraph said B5b deletes both; it was written from the issue
-        text and not from the PR. Re-derive:
+        THE RETIRED MECHANISM IS MOSTLY GONE FROM THE SCHEMA. B5b of cleat#3245 (merged as
+        47de7fd2, 2026-10-27) deleted `admin.claim_workflows`: 0 references in
+        migrations/postgres/001_schema.sql on develop, against 4 before it.
+        `admin.get_due_schedules` is still defined there (4 references) and nothing calls
+        it; B5b did not touch it. The two pre-rebaseline grant migrations no longer exist
+        as files. Re-derive:
 
+          git grep -c 'admin\.claim_workflows' -- migrations/postgres/001_schema.sql
+            # no output: no match (it printed 4 before B5b)
+          git grep -c 'admin\.get_due_schedules' -- migrations/postgres/001_schema.sql
           git grep -n 'admin\.claim_workflows\|admin\.get_due_schedules' -- '*.go' ':!*_test.go'
             # only comments and the flag's help text -- no call
-          git grep -n -i 'FUNCTION admin\.claim_workflows' -- migrations
 
         SQL Server's migrations/mssql/optional/cross_tenant_claim.sql is NOT a prerequisite
         for claiming: its own header says the per-tenant rotation needs no grant to claim
         and states what it still affects. This entry used to name it as the SQL Server
         mechanism, which it no longer is.
       open_items:
-        - "UNMEASURED on SQL Server (2026-10-27): that rotation needs no grant there. It is
-           read from claimRotating, which issues no cross-tenant statement, from the flag's
-           help text, and from the header of migrations/mssql/optional/cross_tenant_claim.sql.
-           docs/reference/worker-config.md still says the opposite for SQL Server (two steps:
-           apply that optional migration, then add the worker principal to cleat_admin),
-           and its MySQL row still says a single shared MySQL database works -- which the
-           TenantLister probe above contradicts. That doc predates cleat#1926 on both
-           points. Of the two statements about SQL Server one is wrong, and cleat#3442
-           running on SQL Server is what decides it; this entry sides with the code until
-           then"
-        - "COVERAGE, stated exactly (2026-10-27). Real-PostgreSQL tests cover the pieces:
-           the tenant list under RLS (TestATenantListNeedsNoRLSExemption), a suspended
-           tenant not being enumerated (TestASuspendedTenantIsNotEnumerated), and the
-           claim itself. The rotation logic -- fair share, resuming the cursor, one broken
-           tenant not stopping the tick, the fallbacks -- is tested only with MOCK stores
-           (cmd/cleat-worker/the_rotating_claim_shares_the_batch_test.go). SQL Server's
-           ListTenantIDs has no test of its own that I could find. No test runs
-           claimRotating end to end against a real multi-tenant database with a real
-           per-tenant factory; that is cleat#3442, and it is what a wider claim should
-           rest on"
+        - "MEASURED on SQL Server (2026-10-27, cleat#3446): rotation needs no cross-tenant
+           grant. cmd/cleat-worker/a_rotating_claim_serves_every_tenant_test.go runs the
+           rotation end to end on SQL Server 2022 with the SHIPPED dbo.fn_tenant_filter
+           (the test asserts it carries no cleat_admin admission, so the optional
+           cross_tenant_claim.sql is not in effect): every live tenant's runs were claimed
+           exactly once, the suspended tenant's were not, and no claim left its tenant. It
+           passed on the author's SQL Server and in Tier 1's log, with no skips. WHAT
+           CARRIES THE WEIGHT: the predicate-text assertion, and sa being subject to the
+           policy, which is measured DIRECTLY by a subtest added in cleat#3452 (as sa, a
+           tenant-B run is invisible under tenant A's session context, 0 rows against 1
+           under B's; switching dbo.TenantFilter_Instances OFF fails that subtest alone).
+           The mis-routing control shows ROUTING only, not the policy: the SQL Server claim
+           carries its own tenant_id predicate, so a mis-routed factory is reported
+           whether or not the policy applies. The test's
+           IS_ROLEMEMBER('cleat_admin') = 0 check is VACUOUS under sa: it maps to dbo, which
+           cannot be made a role member (ALTER ROLE ... ADD MEMBER dbo fails with Msg
+           15405, measured), so it returns 0 whatever the setup. SCOPE: that no cross-tenant
+           admission is needed is therefore measured; what it leaves unmeasured is a least-privilege
+           application login's ordinary object grants (SELECT, DML, EXEC), and no
+           workflow's WASM was run. docs/reference/worker-config.md still says the opposite for SQL Server
+           (two steps: apply the optional migration, add the principal to cleat_admin) and
+           claims a single shared MySQL database works, which the TenantLister probe above
+           contradicts; both predate cleat#1926 and are tracked in cleat#3447"
+        - "COVERAGE, stated exactly (2026-10-27). cmd/cleat-worker/a_rotating_claim_serves_every_tenant_test.go
+           (cleat#3446) runs claimGeneral against a real multi-tenant database with the
+           dialect's real StoreFactory on PostgreSQL and SQL Server, and asserts the
+           three properties above, each with a control inside the test; it was falsified
+           against production code (routing in storeForTenant, ListTenantIDs' suspension
+           filter, the tenant context inside the PostgreSQL claim). Its MySQL arm pins the
+           fallback only. NOT covered: a workflow's WASM execution under the claimed
+           tenant, a sharded worker, a least-privilege application login, and the fair
+           share and cursor behaviour against a real database (those are tested with MOCK
+           stores in cmd/cleat-worker/the_rotating_claim_shares_the_batch_test.go). The
+           narrower pieces keep their own tests: the tenant list under RLS
+           (TestATenantListNeedsNoRLSExemption) and a suspended tenant not being
+           enumerated (TestASuspendedTenantIsNotEnumerated) are PostgreSQL only"
         - "a sharded worker cannot rotate and serves its own tenant only (ShardedStore is
            not a TenantLister; measured above). Not tested end to end, and no fix is
            planned here -- recorded because the previous text implied the flag worked on
@@ -1052,8 +1069,8 @@ tier2:
         - "COVERAGE, stated exactly (2026-10-27): the per-tenant read is tested with mock
            stores (cmd/cleat-worker/the_due_schedule_read_covers_every_tenant_test.go) and
            the firing scope by TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore.
-           cleat#3442 is the end-to-end test of claimRotating; it does not cover the
-           schedule read, so this half has no end-to-end test planned yet"
+           cleat#3446 is the end-to-end test of claimRotating (the claim); it does not
+           cover the schedule read, so this half has no end-to-end test planned yet"
         - "the dashboard was not re-checked for this rewrite; see cross-tenant-claim's
            last open item"
 
