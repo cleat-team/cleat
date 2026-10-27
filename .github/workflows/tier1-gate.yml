@@ -291,11 +291,13 @@ jobs:
         shard: [1, 2]
     runs-on: ubuntu-latest
     # Each shard runs roughly half of ./engine/...'s ~3500 top-level tests.
-    # 45 carries the same buffer the pre-sharding single job had over its own
+    # 45 carried the same buffer the pre-sharding single job had over its own
     # GO_TEST_TIMEOUT (tier-gate.sh defaults to 30m): the difference is setup
     # cost -- checkout, Python install, wasm-tools install, the SQL Server
     # database step -- which does not shrink with sharding.
-    timeout-minutes: 45
+    # Raised from 45 to 60, cleat#3482: 45 was 1.99x this job's longest successful
+    # pull_request run, below the 2.5x margin cleat#3479 uses.
+    timeout-minutes: 60  # max 23.1m over 105 successful runs (develop push + pull_request samples); internal go test -timeout 30m, 2026-10-27; cleat#3482
 
     services:
       postgres:
@@ -651,7 +653,11 @@ jobs:
     # job. Conservative on purpose for this first split; lower it once two
     # or three real runs establish each leg's actual ceiling, the same way
     # 45 was raised to 60 above only after direct measurement, not a guess.
-    timeout-minutes: 60
+    # Raised from 60 to 110, cleat#3482: 60 was 1.61x the longest successful
+    # pull_request run (37.4m), and a develop push has since run 43.3m. 110 is
+    # above that longest run plus a package's own 30m Go timeout (73.3m), so a
+    # hung package reaches its timeout and goroutine dump before this cap.
+    timeout-minutes: 110  # max 43.3m over 104 successful runs (develop push + pull_request samples); internal go test -timeout 30m, 2026-10-27; cleat#3482
 
     services:
       postgres:

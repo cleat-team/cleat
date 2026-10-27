@@ -141,7 +141,9 @@ jobs:
   e2e-cross-language:
     name: Cross-Language WASM E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Raised from 20 to 35, cleat#3482: 20 was 1.62x the longest successful
+    # pull_request run, below the 2.5x margin cleat#3479 uses.
+    timeout-minutes: 35  # max 12.1m over 55 successful runs (develop push + pull_request samples); internal go test -timeout 10m, 2026-10-27; cleat#3482
 
     steps:
       - uses: actions/checkout@v7
