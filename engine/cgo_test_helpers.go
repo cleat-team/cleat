@@ -120,6 +120,39 @@ package engine
 //     }
 //     return 2;
 // }
+//
+// // Returns 0 ok(resolved) / 1 ok(rejected) / 2 ok(timed-out) / 11 err(suspended)
+// // / 12 err(failed) / -1 for anything else. The ok case of
+// // result<await-outcome, call-failure> is a VARIANT, not a string, which
+// // cgotest_val_get_call_outcome rejects; the err cases are the same shape and go
+// // through it.
+// static int cgotest_val_get_await_outcome(const wasmtime_component_val_t *v,
+//                                          const char **msg, size_t *msglen,
+//                                          uint32_t *code) {
+//     *msg = NULL;
+//     *msglen = 0;
+//     *code = 0;
+//     if (v->kind != WASMTIME_COMPONENT_RESULT) { return -1; }
+//     const wasmtime_component_val_t *inner = v->of.result.val;
+//     if (inner == NULL) { return -1; }
+//     if (!v->of.result.is_ok) {
+//         int r = cgotest_val_get_call_outcome(v, msg, msglen, code);
+//         return r == 1 ? 11 : (r == 2 ? 12 : -1);
+//     }
+//     if (inner->kind != WASMTIME_COMPONENT_VARIANT) { return -1; }
+//     const char *d = inner->of.variant.discriminant.data;
+//     size_t dlen = inner->of.variant.discriminant.size;
+//     const wasmtime_component_val_t *payload = inner->of.variant.val;
+//     if (dlen == 9 && memcmp(d, "timed-out", 9) == 0) { return payload == NULL ? 2 : -1; }
+//     int kind;
+//     if (dlen == 8 && memcmp(d, "resolved", 8) == 0) { kind = 0; }
+//     else if (dlen == 8 && memcmp(d, "rejected", 8) == 0) { kind = 1; }
+//     else { return -1; }
+//     if (payload == NULL || payload->kind != WASMTIME_COMPONENT_STRING) { return -1; }
+//     *msg = payload->of.string.data;
+//     *msglen = payload->of.string.size;
+//     return kind;
+// }
 import "C"
 import (
 	"fmt"
@@ -228,6 +261,29 @@ func cgotestReadCallOutcome(r unsafe.Pointer) (kind, payload string, code uint32
 	case 1:
 		return "suspended", "", 0
 	case 2:
+		return "failed", cgotestGoStr(msg, msgLen), uint32(cCode)
+	}
+	return "", "", 0
+}
+
+// cgotestReadAwaitOutcome decodes a result<await-outcome, call-failure> written
+// into a result slot: kind is "resolved", "rejected", "timed-out", "suspended"
+// or "failed", and "" for a value that is not one of those (a dispatcher still
+// calling setResultString writes a bare string, which is none of them).
+func cgotestReadAwaitOutcome(r unsafe.Pointer) (kind, payload string, code uint32) {
+	var msg *C.char
+	var msgLen C.size_t
+	var cCode C.uint32_t
+	switch C.cgotest_val_get_await_outcome((*C.wasmtime_component_val_t)(r), &msg, &msgLen, &cCode) {
+	case 0:
+		return "resolved", cgotestGoStr(msg, msgLen), 0
+	case 1:
+		return "rejected", cgotestGoStr(msg, msgLen), 0
+	case 2:
+		return "timed-out", "", 0
+	case 11:
+		return "suspended", "", 0
+	case 12:
 		return "failed", cgotestGoStr(msg, msgLen), uint32(cCode)
 	}
 	return "", "", 0

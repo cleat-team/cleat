@@ -434,8 +434,8 @@ func (b *wasmtimeBackend) guestIsDrainingDefers() bool {
 // error (errCode in the low bits, the message in the buffer) can reach the
 // guest as anything but text. An error therefore arrives as the host's message
 // and fails the guest's JSON parse loudly, which is the most this signature
-// can do; carrying them as a case of the type is the redesign the
-// stop-correspondence guard records as reasonWitReturnsABareString.
+// can do; carrying them as a case of the type is what cleat#3425 did for
+// durable-await-promise, and these two calls have not had it done.
 func extractChildAnswer(packed int64, buf []byte) string {
 	if packed == packAwaitChildResultSuspend() {
 		return ""
@@ -547,7 +547,25 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 	return nil
 }
 
-// dispatchAwaitPromise handles (string,u64) -> string.
+// awaitRejectionReporter is implemented by the host handler that can say whether
+// the AwaitPromise call it just answered ended in a REJECTION.
+//
+// The packed word cannot: a rejected promise and a host error (no promise
+// store) both carry errCode 1 and a message, and five SDKs decode that word, so
+// it is not changed to add a case. The component path needs the distinction
+// because its WIT type has a case for each (cleat#3425). A handler that does
+// not implement this -- the test mocks -- reports every errCode as a host error.
+type awaitRejectionReporter interface {
+	lastAwaitPromiseRejected() bool
+}
+
+// dispatchAwaitPromise handles (string,u64) -> result<await-outcome, call-failure>.
+//
+// This was `-> string`, decoded with extractStringFromSimplePacked, which reads
+// the length field and nothing else (cleat#3425, measured on a real Python
+// guest): a rejection arrived as its reason with rejected=False, a host error as
+// its message, a genuine timeout as "" -- indistinguishable from a promise
+// resolved with an empty value -- and a stop as "" too.
 func (b *wasmtimeBackend) dispatchAwaitPromise(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
@@ -560,9 +578,36 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.AwaitPromise(ctxWithMem(context.Background(), buf), nil, id, timeoutMs, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	// The stop is tested FIRST and by mask, for the reason decodeCallOutcome
+	// gives. In this layout bit 31 sits in the byte at bits 24-31 (the
+	// "rejected" flag the Python decoder documents) and the length field starts
+	// at bit 32, so a stop reads as an ordinary result of length 0: measured
+	// with the check removed, TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase
+	// reports the stop as "resolved" -- the same silent empty success this
+	// import produced before it could carry a stop at all.
+	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
+		setResultCallOutcome(results, nresults, callOutcome{suspended: true})
+		return nil
+	}
+
+	u := uint64(packed)
+	payload := extractStringFromSimplePacked(packed, buf)
+	if errCode := uint16(u & 0xFFFF); errCode != 0 {
+		if r, ok := b.handler.(awaitRejectionReporter); ok && r.lastAwaitPromiseRejected() {
+			setResultAwaitOutcome(results, nresults, awaitRejected, payload)
+			return nil
+		}
+		// code 0: the packed errCode here is this call's own ("1"), not the
+		// call-error taxonomy the guest maps to retryable/permanent classes.
+		setResultCallOutcome(results, nresults, callOutcome{failed: true, payload: payload})
+		return nil
+	}
+	if byte(u>>16) != 0 {
+		setResultAwaitOutcome(results, nresults, awaitTimedOut, "")
+		return nil
+	}
+	setResultAwaitOutcome(results, nresults, awaitResolved, payload)
 	return nil
 }
 

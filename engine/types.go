@@ -632,20 +632,21 @@ const (
 
 // execSession implements HostHandler for a single execution or replay.
 type execSession struct {
-	engine       *Engine
-	history      []EventRecord
-	stepCount    int
-	isReplay     bool
-	nowMs        int64
-	randomSeq    int64 // monotonic counter for deterministic Random()
-	suspendErr   *SuspendError
-	deferrals    map[string]string // registered defer callbacks (deferID -> description)
-	inDeferPhase bool              // true while the guest is draining its defer table (cleat#1155)
-	workflowID   string            // parent workflow instance ID (for child workflows)
-	defName      string            // workflow definition name (for metrics labels)
-	execRunID    string            // current execution run ID
-	queryState   map[string]string // key-value state set via SetQueryState
-	tenantID     string            // tenant ID injected into plugin function context
+	engine        *Engine
+	history       []EventRecord
+	stepCount     int
+	isReplay      bool
+	nowMs         int64
+	randomSeq     int64 // monotonic counter for deterministic Random()
+	suspendErr    *SuspendError
+	deferrals     map[string]string // registered defer callbacks (deferID -> description)
+	inDeferPhase  bool              // true while the guest is draining its defer table (cleat#1155)
+	awaitRejected bool              // the last AwaitPromise ended in a rejection (cleat#3425)
+	workflowID    string            // parent workflow instance ID (for child workflows)
+	defName       string            // workflow definition name (for metrics labels)
+	execRunID     string            // current execution run ID
+	queryState    map[string]string // key-value state set via SetQueryState
+	tenantID      string            // tenant ID injected into plugin function context
 
 	// callerPluginName is read by pluginCallGuard.Check at both call_plugin
 	// sites in plugins.go, but nothing outside a _test.go file assigns it.

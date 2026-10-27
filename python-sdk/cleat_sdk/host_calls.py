@@ -187,6 +187,15 @@ try:
         durable_send as _import_cleat_send,
     )
     from wit_world.imports.durable_promises import (
+        AwaitOutcome_Rejected as _AwaitOutcomeRejected,
+    )
+    from wit_world.imports.durable_promises import (
+        AwaitOutcome_Resolved as _AwaitOutcomeResolved,
+    )
+    from wit_world.imports.durable_promises import (
+        AwaitOutcome_TimedOut as _AwaitOutcomeTimedOut,
+    )
+    from wit_world.imports.durable_promises import (
         durable_await_promise as _import_cleat_await_promise,
     )
     from wit_world.imports.durable_promises import (
@@ -264,6 +273,19 @@ except ImportError:
 
     class _CallFailureSuspended:  # type: ignore[no-redef]
         """Stand-in for the suspended case outside the WASM runtime."""
+
+    class _AwaitOutcomeResolved:  # type: ignore[no-redef]
+        """Stand-in for ``await-outcome.resolved`` outside the WASM runtime."""
+
+        value: str = ""
+
+    class _AwaitOutcomeRejected:  # type: ignore[no-redef]
+        """Stand-in for ``await-outcome.rejected`` outside the WASM runtime."""
+
+        value: str = ""
+
+    class _AwaitOutcomeTimedOut:  # type: ignore[no-redef]
+        """Stand-in for ``await-outcome.timed-out`` outside the WASM runtime."""
 
 
 T = TypeVar("T")
@@ -2505,7 +2527,24 @@ class HostCalls:
             If the host reports an error.
         """
         self.dispatch_updates()  # dispatch point; see dispatch_updates
-        result = _import_cleat_await_promise(promise_id, timeout_ms)
+        try:
+            result = _import_cleat_await_promise(promise_id, timeout_ms)
+        except _WitErr as err:
+            # ``err(call-failure)``: a stop unwinds, a host failure raises.
+            # Neither is an outcome of the promise (cleat#3425).
+            _raise_call_failure("promise", "await_promise", err.value)
+            raise  # unreachable; _raise_call_failure always raises
+
+        # The component path's ``await-outcome`` variant (cleat#3425): the three
+        # ways a wait can end, each its own case. Typed ``-> string`` this was
+        # one undifferentiated value, so a rejection arrived as the rejection
+        # text with ``rejected=False`` and a timeout as ``""``.
+        if isinstance(result, _AwaitOutcomeResolved):
+            return PromiseResult(result=result.value, timed_out=False, rejected=False)
+        if isinstance(result, _AwaitOutcomeRejected):
+            return PromiseResult(result=result.value, timed_out=False, rejected=True)
+        if isinstance(result, _AwaitOutcomeTimedOut):
+            return PromiseResult(result="", timed_out=True, rejected=False)
 
         if isinstance(result, str):
             return PromiseResult(result=result, timed_out=False, rejected=False)

@@ -840,16 +840,51 @@ func TestDispatchChildWorkflowWithOptions(t *testing.T) {
 	wantCallOutcome(t, resultPtr, "ok", 20, 0)
 }
 
-func TestDispatchAwaitPromise(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("promise-id", uint64(1000))
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(22, argsPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
+// rejectingHandler is a mockHostHandler that reports its last AwaitPromise as a
+// rejection, the way *execSession does through awaitRejectionReporter.
+type rejectingHandler struct{ *mockHostHandler }
+
+func (rejectingHandler) lastAwaitPromiseRejected() bool { return true }
+
+// cleat#3425: durable-await-promise returns result<await-outcome, call-failure>,
+// and each packed word the host can answer with lands in its own case. Before,
+// every one of them was flattened to a string by extractStringFromSimplePacked.
+func TestDispatchAwaitPromiseMapsEachPackedWordToItsOwnCase(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		handler     HostHandler
+		wantKind    string
+		wantPayload int
+	}{
+		{"resolved", &mockHostHandler{ret: packAwaitPromiseResult(5, false, 0)}, "resolved", 5},
+		{"resolved with an empty value", &mockHostHandler{ret: packAwaitPromiseResult(0, false, 0)}, "resolved", 0},
+		{"timeout", &mockHostHandler{ret: packAwaitPromiseResult(0, true, 0)}, "timed-out", 0},
+		{"timeout inside a host defer drain", &mockHostHandler{ret: packAwaitSignalsResult(0, 0, true, 0)}, "timed-out", 0},
+		{"host error", &mockHostHandler{ret: packAwaitPromiseResult(7, false, 1)}, "failed", 7},
+		{"rejection", rejectingHandler{&mockHostHandler{ret: packAwaitPromiseResult(6, false, 1)}}, "rejected", 6},
+		// The stop sentinel is bit 31, which lands inside this layout's timed-out
+		// byte. Reading the fields first takes it for a timeout.
+		{"stop", &mockHostHandler{ret: callSuspendSentinel}, "suspended", 0},
+	} {
+		b := &wasmtimeBackend{handler: c.handler}
+		argsPtr, _, freeArgs := cgotestMakeMixedArgs("promise-id", uint64(1000))
+		resultPtr := cgotestAllocResult()
+		if err := b.cgotestDispatchStr(22, argsPtr, 2, resultPtr); err != nil {
+			freeArgs()
+			t.Fatalf("%s: unexpected error: %v", c.name, err)
+		}
+		freeArgs()
+		kind, payload, code := cgotestReadAwaitOutcome(resultPtr)
+		if kind != c.wantKind {
+			t.Errorf("%s: case = %q, want %q (an empty case means the dispatcher wrote something that is not a result<await-outcome, call-failure>)",
+				c.name, kind, c.wantKind)
+		}
+		if len(payload) != c.wantPayload {
+			t.Errorf("%s: payload is %d bytes, want %d", c.name, len(payload), c.wantPayload)
+		}
+		if code != 0 {
+			t.Errorf("%s: call-error code = %d, want 0 (the packed errCode here is this call's own, not the call-error taxonomy)", c.name, code)
+		}
 	}
 }
 
