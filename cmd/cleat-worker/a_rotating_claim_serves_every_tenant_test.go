@@ -71,6 +71,15 @@ type rotationRig struct {
 	register func(t *testing.T, id, name string, suspended bool)
 	// reset empties the run tables of this rig's own database.
 	reset func(t *testing.T)
+	// isolationProbe, where set, reads one tenant's run back over a single
+	// connection scoped to ANOTHER tenant and then to its own, and returns how
+	// many rows each read saw. It measures that the connection this rig runs as
+	// is subject to the isolation policy, directly. It exists because that
+	// cannot be inferred from the claim on SQL Server: the claim there carries an
+	// explicit tenant predicate (MSSQLStore.claimWorkflowsOnce calls it "the
+	// whole of tenant isolation on this connection"), so a claim that comes back
+	// right says nothing about whether the policy applies to this principal.
+	isolationProbe func(t *testing.T) (otherTenantRows, ownTenantRows int, principal string)
 }
 
 // claimRecord is one run returned by a ClaimWorkflows call, with the tenant the
@@ -386,6 +395,29 @@ func assertRotationServesEveryTenant(t *testing.T, rig *rotationRig) {
 		}
 	})
 
+	// A DIRECT MEASUREMENT, where the claim cannot supply one (SQL Server): the
+	// principal this rig runs as must be subject to the isolation policy. The
+	// first subtest passing does not show that, because the SQL Server claim
+	// carries its own tenant predicate; so a run is read back over a connection
+	// scoped to a different tenant, which must see nothing, and over one scoped
+	// to its owner, which must see it (else "sees nothing" could mean "not there").
+	if rig.isolationProbe != nil {
+		t.Run("control: the principal is subject to the isolation policy (read directly)", func(t *testing.T) {
+			other, own, principal := rig.isolationProbe(t)
+			t.Logf("%s: principal %s read a tenant B run: %d row(s) scoped to tenant A, %d row(s) scoped to tenant B",
+				rig.dialect, principal, other, own)
+			if own != 1 {
+				t.Fatalf("%s: scoped to its own tenant the run was visible %d time(s), want 1; "+
+					"the probe cannot tell \"hidden by the policy\" from \"not there\"", rig.dialect, own)
+			}
+			if other != 0 {
+				t.Errorf("%s: scoped to a DIFFERENT tenant the principal %s still read the run (%d row(s)). "+
+					"It is not subject to the isolation policy, so nothing here shows the rotation relies on "+
+					"anything but the claim's own predicate", rig.dialect, principal, other)
+			}
+		})
+	}
+
 	// CONTROL for assertion 3, where a connection that bypasses isolation can be
 	// made. With it, every tenant's store sees every row.
 	if rig.bypassFactory != nil {
@@ -527,8 +559,11 @@ func newMSSQLRotationRig(t *testing.T) *rotationRig {
 	// MEMBER dbo fails with Msg 15405 "Cannot use the special principal 'dbo'",
 	// measured), so IS_ROLEMEMBER returns 0 whatever the setup. It is kept
 	// because a CLEAT_TEST_MSSQL naming any other login makes it meaningful.
-	// That sa still does not bypass the policy is shown by the mis-routing
-	// control below, not by this check. Pointed out by cleat-review-69 on #3451.
+	// That sa does not bypass the policy is NOT shown by the claim either: the
+	// SQL Server claim carries its own explicit tenant predicate, so the
+	// mis-routing control shows routing and nothing about RLS. It is measured
+	// directly by the isolation subtest (rig.isolationProbe). Both points were
+	// pointed out by cleat-review-69 on #3451.
 	var member sql.NullInt64
 	if err := db.QueryRowContext(ctx, `SELECT IS_ROLEMEMBER(N'cleat_admin')`).Scan(&member); err != nil {
 		t.Fatalf("reading cleat_admin membership: %v", err)
@@ -563,6 +598,53 @@ func newMSSQLRotationRig(t *testing.T) *rotationRig {
 				id, name, suspended); err != nil {
 				t.Fatalf("registering tenant %s: %v", name, err)
 			}
+		},
+		isolationProbe: func(t *testing.T) (int, int, string) {
+			t.Helper()
+			tenantA, tenantB, runID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+			factory := engine.NewMSSQLStoreFactory(connStr)
+			st, closer, err := factory.OpenStore(ctx, tenantB, "default")
+			if err != nil {
+				t.Fatalf("isolation probe: OpenStore(B): %v", err)
+			}
+			defer closer.Close()
+			if err := st.DeployWorkflowDef(ctx, &engine.WorkflowDef{
+				Name: "rotation-probe-3442", Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
+			}); err != nil {
+				t.Fatalf("isolation probe: deploy def: %v", err)
+			}
+			if _, _, err := st.StartNewRun(ctx, runID, "rotation-probe-3442", 1, json.RawMessage(`{}`),
+				"probe-"+runID, tenantB, 0); err != nil {
+				t.Fatalf("isolation probe: StartNewRun: %v", err)
+			}
+
+			// ONE pinned connection: sp_set_session_context lives on the
+			// connection, and a pool would hand the next statement another one.
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("isolation probe: pin a connection: %v", err)
+			}
+			defer conn.Close()
+			var principal string
+			if err := conn.QueryRowContext(ctx, `SELECT SUSER_SNAME() + N' as ' + USER_NAME()`).Scan(&principal); err != nil {
+				t.Fatalf("isolation probe: reading the principal: %v", err)
+			}
+			count := func(scopedTo string) int {
+				t.Helper()
+				if _, err := conn.ExecContext(ctx,
+					`EXEC sp_set_session_context @key=N'tenant_id', @value=@p1`, scopedTo); err != nil {
+					t.Fatalf("isolation probe: scoping to %s: %v", scopedTo, err)
+				}
+				var n int
+				if err := conn.QueryRowContext(ctx,
+					`SELECT COUNT(*) FROM dbo.workflow_instances WHERE id = @p1`, runID).Scan(&n); err != nil {
+					t.Fatalf("isolation probe: counting: %v", err)
+				}
+				return n
+			}
+			other := count(tenantA)
+			own := count(tenantB)
+			return other, own, principal
 		},
 		reset: func(t *testing.T) {
 			t.Helper()
