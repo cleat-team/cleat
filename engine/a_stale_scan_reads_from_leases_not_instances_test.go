@@ -39,9 +39,6 @@ func TestReapStaleInstancesReadsHeartbeatFromLeasesNotInstances(t *testing.T) {
 	// workflow_leases looks STALE (would be reaped if read). If the scan
 	// still reads workflow_instances, this row survives; if it reads
 	// workflow_leases, it does not.
-	if _, err := db.Exec(`UPDATE workflow_instances SET heartbeat_at = now() WHERE id = $1`, id); err != nil {
-		t.Fatalf("set workflow_instances.heartbeat_at fresh: %v", err)
-	}
 	if _, err := db.Exec(`UPDATE workflow_leases SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
 		t.Fatalf("set workflow_leases.heartbeat_at stale: %v", err)
 	}
@@ -64,55 +61,6 @@ func TestReapStaleInstancesReadsHeartbeatFromLeasesNotInstances(t *testing.T) {
 	}
 }
 
-// TestReapStaleInstancesIgnoresAStaleInstancesHeartbeatWhenLeasesIsFresh is
-// the mirror image and the sharper assertion: a row that LOOKS stale on
-// workflow_instances but is FRESH on workflow_leases must NOT be reclaimed.
-// A scan that still reads workflow_instances even partially (a leftover
-// predicate, a UNION, a fallback) would reclaim this row; one that reads
-// workflow_leases exclusively will not.
-func TestReapStaleInstancesIgnoresAStaleInstancesHeartbeatWhenLeasesIsFresh(t *testing.T) {
-	store, db := retryAndAdminLeaseTestStore(t)
-	ctx := context.Background()
-
-	const defName = "stale-scan-ignores-instances-def"
-	if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
-
-	const id = "stale-scan-ignores-instances-wf-1"
-	seedClaimedTriple(t, db, id, defName, "worker-stale-scan-2", 1)
-
-	// The instance copy is planted as a stale running run, which a scan that
-	// read it would reclaim. seedClaimedTriple writes a narrow instance row
-	// (cleat#3245 B4a), so status is planted here too, not just heartbeat_at.
-	if _, err := db.Exec(`UPDATE workflow_instances SET status = 'running', heartbeat_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
-		t.Fatalf("set workflow_instances stale and running: %v", err)
-	}
-	if _, err := db.Exec(`UPDATE workflow_leases SET heartbeat_at = now() WHERE id = $1`, id); err != nil {
-		t.Fatalf("set workflow_leases.heartbeat_at fresh: %v", err)
-	}
-
-	n, err := store.ReapStaleInstances(ctx, 30*time.Second, 0)
-	if err != nil {
-		t.Fatalf("ReapStaleInstances: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("ReapStaleInstances reclaimed %d, want 0 -- workflow_leases.heartbeat_at is "+
-			"fresh, so a scan reading workflow_leases must leave this row alone regardless of "+
-			"what workflow_instances.heartbeat_at says", n)
-	}
-
-	var instStatus string
-	if err := db.QueryRow(`SELECT status FROM workflow_instances WHERE id = $1`, id).Scan(&instStatus); err != nil {
-		t.Fatalf("read workflow_instances.status: %v", err)
-	}
-	if instStatus != "running" {
-		t.Errorf("workflow_instances.status = %q, want %q (untouched)", instStatus, "running")
-	}
-}
-
 func TestListStaleHoldersReadsHeartbeatFromLeasesNotInstances(t *testing.T) {
 	store, db := retryAndAdminLeaseTestStore(t)
 	ctx := context.Background()
@@ -127,9 +75,6 @@ func TestListStaleHoldersReadsHeartbeatFromLeasesNotInstances(t *testing.T) {
 	const id = "list-stale-holders-reads-leases-wf-1"
 	seedClaimedTriple(t, db, id, defName, "worker-list-stale-1", 1)
 
-	if _, err := db.Exec(`UPDATE workflow_instances SET heartbeat_at = now() WHERE id = $1`, id); err != nil {
-		t.Fatalf("set workflow_instances.heartbeat_at fresh: %v", err)
-	}
 	if _, err := db.Exec(`UPDATE workflow_leases SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
 		t.Fatalf("set workflow_leases.heartbeat_at stale: %v", err)
 	}
@@ -168,9 +113,6 @@ func TestReapStaleInstancesExceptReadsHeartbeatFromLeasesNotInstances(t *testing
 	const id = "reap-except-reads-leases-wf-1"
 	seedClaimedTriple(t, db, id, defName, "worker-reap-except-1", 1)
 
-	if _, err := db.Exec(`UPDATE workflow_instances SET heartbeat_at = now() WHERE id = $1`, id); err != nil {
-		t.Fatalf("set workflow_instances.heartbeat_at fresh: %v", err)
-	}
 	if _, err := db.Exec(`UPDATE workflow_leases SET heartbeat_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
 		t.Fatalf("set workflow_leases.heartbeat_at stale: %v", err)
 	}

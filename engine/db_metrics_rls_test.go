@@ -56,8 +56,8 @@ func TestMetricsQueriesWorkUnderRLS(t *testing.T) {
 	}
 	stalled := time.Now().Add(-2 * time.Hour)
 	if _, err := adminDB.Exec(
-		`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id)
-		 VALUES ('rls-metrics-wf', 'rls-metrics-def', 1, $1)`,
+		`INSERT INTO workflow_instances (id, tenant_id)
+		 VALUES ('rls-metrics-wf', $1)`,
 		tenant); err != nil {
 		t.Fatalf("seed workflow_instances: %v", err)
 	}

@@ -45,13 +45,6 @@ func TestPartitionFencedBatchUpdatesTheLeaseRow(t *testing.T) {
 		t.Fatalf("ClaimWorkflow: %v (nil=%v)", err, claimed == nil)
 	}
 
-	// cleat#3245 B2: heartbeat_at is renewed on workflow_leases only. Plant a
-	// sentinel on the instance row so a renewal still landing there would
-	// show; the claim no longer writes that column at all.
-	sentinel := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := db.Exec(`UPDATE workflow_instances SET heartbeat_at = $2 WHERE id = $1`, wfID, sentinel); err != nil {
-		t.Fatalf("plant the instance sentinel: %v", err)
-	}
 	var leaseBefore time.Time
 	if err := db.QueryRow(`SELECT heartbeat_at FROM workflow_leases WHERE id = $1`, wfID).Scan(&leaseBefore); err != nil {
 		t.Fatalf("read workflow_leases.heartbeat_at (before): %v", err)
@@ -78,10 +71,7 @@ func TestPartitionFencedBatchUpdatesTheLeaseRow(t *testing.T) {
 		t.Fatalf("lost = %+v, want none: the claim is still held by %s", lost, worker)
 	}
 
-	var instAfter, leaseAfter time.Time
-	if err := db.QueryRow(`SELECT heartbeat_at FROM workflow_instances WHERE id = $1`, wfID).Scan(&instAfter); err != nil {
-		t.Fatalf("read workflow_instances.heartbeat_at (after): %v", err)
-	}
+	var leaseAfter time.Time
 	if err := db.QueryRow(`SELECT heartbeat_at FROM workflow_leases WHERE id = $1`, wfID).Scan(&leaseAfter); err != nil {
 		t.Fatalf("read workflow_leases.heartbeat_at (after): %v", err)
 	}
@@ -89,10 +79,6 @@ func TestPartitionFencedBatchUpdatesTheLeaseRow(t *testing.T) {
 	if !leaseAfter.After(leaseBefore) {
 		t.Errorf("workflow_leases.heartbeat_at did not advance (before=%v after=%v): the batch "+
 			"fence renewed nothing", leaseBefore, leaseAfter)
-	}
-	if !instAfter.Equal(sentinel) {
-		t.Errorf("workflow_instances.heartbeat_at = %v, want the planted %v untouched -- the batch "+
-			"fence must lock the instance row, not rewrite it", instAfter, sentinel)
 	}
 }
 

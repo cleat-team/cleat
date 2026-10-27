@@ -33,52 +33,6 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-func TestIdxInstancesHeartbeatDoesNotIndexHeartbeatAt(t *testing.T) {
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	t.Cleanup(func() { db.Close() })
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-
-	var def string
-	if err := db.QueryRow(
-		`SELECT pg_get_indexdef('idx_instances_heartbeat'::regclass)`,
-	).Scan(&def); err != nil {
-		t.Fatalf("idx_instances_heartbeat: %v", err)
-	}
-	if strings.Contains(def, "heartbeat_at") {
-		t.Errorf("idx_instances_heartbeat still indexes heartbeat_at (%s) -- this is half of what makes "+
-			"a heartbeat UPDATE eligible to be HOT (see migration 015); restoring it silently loses "+
-			"the fix cleat#3272/#3274 measured", def)
-	}
-
-	// Negative control: the column must still be a real column on the table,
-	// or this test would pass vacuously against a renamed/dropped column
-	// rather than against the index definition it claims to check.
-	if _, err := db.Query(`SELECT heartbeat_at FROM workflow_instances LIMIT 0`); err != nil {
-		t.Fatalf("control failed: workflow_instances.heartbeat_at does not exist at all (%v) -- "+
-			"this test's premise (a column present on the table but absent from the index) does not hold", err)
-	}
-}
-
-func TestIdxInstancesStaleDoesNotIndexHeartbeatAt(t *testing.T) {
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	t.Cleanup(func() { db.Close() })
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
-
-	var def string
-	if err := db.QueryRow(
-		`SELECT pg_get_indexdef('idx_instances_stale'::regclass)`,
-	).Scan(&def); err != nil {
-		t.Fatalf("idx_instances_stale: %v", err)
-	}
-	if strings.Contains(def, "heartbeat_at") {
-		t.Errorf("idx_instances_stale still indexes heartbeat_at (%s) -- this is the other half of "+
-			"what makes a heartbeat UPDATE eligible to be HOT (see migration 015); restoring it "+
-			"silently loses the fix cleat#3272/#3274 measured, and ALSO changes ReapStaleInstances/"+
-			"ListStaleHolders back to an index range scan instead of the accepted heap-scan-plus-sort "+
-			"tradeoff", def)
-	}
-}
-
 func TestWorkflowInstancesFillfactorIsLoweredForHotUpdates(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	t.Cleanup(func() { db.Close() })

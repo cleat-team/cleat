@@ -14,15 +14,12 @@ import (
 
 func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{
-			// Three columns: ContinueAsNew's INSERT now RETURNs
-			// parent_workflow_id (migration 018 (folded into
-			// migrations/postgres/001_schema.sql by #3358)) alongside id and
-			// task_queue -- nil here since this mock's "old-run" has no
-			// parent to inherit from.
-			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid", "default", nil}},
-		},
+		// ContinueAsNew inserts the successor's narrow instance row (RETURNing
+		// its id), then reads the task queue and the inherited parent
+		// separately -- nil here since this mock's "old-run" has no parent.
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{"new-run-uuid"}}},
+		{match: "SELECT COALESCE((SELECT task_queue FROM workflow_defs", data: [][]driver.Value{{"default"}}},
+		{match: "SELECT (SELECT parent_workflow_id FROM workflow_leases", data: [][]driver.Value{{nil}}},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
 		// ContinueAsNew to commit and return the new run ID.
@@ -46,14 +43,12 @@ func TestPostgresStore_ContinueAsNew_Success(t *testing.T) {
 
 func TestPostgresStore_ContinueAsNew_NoEvents(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{
-			// Three columns: ContinueAsNew's INSERT now RETURNs
-			// parent_workflow_id (migration 018) alongside id and
-			// task_queue -- nil here since this mock's "old-run" has no
-			// parent to inherit from.
-			match: "INSERT INTO workflow_instances (id, def_name",
-			data:  [][]driver.Value{{"new-run-uuid", "default", nil}},
-		},
+		// ContinueAsNew inserts the successor's narrow instance row (RETURNing
+		// its id), then reads the task queue and the inherited parent
+		// separately -- nil here since this mock's "old-run" has no parent.
+		{match: "INSERT INTO workflow_instances", data: [][]driver.Value{{"new-run-uuid"}}},
+		{match: "SELECT COALESCE((SELECT task_queue FROM workflow_defs", data: [][]driver.Value{{"default"}}},
+		{match: "SELECT (SELECT parent_workflow_id FROM workflow_leases", data: [][]driver.Value{{nil}}},
 	}, []mockExecResult{
 		// "Complete old run" UPDATE must report the fence as held for
 		// ContinueAsNew to commit and return the new run ID.

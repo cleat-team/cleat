@@ -58,15 +58,15 @@ func TestTheInFlightQueryAnswersARoleThatRLSAppliesTo(t *testing.T) {
 	// THE CONTROL, AND IT IS THE REASON THE REST MEANS ANYTHING. The same read,
 	// written out directly, is what blobstore's sweep used to do and what it
 	// was refused for. If this ever stops failing, the policy on
-	// workflow_instances has changed and the function may no longer be needed
+	// workflow_leases has changed and the function may no longer be needed
 	// -- but the test must not go quietly green on that, so it is asserted.
 	var n int
 	err := rlsDB.QueryRowContext(ctx,
-		`SELECT count(*) FROM workflow_instances WHERE status IN ('ready','running')`).Scan(&n)
+		`SELECT count(*) FROM workflow_leases WHERE status IN ('ready','running')`).Scan(&n)
 	if err == nil {
-		t.Fatal("reading workflow_instances directly with no tenant in context SUCCEEDED.\n\n" +
+		t.Fatal("reading workflow_leases directly with no tenant in context SUCCEEDED.\n\n" +
 			"That is the state migration 073 exists to work around. Either the policy on " +
-			"workflow_instances changed, or this connection is exempt from it. If the " +
+			"workflow_leases changed, or this connection is exempt from it. If the " +
 			"former, admin.in_flight_workflow_ids() may be removable -- but check before " +
 			"deleting it, because the sweeps depend on it.")
 	}

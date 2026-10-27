@@ -127,69 +127,33 @@ that prose yet — not that the column does not exist.
 
 ### workflow_instances
 
-Tracks individual workflow execution state. Serves as both state store and
-work queue.
+The identity row of a workflow run. It holds the columns that belong to the run
+itself, and almost nothing else: the state a run moves through lives on two
+tables that share its `id`.
 
-cleat#3360 dropped five columns steps 2-3 of the `workflow_leases`/
-`workflow_payloads` split (cleat#3245 Phase 3) made redundant here --
-`cancellation_requested`, `cancellation_reason`, `compacted_at`,
-`plugin_vers`, `concurrency_key` (the text; `concurrency_key_hash` stays).
-`sticky_worker_id` and `concurrency_key_hash` were considered too and
-deferred: `001_schema.sql` indexes both, and that file is byte-verified
-against a frozen historical baseline, so dropping them now would break
-`TestShippedSchema_IsIdempotent`'s replay check. See
-`migrations/postgres/004_drop_now_redundant_workflow_instances_columns.sql`
-for the full reasoning.
+| Table | Holds |
+|-------|-------|
+| `workflow_instances` | `id`, `tenant_id`, `parent_close_policy`, `event_count`, `history_swept_at` |
+| `workflow_leases` | who holds the run and when it wakes: `status`, `assigned_to`, `generation`, `heartbeat_at`, `next_wake_at`, `task_queue`, `priority`, the claim counters, the run limits, `parent_workflow_id`, `continued_from` |
+| `workflow_payloads` | what the run read and wrote: `input`, `result`, `query_state`, `compaction_state`, the error columns, `trace_id`, `def_name`, `def_version`, `completed_at` |
+
+Every foreign key to a run points at `workflow_instances(id)`, so a run's two
+other rows go with it by `ON DELETE CASCADE`. The definition a run executes is
+recorded on `workflow_payloads`, and the foreign key to `workflow_defs` is there
+too, so a definition cannot be deleted while a run still uses it.
+
+This is the shape a fresh 0.5.0 database is built with. A database from 0.4.0 has
+the older, wide table and is refused rather than converted; see
+`docs/operations/upgrading.md`.
 
 ```sql
 CREATE TABLE workflow_instances (
     id TEXT NOT NULL,
-    def_name TEXT NOT NULL,
-    def_version INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ready',
-    input JSONB NOT NULL DEFAULT '{}',
-    assigned_to TEXT,
-    heartbeat_at TIMESTAMPTZ,
-    next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    completed_at TIMESTAMPTZ,
-    result JSONB,
-    error_msg TEXT,
-    error_code TEXT,
-    error_op TEXT,
-    parent_workflow_id TEXT,
     parent_close_policy TEXT DEFAULT 'ABANDON',
-    query_state JSONB DEFAULT '{}',
-    trace_id TEXT,
-    sticky_worker_id TEXT,
     tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
-    task_queue TEXT NOT NULL DEFAULT 'default',
-    compaction_state JSONB,
-    compaction_step INTEGER,
     event_count BIGINT NOT NULL DEFAULT 0,
-    allowed_signals JSONB,
-    priority INTEGER NOT NULL DEFAULT 0,
-    generation BIGINT NOT NULL DEFAULT 0,
-    pending_terminal_status TEXT,
-    defer_phase_deadline TIMESTAMPTZ,
-    continued_from TEXT,
-    signal_seq BIGINT NOT NULL DEFAULT 0,
-    signal_seq_at_claim BIGINT NOT NULL DEFAULT 0,
-    signal_consumed_seq BIGINT NOT NULL DEFAULT 0,
-    signal_consumed_at_claim BIGINT NOT NULL DEFAULT 0,
-    promise_seq BIGINT NOT NULL DEFAULT 0,
-    promise_seq_at_claim BIGINT NOT NULL DEFAULT 0,
-    reclaim_count BIGINT NOT NULL DEFAULT 0,
-    started_at TIMESTAMPTZ,
-    concurrency_key_hash BYTEA,
-    run_wasm_instance_timeout_ms BIGINT,
-    run_wasm_wall_clock_ceiling_ms BIGINT,
-    run_host_retry_budget_ms BIGINT,
-    run_max_workflow_duration_ms BIGINT,
-    completed_by TEXT,
     history_swept_at TIMESTAMPTZ,
-    PRIMARY KEY (id),
-    FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)
+    PRIMARY KEY (id)
 );
 ```
 
@@ -594,11 +558,11 @@ rows of one workflow may share.
 
 | Index | Table | Purpose | Uniqueness |
 |-------|-------|---------|------------|
-| `idx_instances_claimable` | `workflow_instances` | Worker poll loop: find runnable instances (`ready` and `terminating`) | Non-unique, partial |
-| `idx_instances_heartbeat` | `workflow_instances` | Heartbeat monitoring | Non-unique, partial |
-| `idx_instances_stale` | `workflow_instances` | Reaper: stale heartbeat detection | Non-unique, partial |
-| `idx_instances_sticky` | `workflow_instances` | Sticky worker fast path | Non-unique, partial |
-| `idx_instances_concurrency_key` | `workflow_instances` | Claim path: skip a run whose concurrency key is held | Non-unique |
+| `idx_leases_claimable` | `workflow_leases` | Worker poll loop: find runnable instances (`ready` and `terminating`) | Non-unique, partial |
+| `idx_leases_heartbeat` | `workflow_leases` | Heartbeat monitoring | Non-unique, partial |
+| `idx_leases_stale` | `workflow_leases` | Reaper: stale heartbeat detection | Non-unique, partial |
+| `idx_leases_sticky` | `workflow_leases` | Sticky worker fast path | Non-unique, partial |
+| `idx_leases_concurrency_key` | `workflow_leases` | Claim path: skip a run whose concurrency key is held | Non-unique, partial |
 | `idx_defs_active` | `workflow_defs` | Latest-version lookup | Non-unique |
 | `idx_promises_status` | `workflow_promises` | Promise resolution lookup | Non-unique |
 | `idx_concurrency_keys_workflow` | `concurrency_keys` | Key-to-workflow lookup | Non-unique |

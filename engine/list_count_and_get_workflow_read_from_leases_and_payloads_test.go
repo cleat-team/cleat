@@ -36,14 +36,11 @@ func TestListWorkflowsReadsFromLeasesAndPayloadsNotInstances(t *testing.T) {
 		t.Fatalf("StartNewRun: %v", err)
 	}
 
-	// Diverge workflow_leases.status and workflow_payloads.def_name away
-	// from workflow_instances, which still says status='ready',
-	// def_name=defName.
+	// Diverge workflow_leases.status away from the 'ready' the run started
+	// with. workflow_instances no longer has a status (cleat#3245 B5), so the
+	// 'ready' is only what the run was created with.
 	if _, err := db.Exec(`UPDATE workflow_leases SET status = 'failed' WHERE id = $1`, id); err != nil {
 		t.Fatalf("diverge workflow_leases.status: %v", err)
-	}
-	if _, err := db.Exec(`UPDATE workflow_payloads SET def_name = 'diverged-def-name' WHERE id = $1`, id); err != nil {
-		t.Fatalf("diverge workflow_payloads.def_name: %v", err)
 	}
 
 	// Filtering by the DIVERGED status finds the row only if the predicate
@@ -56,10 +53,10 @@ func TestListWorkflowsReadsFromLeasesAndPayloadsNotInstances(t *testing.T) {
 		t.Fatalf("ListWorkflows(Status=failed) = %v, want [%s] -- a miss means the filter "+
 			"used workflow_instances.status ('ready') instead of workflow_leases.status ('failed')", rows, id)
 	}
-	if rows[0].DefName != "diverged-def-name" {
+	if rows[0].DefName != defName {
 		t.Errorf("ListWorkflows returned DefName = %q, want %q -- the SELECT used "+
-			"workflow_instances.def_name instead of workflow_payloads.def_name",
-			rows[0].DefName, "diverged-def-name")
+			"something other than workflow_payloads.def_name",
+			rows[0].DefName, defName)
 	}
 
 	// The OLD status, still true of workflow_instances alone, must find
@@ -135,9 +132,6 @@ func TestGetWorkflowByIDReadsFromLeasesAndPayloadsNotInstances(t *testing.T) {
 	if _, err := db.Exec(`UPDATE workflow_leases SET status = 'failed' WHERE id = $1`, id); err != nil {
 		t.Fatalf("diverge workflow_leases.status: %v", err)
 	}
-	if _, err := db.Exec(`UPDATE workflow_payloads SET def_name = 'diverged-def-name' WHERE id = $1`, id); err != nil {
-		t.Fatalf("diverge workflow_payloads.def_name: %v", err)
-	}
 
 	wf, err := store.GetWorkflowByID(ctx, id)
 	if err != nil || wf == nil {
@@ -147,60 +141,9 @@ func TestGetWorkflowByIDReadsFromLeasesAndPayloadsNotInstances(t *testing.T) {
 		t.Errorf("GetWorkflowByID returned Status = %q, want %q -- the SELECT used "+
 			"workflow_instances.status instead of workflow_leases.status", wf.Status, "failed")
 	}
-	if wf.DefName != "diverged-def-name" {
+	if wf.DefName != defName {
 		t.Errorf("GetWorkflowByID returned DefName = %q, want %q -- the SELECT used "+
-			"workflow_instances.def_name instead of workflow_payloads.def_name",
-			wf.DefName, "diverged-def-name")
-	}
-}
-
-// TestTraceWorkflowMirrorsOntoWorkflowPayloadsNotJustInstances covers the one
-// write-mirror site piece F added that has no pre-existing lease/payload
-// regression test to extend (TraceWorkflow wrote only workflow_instances
-// before this piece, with no dual-write at all).
-func TestTraceWorkflowMirrorsOntoWorkflowPayloadsNotJustInstances(t *testing.T) {
-	store, db := newRunTestStore(t)
-	ctx := context.Background()
-
-	const defName = "trace-mirrors-payloads-def"
-	if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
-
-	id, _, err := store.StartNewRun(ctx, "", defName, 1, json.RawMessage(`{}`), "trace-mirrors-payloads", DefaultTenantUUID, 0)
-	if err != nil {
-		t.Fatalf("StartNewRun: %v", err)
-	}
-
-	const traceID = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
-	if err := store.TraceWorkflow(ctx, id, traceID); err != nil {
-		t.Fatalf("TraceWorkflow: %v", err)
-	}
-
-	var payloadTraceID string
-	if err := db.QueryRow(`SELECT trace_id FROM workflow_payloads WHERE id = $1`, id).Scan(&payloadTraceID); err != nil {
-		t.Fatalf("read workflow_payloads.trace_id: %v", err)
-	}
-	if payloadTraceID != traceID {
-		t.Fatalf("workflow_payloads.trace_id = %q, want %q -- TraceWorkflow is not mirroring onto workflow_payloads", payloadTraceID, traceID)
-	}
-
-	// Diverge workflow_instances.trace_id directly, bypassing TraceWorkflow.
-	// GetWorkflowByID reading it instead of workflow_payloads would see this
-	// wrong value.
-	if _, err := db.Exec(`UPDATE workflow_instances SET trace_id = 'wrong-trace-id' WHERE id = $1`, id); err != nil {
-		t.Fatalf("diverge workflow_instances.trace_id: %v", err)
-	}
-
-	wf, err := store.GetWorkflowByID(ctx, id)
-	if err != nil || wf == nil {
-		t.Fatalf("GetWorkflowByID: %v (nil=%v)", err, wf == nil)
-	}
-	if wf.TraceID != traceID {
-		t.Errorf("GetWorkflowByID returned TraceID = %q, want %q -- a %q means the read "+
-			"used workflow_instances.trace_id instead of workflow_payloads.trace_id",
-			wf.TraceID, traceID, "wrong-trace-id")
+			"something other than workflow_payloads.def_name",
+			wf.DefName, defName)
 	}
 }

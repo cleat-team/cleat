@@ -58,19 +58,15 @@ import (
 //
 // TestProcedureMigrationListsAreComplete still checks this against the
 // directory, so it stays honest: if a later migration defines the routine, the
-// list must name it. 005 is the first since that compaction: cleat#3245 B1b
-// redefines finalize_workflow_status to stop writing payload columns to
-// workflow_instances, so the list is two entries again until the next
-// baseline regeneration folds 005 into 003. 007 (cleat#3245 B3c) redefines it
-// again to stop writing the lease columns there; B5 folds both.
+// list must name it. The list ran to three entries while cleat#3245 B1b (005)
+// and B3c (007) redefined finalize_workflow_status on top of 003; B5 folded both
+// into the regenerated 003 and deleted them, so it is one entry again.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
-	"005_finalize_workflow_status_writes_payloads_only.sql",
-	"007_finalize_workflow_status_writes_leases_only.sql",
 }
 
 // ONE entry since the cleat#3348 re-compaction, for the same reason the
-// Postgres list above had one until cleat#3245 B1b's 005: 003 now carries the FINAL body, generated
+// Postgres list above has one: 003 now carries the FINAL body, generated
 // from a database built by the whole chain through 012, so it is the last
 // definition by construction rather than by replaying 011 on top of it.
 // MySQL's FIRST compaction (cleat#2433) left this list at two entries

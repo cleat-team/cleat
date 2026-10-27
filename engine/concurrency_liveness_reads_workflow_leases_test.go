@@ -38,7 +38,6 @@ func seedKeyHolderAndWaiter(t *testing.T, store *PostgresStore, db *sql.DB, key,
 	waiter = startPayloadReaderRun(t, store, "b3c-liveness-waiter-"+t.Name())
 	hash := retentionKeyHash(key)
 	for _, id := range []string{holder, waiter} {
-		diverge(t, db, "workflow_instances", `concurrency_key_hash = $2`, id, hash)
 		// The key's text lives only on workflow_leases (cleat#3360 dropped it
 		// from workflow_instances); a claim copies it into the row it takes.
 		diverge(t, db, "workflow_leases", `concurrency_key_hash = $2, concurrency_key = $3`, id, hash, key)

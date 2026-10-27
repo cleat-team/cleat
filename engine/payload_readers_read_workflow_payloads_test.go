@@ -53,7 +53,6 @@ func TestQueryStateReadersReadWorkflowPayloads(t *testing.T) {
 	id := startPayloadReaderRun(t, store, "b1a-query-state")
 
 	diverge(t, db, "workflow_payloads", `query_state = '{"k":"payloads"}'`, id)
-	diverge(t, db, "workflow_instances", `query_state = '{"k":"instances"}'`, id)
 
 	got, err := store.GetQueryState(ctx, id, "k")
 	if err != nil {
@@ -76,7 +75,6 @@ func TestLoadCompactionStateReadsWorkflowPayloads(t *testing.T) {
 	id := startPayloadReaderRun(t, store, "b1a-load-compaction")
 
 	diverge(t, db, "workflow_payloads", `compaction_state = '{"version":1,"compacted_step":7,"events":[]}'`, id)
-	diverge(t, db, "workflow_instances", `compaction_state = '{"version":1,"compacted_step":99,"events":[]}'`, id)
 
 	cs, err := store.LoadCompactionState(context.Background(), id)
 	if err != nil {
@@ -122,7 +120,6 @@ func TestClearExpiredCompactionStateClearsWorkflowPayloads(t *testing.T) {
 	// only the lease copy says 'done'), expired by workflow_payloads.
 	// completed_at only: workflow_instances.completed_at is NULL, so a
 	// predicate still reading it selects nothing.
-	diverge(t, db, "workflow_instances", `completed_at = NULL, compaction_state = '{}'`, id)
 	diverge(t, db, "workflow_leases", `status = 'done'`, id)
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours', compaction_state = '{}', compaction_step = 5`, id)
 
@@ -148,7 +145,6 @@ func TestGetChildResultReadsWorkflowPayloads(t *testing.T) {
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b1a-child-result")
 
-	diverge(t, db, "workflow_instances", `result = '{"from":"instances"}'`, id)
 	diverge(t, db, "workflow_leases", `status = 'done'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `result = '{"from":"payloads"}'`, id)
 
@@ -166,7 +162,6 @@ func TestGetChildCompletedAtMsReadsWorkflowPayloads(t *testing.T) {
 	id := startPayloadReaderRun(t, store, "b1a-child-completed-at")
 
 	want := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	diverge(t, db, "workflow_instances", `completed_at = NULL`, id)
 	diverge(t, db, "workflow_payloads", `completed_at = $2`, id, want)
 
 	ms, ok, err := store.GetChildCompletedAtMs(context.Background(), id)
@@ -183,7 +178,6 @@ func TestGetAllowedSignalCallersReadsWorkflowPayloads(t *testing.T) {
 	id := startPayloadReaderRun(t, store, "b1a-allowed-signals")
 
 	diverge(t, db, "workflow_payloads", `allowed_signals = '["from-payloads"]'`, id)
-	diverge(t, db, "workflow_instances", `allowed_signals = '["from-instances"]'`, id)
 
 	got, err := store.GetAllowedSignalCallers(context.Background(), id)
 	if err != nil {
@@ -194,34 +188,32 @@ func TestGetAllowedSignalCallersReadsWorkflowPayloads(t *testing.T) {
 	}
 }
 
-// def_name on workflow_instances carries a foreign key to workflow_defs, so
-// the decoy goes on workflow_payloads, which has none: the diverged name is
-// one only workflow_payloads holds.
+// workflow_instances no longer has a def_name (cleat#3245 B5), so the counts
+// below can only be answered from workflow_payloads.
 func TestActiveInstanceCountsReadDefNameFromWorkflowPayloads(t *testing.T) {
 	store, db := newRunTestStore(t)
 	ctx := context.Background()
-	id := startPayloadReaderRun(t, store, "b1a-active-counts")
-	diverge(t, db, "workflow_payloads", `def_name = 'b1a-diverged-def'`, id)
+	startPayloadReaderRun(t, store, "b1a-active-counts")
 
-	if n, err := store.CountActiveInstances(ctx, "b1a-diverged-def", 1); err != nil || n != 1 {
-		t.Errorf("CountActiveInstances(diverged) = %d, %v; want 1 -- it read workflow_instances.def_name", n, err)
+	if n, err := store.CountActiveInstances(ctx, "b1a-active-counts", 1); err != nil || n != 1 {
+		t.Errorf("CountActiveInstances(its own name) = %d, %v; want 1", n, err)
 	}
-	if n, err := store.CountActiveInstances(ctx, "b1a-active-counts", 1); err != nil || n != 0 {
-		t.Errorf("CountActiveInstances(original) = %d, %v; want 0 -- it read workflow_instances.def_name", n, err)
+	if n, err := store.CountActiveInstances(ctx, "b1a-another-def", 1); err != nil || n != 0 {
+		t.Errorf("CountActiveInstances(another name) = %d, %v; want 0", n, err)
 	}
 	counts, err := store.GetActiveInstanceCountsByVersion(ctx)
 	if err != nil {
 		t.Fatalf("GetActiveInstanceCountsByVersion: %v", err)
 	}
-	if counts["b1a-diverged-def:1"] != 1 || counts["b1a-active-counts:1"] != 0 {
-		t.Errorf("GetActiveInstanceCountsByVersion = %v, want only b1a-diverged-def:1", counts)
+	if counts["b1a-active-counts:1"] != 1 || counts["b1a-another-def:1"] != 0 {
+		t.Errorf("GetActiveInstanceCountsByVersion = %v, want b1a-active-counts:1=1", counts)
 	}
 	active, err := (&WorkflowLoader{db: db}).ActiveVersions(ctx)
 	if err != nil {
 		t.Fatalf("ActiveVersions: %v", err)
 	}
-	if len(active["b1a-diverged-def"]) != 1 || len(active["b1a-active-counts"]) != 0 {
-		t.Errorf("ActiveVersions = %v, want only b1a-diverged-def", active)
+	if len(active["b1a-active-counts"]) != 1 || len(active["b1a-another-def"]) != 0 {
+		t.Errorf("ActiveVersions = %v, want only b1a-active-counts", active)
 	}
 }
 
@@ -235,7 +227,6 @@ func TestTheClaimHandsBackWorkflowPayloadsColumns(t *testing.T) {
 	id := startPayloadReaderRun(t, store, "b1a-claim-payloads")
 
 	diverge(t, db, "workflow_payloads", `input = '{"from":"payloads"}', trace_id = 'trace-payloads'`, id)
-	diverge(t, db, "workflow_instances", `input = '{"from":"instances"}', trace_id = 'trace-instances'`, id)
 
 	wf, err := store.ClaimWorkflow(context.Background(), "b1a-worker")
 	if err != nil {
@@ -258,7 +249,6 @@ func TestTheStickyClaimHandsBackWorkflowPayloadsColumns(t *testing.T) {
 	}
 
 	diverge(t, db, "workflow_payloads", `input = '{"from":"payloads"}', trace_id = 'trace-payloads'`, id)
-	diverge(t, db, "workflow_instances", `input = '{"from":"instances"}', trace_id = 'trace-instances'`, id)
 
 	wfs, err := store.ClaimStickyWorkflows(ctx, "b1a-sticky-worker", 10)
 	if err != nil {
@@ -298,7 +288,6 @@ func TestDeleteCompletedWorkflowsReadsCompletedAtFromWorkflowPayloads(t *testing
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b1a-retention-completed")
 
-	diverge(t, db, "workflow_instances", `completed_at = NULL`, id)
 	diverge(t, db, "workflow_leases", `status = 'done'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
 
@@ -316,7 +305,6 @@ func TestReadReplacedOutcomeReadsWorkflowPayloadsOnPostgres(t *testing.T) {
 	store, db := newRunTestStore(t)
 	id := startPayloadReaderRun(t, store, "b1a-replaced-outcome")
 
-	diverge(t, db, "workflow_instances", `error_msg = 'from-instances'`, id)
 	diverge(t, db, "workflow_leases", `status = 'failed'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `error_msg = 'from-payloads'`, id)
 
@@ -342,12 +330,10 @@ func TestDeferPhaseOwedReadsCompactionStateFromWorkflowPayloadsOnPostgres(t *tes
 	}
 
 	diverge(t, db, "workflow_payloads", `compaction_state = '{}'`, id)
-	diverge(t, db, "workflow_instances", `compaction_state = NULL`, id)
 	if !owed() {
 		t.Errorf("compacted on workflow_payloads only: predicate says not owed -- it read workflow_instances")
 	}
 	diverge(t, db, "workflow_payloads", `compaction_state = NULL`, id)
-	diverge(t, db, "workflow_instances", `compaction_state = '{}'`, id)
 	if owed() {
 		t.Errorf("compacted on workflow_instances only: predicate says owed -- it read workflow_instances")
 	}
@@ -361,7 +347,6 @@ func TestTerminateTreatsARunCompactedOnWorkflowPayloadsAsOwingADeferPhase(t *tes
 	id := startPayloadReaderRun(t, store, "b1a-terminate-compacted")
 
 	diverge(t, db, "workflow_payloads", `compaction_state = '{}'`, id)
-	diverge(t, db, "workflow_instances", `compaction_state = NULL`, id)
 
 	if err := store.TerminateWorkflow(context.Background(), id, "b1a"); err != nil {
 		t.Fatalf("TerminateWorkflow: %v", err)
@@ -396,7 +381,6 @@ func TestGetCompactionCandidatesReadsCompactionStepFromWorkflowPayloads(t *testi
 	// workflow_payloads, so a candidate; compacted far past its history per
 	// workflow_instances, so not one.
 	diverge(t, db, "workflow_payloads", `compaction_step = NULL`, id)
-	diverge(t, db, "workflow_instances", `compaction_step = 1000`, id)
 
 	ids, err := store.GetCompactionCandidates(ctx, 2, 10)
 	if err != nil {
@@ -418,7 +402,6 @@ func TestAdminForceResolveReadsCompactionStateFromWorkflowPayloads(t *testing.T)
 
 	// No defer events, so only "compacted" can make a defer phase owed.
 	diverge(t, db, "workflow_payloads", `compaction_state = '{}'`, id)
-	diverge(t, db, "workflow_instances", `compaction_state = NULL`, id)
 
 	if err := store.AdminForceComplete(ctx, id, 0, `{"ok":true}`, "operator-1"); err != nil {
 		t.Fatalf("AdminForceComplete: %v", err)
@@ -445,7 +428,6 @@ func TestDeleteExpiredEventsReadsCompletedAtFromWorkflowPayloads(t *testing.T) {
 
 	// Terminal by status (read from workflow_leases since B3a); expired by
 	// workflow_payloads.completed_at only.
-	diverge(t, db, "workflow_instances", `completed_at = NULL`, id)
 	diverge(t, db, "workflow_leases", `status = 'done'`, id)
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
 
@@ -467,7 +449,6 @@ func TestDeleteDeadLetteredWorkflowsReadsCompletedAtFromWorkflowPayloads(t *test
 	ctx := context.Background()
 	id := startPayloadReaderRun(t, store, "b1a-dead-lettered")
 
-	diverge(t, db, "workflow_instances", `completed_at = NULL`, id)
 	diverge(t, db, "workflow_leases", `status = 'dead_lettered'`, id) // status is read from workflow_leases since B3a
 	diverge(t, db, "workflow_payloads", `completed_at = now() - interval '2 hours'`, id)
 

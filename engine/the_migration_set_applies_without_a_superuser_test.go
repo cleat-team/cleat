@@ -280,12 +280,12 @@ func TestTheMigrationSetAppliesWithoutASuperuser(t *testing.T) {
 			SELECT r.rolname, r.rolbypassrls
 			  FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
 			  JOIN pg_namespace n ON n.oid = p.pronamespace
-			 WHERE n.nspname = 'admin' AND p.proname = 'claim_workflows'`).Scan(&owner, &ownerBypass)
+			 WHERE n.nspname = 'admin' AND p.proname = 'in_flight_workflow_ids'`).Scan(&owner, &ownerBypass)
 		if err != nil {
-			t.Fatalf("admin.claim_workflows was not created at all: %v", err)
+			t.Fatalf("admin.in_flight_workflow_ids was not created at all: %v", err)
 		}
 		if ownerBypass {
-			t.Errorf("admin.claim_workflows is owned by %s, which has BYPASSRLS; "+
+			t.Errorf("admin.in_flight_workflow_ids is owned by %s, which has BYPASSRLS; "+
 				"that cannot happen on a platform where no superuser could grant it", owner)
 		}
 	})

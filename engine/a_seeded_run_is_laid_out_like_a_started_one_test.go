@@ -43,10 +43,9 @@ func TestASeededRunHasTheLeaseAndPayloadRowsStartNewRunWrites(t *testing.T) {
 	}
 }
 
-// The instance row carries only what survives B5: the seed writes id,
-// tenant_id, def_name, def_version (NOT NULL until B5) and parent_close_policy,
-// and every other column is at its default. A non-narrow column written here
-// would be a column B5's drop breaks.
+// The instance row is what B5 left: id, tenant_id, parent_close_policy,
+// event_count and history_swept_at. The seed writes the first three, and the
+// two counters stay at their defaults, as they do for a run StartNewRun makes.
 func TestASeededRunWritesOnlyTheNarrowInstanceColumns(t *testing.T) {
 	store, db := newRunTestStore(t)
 	startPayloadReaderRun(t, store, "b4-narrow") // deploys the def the foreign key needs
@@ -57,8 +56,8 @@ func TestASeededRunWritesOnlyTheNarrowInstanceColumns(t *testing.T) {
 		ParentWorkflowID: "b4-parent", ParentClosePolicy: "TERMINATE",
 	})
 	defaults := "b4-defaults-" + t.Name()
-	if _, err := db.Exec(`INSERT INTO workflow_instances (id, tenant_id, def_name, def_version, parent_close_policy)
-		VALUES ($1, $2, 'b4-narrow', 1, 'TERMINATE')`, defaults, DefaultTenantUUID); err != nil {
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, tenant_id, parent_close_policy)
+		VALUES ($1, $2, 'TERMINATE')`, defaults, DefaultTenantUUID); err != nil {
 		t.Fatalf("insert the all-defaults row: %v", err)
 	}
 	if got, want := seedComparable(t, db, "workflow_instances", id), seedComparable(t, db, "workflow_instances", defaults); got != want {
