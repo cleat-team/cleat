@@ -512,6 +512,14 @@ var adapterDefs = map[string]adapterDef{
 			{"runIDs", "[]string"},
 		},
 		ResultStmts: []string{
+			// The same bit-62 sentinel AwaitChild and AwaitAnyChild test, and the
+			// engine's freshAwaitAllChildren returns it whenever a child is still
+			// running. Without this the 1<<62 below was read as a result length of
+			// 1<<30 over resultsBuf (cleat#3385).
+			"suspendSentinel := uint64(result)&(1<<62) != 0",
+			"if suspendSentinel {",
+			"	panic(cleat.ErrSuspend)",
+			"}",
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
