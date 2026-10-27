@@ -44,6 +44,13 @@ package engine
 //     return val;
 // }
 //
+// static wasmtime_component_val_t cgotest_make_bool(bool v) {
+//     wasmtime_component_val_t val;
+//     val.kind = WASMTIME_COMPONENT_BOOL;
+//     val.of.boolean = v;
+//     return val;
+// }
+//
 // static wasmtime_component_val_t cgotest_make_u32(uint32_t v) {
 //     wasmtime_component_val_t val;
 //     val.kind = WASMTIME_COMPONENT_U32;
@@ -167,6 +174,8 @@ func cgotestMakeMixedArgs(args ...any) (ptr unsafe.Pointer, count int, free func
 			vals[i] = C.cgotest_make_u64(C.uint64_t(v))
 		case uint32:
 			vals[i] = C.cgotest_make_u32(C.uint32_t(v))
+		case bool:
+			vals[i] = C.cgotest_make_bool(C.bool(v))
 		}
 	}
 	if len(vals) == 0 {
@@ -298,6 +307,8 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 		23: b.dispatchGetScope,
 		24: b.dispatchAwaitSignals,
 		25: b.dispatchComponentDefault,
+		26: b.dispatchRunDetached,
+		27: b.dispatchDeferPhase,
 	}[method]
 	// The same nil guard as cgotestDispatchStr, which this helper LACKED until
 	// 2026-09-06 while the comment on the other one claimed the rule for both.
