@@ -85,6 +85,9 @@ func TestAPythonWorkflowThatRaisesFailsTheRun(t *testing.T) {
 	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("the run failed, but its error does not carry the exception's message: %v", err)
 	}
+	if !strings.Contains(err.Error(), "ValueError") {
+		t.Errorf("the run failed, but its error does not name the exception's type: %v", err)
+	}
 	// A raise is the workflow reporting that it failed, not the module
 	// faulting. A host that predates the `failed` case still fails the run but
 	// labels it "wasm trap: ... not a run-outcome variant" and drops the
@@ -97,6 +100,23 @@ func TestAPythonWorkflowThatRaisesFailsTheRun(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "wasm trap") {
 		t.Errorf("a raise is labelled a wasm trap, which it is not: %v", err)
+	}
+}
+
+// TestAPythonWorkflowThatRaisesWithNoMessageStillSaysWhatItRaised covers the
+// exceptions whose str() is empty -- `raise KeyError()` is the common one. A
+// failure that carried only str(exc) would be a failed run with nothing to read,
+// so the message names the type. Found in review of the change that added the
+// failed case (cleat-review-69), not by running it.
+func TestAPythonWorkflowThatRaisesWithNoMessageStillSaysWhatItRaised(t *testing.T) {
+	_, _, _, err := pythonExecuteFixture(t, "wf-python-raises-empty", "raises_empty_workflow.py", "raises_empty")
+
+	if err == nil {
+		t.Fatal("a Python workflow that raised KeyError() did not fail the run")
+	}
+	if !strings.Contains(err.Error(), "KeyError") {
+		t.Errorf("the run failed with no indication of what was raised: %v\n\n"+
+			"str(KeyError()) is empty, so a failure carrying only the exception's text says nothing.", err)
 	}
 }
 

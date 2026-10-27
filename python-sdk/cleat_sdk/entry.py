@@ -693,7 +693,14 @@ def cleat_entry(name: str | None = None, expose: str | None = None) -> Callable:
                     run_deferred()
                 except SuspendSentinel:
                     return SUSPENDED
-                return _WorkflowFailure(json.dumps({"error": str(exc)}), str(exc))
+                # The legacy payload keeps str(exc) exactly, for every direct
+                # caller. The failure's own message adds the exception's type,
+                # because str(exc) is EMPTY for ``raise KeyError()`` and several
+                # others, and a failed run with no message at all tells an
+                # operator nothing.
+                kind = type(exc).__name__
+                message = f"{kind}: {exc}" if str(exc) else kind
+                return _WorkflowFailure(json.dumps({"error": str(exc)}), message)
 
         # Mark the wrapper for introspection tooling.
         export_wrapper._is_cleat_entry = True  # type: ignore[attr-defined]

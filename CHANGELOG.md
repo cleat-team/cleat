@@ -31,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the worker recorded a success: no retry, no dead-lettering, no failure alert, and a parent
   awaiting the run as a child saw a result. Every other SDK already failed the run. The
   `run-outcome` variant in `python-sdk/wit/cleat.wit` gained a `failed(string)` case, appended
-  after `suspended`, and a raise now arrives as a failure carrying the exception's message.
+  after `suspended`, and a raise now arrives as a failure carrying the exception's type and message
+  (`ValueError: boom`; the type alone for an exception with no text, such as `KeyError()`).
   **What to check:** anything that read the `{"error": ...}` output of a Python workflow that
   raised must now read the run's failure instead, and a Python workflow that raises on purpose
   to "return an error" will now be retried or dead-lettered like any failed run. A workflow that
