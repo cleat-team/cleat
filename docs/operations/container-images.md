@@ -117,6 +117,14 @@ the workflow on that branch (`gh workflow run develop-image.yml --ref develop`,
 or `--ref release/v0.5.0`). A dispatch on any other ref is refused before
 anything is pushed, and the tag prefix is chosen from the ref alone.
 
+A failed or timed-out push run opens, or comments on, a tracking issue labelled
+`area/ci` and titled `[develop-image] image publish failed on <branch>`
+(`develop-image-failure-notifier.yml`, cleat#3374). It names the commit, the
+sha tags (short and full) that may be missing, and the jobs and steps that failed;
+a failure in the step that moves `:develop` is reported as that, because the sha tags
+are already pushed by then. A failed
+`workflow_dispatch` run is not reported: whoever dispatched it is reading it.
+
 To exercise the landed-sha gate without publishing, dispatch on `develop` with
 `dry_run` set and name the branch and commit to judge:
 
