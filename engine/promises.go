@@ -196,7 +196,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				Reason: fmt.Sprintf("await_promise(%s)", promiseID),
 				Until:  time.Now().Add(time.Duration(timeoutMs) * time.Millisecond),
 			}
-			return packAwaitPromiseResult(0, true, 0)
+			return s.suspendingAwaitResult()
 		}
 		// time.Now(), not nowMs.Load(). The latter is a CACHED clock refreshed
 		// on poll cycles (UpdateNowMs), and a cached clock that lags the real
@@ -213,6 +213,11 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			// reaching this point decides the same way. Time only moves
 			// forward, which is the property that makes the outcome stable
 			// without a durable record of it.
+			//
+			// This is the one return in the function that IS a timeout, and
+			// it stays a timed-out word. The other three set suspendErr and
+			// return s.suspendingAwaitResult(): a suspending await must not
+			// hand the guest a word it reads as a timeout (cleat#3383).
 			return packAwaitPromiseResult(0, true, 0)
 		}
 		// Woke early -- something other than the deadline. Wait out the
@@ -222,7 +227,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			Reason: fmt.Sprintf("await_promise(%s)", promiseID),
 			Until:  time.UnixMilli(deadlineMs),
 		}
-		return packAwaitPromiseResult(0, true, 0)
+		return s.suspendingAwaitResult()
 	}
 
 	// First time: record the await and suspend.
@@ -242,7 +247,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
 	}
 
-	return packAwaitPromiseResult(0, true, 0)
+	return s.suspendingAwaitResult()
 }
 
 func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseID, value string) int64 {

@@ -89,6 +89,10 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	{"pluginCallOutcome", "PluginCall"},
 	{"pluginCallStreaming", "PluginCallStreaming"},
 	{"awaitSignalsMs", "DurableAwaitSignals"},
+	// AwaitPromise is a stop site through suspendingAwaitResult rather than
+	// stopBeforeNewWork (cleat#3383): a fresh await that has to wait answers with
+	// the sentinel, and bit 31 lands inside this layout's timed-out field.
+	{"awaitPromiseMs", "AwaitPromise"},
 	// waitForEventMs, not waitForEvent: the latter delegates, so the stop guard
 	// lives in the _ms form -- the same shape as awaitSignalsMs above.
 	{"waitForEventMs", "WaitForEvent"},
@@ -103,10 +107,11 @@ var javaCallsTheHostCanRefuse = []sdkRefusableCall{
 	// `long result = ...(` host call, so this entry is stale").
 	//
 	// Removing it does NOT weaken the guard, and that was checked. Of the
-	// three callees, only SignalWorkflow calls stopBeforeNewWork --
-	// CreatePromise, AwaitPromise and ResolvePromise do not, which is why
-	// none was ever listed -- and signalWorkflow is on this list, three lines
-	// above. Every refusable call the composite makes is still covered.
+	// three callees, only SignalWorkflow called stopBeforeNewWork; AwaitPromise
+	// joined it as a stop site in cleat#3383, through suspendingAwaitResult,
+	// and is listed above as awaitPromiseMs. CreatePromise and ResolvePromise
+	// still refuse nothing, which is why they were never listed. Every
+	// refusable call the composite makes is covered.
 	//
 	//	for f in CreatePromise AwaitPromise ResolvePromise SignalWorkflow; do
 	//	  awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go \

@@ -27,6 +27,9 @@ var goFixtureExpectations = map[string]string{
 	// "" means analysis must report no threading errors.
 	"allhostcalls": "",
 	"autothread":   "",
+	// cleat#3383: CreatePromise -> AwaitPromise -> DurableCall on timeout, one
+	// entry point taking one struct. Must verify cleanly.
+	"awaitpromisebranch": "",
 	// cleat#3378: AwaitSignals -> PluginCall on timeout -> AwaitSignals, one
 	// entry point taking one struct. Must verify cleanly.
 	"awaittimeoutbranch": "",

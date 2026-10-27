@@ -2469,6 +2469,12 @@ class HostCalls:
         if isinstance(result, str):
             return PromiseResult(result=result, timed_out=False, rejected=False)
 
+        # A fresh await that has to wait answers with the stop sentinel, not a
+        # timed-out word (cleat#3383). Tested FIRST: bit 31 lands inside this
+        # layout's timed-out field, so decoding first reads a suspend as a
+        # timeout and the workflow takes its timeout branch before the run stops.
+        _raise_if_stopped(result)
+
         result_len, timed_out, rejected, err_code = decode_await_promise_result(result)
         if err_code != 0:
             raise RuntimeError(

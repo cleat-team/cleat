@@ -1,6 +1,8 @@
 package engine
 
 import (
+	goscanner "go/scanner"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,6 +77,16 @@ const (
 	// function the world DOES declare and declares wrongly -- keeping them
 	// separate is the point of these being constants.
 	reasonNotInTheComponentWorld exemptReason = "not-in-the-component-world"
+
+	// reasonWitReturnsABareString: an OPEN FINDING, and a third shape. The
+	// world DOES declare the function, and not with out-pointers, but its
+	// return type is a bare `string`, so the dispatcher flattens the packed
+	// word to the response text and drops the timed-out, error and stop fields
+	// together. Tracked in cleat#3425. Only the host-side half of cleat#3383 reaches a component
+	// guest: it cannot be refused, cannot see an error, and cannot tell a
+	// timeout from a resolved empty value. Distinct from the two above for the
+	// same reason they are distinct from each other.
+	reasonWitReturnsABareString exemptReason = "open-finding-wit-returns-a-bare-string"
 )
 
 // stopSurface declares, for one host stop site, which Go adapters and which WIT
@@ -259,6 +271,24 @@ var stopSurfaces = map[string]stopSurface{
 		wit:    nil,
 		witWhy: reasonWitIsStillCoreABI,
 	},
+	"AwaitPromise": {
+		// A stop site by suspendingAwaitResult alone (cleat#3383): it never asks
+		// stopBeforeNewWork, so an await_promise in a defer segment is not
+		// refused -- only a suspending one is answered with the sentinel.
+		//
+		// The WIT function is declared and returns a bare `string`, which is
+		// the third shape: neither result<string, call-failure> nor a scalar.
+		// The component dispatcher (dispatchAwaitPromise) decodes the packed
+		// word with extractStringFromSimplePacked, which reads the length
+		// field and nothing else, so a Python component guest receives "" for
+		// a stop, for a real timeout and for an error alike, and the Python
+		// SDK returns timed_out=False for it (cleat#3425). Recorded as an open finding
+		// rather than papered over with a `py` entry: `py` substitutes for a
+		// guarantee a scalar return gives up, and there is no scalar here.
+		adapters: []string{"AwaitPromise"},
+		wit:      nil,
+		witWhy:   reasonWitReturnsABareString,
+	},
 	"WaitForEvent": {
 		// The claim/register/re-claim loop the application used to write by hand
 		// (cleat#2998). It consults stopBeforeNewWork for the same reason a
@@ -293,7 +323,17 @@ func repoFile(t *testing.T, rel string) string {
 	return string(b)
 }
 
-// hostStopSites returns the execSession methods that consult stopBeforeNewWork.
+// hostStopSites returns the execSession methods that can answer a guest with
+// the stop sentinel: those that consult stopBeforeNewWork, and those that
+// return suspendingAwaitResult.
+//
+// The second kind was invisible to this scan until cleat#3383. A suspending
+// await returns the sentinel so the guest cannot take its timeout branch
+// (cleat#3378), which makes the call a stop site whether or not it ever asks
+// about a defer segment. DurableAwaitSignals and WaitForEvent happened to be
+// sites already through stopBeforeNewWork; AwaitPromise is the first call that
+// reaches the sentinel only this way, so a scan keyed on one name reported a
+// guarded Go adapter with no host site behind it.
 //
 // The definition of stopBeforeNewWork itself contains its own name and is not a
 // caller. Excluding it is not cosmetic: including it inflates the count by one,
@@ -323,15 +363,54 @@ func hostStopSites(t *testing.T) map[string]bool {
 			if i+1 < len(locs) {
 				end = locs[i+1][0]
 			}
-			if name == "stopBeforeNewWork" {
+			if name == "stopBeforeNewWork" || name == "suspendingAwaitResult" {
 				continue
 			}
-			if strings.Contains(src[loc[0]:end], "stopBeforeNewWork()") {
+			body := src[loc[0]:end]
+			if callsInCode(body, "stopBeforeNewWork") || callsInCode(body, "suspendingAwaitResult") {
 				sites[name] = true
 			}
 		}
 	}
 	return sites
+}
+
+// callsInCode reports whether src contains a call `name()` in CODE: the three
+// tokens name ( ) as the Go scanner reads them, which skips comments and keeps a
+// string literal as one token.
+//
+// It replaced strings.Contains on the raw method text, and the difference is the
+// whole point. A substring scan cannot tell a call from a sentence about the
+// call: the comment cleat#3383 added above AwaitPromise's deadline-passed return
+// quoted `suspendingAwaitResult()`, so with all three real returns reverted this
+// scan still counted AwaitPromise as a stop site and the guard reported
+// agreement. Measured by the reviewer on that head: reverted host, comment
+// present, PASS; the same revert with the comment reworded, FAIL. A check that
+// is satisfied by the text describing the thing it checks passes on exactly the
+// trees it exists to reject.
+func callsInCode(src, name string) bool {
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(src))
+	var sc goscanner.Scanner
+	// A body is a fragment, not a file, and it may end mid-token; errors are
+	// expected and say nothing about whether a call was seen.
+	sc.Init(file, []byte(src), func(token.Position, string) {}, 0)
+	var ident, lparen bool
+	for {
+		_, tok, lit := sc.Scan()
+		if tok == token.EOF {
+			return false
+		}
+		switch {
+		case ident && lparen && tok == token.RPAREN:
+			return true
+		case ident && tok == token.LPAREN:
+			lparen = true
+			continue
+		}
+		ident = tok == token.IDENT && lit == name
+		lparen = false
+	}
 }
 
 // adaptersWithSuspendCheck returns the adapterDefs keys whose decoder is wrapped
@@ -445,34 +524,49 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 		got  map[string]bool
 		min  int
 		must string
+		// alsoIf names a second reason the canary can be absent, when the scan
+		// being too narrow is not the only one.
+		alsoIf string
 	}{
-		{"host stop sites", sites, 6, "DurableCall"},
-		{"adapters with withSuspendCheck", wrappedAdapters, 6, "DurableCall"},
-		{"all adapterDefs keys", allAdapters, 30, "DurableSleep"},
-		{"WIT call-outcome functions", outcomeWit, 6, "durable-call"},
-		{"WIT scalar-returning functions", scalarWit, 15, "durable-acquire-lock"},
+		{"host stop sites", sites, 6, "DurableCall", ""},
+		// A member only the suspendingAwaitResult arm of the scan can find
+		// (cleat#3383). Without it, narrowing the scan back to
+		// stopBeforeNewWork passes this vacuity check and fails only the
+		// reverse direction below, for a reason that reads like a host regression.
+		{"host stop sites", sites, 6, "AwaitPromise",
+			"OR AwaitPromise's host sites were reverted: it is a stop site only by returning " +
+				"suspendingAwaitResult() in code (cleat#3383), so check engine/promises.go before " +
+				"widening the scan"},
+		{"adapters with withSuspendCheck", wrappedAdapters, 6, "DurableCall", ""},
+		{"all adapterDefs keys", allAdapters, 30, "DurableSleep", ""},
+		{"WIT call-outcome functions", outcomeWit, 6, "durable-call", ""},
+		{"WIT scalar-returning functions", scalarWit, 15, "durable-acquire-lock", ""},
 		// The canary is deliberately NOT acquire_lock_ms, the method this file
 		// actually requires. Using the method under test makes the vacuity check
 		// fire first when it is removed, so the per-site check below can never
 		// be reached and cannot be falsified. Measured: it did exactly that.
-		{"Python methods testing the stop sentinel", pyChecks, 8, "signal_workflow"},
-		{"all WIT functions", allWit, 30, "durable-sleep"},
+		{"Python methods testing the stop sentinel", pyChecks, 8, "signal_workflow", ""},
+		{"all WIT functions", allWit, 30, "durable-sleep", ""},
 	} {
 		if len(c.got) < c.min {
 			t.Fatalf("%s: found %d, expected at least %d -- this scan is matching "+
 				"almost nothing and would pass whatever the tree said", c.what, len(c.got), c.min)
 		}
 		if !c.got[c.must] {
-			t.Fatalf("%s: %q is missing, so the scan is reading the wrong thing. "+
+			why := "the scan is reading the wrong thing"
+			if c.alsoIf != "" {
+				why += ", " + c.alsoIf
+			}
+			t.Fatalf("%s: %q is missing, so %s. "+
 				"A size floor alone would not have caught this: the other entries are present.",
-				c.what, c.must)
+				c.what, c.must, why)
 		}
 	}
 
 	// -- 1. every host stop site declares its surfaces ----------------------
 	for _, site := range sortedStopKeys(sites) {
 		if _, ok := stopSurfaces[site]; !ok {
-			t.Errorf("engine method %q consults stopBeforeNewWork and is not in stopSurfaces.\n\n"+
+			t.Errorf("engine method %q can answer a guest with the stop sentinel (it consults stopBeforeNewWork or returns suspendingAwaitResult) and is not in stopSurfaces.\n\n"+
 				"A new host stop site means a guest can now be refused on a call it may not "+
 				"check. Add an entry naming its Go adapter and its WIT function, or an "+
 				"exemption with a reason constant. Do not add an empty entry.", site)
@@ -486,7 +580,7 @@ func TestTheThreeStopSurfacesAgree(t *testing.T) {
 	}
 	for _, site := range sortedStopKeys(declared) {
 		if !sites[site] {
-			t.Errorf("stopSurfaces names %q, which no longer consults stopBeforeNewWork.\n\n"+
+			t.Errorf("stopSurfaces names %q, which no longer consults stopBeforeNewWork or returns suspendingAwaitResult.\n\n"+
 				"Either the guard was removed from the host -- which is the regression this "+
 				"test exists for -- or the method was renamed and this entry was not.", site)
 		}
@@ -713,4 +807,30 @@ func funcBody(t *testing.T, src, name string) string {
 		return rest[:end[1]]
 	}
 	return rest
+}
+
+// callsInCode is what lets the scan above tell a call from prose, so it gets its
+// own known-positives: a scan helper that cannot be shown to refuse a comment or
+// a string is the defect it replaced.
+func TestCallsInCodeSeesACallAndNotAnythingElse(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"a real call", "func f() int64 { return s.suspendingAwaitResult() }", true},
+		{"a call with whitespace before the paren", "x := suspendingAwaitResult ( )", true},
+		{"only a line comment", "// return s.suspendingAwaitResult(): a suspending await", false},
+		{"only a block comment", "/* s.suspendingAwaitResult() */", false},
+		{"only a string literal", `msg := "call suspendingAwaitResult() here"`, false},
+		{"a different name", "return s.suspendingAwaitResultX()", false},
+		{"the name without a call", "f := s.suspendingAwaitResult", false},
+		{"a call with arguments is not this call", "s.suspendingAwaitResult(1)", false},
+		{"a comment AND a real call", "// suspendingAwaitResult()\nreturn s.suspendingAwaitResult()", true},
+		{"a source that ends mid-token", `return s.suspendingAwaitResult() + "unterminated`, true},
+	} {
+		if got := callsInCode(c.src, "suspendingAwaitResult"); got != c.want {
+			t.Errorf("%s: callsInCode = %v, want %v\n  src: %s", c.name, got, c.want, c.src)
+		}
+	}
 }
