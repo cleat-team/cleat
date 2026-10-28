@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 )
 
 // cleat#3497: a deploy that would replace a version's WASM while runs of that
@@ -58,7 +61,7 @@ func TestADeployWillNotReplaceBytesUnderAnOpenRun(t *testing.T) {
 				if err != nil || inst == nil {
 					t.Fatalf("UNMEASURED: cannot read run %s back: %v", id, err)
 				}
-				settled := map[string]bool{"done": true, "failed": true, "dead_lettered": true, "terminated": true, "cancelled": true}[string(inst.Status)]
+				settled := map[string]bool{"done": true, "failed": true, "dead_lettered": true, "terminated": true, "cancelled": true}[inst.Status]
 				if settled != wantSettled {
 					t.Fatalf("UNMEASURED: run %s has status %q, but this case needs it settled=%v, "+
 						"so the deploy below would not be testing the rule", id, inst.Status, wantSettled)
@@ -160,6 +163,53 @@ func TestADeployWillNotReplaceBytesUnderAnOpenRun(t *testing.T) {
 					t.Fatalf("the replacement after settle did not write: have %x, want %x", got, bytesD)
 				}
 			})
+
+			// Two overlapping FIRST deploys of one version. The check reads the
+			// existing row FOR UPDATE, and on MySQL at REPEATABLE READ an absent
+			// key makes that a gap lock that both sessions hold, so each one's
+			// INSERT waited on the other and one was killed with error 1213
+			// (cleat#3509 review). A client retrying a deploy that is still in
+			// flight does exactly this, with identical bytes. Neither is a case
+			// the rule refuses: with no row there is no run, so every call must
+			// succeed. The race is milliseconds wide, so one round proves little;
+			// each round uses a fresh name so every round is a first deploy.
+			for _, c := range []struct {
+				label string
+				same  bool
+			}{{"identical bytes", true}, {"different bytes", false}} {
+				c := c
+				t.Run("overlapping first deploys with "+c.label+" all succeed", func(t *testing.T) {
+					const rounds, racers = 8, 4
+					for r := 0; r < rounds; r++ {
+						name := fmt.Sprintf("replace-concurrent-first-%t-%d-%d", c.same, r, time.Now().UnixNano())
+						start := make(chan struct{})
+						errs := make([]error, racers)
+						var wg sync.WaitGroup
+						for i := 0; i < racers; i++ {
+							wasm := bytesA
+							if !c.same {
+								wasm = []byte{0x00, 0x61, 0x73, 0x6d, 0x01, byte(0x20 + i)}
+							}
+							wg.Add(1)
+							go func(i int, wasm []byte) {
+								defer wg.Done()
+								<-start
+								errs[i] = deploy(name, 1, wasm, false)
+							}(i, wasm)
+						}
+						close(start)
+						wg.Wait()
+						for i, err := range errs {
+							if err != nil {
+								t.Fatalf("round %d: racer %d of %d deploying %s v1 for the first time failed: %v", r, i, racers, name, err)
+							}
+						}
+						if got := stored(t, name, 1); len(got) == 0 {
+							t.Fatalf("round %d: %s v1 has no bytes after %d successful deploys", r, name, racers)
+						}
+					}
+				})
+			}
 
 			t.Run("different bytes with no run at all are allowed", func(t *testing.T) {
 				const name = "replace-no-runs"

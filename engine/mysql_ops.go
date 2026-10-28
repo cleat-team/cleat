@@ -910,11 +910,17 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	// version) with no tenant in it, and ON DUPLICATE KEY UPDATE turns the
 	// collision into an overwrite. IMPROVEMENT-PLAN 3.12.
 	//
-	// Read and write in one transaction, with the row locked. SELECT ... FOR
-	// UPDATE also takes a gap lock on the unique index when the row does not
-	// exist, so a concurrent deploy of the same new name blocks here rather
-	// than slipping between the read and the insert.
-	tx, err := s.beginTx(ctx)
+	// Read and write in one transaction, with an existing row locked.
+	//
+	// READ COMMITTED, and not the default REPEATABLE READ, on purpose
+	// (cleat#3509). Under REPEATABLE READ a SELECT ... FOR UPDATE on a key that
+	// does not exist yet takes a gap lock, two overlapping first deploys of one
+	// version both hold it, and each INSERT then waits on the other: one died
+	// with error 1213, identical bytes included, so a client retrying a deploy
+	// still in flight failed. READ COMMITTED takes no gap lock on an absent key;
+	// the second INSERT waits for the first to commit and then updates. An
+	// EXISTING row is still locked, which is what serialises two replacements.
+	tx, err := s.beginTxReadCommitted(ctx)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: begin: %w", err)
 	}
