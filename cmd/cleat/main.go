@@ -1169,7 +1169,7 @@ func runDeploy(args []string) {
 	// cleat#3497. Without it, redeploying different bytes onto a version that
 	// still has open runs is refused: they replay their history under whatever
 	// bytes the version holds, so replacing them under a live run can diverge it.
-	forceFlag := fs.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code)")
+	forceFlag := fs.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code, and a running worker can keep the previous bytes for up to about 5 seconds after a replacement of the same length)")
 	fs.Parse(args)
 
 	remainder := fs.Args()

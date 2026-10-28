@@ -99,6 +99,16 @@ code they started on, or pass `--force` to replace the bytes on purpose.
 option). `cleatctl deploy workflow` always assigns the next version, so it cannot
 hit this. cleat#3497.
 
+**When a running worker picks up replaced bytes.** A worker keeps each definition it
+has loaded in memory (and, with `--wasm-cache-dir`, on disk) and checks it against the
+database. A replacement of a different length is noticed on the next task, because the
+length is compared every time. A replacement of the **same length** is noticed by
+comparing a SHA-256 of the stored bytes, which the worker asks for at most once every
+5 seconds per definition, so after `--force` (or any replacement) a worker **may run
+the previous bytes for up to about 5 seconds**. A worker that cannot reach the database
+keeps serving what it has. The interval is a fixed constant of the worker, not a flag
+(cleat#3516).
+
 Example:
 
     cleat deploy --db "postgres://..." --name place_order ./out/place_order.wasm
