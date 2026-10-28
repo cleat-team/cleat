@@ -673,10 +673,18 @@ func buildWorkerBinaryOnce(t *testing.T) string {
 // file's use of a published image this test is not meant to validate.
 func startSandboxPostgres(t *testing.T) (dsn, containerName string) {
 	t.Helper()
-	containerName = "cleat-test-1969-pg-" + t.Name()
-	exec.Command("docker", "rm", "-f", containerName).Run() // best effort, in case a prior run leaked one
+	// A name unique to THIS run (cleat#3510). It used to be "cleat-test-1969-pg-" + t.Name(), removed
+	// at the start "in case a prior run leaked one" and again in t.Cleanup, so a second run of the same
+	// test on one docker daemon removed the first run's database out from under it, and its own cleanup
+	// then removed the second's. Several sessions share one daemon here. The pre-clean is gone with the
+	// fixed name: removing a container this run did not create is exactly the hazard. A leaked one is
+	// findable by its labels (`docker ps -a --filter label=cleat.test=1969-pg`) and is left for a person
+	// to remove.
+	containerName = fmt.Sprintf("cleat-test-1969-pg-%s-%d-%x", t.Name(), os.Getpid(), time.Now().UnixNano())
 
 	run := exec.Command("docker", "run", "-d", "--name", containerName,
+		"--label", "cleat.test=1969-pg",
+		"--label", "cleat.test.pid="+strconv.Itoa(os.Getpid()),
 		"-e", "POSTGRES_USER=cleat",
 		"-e", "POSTGRES_PASSWORD=cleat",
 		"-e", "POSTGRES_DB=cleat",
@@ -727,33 +735,6 @@ func startSandboxPostgres(t *testing.T) (dsn, containerName string) {
 	return "", ""
 }
 
-// waitForPortFree waits until nothing is listening on localhost:port, up to
-// 10s, before this test's own worker tries to bind it. Guards specifically
-// against back-to-back runs of this test in one session: the prior worker
-// process is a subprocess, and t.Cleanup's Kill+Wait ensures the PROCESS is
-// gone, but the OS reclaiming the TCP port it held is a separate, not
-// perfectly synchronous event. Measured once directly: a run immediately
-// following another took 41s instead of the usual 13-17s, entirely inside
-// waitForHealthz's 30s budget -- consistent with the new worker's bind
-// racing the old one's port release. A real CI job runs this test once, so
-// this mainly protects local back-to-back runs, but the cost of checking is
-// a handful of failed dials, not worth skipping for that.
-func waitForPortFree(t *testing.T, port int) {
-	t.Helper()
-	addr := fmt.Sprintf("localhost:%d", port)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err != nil {
-			return // nothing answered -- the port is free
-		}
-		conn.Close()
-		time.Sleep(200 * time.Millisecond)
-	}
-	t.Fatalf("port %d is still in use after 10s -- something other than this test's own "+
-		"worker (already cleaned up by this point) is bound to it", port)
-}
-
 // waitForHealthz polls url until it answers 200 or the deadline passes.
 func waitForHealthz(t *testing.T, url string) {
 	t.Helper()
@@ -773,7 +754,7 @@ func waitForHealthz(t *testing.T, url string) {
 	t.Fatalf("worker at %s did not become healthy within 30s", url)
 }
 
-// startWorkerWithDiscoveredPort starts cleat-worker with `--api-addr 127.0.0.1:0` -- so the
+// startLiveTestWorker starts cleat-worker with `--api-addr 127.0.0.1:0` -- so the
 // kernel allocates the port and the worker binds it as ONE act -- and reads the bound port
 // back from the worker's own "HTTP API listening" log line. That closes the cross-allocator
 // race holdTCPPort cannot: nothing can take the number between the allocation and the bind,
@@ -788,11 +769,15 @@ func waitForHealthz(t *testing.T, url string) {
 // The caller owns the returned cmd and must kill it -- the sites below install a t.Cleanup.
 // The worker's output is captured so a startup failure can be PRINTED rather than read as a
 // slow start: "never logged an address" and "still coming up" would otherwise be identical.
-func startWorkerWithDiscoveredPort(t *testing.T, workerBin, dsn string) (base string, cmd *exec.Cmd) {
+// It takes the working directory and any extra flags, and returns the worker's captured log so a
+// test can print it on failure. The three entry-point live tests use it with --migrate-on-start and
+// --require-auth=false; before cleat#3510 each hard-coded :8080, so two runs on one host collided.
+func startLiveTestWorker(t *testing.T, workerBin, dsn, dir string, extraArgs ...string) (base string, cmd *exec.Cmd, log *lockedBuffer) {
 	t.Helper()
-	var log lockedBuffer
-	cmd = exec.Command(workerBin, "--db", dsn, "--api-addr", "127.0.0.1:0")
-	cmd.Stdout, cmd.Stderr = &log, &log
+	log = &lockedBuffer{}
+	cmd = exec.Command(workerBin, append([]string{"--db", dsn, "--api-addr", "127.0.0.1:0"}, extraArgs...)...)
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start cleat-worker: %v", err)
 	}
@@ -806,12 +791,23 @@ func startWorkerWithDiscoveredPort(t *testing.T, workerBin, dsn string) (base st
 				continue
 			}
 			if m := addrRe.FindStringSubmatch(line); m != nil {
-				return "http://" + m[1], cmd
+				return "http://" + m[1], cmd, log
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	// The caller never receives cmd on this path, so it cannot install the kill the sites below do.
+	cmd.Process.Kill()
+	cmd.Wait()
 	t.Fatalf("cleat-worker never logged its bound API address within 30s -- that is a startup "+
 		"failure, not a slow start; its log:\n%s", log.String())
-	return "", cmd
+	return "", cmd, log
+}
+
+// startWorkerWithDiscoveredPort is startLiveTestWorker with no working directory, no extra flags and
+// the log discarded by the caller.
+func startWorkerWithDiscoveredPort(t *testing.T, workerBin, dsn string) (base string, cmd *exec.Cmd) {
+	t.Helper()
+	base, cmd, _ = startLiveTestWorker(t, workerBin, dsn, "")
+	return base, cmd
 }
