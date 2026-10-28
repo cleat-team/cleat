@@ -231,6 +231,27 @@ func TestADisabledWebhookDoesNotDeliver(t *testing.T) {
 
 			setEnabled(disabledID, false)
 
+			// ---- deliver() holds a disabled webhook's row by itself ----
+			// Called directly, before any sweep: the due query's join keeps held rows out of a
+			// sweep, so a sweep never reaches deliver()'s own check, which exists for a disable
+			// landing between a sweep's read and its lookup. Calling deliver() skips the sweep
+			// and so the race, and leaves that check as the only thing deciding. It must come
+			// BEFORE the sweeps below: a sweep's claim moves next_attempt_at, and the
+			// "a hold must not touch the row" assertion would then compare a row this call
+			// had already touched (cleat-review on cleat#3544).
+			outcome, derr := p.deliver(sweepCtx, ctx, deliveryRow{
+				ID: pendingID, WebhookID: disabledID, EventType: "test.event", Payload: json.RawMessage(`{}`),
+			})
+			if derr != nil || outcome != "held" {
+				t.Errorf("deliver() on a disabled webhook's due row: got outcome %q err %v, want \"held\" and no error", outcome, derr)
+			}
+			if got := disabledHits.Load(); got != 0 {
+				t.Errorf("deliver() POSTed %d time(s) to a disabled webhook, want 0", got)
+			}
+			if after := read(pendingID); after != before[pendingID] {
+				t.Errorf("deliver() changed a held row: before %+v, after %+v", before[pendingID], after)
+			}
+
 			// ---- (a) send_webhook on a disabled row is refused, with its own message ----
 			err = send(disabledID, 1)
 			switch {
