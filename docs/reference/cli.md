@@ -187,6 +187,16 @@ Example:
     cleat vet ./testdata/basic/
     cleat vet --lang rust --ci ./my-crate/
 
+**Run it before you push a Go workflow.** The checks that `cleat build` enforces on
+Go source (for example E008, E009, the HostCalls threading check and the W002
+floating-point warning) are not run by `go build`, `go vet` or `go test`, so a
+workflow can pass all three and still be rejected by `cleat build`. `cleat vet
+<package-path>` runs the same analysis without compiling, and for a Go package it
+gives the same answer as `cleat build` (`cleat vet`, `cleat build` and `cleat build
+--json` agree on whether the package is accepted; cleat#3524). It exits 1 on an error
+or a threading problem and 0 otherwise; warnings such as W002 are printed and do not
+change the exit status. In CI, `--ci` writes GitHub annotations.
+
 ---
 
 ## versions
