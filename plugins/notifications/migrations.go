@@ -526,5 +526,138 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					FOREIGN KEY (webhook_id) REFERENCES webhook_config(id);
 			`,
 		},
+		{
+			// webhook_config.name: an optional, caller-set name, unique per tenant
+			// among rows that have not been deleted. cleat#3538.
+			//
+			// WHY. A webhook row had no identity a caller could choose. The only
+			// attributes to find one by were `url`, which changes, and `events`, which
+			// means something else. clew (clew#317) found its row by URL, so a changed
+			// URL created a SECOND row and left runs that already held the first row's
+			// id delivering to the old URL under the old secret. A name lets an app
+			// find its own webhook, and move it, by a stable key.
+			//
+			// NULLABLE, AND NULL IS NOT A NAME. Existing rows get NULL, and any number
+			// of rows may have no name: uniqueness applies only to rows that have one.
+			// Each dialect gets there differently.
+			//
+			//   postgres  a partial unique index. (tenant_id, name) already treats NULLs
+			//             as distinct, and the predicate also drops deleted rows.
+			//   mssql     a FILTERED unique index with the same predicate. SQL Server
+			//             treats two NULLs as EQUAL in a unique index, so an unfiltered one
+			//             would allow a single unnamed row per tenant -- the same reason
+			//             plugins/auditlog's idx_audit_events_tenant_seq is filtered.
+			//   mysql     no partial indexes. A virtual generated column, name_live, is the
+			//             name while the row is live and NULL once deleted_at is set, and
+			//             the unique index is on (tenant_id, name_live). NULLs are distinct
+			//             there, so unnamed and deleted rows never collide.
+			//
+			// DELETED ROWS RELEASE THEIR NAME. handleDeleteWebhook soft-deletes (v6), so a
+			// plain unique index on (tenant_id, name) would hold a deleted webhook's name
+			// forever and the next create of that name would be refused by a row nobody can
+			// list. The predicate (or name_live) makes uniqueness a property of live rows.
+			//
+			// CASE. The API accepts only [a-z0-9._-] names (validWebhookName), so no
+			// collation comparison can ever make two names equal that this index sees as
+			// different, or the reverse: MySQL and SQL Server compare case-insensitively
+			// by default and PostgreSQL does not.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1, for the same reason v6 and v7 are.
+			Version: 8,
+			Up: `
+				ALTER TABLE webhook_config ADD COLUMN IF NOT EXISTS name TEXT;
+				CREATE UNIQUE INDEX IF NOT EXISTS uq_webhook_config_tenant_name
+					ON webhook_config (tenant_id, name) WHERE name IS NOT NULL AND deleted_at IS NULL;
+			`,
+			// MySQL has no ADD COLUMN IF NOT EXISTS and no CREATE INDEX IF NOT EXISTS, and its
+			// DDL is not transactional, so every step is guarded like v6 and v7: a crash
+			// between two of them must leave a migration that finishes on the next boot, not
+			// one that fails forever on ERROR 1060 / 1061.
+			UpMySQL: `
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_config ADD COLUMN name VARCHAR(128) NULL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name_live'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_config ADD COLUMN name_live VARCHAR(128) GENERATED ALWAYS AS (IF(deleted_at IS NULL, name, NULL)) VIRTUAL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND index_name = 'uq_webhook_config_tenant_name'
+				);
+				SET @ddl := IF(@idx = 0,
+					'CREATE UNIQUE INDEX uq_webhook_config_tenant_name ON webhook_config (tenant_id, name_live)',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			// The index is created through EXEC so its text is compiled after the column
+			// exists: a batch that adds a column and then names it in a CREATE INDEX is
+			// resolved before either runs. plugin.splitStatements already separates the
+			// statements, and the EXEC keeps the dependency out of the parser's reach, the
+			// way plugins/eventtriggers creates uq_event_awaiters_registration.
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_config') AND name = 'name')
+				ALTER TABLE webhook_config ADD name NVARCHAR(128) NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('webhook_config') AND name = 'uq_webhook_config_tenant_name')
+				EXEC('CREATE UNIQUE INDEX uq_webhook_config_tenant_name ON webhook_config (tenant_id, name) WHERE name IS NOT NULL AND deleted_at IS NULL');
+			`,
+			Down: `
+				DROP INDEX IF EXISTS uq_webhook_config_tenant_name;
+				ALTER TABLE webhook_config DROP COLUMN IF EXISTS name;
+			`,
+			DownMySQL: `
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND index_name = 'uq_webhook_config_tenant_name'
+				);
+				SET @ddl := IF(@idx > 0, 'DROP INDEX uq_webhook_config_tenant_name ON webhook_config', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name_live'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_config DROP COLUMN name_live', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'name'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_config DROP COLUMN name', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID('webhook_config') AND name = 'uq_webhook_config_tenant_name')
+				DROP INDEX uq_webhook_config_tenant_name ON webhook_config;
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_config') AND name = 'name')
+				ALTER TABLE webhook_config DROP COLUMN name;
+			`,
+		},
 	}
 }

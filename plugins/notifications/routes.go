@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
@@ -84,12 +86,15 @@ type webhookConfigJSON struct {
 	Enabled          bool      `json:"enabled"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+	// Name is the caller-set name, or null for a webhook that has none. cleat#3538.
+	Name *string `json:"name"`
 }
 
 type createWebhookRequest struct {
 	URL    string        `json:"url"`
 	Secret plugin.Secret `json:"secret,omitempty"`
 	Events []string      `json:"events"`
+	Name   *string       `json:"name,omitempty"`
 }
 
 type updateWebhookRequest struct {
@@ -97,6 +102,34 @@ type updateWebhookRequest struct {
 	Secret  *plugin.Secret `json:"secret,omitempty"`
 	Events  *[]string      `json:"events,omitempty"`
 	Enabled *bool          `json:"enabled,omitempty"`
+	Name    *string        `json:"name,omitempty"`
+}
+
+// webhookNameIndex is the unique index (v8) that makes a name unique per tenant among live rows. The
+// duplicate-name classifier below matches on it, so a collision on any other key is not reported as one.
+const webhookNameIndex = "uq_webhook_config_tenant_name"
+
+// webhookNamePattern is the whole of what a name may be: lowercase ASCII, digits, '.', '_' and '-', starting
+// with a letter or digit, at most 128 characters. It is narrow on purpose. MySQL and SQL Server compare
+// text case-insensitively by default and PostgreSQL does not, so any name that differs only by case would
+// be unique on one and a duplicate on another; no name that can be written here has that property.
+var webhookNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+const webhookNameRule = "name must be 1 to 128 characters of a-z, 0-9, '.', '_' or '-', starting with a letter or digit"
+
+func validWebhookName(n string) bool { return webhookNamePattern.MatchString(n) }
+
+// isDuplicateWebhookName reports whether err is the unique index on (tenant_id, name) refusing a write. It
+// asks for the index NAME, not just "duplicate": every dialect's message carries the index (PostgreSQL
+// `unique constraint "uq_..."`, MySQL `for key 'webhook_config.uq_...'`, SQL Server `with unique index
+// 'uq_...'`), and a classifier that accepted any duplicate would call a collision on some other key a
+// taken name.
+func isDuplicateWebhookName(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate") && strings.Contains(msg, webhookNameIndex)
 }
 
 type deliveryJSON struct {
@@ -143,6 +176,11 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Name != nil && !validWebhookName(*req.Name) {
+		p.writeError(w, 400, webhookNameRule)
+		return
+	}
+
 	eventsJSON, err := json.Marshal(req.Events)
 	if err != nil {
 		p.logger.Error("notifications: marshal events", "error", err)
@@ -175,9 +213,14 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	// first; this one was missed in the same PR and caught by cleat-review
 	// running POST /webhooks against real MySQL.
 	_, err = p.db.Exec(r.Context(), `
-			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, true, $6, $7)
-		`, tid, id, req.URL, secretConfigured, string(eventsJSON), now, now)
+			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at, name)
+			VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8)
+		`, tid, id, req.URL, secretConfigured, string(eventsJSON), now, now, req.Name)
+	if req.Name != nil && isDuplicateWebhookName(err) {
+		// Before the secret is stored, so a refused name leaves no secret behind.
+		p.writeError(w, 409, fmt.Sprintf("a webhook named %q already exists", *req.Name))
+		return
+	}
 	if err != nil {
 		p.logger.Error("notifications: create webhook", "error", err)
 		p.writeError(w, 500, "failed to create webhook")
@@ -206,6 +249,7 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		Enabled:          true,
 		CreatedAt:        now,
 		UpdatedAt:        now,
+		Name:             req.Name,
 	})
 }
 
@@ -218,12 +262,27 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), `
-			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
+	// ?name= is a lookup by the caller-set name (cleat#3538): the answer is still a list, of one webhook
+	// or none, so a client reads it the same way as an unfiltered list. A name that could never exist is
+	// a 400 rather than an empty list, so a typo reads as a typo.
+	query := `
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at, name
 			FROM webhook_config
-			WHERE tenant_id = $1 AND deleted_at IS NULL
-			ORDER BY created_at DESC
-		`, tid)
+			WHERE tenant_id = $1 AND deleted_at IS NULL`
+	args := []any{tid}
+	if q := r.URL.Query(); q.Has("name") {
+		name := q.Get("name")
+		if !validWebhookName(name) {
+			p.writeError(w, 400, webhookNameRule)
+			return
+		}
+		query += ` AND name = $2`
+		args = append(args, name)
+	}
+	query += `
+			ORDER BY created_at DESC`
+
+	rows, err := p.db.Query(r.Context(), query, args...)
 	if err != nil {
 		p.logger.Error("notifications: list webhooks", "error", err)
 		p.writeError(w, 500, "failed to list webhooks")
@@ -237,7 +296,7 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 			c         webhookConfigJSON
 			eventsRaw []byte
 		)
-		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt, &c.Name); err != nil {
 			p.logger.Error("notifications: scan webhook", "error", err)
 			continue
 		}
@@ -274,10 +333,10 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		eventsRaw []byte
 	)
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
-			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at, name
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt, &c.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -349,6 +408,18 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		args = append(args, *req.Enabled)
 		argIdx++
 	}
+	// A name can be set or changed, not cleared, as the secret can be rotated and not cleared: a webhook
+	// that an app looks up by name does not lose that identity by an update that omits the field, and an
+	// explicit "" is refused rather than read as "remove it".
+	if req.Name != nil {
+		if !validWebhookName(*req.Name) {
+			p.writeError(w, 400, webhookNameRule)
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
+		args = append(args, *req.Name)
+		argIdx++
+	}
 
 	// A secret rotation carries no SET clause of its own any more -- it goes
 	// through p.secrets, not this UPDATE -- so it no longer counts toward
@@ -369,6 +440,11 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
 	rows, err := p.db.Exec(r.Context(), query, args...)
+	if req.Name != nil && isDuplicateWebhookName(err) {
+		// Before the secret is rotated: a refused rename changes nothing.
+		p.writeError(w, 409, fmt.Sprintf("a webhook named %q already exists", *req.Name))
+		return
+	}
 	if err != nil {
 		p.logger.Error("notifications: update webhook", "error", err)
 		p.writeError(w, 500, "failed to update webhook")
@@ -399,10 +475,10 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		eventsRaw []byte
 	)
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), `
-			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at, name
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt, &c.Name)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated webhook")
