@@ -166,7 +166,7 @@ curl -X POST http://localhost:8080/api/definitions \
   }"
 ```
 
-There is no `namespace` or `task_queue` field: neither is a concept this endpoint knows about. The response is a `201` with the assigned version:
+There is no `namespace` or `task_queue` field: neither is a concept this endpoint knows about. The version is the one the binary is stamped with (`cleat build --version N`, default `1`); leave `version` out and that stamp is used. A `version` that disagrees with the stamp is refused with a `400` naming both numbers, and so is a binary stamped `0`, because a worker only runs a binary under the version it is stamped with: a row numbered anything else is a version that never runs. A binary that carries no version stamp at all is given the next free number. The response is a `201` with the version:
 
 ```json
 {
