@@ -140,6 +140,19 @@ Anything else resolving authorship from merged history needs the same treatment.
 An empty parse there reports a formatting limitation, not an unattributed commit
 — and those two lead to opposite conclusions about who did the work.
 
+**A commit already under a release tag is reported, not failed.** A squash onto a
+`release/**` branch can leave the trailer outside the message's final paragraph
+(`Claude-Stream: …`, a blank line, then GitHub's appended `Signed-off-by` /
+`Co-authored-by`), and it does so at *merge*, after the pull request's own check
+has already passed. It surfaces at the next `main` → `develop` back-merge, whose
+range contains those commits — by then published, so the repair above would mean
+rewriting a release. Measured on cleat#3486 (`739dffed`, from #3464). When a
+finding is on a commit reachable from a `vX.Y.Z` tag, `Stream Trailer Check`
+prints it as a `::notice::` naming the commit and the tag, and does not fail on
+it; a prerelease tag does not count, and every other commit still fails.
+`scripts/test-stream-trailer-check.sh` runs the workflow's own step text against
+fixture repositories to hold that line (cleat#3488).
+
 The same setting enables `.githooks/pre-commit`, which refuses a commit that
 adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
 CI cannot check that — it asserts uniqueness and block membership, both of
