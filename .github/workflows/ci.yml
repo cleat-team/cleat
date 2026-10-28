@@ -1330,6 +1330,8 @@ jobs:
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Stream trailer check self-test" >> "$LINT_FAILURES_FILE"
           scripts/test-stream-trailer-check.sh
+          LINT_GUARD_EOF
+
       # A runner job with no `timeout-minutes` inherits GitHub's 360-minute default,
       # which is what cleat#3479 and cleat#3482 spent two PRs removing by hand
       # (cleat#3492). Refuses a new job that lands uncapped unless it is on
