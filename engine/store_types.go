@@ -315,6 +315,12 @@ type WorkflowDef struct {
 	// endpoint-set cap would stay, silently mis-tuning the version it was not
 	// chosen for. See cleat#889.
 	MaxHistoryLength int `json:"max_history_length,omitempty"`
+	// ReplaceUnderOpenRuns lets DeployWorkflowDef replace the WASM of a
+	// (tenant, name, version) whose bytes differ while runs of that version are
+	// still open. Off by default, and deliberately: a run replays its history under
+	// the bytes the definition holds, so this is a hot-fix a person chose, never
+	// something a default can reach. cleat#3497. Not part of the wire form.
+	ReplaceUnderOpenRuns bool `json:"-"`
 }
 
 // EntryPointSchema is one entry point's build-time-computed JSON Schema

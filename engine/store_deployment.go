@@ -250,6 +250,12 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// behaviour as current.
 	tenantID := s.tenantID
 
+	// cleat#3497: this tenant's own redeploy of a version with open runs may not
+	// replace its bytes. See engine/workflow_def_replacement.go for the rule.
+	if err := CheckWorkflowDefReplacementPostgres(ctx, tx, tenantID, def.Name, def.Version, def.WASMBytes, def.ReplaceUnderOpenRuns); err != nil {
+		return err
+	}
+
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row, so there is nothing to
 	// adjudicate. The ON CONFLICT below can now only fire for this tenant's own

@@ -3004,6 +3004,17 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		// because each tenant has its own (tenant_id, name, version) row and a
 		// deploy simply creates or updates the caller's own. IMPROVEMENT-PLAN
 		// 3.77 / D7.
+		// cleat#3497: an explicit version whose bytes differ, with runs still open on
+		// it, is refused (engine/workflow_def_replacement.go). A conflict with the
+		// state of the definition, not a server fault, and the caller can fix it by
+		// leaving "version" out so the next free one is taken. There is no force field
+		// on this API on purpose -- see the note above on not widening its surface;
+		// a deliberate hot-fix goes through `cleat deploy --force`.
+		if errors.Is(err, engine.ErrWorkflowDefInUse) {
+			slog.Warn("deploy workflow def refused: open runs on that version", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error() + `; leave "version" out to deploy it as the next version`})
+			return
+		}
 		slog.Error("deploy workflow def failed", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
 		return

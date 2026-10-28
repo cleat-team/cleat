@@ -15,6 +15,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"go/token"
@@ -1152,11 +1153,15 @@ func runDeploy(args []string) {
 	// `--dry-run` gives a real, opt-in way to preview without a database --
 	// the same flag name and behavior as `cleat plugin install --dry-run`.
 	dryRunFlag := fs.Bool("dry-run", false, "print what would be deployed without connecting to a database")
+	// cleat#3497. Without it, redeploying different bytes onto a version that
+	// still has open runs is refused: they replay their history under whatever
+	// bytes the version holds, so replacing them under a live run can diverge it.
+	forceFlag := fs.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code)")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] [--dry-run] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] [--force] [--dry-run] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -1300,8 +1305,10 @@ func runDeploy(args []string) {
 	}
 
 	// Use the version embedded in WASM metadata if available; otherwise
-	// auto-increment.  Deploying the same version multiple times updates
-	// the existing row (idempotent).
+	// auto-increment. Deploying the same version again is idempotent only when the
+	// bytes are identical: different bytes on a version that still has open runs
+	// are refused below unless --force is given (cleat#3497), because `cleat build`
+	// stamps version 1 by default and this used to replace v1's WASM under them.
 	version := 1
 	if metaErr == nil && meta.WorkflowVersion > 0 {
 		version = meta.WorkflowVersion
@@ -1312,6 +1319,17 @@ func runDeploy(args []string) {
 			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	// The same rule PostgresStore.DeployWorkflowDef applies, from the same function,
+	// so `cleat deploy` and every store-backed deploy path refuse the same thing.
+	if cerr := engine.CheckWorkflowDefReplacementPostgres(context.Background(), tx, deployTenantID, name, version, wasmBytes, *forceFlag); cerr != nil {
+		_ = tx.Rollback()
+		fmt.Fprintf(os.Stderr, "Error: %v\n", cerr)
+		if errors.Is(cerr, engine.ErrWorkflowDefInUse) {
+			fmt.Fprintln(os.Stderr, engine.WorkflowDefInUseCLIAdvice)
+		}
+		os.Exit(1)
 	}
 
 	_, err = tx.Exec(

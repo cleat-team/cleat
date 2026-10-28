@@ -903,22 +903,33 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 		}
 	}
 
-	// Refuse to deploy over a definition owned by another tenant.
+	// Another tenant's definition of the same name is a different row: the
+	// primary key is (tenant_id, name, version) (migrations/mysql/001_schema.sql),
+	// so ON DUPLICATE KEY UPDATE below can only collide with this tenant's own
+	// row. A comment here once said the key had no tenant in it and that this
+	// code was the only thing between a deploy and another tenant's bytes
+	// (IMPROVEMENT-PLAN 3.12); IMPROVEMENT-PLAN 3.77 moved the tenant into the key.
 	//
-	// MySQL has no row-level security, so this check is the only thing between
-	// a deploy and another tenant's WASM bytes: the primary key is (name,
-	// version) with no tenant in it, and ON DUPLICATE KEY UPDATE turns the
-	// collision into an overwrite. IMPROVEMENT-PLAN 3.12.
+	// Read and write in one transaction, with an existing row locked.
 	//
-	// Read and write in one transaction, with the row locked. SELECT ... FOR
-	// UPDATE also takes a gap lock on the unique index when the row does not
-	// exist, so a concurrent deploy of the same new name blocks here rather
-	// than slipping between the read and the insert.
-	tx, err := s.beginTx(ctx)
+	// READ COMMITTED, and not the default REPEATABLE READ, on purpose
+	// (cleat#3509). Under REPEATABLE READ a SELECT ... FOR UPDATE on a key that
+	// does not exist yet takes a gap lock, two overlapping first deploys of one
+	// version both hold it, and each INSERT then waits on the other: one died
+	// with error 1213, identical bytes included, so a client retrying a deploy
+	// still in flight failed. READ COMMITTED takes no gap lock on an absent key;
+	// the second INSERT waits for the first to commit and then updates. An
+	// EXISTING row is still locked, which is what serialises two replacements.
+	tx, err := s.beginTxReadCommitted(ctx)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// cleat#3497: see engine/workflow_def_replacement.go.
+	if err := s.checkWorkflowDefReplacement(ctx, tx, def); err != nil {
+		return err
+	}
 
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.

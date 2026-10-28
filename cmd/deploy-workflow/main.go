@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -27,6 +28,10 @@ import (
 func main() {
 	dbURL := flag.String("db", "", "Database connection URL")
 	driver := flag.String("driver", "postgres", "Database driver (postgres, mysql, mssql)")
+	// cleat#3497: different bytes onto a version that still has open runs are
+	// refused unless this is given. The embedded stamp wins here (chooseDeployVersion),
+	// and `cleat build` stamps 1 by default, so a rebuild-and-redeploy lands on v1.
+	force := flag.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -215,9 +220,14 @@ func main() {
 		MinVersion: minVersion,
 		Exposure:   exposure,
 		CreatedAt:  time.Now(),
+
+		ReplaceUnderOpenRuns: *force,
 	}
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {
 		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, version, err)
+		if errors.Is(err, engine.ErrWorkflowDefInUse) {
+			fmt.Fprintln(os.Stderr, engine.WorkflowDefInUseCLIAdvice)
+		}
 		os.Exit(1)
 	}
 	fmt.Printf("Deployed %s v%d (%d bytes, SHA256=%x) to %s\n",
