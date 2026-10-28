@@ -777,6 +777,23 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The rest shards run ./cmd/... and ./tests/crash/..., whose Java tests
+      # (TestJavaBuildRefusesAStaleManifest, TestJavaBuildRefusesMultipleManifests,
+      # TestJavaExampleEntryPointResolutionLive, TestCrashMidAgentLoopResumes.../java)
+      # build with Gradle 7.6.4 behind `cleat build --target java`. This job named no
+      # JDK, so it followed the runner image's default: `ubuntu-latest` moved from
+      # ubuntu-24.04 (JDK 17) to ubuntu-26.04 (JDK 25, per the actions/runner-images
+      # readmes), and these shards, a required check, failed on every develop push
+      # from 2026-10-27T23:47Z. The engine shards are untouched: Tier 1 excludes
+      # TestJavaWorkflowExecute as a lower-tier test and they passed on 26.04.
+      # cleat#3499, cleat#3498.
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        if: github.event_name != 'merge_group'
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Install componentize-py, PyYAML and the Python SDK
         if: github.event_name != 'merge_group'
         run: |
