@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -235,50 +236,56 @@ func TestConcurrentClaimsOfOneDeliveryHaveOneWinner(t *testing.T) {
 		t.Run(be.Name, func(t *testing.T) {
 			defer be.Cleanup()
 			defer removeLeakedWebhookSecrets(t, be)
-			p, sweepCtx, webhookID, tenantCtx, cleanup := claimFixture(t, be, func(w http.ResponseWriter, r *http.Request) {})
-			defer cleanup()
-			id := queueDelivery(t, p, be, tenantCtx, webhookID)
 
 			// SQL Server's answer depends on READ_COMMITTED_SNAPSHOT: whether an
-			// UPDATE waiting on a row lock re-checks its predicate afterwards.
-			// cleat does not turn RCSI on itself, but docs/reference/database-
-			// backends.md recommends it and Azure SQL Database, the preferred Azure
-			// target, has it on, so both regimes are run and the setting is stated
-			// rather than assumed.
-			rcsiState := func() int {
-				var v int
-				if err := be.DB.QueryRowContext(context.Background(),
-					`SELECT CAST(is_read_committed_snapshot_on AS int) FROM sys.databases WHERE name = DB_NAME()`).Scan(&v); err != nil {
-					t.Fatalf("read the SQL Server isolation setting: %v", err)
-				}
-				return v
-			}
-			claimRounds(t, p, sweepCtx, id)
+			// UPDATE waiting on a row lock re-checks its predicate afterwards. cleat
+			// does not turn RCSI on itself, and docs/reference/database-backends.md
+			// recommends it, so both regimes are run and each one's setting is
+			// ASSERTED, not logged. Neither pass touches the shared database's
+			// options: the first requires it to be off, the second runs in a private
+			// database (notificationsPrivateRCSIDatabase) that the test owns.
 			if plugin.Dialect(string(be.Dialect)) == plugin.DialectMSSQL {
-				t.Logf("SQL Server READ_COMMITTED_SNAPSHOT = %d for the first pass", rcsiState())
-				var name string
-				if err := be.DB.QueryRowContext(context.Background(), `SELECT DB_NAME()`).Scan(&name); err != nil {
-					t.Fatalf("read the database name: %v", err)
+				if got := mssqlRCSI(t, be.DB); got != 0 {
+					t.Fatalf("UNMEASURED: the shared SQL Server test database has READ_COMMITTED_SNAPSHOT = %d; "+
+						"the RCSI-off pass cannot be measured here, and this test will not change the setting "+
+						"(something else turned it on, or a previous run of this test did)", got)
 				}
-				if _, err := be.DB.ExecContext(context.Background(),
-					fmt.Sprintf("ALTER DATABASE [%s] SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE", name)); err != nil {
-					t.Fatalf("UNMEASURED: could not turn READ_COMMITTED_SNAPSHOT on: %v", err)
+				t.Logf("SQL Server READ_COMMITTED_SNAPSHOT = 0 for the first pass (shared database)")
+			}
+			claimRoundsOn(t, be)
+
+			if plugin.Dialect(string(be.Dialect)) == plugin.DialectMSSQL {
+				private := be
+				private.DB = notificationsPrivateRCSIDatabase(t)
+				if got := mssqlRCSI(t, private.DB); got != 1 {
+					t.Fatalf("UNMEASURED: the private SQL Server database has READ_COMMITTED_SNAPSHOT = %d, want 1", got)
 				}
-				// WITH ROLLBACK IMMEDIATE disconnects the pool's idle sessions, and the
-				// first claim to reuse one fails with "Read: EOF" (measured: exactly one
-				// error, in round 0, on every off-to-on transition). That is the test
-				// setup killing a connection, not the claim; drop the idle connections
-				// so the race below runs on fresh ones.
-				be.DB.SetMaxIdleConns(0)
-				be.DB.SetMaxIdleConns(10)
-				if got := rcsiState(); got != 1 {
-					t.Fatalf("UNMEASURED: READ_COMMITTED_SNAPSHOT is %d after turning it on", got)
-				}
-				t.Logf("SQL Server READ_COMMITTED_SNAPSHOT = 1 for the second pass")
-				claimRounds(t, p, sweepCtx, id)
+				t.Logf("SQL Server READ_COMMITTED_SNAPSHOT = 1 for the second pass (private database)")
+				claimRoundsOn(t, private)
 			}
 		})
 	}
+}
+
+// mssqlRCSI reports is_read_committed_snapshot_on for the database db is attached to.
+func mssqlRCSI(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var v int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT CAST(is_read_committed_snapshot_on AS int) FROM sys.databases WHERE name = DB_NAME()`).Scan(&v); err != nil {
+		t.Fatalf("read the SQL Server isolation setting: %v", err)
+	}
+	return v
+}
+
+// claimRoundsOn builds the fixture on be's database, queues one delivery and runs
+// the concurrent claim race against it.
+func claimRoundsOn(t *testing.T, be testutil.PluginTestBackend) {
+	t.Helper()
+	p, sweepCtx, webhookID, tenantCtx, cleanup := claimFixture(t, be, func(w http.ResponseWriter, r *http.Request) {})
+	defer cleanup()
+	id := queueDelivery(t, p, be, tenantCtx, webhookID)
+	claimRounds(t, p, sweepCtx, id)
 }
 
 // TestAClaimedDeliveryIsFreedWhenItsLeaseRunsOut: a sweep that claims and dies
