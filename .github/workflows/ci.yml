@@ -1318,6 +1318,20 @@ jobs:
           python3 scripts/oci_image_labels.py --self-test
           LINT_GUARD_EOF
 
+      # cleat#3488: stream-trailer-check.yml's "Check stream trailers" step is
+      # ~200 lines of bash inside a workflow, and until now was tested by hand,
+      # once, by whoever last edited it. This extracts that step's run: text and
+      # runs it against fixture repositories: an unparseable trailer still FAILS,
+      # the same commit under a vX.Y.Z tag is a notice, a prerelease tag does
+      # not widen that, and an empty range is UNMEASURED. A copy would certify
+      # the copy; this runs the shipped text.
+      - name: Stream trailer check self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Stream trailer check self-test" >> "$LINT_FAILURES_FILE"
+          scripts/test-stream-trailer-check.sh
+          LINT_GUARD_EOF
+
       # Dependabot coverage. Two directions, both silent without this: an entry
       # naming a directory that does not exist is skipped by Dependabot with no
       # error at all, and a manifest in no entry gets security updates only.
