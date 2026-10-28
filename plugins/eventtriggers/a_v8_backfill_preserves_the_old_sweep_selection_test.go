@@ -20,10 +20,13 @@ import (
 
 // seededPreV8Row names one of the four rows seedPreV8Rows writes, so the
 // test can check which of ITS OWN rows the sweep selected rather than a
-// bare count -- queryUnprocessedEvents is a genuinely cross-tenant, no-limit
-// scan (mirroring processBatch), and this suite's other tests share the
-// same database and also write ingested_events rows, so a bare row count
-// is not this test's to claim.
+// bare count -- queryUnprocessedEvents is a genuinely cross-tenant scan of
+// the OLDEST 100 undispatched rows (ORDER BY seq LIMIT 100, mirroring
+// processBatch), not an unbounded one. On a database that already holds 97 or
+// more such rows the four rows this test seeds fall outside the first 100 and
+// the pending one reads as unselected (cleat#3529), which is why every arm now
+// gets a database of its own. A bare row count is still not this test's to
+// claim.
 type seededPreV8Row struct {
 	id     uuid.UUID
 	status string
@@ -110,8 +113,21 @@ func TestV8BackfillPreservesTheOldSweepSelection(t *testing.T) {
 				// (cleat#2223) already does for the identical reason, citing
 				// this same cleat#2871 precedent.
 				sqlDB = freshMySQLDatabase(t)
+			case testutil.DialectPostgres:
+				// This arm alone used testutil.TestDB, the database shared by
+				// every test in the package's whole `go test` invocation and,
+				// run after run, by the machine's long-lived test server
+				// (cleat#3529). plugin_migrations is keyed on (plugin_name,
+				// version), so once ANY run had applied this plugin's full
+				// migrations there, "migrate to v7" and "migrate to v8" below
+				// were silent no-ops, the backfill never ran, and the three
+				// terminal rows stayed selectable: the arm passed once on a
+				// never-used database and failed every time after. Rows left
+				// behind there also fill the sweep's LIMIT 100. Isolation by
+				// construction, as for the two arms above.
+				sqlDB = freshPostgresDatabase(t)
 			default:
-				sqlDB = testutil.TestDB(t, tc.td)
+				t.Fatalf("unknown dialect %q", tc.td)
 			}
 			dialect := plugin.Dialect(string(tc.td))
 			real := &Plugin{dialect: dialect}
@@ -134,15 +150,14 @@ func TestV8BackfillPreservesTheOldSweepSelection(t *testing.T) {
 				t.Fatalf("migrate to v8: %v", err)
 			}
 
-			// queryUnprocessedEvents is a genuinely cross-tenant, no-limit
-			// scan in production (processBatch runs it under
-			// AcrossAllTenants) -- reading it through a bare, unscoped
-			// connection would have RLS's FILTER predicate hide every row
-			// and pass for the wrong reason. It is also, for that same
-			// reason, not this test's alone to count: this suite's other
-			// tests share the database and write their own ingested_events
-			// rows, so the check below is keyed on the FOUR IDs this test
-			// itself seeded, never on the result set's size.
+			// queryUnprocessedEvents is a genuinely cross-tenant scan in
+			// production (processBatch runs it under AcrossAllTenants) --
+			// reading it through a bare, unscoped connection would have RLS's
+			// FILTER predicate hide every row and pass for the wrong reason.
+			// It is LIMITed to the oldest 100 undispatched rows, which cannot
+			// hide this test's four rows only because the database is this
+			// test's own (cleat#3529); the check below is keyed on the FOUR
+			// IDs this test itself seeded, never on the result set's size.
 			sweepCtx := plugin.AcrossAllTenants(context.Background(), "test: cross-tenant dispatch sweep")
 			rows, err := db.Query(sweepCtx, queryUnprocessedEvents.For(dialect))
 			if err != nil {
@@ -221,6 +236,72 @@ func seedPreV8Rows(t *testing.T, ctx context.Context, db *engine.SQLDBAdapter, t
 		seeded = append(seeded, seededPreV8Row{id: id, status: r.status})
 	}
 	return seeded
+}
+
+// freshPostgresDatabase creates a uniquely-named PostgreSQL database on the
+// same server CLEAT_TEST_POSTGRES / CLEAT_TEST_DB points at, builds the
+// package's full test schema in it, and returns a *sql.DB connected to that
+// database alone -- see the comment at this function's one call site for why
+// this arm needs its own database rather than the one testutil.TestDB shares.
+//
+// An unreachable server is a skip only when nobody configured one, exactly as
+// testutil.TestDB treats it: a configured DSN that does not connect is a
+// failure of the configuration, and skipping would hide it. The new database's
+// DSN is derived from testutil.PostgresTestDSN, which already carries the
+// application_name tag the foreign-session probe uses to recognise this
+// process's own connections. DROP DATABASE ... WITH (FORCE) needs PostgreSQL 13
+// or later; CI runs 16.
+func freshPostgresDatabase(t *testing.T) *sql.DB {
+	t.Helper()
+	adminDSN := testutil.PostgresTestDSN()
+	configured := os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
+	unavailable := t.Skipf
+	if configured {
+		unavailable = t.Fatalf
+	}
+	admin, err := sql.Open("postgres", adminDSN)
+	if err != nil {
+		unavailable("open admin postgres connection: %v", err)
+		return nil
+	}
+	if err := admin.Ping(); err != nil {
+		admin.Close()
+		unavailable("ping admin postgres connection: %v", err)
+		return nil
+	}
+
+	u, err := url.Parse(adminDSN)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		admin.Close()
+		t.Fatalf("the PostgreSQL test DSN is not a postgres:// URL, so a fresh database cannot be addressed from it (parse error: %v)", err)
+	}
+
+	name := "cleat_test_3529_" + strings.ReplaceAll(uuid.New().String(), "-", "")
+	if _, err := admin.Exec(`CREATE DATABASE "` + name + `"`); err != nil {
+		admin.Close()
+		t.Fatalf("create database %s: %v", name, err)
+	}
+	// Registered in this order so t.Cleanup's LIFO runs the pool close first,
+	// then the drop, then the admin close: the drop must not find the test's own
+	// connections still attached, and must not run on a closed admin handle.
+	t.Cleanup(func() { admin.Close() })
+	t.Cleanup(func() {
+		if _, err := admin.Exec(`DROP DATABASE IF EXISTS "` + name + `" WITH (FORCE)`); err != nil {
+			t.Logf("cleanup: drop database %s: %v", name, err)
+		}
+	})
+
+	u.Path = "/" + name
+	db, err := sql.Open("postgres", u.String())
+	if err != nil {
+		t.Fatalf("open fresh postgres database %s: %v", name, err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping fresh postgres database %s: %v", name, err)
+	}
+	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
+	return db
 }
 
 // freshMySQLDatabase creates a uniquely-named MySQL database on the same
