@@ -920,6 +920,11 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	}
 	defer tx.Rollback()
 
+	// cleat#3497: see engine/workflow_def_replacement.go.
+	if err := s.checkWorkflowDefReplacement(ctx, tx, def); err != nil {
+		return err
+	}
+
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `

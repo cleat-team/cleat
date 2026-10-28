@@ -74,6 +74,7 @@ Upload a compiled WASM workflow to the database.
 |------|---------|-------------|
 | `--name <name>` | derived from WASM metadata or filename | Workflow name |
 | `--task-queue <queue>` | `default` | Task queue (e.g. `default`, `gpu`, `high-memory`) |
+| `--force` | off | Replace the WASM of a version that has open runs and different bytes (see below) |
 
 > Corrected 2026-08-09: this table previously also listed a `--namespace`
 > flag. `runDeploy` in `cmd/cleat/main.go` only defines `--name` and
@@ -85,6 +86,20 @@ Upload a compiled WASM workflow to the database.
 
 Requires `--db` or `CLEAT_DATABASE_URL`. In dry-run mode (no DB configured),
 prints what would be deployed.
+
+**Redeploying a version.** The version comes from the artifact's stamp, and
+`cleat build` stamps `1` unless given `--version`. Redeploying a version whose
+bytes are identical is a no-op. Redeploying a version with **different** bytes is
+refused while any run of that version is still open, because a run replays its
+recorded history under whatever bytes the version holds, and replacing them under
+a live run can make it diverge. The error names the version and the number of open
+runs. Build with a higher `--version` and deploy that, so the open runs keep the
+code they started on, or pass `--force` to replace the bytes on purpose. A rebuild
+from a different directory currently produces different bytes (cleat#3501), so an
+unchanged source can be refused too. `deploy-workflow` takes the same `--force`,
+and the worker's upload API answers `409` for the same refusal (it has no force
+option). `cleatctl deploy workflow` always assigns the next version, so it cannot
+hit this. cleat#3497.
 
 Example:
 

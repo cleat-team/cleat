@@ -214,7 +214,11 @@ func TestExecuteWorkflowInstallsTheFetcherOnlyWhenTheFlagIsSet(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadMetadata: %v", err)
 			}
-			const defName = "workflow-fetch-wiring-worker"
+			// One definition per arm. The arms share a database, the first leaves its
+			// run suspended on the guest's sleep, and the fixture's bytes differ per
+			// build, so deploying both onto one name replaced the bytes under an open
+			// run, which a deploy now refuses (cleat#3497).
+			defName := fmt.Sprintf("workflow-fetch-wiring-worker-%t", tc.enabled)
 			if err := store.DeployWorkflowDef(ctx, &engine.WorkflowDef{
 				Name: defName, Version: meta.WorkflowVersion, WASMBytes: wasmBytes,
 				ABIVersion: meta.ABIVersion, MinVersion: meta.MinCompatibleVersion,
