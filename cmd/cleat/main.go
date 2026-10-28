@@ -2510,9 +2510,25 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		}
 
 		// Write lock file for reproducible builds without DB access.
-		entries := make(map[string]wasm.LockEntry, len(resolved))
-		for name, v := range resolved {
-			entries[name] = wasm.LockEntry{Version: v}
+		//
+		// MERGED INTO THE LOCK THAT IS THERE, NOT WRITTEN FROM THE SCAN ALONE
+		// (cleat#3508). The scan reads only this workflow's own package, so a
+		// child started from an imported package is in the lock only because
+		// someone added it by hand. Writing the lock from the scan dropped that
+		// entry whenever the own package had a nameable child, and dropped it
+		// from the build's pins as well, which under --channel frozen is the
+		// child silently resolving to MAX(version) at run time.
+		var existing *wasm.LockFile
+		if lf, err := wasm.ReadLockFile("."); err == nil && (lf.Version == wasm.LockFileVersion || lf.Version == 1) {
+			existing = lf
+		}
+		entries, kept := mergeLockEntries(existing, resolved)
+		if len(kept) > 0 {
+			logBuildProgress("  Kept %d %s entr%s the scan did not find: %s\n",
+				len(kept), wasm.LockFileName, map[bool]string{true: "y", false: "ies"}[len(kept) == 1], strings.Join(kept, ", "))
+			for _, name := range kept {
+				resolved[name] = entries[name].Version
+			}
 		}
 		lf := &wasm.LockFile{
 			Version: wasm.LockFileVersion,
@@ -2548,6 +2564,32 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 	}
 	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", wasm.LockFileName)
 	return nil
+}
+
+// mergeLockEntries returns the lock entries to write: every resolved child, at
+// its resolved version, plus every entry of the existing lock whose name the
+// scan did not resolve, unchanged. kept names the latter, sorted.
+//
+// An existing entry for a name the scan DID resolve is replaced, because
+// re-resolving it is what --db is for. One for a name the scan did not find is
+// indistinguishable from a child that is no longer called and from one started
+// by an imported package, and dropping the second is the worse mistake: this
+// keeps both, and `cleat lock` is the way to prune.
+func mergeLockEntries(existing *wasm.LockFile, resolved map[string]int) (entries map[string]wasm.LockEntry, kept []string) {
+	entries = make(map[string]wasm.LockEntry, len(resolved))
+	if existing != nil {
+		for name, e := range existing.Entries {
+			if _, found := resolved[name]; !found {
+				entries[name] = e
+				kept = append(kept, name)
+			}
+		}
+	}
+	sort.Strings(kept)
+	for name, v := range resolved {
+		entries[name] = wasm.LockEntry{Version: v}
+	}
+	return entries, kept
 }
 
 // resolveChildVersionsFromStore resolves child workflow versions using the
