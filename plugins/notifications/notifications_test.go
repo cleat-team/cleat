@@ -185,7 +185,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryWebhookExists(args)
-	case strings.Contains(query, "SELECT url, tenant_id, secret_configured FROM webhook_config"):
+	case strings.Contains(query, "SELECT url, tenant_id, secret_configured, enabled FROM webhook_config"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryWebhookConfigForDelivery(args)
@@ -581,14 +581,14 @@ func (c *fakeConn) queryWebhookConfigForDelivery(args []driver.NamedValue) (driv
 		return nil, err
 	}
 
-	columns := []string{"url", "tenant_id", "secret_configured"}
+	columns := []string{"url", "tenant_id", "secret_configured", "enabled"}
 	cfg := findWebhookCfg(c.store.configs, id)
 	if cfg == nil || cfg.deletedAt != nil {
 		return &fakeRows{columns: columns}, nil
 	}
 	return &fakeRows{
 		columns: columns,
-		data:    [][]driver.Value{{cfg.url, cfg.tenantID.String(), cfg.secretConfigured}},
+		data:    [][]driver.Value{{cfg.url, cfg.tenantID.String(), cfg.secretConfigured, cfg.enabled}},
 	}, nil
 }
 
@@ -604,8 +604,10 @@ func (c *fakeConn) queryPendingDeliveries(args []driver.NamedValue) (driver.Rows
 		// wc.deleted_at IS NULL" (background.go, cleat#2220): an INNER join,
 		// not a LEFT one, so a delivery with no matching config row at all --
 		// not just a soft-deleted one -- is excluded too.
+		// AND wc.enabled (cleat#3539): a disabled webhook's deliveries are held,
+		// so they are not due.
 		cfg := findWebhookCfg(c.store.configs, d.webhookID)
-		if cfg == nil || cfg.deletedAt != nil {
+		if cfg == nil || cfg.deletedAt != nil || !cfg.enabled {
 			continue
 		}
 		// The payload must be []byte for driver.Value compatibility.
