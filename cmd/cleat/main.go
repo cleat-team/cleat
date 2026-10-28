@@ -2630,7 +2630,7 @@ func resolveChildVersionsFromStore(ctx context.Context, store engine.WorkflowSto
 func runLock(args []string) {
 	fs := flag.NewFlagSet("lock", flag.ExitOnError)
 	lockDB := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
-	lockUpdate := fs.Bool("update", false, "re-resolve every child named in cleat.lock from the database (with a <package>, only the children it finds; other entries are kept)")
+	lockUpdate := fs.Bool("update", false, "re-resolve every child named in cleat.lock from the database, replacing a version chosen by hand and printing each version it moves (with a <package>, only the children it finds; other entries are kept)")
 	lockChannel := fs.String("channel", "stable", "channel for version resolution: stable, latest, canary, or custom tag")
 	lockTenant := fs.String("tenant", "", "tenant UUID for scoped resolution (default: zero UUID)")
 	fs.Parse(args)
