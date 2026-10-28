@@ -16,6 +16,12 @@
 #     the tag, and passes -- it cannot be amended (cleat#3488);
 #   * a prerelease or non-semver tag does NOT widen that exemption;
 #   * a released finding does not hide an unreleased one in the same range;
+#   * a finding on a commit already on origin/develop is a notice too, because
+#     develop is squash-only and protected, so it cannot be amended either
+#     (cleat#3496: a release PR to main runs before its tag exists);
+#   * and that does NOT loosen a pull request INTO develop, whose range excludes
+#     develop by construction: a bad commit on top of develop's tip still fails,
+#     including when develop has moved on past the PR's base;
 #   * an empty range is UNMEASURED (exit 2), not a pass.
 #
 # Exit 0 all cases held, 1 a case did not.
@@ -141,6 +147,61 @@ new_repo; base=$(head_of); commit "$MALFORMED"; git -C "$R" tag v1.0.0; commit "
 run_step "$base" "$(head_of)"
 expect "a released finding does not hide an unreleased one" 1 \
   "reported as already published: 1" "STREAM TRAILER CHECK" "no Claude-Stream trailer" "published in v1.0.0"
+
+# cleat#3496. origin/develop is a remote-tracking ref in CI (actions/checkout with
+# fetch-depth: 0), so a fixture sets it with update-ref.
+on_develop() { git -C "$R" update-ref refs/remotes/origin/develop "${1:-HEAD}"; }
+
+new_repo; base=$(head_of); commit "$MALFORMED"; on_develop
+run_step "$base" "$(head_of)"
+expect "an unparseable trailer already on develop is a notice, and passes" 0 \
+  "reported as already published: 1 (of which on develop and untagged: 1)" "ALREADY PUBLISHED" \
+  "already on develop" "does NOT parse as a trailer"
+refute "...and does not print the failure banner" "STREAM TRAILER CHECK"
+
+new_repo; base=$(head_of); commit "$MISSING"; on_develop
+run_step "$base" "$(head_of)"
+expect "a commit with no trailer at all on develop is a notice too (a bot's)" 0 \
+  "already on develop" "no Claude-Stream trailer"
+
+new_repo; base=$(head_of); commit "$MALFORMED"; git -C "$R" tag v1.0.0; on_develop
+run_step "$base" "$(head_of)"
+expect "tagged AND on develop: reported once, as published in the tag" 0 \
+  "published in v1.0.0" "of which on develop and untagged: 0"
+
+# The boundary the rule must keep: nothing is waived for a commit that is NOT on
+# develop. This is a pull request INTO develop -- the same shape a feature PR has.
+new_repo; on_develop; base=$(head_of); commit "$MALFORMED"
+run_step "$base" "$(head_of)"
+expect "KNOWN-POSITIVE: a PR into develop with a bad commit still fails" 1 \
+  "STREAM TRAILER CHECK" "does NOT parse as a trailer" "of which on develop and untagged: 0"
+refute "...and waives nothing" "ALREADY PUBLISHED"
+
+new_repo; on_develop; base=$(head_of); commit "$MISSING"
+run_step "$base" "$(head_of)"
+expect "KNOWN-POSITIVE: a PR into develop with NO trailer still fails" 1 \
+  "STREAM TRAILER CHECK" "no Claude-Stream trailer"
+
+# develop has moved on past the PR's base, with a commit the PR does not contain.
+# A develop ref far ahead of the base must not classify the PR's own commit.
+new_repo; base=$(head_of)
+git -C "$R" checkout -q -b dev; commit "$GOOD"; on_develop
+git -C "$R" checkout -q -b pr "$base"; commit "$MALFORMED"
+run_step "$base" "$(head_of)"
+expect "develop ahead of the PR's base does not classify the PR's own commit" 1 \
+  "STREAM TRAILER CHECK" "of which on develop and untagged: 0"
+
+# A finding on develop does not hide one that is not: the release-branch squash
+# that has not been back-merged yet (739dffed on #3466) is the real instance.
+new_repo; base=$(head_of); commit "$MALFORMED"; on_develop; commit "$MALFORMED"
+run_step "$base" "$(head_of)"
+expect "a finding on develop does not hide one that is not" 1 \
+  "of which on develop and untagged: 1" "STREAM TRAILER CHECK"
+
+new_repo; base=$(head_of); commit "$MALFORMED"
+run_step "$base" "$(head_of)"
+expect "no origin/develop: strict, and says so" 1 \
+  "origin/develop is not present in this checkout" "STREAM TRAILER CHECK"
 
 new_repo; base=$(head_of)
 run_step "$base" "$base"

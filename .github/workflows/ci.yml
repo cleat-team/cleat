@@ -1323,8 +1323,10 @@ jobs:
       # once, by whoever last edited it. This extracts that step's run: text and
       # runs it against fixture repositories: an unparseable trailer still FAILS,
       # the same commit under a vX.Y.Z tag is a notice, a prerelease tag does
-      # not widen that, and an empty range is UNMEASURED. A copy would certify
-      # the copy; this runs the shipped text.
+      # not widen that, a commit already on origin/develop is a notice too
+      # (cleat#3496) while a pull request INTO develop is not loosened by it,
+      # and an empty range is UNMEASURED. A copy would certify the copy; this
+      # runs the shipped text.
       - name: Stream trailer check self-test
         if: always()
         run: |
