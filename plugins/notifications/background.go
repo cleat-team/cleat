@@ -323,10 +323,10 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	//
 	// IT IS NOT HOW A HELD ROW IS KEPT OUT OF THE SWEEP. A row skipped here would
 	// still be in queryDueDeliveries' result, which is ORDER BY next_attempt_at
-	// LIMIT 100 across every webhook, so 100 held rows at the front would starve
-	// every enabled webhook's deliveries. Nothing is marked: the claim moved
-	// next_attempt_at by the lease, which is harmless, and the join excludes the
-	// row from the next sweep.
+	// LIMIT 100 across every webhook, so held rows left in it would take places
+	// ahead of enabled webhooks' deliveries. Nothing is marked: the claim moved
+	// next_attempt_at by the lease, so a re-enable inside that minute resumes the
+	// row up to a lease later, and the join excludes it from the next sweep.
 	if !cfg.Enabled {
 		return "held", nil
 	}
@@ -592,8 +592,10 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 // they stay pending/retrying and unchanged, and are due again the moment the
 // webhook is re-enabled. It belongs in this join and nowhere later: the query is
 // ORDER BY next_attempt_at LIMIT 100 over every webhook, so a held row left in the
-// result and skipped afterwards would still take one of the 100, and enough of
-// them at the front would starve every enabled webhook.
+// result and skipped afterwards would still take one of the 100. The claim's lease
+// (two sweep intervals) takes a skipped row out of the next sweep, so that delays
+// an enabled webhook's delivery by a sweep or two while fewer than about 200 rows
+// are held, and starves it for as long as more are.
 //
 // INNER JOIN webhook_config, not a LEFT JOIN: cleat#2220. A LEFT JOIN plus
 // "wc.deleted_at IS NULL" would read true when there is no matching config

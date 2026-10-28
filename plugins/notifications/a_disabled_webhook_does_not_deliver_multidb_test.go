@@ -37,9 +37,14 @@ import (
 //     resumes it. Cancel and dead-letter are terminal and could not be resumed.
 //   - Held is decided in queryDueDeliveries' JOIN, not by skipping in deliver().
 //     The due query is ORDER BY next_attempt_at LIMIT 100 across every webhook, so
-//     held rows that stayed in its result would sit at the front and starve every
-//     enabled webhook. The starvation case below seeds more than 100 held rows
-//     older than an enabled webhook's delivery; a skip at deliver() time fails it.
+//     held rows that stayed in its result would take places in it ahead of every
+//     enabled webhook's delivery. The case below seeds more than 100 held rows
+//     older than an enabled webhook's delivery and requires that delivery to be
+//     attempted by the FIRST sweep; a skip at deliver() time fails it. (A claim's
+//     60 s lease takes the skipped rows out of the next sweep, so the delay is a
+//     sweep or two for 105 rows and does not end for 200 or more: the lease is two
+//     sweep intervals. Asserting after several sweeps, as this test first did,
+//     passes under the skip, which was measured.)
 //   - GET .../deliveries still lists the held rows (webhookExistsSQL is shared with
 //     it and must not learn about enabled).
 //
@@ -176,6 +181,20 @@ func TestADisabledWebhookDoesNotDeliver(t *testing.T) {
 					"the silence asserted below would mean nothing", got)
 			}
 
+			// ---- drain whatever else is due, so the sweeps below see only this test's rows ----
+			// Other tests in this package leave due deliveries in a shared database. The
+			// loop ends when a sweep attempts nothing; it runs BEFORE the held rows exist,
+			// so it cannot spend their leases.
+			for i := 0; i < 10; i++ {
+				attempted, _, _, err := p.processDeliveries(sweepCtx, ctx)
+				if err != nil {
+					t.Fatalf("drain sweep: %v", err)
+				}
+				if attempted == 0 {
+					break
+				}
+			}
+
 			// ---- seed the queue, then disable ----
 			// Direct INSERTs for deterministic statuses, as the delete test does:
 			// one pending, one retrying (attempt_count 1), both long due. Then more
@@ -225,20 +244,18 @@ func TestADisabledWebhookDoesNotDeliver(t *testing.T) {
 				t.Errorf("a refused send_webhook left %d delivery row(s), want the %d seeded", got, rowsBefore)
 			}
 
-			// ---- an enabled neighbour is not starved by the held crowd ----
-			// 107 held rows, every one due and older than this delivery. The due
-			// query takes 100 rows by age: left in its result and skipped later,
-			// they would fill it and this delivery would never be attempted.
+			// ---- an enabled neighbour is attempted by the very next sweep ----
+			// 107 held rows, every one due and older than this delivery. The due query
+			// takes 100 rows by age: left in its result and skipped later, they would
+			// fill it, and this delivery would wait for a later sweep.
 			if err := send(enabledID, 1); err != nil {
 				t.Fatalf("send_webhook on the enabled webhook: %v", err)
 			}
 			hitsBefore := enabledHits.Load()
-			for i := 0; i < 3 && enabledHits.Load() == hitsBefore; i++ {
-				sweep()
-			}
+			sweep()
 			if got := enabledHits.Load(); got != hitsBefore+1 {
-				t.Errorf("the enabled webhook received %d new POST(s) while %d held rows were due, want 1: "+
-					"held rows must be left out of the due query, not skipped after it (head-of-line starvation)",
+				t.Errorf("the enabled webhook received %d new POST(s) from one sweep while %d held rows were due, want 1: "+
+					"held rows must be left out of the due query, not skipped after it (head-of-line blocking)",
 					got-hitsBefore, len(held))
 			}
 
