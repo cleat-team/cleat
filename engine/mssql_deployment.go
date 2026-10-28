@@ -564,7 +564,8 @@ func (s *MSSQLStore) PurgeWorkflowDef(ctx context.Context, name string, version 
 	return tx.Commit()
 }
 
-// CountActiveInstances returns the number of ready or running instances for a version.
+// CountActiveInstances returns the number of instances of a version that are not settled:
+// ready, running or terminating (cleat#3506).
 func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
 	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
 	tx, err := s.beginTxWithContext(ctx)
@@ -577,7 +578,7 @@ func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, vers
 	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
 		WHERE def_name = @p1 AND def_version = @p2 AND tenant_id = @p3
-		  AND status IN ('ready', 'running')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
@@ -654,7 +655,7 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
-		WHERE status IN ('ready', 'running')
+		WHERE status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = @p1
 		GROUP BY def_name, def_version
 	`, s.tenantID)

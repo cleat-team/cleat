@@ -537,7 +537,8 @@ type WorkflowStore interface {
 	// PurgeWorkflowDef permanently deletes a workflow definition (WASM bytes and all).
 	PurgeWorkflowDef(ctx context.Context, name string, version int) error
 
-	// CountActiveInstances returns the number of running/ready instances for a version.
+	// CountActiveInstances returns the number of instances of a version that are not
+	// settled: ready, running or terminating (cleat#3506).
 	CountActiveInstances(ctx context.Context, name string, version int) (int, error)
 
 	// ResolveLatestVersion resolves the latest version for a named definition.
@@ -547,7 +548,8 @@ type WorkflowStore interface {
 	ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error)
 
 	// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count for
-	// all workflow definitions that have active instances.
+	// all workflow definitions that have instances that are not settled (see
+	// CountActiveInstances).
 	GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error)
 
 	// RecordWorkflowMemorySample inserts a new memory sample and updates the EWMA summary.

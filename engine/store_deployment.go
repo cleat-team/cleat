@@ -428,7 +428,9 @@ func (s *PostgresStore) PurgeWorkflowDef(ctx context.Context, name string, versi
 	return tx.Commit()
 }
 
-// CountActiveInstances returns the number of ready or running instances for a version.
+// CountActiveInstances returns the number of instances of a version that are not settled:
+// ready, running or terminating. A terminating run is mid-shutdown, running its defer phase,
+// which executes guest code (cleat#3506).
 
 func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -442,7 +444,7 @@ func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, v
 		SELECT COUNT(*) FROM workflow_leases l
 		JOIN workflow_payloads p ON p.id = l.id
 		WHERE p.def_name = $1 AND p.def_version = $2
-		  AND l.status IN ('ready', 'running')
+		  AND l.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 	`, name, version).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
@@ -450,7 +452,8 @@ func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, v
 	return count, tx.Commit()
 }
 
-// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count.
+// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count of instances
+// that are not settled (see CountActiveInstances).
 
 func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -463,7 +466,7 @@ func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (m
 		SELECT p.def_name, p.def_version, COUNT(*) as cnt
 		FROM workflow_leases l
 		JOIN workflow_payloads p ON p.id = l.id
-		WHERE l.status IN ('ready', 'running')
+		WHERE l.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		GROUP BY p.def_name, p.def_version
 	`)
 	if err != nil {

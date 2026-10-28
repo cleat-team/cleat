@@ -1064,13 +1064,14 @@ func (s *MySQLStore) PurgeWorkflowDef(ctx context.Context, name string, version 
 	return nil
 }
 
-// CountActiveInstances returns the number of running/ready instances for a version.
+// CountActiveInstances returns the number of instances of a version that are not settled:
+// ready, running or terminating (cleat#3506).
 func (s *MySQLStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
 		WHERE def_name = ? AND def_version = ?
-		  AND status IN ('ready', 'running')
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = ?
 	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
@@ -1114,7 +1115,7 @@ func (s *MySQLStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
-		WHERE status IN ('ready', 'running')
+		WHERE status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
 		  AND tenant_id = ?
 		GROUP BY def_name, def_version
 	`, s.tenantID)
