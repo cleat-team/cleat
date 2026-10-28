@@ -62,7 +62,10 @@ func TestWorkerShutdownAbortsADurableCallsHostBackoffWait(t *testing.T) {
 		t.Fatalf("ReadMetadata: %v", err)
 	}
 
-	const defName = "shutdown-backoff-acceptance-worker"
+	// Unique per run: the database persists between runs, the fixture's bytes
+	// differ per build, and a run left open by an earlier invocation would make
+	// a redeploy of the same name a refused replacement (cleat#3497).
+	defName := fmt.Sprintf("shutdown-backoff-acceptance-worker-%d", time.Now().UnixNano())
 	if err := store.DeployWorkflowDef(ctx, &engine.WorkflowDef{
 		Name: defName, Version: meta.WorkflowVersion, WASMBytes: wasmBytes,
 		ABIVersion: meta.ABIVersion, MinVersion: meta.MinCompatibleVersion,

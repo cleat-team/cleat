@@ -94,10 +94,8 @@ refused while any run of that version is still open, because a run replays its
 recorded history under whatever bytes the version holds, and replacing them under
 a live run can make it diverge. The error names the version and the number of open
 runs. Build with a higher `--version` and deploy that, so the open runs keep the
-code they started on, or pass `--force` to replace the bytes on purpose. A rebuild
-from a different directory currently produces different bytes (cleat#3501), so an
-unchanged source can be refused too. `deploy-workflow` takes the same `--force`,
-and the worker's upload API answers `409` for the same refusal (it has no force
+code they started on, or pass `--force` to replace the bytes on purpose.
+`deploy-workflow` takes the same `--force`, and the worker's upload API answers `409` for the same refusal (it has no force
 option). `cleatctl deploy workflow` always assigns the next version, so it cannot
 hit this. cleat#3497.
 

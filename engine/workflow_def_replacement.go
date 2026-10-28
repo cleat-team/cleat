@@ -59,14 +59,9 @@ func (e *WorkflowDefInUseError) Error() string {
 
 // WorkflowDefInUseCLIAdvice is what `cleat deploy` and `deploy-workflow` print after
 // the refusal. They share the --force and --version flags, so it is written once.
-// The last sentence is there because the refusal can look wrong: a rebuild from a
-// different directory changes the bytes today (cleat#3501, no -trimpath), so the
-// same source can read as different bytes and be refused.
 const WorkflowDefInUseCLIAdvice = "To proceed: build with a higher version (cleat build --version N) and deploy that, " +
 	"so the open runs keep the code they started on; or pass --force to replace these bytes on purpose, " +
-	"which makes those runs replay their history under the new code. " +
-	"If you did not change the source, check that you rebuilt from the same directory: " +
-	"the output path is part of the bytes today (cleat#3501)."
+	"which makes those runs replay their history under the new code."
 
 // Is reports a match against ErrWorkflowDefInUse.
 func (e *WorkflowDefInUseError) Is(target error) bool { return target == ErrWorkflowDefInUse }
