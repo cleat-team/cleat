@@ -477,7 +477,13 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 	// Standard Go wasip1 compilation.
 	logBuildProgress("  Compiling WASM module (go/wasip1)...\n")
+	//
+	// -trimpath (cleat#3501): the module is compiled inside outDir, so without
+	// it the toolchain records that directory in the binary and one source
+	// tree built to two -o paths gave two different sha256s -- which a guard
+	// comparing deployed bytes (cleat#3497) would read as a changed workflow.
 	buildCmd := exec.Command("go", "build",
+		"-trimpath",
 		"-o", wasmPath,
 		".",
 	)
