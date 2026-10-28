@@ -2579,7 +2579,7 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 // indistinguishable from a child that is no longer called and from one started
 // by an imported package, and dropping the second is the worse mistake: this
 // keeps both. Remove a stale entry from cleat.lock by hand: `cleat lock` does
-// not prune (cleat#3521).
+// not prune either (cleat#3521).
 func mergeLockEntries(existing *wasm.LockFile, resolved map[string]int) (entries map[string]wasm.LockEntry, kept []string) {
 	entries = make(map[string]wasm.LockEntry, len(resolved))
 	if existing != nil {
@@ -2630,7 +2630,7 @@ func resolveChildVersionsFromStore(ctx context.Context, store engine.WorkflowSto
 func runLock(args []string) {
 	fs := flag.NewFlagSet("lock", flag.ExitOnError)
 	lockDB := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
-	lockUpdate := fs.Bool("update", false, "re-resolve all child versions from database")
+	lockUpdate := fs.Bool("update", false, "re-resolve every child named in cleat.lock from the database (with a <package>, only the children it finds; other entries are kept)")
 	lockChannel := fs.String("channel", "stable", "channel for version resolution: stable, latest, canary, or custom tag")
 	lockTenant := fs.String("tenant", "", "tenant UUID for scoped resolution (default: zero UUID)")
 	fs.Parse(args)
@@ -2652,16 +2652,22 @@ func runLock(args []string) {
 		tenantID = engine.DefaultTenantUUID
 	}
 
+	var existing *wasm.LockFile
+	if lf, err := wasm.ReadLockFile("."); err == nil && (lf.Version == wasm.LockFileVersion || lf.Version == 1) {
+		existing = lf
+	}
+
 	var children map[string]bool
-	if *lockUpdate {
-		// Re-read existing lock file to find child names.
-		lf, err := wasm.ReadLockFile(".")
-		if err != nil {
+	if *lockUpdate && len(fs.Args()) == 0 {
+		// Re-resolve every name the lock holds. This is the documented meaning of
+		// --update, and it replaces a version someone chose by hand, so each
+		// version it moves is reported below (cleat#3521).
+		if existing == nil {
 			fmt.Fprintf(os.Stderr, "Error: no %s found (required with --update)\n", wasm.LockFileName)
 			os.Exit(1)
 		}
-		children = make(map[string]bool, len(lf.Entries))
-		for name := range lf.Entries {
+		children = make(map[string]bool, len(existing.Entries))
+		for name := range existing.Entries {
 			children[name] = true
 		}
 	} else {
@@ -2699,27 +2705,72 @@ func runLock(args []string) {
 
 	// Use the tenant-scoped store so all queries are isolated.
 	store := engine.NewPostgresStore(db).WithTenant(tenantID)
-	resolved, err := resolveChildVersionsFromStore(ctx, store, children, *lockChannel)
+	lf, resolved, kept, changed, err := lockFileFor(ctx, store, existing, children, *lockChannel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
 		os.Exit(1)
 	}
-
-	entries := make(map[string]wasm.LockEntry, len(resolved))
-	for name, v := range resolved {
-		entries[name] = wasm.LockEntry{Version: v}
-	}
-	lf := &wasm.LockFile{
-		Version: wasm.LockFileVersion,
-		Policy:  *lockChannel,
-		Entries: entries,
-	}
+	entries := lf.Entries
 	if err := wasm.WriteLockFile(".", lf); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: writing %s: %v\n", wasm.LockFileName, err)
 		os.Exit(1)
 	}
 	fmt.Printf("Wrote %s with %d child workflow version(s)\n", wasm.LockFileName, len(entries))
-	for name, v := range resolved {
-		fmt.Printf("  %s: v%d\n", name, v)
+	names := make([]string, 0, len(resolved))
+	for name := range resolved {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("  %s: v%d\n", name, resolved[name])
+	}
+	for _, c := range changed {
+		fmt.Printf("  Changed %s: v%d -> v%d\n", c.Name, c.From, c.To)
+	}
+	if len(kept) > 0 {
+		fmt.Printf("  Kept %d entr%s this run did not resolve: %s\n",
+			len(kept), map[bool]string{true: "y", false: "ies"}[len(kept) == 1], strings.Join(kept, ", "))
+	}
+}
+
+// lockFileFor resolves children against the store and returns the lock to write,
+// merged into the existing one (see lockEntriesFor), the resolved versions, the
+// names kept and the versions changed. It is runLock without the database
+// connection and the file write, so a test can drive it with a stub store.
+func lockFileFor(ctx context.Context, store engine.WorkflowStore, existing *wasm.LockFile, children map[string]bool, channel string) (lf *wasm.LockFile, resolved map[string]int, kept []string, changed []lockChange, err error) {
+	resolved, err = resolveChildVersionsFromStore(ctx, store, children, channel)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	entries, kept, changed := lockEntriesFor(existing, resolved)
+	return &wasm.LockFile{Version: wasm.LockFileVersion, Policy: channel, Entries: entries}, resolved, kept, changed, nil
+}
+
+// lockChange is an entry whose version a lock run moved.
+type lockChange struct {
+	Name     string
+	From, To int
+}
+
+// lockEntriesFor is what `cleat lock` writes: the resolved children, merged into
+// the existing lock so that every entry it did not resolve stays as it was
+// (cleat#3521). kept names those, sorted; changed lists each resolved child whose
+// version differs from the existing entry, sorted by name, so a version that was
+// chosen by hand and is replaced is reported rather than lost silently.
+//
+// `cleat lock <package>` resolves only the children the scan finds, so a child
+// started from an imported package, which is in the lock only because someone
+// listed it, survives. `cleat lock --update` resolves every name in the lock, so
+// nothing is kept and every moved version is in changed.
+func lockEntriesFor(existing *wasm.LockFile, resolved map[string]int) (entries map[string]wasm.LockEntry, kept []string, changed []lockChange) {
+	entries, kept = mergeLockEntries(existing, resolved)
+	if existing != nil {
+		for name, v := range resolved {
+			if old, ok := existing.Entries[name]; ok && old.Version != v {
+				changed = append(changed, lockChange{Name: name, From: old.Version, To: v})
+			}
+		}
+		sort.Slice(changed, func(i, j int) bool { return changed[i].Name < changed[j].Name })
+	}
+	return entries, kept, changed
 }
