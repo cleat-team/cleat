@@ -127,52 +127,6 @@ func TestWorkflowLoader_Load_DBError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Deploy tests
-// ---------------------------------------------------------------------------
-
-func TestWorkflowLoader_Deploy_Success(t *testing.T) {
-	conn := &mockVLConnector{
-		execRes: &mockVLResult{rowsAffected: 1},
-	}
-	db := newMockVLDB(conn)
-	defer db.Close()
-
-	l := NewWorkflowLoader(db, nil, nil, 10)
-	err := l.Deploy(context.Background(), "wf", 1, []byte{0x00, 0x61, 0x73, 0x6d}, map[string]string{"p": "v1"}, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestWorkflowLoader_Deploy_ExecError(t *testing.T) {
-	conn := &mockVLConnector{
-		execErr: errors.New("disk full"),
-	}
-	db := newMockVLDB(conn)
-	defer db.Close()
-
-	l := NewWorkflowLoader(db, nil, nil, 10)
-	err := l.Deploy(context.Background(), "wf", 1, []byte("wasm"), nil, 0)
-	if err == nil {
-		t.Fatal("expected exec error")
-	}
-}
-
-func TestWorkflowLoader_Deploy_NilPluginDeps(t *testing.T) {
-	conn := &mockVLConnector{
-		execRes: &mockVLResult{rowsAffected: 1},
-	}
-	db := newMockVLDB(conn)
-	defer db.Close()
-
-	l := NewWorkflowLoader(db, nil, nil, 10)
-	err := l.Deploy(context.Background(), "wf", 1, []byte("wasm"), nil, 0)
-	if err != nil {
-		t.Fatalf("unexpected error with nil plugin deps: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Deprecate tests
 // ---------------------------------------------------------------------------
 

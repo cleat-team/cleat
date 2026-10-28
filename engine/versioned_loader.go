@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -167,35 +166,36 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 	return compiled, nil
 }
 
-// Deploy inserts a new workflow definition into the database.
-// If the definition already exists, it is updated (upsert semantics).
+// Deploy writes a workflow definition through PostgresStore.DeployWorkflowDef, so
+// it has the store's behaviour and nothing of its own: the definition is recorded
+// for the default tenant, redeploying identical bytes is an idempotent upsert, and
+// replacing the WASM of a version that still has open runs is refused with
+// ErrWorkflowDefInUse (cleat#3497). abi_version is 1.
 //
-// SQL: INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version)
+// This method carried its own copy of the upsert, and the copy had `disabled_at IS
+// NULL` inside the SET list, which is not an assignment: PostgreSQL rejects the
+// statement before it runs (cleat#3511). Three tests passed against it because
+// they drove a mock database that accepts any statement. It also skipped the
+// store's transaction, so it could not have set a tenant under row-level security.
 //
-//	VALUES ($1, $2, $3, $4, $5, $6)
-//	ON CONFLICT (tenant_id, name, version) DO UPDATE SET
-//	  wasm_bytes = $3, abi_version = $4, plugin_deps = $5, min_version = $6,
-//	  disabled_at IS NULL, created_at = now()
+// The loader is PostgreSQL-only, like every other method on it, so this does not
+// take the other dialects' stores.
 func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, wasmBytes []byte, pluginDeps map[string]string, minVersion int) error {
-	pluginDepsJSON, err := json.Marshal(pluginDeps)
-	if err != nil {
-		return fmt.Errorf("deploy %s v%d: marshal plugin_deps: %w", name, version, err)
-	}
-
-	_, err = l.db.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version)
-		VALUES ($1, $2, $3, 1, $4, $5)
-		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
-			wasm_bytes = EXCLUDED.wasm_bytes,
-			abi_version = EXCLUDED.abi_version,
-			plugin_deps = EXCLUDED.plugin_deps,
-			min_version = EXCLUDED.min_version,
-			disabled_at IS NULL,
-			created_at = now()
-	`, name, version, wasmBytes, pluginDepsJSON, minVersion)
+	err := NewPostgresStore(l.db).DeployWorkflowDef(ctx, &WorkflowDef{
+		Name:       name,
+		Version:    version,
+		WASMBytes:  wasmBytes,
+		ABIVersion: 1,
+		MinVersion: minVersion,
+		PluginDeps: pluginDeps,
+	})
 	if err != nil {
 		return fmt.Errorf("deploy %s v%d: %w", name, version, err)
 	}
+
+	// Load serves from this cache, so a replaced version must not keep its old
+	// compiled module. Only after a successful write: a refused Deploy changed nothing.
+	l.cacheRemove(defKey{Name: name, Version: version})
 
 	slog.InfoContext(ctx, "workflow deployed",
 		"name", name, "version", version, "size_bytes", len(wasmBytes), "plugins", len(pluginDeps), "min_version", minVersion)
