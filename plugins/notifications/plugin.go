@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -77,7 +76,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		// the default transport -- TestEveryPluginRoutesItsEgressThroughTheGuard
 		// is what keeps that from being how production works.
 		Transport: env.HTTPTransport,
-		Timeout:   30 * time.Second,
+		Timeout:   deliveryHTTPTimeout,
 	}
 
 	// Parse optional config.
