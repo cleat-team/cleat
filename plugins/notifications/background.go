@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -24,6 +25,33 @@ import (
 // test at all -- and it is the one line whose absence breaks the worker
 // outright rather than degrading it. cleat#1512.
 var deliveryInterval = 30 * time.Second
+
+// deliveryHTTPTimeout bounds one outbound delivery POST, response body included
+// (http.Client.Timeout covers reading it). It is the client's timeout in Init and
+// the number the lease below is derived from.
+const deliveryHTTPTimeout = 30 * time.Second
+
+// deliveryLeaseMargin is what a lease allows beyond the HTTP timeout: the secret
+// fetch before the POST and the mark* write after it.
+const deliveryLeaseMargin = 30 * time.Second
+
+// deliveryLease is how long a claimed delivery stays out of every sweep's due
+// set (cleat#3526). It is DERIVED from the HTTP timeout, never a free-standing
+// number: if a send could outlast its lease, another sweeper would reclaim the row
+// and send it again, which is the defect the claim exists to remove, returning
+// through a different path. TestTheLeaseOutlastsTheSlowestSend pins the relation.
+const deliveryLease = deliveryHTTPTimeout + deliveryLeaseMargin
+
+// leaseSeconds converts a lease to the whole seconds the claim binds. It refuses
+// anything under one second: a zero lease would claim nothing (the row would be
+// due again at once), and on MySQL, whose affected-row count is rows CHANGED
+// rather than matched, would also make a successful claim read as zero rows.
+func leaseSeconds(d time.Duration) (int, error) {
+	if d < time.Second {
+		return 0, fmt.Errorf("notifications: delivery lease %v is under one second; a lease must outlast the send it protects", d)
+	}
+	return int(d / time.Second), nil
+}
 
 // Run starts the delivery retry loop. It runs every 30 seconds, finding
 // undelivered webhook deliveries whose next_attempt_at <= now() and
@@ -97,7 +125,14 @@ func (p *Plugin) Run(ctx context.Context) error {
 				)
 				continue
 			}
-			p.logger.Info("notifications: work cycle completed",
+			// A tick that found nothing due is DEBUG: at the 30s interval that is
+			// 2,880 lines a day per worker saying nothing, and more at any shorter
+			// interval (cleat#3525). A tick that attempted a delivery stays INFO.
+			level := slog.LevelInfo
+			if attempted == 0 {
+				level = slog.LevelDebug
+			}
+			p.logger.Log(ctx, level, "notifications: work cycle completed",
 				"plugin", p.Info().Name,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"deliveries_attempted", attempted,
@@ -167,6 +202,22 @@ func (p *Plugin) processDeliveries(ctx, baseCtx context.Context) (int, int, int,
 		}
 		d.Payload = payload.Raw
 
+		// CLAIM BEFORE SENDING (cleat#3526). The due query above is a plain
+		// SELECT, and every worker runs this loop, so two sweeps that overlapped
+		// could both read this row as due and both POST it -- measured: two POSTs
+		// of one delivery on PostgreSQL, MySQL and SQL Server. send_webhook is
+		// Idempotent:false. Only the sweep whose UPDATE moves the row's due time
+		// goes on to send it; any other, and a delivery cancelled since the read,
+		// is skipped.
+		claimed, cerr := p.claimDelivery(ctx, d.ID)
+		if cerr != nil {
+			p.logger.Error("notifications: claim delivery", "delivery_id", d.ID, "error", cerr)
+			continue
+		}
+		if !claimed {
+			continue
+		}
+
 		attempted++
 		// ONE TRACE PER DELIVERY, originated here because a webhook delivery has
 		// no caller: this sweep runs on a timer with no inbound request, so there
@@ -192,6 +243,41 @@ func (p *Plugin) processDeliveries(ctx, baseCtx context.Context) (int, int, int,
 	}
 
 	return attempted, succeeded, failed, rows.Err()
+}
+
+// claimDelivery takes a lease on one due delivery: it moves next_attempt_at
+// forward by deliveryLease, and reports true only if this call is the one that
+// moved it. It is a compare-and-swap on the row, so it needs no new status, no
+// schema change and no change to the mark* guards, and a sweep that dies after
+// claiming frees the row when the lease runs out.
+//
+// THE DATABASE CLOCK ON BOTH SIDES. The SET and the WHERE both use the
+// database's own now (nowPlusSecondsSQLExpr, nowSQLExpr), the clock the due query
+// and every other next_attempt_at stamp already use. Two workers with skewed
+// clocks therefore cannot disagree about whether a lease has run out, and no Go
+// time.Time is bound.
+//
+// The WHERE re-checks status and that the row is still due: a delivery cancelled
+// since it was read (handleDeleteWebhook sets 'cancelled'), or claimed by another
+// sweep a moment ago, matches nothing. MySQL's affected-row count is rows
+// CHANGED; the SET always moves next_attempt_at forward (old <= now < now+lease),
+// so changed equals matched provided the lease is at least a second, which
+// leaseSeconds enforces.
+func (p *Plugin) claimDelivery(ctx context.Context, id uuid.UUID) (bool, error) {
+	secs, err := leaseSeconds(deliveryLease)
+	if err != nil {
+		return false, err
+	}
+	// $1 is textually first (inside the SET), then $2: MySQL binds by appearance.
+	n, err := p.db.Exec(ctx, fmt.Sprintf(`
+			UPDATE webhook_delivery
+			SET next_attempt_at = %s
+			WHERE id = $2 AND status IN ('pending', 'retrying') AND next_attempt_at <= %s
+		`, nowPlusSecondsSQLExpr(p.dialect, "$1"), nowSQLExpr(p.dialect)), secs, id)
+	if err != nil {
+		return false, fmt.Errorf("claim delivery: %w", err)
+	}
+	return n == 1, nil
 }
 
 // deliver attempts a single webhook delivery. It reads the webhook config,
