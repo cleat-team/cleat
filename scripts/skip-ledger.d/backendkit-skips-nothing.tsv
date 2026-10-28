@@ -1,0 +1,1 @@
+test-go/backendkit	0	__UNATTRIBUTED__	cleat/backendkit skips nothing: its tests stand up their own httptest servers and need no database, worker or environment variable, so it has no optional resource to skip on. Measured 2026-10-28 with no CLEAT_TEST_* set: 96 pass (subtests included), 0 skip (cleat#3543)
