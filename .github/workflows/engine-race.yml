@@ -89,6 +89,19 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # TestJavaWorkflowExecute runs under ./engine/... and builds with the runner
+      # image's own `gradle` and `java`. This job named no JDK, so it followed the
+      # image's default, and `ubuntu-latest` moved from ubuntu-24.04 (default JDK
+      # 17, which every earlier run here passed on) to ubuntu-26.04 (default JDK 25,
+      # per the actions/runner-images readmes). Naming JDK 17 keeps the configuration
+      # that passed. A scheduled workflow does not run on a pull request, so this
+      # was found by reading the workflow, not by a PR's checks (cleat#3499).
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Run ./engine/... under -race
         shell: bash
         run: |
