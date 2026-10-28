@@ -305,9 +305,16 @@ Resolve and pin child workflow versions for reproducible builds.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--db <conn>` | `CLEAT_DATABASE_URL` | PostgreSQL connection string |
-| `--update` | `false` | Re-resolve all child versions from database (reads existing lock file) |
+| `--update` | `false` | Without a package, re-resolve every child named in the existing lock file. With a package, the same as without `--update`. |
 
 Writes a `cleat.lock` file with pinned child workflow versions.
+
+`cleat lock <package>` resolves the children the build can see in that package and
+**keeps every other entry in an existing lock as it was**, so a child started from an
+imported package that you listed by hand stays pinned at the version you chose.
+`cleat lock --update` with no package re-resolves **every** name in the lock, including
+those, and prints `Changed <name>: vA -> vB` for each version it moves. Neither removes
+an entry: delete a stale one from `cleat.lock` by hand. (cleat#3521)
 
 Example:
 
