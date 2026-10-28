@@ -112,6 +112,10 @@ func main() {
 
 	command := args[0]
 	pattern := args[1]
+	// The subcommands below parse args[1:], not os.Args[2:]. args is flag.Args(),
+	// so it starts after the global flags; os.Args[2:] still held a leading
+	// `--db <dsn>` or `--tenant <uuid>` and its value, and the value was read as
+	// the package (cleat#3519).
 
 	switch command {
 	case "build":
@@ -135,7 +139,7 @@ func main() {
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
-		fs.Parse(os.Args[2:])
+		fs.Parse(args[1:])
 		if target == "tinygo" {
 			fmt.Fprintf(os.Stderr, "Error: TinyGo support was removed; use the default Go/wasip1 target (--target go, or omit --target).\n")
 			os.Exit(1)
@@ -169,7 +173,7 @@ func main() {
 		vetLang := fs.String("lang", "", "language target: go, rust, java, as, python (auto-detected if empty)")
 		vetJSON := fs.Bool("json", false, "output results as JSON")
 		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
-		fs.Parse(os.Args[2:])
+		fs.Parse(args[1:])
 		remainder := fs.Args()
 		refuseTrailingFlags("vet", remainder)
 		if len(remainder) > 0 {
