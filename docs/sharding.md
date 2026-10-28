@@ -31,9 +31,42 @@ This means a workflow always routes to the same shard without a lookup table.
 
 ### Definition-Level Data
 
-Workflow definitions (`workflow_defs` rows), WASM binaries, and version lists
-are expected to be **replicated to every shard**.  The `ShardedStore` tries
-each shard when loading definitions and returns the first success.
+Workflow definitions (`workflow_defs` rows) and their WASM binaries are
+**replicated to every shard**: a run's rows are placed by its run ID, and the
+foreign key from a run to its definition is inside one database, so every shard
+that can hold a run needs the definition. Until cleat#3545 a deploy wrote the
+definition to one shard only, and a run on any other shard failed with
+`workflow_payloads_def_fkey`.
+
+| Operation | Behaviour |
+|-----------|-----------|
+| deploy, deprecate | Written to every shard, the shard the name hashes to first. |
+| purge | Asked of every shard first (the DELETE is run and rolled back); if any refuses, nothing is removed anywhere. Otherwise the other shards first and the name's own shard last. |
+| list | Each (name, version) once; where copies differ, the name's own shard wins. |
+| count of open runs | Summed over every shard. |
+| load by name (WASM, config, DAG, version lookup) | Tries the name's own shard first, then the rest. |
+| tags and routing rules | Live on the name's own shard only. They are read and written by name, never from a run's shard. |
+
+There is no transaction across databases, so a write can reach some shards and
+not others. The error names the shards written, the shards that failed and the
+shards not tried, and says what repairs it: for a deploy or deprecate, run the
+same command again.
+
+A purge is refused by any shard that still holds a run of that version,
+**finished runs included**, until retention removes the row (the foreign key from
+a run to its definition does not cascade). Version GC and `cleatctl versions
+purge` check only runs that are not settled, so this is the usual reason a purge
+fails, not a race. Because the question is asked of every shard before any is
+written, such a refusal changes nothing. Only a run that starts between the
+question and the write can split a purge; then the shards already purged no longer
+hold the definition, and deploying the version again restores them. A deploy that would replace a version's bytes under open runs
+(cleat#3497) is refused if **any** shard has such runs, and is checked on every
+shard before any is written. That pre-check exists for PostgreSQL; on MySQL and
+SQL Server each shard applies the rule to its own runs as it is written.
+
+`cleat deploy --db` writes by raw SQL to the one database it is given, so
+against a sharded deployment it reaches that shard only; deploy through the
+worker or `cleatctl` instead.
 
 ### Fan-Out Operations
 
@@ -53,9 +86,9 @@ independently fire its own cron ticks.
 
 ### New Workflow Placement
 
-`StartNewRun` picks a shard by hashing the **definition name**.  All runs of
-the same workflow type land on the same shard, which simplifies capacity
-planning and keeps related data together.
+`StartNewRun` picks a shard by hashing the **run ID**, so runs of one workflow
+type spread over every shard. (This section said the definition name until
+cleat#3545; that was never what the code did.)
 
 Child workflows are placed on the **same shard as the parent** (hash of the
 parent workflow ID).

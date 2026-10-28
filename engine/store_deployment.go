@@ -282,6 +282,37 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	return tx.Commit()
 }
 
+// preflightWorkflowDefReplacement asks cleat#3497's question for def without writing: would deploying
+// these bytes replace a version's WASM under runs that are still open on THIS database. ShardedStore
+// asks it of every shard before it writes any (sharded_store_defs.go). The transaction is read-only
+// in effect and is rolled back.
+func (s *PostgresStore) preflightWorkflowDefReplacement(ctx context.Context, def *WorkflowDef) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("preflight workflow def replacement: begin: %w", err)
+	}
+	defer tx.Rollback()
+	return CheckWorkflowDefReplacementPostgres(ctx, tx, s.tenantID, def.Name, def.Version, def.WASMBytes, def.ReplaceUnderOpenRuns)
+}
+
+// preflightWorkflowDefPurge asks whether PurgeWorkflowDef would be refused on THIS database, by
+// running its DELETE and rolling it back. workflow_payloads_def_fkey is NO ACTION, so any run row of
+// the version, finished or not, refuses it until retention removes the row. ShardedStore asks every
+// shard before it removes the definition from any (sharded_store_defs.go).
+func (s *PostgresStore) preflightWorkflowDefPurge(ctx context.Context, name string, version int) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("preflight workflow def purge: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_defs WHERE name = $1 AND version = $2
+	`, name, version); err != nil {
+		return fmt.Errorf("purge workflow def: %w", err)
+	}
+	return nil
+}
+
 // ListWorkflowDefs returns all versions of a workflow, ordered by version DESC.
 // If name is empty, returns all workflow definitions across all workflows.
 

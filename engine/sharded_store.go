@@ -458,12 +458,12 @@ func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID s
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
 
-// LoadWASM tries each shard (WASM definitions are replicated across all shards).
+// LoadWASM reads the definition's bytes, trying the designated shard first and then the rest.
+// Definitions are replicated to every shard (sharded_store_defs.go), so any shard can answer; the
+// designated one is first so the answer agrees with what a deploy wrote there.
 func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		wasm, err := shard.Store.LoadWASM(ctx, defName, defVersion)
 		if err == nil {
@@ -474,12 +474,10 @@ func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion 
 	return nil, lastErr
 }
 
-// GetWASMLength returns the byte length of the stored WASM binary.
+// GetWASMLength returns the byte length of the stored WASM binary, designated shard first (see LoadWASM).
 func (s *ShardedStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		length, err := shard.Store.GetWASMLength(ctx, defName, defVersion)
 		if err == nil {
@@ -490,7 +488,9 @@ func (s *ShardedStore) GetWASMLength(ctx context.Context, defName string, defVer
 	return 0, lastErr
 }
 
-// ListVersions tries each shard (definitions are replicated across shards).
+// ListVersions merges the version lists of every shard. Definitions are replicated to every shard, so
+// the union is normally each shard's own list; it is a union rather than one shard's list so a version
+// that only a partly-applied deploy reached is still visible, and re-deploying it repairs the rest.
 func (s *ShardedStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	// Merge version lists from all shards (deduped).
 	seen := make(map[int]bool)
@@ -1184,12 +1184,10 @@ func (s *ShardedStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) 
 	return all, nil
 }
 
-// LoadWorkflowConfig tries each shard (defs are replicated across shards).
+// LoadWorkflowConfig tries the designated shard first, then the rest (defs are replicated; see LoadWASM).
 func (s *ShardedStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		maxHistory, err := shard.Store.LoadWorkflowConfig(ctx, defName, defVersion)
 		if err == nil {
@@ -1200,12 +1198,10 @@ func (s *ShardedStore) LoadWorkflowConfig(ctx context.Context, defName string, d
 	return 0, lastErr
 }
 
-// LoadDAGSpec tries each shard (defs are replicated across shards).
+// LoadDAGSpec tries the designated shard first, then the rest (defs are replicated; see LoadWASM).
 func (s *ShardedStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
 	var lastErr error
-	s.mu.RLock()
-	shards := s.shards
-	s.mu.RUnlock()
+	shards, _ := s.defShards(defName)
 	for _, shard := range shards {
 		spec, err := shard.Store.LoadDAGSpec(ctx, defName, defVersion)
 		if err == nil {
@@ -1646,29 +1642,6 @@ func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, re
 
 // ---- Version management methods ----
 
-// DeployWorkflowDef delegates to the shard determined by the workflow name.
-func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
-	shard := s.getShard(def.Name)
-	if shard == nil {
-		return fmt.Errorf("deploy_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.DeployWorkflowDef(ctx, def)
-}
-
-// ListWorkflowDefs queries each shard and aggregates results.
-func (s *ShardedStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
-	var all []WorkflowDef
-	err := s.forEachShard(func(store WorkflowStore) error {
-		defs, err := store.ListWorkflowDefs(ctx, name)
-		if err != nil {
-			return err
-		}
-		all = append(all, defs...)
-		return nil
-	})
-	return all, err
-}
-
 // GetWorkflowDef delegates to the shard determined by the workflow name.
 func (s *ShardedStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
 	shard := s.getShard(name)
@@ -1676,33 +1649,6 @@ func (s *ShardedStore) GetWorkflowDef(ctx context.Context, name string, version 
 		return nil, fmt.Errorf("get_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetWorkflowDef(ctx, name, version)
-}
-
-// MarkVersionDeprecated delegates to the shard determined by the workflow name.
-func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
-	shard := s.getShard(name)
-	if shard == nil {
-		return fmt.Errorf("mark_version_deprecated: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.MarkVersionDeprecated(ctx, name, version, deprecated)
-}
-
-// PurgeWorkflowDef delegates to the shard determined by the workflow name.
-func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
-	shard := s.getShard(name)
-	if shard == nil {
-		return fmt.Errorf("purge_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.PurgeWorkflowDef(ctx, name, version)
-}
-
-// CountActiveInstances delegates to the shard determined by the workflow name.
-func (s *ShardedStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
-	shard := s.getShard(name)
-	if shard == nil {
-		return 0, fmt.Errorf("count_active_instances: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
-	}
-	return shard.Store.CountActiveInstances(ctx, name, version)
 }
 
 // GetActiveInstanceCountsByVersion queries each shard and aggregates results.
