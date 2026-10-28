@@ -1337,7 +1337,8 @@ tier2:
       why: >-
         Has its own go.mod, so the `dir: cleat, path: ./...` entry in ci.yml's test-go
         matrix does not descend into it. Measured 2026-08-07: builds and passes, and no
-        workflow references it at all.
+        workflow referenced it at all. Since cleat#3543 its tests run in their own
+        matrix entry, `Test Go (backendkit) on 1.26`, which is not a required check.
 
     - dir: examples
       why: >-

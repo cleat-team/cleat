@@ -2762,6 +2762,23 @@ jobs:
           # whose machine it ran on.
           - name: hooks
             path: ./tests/hooks/...
+          # cleat/backendkit is its OWN Go module (cleat/backendkit/go.mod), so the
+          # `core` entry above -- `go test ./...` with dir: cleat -- stops at the module
+          # boundary and never reached it: measured on develop's `Test Go (core)`, 10
+          # packages, 0 of them backendkit, and no other workflow ran its tests either
+          # (cleat#3543). clew depends on it, pinned by pseudo-version.
+          #
+          # NOT REQUIRED, deliberately. A new matrix entry is a new check NAME, and making
+          # a name required is a branch-protection change that is the owner's call; it is
+          # not in .github/required-checks.txt. Needs nothing but a Go toolchain: no
+          # database, no worker, no environment variable (its tests stand up their own
+          # httptest servers), so this leg cannot go green by skipping. It cannot go green
+          # by running nothing either: the "Skip budget" step below fails a report with no
+          # "Test" events at all, which a `./...` that matched a package without tests
+          # would otherwise leave as a green `go test`.
+          - name: backendkit
+            dir: cleat/backendkit
+            path: ./...
     steps:
       - uses: actions/checkout@v7
 
