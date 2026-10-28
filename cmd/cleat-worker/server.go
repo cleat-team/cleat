@@ -2928,9 +2928,35 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 
 	ctx := r.Context()
 
-	// Auto-increment version if not specified
+	// The version of a definition is the version its binary is stamped with
+	// (cleat#3513). The worker's pre-flight returns a run to the queue when the
+	// binary's stamp differs from its row's version, so a row numbered anything but
+	// the stamp is a version that can never run. This handler used to take the next
+	// free number when "version" was left out and store the binary untouched, which
+	// for a default build (stamp 1) uploaded twice made row 2 with a binary that says
+	// 1; and a stamp of 0, which `cleat build` and `cleat deploy` refuse, was stored
+	// as row 1 and never ran either. Measured, with a real worker, on cleat#3513.
+	//
+	// ReadMetadata does not validate, so a stamp that is not positive reaches here and
+	// is refused here. A binary with no metadata at all keeps the old behaviour (the
+	// next free number): the worker skips its pre-flight when it cannot read a stamp.
+	meta, metaErr := wasm.ReadMetadata(wasmBytes)
 	version := req.Version
-	if version <= 0 {
+	if metaErr == nil {
+		stamp := meta.WorkflowVersion
+		if stamp <= 0 {
+			s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+				"the binary is stamped version %d, and a version must be positive; rebuild it with --version N, N >= 1", stamp)})
+			return
+		}
+		if req.Version > 0 && req.Version != stamp {
+			s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+				"version %d was requested but the binary is stamped version %d, and a worker only runs a binary under the version it is stamped with; "+
+					"leave \"version\" out to deploy it as version %d, or rebuild it with --version %d", req.Version, stamp, stamp, req.Version)})
+			return
+		}
+		version = stamp
+	} else if version <= 0 {
 		defs, err := st.ListWorkflowDefs(ctx, req.Name)
 		if err == nil {
 			for _, d := range defs {
@@ -2953,7 +2979,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	// request field would be a decision about this API's surface, not a
 	// consequence of the rule, so it is deliberately not made here.
 	declared := engine.ExposureClass("")
-	if meta, metaErr := wasm.ReadMetadata(wasmBytes); metaErr == nil {
+	if metaErr == nil {
 		declared = engine.ExposureClass(meta.Exposure)
 	}
 
@@ -3007,11 +3033,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		// cleat#3497: an explicit version whose bytes differ, with runs still open on
 		// it, is refused (engine/workflow_def_replacement.go). A conflict with the
 		// state of the definition, not a server fault. The way out is a build with a
-		// higher --version uploaded with that same "version": this handler assigns the
-		// next free version when "version" is left out but never reads or rewrites the
-		// binary's own stamp, and the worker returns a run whose binary stamp differs
-		// from its row's version to the queue, so "leave it out" can create a version
-		// that never runs (cleat#3513). There is no force field
+		// higher --version: the version of an upload is the binary's stamp, so a new
+		// version needs a new stamp, and leaving "version" out would only name the same
+		// version again. (Until cleat#3513 this handler took the next free number when
+		// "version" was left out and never read the stamp, which made a row no worker
+		// would run; the hint then said the opposite of this.) There is no force field
 		// on this API on purpose -- see the note above on not widening its surface;
 		// a deliberate hot-fix goes through `cleat deploy --force`.
 		if errors.Is(err, engine.ErrWorkflowDefInUse) {
