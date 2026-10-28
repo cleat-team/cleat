@@ -12,7 +12,7 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// LeakedTenantSecrets lists the tenant_secrets rows on db whose name starts
+// leakedTenantSecrets lists the tenant_secrets rows on db whose name starts
 // with any of prefixes, as "tenant/name". cleat#3484.
 //
 // This is the detector for the defect cleat#3474 was: a plugin test that seals
@@ -33,17 +33,17 @@ import (
 //     so a non-superuser reads 0 the same way. That is an error too.
 //   - A database that has no tenant_secrets table has nothing to leak: that is
 //     a clean answer, and the only one reached without reading a row.
-func LeakedTenantSecrets(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefixes ...string) ([]string, error) {
-	found, _, err := leakedTenantSecrets(ctx, db, dialect, prefixes...)
-	return found, err
-}
-
-// leakedTenantSecrets is LeakedTenantSecrets plus whether the table was there at
-// all, so a caller can SAY "no tenant_secrets table" instead of printing the
-// same nothing it prints when it read the table and found no row.
+//
+// It also reports whether the table was there at all, so a caller can SAY "no
+// tenant_secrets table" instead of printing the same nothing it prints when it
+// read the table and found no row.
+//
+// Unexported on purpose: RunAndCheckTenantSecretLeaks is the one caller outside
+// this package's tests, and an exported function whose only callers are tests is
+// what the dead-export guard exists to refuse.
 func leakedTenantSecrets(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefixes ...string) (found []string, tablePresent bool, err error) {
 	if len(prefixes) == 0 {
-		return nil, false, fmt.Errorf("LeakedTenantSecrets: no prefix given, so it would measure nothing")
+		return nil, false, fmt.Errorf("leakedTenantSecrets: no prefix given, so it would measure nothing")
 	}
 	has, err := hasTenantSecretsTable(ctx, db, dialect)
 	if err != nil {
@@ -63,15 +63,15 @@ func readLeaked(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefi
 	case testutil.DialectPostgres:
 		var super string
 		if err := db.QueryRowContext(ctx, `SELECT current_setting('is_superuser')`).Scan(&super); err != nil {
-			return nil, fmt.Errorf("LeakedTenantSecrets: is_superuser: %w", err)
+			return nil, fmt.Errorf("leakedTenantSecrets: is_superuser: %w", err)
 		}
 		if super != "on" {
-			return nil, fmt.Errorf("LeakedTenantSecrets: UNMEASURED: the connection is not a superuser, so row-level security would hide other tenants' rows and read as a clean result")
+			return nil, fmt.Errorf("leakedTenantSecrets: UNMEASURED: the connection is not a superuser, so row-level security would hide other tenants' rows and read as a clean result")
 		}
 		for _, p := range prefixes {
 			rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT tenant_id::text, name FROM tenant_secrets WHERE LEFT(name, %d) = $1`, len(p)), p)
 			if err != nil {
-				return nil, fmt.Errorf("LeakedTenantSecrets: %w", err)
+				return nil, fmt.Errorf("leakedTenantSecrets: %w", err)
 			}
 			found, err = appendPairs(found, rows)
 			if err != nil {
@@ -82,7 +82,7 @@ func readLeaked(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefi
 		for _, p := range prefixes {
 			rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT tenant_id, name FROM tenant_secrets WHERE LEFT(name, %d) = ?`, len(p)), p)
 			if err != nil {
-				return nil, fmt.Errorf("LeakedTenantSecrets: %w", err)
+				return nil, fmt.Errorf("leakedTenantSecrets: %w", err)
 			}
 			found, err = appendPairs(found, rows)
 			if err != nil {
@@ -92,7 +92,7 @@ func readLeaked(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefi
 	case testutil.DialectMSSQL:
 		trows, err := db.QueryContext(ctx, `SELECT CAST(tenant_id AS NVARCHAR(36)) FROM admin.tenants`)
 		if err != nil {
-			return nil, fmt.Errorf("LeakedTenantSecrets: list tenants: %w", err)
+			return nil, fmt.Errorf("leakedTenantSecrets: list tenants: %w", err)
 		}
 		var tenants []string
 		for trows.Next() {
@@ -109,22 +109,22 @@ func readLeaked(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefi
 		}
 		trows.Close()
 		if len(tenants) == 0 {
-			return nil, fmt.Errorf("LeakedTenantSecrets: UNMEASURED: admin.tenants lists no tenant, so no connection could be scoped to read tenant_secrets and the count would be 0 whatever it holds")
+			return nil, fmt.Errorf("leakedTenantSecrets: UNMEASURED: admin.tenants lists no tenant, so no connection could be scoped to read tenant_secrets and the count would be 0 whatever it holds")
 		}
 		for _, tenant := range tenants {
 			conn, err := db.Conn(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("LeakedTenantSecrets: %w", err)
+				return nil, fmt.Errorf("leakedTenantSecrets: %w", err)
 			}
 			if _, err := conn.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant); err != nil {
 				conn.Close()
-				return nil, fmt.Errorf("LeakedTenantSecrets: scope to tenant %s: %w", tenant, err)
+				return nil, fmt.Errorf("leakedTenantSecrets: scope to tenant %s: %w", tenant, err)
 			}
 			for _, p := range prefixes {
 				rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT CAST(tenant_id AS NVARCHAR(36)), name FROM tenant_secrets WHERE LEFT(name, %d) = @p1`, len(p)), p)
 				if err != nil {
 					conn.Close()
-					return nil, fmt.Errorf("LeakedTenantSecrets: %w", err)
+					return nil, fmt.Errorf("leakedTenantSecrets: %w", err)
 				}
 				found, err = appendPairs(found, rows)
 				if err != nil {
@@ -135,7 +135,7 @@ func readLeaked(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefi
 			conn.Close()
 		}
 	default:
-		return nil, fmt.Errorf("LeakedTenantSecrets: unknown dialect %v", dialect)
+		return nil, fmt.Errorf("leakedTenantSecrets: unknown dialect %v", dialect)
 	}
 	sort.Strings(found)
 	return found, nil
@@ -174,7 +174,7 @@ func hasTenantSecretsTable(ctx context.Context, db *sql.DB, dialect testutil.Dia
 	}
 	var n int
 	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
-		return false, fmt.Errorf("LeakedTenantSecrets: look for tenant_secrets: %w", err)
+		return false, fmt.Errorf("leakedTenantSecrets: look for tenant_secrets: %w", err)
 	}
 	return n > 0, nil
 }

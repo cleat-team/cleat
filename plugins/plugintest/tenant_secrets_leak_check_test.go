@@ -64,7 +64,7 @@ func TestLeakedTenantSecretsNamesWhatIsLeftAndOnlyThat(t *testing.T) {
 				}
 			})
 
-			if got, err := LeakedTenantSecrets(ctx, be.DB, be.Dialect, mine, other); err != nil || len(got) != 0 {
+			if got, err := leakedRows(ctx, be.DB, be.Dialect, mine, other); err != nil || len(got) != 0 {
 				t.Fatalf("before seeding: got %v, %v; want nothing (a dirty shared database makes this test measure the wrong thing)", got, err)
 			}
 
@@ -81,7 +81,7 @@ func TestLeakedTenantSecretsNamesWhatIsLeftAndOnlyThat(t *testing.T) {
 				}
 			}
 
-			got, err := LeakedTenantSecrets(ctx, be.DB, be.Dialect, mine)
+			got, err := leakedRows(ctx, be.DB, be.Dialect, mine)
 			if err != nil {
 				t.Fatalf("LeakedTenantSecrets: %v", err)
 			}
@@ -92,10 +92,10 @@ func TestLeakedTenantSecretsNamesWhatIsLeftAndOnlyThat(t *testing.T) {
 			for _, tn := range tenants {
 				RemoveTenantSecretsWithPrefix(t, be.DB, be.Dialect, tn, mine)
 			}
-			if got, err := LeakedTenantSecrets(ctx, be.DB, be.Dialect, mine); err != nil || len(got) != 0 {
+			if got, err := leakedRows(ctx, be.DB, be.Dialect, mine); err != nil || len(got) != 0 {
 				t.Fatalf("after RemoveTenantSecretsWithPrefix: got %v, %v; want nothing", got, err)
 			}
-			if got, err := LeakedTenantSecrets(ctx, be.DB, be.Dialect, other); err != nil || len(got) != len(tenants) {
+			if got, err := leakedRows(ctx, be.DB, be.Dialect, other); err != nil || len(got) != len(tenants) {
 				t.Fatalf("the other prefix's rows were removed with the first, or not seen: got %v, %v; want %d", got, err, len(tenants))
 			}
 		})
@@ -103,9 +103,16 @@ func TestLeakedTenantSecretsNamesWhatIsLeftAndOnlyThat(t *testing.T) {
 }
 
 func TestLeakedTenantSecretsRefusesToMeasureWithNoPrefix(t *testing.T) {
-	if _, err := LeakedTenantSecrets(context.Background(), (*sql.DB)(nil), testutil.DialectMySQL); err == nil {
+	if _, err := leakedRows(context.Background(), (*sql.DB)(nil), testutil.DialectMySQL); err == nil {
 		t.Fatal("no prefix: want an error, not a clean answer")
 	}
+}
+
+// leakedRows is leakedTenantSecrets without the table-present flag, for the
+// cases that only care what was named.
+func leakedRows(ctx context.Context, db *sql.DB, dialect testutil.Dialect, prefixes ...string) ([]string, error) {
+	found, _, err := leakedTenantSecrets(ctx, db, dialect, prefixes...)
+	return found, err
 }
 
 func sameSet(a, b []string) bool {
