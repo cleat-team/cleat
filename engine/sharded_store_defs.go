@@ -30,11 +30,17 @@ import (
 // THERE IS NO CROSS-DATABASE TRANSACTION, so a fan-out can stop half way. What this does about it:
 //
 //	deploy and deprecate write the designated shard first and stop if it fails, so a failure there
-//	  leaves nothing changed; purge removes the other shards first and the designated one last, and
-//	  only if the rest succeeded, so a definition that is still visible by name is never one that
-//	  has already been removed from a shard
-//	every write is idempotent, so running the same command again repairs a partial one
-//	the error names the shards that were written, the shards that failed and the shards not tried
+//	  leaves nothing changed
+//	purge asks every shard first (a DELETE that is rolled back) and writes nothing if any refuses.
+//	  That refusal is ROUTINE, not a race: workflow_payloads_def_fkey is NO ACTION and a FINISHED
+//	  run keeps its row until retention, while version GC and `cleatctl versions purge` gate only on
+//	  runs that are not settled. A shard holding history of the version refuses, and a purge that had
+//	  already removed it from the shards before it would leave them without a definition their runs
+//	  need (cleat#3546 review). Only a run that starts between the question and the write can still
+//	  split a purge, and then the designated shard is written last and only if the rest succeeded
+//	every write is idempotent
+//	the error names the shards that were written, the shards that failed and the shards not tried,
+//	  and says what repairs that operation
 //
 // A deploy over bytes that differ from the deployed ones is refused when ANY shard has open runs of
 // that version (cleat#3497). Each shard's own write checks only its own runs, so without a
@@ -50,6 +56,9 @@ type ShardedDefWriteError struct {
 	Failed       []string
 	NotAttempted []string
 	Errs         []error
+	// Repair says what to do about it, which differs by operation: running a refused purge again is
+	// refused again.
+	Repair string
 }
 
 func (e *ShardedDefWriteError) Error() string {
@@ -59,7 +68,8 @@ func (e *ShardedDefWriteError) Error() string {
 	if len(e.NotAttempted) > 0 {
 		fmt.Fprintf(&b, ", not attempted on [%s]", strings.Join(e.NotAttempted, ", "))
 	}
-	b.WriteString(". Run the same command again: every shard's write is idempotent, so it repairs this")
+	b.WriteString(". ")
+	b.WriteString(e.Repair)
 	for _, err := range e.Errs {
 		b.WriteString("; ")
 		b.WriteString(err.Error())
@@ -75,6 +85,13 @@ func (e *ShardedDefWriteError) Unwrap() []error { return e.Errs }
 // the rule on that shard alone.
 type defReplacementPreflight interface {
 	preflightWorkflowDefReplacement(ctx context.Context, def *WorkflowDef) error
+}
+
+// defPurgePreflight is implemented by a store that can ask whether a purge would be refused without
+// removing anything. PostgresStore does, by running the DELETE and rolling it back, so the question
+// is the statement itself and cannot drift from it.
+type defPurgePreflight interface {
+	preflightWorkflowDefPurge(ctx context.Context, name string, version int) error
 }
 
 // defShards returns every shard with the designated one for name first, and the designated one
@@ -110,7 +127,12 @@ func (s *ShardedStore) fanOutDefWrite(op, name string, version int, designatedFi
 		reordered = append(reordered, all[1:]...)
 		all = append(reordered, all[0])
 	}
-	res := &ShardedDefWriteError{Op: op, Name: name, Version: version}
+	repair := "Run the same command again: every shard's write is idempotent, so it repairs this"
+	if !designatedFirst {
+		repair = "The shards written no longer hold this definition: deploy the version again to restore them, " +
+			"or clear what the failing shard holds and purge again"
+	}
+	res := &ShardedDefWriteError{Op: op, Name: name, Version: version, Repair: repair}
 	for i, sh := range all {
 		isDesignated := sh == designated
 		if !designatedFirst && isDesignated && len(res.Failed) > 0 {
@@ -180,8 +202,26 @@ func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, v
 	})
 }
 
-// PurgeWorkflowDef removes the definition from every shard.
+// PurgeWorkflowDef removes the definition from every shard, or from none if any shard that can say
+// so beforehand would refuse.
 func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
+	all, designated := s.defShards(name)
+	if designated == nil {
+		return fmt.Errorf("purge_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	var refused []error
+	for _, sh := range all {
+		pf, ok := sh.Store.(defPurgePreflight)
+		if !ok {
+			continue
+		}
+		if err := pf.preflightWorkflowDefPurge(ctx, name, version); err != nil {
+			refused = append(refused, fmt.Errorf("shard %q: %w", sh.Config.Name, err))
+		}
+	}
+	if len(refused) > 0 {
+		return fmt.Errorf("purge_workflow_def %q version %d refused, no shard was written: %w", name, version, errors.Join(refused...))
+	}
 	return s.fanOutDefWrite("purge_workflow_def", name, version, false, func(sh *Shard) error {
 		return sh.Store.PurgeWorkflowDef(ctx, name, version)
 	})

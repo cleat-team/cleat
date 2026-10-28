@@ -41,7 +41,7 @@ definition to one shard only, and a run on any other shard failed with
 | Operation | Behaviour |
 |-----------|-----------|
 | deploy, deprecate | Written to every shard, the shard the name hashes to first. |
-| purge | Removed from the other shards first and that one last, and only if the rest succeeded. |
+| purge | Asked of every shard first (the DELETE is run and rolled back); if any refuses, nothing is removed anywhere. Otherwise the other shards first and the name's own shard last. |
 | list | Each (name, version) once; where copies differ, the name's own shard wins. |
 | count of open runs | Summed over every shard. |
 | load by name (WASM, config, DAG, version lookup) | Tries the name's own shard first, then the rest. |
@@ -49,8 +49,17 @@ definition to one shard only, and a run on any other shard failed with
 
 There is no transaction across databases, so a write can reach some shards and
 not others. The error names the shards written, the shards that failed and the
-shards not tried, and every write is idempotent: run the same command again to
-repair it. A deploy that would replace a version's bytes under open runs
+shards not tried, and says what repairs it: for a deploy or deprecate, run the
+same command again.
+
+A purge is refused by any shard that still holds a run of that version,
+**finished runs included**, until retention removes the row (the foreign key from
+a run to its definition does not cascade). Version GC and `cleatctl versions
+purge` check only runs that are not settled, so this is the usual reason a purge
+fails, not a race. Because the question is asked of every shard before any is
+written, such a refusal changes nothing. Only a run that starts between the
+question and the write can split a purge; then the shards already purged no longer
+hold the definition, and deploying the version again restores them. A deploy that would replace a version's bytes under open runs
 (cleat#3497) is refused if **any** shard has such runs, and is checked on every
 shard before any is written. That pre-check exists for PostgreSQL; on MySQL and
 SQL Server each shard applies the rule to its own runs as it is written.

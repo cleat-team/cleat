@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -235,34 +236,68 @@ func TestDeprecatingAndPurgingAVersionReachEveryShard(t *testing.T) {
 	}
 }
 
-func TestAPurgeRefusedOnOneShardLeavesTheDesignatedCopyInPlace(t *testing.T) {
-	rs := newRealShards(t, "cleat_shard_defs_purge", "a", "b")
-	ctx := context.Background()
-	const name = "shard-defs-purge"
-	designated := rs.shardOf(name)
-	other := otherThan(designated, len(rs.names))
+// A purge is refused by any shard that still holds a run of the version, FINISHED ones included:
+// workflow_payloads_def_fkey is NO ACTION and a finished run keeps its row until retention. Version GC
+// and `cleatctl versions purge` gate only on runs that are not settled, so this is the ROUTINE case, not
+// a race (cleat#3546 review). With two shards it can hide, because the refusing shard is the only
+// non-designated one and the designated copy is written last; it takes a third shard for a purge to
+// remove the definition from one shard and then be refused by the next. So: three shards, and the
+// history on each non-designated shard in turn.
+func TestAPurgeRefusedByAnyShardWritesNothingAnywhere(t *testing.T) {
+	for _, historyOn := range []int{0, 1} {
+		historyOn := historyOn
+		t.Run(fmt.Sprintf("history_on_the_%s_other_shard", []string{"first", "second"}[historyOn]), func(t *testing.T) {
+			rs := newRealShards(t, fmt.Sprintf("cleat_shard_defs_purge%d", historyOn), "a", "b", "c")
+			ctx := context.Background()
+			const name = "shard-defs-purge"
+			designated := rs.shardOf(name)
+			var others []int
+			for i := range rs.names {
+				if i != designated {
+					others = append(others, i)
+				}
+			}
+			refusing := others[historyOn]
 
-	if err := rs.deploy(ctx, name, 1, defBytesA, false); err != nil {
-		t.Fatalf("deploy: %v", err)
-	}
-	// A run on the non-designated shard references the definition there, so that shard's DELETE is
-	// refused by workflow_payloads_def_fkey.
-	rs.startRunOn(ctx, t, other, name)
+			if err := rs.deploy(ctx, name, 1, defBytesA, false); err != nil {
+				t.Fatalf("deploy: %v", err)
+			}
+			// A run that has FINISHED, on the refusing shard only.
+			id := rs.startRunOn(ctx, t, refusing, name)
+			if _, err := rs.dbs[refusing].Exec(`UPDATE workflow_leases SET status = 'done' WHERE id = $1`, id); err != nil {
+				t.Fatalf("UNMEASURED: settle the run: %v", err)
+			}
+			// The gate version GC uses calls this version unused. That is the precondition: without it
+			// this would be the unusual case, not the routine one.
+			if n, err := rs.store.CountActiveInstances(ctx, name, 1); err != nil || n != 0 {
+				t.Fatalf("UNMEASURED: CountActiveInstances = %d, %v, want 0 (the run is settled)", n, err)
+			}
 
-	err := rs.store.PurgeWorkflowDef(ctx, name, 1)
-	if err == nil {
-		t.Fatal("purging a definition a run still references succeeded")
-	}
-	if !strings.Contains(err.Error(), "workflow_payloads_def_fkey") || !strings.Contains(err.Error(), rs.names[other]) {
-		t.Errorf("the error does not name the shard and the constraint: %v", err)
-	}
-	// Still visible by name, so still removable: the designated copy is purged last and only if the
-	// rest succeeded.
-	if got := rs.defCount(t, designated, name); got != 1 {
-		t.Errorf("the designated shard %q holds %d copies after a refused purge, want 1", rs.names[designated], got)
-	}
-	if got := rs.defCount(t, other, name); got != 1 {
-		t.Errorf("shard %q holds %d copies after its purge was refused, want 1", rs.names[other], got)
+			err := rs.store.PurgeWorkflowDef(ctx, name, 1)
+			if err == nil {
+				t.Fatal("a purge of a version a shard still holds a finished run of succeeded")
+			}
+			var partial *ShardedDefWriteError
+			if errors.As(err, &partial) {
+				t.Errorf("the purge was refused only after writing: written to %v, failed on %v", partial.Succeeded, partial.Failed)
+			}
+			if !strings.Contains(err.Error(), "no shard was written") || !strings.Contains(err.Error(), `"`+rs.names[refusing]+`"`) ||
+				!strings.Contains(err.Error(), "workflow_payloads_def_fkey") {
+				t.Errorf("the error does not say nothing was written and name the shard and the constraint: %v", err)
+			}
+			for i := range rs.names {
+				if got := rs.defCount(t, i, name); got != 1 {
+					t.Errorf("shard %q holds %d copies after a refused purge, want 1", rs.names[i], got)
+				}
+			}
+			// The symptom: a run can still start on every shard.
+			for i := range rs.names {
+				runID := rs.idOnShard(t, i, "after-refused-purge")
+				if _, _, err := rs.store.StartNewRun(ctx, runID, name, 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
+					t.Errorf("a run on shard %q cannot start after a refused purge: %v", rs.names[i], err)
+				}
+			}
+		})
 	}
 }
 
