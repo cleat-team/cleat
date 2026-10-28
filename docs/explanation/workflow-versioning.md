@@ -123,6 +123,21 @@ version is exactly what was pinned. With policy `"stable"`, the entries record
 what was stable at build time (for auditing), but runtime resolution re-queries
 the `stable` tag so you can move the tag without rebuilding.
 
+### Which child names the build can pin
+
+The build reads child names from the source. A name that is a compile-time
+constant is pinned: a string literal, a named `const`, or a constant expression
+such as `prefix + "-child"`. A name computed at run time (a variable, a
+parameter, the result of a call) cannot be known at build time, so it gets no
+entry in `ChildVersions` and no line in `cleat.lock`.
+
+Under `cleat build --channel frozen` that is an error, because a frozen build
+promises exactly-this-version children: the build stops and prints each such
+call as `file:line: ChildWorkflow(expr)`. Name those children with a `const`.
+Under any other channel the child resolves at the point of use, as that channel
+says, and the build is unchanged. `cleat lock` warns about each such call and
+leaves it out of the lock (cleat#3500).
+
 ## Use cases
 
 ### 1. Development: always pick up latest child changes
