@@ -50,10 +50,15 @@ func TestAnUploadRefusedForOpenRunsIsAConflictNotAServerError(t *testing.T) {
 		if code != http.StatusConflict {
 			t.Fatalf("HTTP %d (%q), want 409", code, msg)
 		}
-		for _, want := range []string{"uploaded", "version 1", "3 run(s)", `leave "version" out`} {
+		for _, want := range []string{"uploaded", "version 1", "3 run(s)", "--version", `with that same "version"`} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("the 409 body %q does not mention %q", msg, want)
 			}
+		}
+		// Measured on cleat#3513: leaving "version" out gives a row whose number need
+		// not match the binary's stamp, and the worker never runs such a version.
+		if strings.Contains(msg, `leave "version" out`) {
+			t.Errorf("the 409 body %q advises leaving \"version\" out, which can create a version the worker never runs (cleat#3513)", msg)
 		}
 	})
 
