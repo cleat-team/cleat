@@ -309,20 +309,8 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		fmt.Fprintf(os.Stderr, "  Found %d functions, %d entry point(s), %d in cleat closure.\n",
 			result.NumFuncs, len(result.EntryPoints), leafCount+closureCount)
 		fmt.Fprintf(os.Stderr, "  Durable leaves: %s\n", formatDurableLeaves(result, cr))
-		// VerifyThreading reports the PRE-TRANSFORM state, deliberately -- see
-		// TestVerifyThreadingAutothreadReportsPassThroughErrors, whose comment
-		// says pass-through functions in a global-h package "are correctly
-		// reported as unthreaded BEFORE the transform runs. After the transform
-		// they get h added as a parameter."
-		//
-		// So an error naming a function the transform auto-threaded is not a
-		// build failure; it is a stale reading of a state that no longer
-		// exists. Failing on it made `cleat build` reject packages the very
-		// next stage was designed to fix -- examples/fooddash, where the error
-		// told the author to declare a package-level var h that order.go:36
-		// already declares. IMPROVEMENT-PLAN 3.229.
-		threadingErrs = dropAutoThreaded(threadingErrs, tr)
-
+		// threadingErrs is already filtered by analyze (see there): an error naming
+		// a function the transform auto-threaded is not reported.
 		fmt.Fprintf(os.Stderr, "  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
 
 		if len(threadingErrs) > 0 {
@@ -1461,6 +1449,26 @@ func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closu
 		fmt.Fprintf(os.Stderr, "Error in AST transformation: %v\n", err)
 		os.Exit(1)
 	}
+
+	// VerifyThreading reports the PRE-TRANSFORM state, deliberately -- see
+	// TestVerifyThreadingAutothreadReportsPassThroughErrors, whose comment
+	// says pass-through functions in a global-h package "are correctly
+	// reported as unthreaded BEFORE the transform runs. After the transform
+	// they get h added as a parameter."
+	//
+	// So an error naming a function the transform auto-threaded is not a
+	// failure; it is a stale reading of a state that no longer exists. Failing
+	// on it made `cleat build` reject packages the very next stage was designed
+	// to fix -- examples/fooddash, where the error told the author to declare a
+	// package-level var h that order.go:36 already declares. IMPROVEMENT-PLAN
+	// 3.229.
+	//
+	// FILTERED HERE, NOT IN runBuild, because the filter was applied only in
+	// runBuild's plain path. `cleat vet` and `cleat build --json` read the
+	// unfiltered list and exited 1 on a package that `cleat build` accepts
+	// (testdata/autothread: build exit 0, vet exit 1, build --json exit 1,
+	// cleat#3524). Every caller of analyze now gets the same answer.
+	threadingErrs = dropAutoThreaded(threadingErrs, tr)
 
 	return result, cg, cr, threadingErrs, usage, tr
 }

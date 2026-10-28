@@ -187,6 +187,23 @@ Example:
     cleat vet ./testdata/basic/
     cleat vet --lang rust --ci ./my-crate/
 
+**Run it before you push a Go workflow.** The checks that `cleat build` enforces on
+Go source (for example E008, E009, the HostCalls threading check and the W002
+floating-point warning) are not run by `go build`, `go vet` or `go test`, so a
+workflow can pass all three and still be rejected by `cleat build`. `cleat vet
+<package-path>` runs that analysis without compiling. For a Go package it gives the
+same verdict on the analysis as `cleat build`: `cleat vet`, `cleat build` and
+`cleat build --json` agree on the closure errors and the threading check (cleat#3524).
+It exits 1 on an error or a threading problem and 0 otherwise; warnings such as W002
+are printed and do not change the exit status. In CI, `--ci` writes GitHub
+annotations.
+
+A clean `cleat vet` does not promise that `cleat build` will succeed. `cleat build`
+goes on to checks and steps that `cleat vet` does not run: with `--channel frozen`
+it refuses a child it cannot pin (see
+[Which child names the build can pin](../explanation/workflow-versioning.md)), and it
+then generates code and compiles the WASM, either of which can fail.
+
 ---
 
 ## versions
