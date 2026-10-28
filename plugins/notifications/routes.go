@@ -451,8 +451,22 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rows == 0 {
-		p.writeError(w, 404, "webhook not found")
-		return
+		// 0 rows is not "no such webhook" on every dialect. PostgreSQL and SQL Server count the rows
+		// MATCHED; MySQL counts rows CHANGED, and its now() has second precision, so an update that
+		// changes nothing else and lands in the same second as the row's last one assigns the value it
+		// already holds and affects 0 rows for a webhook that exists (cleat#3541). Ask, rather than infer.
+		// The same statement the other read paths use, so a deleted webhook, another tenant's and an id
+		// that never existed all still answer 404.
+		var exists bool
+		if err := p.db.QueryRow(r.Context(), webhookExistsSQL(p.dialect), id, tid).Scan(&exists); err != nil {
+			p.logger.Error("notifications: check webhook exists", "error", err)
+			p.writeError(w, 500, "failed to update webhook")
+			return
+		}
+		if !exists {
+			p.writeError(w, 404, "webhook not found")
+			return
+		}
 	}
 
 	// The secret write happens AFTER the row update confirms id belongs to
