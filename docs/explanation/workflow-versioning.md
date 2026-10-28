@@ -140,10 +140,12 @@ leaves it out of the lock (cleat#3500).
 
 The build reads only the workflow's own package. A child started from an
 **imported** package (a helper module, `dagrun`) is not visible to it, so its
-name is neither refused nor discovered. A frozen build still carries every
+name is neither refused nor discovered. A frozen build built without `--db` carries every
 entry in `cleat.lock` into the metadata, so list such a child in the lock by
-hand and it is pinned. With no lock, nothing can pin it: the build says so and
-the child resolves to the highest deployed version at runtime.
+hand and it is pinned. With `--db` the lock is rewritten from the children the
+build can see, which drops a hand-added entry (cleat#3508). With no lock,
+nothing can pin it: the build says so and the child resolves to the highest
+deployed version at runtime.
 
 ## Use cases
 
