@@ -53,8 +53,9 @@ func leaseSeconds(d time.Duration) (int, error) {
 	return int(d / time.Second), nil
 }
 
-// Run starts the delivery retry loop. It runs every 30 seconds, finding
-// undelivered webhook deliveries whose next_attempt_at <= now() and
+// Run starts the delivery retry loop. It runs every 30 seconds, and also at
+// once when send_webhook records a delivery on this process (cleat#3525),
+// finding undelivered webhook deliveries whose next_attempt_at <= now() and
 // attempting HTTP POST delivery. Returns when ctx is cancelled.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
@@ -106,6 +107,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 	ticker := time.NewTicker(deliveryInterval)
 	defer ticker.Stop()
+	nudge := p.nudgeCh()
 
 	p.logger.Info("notifications: delivery retry loop started", "interval", deliveryInterval)
 
@@ -116,30 +118,32 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			start := time.Now()
-			attempted, succeeded, failed, err := p.processDeliveries(ctx, baseCtx)
-			if err != nil {
-				p.logger.Error("notifications: delivery processing failed",
-					"plugin", p.Info().Name,
-					"error", err,
-				)
-				continue
-			}
-			// A tick that found nothing due is DEBUG: at the 30s interval that is
-			// 2,880 lines a day per worker saying nothing, and more at any shorter
-			// interval (cleat#3525). A tick that attempted a delivery stays INFO.
-			level := slog.LevelInfo
-			if attempted == 0 {
-				level = slog.LevelDebug
-			}
-			p.logger.Log(ctx, level, "notifications: work cycle completed",
-				"plugin", p.Info().Name,
-				"duration_ms", time.Since(start).Milliseconds(),
-				"deliveries_attempted", attempted,
-				"deliveries_succeeded", succeeded,
-				"deliveries_failed", failed,
-			)
+		case <-nudge:
 		}
+
+		start := time.Now()
+		attempted, succeeded, failed, err := p.processDeliveries(ctx, baseCtx)
+		if err != nil {
+			p.logger.Error("notifications: delivery processing failed",
+				"plugin", p.Info().Name,
+				"error", err,
+			)
+			continue
+		}
+		// A tick that found nothing due is DEBUG: at the 30s interval that is
+		// 2,880 lines a day per worker saying nothing, and more at any shorter
+		// interval (cleat#3525). A tick that attempted a delivery stays INFO.
+		level := slog.LevelInfo
+		if attempted == 0 {
+			level = slog.LevelDebug
+		}
+		p.logger.Log(ctx, level, "notifications: work cycle completed",
+			"plugin", p.Info().Name,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"deliveries_attempted", attempted,
+			"deliveries_succeeded", succeeded,
+			"deliveries_failed", failed,
+		)
 	}
 }
 
@@ -600,4 +604,23 @@ JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC`,
+}
+
+// nudgeCh returns the channel send_webhook uses to wake Run, building it on
+// first use. Buffered by one: any number of deliveries recorded while a sweep
+// is running collapse into a single follow-up sweep, which is all they need.
+func (p *Plugin) nudgeCh() chan struct{} {
+	p.nudgeOnce.Do(func() { p.nudge = make(chan struct{}, 1) })
+	return p.nudge
+}
+
+// nudgeDeliveryLoop asks this process's Run to sweep now rather than at its next
+// tick. It never blocks and never fails: with no loop running, or one already
+// signalled, the signal is dropped and the delivery waits for the tick exactly
+// as it did before (cleat#3525).
+func (p *Plugin) nudgeDeliveryLoop() {
+	select {
+	case p.nudgeCh() <- struct{}{}:
+	default:
+	}
 }
