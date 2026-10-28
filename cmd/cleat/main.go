@@ -2574,7 +2574,8 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 // re-resolving it is what --db is for. One for a name the scan did not find is
 // indistinguishable from a child that is no longer called and from one started
 // by an imported package, and dropping the second is the worse mistake: this
-// keeps both, and `cleat lock` is the way to prune.
+// keeps both. Remove a stale entry from cleat.lock by hand: `cleat lock` does
+// not prune (cleat#3521).
 func mergeLockEntries(existing *wasm.LockFile, resolved map[string]int) (entries map[string]wasm.LockEntry, kept []string) {
 	entries = make(map[string]wasm.LockEntry, len(resolved))
 	if existing != nil {

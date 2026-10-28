@@ -145,8 +145,12 @@ name is neither refused nor discovered. A frozen build carries every entry in
 is pinned. That holds with `--db` too: the build re-resolves the children it can
 see against the database and keeps every other entry in the lock as it was, both
 in the file and in the pins (cleat#3508). The cost of keeping them is that an
-entry for a child that is no longer called also stays; `cleat lock` is how to
-prune. With no lock, nothing can pin it: the build says so and the child
+entry for a child that is no longer called also stays, so remove a stale entry
+from `cleat.lock` by hand. `cleat lock` does not prune: `cleat lock <package>`
+rewrites the lock from the scan alone, which drops a hand-added entry, and
+`cleat lock --update` keeps every name but re-resolves each one from the
+database, replacing a version you chose (cleat#3521). With no lock, nothing can
+pin it: the build says so and the child
 resolves to the highest deployed version at runtime.
 
 ## Use cases
