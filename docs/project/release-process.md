@@ -24,6 +24,7 @@ gitflow is defined by the merge graph, so the method is not a matter of taste:
 | Hop | Method | Why |
 |-----|--------|-----|
 | `feature/*` -> `develop` | **Squash** | Keeps develop's history one commit per change. |
+| `fix/*`, `bugfix/*` -> `release/*` | **Merge commit** | A squash leaves `Claude-Stream:` outside the final paragraph, git stops reading it as a trailer, and that commit then fails `Stream Trailer Check` on the release PR to `main` with nothing left to amend (cleat#3496). If a squash is unavoidable, edit its message so the trailer stays in the last paragraph. |
 | `release/*` -> `main` | **Merge commit** | `main` must descend from the released history. |
 | `main` -> `develop` | **Merge commit** | Carries the tag back with the version bump; the only merge that makes the tag an ancestor of `develop`. |
 | `hotfix/*` -> `main` | **Merge commit** | Same as a release. |
@@ -50,6 +51,17 @@ So **the two rows above whose whole point is the second parent — `main -> deve
 and `hotfix/* -> develop` — cannot be merged as written.** The queue squashes
 them, and `bypass_actors` is empty, so nobody can step around it. The `-> main`
 rows are unaffected: `main` carries no ruleset and the dropdown governs there.
+
+The `fix/*` -> `release/*` row is a convention for the same reason: the
+**`release branches`** ruleset (`25901002`, `release/**`) has no merge queue, and
+its pull-request rule allows `merge`, `squash` and `rebase`, so the merger
+chooses. Re-derive it, because that is the whole basis for the row:
+
+```bash
+gh api repos/cleat-team/cleat/rulesets/25901002 \
+  --jq '.rules[]|select(.type=="pull_request")|.parameters.allowed_merge_methods'
+# -> ["merge","squash","rebase"]                        (2026-10-28)
+```
 
 Rebase merging is disabled. Re-derive the repo-wide settings with:
 

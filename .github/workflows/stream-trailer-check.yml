@@ -216,6 +216,35 @@ jobs:
             git tag --contains "$1" --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true
           }
 
+          # A tag is not the only way a commit becomes unamendable, and a release
+          # pull request to main runs BEFORE its tag exists (cleat#3496). Measured
+          # on #3466 (base main 66dd6dcd7, head release/v0.5.0 739dffeda), with
+          # v0.5.0 removed: 184 findings, 183 of them commits that were already on
+          # develop and one (739dffed, the #3464 squash) that was not. Develop's
+          # commits are squashes, so by the header above every one of them reads
+          # as having no trailer here, and none can be amended: develop is
+          # protected.
+          #
+          # So a finding on a commit reachable from origin/develop is reported
+          # rather than failed, for the reason a tagged one is. WHY THIS DOES NOT
+          # LOOSEN THE CHECK ON A PULL REQUEST INTO DEVELOP: that range is
+          # base..head, which excludes everything reachable from develop's tip by
+          # construction, so nothing in it can match. The rule only ever bites on
+          # a range that already lives on develop -- a release branch cut from it,
+          # or develop itself. A commit that is NOT on develop is untouched, which
+          # is why this does not cover a squash made directly on release/** and
+          # not yet back-merged (the one remaining finding above): the repair for
+          # that one is at the squash, see CONTRIBUTING.md.
+          #
+          # A missing origin/develop classifies nothing and every finding fails,
+          # the strict direction, and is said out loud below.
+          DEVELOP_REF=refs/remotes/origin/develop
+          DEVELOP_PRESENT=0
+          if git rev-parse --verify -q "${DEVELOP_REF}^{commit}" >/dev/null; then DEVELOP_PRESENT=1; fi
+          landed_on_develop() {
+            [ "$DEVELOP_PRESENT" -eq 1 ] && git merge-base --is-ancestor "$1" "$DEVELOP_REF"
+          }
+
           TOTAL=0
           EXEMPT=0
           FINDINGS=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r commit; do
@@ -261,11 +290,15 @@ jobs:
           # Sort each finding into fails-the-check or already-published.
           FAILING=""
           NOTICES=""
+          ON_DEVELOP=0
           while IFS=$'\t' read -r finding_sha finding_msg; do
             [ -n "$finding_sha" ] || continue
             published_in=$(released_in "$finding_sha")
             if [ -n "$published_in" ]; then
               NOTICES="${NOTICES}${finding_msg}  [published in ${published_in}: it cannot be amended]"$'\n'
+            elif landed_on_develop "$finding_sha"; then
+              ON_DEVELOP=$((ON_DEVELOP + 1))
+              NOTICES="${NOTICES}${finding_msg}  [already on develop: it cannot be amended]"$'\n'
             else
               FAILING="${FAILING}${finding_msg}"$'\n'
             fi
@@ -298,9 +331,12 @@ jobs:
             echo "This is a failure of the check, not a finding about the pull request." >&2
             exit 2
           fi
-          echo "commits in range: $TOTAL, checked: $CHECKED, exempt (predate the convention): $EXEMPT, reported as already published: $NOTICED"
+          echo "commits in range: $TOTAL, checked: $CHECKED, exempt (predate the convention): $EXEMPT, reported as already published: $NOTICED (of which on develop and untagged: $ON_DEVELOP)"
           if [ -z "$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*')" ]; then
             echo "note: no vX.Y.Z tag is present in this checkout, so no commit can be classified as published and every finding fails."
+          fi
+          if [ "$DEVELOP_PRESENT" -ne 1 ]; then
+            echo "note: ${DEVELOP_REF#refs/remotes/} is not present in this checkout, so no commit can be classified as already on develop and every untagged finding fails."
           fi
           if [ "$NOTICED" -gt 0 ]; then
             echo "============================================"
@@ -309,9 +345,9 @@ jobs:
             echo ""
             echo "$NOTICES"
             echo ""
-            echo "These commits are reachable from a release tag, so the repair this check"
-            echo "normally asks for would rewrite released history. They are named here"
-            echo "so the finding stays visible (cleat#3488)."
+            echo "These commits are reachable from a release tag or from origin/develop, so"
+            echo "the repair this check normally asks for would rewrite published history."
+            echo "They are named here so the finding stays visible (cleat#3488, cleat#3496)."
             echo ""
             printf '%s\n' "$NOTICES" | while IFS= read -r line; do
               echo "::notice title=Stream trailer on an already-published commit::${line#"${line%%[![:space:]]*}"}"

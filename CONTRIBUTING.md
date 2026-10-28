@@ -140,7 +140,7 @@ Anything else resolving authorship from merged history needs the same treatment.
 An empty parse there reports a formatting limitation, not an unattributed commit
 — and those two lead to opposite conclusions about who did the work.
 
-**A commit already under a release tag is reported, not failed.** A squash onto a
+**A commit already under a release tag, or already on `develop`, is reported, not failed.** A squash onto a
 `release/**` branch can leave the trailer outside the message's final paragraph
 (`Claude-Stream: …`, a blank line, then GitHub's appended `Signed-off-by` /
 `Co-authored-by`), and it does so at *merge*, after the pull request's own check
@@ -150,8 +150,20 @@ rewriting a release. Measured on cleat#3486 (`739dffed`, from #3464). When a
 finding is on a commit reachable from a `vX.Y.Z` tag, `Stream Trailer Check`
 prints it as a `::notice::` naming the commit and the tag, and does not fail on
 it; a prerelease tag does not count, and every other commit still fails.
+
+A release pull request to `main` runs before its tag exists, so the tag alone
+classifies none of its range. Most of that range is `develop`'s own squashes,
+which GitHub assembles with the trailer mid-body (above) and which nobody can
+amend, so a finding on a commit reachable from `origin/develop` is reported the
+same way. Measured on #3466 with `v0.5.0` removed: 184 findings, 183 of them
+already on `develop` and one not (cleat#3496). **This cannot loosen a pull
+request into `develop`:** that range is `base..head`, which excludes everything
+`develop` contains. It does not cover a squash made directly on `release/**`
+and not yet back-merged, which is why such a PR is merged with a **merge
+commit** (`docs/project/release-process.md`).
+
 `scripts/test-stream-trailer-check.sh` runs the workflow's own step text against
-fixture repositories to hold that line (cleat#3488).
+fixture repositories to hold those lines (cleat#3488, cleat#3496).
 
 The same setting enables `.githooks/pre-commit`, which refuses a commit that
 adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
