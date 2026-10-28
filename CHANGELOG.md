@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `cleat build` is reproducible across `-o` paths. It compiles in the output directory and did not pass `-trimpath`, so that directory's path was recorded in the WASM and one source tree built to two output paths gave two different sha256s. Any byte-comparing guard, including the refusal proposed in cleat#3497, would have read a rebuild of unchanged source as a changed workflow. With `-o` inside a git checkout the Go toolchain also stamped the commit (`vcs.revision`, `vcs.time`, `vcs.modified`), so the bytes changed on every commit. The build now passes `-trimpath` and `-buildvcs=false` (cleat#3501). Only the Go build path is changed and measured; the Rust, Java, Python and AssemblyScript builds are not.
 - Release images (`cleat-worker:vX.Y.Z`) now carry the OCI labels `source`, `revision`, `ref.name` and `version`. v0.4.0 and v0.5.0 were published with none, so a release image did not say what commit it was built from (cleat#3487). Those two tags are not re-published; v0.5.0's provenance is the digest its Release run exported. The labels come from one script shared with the develop and rc image workflows, and `Release Dry Run` now fails if a built image lacks them.
 
 ## [0.5.0] - 2026-10-27
