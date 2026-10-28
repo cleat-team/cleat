@@ -68,3 +68,46 @@ func TestAWorkflowLoaderDeployRefusesToReplaceBytesUnderAnOpenRun(t *testing.T) 
 		t.Fatalf("a refused Deploy changed the stored bytes: have %x (%v), want %x", got, err, bytesA)
 	}
 }
+
+// A successful Deploy drops the loader's cached compiled module for that
+// (name, version). Load serves from that cache, so without this a replacement the
+// rule allows (no open run) kept serving the old module until the process restarted.
+// A refused Deploy changes nothing and must leave the cache alone.
+func TestAWorkflowLoaderDeployDropsTheCachedModuleForThatVersion(t *testing.T) {
+	_, db := newRunTestStore(t)
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	l := NewWorkflowLoader(db, rt, nil, 10)
+
+	seed := func(t *testing.T, key defKey) {
+		t.Helper()
+		compiled, err := rt.CompileModule(ctx, minimalWasm())
+		if err != nil {
+			t.Fatalf("CompileModule: %v", err)
+		}
+		l.cachePut(key, compiled)
+		if _, ok := l.cacheGet(key); !ok {
+			t.Fatalf("UNMEASURED: the module for %v is not cached, so a miss below would mean nothing", key)
+		}
+	}
+
+	const name = "loader-deploy-cache"
+	key := defKey{Name: name, Version: 1}
+	other := defKey{Name: name, Version: 2}
+	seed(t, key)
+	seed(t, other)
+
+	if err := l.Deploy(ctx, name, 1, []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x0a}, nil, 1); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if _, ok := l.cacheGet(key); ok {
+		t.Errorf("the cached module for %v survived a successful Deploy of that version", key)
+	}
+	if _, ok := l.cacheGet(other); !ok {
+		t.Errorf("Deploy of version 1 dropped the cached module of version 2")
+	}
+}

@@ -193,6 +193,10 @@ func (l *WorkflowLoader) Deploy(ctx context.Context, name string, version int, w
 		return fmt.Errorf("deploy %s v%d: %w", name, version, err)
 	}
 
+	// Load serves from this cache, so a replaced version must not keep its old
+	// compiled module. Only after a successful write: a refused Deploy changed nothing.
+	l.cacheRemove(defKey{Name: name, Version: version})
+
 	slog.InfoContext(ctx, "workflow deployed",
 		"name", name, "version", version, "size_bytes", len(wasmBytes), "plugins", len(pluginDeps), "min_version", minVersion)
 	return nil
