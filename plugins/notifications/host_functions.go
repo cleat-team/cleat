@@ -156,6 +156,11 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 		return "", fmt.Errorf("notifications: webhook not found: %s", input.WebhookID)
 	}
 
+	// The row is committed (p.db.Exec returned), so a sweep started now can see
+	// it. Wake this worker's delivery loop instead of leaving the first attempt
+	// to wait up to deliveryInterval.
+	p.nudgeDeliveryLoop()
+
 	p.logger.Info("notifications: delivery created",
 		"delivery_id", deliveryID,
 		"webhook_id", input.WebhookID,

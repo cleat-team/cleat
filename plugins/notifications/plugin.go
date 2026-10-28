@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -41,6 +42,13 @@ type Plugin struct {
 	config     Config
 	dialect    plugin.Dialect
 	secrets    plugin.Secrets
+
+	// nudge wakes Run's loop when send_webhook has just recorded a delivery, so
+	// the first attempt does not wait for the next tick (cleat#3525). Built
+	// lazily through nudgeCh because tests, and anything else that builds a
+	// Plugin without Init, must not have to know it exists.
+	nudgeOnce sync.Once
+	nudge     chan struct{}
 }
 
 // Config controls notifications plugin behaviour.
