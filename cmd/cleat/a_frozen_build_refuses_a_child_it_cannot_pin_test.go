@@ -49,16 +49,31 @@ func Parent(h cleat.HostCalls, input string) (string, error) {
 }
 `
 
-	build := func(t *testing.T, src, channel string) (dir, out string, err error) {
+	// modExtra is appended to the workflow's go.mod; "{{dir}}" is replaced by the
+	// workflow directory, so a replace can point at a module nested under it.
+	var modExtra string
+	build := func(t *testing.T, src, channel string, extra ...map[string]string) (dir, out string, err error) {
 		t.Helper()
 		dir = t.TempDir()
 		if werr := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); werr != nil {
 			t.Fatal(werr)
 		}
+		for _, files := range extra {
+			for rel, body := range files {
+				path := filepath.Join(dir, rel)
+				if werr := os.MkdirAll(filepath.Dir(path), 0o755); werr != nil {
+					t.Fatal(werr)
+				}
+				if werr := os.WriteFile(path, []byte(body), 0o644); werr != nil {
+					t.Fatal(werr)
+				}
+			}
+		}
 		root := repoRoot(t)
 		mod := "module myworkflow\n\ngo 1.24\n\nrequire github.com/cleat-team/cleat v0.0.0\n\n" +
 			"replace github.com/cleat-team/cleat => " + root + "\n" +
-			"replace github.com/cleat-team/cleat/cleat => " + filepath.Join(root, "cleat") + "\n"
+			"replace github.com/cleat-team/cleat/cleat => " + filepath.Join(root, "cleat") + "\n" +
+			strings.ReplaceAll(modExtra, "{{dir}}", dir)
 		if werr := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(mod), 0o644); werr != nil {
 			t.Fatal(werr)
 		}
@@ -120,6 +135,54 @@ func Parent(h cleat.HostCalls, input string) (string, error) {
 		}
 	})
 
+	// The scan reads the workflow's own package, so a child started from an
+	// IMPORTED package is invisible to it. The pin used to be built only when
+	// the scan found a child, so such a workflow was pinned exactly when its own
+	// package also happened to start a nameable child (cleat#3500 review).
+	t.Run("a child started from an imported package is pinned from the lock", func(t *testing.T) {
+		helperSrc := `package helper
+
+import "github.com/cleat-team/cleat/cleat"
+
+func Start(h cleat.HostCalls, input string) (string, error) {
+	return h.ChildWorkflow("pinned-child", input)
+}
+`
+		helperMod := "module example.com/helper\n\ngo 1.24\n\nrequire github.com/cleat-team/cleat v0.0.0\n"
+		importer := `package main
+
+import (
+	"github.com/cleat-team/cleat/cleat"
+
+	"example.com/helper"
+)
+
+// @cleatEntry(name="parent")
+func Parent(h cleat.HostCalls, input string) (string, error) {
+	return helper.Start(h, input)
+}
+`
+		modExtra = "require example.com/helper v0.0.0\nreplace example.com/helper => {{dir}}/helpermod\n"
+		defer func() { modExtra = "" }()
+		dir, out, err := build(t, importer, "frozen", map[string]string{"helpermod/helper.go": helperSrc, "helpermod/go.mod": helperMod})
+		if err != nil {
+			t.Fatalf("build failed:\n%s", out)
+		}
+		wasms, _ := filepath.Glob(filepath.Join(dir, "out", "*.wasm"))
+		if len(wasms) != 1 {
+			t.Fatalf("want one .wasm, got %v", wasms)
+		}
+		b, _ := os.ReadFile(wasms[0])
+		meta, merr := wasm.ReadMetadata(b)
+		if merr != nil {
+			t.Fatalf("ReadMetadata: %v", merr)
+		}
+		if meta.ChildVersions["pinned-child"] != 7 {
+			t.Errorf("ChildVersions = %v, want pinned-child pinned at 7 from the lock. A frozen build whose "+
+				"own package starts no child must still carry the lock's pins.", meta.ChildVersions)
+		}
+	})
+
 	t.Run("a stable build is unchanged by a computed child", func(t *testing.T) {
 		_, out, err := build(t, computed, "stable")
 		if err != nil {
@@ -149,5 +212,36 @@ func TestFrozenChildBindingError(t *testing.T) {
 	}
 	if got := frozenChildBindingError(nil, "frozen"); got != "" {
 		t.Errorf("nil usage must not refuse, got %q", got)
+	}
+}
+
+// With nothing for the scan to resolve, a --db build must not take the database
+// branch: it would write an EMPTY cleat.lock over the one an imported package's
+// children are pinned by. No database is needed to see this -- the DSN below
+// points nowhere, so taking the branch fails the test loudly (the branch exits
+// the process on a connection error) instead of passing quietly.
+func TestAFrozenBuildWithNothingToResolveReadsTheLockNotTheDatabase(t *testing.T) {
+	dir := t.TempDir()
+	lf := &wasm.LockFile{
+		Version: wasm.LockFileVersion,
+		Policy:  "frozen",
+		Entries: map[string]wasm.LockEntry{"from-an-imported-package": {Version: 4}},
+	}
+	if err := wasm.WriteLockFile(dir, lf); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	saved := dbConnStr
+	dbConnStr = "postgres://nobody@127.0.0.1:1/none?sslmode=disable&connect_timeout=1"
+	defer func() { dbConnStr = saved }()
+
+	got := resolveBuildChildVersions(map[string]bool{}, "frozen", true)
+	if got["from-an-imported-package"] != 4 {
+		t.Errorf("resolved %v, want the lock's pin (4) for from-an-imported-package", got)
+	}
+	after, err := wasm.ReadLockFile(dir)
+	if err != nil || len(after.Entries) != 1 {
+		t.Errorf("the lock was rewritten: entries=%v err=%v", after, err)
 	}
 }

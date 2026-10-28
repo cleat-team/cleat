@@ -529,7 +529,13 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	}
 	// Resolve child workflow versions from lock file or database.
 	var childVersions map[string]int
-	if len(usage.Children) > 0 {
+	// A frozen build resolves even when the scan found no child (cleat#3500).
+	// The scan reads only the workflow's own package, so a child started from an
+	// imported package is invisible to it; the lock is what names it. Resolving
+	// only when the scan found something pinned the WHOLE lock in that case and
+	// nothing otherwise, so a helper package's children were pinned exactly when
+	// the workflow's own package also started a nameable one.
+	if len(usage.Children) > 0 || channel == "frozen" {
 		childVersions = resolveBuildChildVersions(usage.Children, channel, jsonOut)
 	}
 
@@ -2480,7 +2486,10 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		tenantID = engine.DefaultTenantUUID
 	}
 
-	if connStr != "" {
+	// With nothing to resolve (a frozen build whose own package starts no
+	// child) the database branch would write an EMPTY lock over the one the
+	// imported packages' children are pinned by. Fall through to read it.
+	if connStr != "" && len(children) > 0 {
 		db, err := openPostgresDB(connStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
@@ -2530,6 +2539,13 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		return result
 	}
 
+	if len(children) == 0 {
+		// Only a frozen build gets here with nothing found. Say what the scan
+		// cannot see rather than imply it found children it could not pin.
+		logBuildProgress("  Warning: --channel frozen found no child workflow in this package and there is no %s. "+
+			"A child started from an imported package is not visible to the build and will NOT be pinned.\n", wasm.LockFileName)
+		return nil
+	}
 	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", wasm.LockFileName)
 	return nil
 }

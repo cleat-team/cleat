@@ -138,6 +138,13 @@ Under any other channel the child resolves at the point of use, as that channel
 says, and the build is unchanged. `cleat lock` warns about each such call and
 leaves it out of the lock (cleat#3500).
 
+The build reads only the workflow's own package. A child started from an
+**imported** package (a helper module, `dagrun`) is not visible to it, so its
+name is neither refused nor discovered. A frozen build still carries every
+entry in `cleat.lock` into the metadata, so list such a child in the lock by
+hand and it is pinned. With no lock, nothing can pin it: the build says so and
+the child resolves to the highest deployed version at runtime.
+
 ## Use cases
 
 ### 1. Development: always pick up latest child changes
