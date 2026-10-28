@@ -1332,6 +1332,24 @@ jobs:
           scripts/test-stream-trailer-check.sh
           LINT_GUARD_EOF
 
+      # A runner job with no `timeout-minutes` inherits GitHub's 360-minute default,
+      # which is what cleat#3479 and cleat#3482 spent two PRs removing by hand
+      # (cleat#3492). Refuses a new job that lands uncapped unless it is on
+      # scripts/workflow-timeout-exemptions.txt with a reason, and an exemption
+      # whose job is gone or has since been capped.
+      #
+      # --self-test first: a known-positive (an uncapped job the guard must name), a
+      # copy of this repo's own workflows with one real cap stripped, and a second
+      # reading of the same files that must agree with the parser. Placed after
+      # "Workflow files parse", which installs pyyaml.
+      - name: Workflow job timeout guard
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Workflow job timeout guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-workflow-job-timeouts.py --self-test
+          scripts/check-workflow-job-timeouts.py
+          LINT_GUARD_EOF
+
       # Dependabot coverage. Two directions, both silent without this: an entry
       # naming a directory that does not exist is skipped by Dependabot with no
       # error at all, and a manifest in no entry gets security updates only.
