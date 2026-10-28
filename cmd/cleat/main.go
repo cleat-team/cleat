@@ -482,8 +482,15 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// it the toolchain records that directory in the binary and one source
 	// tree built to two -o paths gave two different sha256s -- which a guard
 	// comparing deployed bytes (cleat#3497) would read as a changed workflow.
+	//
+	// -buildvcs=false is the same fix for the second leak: with -o inside a git
+	// checkout (clew builds to -o dist), the default -buildvcs=auto stamps
+	// vcs.revision, vcs.time and vcs.modified, so the bytes changed on every
+	// commit, including one touching an unrelated file. Nothing in guest code
+	// reads the stamp.
 	buildCmd := exec.Command("go", "build",
 		"-trimpath",
+		"-buildvcs=false",
 		"-o", wasmPath,
 		".",
 	)

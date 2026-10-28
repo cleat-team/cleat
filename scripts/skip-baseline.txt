@@ -1,6 +1,5 @@
 benchmarks	buildBenchWasm	2
 benchmarks	newBenchEngine	1
-cmd/cleat	TestABuildDoesNotEmbedTheOutputPath	2
 cmd/cleat	TestARelativeOutputDirectoryIsNotMisplaced	2
 cmd/cleat	TestARelativePythonEntryResolvesWhereTheUserStands	4
 cmd/cleat	TestASBuildRefusesNondeterminism	2
@@ -61,6 +60,7 @@ cmd/cleat	TestVetPython	3
 cmd/cleat	TestVetPythonAcceptsTheSingleFileForm	2
 cmd/cleat	compileASFixture	1
 cmd/cleat	findPipOnPathOrSkip	1
+cmd/cleat	needBinary	2
 cmd/cleat	newASVetProject	1
 cmd/cleat	runVetCmd	1
 cmd/cleat	skipIfNoCleatSDKPython	2
