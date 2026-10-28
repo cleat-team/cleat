@@ -23,6 +23,7 @@ cmd/cleat	TestDeployWithoutDatabaseFailsRatherThanSilentlyDoingNothing	1
 cmd/cleat	TestEveryDocumentedCleatInvocationClearsFlagParsing	1
 cmd/cleat	TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds	1
 cmd/cleat	TestEveryTemplateDocumentedCommandActuallyRuns	1
+cmd/cleat	TestFrozenBuildRefusesAChildItCannotPin	2
 cmd/cleat	TestFullstackTemplateProxyPassesItsOwnVetAndTests	1
 cmd/cleat	TestFullstackTemplateRunStartsAWorkflow	3
 cmd/cleat	TestJavaBuildRefusesAStaleManifest	3

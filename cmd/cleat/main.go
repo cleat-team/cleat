@@ -279,6 +279,13 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 
+	// cleat#3500: refused before anything is compiled, so a build that cannot
+	// keep the policy it was asked for does not leave an artifact behind.
+	if msg := frozenChildBindingError(usage, channel); msg != "" {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		os.Exit(1)
+	}
+
 	if jsonOut {
 		vo := vetJSONOutput(result, cr, threadingErrs)
 		jsonBytes, jErr := json.Marshal(vo)
@@ -522,7 +529,13 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	}
 	// Resolve child workflow versions from lock file or database.
 	var childVersions map[string]int
-	if len(usage.Children) > 0 {
+	// A frozen build resolves even when the scan found no child (cleat#3500).
+	// The scan reads only the workflow's own package, so a child started from an
+	// imported package is invisible to it; the lock is what names it. Resolving
+	// only when the scan found something pinned the WHOLE lock in that case and
+	// nothing otherwise, so a helper package's children were pinned exactly when
+	// the workflow's own package also started a nameable one.
+	if len(usage.Children) > 0 || channel == "frozen" {
 		childVersions = resolveBuildChildVersions(usage.Children, channel, jsonOut)
 	}
 
@@ -1646,6 +1659,36 @@ func exposureDeclarationError(usage *wasm.UsageInfo) string {
 	return ""
 }
 
+// frozenChildBindingError is the refusal for `cleat build --channel frozen` when
+// the source starts a child whose name is not a compile-time constant
+// (cleat#3500).
+//
+// "frozen" promises exactly-this-version children. The pin is a map from child
+// name to version, built from names the scan can read; a child it cannot name
+// gets no entry, resolves to MAX(version) at runtime, and the build still said
+// `child_binding_policy: "frozen"` and exited 0. A user who chose frozen to
+// get a fixed set got a mix, and nothing said so -- clew's ctolap named its
+// children through Go constants and hit exactly this.
+//
+// Only "frozen" refuses. The other channels (stable, latest, a tag) resolve a
+// name at the point of use by design, so an unpinned child is not a broken
+// promise there; changing that is a behaviour change nobody asked for.
+//
+// Empty means nothing to refuse.
+func frozenChildBindingError(usage *wasm.UsageInfo, channel string) string {
+	if usage == nil || channel != "frozen" || len(usage.UnresolvedChildren) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "--channel frozen cannot pin %d child workflow start(s) whose name is not a compile-time constant:\n", len(usage.UnresolvedChildren))
+	for _, u := range usage.UnresolvedChildren {
+		fmt.Fprintf(&b, "  %s: %s(%s)\n", u.Pos, u.Method, u.Expr)
+	}
+	b.WriteString("An unpinned child would resolve to the highest deployed version at runtime. " +
+		"Name each child with a string literal or a const, or build with a channel that resolves at the point of use (stable, latest).")
+	return b.String()
+}
+
 // workflowLogicalName returns the workflow's declared or derived name, with
 // no file extension -- the identity `cleat deploy` registers a definition
 // under and what a client later starts via /api/workflows/<name>/start.
@@ -2443,7 +2486,10 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		tenantID = engine.DefaultTenantUUID
 	}
 
-	if connStr != "" {
+	// With nothing to resolve (a frozen build whose own package starts no
+	// child) the database branch would write an EMPTY lock over the one the
+	// imported packages' children are pinned by. Fall through to read it.
+	if connStr != "" && len(children) > 0 {
 		db, err := openPostgresDB(connStr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
@@ -2493,6 +2539,13 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		return result
 	}
 
+	if len(children) == 0 {
+		// Only a frozen build gets here with nothing found. Say what the scan
+		// cannot see rather than imply it found children it could not pin.
+		logBuildProgress("  Warning: --channel frozen found no child workflow in this package and there is no %s. "+
+			"A child started from an imported package is not visible to the build and will NOT be pinned.\n", wasm.LockFileName)
+		return nil
+	}
 	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", wasm.LockFileName)
 	return nil
 }
@@ -2574,6 +2627,12 @@ func runLock(args []string) {
 		pattern := remainder[0]
 		_, _, _, _, usage, _ := analyze(pattern)
 		children = usage.Children
+		// cleat#3500: the lock is the pin source, so a child the scan cannot
+		// name is a child the lock silently omits.
+		for _, u := range usage.UnresolvedChildren {
+			fmt.Fprintf(os.Stderr, "Warning: %s: %s(%s) -- the child name is not a compile-time constant, so it is NOT in the lock.\n",
+				u.Pos, u.Method, u.Expr)
+		}
 	}
 
 	if len(children) == 0 {

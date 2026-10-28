@@ -37,9 +37,13 @@ var goFixtureExpectations = map[string]string{
 	// cleat#1065: the Go reader for tests/conformance/entry_point_binding_cases.json.
 	"bindingconformance": "",
 	"cancelpoll":         "",
-	"clew-lifecycle":     "",
-	"crashcall":          "",
-	"crosslang":          "",
+	// cleat#3500: starts children by literal, const, constant expression, raw
+	// string, variable and call. Must verify cleanly -- the unresolvable names are
+	// reported by the usage scan, not refused by analysis.
+	"childnames":     "",
+	"clew-lifecycle": "",
+	"crashcall":      "",
+	"crosslang":      "",
 	// cleat#3408: one entry point, one string input, one DurableFetch. Must verify cleanly.
 	"fetchprobe": "",
 	// cleat#1617: its only host-call route is cleat/dagrun, whose needs are

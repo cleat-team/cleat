@@ -11,9 +11,11 @@ package wasm
 
 import (
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -257,6 +259,15 @@ type UsageInfo struct {
 	// Keys are the first argument string literals of h.ChildWorkflow(name, ...),
 	// h.ChildWorkflowWithOptions(name, ...), and h.ChildWorkflowTyped(name, ...).
 	Children map[string]bool
+
+	// UnresolvedChildren lists the child-start call sites whose name the scan
+	// could not reduce to a compile-time constant string (cleat#3500). Such a
+	// child is absent from Children, so nothing pins it: under `--channel
+	// frozen` it would resolve to MAX(version) at runtime while the metadata
+	// still said "frozen". A constant -- a literal, a named const, a constant
+	// expression -- IS resolved and lands in Children, so only a name computed
+	// at run time (a variable, a parameter, a call) appears here.
+	UnresolvedChildren []UnresolvedChild
 
 	// Exposure is the value of the package-level `//cleat:exposure` directive,
 	// verbatim and UNVALIDATED (cleat#1986 slice 2c). Empty means the source
@@ -662,17 +673,57 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 			info.Used[importName] = true
 		}
 
-		// Extract child workflow name from the first string literal argument.
+		// Extract the child workflow name from the first argument.
 		if fieldName == "ChildWorkflow" || fieldName == "ChildWorkflowWithOptions" || fieldName == "ChildWorkflowTyped" {
 			if len(call.Args) > 0 {
-				if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					name := strings.Trim(lit.Value, `"`)
+				if name, ok := constantChildName(fd.Pkg, call.Args[0]); ok {
 					info.Children[name] = true
+				} else {
+					info.UnresolvedChildren = append(info.UnresolvedChildren, UnresolvedChild{
+						Pos:    fd.Pkg.Fset.Position(call.Args[0].Pos()).String(),
+						Method: fieldName,
+						Expr:   types.ExprString(call.Args[0]),
+					})
 				}
 			}
 		}
 		return true
 	})
+}
+
+// UnresolvedChild is one child-start call whose name the build cannot know.
+type UnresolvedChild struct {
+	Pos    string // file:line:col of the name argument
+	Method string // ChildWorkflow, ChildWorkflowWithOptions or ChildWorkflowTyped
+	Expr   string // the argument as written
+}
+
+// constantChildName reduces a child-name argument to its string value when the
+// type checker knows it at compile time.
+//
+// Asking the checker rather than matching *ast.BasicLit is what makes a named
+// constant resolve: until cleat#3500 only a literal at the call site did, so a
+// workflow naming its children through `const childName = "..."` produced no
+// pin and no warning. types.TypeAndValue.Value is set for every constant
+// expression -- literal, named const, concatenation of constants -- and nil for
+// anything evaluated at run time, so the same call separates the two.
+//
+// A raw-string literal also resolves correctly here, where the previous
+// strings.Trim of double quotes left its backticks in the name.
+func constantChildName(pkg *analyzer.Package, arg ast.Expr) (string, bool) {
+	if pkg != nil && pkg.Info != nil {
+		if tv, ok := pkg.Info.Types[arg]; ok && tv.Value != nil && tv.Value.Kind() == constant.String {
+			return constant.StringVal(tv.Value), true
+		}
+	}
+	// No type information for this node: fall back to the literal, the one
+	// form that needs none.
+	if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+		if name, err := strconv.Unquote(lit.Value); err == nil {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // Count returns the number of used host functions.
