@@ -903,12 +903,12 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 		}
 	}
 
-	// Refuse to deploy over a definition owned by another tenant.
-	//
-	// MySQL has no row-level security, so this check is the only thing between
-	// a deploy and another tenant's WASM bytes: the primary key is (name,
-	// version) with no tenant in it, and ON DUPLICATE KEY UPDATE turns the
-	// collision into an overwrite. IMPROVEMENT-PLAN 3.12.
+	// Another tenant's definition of the same name is a different row: the
+	// primary key is (tenant_id, name, version) (migrations/mysql/001_schema.sql),
+	// so ON DUPLICATE KEY UPDATE below can only collide with this tenant's own
+	// row. A comment here once said the key had no tenant in it and that this
+	// code was the only thing between a deploy and another tenant's bytes
+	// (IMPROVEMENT-PLAN 3.12); IMPROVEMENT-PLAN 3.77 moved the tenant into the key.
 	//
 	// Read and write in one transaction, with an existing row locked.
 	//
