@@ -44,6 +44,11 @@ import (
 type wasmLRUEntry struct {
 	key   string
 	bytes []byte
+	// digest is the SHA-256 of bytes, and checkedAt is when the store last
+	// agreed it is the stored one. Both are zero for an entry put without
+	// them, which loadWASM treats as "not yet verified" (cleat#3516).
+	digest    string
+	checkedAt time.Time
 }
 
 // wasmLRUCache is a bounded LRU cache for WASM byte slices keyed by
@@ -80,7 +85,8 @@ func (c *wasmLRUCache) put(key string, data []byte) {
 	defer c.mu.Unlock()
 	if elem, ok := c.index[key]; ok {
 		c.list.MoveToFront(elem)
-		elem.Value.(*wasmLRUEntry).bytes = data
+		e := elem.Value.(*wasmLRUEntry)
+		e.bytes, e.digest, e.checkedAt = data, "", time.Time{}
 		return
 	}
 	for c.list.Len() >= c.maxEnts || c.sizeBytesLocked()+int64(len(data)) > c.maxBytes {
@@ -89,6 +95,33 @@ func (c *wasmLRUCache) put(key string, data []byte) {
 	entry := &wasmLRUEntry{key: key, bytes: data}
 	elem := c.list.PushFront(entry)
 	c.index[key] = elem
+}
+
+// putVerified stores data with the digest the store agreed it had at `at`.
+func (c *wasmLRUCache) putVerified(key string, data []byte, digest string, at time.Time) {
+	c.put(key, data)
+	c.markChecked(key, digest, at)
+}
+
+// markChecked records that the store held the bytes with this digest at `at`.
+func (c *wasmLRUCache) markChecked(key, digest string, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.index[key]; ok {
+		e := elem.Value.(*wasmLRUEntry)
+		e.digest, e.checkedAt = digest, at
+	}
+}
+
+// verification returns what markChecked recorded for key, zero values if none.
+func (c *wasmLRUCache) verification(key string) (digest string, checkedAt time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.index[key]; ok {
+		e := elem.Value.(*wasmLRUEntry)
+		return e.digest, e.checkedAt
+	}
+	return "", time.Time{}
 }
 
 func (c *wasmLRUCache) sizeBytesLocked() int64 {
@@ -7015,27 +7048,84 @@ func (w *Worker) loadWASM(store engine.WorkflowStore, cacheTenant, defName strin
 	key := cacheTenant + "/" + defName + ":" + strconv.Itoa(defVersion)
 
 	// Check in-memory cache first.
+	//
+	// THE ENTRY IS VALIDATED AGAINST THE STORE'S CONTENT, NOT ITS LENGTH
+	// (cleat#3516). It was validated by length alone, so a replacement of the
+	// same size was served stale for as long as the process lived, and the
+	// deliberate replacement cleat#3497 allows (`--force`) did not take effect
+	// on a worker that had loaded the version.
+	//
+	// The length stays as the check on every hit, because it is cheap (Postgres
+	// answers it from the TOAST header). The digest costs a read of the whole
+	// row, so it is asked for at most once per wasmRevalidateInterval per key.
+	// That interval is the longest a same-length replacement can go unnoticed.
+	memoryWasStale := false
 	if cached, ok := w.wasmCache.get(key); ok {
 		dbLen, err := store.GetWASMLength(w.ctx, defName, defVersion)
-		if err == nil {
-			if dbLen == int64(len(cached)) {
+		switch {
+		case err != nil:
+			// The store cannot be asked, so serve what we have, as before.
+			w.Metrics.RecordWasmCacheHit(w.ctx)
+			return cached, nil
+		case dbLen != int64(len(cached)):
+			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key, "reason", "length")
+			w.wasmCache.remove(key)
+			memoryWasStale = true
+		default:
+			digest, checkedAt := w.wasmCache.verification(key)
+			now := time.Now()
+			if digest != "" && now.Sub(checkedAt) < wasmRevalidateInterval {
 				w.Metrics.RecordWasmCacheHit(w.ctx)
 				return cached, nil
 			}
-			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key)
-		} else {
-			w.Metrics.RecordWasmCacheHit(w.ctx)
-			return cached, nil
+			stored, loaded, derr := w.storedWASMDigest(store, defName, defVersion)
+			if derr != nil {
+				w.Metrics.RecordWasmCacheHit(w.ctx)
+				return cached, nil
+			}
+			if digest == "" {
+				digest = engine.WASMDigest(cached)
+			}
+			if stored == digest {
+				w.wasmCache.markChecked(key, digest, now)
+				w.Metrics.RecordWasmCacheHit(w.ctx)
+				return cached, nil
+			}
+			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key, "reason", "content")
+			w.wasmCache.remove(key)
+			memoryWasStale = true
+			if loaded != nil {
+				return w.adoptWASM(key, cacheTenant, defName, defVersion, loaded), nil
+			}
 		}
-		w.wasmCache.remove(key)
 	}
 
 	// Check disk cache before going to the database.
-	if w.wasmDiskCache != nil {
+	//
+	// The disk index maps (tenant, name, version) to the hash of the bytes
+	// that were stored when it was written, so it survives a replacement and
+	// answers with the old bytes. It is therefore checked against the store
+	// before it is trusted. The check is a read of the whole row, once per
+	// memory miss, which is the price of not downloading the bytes it would
+	// replace. If the store cannot be asked, the disk bytes are served, as
+	// they were before. It is skipped when the memory entry was just found
+	// stale: the index still names the same old bytes, and asking again would
+	// hash the row a second time to be told so.
+	if w.wasmDiskCache != nil && !memoryWasStale {
 		if cached := w.wasmDiskCache.LookupDef(cacheTenant, defName, defVersion); cached != nil {
 			w.Metrics.RecordWasmCacheMiss(w.ctx)
-			w.wasmCache.put(key, cached)
-			return cached, nil
+			stored, loaded, derr := w.storedWASMDigest(store, defName, defVersion)
+			switch {
+			case derr != nil:
+				w.wasmCache.put(key, cached)
+				return cached, nil
+			case stored == engine.WASMDigest(cached):
+				w.wasmCache.putVerified(key, cached, stored, time.Now())
+				return cached, nil
+			case loaded != nil:
+				return w.adoptWASM(key, cacheTenant, defName, defVersion, loaded), nil
+			}
+			w.logger.InfoContext(w.ctx, "WASM disk cache stale, reloading", "worker_id", w.id, "key", key)
 		}
 	}
 
@@ -7046,13 +7136,38 @@ func (w *Worker) loadWASM(store engine.WorkflowStore, cacheTenant, defName strin
 		return nil, err
 	}
 
-	// Store to disk cache for future restarts.
+	return w.adoptWASM(key, cacheTenant, defName, defVersion, wasmBytes), nil
+}
+
+// wasmRevalidateInterval is how often a cached definition is compared with the
+// store by content. A variable so a test can set it to zero.
+var wasmRevalidateInterval = 5 * time.Second
+
+// storedWASMDigest returns the digest of the bytes the store holds for a
+// definition. A store that can hash in the database does so; any other is asked
+// for the bytes, which are returned too so a mismatch does not read them twice.
+func (w *Worker) storedWASMDigest(store engine.WorkflowStore, defName string, defVersion int) (digest string, loaded []byte, err error) {
+	if d, ok := store.(engine.WASMDigester); ok {
+		digest, err = d.GetWASMDigest(w.ctx, defName, defVersion)
+		return digest, nil, err
+	}
+	loaded, err = store.LoadWASM(w.ctx, defName, defVersion)
+	if err != nil {
+		return "", nil, err
+	}
+	return engine.WASMDigest(loaded), loaded, nil
+}
+
+// adoptWASM files bytes just read from the store in both caches, with the
+// digest of what was read, and returns them.
+func (w *Worker) adoptWASM(key, cacheTenant, defName string, defVersion int, wasmBytes []byte) []byte {
+	// Store to disk cache for future restarts. StoreDef repoints the index at
+	// these bytes, which is what makes a replacement outlive a restart.
 	if w.wasmDiskCache != nil {
 		w.wasmDiskCache.StoreDef(cacheTenant, defName, defVersion, wasmBytes)
 	}
-
-	w.wasmCache.put(key, wasmBytes)
-	return wasmBytes, nil
+	w.wasmCache.putVerified(key, wasmBytes, engine.WASMDigest(wasmBytes), time.Now())
+	return wasmBytes
 }
 
 func (w *Worker) waitForDB() {

@@ -68,6 +68,7 @@ var goFixtureExpectations = map[string]string{
 	// that is not listed is a fixture nothing checks.
 	"summarise":    "",
 	"deferfunc":    "",
+	"hotfixmarker": "",
 	"durablesend":  "",
 	"fencereentry": "",
 	"generics":     "",
