@@ -139,7 +139,13 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	if p.dialect == plugin.DialectMSSQL {
 		existsGuard += " WITH (REPEATABLEREAD)"
 	}
-	existsGuard += " WHERE id = $6 AND tenant_id = $7 AND deleted_at IS NULL"
+	// AND enabled (cleat#3539): a DISABLED webhook takes no new deliveries. A plain
+	// predicate, with none of the locking above, because the only race it has is
+	// benign: a send admitted just before a disable lands is a delivery that the
+	// due query then holds, which is what a queued delivery on a disabled webhook
+	// is meant to be. The lock exists for delete, whose cancellation would miss a
+	// late insert.
+	existsGuard += " WHERE id = $6 AND tenant_id = $7 AND deleted_at IS NULL AND " + enabledSQL(p.dialect)
 	if p.dialect != plugin.DialectMSSQL {
 		existsGuard += " FOR SHARE"
 	}
@@ -153,6 +159,16 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 		return "", fmt.Errorf("notifications: create delivery: %w", err)
 	}
 	if rowsInserted == 0 {
+		// The row existed a moment ago (the check above) and was refused by the
+		// guard: disabled, or deleted since. Say which, so a guest can tell a
+		// webhook someone paused from one that is gone. webhookExistsSQL is the
+		// right question here for the same reason it is the one above: it ignores
+		// enabled.
+		var stillThere bool
+		if err := p.db.QueryRow(ctx, webhookExistsSQL(p.dialect),
+			input.WebhookID, cc.TenantID).Scan(&stillThere); err == nil && stillThere {
+			return "", fmt.Errorf("notifications: webhook disabled: %s", input.WebhookID)
+		}
 		return "", fmt.Errorf("notifications: webhook not found: %s", input.WebhookID)
 	}
 
@@ -170,4 +186,15 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	output := sendWebhookOutput{DeliveryID: deliveryID}
 	outJSON, _ := json.Marshal(output)
 	return string(outJSON), nil
+}
+
+// enabledSQL is the predicate for "this webhook_config row is enabled", spelled
+// for the dialect: PostgreSQL's column is a boolean, MySQL's is TINYINT(1) and
+// SQL Server's is BIT, neither of which is a boolean expression on its own.
+// queryDueDeliveries spells the same thing out in each dialect's own variant.
+func enabledSQL(d plugin.Dialect) string {
+	if d == plugin.DialectPostgres {
+		return "enabled"
+	}
+	return "enabled = 1"
 }

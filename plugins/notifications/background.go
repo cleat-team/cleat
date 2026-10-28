@@ -164,6 +164,7 @@ type webhookConfigRow struct {
 	URL              string
 	TenantID         uuid.UUID
 	SecretConfigured bool
+	Enabled          bool
 }
 
 // processDeliveries queries for pending and retrying deliveries whose retry
@@ -309,10 +310,25 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	// webhook that has since been soft-deleted.
 	var cfg webhookConfigRow
 	err := plugin.ScanRow(p.db.QueryRow(ctx, `
-			SELECT url, tenant_id, secret_configured FROM webhook_config WHERE id = $1 AND deleted_at IS NULL
-		`, d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured)
+			SELECT url, tenant_id, secret_configured, enabled FROM webhook_config WHERE id = $1 AND deleted_at IS NULL
+		`, d.WebhookID), &cfg.URL, &cfg.TenantID, &cfg.SecretConfigured, &cfg.Enabled)
 	if err != nil {
 		return "", fmt.Errorf("lookup webhook config: %w", err)
+	}
+	// A DISABLED webhook's deliveries are HELD (cleat#3539): not sent, and not
+	// touched, so that re-enabling resumes them. queryDueDeliveries' join already
+	// leaves them out, and that is the layer that matters; this is the one for a
+	// disable that lands between the sweep's read and this lookup, the way the
+	// deleted_at filter above is for a delete.
+	//
+	// IT IS NOT HOW A HELD ROW IS KEPT OUT OF THE SWEEP. A row skipped here would
+	// still be in queryDueDeliveries' result, which is ORDER BY next_attempt_at
+	// LIMIT 100 across every webhook, so 100 held rows at the front would starve
+	// every enabled webhook's deliveries. Nothing is marked: the claim moved
+	// next_attempt_at by the lease, which is harmless, and the join excludes the
+	// row from the next sweep.
+	if !cfg.Enabled {
+		return "held", nil
 	}
 
 	// A signing secret is now REQUIRED on every webhook (cleat#1992/#2172,
@@ -572,6 +588,13 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 // missed sweep before the next one caught it -- silent by dilution, not by
 // impossibility, which is exactly the class of bug a lower-frequency
 // production system does not surface for itself.
+// AND wc.enabled (cleat#3539) is what HOLDS the deliveries of a disabled webhook:
+// they stay pending/retrying and unchanged, and are due again the moment the
+// webhook is re-enabled. It belongs in this join and nowhere later: the query is
+// ORDER BY next_attempt_at LIMIT 100 over every webhook, so a held row left in the
+// result and skipped afterwards would still take one of the 100, and enough of
+// them at the front would starve every enabled webhook.
+//
 // INNER JOIN webhook_config, not a LEFT JOIN: cleat#2220. A LEFT JOIN plus
 // "wc.deleted_at IS NULL" would read true when there is no matching config
 // row at all (a missing row makes every wc.* column NULL, and NULL IS NULL
@@ -586,21 +609,21 @@ func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 var queryDueDeliveries = plugin.Query{
 	Default: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
-JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL AND wc.enabled
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MySQL: `SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
-JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL AND wc.enabled = 1
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= NOW(6)
 ORDER BY d.next_attempt_at ASC
 LIMIT 100`,
 	MSSQL: `SELECT TOP 100 d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 FROM webhook_delivery d
-JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL
+JOIN webhook_config wc ON wc.id = d.webhook_id AND wc.deleted_at IS NULL AND wc.enabled = 1
 WHERE d.status IN ('pending', 'retrying')
   AND d.next_attempt_at <= now()
 ORDER BY d.next_attempt_at ASC`,
