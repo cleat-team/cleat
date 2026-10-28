@@ -79,17 +79,23 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 			name := "p_" + template
 			wantArtifact := name + ".wasm"
 
-			out, err := runCleatIn(t, root, "init", "--template", template, name)
+			initOut, err := runCleatIn(t, root, "init", "--template", template, name)
 			if err != nil {
-				t.Fatalf("cleat init --template %s failed: %v\n%s", template, err, out)
+				t.Fatalf("cleat init --template %s failed: %v\n%s", template, err, initOut)
 			}
 
 			proj := filepath.Join(root, name)
-			out, err = runCleatIn(t, proj, "build", "-o", "./out", ".")
+			out, err := runCleatIn(t, proj, "build", "-o", "./out", ".")
 			if err != nil {
+				// init's own output is printed here too (cleat#3533). init exits 0 even when
+				// the `go mod tidy` it runs in the scaffold fails, and says so only in a
+				// warning, so on a failed build that warning is the likeliest explanation and
+				// used to be discarded with the rest of a successful init's output. Printing it
+				// changes no behaviour: tidyScaffold stays non-fatal.
 				t.Fatalf("a scaffolded %s project does not build.\n"+
-					"This is the first command its own README tells a new user to run.\n%v\n%s",
-					template, err, out)
+					"This is the first command its own README tells a new user to run.\n%v\n%s\n"+
+					"--- the output of the `cleat init` that made it (it exited 0):\n%s",
+					template, err, out, initOut)
 			}
 
 			// An exit code of 0 is not the claim -- an artifact is. `cleat
