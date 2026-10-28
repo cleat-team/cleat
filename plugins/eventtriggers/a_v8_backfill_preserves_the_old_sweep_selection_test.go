@@ -239,10 +239,13 @@ func seedPreV8Rows(t *testing.T, ctx context.Context, db *engine.SQLDBAdapter, t
 }
 
 // freshPostgresDatabase creates a uniquely-named PostgreSQL database on the
-// same server CLEAT_TEST_POSTGRES / CLEAT_TEST_DB points at, builds the
-// package's full test schema in it, and returns a *sql.DB connected to that
-// database alone -- see the comment at this function's one call site for why
-// this arm needs its own database rather than the one testutil.TestDB shares.
+// same server CLEAT_TEST_POSTGRES / CLEAT_TEST_DB points at, builds the test
+// schema in it, and returns a *sql.DB connected to that database alone -- see
+// the comment at this function's one call site for why this arm needs its own
+// database rather than the one testutil.TestDB shares. The schema comes from
+// testutil.SetupMinimalSchema, whose name is historical: it applies the whole
+// schema for the dialect, as SetupMySQLFullSchema and SetupMSSQLFullSchema do
+// for the other two arms.
 //
 // An unreachable server is a skip only when nobody configured one, exactly as
 // testutil.TestDB treats it: a configured DSN that does not connect is a
