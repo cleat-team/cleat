@@ -3033,11 +3033,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		// cleat#3497: an explicit version whose bytes differ, with runs still open on
 		// it, is refused (engine/workflow_def_replacement.go). A conflict with the
 		// state of the definition, not a server fault. The way out is a build with a
-		// higher --version uploaded with that same "version": this handler assigns the
-		// next free version when "version" is left out but never reads or rewrites the
-		// binary's own stamp, and the worker returns a run whose binary stamp differs
-		// from its row's version to the queue, so "leave it out" can create a version
-		// that never runs (cleat#3513). There is no force field
+		// higher --version: the version of an upload is the binary's stamp, so a new
+		// version needs a new stamp, and leaving "version" out would only name the same
+		// version again. (Until cleat#3513 this handler took the next free number when
+		// "version" was left out and never read the stamp, which made a row no worker
+		// would run; the hint then said the opposite of this.) There is no force field
 		// on this API on purpose -- see the note above on not widening its surface;
 		// a deliberate hot-fix goes through `cleat deploy --force`.
 		if errors.Is(err, engine.ErrWorkflowDefInUse) {
