@@ -20,7 +20,7 @@ import (
 // Who may call:
 //   - an admin-scoped operator key: any tenant;
 //   - any other operator key (a provision-scoped one): SUSPEND ONLY, and only a tenant its principal
-//     created, the check the confirm route makes. It cannot resume: the flag is one bit and records who set
+//     created, the check the confirm route makes. It cannot resume: the flag is one bit and does NOT record who set
 //     it, so a provisioner that could clear it could lift a suspension an operator made (cleat#3582 review);
 //   - a tenant key never. A tenant key reaches /api/admin/* when --enable-admin-api is on, and a tenant
 //     must not be able to suspend itself or another tenant.
