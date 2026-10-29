@@ -4048,6 +4048,15 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		return
 	}
 	if err != nil {
+		// The engine could not read the limits this run must run under, so the
+		// guest never ran (cleat#3565). Nothing happened to the workflow: it is
+		// released with a backoff, not failed, and not finalized as a defer
+		// segment would be. Before the deferPhase branch for that reason -- an
+		// unrun cleanup is not a lost one.
+		if errors.Is(err, engine.ErrLimitsUnavailable) {
+			w.releaseForLimitsUnavailable(wf, err)
+			return
+		}
 		if deferPhase {
 			// A defer segment that could not run is still a terminate that
 			// has to complete. The outcome was decided and recorded before
@@ -7611,6 +7620,42 @@ func (w *Worker) releaseForAnotherWorker(wf *engine.WorkflowInstance, reason, op
 		"def_name", wf.DefName, "def_version", wf.DefVersion,
 		"check", op, "reason", reason)
 
+	w.returnToQueueAfterBackoff(wf)
+}
+
+// releaseForLimitsUnavailable returns a run to the queue because the engine
+// could not read its limits (engine.ErrLimitsUnavailable, cleat#3565), with the
+// same backoff an unservable run gets. The two differ in what they say: that
+// run needs a worker that can serve it, and this one needs the database to
+// answer a query, so the message must not send an operator looking for a
+// missing worker.
+//
+// ERROR, rate-limited per run: every release of this kind is an execution that
+// was refused rather than run under a bound it did not choose, and a
+// deployment whose settings table stays unreadable stops running work here --
+// which has to be visible.
+func (w *Worker) releaseForLimitsUnavailable(wf *engine.WorkflowInstance, cause error) {
+	ctx := context.Background()
+	const op = "limits_unavailable"
+	if w.Metrics != nil {
+		w.Metrics.RecordWorkflowRelease(ctx, op)
+	}
+	level := slog.LevelDebug
+	if w.shouldWarnUnservable(wf.ID, op, time.Now()) {
+		level = slog.LevelError
+	}
+	w.logger.Log(ctx, level,
+		"could not read this workflow's limits; returning it to the queue rather than running it under the worker's own",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
+		"def_name", wf.DefName, "def_version", wf.DefVersion, "error", cause)
+	w.returnToQueueAfterBackoff(wf)
+}
+
+// returnToQueueAfterBackoff is the release both of the above end in: next_wake_at
+// goes forward by the unservable backoff, so a run nothing can serve right now
+// costs one claim-and-release per interval across the pool rather than a spin.
+func (w *Worker) returnToQueueAfterBackoff(wf *engine.WorkflowInstance) {
+	ctx := context.Background()
 	st, release := w.storeFor(wf)
 	defer release()
 	backoff := w.unservableBackoff

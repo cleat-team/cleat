@@ -180,6 +180,11 @@ func (e *Engine) executeWithBackend(
 	input json.RawMessage,
 	history []EventRecord,
 ) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
+	// Before anything runs, and before the history is touched: an execution that
+	// cannot read the limits it must run under does not run. cleat#3565.
+	if lerr := e.ensureLimits(ctx); lerr != nil {
+		return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: %w", e.workflowID, lerr)
+	}
 	// If compaction state is set, merge virtual compacted events with tail
 	// history to produce a complete replay history for deterministic replay.
 	compactedStep := 0
@@ -462,6 +467,10 @@ func (e *Engine) executeWithBackend(
 // executeCompiled runs a fresh execution using a pre-compiled module.
 // history is the event history to replay (nil for fresh execution).
 func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord, wasmBytes []byte) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
+	// See executeWithBackend.
+	if lerr := e.ensureLimits(ctx); lerr != nil {
+		return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: %w", e.workflowID, lerr)
+	}
 	if e.rt == nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: no runtime available for WASM execution")
 	}
@@ -723,6 +732,10 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 // This is called by the worker on workflow exit (after the main entry point
 // returns) to run registered defer callbacks in LIFO order.
 func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName string, input json.RawMessage) (string, error) {
+	// See executeWithBackend.
+	if lerr := e.ensureLimits(ctx); lerr != nil {
+		return "", fmt.Errorf("host: workflow %s: %w", e.workflowID, lerr)
+	}
 	// Run the defer on the same backend the workflow itself runs on, so the
 	// execution fence applies to it.
 	//
