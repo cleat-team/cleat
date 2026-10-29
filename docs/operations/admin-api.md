@@ -108,6 +108,37 @@ A tenant made offline (`cleat-worker --create-tenant`) has no recorded creator, 
 confirm it: this route can only ever mint a key for a tenant it created. The creation is audited on the new
 tenant's own chain, with the principal as the subject.
 
+### From Go: `backendkit`
+
+`backendkit` wraps both calls, and the handshake's ordering is yours to keep: **store the key, then confirm it.**
+
+```go
+admin := backendkit.NewProvisioner(backendkit.New(workerURL, backendkit.WithAPIKey(provisionKey)))
+
+// TenantID is a UUID you choose, and it is required: it is what makes a retry safe.
+tenant, key, err := admin.EnsureTenant(ctx, backendkit.TenantRequest{TenantID: id, OrgName: "Acme Org"})
+switch {
+case errors.Is(err, backendkit.ErrTenantExists), errors.Is(err, backendkit.ErrNameTaken):
+    return err // someone else's tenant, or a taken name: repeating it unchanged cannot help
+case err != nil:
+    return err // anything else: repeating the same call is safe
+}
+if key != nil { // nil once a key has been confirmed
+    if err := saveKey(ctx, tenant.ID, key.Secret); err != nil { // durably, before confirming
+        return err
+    }
+    if err := admin.ConfirmKey(ctx, tenant.ID, key.KeyID); err != nil {
+        return err
+    }
+}
+
+// Then act for the tenant with its own key. The library keeps no keys: lookupKey is yours.
+clients := &backendkit.TenantClients{Base: backendkit.New(workerURL), KeyResolver: lookupKey}
+c, err := clients.For(ctx, tenant.ID)
+```
+
+A `FirstKey` prints without its secret under every `fmt` verb and in `slog`; read `key.Secret` to store it. Each refusal in the table above has a sentinel (`ErrTenantExists`, `ErrNameTaken`, `ErrTenantDiffers` with the differing fields in a `*TenantDiffersError`, `ErrOrgNotFound`, `ErrNoProvisionalKey`, `ErrProvisioningUnavailable`), wrapped beside the `*UpstreamStatusError`. A **confirm's `404` has no sentinel**: the worker answers it identically for a missing tenant, a tenant this credential did not create, and a worker with the admin API off, so the client cannot say which.
+
 ## Rotating a tenant's own key (`/api/keys`)
 
 A tenant manages its own API keys with its own key. These routes are **not** under `/api/admin/` and do not need
