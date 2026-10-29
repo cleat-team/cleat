@@ -164,6 +164,34 @@ exactly one standing (measured: without the lock both succeed, on PostgreSQL and
 against a mistake, not against a determined caller: `?force=true` removes the last key, after which only
 `cleat-worker --generate-api-key` (offline) or a new operator-provisioned key restores access.
 
+## Suspending and resuming a tenant
+
+`POST /api/admin/tenants/{tenant}/suspend` and `POST /api/admin/tenants/{tenant}/resume` set and clear a tenant's
+`suspended` flag. A suspended tenant may not start new workflows; `cleatctl suspend-tenant` documents exactly what
+else it does and does not stop (runs already executing are not stopped). Suspending deletes nothing, and resume
+undoes it. Both answer `200 {"tenant_id": "...", "suspended": true|false}` and are idempotent. They exist because
+dropping a tenant (a later step) requires the tenant to be suspended first, and a service that creates tenants must
+be able to take that step for the ones it made without holding a key that can suspend anyone's.
+
+| Caller | `suspend` | `resume` |
+|---|---|---|
+| admin operator key | **any** tenant, `200` | **any** tenant, `200` |
+| provision operator key | only a tenant **its principal created**, `200`. Any other tenant, one made offline, and one that does not exist are all `404` with the same body | `403`: **never** |
+| tenant key | `403` | `403` |
+
+**A provision key can suspend and can never resume**, and that is deliberate. The flag is one bit and does not record
+who set it. An admin suspends a tenant for non-payment, the trial-expiry sweep suspends one, `cleatctl suspend-tenant`
+suspends one: if the service that created the tenant could clear the flag it could lift any of them, merely because
+it created the tenant. To undo a provisioner's own suspension, use an admin key. (Recording who suspended was
+considered and rejected for now: every writer of the flag would have to keep that record true, and a stale record
+would reopen the hole.) Suspending a tenant an admin has already suspended succeeds and changes nothing.
+
+A tenant key reaches `/api/admin/*` when the flag is on, and must not suspend a tenant, so the handler refuses it
+itself. A provision key reaches `suspend` only with the tenant id in its one canonical spelling (lower-case,
+hyphenated) and only with `POST`; any other spelling is `403` from the scope. Like provisioning, these routes answer
+`501` on MySQL and on a sharded worker. The change is audited on the tenant's own chain, with the operator as the
+subject.
+
 ## Acting on another tenant
 
 `/api/admin/tenants/{tenant}/instances/{id}/…` is the same four operations addressed at an explicit tenant.

@@ -1,0 +1,1 @@
+test-go/commands	1	^TestSuspendingOverHTTPAgainstRealDatabases/mssql$	dialect-gated per SUBTEST (cleat#3552, B3a): the real-store pass runs PostgreSQL here and SQL Server where that DSN is set; no MySQL arm because the routes answer 501 on MySQL (provisioning is PostgreSQL and SQL Server only, D41). Measured by NAME with only CLEAT_TEST_POSTGRES set.
