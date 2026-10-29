@@ -6226,22 +6226,74 @@ func (w *Worker) reapOnce() {
 // cannot MARK a phase -- TerminateWorkflow and the DeferPhaseStore pair ship
 // together -- so it has nothing to sweep.
 func (w *Worker) expireDeferPhases() {
-	dps, ok := w.store.(engine.DeferPhaseStore)
-	if !ok {
+	// A worker whose own store cannot sweep has nothing to sweep anywhere: every store
+	// in one process is the same kind, and a kind that cannot expire a phase cannot mark
+	// one either. Not visiting the other tenants also avoids opening each of them for
+	// nothing on every tick.
+	if _, ok := w.store.(engine.DeferPhaseStore); !ok {
 		return
+	}
+	if w.expireDeferPhasesOf(w.store, "") {
+		w.expireDeferPhasesOfOtherTenants()
+	}
+}
+
+// expireDeferPhasesOf sweeps one store, logging as the sweep always did, and
+// reports whether the sweep ran without error (a store with no defer-phase
+// support has nothing to sweep and counts as having run). tenantID is empty for the worker's
+// own store and the tenant otherwise.
+func (w *Worker) expireDeferPhasesOf(st engine.WorkflowStore, tenantID string) bool {
+	dps, ok := st.(engine.DeferPhaseStore)
+	if !ok {
+		return true
 	}
 	n, err := dps.ExpireDeferPhases(w.ctx)
 	if err != nil {
 		if isConnectionError(err) {
-			w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: DB appears down", "worker_id", w.id)
+			w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: DB appears down", "worker_id", w.id, "tenant_id", tenantID)
 		} else {
-			w.logger.ErrorContext(w.ctx, "Defer-phase deadline sweep error", "worker_id", w.id, "error", err)
+			w.logger.ErrorContext(w.ctx, "Defer-phase deadline sweep error", "worker_id", w.id, "tenant_id", tenantID, "error", err)
 		}
-		return
+		return false
 	}
 	if n > 0 {
 		w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: terminated workflows whose cleanup did not finish in time",
-			"worker_id", w.id, "count", n)
+			"worker_id", w.id, "tenant_id", tenantID, "count", n)
+	}
+	return true
+}
+
+// expireDeferPhasesOfOtherTenants runs the same sweep through each other
+// tenant's own store (cleat#3572). ExpireDeferPhases is scoped to its store's
+// tenant, so through the worker's own store alone a terminating run of any
+// other tenant was never expired: its deadline passed and it stayed in
+// 'terminating', and the only worker that could end it was one whose own tenant
+// it was.
+//
+// Unlike the stale-run reaper this needs no stall guard. It decides from a
+// deadline the database recorded, not from a heartbeat this worker may have
+// failed to observe, so a stall of this worker's view cannot make it wrong.
+//
+// A tenant's failure is logged by expireDeferPhasesOf and does not mean the
+// worker's own database is in trouble, so nothing here records it as such.
+// Gated on --claim-across-tenants like the other cross-tenant reapers.
+func (w *Worker) expireDeferPhasesOfOtherTenants() {
+	if !w.claimAcrossTenants {
+		return
+	}
+	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+		w.expireDeferPhasesOf(st, tenantID)
+	})
+	if err != nil {
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			w.logger.ErrorContext(w.ctx, "Defer-phase deadline sweep: could not list tenants; other tenants' phases were not swept this tick",
+				"worker_id", w.id, "error", err)
+		}
+		return
+	}
+	if sweep.OpenFailed > 0 {
+		w.logger.WarnContext(w.ctx, "Defer-phase deadline sweep: some tenants could not be opened this tick; their phases wait for the next",
+			"worker_id", w.id, "tenants", sweep.Visited, "open_failed", sweep.OpenFailed, "first_open_error", sweep.FirstErr)
 	}
 }
 
