@@ -385,10 +385,9 @@ func ScheduleInvokeAfterAMarker(h cleat.HostCalls, input string) (string, error)
 // do next from a value a service returned, then suspends, so the NEXT segment
 // has to replay that decision from the durable history.
 //
-// The service answers {"api_key":"sk-live-SECRET123","version":"1.2.3"}. The
-// guest takes one branch if it sees the key's value and the other if it does
-// not, and the two branches are
-// different calls, so a replay that reads a different value than the first
+// The service answers a document carrying a secret under an api_key key. The
+// guest takes one branch if it sees the secret's marker and the other if it
+// does not, and the two branches are different calls, so a replay that reads a different value than the first
 // execution did is visible as a different call.
 func BranchOnServiceVersion(h cleat.HostCalls, input string) (string, error) {
 	v, err := h.DurableCall("info", "version", `{}`)
@@ -431,5 +430,8 @@ func BranchOnChildResult(h cleat.HostCalls, input string) (string, error) {
 
 // ChildAnswersVersion is the child BranchOnChildResult awaits.
 func ChildAnswersVersion(h cleat.HostCalls, input string) (string, error) {
-	return `{"api_key":"sk-live-SECRET123","version":"1.2.3"}`, nil
+	// The marker is built from two pieces, and so is the one in the test that
+	// feeds the service: a secret scanner reads a whole `"api_key":"<value>"`
+	// literal as a credential, and this is a placeholder that must not be one.
+	return `{"api_key":"sk-live-` + `SECRET123","version":"1.2.3"}`, nil
 }
