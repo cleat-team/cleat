@@ -4,6 +4,7 @@ import (
 	"embed"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -42,26 +43,31 @@ func runInit(args []string) {
 	}
 	projectName := flags.Arg(0)
 
+	// failed is what a scaffold's `go mod tidy` reported, if it failed. init
+	// still exits 0, so an offline user gets a project, but what it says
+	// last is that the project will not build yet (cleat#3533).
+	var failed *tidyFailure
 	switch *templateName {
 	case "agent":
-		scaffoldAgent(projectName)
+		failed = scaffoldAgent(projectName)
 	case "basic":
-		scaffoldBasic(projectName)
+		failed = scaffoldBasic(projectName)
 	case "agent-python":
 		scaffoldAgentPython(projectName)
 	case "agent-workflow":
-		scaffoldAgentWorkflow(projectName)
+		failed = scaffoldAgentWorkflow(projectName)
 	case "workflow":
-		scaffoldWorkflow(projectName)
+		failed = scaffoldWorkflow(projectName)
 	case "fullstack":
-		scaffoldFullstack(projectName)
+		failed = scaffoldFullstack(projectName)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent, agent-python, agent-workflow, workflow, fullstack\n", *templateName)
 		os.Exit(1)
 	}
+	failed.report(os.Stderr)
 }
 
-func scaffoldBasic(projectName string) {
+func scaffoldBasic(projectName string) *tidyFailure {
 	dir := projectName
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -94,11 +100,12 @@ func Hello(h cleat.HostCalls, input string) (string, error) {
 	}
 
 	writeYAML(dir, projectName, "hello")
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created basic project in %s/\n", dir)
+	return failed
 }
 
-func scaffoldAgent(projectName string) {
+func scaffoldAgent(projectName string) *tidyFailure {
 	dir := projectName
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -150,8 +157,9 @@ func scaffoldAgent(projectName string) {
 	}
 
 	writeYAML(dir, projectName, "research_agent")
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created AI agent project in %s/\n", dir)
+	return failed
 }
 
 func scaffoldAgentPython(projectName string) {
@@ -199,7 +207,7 @@ func scaffoldAgentPython(projectName string) {
 // file's own doc comment for why (tests/crash/agent_resume_test.go builds it
 // against the LOCAL module, which a template -- resolved from the proxy --
 // cannot stand in for).
-func scaffoldAgentWorkflow(projectName string) {
+func scaffoldAgentWorkflow(projectName string) *tidyFailure {
 	dir := projectName
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -231,11 +239,12 @@ func scaffoldAgentWorkflow(projectName string) {
 	// function is @cleatEntry(name="agent") in workflow.go, and cleat.yaml's
 	// entry_points must name what the module actually exports.
 	writeYAML(dir, projectName, "agent")
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created agent workflow project in %s/\n", dir)
+	return failed
 }
 
-func scaffoldWorkflow(projectName string) {
+func scaffoldWorkflow(projectName string) *tidyFailure {
 	dir := projectName
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -265,8 +274,9 @@ func scaffoldWorkflow(projectName string) {
 	writeScaffoldTemplate(workflowTemplates, "templates/workflow/cleat.yaml", dir, "cleat.yaml", projectName)
 	writeScaffoldTemplate(workflowTemplates, "templates/workflow/Makefile", dir, "Makefile", projectName)
 
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created workflow project in %s/\n", dir)
+	return failed
 }
 
 // scaffoldFullstack writes a project wiring a durable command path, the
@@ -276,7 +286,7 @@ func scaffoldWorkflow(projectName string) {
 // template has a subdirectory: a hand-maintained list silently stops copying
 // whatever someone adds later, and the failure is a scaffold that is merely
 // incomplete rather than broken -- which nobody notices.
-func scaffoldFullstack(projectName string) {
+func scaffoldFullstack(projectName string) *tidyFailure {
 	dir := projectName
 	const root = "templates/fullstack"
 
@@ -323,10 +333,11 @@ func scaffoldFullstack(projectName string) {
 	writeScaffoldTemplate(fullstackTemplates, "templates/fullstack/Makefile", dir, "Makefile", projectName)
 	writeScaffoldTemplate(fullstackTemplates, "templates/fullstack/README.md", dir, "README.md", projectName)
 
-	tidyScaffold(dir)
+	failed := tidyScaffold(dir)
 	fmt.Printf("Created full-stack project in %s/\n", dir)
 	fmt.Printf("  next: cd %s && make up && make logs | grep rate-limiter\n", dir)
 	fmt.Printf("  the rate limiter must report mode=db; see README.md\n")
+	return failed
 }
 
 // writeScaffoldTemplate renders one template file with the project's actual
@@ -461,13 +472,44 @@ func stripScaffoldBuildTag(data []byte) []byte {
 // offline should get a project plus one instruction, not no project. The
 // message names the command rather than the failure, because "run go mod tidy"
 // is the whole remedy.
-func tidyScaffold(dir string) {
+//
+// IT STAYS NON-FATAL, AND SAYS SO LAST (cleat#3533, owner decision D45). The
+// warning printed here is in the middle of init's output: the scaffold prints
+// "Created ... project" after it, and fullstack prints two more lines, so a
+// user who scrolled past it was told the project was created and nothing more.
+// It returns the failure instead, and runInit reports it as the final line.
+func tidyScaffold(dir string) *tidyFailure {
 	cmd := exec.Command("go", "mod", "tidy")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "\nWarning: could not resolve dependencies (%v).\n"+
 			"Run 'go mod tidy' in %s before building.\n%s\n", err, dir, out)
+		return &tidyFailure{dir: dir}
 	}
+	return nil
+}
+
+// tidyFailure records that a scaffold's `go mod tidy` failed.
+type tidyFailure struct{ dir string }
+
+// report prints the one line init ends with when the scaffold's dependencies
+// were not resolved: what is wrong, and the command that fixes it. A nil
+// failure prints nothing, so a successful init's output is unchanged.
+func (f *tidyFailure) report(w io.Writer) {
+	if f == nil {
+		return
+	}
+	fmt.Fprintf(w, "WARNING: %s was created but will not build yet: its dependencies were not resolved (the cause is above). Fix it with: cd %s && go mod tidy\n",
+		f.dir, shellWord(f.dir))
+}
+
+// shellWord quotes s for a POSIX shell only when it needs it, so the common
+// project name prints bare.
+func shellWord(s string) string {
+	if s != "" && strings.Trim(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // scaffoldBasicGoMod is basic's go.mod, as a literal rather than an embedded

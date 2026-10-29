@@ -25,7 +25,7 @@ import (
 func TestScaffoldedGoFilesHaveNoBuildConstraint(t *testing.T) {
 	for _, tmpl := range []struct {
 		name     string
-		scaffold func(string)
+		scaffold func(string) *tidyFailure
 	}{
 		{"agent", scaffoldAgent},
 		{"agent-workflow", scaffoldAgentWorkflow},
