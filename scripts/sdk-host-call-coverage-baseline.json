@@ -2,7 +2,7 @@
   "go": {
     "covered": 39,
     "surface": 39,
-    "executed": 27
+    "executed": 28
   },
   "python": {
     "covered": 61,
