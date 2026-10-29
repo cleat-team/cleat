@@ -179,8 +179,8 @@ func TestWorkflowLoader_Deprecate_ExecError(t *testing.T) {
 func TestWorkflowLoader_ListVersions_Success(t *testing.T) {
 	conn := &mockVLConnector{
 		rows: [][]driver.Value{
-			{"wf", int64(2), []byte{0x00, 0x61, 0x73, 0x6d}, int64(1), `{"p":"v"}`, int64(1), time.Now(), nil, false},
-			{"wf", int64(1), []byte{0x00, 0x61, 0x73, 0x6d}, int64(1), nil, int64(0), time.Now(), time.Now(), true},
+			{"wf", int64(2), []byte{0x00, 0x61, 0x73, 0x6d}, nil, int64(1), `{"p":"v"}`, int64(1), time.Now(), nil, false},
+			{"wf", int64(1), []byte{0x00, 0x61, 0x73, 0x6d}, nil, int64(1), nil, int64(0), time.Now(), time.Now(), true},
 		},
 	}
 	db := newMockVLDB(conn)

@@ -251,12 +251,20 @@ func (l *WorkflowLoader) Deprecate(ctx context.Context, name string, version int
 // ListVersions returns all deployed versions of a workflow definition,
 // ordered by version descending.
 //
-// SQL: SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, disabled_at, gc_eligible
+// WASMBytes is the code the version runs, wherever it is stored. A version installed
+// from a library holds no bytes of its own, it names a member of a published library
+// (cleat#3540), and a listing that scanned the column alone would hand back an empty
+// slice for it, which reads as "no code" and not as "code held elsewhere". So the
+// query also selects the library column and, for a row that has one, the bytes are
+// read from the member it names. Two reads and not a join, for the reason LoadWASM
+// does: an ordinary definition must not need USAGE on the library schema.
+//
+// SQL: SELECT name, version, wasm_bytes, library, abi_version, plugin_deps, min_version, created_at, disabled_at, gc_eligible
 //
 //	FROM workflow_defs WHERE name = $1 ORDER BY version DESC
 func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]WorkflowDef, error) {
 	rows, err := l.db.QueryContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, plugin_deps, min_version, created_at, disabled_at, gc_eligible
+		SELECT name, version, wasm_bytes, library, abi_version, plugin_deps, min_version, created_at, disabled_at, gc_eligible
 		FROM workflow_defs
 		WHERE name = $1
 		ORDER BY version DESC
@@ -267,10 +275,12 @@ func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]Workf
 	defer rows.Close()
 
 	var defs []WorkflowDef
+	var libraries []sql.NullString // parallel to defs: the library each row names, if any
 	for rows.Next() {
 		var def WorkflowDef
 		var pluginDeps sql.NullString
-		if err := rows.Scan(&def.Name, &def.Version, &def.WASMBytes,
+		var library sql.NullString
+		if err := rows.Scan(&def.Name, &def.Version, &def.WASMBytes, &library,
 			&def.ABIVersion, &pluginDeps, &def.MinVersion,
 			&def.CreatedAt, &def.DisabledAt, &def.GCEligible); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
@@ -279,9 +289,24 @@ func (l *WorkflowLoader) ListVersions(ctx context.Context, name string) ([]Workf
 			def.PluginDeps = decodePluginDeps(slog.Default(), []byte(pluginDeps.String), def.Name, def.Version)
 		}
 		defs = append(defs, def)
+		libraries = append(libraries, library)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list versions rows: %w", err)
+	}
+	rows.Close() // release the connection before reading members through the pool
+
+	for i := range defs {
+		if !libraries[i].Valid {
+			continue
+		}
+		var bytes []byte
+		if err := l.db.QueryRowContext(ctx,
+			`SELECT wasm_bytes FROM library.members WHERE library = $1 AND name = $2 AND version = $3`,
+			libraries[i].String, defs[i].Name, defs[i].Version).Scan(&bytes); err != nil {
+			return nil, fmt.Errorf("list versions for %s: read version %d from library %q: %w", name, defs[i].Version, libraries[i].String, err)
+		}
+		defs[i].WASMBytes = bytes
 	}
 	return defs, nil
 }
