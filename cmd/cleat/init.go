@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 
 	"golang.org/x/mod/module"
@@ -542,7 +543,62 @@ func basicModulePath(projectName string) (string, error) {
 		return "", fmt.Errorf("the project directory %q cannot be this project's Go module path (%v); "+
 			"the basic template names its module after the directory, which takes letters, digits and '-', '.', '_', '~'", base, err)
 	}
+	if why := reservedModuleName(base); why != "" {
+		return "", fmt.Errorf("the project directory %q cannot be this project's Go module path: %s; "+
+			"the basic template names its module after the directory, so choose another name", base, why)
+	}
 	return base, nil
+}
+
+// reservedModuleNames are names module.CheckImportPath accepts and the go command
+// does not take as a module: `go` is "invalid module path", `std` and `cmd` are
+// "not an importable package", and `toolchain` fails the same way when go.mod is
+// read (cleat#3560 review, measured with `go mod tidy` online).
+var reservedModuleNames = map[string]string{
+	"go":        "the go command reserves it",
+	"std":       "the go command reserves it for the standard library",
+	"cmd":       "the go command reserves it for its own commands",
+	"toolchain": "the go command reserves it",
+}
+
+var (
+	stdPackagesOnce sync.Once
+	stdPackages     map[string]bool
+)
+
+// standardPackages is the import paths of the Go standard library, as the toolchain
+// that will run `go mod tidy` lists them, so a package added in a later Go is
+// covered without this file knowing its name. It is empty if `go list std` cannot
+// run, which leaves only reservedModuleNames: `go mod tidy` is about to fail and
+// say why in that case anyway.
+func standardPackages() map[string]bool {
+	stdPackagesOnce.Do(func() {
+		stdPackages = map[string]bool{}
+		cmd := exec.Command("go", "list", "std")
+		cmd.Dir = os.TempDir() // not inside a module that could change the answer
+		out, err := cmd.Output()
+		if err != nil {
+			return
+		}
+		for _, p := range strings.Fields(string(out)) {
+			stdPackages[p] = true
+		}
+	})
+	return stdPackages
+}
+
+// reservedModuleName says why name cannot be a project's module, or "" if it can.
+// A module named like a standard library package (`fmt`, `os`, `unsafe`) is one
+// `go mod tidy` cannot resolve imports against, though `go mod init` writes it;
+// a name that is only a prefix of such paths (`text`, `archive`) is fine.
+func reservedModuleName(name string) string {
+	if why, ok := reservedModuleNames[name]; ok {
+		return why
+	}
+	if standardPackages()[name] {
+		return "it is the name of a Go standard library package"
+	}
+	return ""
 }
 
 // scaffoldBasicGoMod is basic's go.mod, as a literal rather than an embedded

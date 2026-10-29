@@ -41,6 +41,14 @@ func TestInitBasicNamesTheModuleForTheDirectory(t *testing.T) {
 		{"ok_basic", "ok_basic", "ok_basic"},
 		{"til~de_3556", "til~de_3556", "til~de_3556"},
 		{"My-App.v2", "My-App.v2", "My-App.v2"},
+		// Only a name that IS a standard library package is reserved, not one that
+		// starts a standard library path (text/template), nor one that merely
+		// resembles a package (Go, fmt2).
+		{"text", "text", "text"},
+		{"archive", "archive", "archive"},
+		{"Go", "Go", "Go"},
+		{"fmt2", "fmt2", "fmt2"},
+		{"internal", "internal", "internal"},
 		{"sub/dir_basic", "sub/dir_basic", "dir_basic"},
 		{abs, abs, "abs_basic"},
 	} {
@@ -96,7 +104,11 @@ func TestInitHelperProcess(t *testing.T) {
 }
 
 func TestInitBasicRefusesANameThatIsNoModulePath(t *testing.T) {
-	for _, name := range []string{"sp ace2_basic", "q'uote dir2", "dollar$x", "semi;colon", "sub/sp ace", "café"} {
+	for _, name := range []string{"sp ace2_basic", "q'uote dir2", "dollar$x", "semi;colon", "sub/sp ace", "café",
+		// Import paths the go command will not take as a module, so `go mod tidy`
+		// fails on them (cleat#3560 review): its own names, and the standard
+		// library's. Measured online, with `go mod tidy`, on Go 1.27.1.
+		"go", "std", "cmd", "toolchain", "fmt", "os", "unsafe", "runtime", "sub/net"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(dir, "sub"), 0755); err != nil {
