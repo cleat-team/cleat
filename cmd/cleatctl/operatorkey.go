@@ -40,9 +40,15 @@ const operatorKeyUsage = `Usage: cleatctl --db <dsn> operator-key <create|list|r
 NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
 
   operator-key create --description <text> [--expires-in <duration>]
+                      [--scope admin|provision] [--principal <name>]
       Mint an operator credential and print it ONCE. Only its SHA-256 hash is
       stored, so a key printed and lost cannot be recovered or re-shown --
       revoke it and mint another.
+      --scope narrows what the key may reach. The default, admin, is every
+      /api/admin/* route, as every key was before scopes existed. provision
+      reaches only tenant provisioning and REQUIRES --principal, the name of the
+      service the key is issued to. A key can carry several scopes (repeat the
+      flag or comma-separate them).
   operator-key list
       Every credential, newest first, including revoked and expired ones.
       Prints no key material, because none is stored.
@@ -52,6 +58,7 @@ NOTE: --db is a GLOBAL flag and goes BEFORE the command name.
 Examples:
   cleatctl --db "$DSN" operator-key create --description "on-call laptop"
   cleatctl --db "$DSN" operator-key create --description "ci" --expires-in 720h
+  cleatctl --db "$DSN" operator-key create --description "clew provisioner" --scope provision --principal clew-service
   cleatctl --db "$DSN" operator-key list
   cleatctl --db "$DSN" operator-key revoke --key-id 3f2a1b8c-...
 `
@@ -97,6 +104,9 @@ func operatorKeyCreate(ctx context.Context, store *auth.OperatorStore, args []st
 
 	description := fs.String("description", "", "what this credential is for; shown by list and revoke")
 	expiresIn := fs.Duration("expires-in", 0, "how long the credential stays valid (0 = never expires)")
+	var scopes scopeFlag
+	fs.Var(&scopes, "scope", "what the key may reach: admin (default) or provision; repeat or comma-separate for several")
+	principal := fs.String("principal", "", "the name of the service the key is issued to; required for the provision scope")
 
 	if err := fs.Parse(args); err != nil {
 		osExit(2)
@@ -126,7 +136,19 @@ func operatorKeyCreate(ctx context.Context, store *auth.OperatorStore, args []st
 	// Generated here, not in the store: this is the only place the plaintext
 	// can be shown, so it has to exist before the INSERT and be printed after.
 	raw := auth.GenerateOperatorKey()
-	op, err := store.CreateOperatorKey(ctx, *description, raw, expiresAt)
+	// admin when no --scope was given: that is what a key was before scopes
+	// existed, so leaving the flag off changes nothing. Defaulted HERE and not in
+	// the store, which refuses an empty scope list on purpose.
+	scopeList := []string(scopes)
+	if len(scopeList) == 0 {
+		scopeList = []string{auth.ScopeAdmin}
+	}
+	op, err := store.CreateOperatorKey(ctx, raw, auth.OperatorKeySpec{
+		Description: *description,
+		ExpiresAt:   expiresAt,
+		Scopes:      scopeList,
+		Principal:   *principal,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: could not create the operator key: %v\n", err)
 		osExit(1)
@@ -136,6 +158,10 @@ func operatorKeyCreate(ctx context.Context, store *auth.OperatorStore, args []st
 	fmt.Printf("Operator key created.\n\n")
 	fmt.Printf("  key_id:      %s\n", op.KeyID)
 	fmt.Printf("  description: %s\n", op.Description)
+	fmt.Printf("  scopes:      %s\n", op.Scopes)
+	if op.Principal != "" {
+		fmt.Printf("  principal:   %s\n", op.Principal)
+	}
 	if expiresAt != nil {
 		fmt.Printf("  expires:     %s\n", expiresAt.UTC().Format(time.RFC3339))
 	} else {
@@ -144,7 +170,26 @@ func operatorKeyCreate(ctx context.Context, store *auth.OperatorStore, args []st
 	fmt.Printf("\n  %s\n\n", raw)
 	fmt.Printf("This is the only time the key is shown -- only its hash is stored, so it\n")
 	fmt.Printf("cannot be recovered. Use it as: Authorization: Bearer <key>\n")
-	fmt.Printf("It is accepted on /api/admin/* and refused everywhere else in the API.\n")
+	if op.Scopes == auth.ScopeAdmin {
+		fmt.Printf("It is accepted on /api/admin/* and refused everywhere else in the API.\n")
+	} else {
+		fmt.Printf("It is accepted only on the routes its scope names, and refused everywhere else in the API.\n")
+	}
+}
+
+// scopeFlag collects --scope. Repeating the flag and comma-separating both work,
+// because both are what someone typing it would try.
+type scopeFlag []string
+
+func (s *scopeFlag) String() string { return strings.Join(*s, ",") }
+
+func (s *scopeFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			*s = append(*s, part)
+		}
+	}
+	return nil
 }
 
 func operatorKeyList(ctx context.Context, store *auth.OperatorStore, args []string) {
@@ -171,8 +216,17 @@ func operatorKeyList(ctx context.Context, store *auth.OperatorStore, args []stri
 
 	now := time.Now()
 	for _, k := range keys {
-		fmt.Printf("%s  %-8s  %s\n", k.KeyID, operatorKeyState(k, now), k.Description)
+		fmt.Printf("%s  %-8s  %-10s  %s\n", k.KeyID, operatorKeyState(k, now), k.Scopes, operatorKeyLabel(k))
 	}
+}
+
+// operatorKeyLabel is a key's description, with its principal when it has one, so
+// a list of keys issued to different services reads as such.
+func operatorKeyLabel(k auth.Operator) string {
+	if k.Principal == "" {
+		return k.Description
+	}
+	return k.Description + "  [principal: " + k.Principal + "]"
 }
 
 // operatorKeyState names a row's state rather than leaving it to be inferred
