@@ -471,7 +471,9 @@ tier1:
   # trigger because MySQL forbids a trigger from reading the table it is defined on, so
   # the obvious COUNT(*) guard is not expressible -- and a declarative constraint holds
   # against any client rather than only against a Go chokepoint, of which there is none:
-  # auth.TenantStore.CreateTenant has no non-test callers and its SQL is PostgreSQL-only.
+  # auth.TenantStore.CreateTenant had no non-test callers and its SQL was PostgreSQL-only (true on
+  # 2026-09-03). It now has a caller (cleat-worker --create-tenant) and statements for PostgreSQL
+  # and SQL Server, cleat#3552; it still refuses MySQL.
   #
   # For per-tenant settings (IMPROVEMENT-PLAN 3.94) this decides the shape: the settings
   # table ships on all three dialects with one uniform API, and on MySQL it holds the

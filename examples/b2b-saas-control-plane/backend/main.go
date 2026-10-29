@@ -4,7 +4,7 @@
 // It is a thin front door onto the worker, plus the one thing the scenario
 // needs that no tenant-scoped worker API can do at all: CREATING a tenant.
 // cleat has exactly one sanctioned surface for that --
-// `cleat-worker --create-tenant`/`--generate-api-key` (PostgreSQL only; see
+// `cleat-worker --create-tenant`/`--generate-api-key` (this scenario runs on PostgreSQL only; see
 // the README) -- and this process SHELLS OUT to it rather than importing
 // auth.TenantStore directly. Two reasons, not one:
 //
@@ -400,8 +400,8 @@ func bearerToken(r *http.Request) string {
 //
 // See the package doc comment for why this is a subprocess rather than a
 // direct auth.TenantStore call. PostgreSQL only -- --create-tenant refuses
-// on MySQL and SQL Server (auth.CreateTenant's own dialect gate), so this
-// scenario does not attempt the other two dialects. See the README.
+// MySQL (auth.CreateTenant's own dialect gate) and this scenario has not been
+// run on SQL Server, so it does not attempt the other two dialects. See the README.
 type tenantAdmin struct {
 	workerBin string
 	cleatBin  string

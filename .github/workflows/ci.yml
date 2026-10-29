@@ -2306,9 +2306,10 @@ jobs:
     # ONE ARM, NOT A DIALECT MATRIX, same reasoning as the sibling DBOS jobs:
     # the DBOS SDK's system database is Postgres-only, so there is no second
     # dialect on this side to diverge on. Note the cleat-side scenario is ALSO
-    # single-dialect, for a different reason (`--create-tenant` refuses on
-    # MySQL and SQL Server) -- the pair is one-armed from both directions, and
-    # neither side's reason is the other's.
+    # single-dialect, for a different reason (`--create-tenant` refuses MySQL,
+    # and refused SQL Server until cleat#3552, but the scenario has not been
+    # run there) -- the pair is one-armed from both directions, and neither
+    # side's reason is the other's.
     #
     # No create-database step: DBOS.launch() creates the system database named
     # by DBOS_SYSTEM_DATABASE_URL if it does not exist. Measured -- a pool
@@ -2448,9 +2449,9 @@ jobs:
     # PostgreSQL only, and not by omission -- see the script's own header
     # comment and the README's "Which dialects this runs on" section. This
     # scenario creates tenants via `cleat-worker --create-tenant`, which
-    # refuses outright on MySQL and SQL Server, so there is no dialect matrix
-    # to run here the way order-lifecycle-scenario and integration-hub-scenario
-    # have one.
+    # refuses outright on MySQL (and refused SQL Server until cleat#3552; the
+    # scenario has not been run there), so there is no dialect matrix to run
+    # here the way order-lifecycle-scenario and integration-hub-scenario have one.
     #
     # Self-contained, unlike the sibling jobs above: the script builds cleat,
     # cleat-worker AND the example's own backend itself, into a scratch

@@ -8,8 +8,9 @@
 # mirrors (free-port allocation, a cleanup trap that captures logs before
 # tearing the stack down, a per-run worker image tag): this scenario's
 # backend creates tenants via `cleat-worker --create-tenant`, and that flag
-# refuses outright on MySQL and SQL Server (auth.CreateTenant's own dialect
-# gate). There is no second arm to run. See the README's dialect section.
+# refuses outright on MySQL (auth.CreateTenant's own dialect gate). It refused
+# SQL Server too until cleat#3552, but this scenario has not been run there, so
+# there is no second arm to run. See the README's dialect section.
 #
 # WHAT THIS ASSERTS, and it is the thing this scenario exists to demonstrate:
 #

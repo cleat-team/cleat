@@ -89,22 +89,41 @@ func NewTenantStoreForDialect(db *sql.DB, dialect string) (*TenantStore, error) 
 // a microservice maps to a tenant, an org groups a customer's tenants and
 // is the billing and ownership entity.
 func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string, orgID uuid.UUID) (uuid.UUID, error) {
-	// PostgreSQL only, and it says so rather than emitting PostgreSQL SQL to
-	// another database. RETURNING is the obstacle: MySQL has no equivalent and
-	// SQL Server spells it OUTPUT, so this needs a different statement shape
-	// per dialect rather than a different table name. It DOES have a
-	// production caller now -- cmd/cleat-worker's --create-tenant flag,
-	// cleat#1114 -- so a silent PostgreSQL fallback here would not be an
-	// inert gap, it would be the exact failure this file was fixed for,
-	// reaching a real deployment.
-	if s.dialect != DialectPostgres {
-		return uuid.Nil, fmt.Errorf("auth: CreateTenant is not implemented for %s", s.dialect)
+	stmt, err := createTenantStmt(s.dialect)
+	if err != nil {
+		return uuid.Nil, err
 	}
-	var tid uuid.UUID
-	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO admin.tenants (name, display_name, org_id) VALUES ($1, $2, $3) RETURNING tenant_id`,
-		name, displayName, orgID).Scan(&tid)
-	return tid, err
+	// The id is made here rather than returned by the database. That is what
+	// lets this run on SQL Server: PostgreSQL's RETURNING has no MySQL
+	// equivalent and SQL Server spells it OUTPUT, so a statement that asks the
+	// database for the id needs a different shape per dialect. One that
+	// supplies it needs only a different placeholder (cleat#3552). It is also
+	// the shape a caller-chosen id needs, so that is a parameter away.
+	tid := uuid.New()
+	// String(), not the uuid.UUID: SQL Server's driver is handed the text form
+	// and converts it to a uniqueidentifier, as seedTenant in this package's
+	// tests already does.
+	if _, err := s.db.ExecContext(ctx, stmt, tid.String(), name, displayName, orgID.String()); err != nil {
+		return uuid.Nil, err
+	}
+	return tid, nil
+}
+
+// createTenantStmt returns the INSERT for a dialect. A function so the shapes
+// can be asserted without a database, like createAPIKeyStmt below.
+//
+// MySQL is refused, not given a shape: it is single-tenant by decision
+// (tiers.yaml, which also says where it is enforced: a database constraint would reject
+// a second tenant anyway), so a statement for it would be one that cannot succeed.
+func createTenantStmt(dialect string) (string, error) {
+	switch dialect {
+	case DialectPostgres:
+		return `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id) VALUES ($1, $2, $3, $4)`, nil
+	case DialectMSSQL:
+		return `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id) VALUES (@p1, @p2, @p3, @p4)`, nil
+	default:
+		return "", fmt.Errorf("auth: CreateTenant is not supported for %s: multi-tenancy is PostgreSQL and SQL Server only", dialect)
+	}
 }
 
 // CreateAPIKey creates an API key for a tenant, with no expiry and no OAuth

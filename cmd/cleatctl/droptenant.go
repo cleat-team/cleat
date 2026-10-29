@@ -308,9 +308,14 @@ func runDropTenant(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		counter, mssqlConn = conn, conn
 	}
 
-	// Through counter, not db: on SQL Server admin.tenants carries the same
-	// policy as everything else, so the name is only readable on the connection
-	// whose tenant key was set above.
+	// Through counter, not db: counter is the connection every count here is
+	// read on, and on SQL Server that is the pinned one whose tenant key was set
+	// above. This comment used to say admin.tenants carries a row policy there.
+	// It does not: no security predicate targets any admin.* table (measured
+	// 2026-10-28 on the CI-pinned SQL Server, the shipped migrations applied,
+	// same query returning 56 predicates for dbo), and an insert into and select
+	// from admin.tenants succeed with no session context set. Reading it here
+	// is for consistency with the counts, not because the table needs it.
 	var tenantName string
 	nameSQL, nameArgs, err := plugin.RebindArgs(`SELECT name FROM admin.tenants WHERE tenant_id = $1`, d.query, []any{tenantID})
 	if err != nil {
