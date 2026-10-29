@@ -793,6 +793,20 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 		// AllowsPublicExposure's falsification found the gap, because the
 		// only test exercising IsTenantSuspended over HTTP uses a mock store.
 		`GRANT SELECT ON admin.tenants TO ` + PostgresRLSTestRole,
+
+		// READ ONLY on the library schema, which is what migration 005 grants the
+		// real application role: a definition installed from a library reads its
+		// bytes, length and digest from library.members (cleat#3540), and the
+		// application role can read the schema and cannot write it. This role is a
+		// stand-in created after the migrations ran, so it is not in 005's loop and
+		// gets the same grants here. Guarded, because a database that predates 005
+		// has no such schema.
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'library') THEN
+				EXECUTE 'GRANT USAGE ON SCHEMA library TO ` + PostgresRLSTestRole + `';
+				EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA library TO ` + PostgresRLSTestRole + `';
+			END IF;
+		END $$;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

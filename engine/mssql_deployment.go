@@ -25,14 +25,25 @@ func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 	defer tx.Rollback()
 
 	var wasmBytes []byte
+	var library sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
-	`, defName, defVersion, s.tenantID).Scan(&wasmBytes)
+		SELECT wasm_bytes, library FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&wasmBytes, &library)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load wasm: %w", err)
+	}
+	if library.Valid {
+		// An installed library definition names an immutable member of a published
+		// library instead of holding bytes (cleat#3540). A second read, only for
+		// such a row, so an ordinary definition never depends on the library schema.
+		if err := tx.QueryRowContext(ctx,
+			`SELECT wasm_bytes FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, defName, defVersion).Scan(&wasmBytes); err != nil {
+			return nil, libraryMemberReadError("load wasm", library.String, defName, defVersion, err)
+		}
 	}
 	return wasmBytes, nil
 }
@@ -46,14 +57,28 @@ func (s *MSSQLStore) GetWASMLength(ctx context.Context, defName string, defVersi
 	}
 	defer tx.Rollback()
 
-	var length int64
+	var length sql.NullInt64
+	var library sql.NullString
 	// Scoped by tenant: definition names are user-chosen, so one tenant asking
 	// for another's name is ordinary rather than adversarial, and the size of
 	// their compiled WASM is not the caller's to read. IMPROVEMENT-PLAN 3.11.
 	err = tx.QueryRowContext(ctx,
-		`SELECT len(wasm_bytes) FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
-		defName, defVersion, s.tenantID).Scan(&length)
-	return length, err
+		`SELECT len(wasm_bytes), library FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
+		defName, defVersion, s.tenantID).Scan(&length, &library)
+	if err != nil {
+		return 0, err
+	}
+	if library.Valid {
+		// The member's stored length, checked against its bytes at publish.
+		var memberLength int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT wasm_length FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, defName, defVersion).Scan(&memberLength); err != nil {
+			return 0, libraryMemberReadError("get wasm length", library.String, defName, defVersion, err)
+		}
+		return memberLength, nil
+	}
+	return length.Int64, nil
 }
 
 // ListVersions returns all deployed versions of a workflow.
@@ -499,17 +524,27 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	var pluginDepsRaw []byte
 	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
+	var library sql.NullString
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
+		SELECT name, version, wasm_bytes, library, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 		FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
-	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
+	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &library, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get workflow def: %w", err)
+	}
+	if library.Valid {
+		// WorkflowDef.WASMBytes is the code the definition RUNS, wherever it is
+		// stored (see PostgresStore.GetWorkflowDef for why an empty slice is not safe).
+		if err := tx.QueryRowContext(ctx,
+			`SELECT wasm_bytes FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, name, version).Scan(&wasmBytes); err != nil {
+			return nil, libraryMemberReadError("get workflow def", library.String, name, version, err)
+		}
 	}
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt

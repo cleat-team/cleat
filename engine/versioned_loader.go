@@ -134,11 +134,12 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 		// Query database for WASM bytes.
 		var abiVersion int
 		var pluginDepsJSON, minVer sql.NullInt64
+		var library sql.NullString
 		err := l.db.QueryRowContext(ctx, `
-			SELECT wasm_bytes, abi_version, plugin_deps, min_version
+			SELECT wasm_bytes, library, abi_version, plugin_deps, min_version
 			FROM workflow_defs
 			WHERE name = $1 AND version = $2 AND disabled_at IS NULL
-		`, name, version).Scan(&wasmBytes, &abiVersion, &pluginDepsJSON, &minVer)
+		`, name, version).Scan(&wasmBytes, &library, &abiVersion, &pluginDepsJSON, &minVer)
 		if errors.Is(err, sql.ErrNoRows) {
 			l.misses.Add(1)
 			return nil, fmt.Errorf("workflow def not found or deprecated: %s v%d", name, version)
@@ -146,6 +147,16 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 		if err != nil {
 			l.misses.Add(1)
 			return nil, fmt.Errorf("load workflow def %s v%d: %w", name, version, err)
+		}
+		if library.Valid {
+			// A definition installed from a library holds no bytes of its own
+			// (cleat#3540); they are the published member's.
+			if err := l.db.QueryRowContext(ctx, `
+				SELECT wasm_bytes FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+			`, library.String, name, version).Scan(&wasmBytes); err != nil {
+				l.misses.Add(1)
+				return nil, libraryMemberReadError("load workflow def", library.String, name, version, err)
+			}
 		}
 
 		// Store to disk cache for future restarts, in the unscoped namespace
