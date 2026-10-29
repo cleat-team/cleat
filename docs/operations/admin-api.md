@@ -137,7 +137,7 @@ clients := &backendkit.TenantClients{Base: backendkit.New(workerURL), KeyResolve
 c, err := clients.For(ctx, tenant.ID)
 ```
 
-A `FirstKey` prints without its secret under every `fmt` verb and in `slog`; read `key.Secret` to store it. Each refusal in the table above has a sentinel (`ErrTenantExists`, `ErrNameTaken`, `ErrTenantDiffers` with the differing fields in a `*TenantDiffersError`, `ErrOrgNotFound`, `ErrNoProvisionalKey`, `ErrProvisioningUnavailable`), wrapped beside the `*UpstreamStatusError`. A **confirm's `404` has no sentinel**: the worker answers it identically for a missing tenant, a tenant this credential did not create, and a worker with the admin API off, so the client cannot say which.
+A `FirstKey` is redacted when it is printed, logged with `slog` or JSON-encoded, so read `key.Secret` to store it and never an encoded copy. The type's doc says what that does not cover: `fmt` cannot call a method on an unexported struct field, so a `FirstKey` held in one still prints its secret under `%v`. Each refusal in the table above has a sentinel (`ErrTenantExists`, `ErrNameTaken`, `ErrTenantDiffers` with the differing fields in a `*TenantDiffersError`, `ErrOrgNotFound`, `ErrNoProvisionalKey`, `ErrProvisioningUnavailable`), wrapped beside the `*UpstreamStatusError`. A **confirm's `404` has no sentinel**: the worker answers it identically for a missing tenant, a tenant this credential did not create, and a worker with the admin API off, so the client cannot say which.
 
 ## Rotating a tenant's own key (`/api/keys`)
 

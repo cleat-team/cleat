@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -251,32 +252,122 @@ func TestAFirstKeyNeverPrintsItsSecret(t *testing.T) {
 		Key    backendkit.FirstKey
 		Ptr    *backendkit.FirstKey
 	}
-	h := holder{Tenant: tid, Key: k, Ptr: &k}
+	held := holder{Tenant: tid, Key: k, Ptr: &k}
+	values := map[string]any{
+		"the key": k, "a pointer to it": &k, "a struct holding it": held, "a pointer to that struct": &held,
+		"a slice of them": []backendkit.FirstKey{k}, "a map of them": map[string]backendkit.FirstKey{"a": k},
+	}
+	leaks := func(out string) bool {
+		return strings.Contains(out, secret) || strings.Contains(out, fmt.Sprintf("%x", secret))
+	}
 
-	for _, v := range []any{k, &k, h, &h, []backendkit.FirstKey{k}, map[string]backendkit.FirstKey{"a": k}} {
+	for name, v := range values {
 		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x"} {
-			if out := fmt.Sprintf(verb, v); strings.Contains(out, secret) || strings.Contains(out, fmt.Sprintf("%x", secret)) {
-				t.Errorf("fmt %s of %T printed the secret: %s", verb, v, out)
+			if out := fmt.Sprintf(verb, v); leaks(out) {
+				t.Errorf("fmt %s of %s printed the secret: %s", verb, name, out)
 			}
+		}
+		// encoding/json is what slog's JSON handler uses for a value nested in a struct, and what an app uses
+		// to log or cache one by accident.
+		b, err := json.Marshal(v)
+		if err != nil || leaks(string(b)) {
+			t.Errorf("json.Marshal of %s = %s, %v: it must not carry the secret", name, b, err)
 		}
 	}
 	if out := fmt.Sprint(k); !strings.Contains(out, kid) || !strings.Contains(out, "redacted") {
 		t.Errorf("a redacted key should still say which key it is: %s", out)
 	}
+	if b, _ := json.Marshal(k); !strings.Contains(string(b), kid) || !strings.Contains(string(b), `"valid_for_seconds":900`) {
+		t.Errorf("an encoded key lost what is not secret: %s", b)
+	}
 
-	var buf bytes.Buffer
-	for _, h := range []slog.Handler{slog.NewJSONHandler(&buf, nil), slog.NewTextHandler(&buf, nil)} {
-		slog.New(h).Info("provisioned", "key", k, "pointer", &k, slog.Any("holder", h))
-	}
-	if strings.Contains(buf.String(), secret) {
-		t.Errorf("slog printed the secret: %s", buf.String())
-	}
-	if !strings.Contains(buf.String(), kid) {
-		t.Errorf("slog lost the key id too: %s", buf.String())
+	// Every handler, with the key as an attribute AND inside a struct. The loop variable is named so that it
+	// cannot shadow `held`: the first version of this test did, logged the handler instead of the struct, and
+	// so never exercised the one case the JSON handler gets wrong without MarshalJSON.
+	for hname, mk := range map[string]func(io.Writer) slog.Handler{
+		"json": func(w io.Writer) slog.Handler { return slog.NewJSONHandler(w, nil) },
+		"text": func(w io.Writer) slog.Handler { return slog.NewTextHandler(w, nil) },
+	} {
+		for name, v := range values {
+			var buf bytes.Buffer
+			slog.New(mk(&buf)).Info("provisioned", slog.Any("value", v))
+			out := buf.String()
+			if leaks(out) {
+				t.Errorf("slog %s handler printed the secret for %s: %s", hname, name, out)
+			}
+			if !strings.Contains(out, kid) {
+				t.Errorf("slog %s handler lost the key id too for %s (so the log line is not the case it should be): %s", hname, name, out)
+			}
+		}
 	}
 
 	// The field itself is still there to store.
 	if k.Secret != secret {
 		t.Error("redaction must not change the value")
+	}
+}
+
+// reflectingHandler stands for a third-party slog handler: it resolves each attribute as slog's contract tells a
+// handler to, then renders what is left by reflection over exported fields, never calling Format or
+// MarshalJSON. slog's own handlers are redacted by those two methods; this is the case only LogValue covers.
+type reflectingHandler struct{ out *strings.Builder }
+
+func (reflectingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h reflectingHandler) WithAttrs([]slog.Attr) slog.Handler     { return h }
+func (h reflectingHandler) WithGroup(string) slog.Handler          { return h }
+func (h reflectingHandler) Handle(_ context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		h.dump(a.Value.Resolve())
+		return true
+	})
+	return nil
+}
+
+func (h reflectingHandler) dump(v slog.Value) {
+	if v.Kind() == slog.KindGroup {
+		for _, a := range v.Group() {
+			h.dump(a.Value.Resolve())
+		}
+		return
+	}
+	h.walk(reflect.ValueOf(v.Any()))
+}
+
+func (h reflectingHandler) walk(rv reflect.Value) {
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if !rv.IsNil() {
+			h.walk(rv.Elem())
+		}
+	case reflect.Struct:
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Type().Field(i).IsExported() {
+				h.walk(rv.Field(i))
+			}
+		}
+	case reflect.String:
+		h.out.WriteString(rv.String() + " ")
+	}
+}
+
+func TestAFirstKeyIsRedactedForAHandlerThatReflects(t *testing.T) {
+	const secret = "cleat_sk_do_not_print_me"
+	k := backendkit.FirstKey{KeyID: kid, Secret: secret, ValidFor: time.Minute}
+
+	var out strings.Builder
+	slog.New(reflectingHandler{out: &out}).Info("provisioned", slog.Any("key", k), slog.Any("pointer", &k))
+	if strings.Contains(out.String(), secret) {
+		t.Errorf("a handler that resolves attributes and reflects saw the secret: %s", out.String())
+	}
+	if !strings.Contains(out.String(), kid) {
+		t.Errorf("the handler saw nothing of the key, so the absence above proves nothing: %q", out.String())
+	}
+
+	// Control: the same handler over an ordinary struct DOES see its fields, so a pass above is the LogValue
+	// and not a handler that cannot see anything.
+	out.Reset()
+	slog.New(reflectingHandler{out: &out}).Info("plain", slog.Any("v", struct{ Secret string }{secret}))
+	if !strings.Contains(out.String(), secret) {
+		t.Errorf("control failed: the reflecting handler cannot see a plain struct's field (%q), so it proves nothing", out.String())
 	}
 }

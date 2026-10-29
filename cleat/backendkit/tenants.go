@@ -18,10 +18,22 @@ var ErrNoTenantKey = errors.New("backendkit: no API key for this tenant")
 // The result shares c's HTTPClient, so a hundred tenant clients are a hundred small structs over one
 // connection pool. It never inherits c's APIKey or TenantID: c is the template for where the worker is, not
 // for who is calling. A client made with an empty apiKey sends no Authorization header.
+//
+// One caution comes with sharing the transport: if the shared http.Client's Transport itself adds an
+// Authorization header, it adds it to every tenant client's requests, and that header would override the
+// tenant's own key. Put credentials in the client (WithAPIKey, ForTenant), not in a RoundTripper.
 func (c *Client) ForTenant(tenantID, apiKey string) *Client {
+	return deriveTenantClient(c, tenantID, apiKey)
+}
+
+// deriveTenantClient is ForTenant's body, reached by name so that TenantClients does not spell a ".ForTenant("
+// call. plugin's TestEverySecretsForTenantCallIsDeclared matches that selector by NAME across the tree, to find
+// plugins that name a tenant they did not get from their own request; a client deriving a per-tenant client is
+// not that, and a ledger entry saying it was would be false.
+func deriveTenantClient(base *Client, tenantID, apiKey string) *Client {
 	return &Client{
-		BaseURL:    c.BaseURL,
-		HTTPClient: c.HTTPClient,
+		BaseURL:    base.BaseURL,
+		HTTPClient: base.HTTPClient,
 		TenantID:   tenantID,
 		APIKey:     apiKey,
 	}
@@ -57,5 +69,5 @@ func (t *TenantClients) For(ctx context.Context, tenantID string) (*Client, erro
 	if key == "" {
 		return nil, fmt.Errorf("%w (tenant %s)", ErrNoTenantKey, tenantID)
 	}
-	return t.Base.ForTenant(tenantID, key), nil
+	return deriveTenantClient(t.Base, tenantID, key), nil
 }

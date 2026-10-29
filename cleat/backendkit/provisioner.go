@@ -89,8 +89,14 @@ type Tenant struct {
 
 // FirstKey is the tenant's first API key, provisional until ConfirmKey makes it permanent.
 //
-// Secret is the only copy: the worker stores its hash. FirstKey prints without it under every fmt verb and in
-// slog, so a stray log line cannot leak it; read the Secret field to store it.
+// Secret is the only copy: the worker stores its hash. Read the Secret field to store it, never a printed or
+// encoded FirstKey. A FirstKey is redacted when it is printed with any fmt verb (directly, or as an exported
+// field or element of a struct, slice or map), logged through slog (as an attribute, or inside a value the
+// JSON handler encodes), or passed to json.Marshal.
+//
+// What this does NOT cover: fmt cannot call a method on an UNEXPORTED struct field, so a struct that holds a
+// FirstKey in an unexported field prints the secret under %v; reflection reads it; and any copy of the Secret
+// string is an ordinary string. Keep a FirstKey in an exported field, or keep only what you need of it.
 type FirstKey struct {
 	KeyID  string
 	Secret string
@@ -100,14 +106,25 @@ type FirstKey struct {
 }
 
 // Format prints the key without its secret, under every verb, so %v, %+v, %#v and %s on a FirstKey, or on a
-// struct holding one, cannot reveal it.
+// struct holding one in an exported field, cannot reveal it.
 func (k FirstKey) Format(f fmt.State, _ rune) {
 	_, _ = fmt.Fprintf(f, "backendkit.FirstKey{KeyID:%s, Secret:<redacted>, ValidFor:%s}", k.KeyID, k.ValidFor)
 }
 
-// LogValue keeps the secret out of slog.
+// LogValue keeps the secret out of slog when a FirstKey is an attribute's value.
 func (k FirstKey) LogValue() slog.Value {
 	return slog.GroupValue(slog.String("key_id", k.KeyID), slog.String("secret", "<redacted>"), slog.Duration("valid_for", k.ValidFor))
+}
+
+// MarshalJSON encodes the key without its secret. slog's JSON handler does not consult LogValue for a value
+// nested in a struct; it encodes the struct with encoding/json, which would print every field. Encoding a
+// FirstKey therefore never stores it: keep Secret yourself.
+func (k FirstKey) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		KeyID           string `json:"key_id"`
+		Secret          string `json:"secret"`
+		ValidForSeconds int64  `json:"valid_for_seconds"`
+	}{KeyID: k.KeyID, Secret: "<redacted>", ValidForSeconds: int64(k.ValidFor / time.Second)})
 }
 
 // Provisioner creates tenants on a worker (cleat#3552). It holds an operator credential with the provision
