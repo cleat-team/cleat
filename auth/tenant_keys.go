@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +29,9 @@ const MaxLiveTenantKeys = 25
 
 // maxListedTenantKeys bounds one listing. Revoked and expired keys stay in the table as history.
 const maxListedTenantKeys = 200
+
+// listLimit is the same bound as the text a statement carries.
+var listLimit = strconv.Itoa(maxListedTenantKeys)
 
 var (
 	// ErrKeyNotFound: the key id is not one of this tenant's. The same error for a key that belongs to
@@ -79,7 +83,7 @@ func keyStatements(dialect string) (keyStmts, error) {
 			lockTenant: `SELECT 1 FROM admin.tenants WHERE tenant_id = $1 FOR UPDATE`,
 			liveCount:  `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
 			insertKey:  `INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at) VALUES ($1, $2, $3, $4, $5)`,
-			list:       `SELECT key_id::text, description, created_at, expires_at, disabled_at, provisional FROM admin.tenant_api_keys WHERE tenant_id = $1 ORDER BY created_at DESC, key_id LIMIT 200`,
+			list:       `SELECT key_id::text, description, created_at, expires_at, disabled_at, provisional FROM admin.tenant_api_keys WHERE tenant_id = $1 ORDER BY created_at DESC, key_id LIMIT ` + listLimit,
 			keyRow:     `SELECT disabled_at FROM admin.tenant_api_keys WHERE tenant_id = $1 AND key_id = $2`,
 			liveOthers: `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1 AND key_id <> $2 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
 			revoke:     `UPDATE admin.tenant_api_keys SET disabled_at = now(), updated_at = now() WHERE tenant_id = $1 AND key_id = $2 AND disabled_at IS NULL`,
@@ -89,7 +93,7 @@ func keyStatements(dialect string) (keyStmts, error) {
 			lockTenant: `SELECT 1 FROM admin.tenants WITH (UPDLOCK, ROWLOCK) WHERE tenant_id = @p1`,
 			liveCount:  `SELECT COUNT(*) FROM admin.tenant_api_keys WHERE tenant_id = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`,
 			insertKey:  `INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at) VALUES (@p1, @p2, @p3, @p4, @p5)`,
-			list:       `SELECT TOP (200) LOWER(CONVERT(NVARCHAR(36), key_id)), description, created_at, expires_at, disabled_at, provisional FROM admin.tenant_api_keys WHERE tenant_id = @p1 ORDER BY created_at DESC, key_id`,
+			list:       `SELECT TOP (` + listLimit + `) LOWER(CONVERT(NVARCHAR(36), key_id)), description, created_at, expires_at, disabled_at, provisional FROM admin.tenant_api_keys WHERE tenant_id = @p1 ORDER BY created_at DESC, key_id`,
 			keyRow:     `SELECT disabled_at FROM admin.tenant_api_keys WHERE tenant_id = @p1 AND key_id = @p2`,
 			liveOthers: `SELECT COUNT(*) FROM admin.tenant_api_keys WHERE tenant_id = @p1 AND key_id <> @p2 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`,
 			revoke:     `UPDATE admin.tenant_api_keys SET disabled_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME() WHERE tenant_id = @p1 AND key_id = @p2 AND disabled_at IS NULL`,
@@ -99,7 +103,7 @@ func keyStatements(dialect string) (keyStmts, error) {
 			lockTenant: `SELECT 1 FROM tenants WHERE tenant_id = ? FOR UPDATE`,
 			liveCount:  `SELECT count(*) FROM tenant_api_keys WHERE tenant_id = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`,
 			insertKey:  `INSERT INTO tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at) VALUES (?, ?, ?, ?, ?)`,
-			list:       `SELECT key_id, description, created_at, expires_at, disabled_at, 0 FROM tenant_api_keys WHERE tenant_id = ? ORDER BY created_at DESC, key_id LIMIT 200`,
+			list:       `SELECT key_id, description, created_at, expires_at, disabled_at, 0 FROM tenant_api_keys WHERE tenant_id = ? ORDER BY created_at DESC, key_id LIMIT ` + listLimit,
 			keyRow:     `SELECT disabled_at FROM tenant_api_keys WHERE tenant_id = ? AND key_id = ?`,
 			liveOthers: `SELECT count(*) FROM tenant_api_keys WHERE tenant_id = ? AND key_id <> ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`,
 			revoke:     `UPDATE tenant_api_keys SET disabled_at = NOW(6), updated_at = NOW(6) WHERE tenant_id = ? AND key_id = ? AND disabled_at IS NULL`,
