@@ -7,6 +7,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
@@ -378,4 +379,57 @@ func ScheduleInvokeAfterAMarker(h cleat.HostCalls, input string) (string, error)
 		return "", err
 	}
 	return `{"status":"scheduled"}`, nil
+}
+
+// BranchOnServiceVersion is cleat#3581's fixture: a guest that decides what to
+// do next from a value a service returned, then suspends, so the NEXT segment
+// has to replay that decision from the durable history.
+//
+// The service answers {"api_key":"sk-live-SECRET123","version":"1.2.3"}. The
+// guest takes one branch if it sees the key's value and the other if it does
+// not, and the two branches are
+// different calls, so a replay that reads a different value than the first
+// execution did is visible as a different call.
+func BranchOnServiceVersion(h cleat.HostCalls, input string) (string, error) {
+	v, err := h.DurableCall("info", "version", `{}`)
+	if err != nil {
+		return "", err
+	}
+	branch := "saw-redacted"
+	if strings.Contains(v, "SECRET123") {
+		branch = "saw-live"
+	}
+	if _, err := h.DurableCall("info", branch, `{}`); err != nil {
+		return "", err
+	}
+	h.DurableSleep(time.Second)
+	return `{"branch":"` + branch + `"}`, nil
+}
+
+// BranchOnChildResult is BranchOnServiceVersion for a CHILD's result: the
+// guest awaits a child, branches on what it returned, then suspends so the
+// next segment replays the await (cleat#3581).
+func BranchOnChildResult(h cleat.HostCalls, input string) (string, error) {
+	runID, err := h.ChildWorkflow("replay-reads-child", `{"__entry_point":"ChildAnswersVersion"}`)
+	if err != nil {
+		return "", err
+	}
+	res, err := h.AwaitChild(runID)
+	if err != nil {
+		return "", err
+	}
+	branch := "saw-redacted"
+	if strings.Contains(res, "SECRET123") {
+		branch = "saw-live"
+	}
+	if _, err := h.DurableCall("info", branch, `{}`); err != nil {
+		return "", err
+	}
+	h.DurableSleep(time.Second)
+	return `{"branch":"` + branch + `"}`, nil
+}
+
+// ChildAnswersVersion is the child BranchOnChildResult awaits.
+func ChildAnswersVersion(h cleat.HostCalls, input string) (string, error) {
+	return `{"api_key":"sk-live-SECRET123","version":"1.2.3"}`, nil
 }
