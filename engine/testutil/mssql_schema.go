@@ -223,6 +223,8 @@ var mssqlCleanupTables = []string{
 	"queues",
 	"tenant_domains",
 	"tenant_settings",
+	// tenant_library_installs: see postgresCleanupTables.
+	"tenant_library_installs",
 }
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.

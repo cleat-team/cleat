@@ -50,7 +50,7 @@ func TestCheckDBDoesNotReportAPostgresOnlyTableMissingOnMySQL(t *testing.T) {
 
 	want := 0
 	for _, core := range coreTables {
-		if !postgresOnlyTables[core] {
+		if !absentByDesign("mysql", core) {
 			want++
 		}
 	}

@@ -135,6 +135,13 @@ var postgresCleanupTables = []string{
 	"queues",
 	"tenant_domains",
 	"tenant_settings",
+	// tenant_library_installs -- cleat#3540. FK'd to nothing and keyed on tenant_id
+	// alone, like the entries above. Without it the bystander's row in
+	// TestEveryTenantOwnedTableIsEmptiedByDropTenant outlives the test and the next
+	// run's seed fails on the primary key. MySQL has no such table (workflow
+	// libraries are PostgreSQL and SQL Server only); the lists must still agree
+	// (TestCleanupTableListsAgree), and an absent table is skipped by existingTables.
+	"tenant_library_installs",
 }
 
 // CleanupPostgresTestData deletes all rows from the cleat test tables.

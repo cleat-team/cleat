@@ -54,6 +54,8 @@ var mysqlCleanupTables = []string{
 	"queues",
 	"tenant_domains",
 	"tenant_settings",
+	// tenant_library_installs: see postgresCleanupTables.
+	"tenant_library_installs",
 }
 
 // CleanupMySQLTestData removes all test data from MySQL tables.

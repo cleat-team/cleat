@@ -25,6 +25,9 @@ var coreTables = []string{
 	"concurrency_keys",
 	"event_history",
 	"idempotency_keys",
+	"library.bundle_members",
+	"library.bundles",
+	"library.members",
 	"payload_encryption_ever_enabled",
 	"plugin_defs",
 	"deployment_secrets",
@@ -33,6 +36,7 @@ var coreTables = []string{
 	"queue_rate_tokens",
 	"slack_workspace",
 	"tenant_domains",
+	"tenant_library_installs",
 	"tenant_secrets",
 	"tenant_settings",
 	"workflow_defs",
@@ -82,4 +86,25 @@ var postgresOnlyTables = map[string]bool{
 	"payload_encryption_ever_enabled": true,
 	"workflow_leases":                 true,
 	"workflow_payloads":               true,
+}
+
+// notOnMySQLTables is the subset of coreTables that PostgreSQL and SQL Server have and
+// MySQL does not, by decision: workflow libraries are PostgreSQL and SQL Server only
+// (cleat#3540, migrations/{postgres,mssql}/005_workflow_libraries.sql), and MySQL has no
+// 005. A MySQL deployment lacking them is healthy, for the reason postgresOnlyTables
+// gives about its own members.
+var notOnMySQLTables = map[string]bool{
+	"library.bundle_members":  true,
+	"library.bundles":         true,
+	"library.members":         true,
+	"tenant_library_installs": true,
+}
+
+// absentByDesign reports whether a core table is not expected on the named dialect
+// ("postgres", "mysql" or "mssql").
+func absentByDesign(dialectName, table string) bool {
+	if dialectName != "postgres" && postgresOnlyTables[table] {
+		return true
+	}
+	return dialectName == "mysql" && notOnMySQLTables[table]
 }

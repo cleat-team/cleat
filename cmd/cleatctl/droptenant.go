@@ -138,6 +138,10 @@ var dropTenantTables = []struct {
 	// survived, and did not appear in the preview an operator confirms.
 	{"workflow_memory_stats", `SELECT count(*) FROM workflow_memory_stats WHERE tenant_id = $1`},
 	{"workflow_memory_samples", `SELECT count(*) FROM workflow_memory_samples WHERE tenant_id = $1`},
+	// cleat#3540. A DELETE in admin.drop_tenant, not a cascade: no foreign key reaches it.
+	// PostgreSQL only here; SQL Server's preview is read from sys.columns and MySQL has no
+	// such table.
+	{"tenant_library_installs", `SELECT count(*) FROM tenant_library_installs WHERE tenant_id = $1`},
 	{"workflow_defs", `SELECT count(*) FROM workflow_defs WHERE tenant_id = $1`},
 	{"admin.tenant_api_keys", `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1`},
 	{"admin.tenant_roles", `SELECT count(*) FROM admin.tenant_roles WHERE tenant_id = $1`},

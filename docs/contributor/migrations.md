@@ -271,7 +271,13 @@ the places the emitter goes wrong:
   or re-prefixes the verb corrupts them. Emit it unchanged.
 - **Security policies reference the predicate function, so the order is forced.** `DROP FUNCTION
   dbo.fn_tenant_filter` fails with error 3729 while any `TenantFilter_*` policy exists. Create
-  function **before** policy; drop policy **before** function.
+  function **before** policy; drop policy **before** function. Frozen `003_procedures.sql` drops a
+  fixed list of policies before it replaces the function, so replaying it over a database where a
+  LATER migration created a policy (cleat#3540's `TenantFilter_LibraryInstalls`) fails the same
+  way. A migration that redefines the function, or a harness that replays 003, has to drop every
+  policy bound to it generically (the way `mssqlDropFilterPoliciesSQL` in `engine/testutil` and
+  `migrations/mssql/optional/cross_tenant_claim.sql` do) and recreate the later ones afterwards
+  (`testutil.MSSQLDropTenantFilterPolicies`, `MSSQLRestoreLaterFilterPolicies`).
 
 ## Reading the result: the conclusion and the duration are two readings
 

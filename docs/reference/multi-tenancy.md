@@ -68,7 +68,7 @@ same tenant-bearing table count.**
 | | PostgreSQL | SQL Server | MySQL |
 |---|---|---|---|
 | tenant-bearing tables | 23 | 21 | 21 |
-| RLS / filter predicates | **19** (`ENABLE` + `FORCE`) | **14** | **0** |
+| RLS / filter predicates | **20** (`ENABLE` + `FORCE`) | **15** | **0** |
 | policies | 20 | 14 | — |
 | **write-blocking predicates** | n/a (`FORCE` covers writes) | **14** (3 each: `AFTER INSERT`, `AFTER UPDATE`, `BEFORE UPDATE`) | 0 |
 | backstop active for an admin connection | no (`FORCE` applies to the owner) | **no** | — |
@@ -99,7 +99,7 @@ predicate form (`migrations/mssql/optional/cross_tenant_claim.sql`, which admits
 `cleat_admin` members; `--claim-across-tenants` does not need it) bypass BLOCK
 exactly as they bypass FILTER, since both share the one predicate function.
 
-**PostgreSQL's 19 of 23 is deliberate, not partial.** The four without RLS are
+**PostgreSQL's 20 of 24 is deliberate, not partial.** The four without RLS are
 the tenant registry itself — `admin.tenants`, `admin.tenant_api_keys`,
 `admin.tenant_roles`, `admin.tenant_egress_allow` — which live in the `admin`
 schema and describe tenants rather than belonging to one.
