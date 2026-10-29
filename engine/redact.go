@@ -16,19 +16,6 @@ import (
 // to prevent stack overflow from malicious deeply-nested input.
 const maxRedactDepth = 50
 
-// sensitivePatterns lists the field-name fragments whose values are redacted.
-// Matching is case-insensitive and is done on the WORDS of a key, not on the
-// raw substring: see isSensitiveField.
-var sensitivePatterns = []string{
-	"token",
-	"secret",
-	"password",
-	"credential",
-	"api_key",
-	"authorization",
-	"api-key",
-}
-
 // substringPatterns are matched anywhere inside a single word of the key, as
 // the whole list used to be matched anywhere inside the key. They are long and
 // specific enough that a word containing one is, in practice, the secret
@@ -185,6 +172,20 @@ func isSensitiveWord(words []string, i int) bool {
 // and are always ASCII. Normalization via golang.org/x/text/unicode/norm is
 // a future enhancement if non-ASCII field names become relevant.
 func isSensitiveField(name string) bool {
+	// An operator's own patterns (--redact-patterns-file) are substrings of the
+	// key, case-insensitively, as the flag documents. They are consulted here and
+	// only here, and nothing consulted them before cleat#3583, so the flag was
+	// accepted and redacted nothing. They are not subject to the descriptor
+	// exception below: an operator who names a fragment means every key that
+	// holds it.
+	if len(customPatterns) > 0 {
+		lower := strings.ToLower(name)
+		for _, p := range customPatterns {
+			if strings.Contains(lower, strings.ToLower(p)) {
+				return true
+			}
+		}
+	}
 	words := keyWords(name)
 	last := len(words) - 1
 	for i := range words {
@@ -530,20 +531,15 @@ func LoadRedactPatterns(path string) error {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Avoid duplicates.
+		// Avoid duplicates within the operator's own list. A line that spells a
+		// built-in name is NOT a duplicate: the built-ins read a key as words
+		// ("token" does not match max_tokens), and a custom pattern is a substring
+		// of the whole key, so the same spelling is a different, wider rule.
 		found := false
-		for _, p := range sensitivePatterns {
+		for _, p := range customPatterns {
 			if strings.EqualFold(p, line) {
 				found = true
 				break
-			}
-		}
-		if !found {
-			for _, p := range customPatterns {
-				if strings.EqualFold(p, line) {
-					found = true
-					break
-				}
 			}
 		}
 		if !found {

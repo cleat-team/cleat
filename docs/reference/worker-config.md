@@ -1208,9 +1208,14 @@ Go duration syntax, so `720h` rather than `30d` — and a bare number is refused
 |------|---------|-------------|
 | string | `""` | Path to file with custom redaction patterns (one per line) |
 
-When set, the worker reads regex patterns from the specified file and applies
-them to redact sensitive fields in event history and logs. Each line in the
-file is a separate pattern. Leave empty to use only built-in defaults.
+When set, the worker reads patterns from the specified file and redacts the
+value of any field whose name contains one of them, in addition to the built-in
+matching. Each line is one pattern: a plain substring (not a regular
+expression), matched case-insensitively anywhere in the field name. Blank lines
+and lines starting with `#` are ignored. Unlike the built-in `token`, which is
+read as a whole word, a custom pattern matches inside any word of the key, so
+`key` redacts `monkey`; name the fragment you mean. Leave empty to use only the
+built-in defaults.
 
 ---
 
