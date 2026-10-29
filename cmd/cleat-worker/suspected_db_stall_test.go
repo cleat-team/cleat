@@ -41,7 +41,7 @@ func (s *stallProbeMockStore) StaleSetShape(ctx context.Context, timeout, missed
 // multiShardStallMockStore satisfies engine.MultiShard over a fixed set of
 // named shard stores, each independently typed (so each can choose whether
 // it implements DBStallDetector). It also embeds *mockStore purely so the
-// top-level value itself satisfies engine.WorkflowStore -- reapUnits never
+// top-level value itself satisfies engine.WorkflowStore -- reapUnitsOf never
 // calls through to it once a MultiShard type assertion succeeds.
 type multiShardStallMockStore struct {
 	*mockStore

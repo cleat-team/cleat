@@ -221,3 +221,68 @@ func TestReaperStaysOnItsOwnTenantWhenItCannotServeOthers(t *testing.T) {
 		}
 	})
 }
+
+// cleat#2006's suppression decides that the stale set looks like a database
+// stall and not dead workers, and it needs several distinct holders IN SCOPE to
+// say so (suspectedDBStall: DistinctAssignedTo > 1). Through a tenant's own
+// store a one-holder tenant never qualifies, so under the same whole-database
+// stall it would be reclaimed in the very tick the own tenant waits. The own
+// store's verdict is the only whole-database evidence this worker has, so when
+// it suppressed any unit this tick the other tenants are not reaped either
+// (cleat-review on #3574, measured with doubles).
+
+// ownStallReaper is the worker's own store with a controllable stall probe and a
+// tenant list.
+type ownStallReaper struct {
+	*stallProbeMockStore
+	tenants []string
+}
+
+func (s *ownStallReaper) ListTenantIDs(context.Context) ([]string, error) { return s.tenants, nil }
+
+func TestReaperDoesNotReapOtherTenantsInATickWhereItsOwnStoreSuspectedAStall(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ownShape    engine.StaleSetShape
+		wantOtherAt int
+	}{
+		{"own store suspects a stall: one-holder tenant under the same stall is not reclaimed", stallShapedShape(), 0},
+		{"control: own store sees ordinary dead-worker staleness, so the tenant IS reaped", healthyShape(), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ownReaps int
+			own := &ownStallReaper{
+				stallProbeMockStore: &stallProbeMockStore{
+					mockStore: &mockStore{reapStaleInstancesFn: func(context.Context, time.Duration) (int, error) {
+						ownReaps++
+						return 0, nil
+					}},
+					staleSetShapeFn: func(context.Context, time.Duration, time.Duration) (engine.StaleSetShape, error) {
+						return tc.ownShape, nil
+					},
+				},
+				tenants: []string{tenantSelf, tenantOther},
+			}
+			// The other tenant has ONE holder in scope: its own probe, if it were
+			// asked, would not call this a stall.
+			other := newReapProbe(1, nil)
+			f := &perTenantFactory{stores: map[string]engine.WorkflowStore{tenantOther: other}}
+			w := newTestWorkerFromStore(own)
+			defer w.cancel()
+			w.storeTenantID = tenantSelf
+			w.reclaimTimeout = 50 * time.Millisecond
+			w.claimAcrossTenants = true
+			w.storeFactory = f
+			seedRecentlyConfirmedHealthy(w)
+
+			w.reapOnce()
+
+			if got := other.reaped(); got != tc.wantOtherAt {
+				t.Errorf("the other tenant's store reaped %d time(s), want %d", got, tc.wantOtherAt)
+			}
+			if tc.wantOtherAt == 0 && ownReaps != 0 {
+				t.Errorf("the own pass was meant to be suppressed but reaped %d time(s): the premise of this case does not hold", ownReaps)
+			}
+		})
+	}
+}

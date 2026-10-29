@@ -5444,19 +5444,14 @@ func (u reapUnit) episodeKey() string {
 	return u.tenant + "/" + u.name
 }
 
-// reapUnits enumerates what reapOnce processes this tick. A MultiShard
-// store (ShardedStore) yields one unit per shard, so cleat#2006's
-// suspected-stall suppression -- and any per-call failure -- is decided
-// independently per shard: one stalled shard must not pause reclaiming on
-// a healthy sibling, and a healthy majority must not mask a genuinely
-// stalled minority. A plain store yields exactly one unit.
-func (w *Worker) reapUnits() []reapUnit {
-	return w.reapUnitsOf(w.store, "")
-}
-
-// reapUnitsOf is reapUnits for any one store: the worker's own (tenant "") or
-// one tenant's. A tenant's store from the sharded factory is a ShardedStore
-// scoped to that tenant, so it yields one unit per shard like the worker's own.
+// reapUnitsOf enumerates what reapOnce processes this tick for one store: the
+// worker's own (tenant "") or one tenant's. A MultiShard store (ShardedStore)
+// yields one unit per shard, so cleat#2006's suspected-stall suppression -- and
+// any per-call failure -- is decided independently per shard: one stalled shard
+// must not pause reclaiming on a healthy sibling, and a healthy majority must
+// not mask a genuinely stalled minority. A plain store yields exactly one unit.
+// A tenant's store from the sharded factory is a ShardedStore scoped to that
+// tenant, so it yields one unit per shard like the worker's own.
 func (w *Worker) reapUnitsOf(store engine.WorkflowStore, tenant string) []reapUnit {
 	ms, ok := store.(engine.MultiShard)
 	if !ok {
@@ -5899,18 +5894,21 @@ func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, e
 }
 
 // reapStore is one reap pass over one tenant's store: one unit per shard for a
-// MultiShard store, or one plain unit -- see reapUnits' doc. tenant is "" for the
+// MultiShard store, or one plain unit -- see reapUnitsOf's doc. tenant is "" for the
 // worker's own store and the tenant's id for another tenant's (cleat#3570).
 //
 // Units are processed independently: cleat#2006's suspected-stall suppression,
 // and any failure, on one unit must not affect a healthy sibling's reclaim this
-// tick. It returns how many runs it reclaimed and the last unit failure, and
-// decides nothing about what a failure means for the worker: that is the
-// caller's, because a failure on the worker's own store is evidence about the
-// worker's database contact and a failure on one tenant's store is not.
-func (w *Worker) reapStore(store engine.WorkflowStore, tenant string, staleTimeout, missedBeat time.Duration) (int, error) {
+// tick. It returns how many runs it reclaimed, whether ANY unit was suppressed
+// this tick (suspected stall, its sticky continuation, or a probe that failed
+// closed), and the last unit failure. It decides nothing about what a failure
+// means for the worker: that is the caller's, because a failure on the worker's
+// own store is evidence about the worker's database contact and a failure on
+// one tenant's store is not.
+func (w *Worker) reapStore(store engine.WorkflowStore, tenant string, staleTimeout, missedBeat time.Duration) (int, bool, error) {
 	var lastErr error
 	var reaped int
+	var anySuppressed bool
 	for _, unit := range w.reapUnitsOf(store, tenant) {
 		suppressed := false
 		if detector, ok := unit.store.(engine.DBStallDetector); ok {
@@ -5956,6 +5954,7 @@ func (w *Worker) reapStore(store engine.WorkflowStore, tenant string, staleTimeo
 			}
 		}
 		if suppressed {
+			anySuppressed = true
 			continue
 		}
 		n, err := w.reapUnitOnce(unit, staleTimeout)
@@ -5964,7 +5963,7 @@ func (w *Worker) reapStore(store engine.WorkflowStore, tenant string, staleTimeo
 			lastErr = err
 		}
 	}
-	return reaped, lastErr
+	return reaped, anySuppressed, lastErr
 }
 
 // reapOtherTenants is the reaper's pass over every tenant other than the
@@ -5999,8 +5998,12 @@ func (w *Worker) reapOtherTenants(staleTimeout, missedBeat time.Duration) int {
 	var reaped, failedTenants int
 	var firstErr error
 	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
-		n, rerr := w.reapStore(st, tenantID, staleTimeout, missedBeat)
+		n, _, rerr := w.reapStore(st, tenantID, staleTimeout, missedBeat)
 		reaped += n
+		if w.maxReclaimPerTick > 0 && n >= w.maxReclaimPerTick {
+			w.logger.WarnContext(w.ctx, "Reaper: hit the per-tick reclaim limit for a tenant; more of its instances remain stale",
+				"worker_id", w.id, "tenant_id", tenantID, "count", n, "limit", w.maxReclaimPerTick)
+		}
 		if rerr != nil {
 			failedTenants++
 			if firstErr == nil {
@@ -6055,7 +6058,7 @@ func (w *Worker) reapOnce() {
 	missedBeat := missedBeatThreshold(w.heartbeatInterval)
 
 	// The worker's own tenant first, through w.store, exactly as before.
-	reaped, lastErr := w.reapStore(w.store, "", staleTimeout, missedBeat)
+	reaped, ownSuppressed, lastErr := w.reapStore(w.store, "", staleTimeout, missedBeat)
 	if lastErr != nil {
 		w.recordDBTrouble()
 		skips := w.recordReapSkip()
@@ -6073,8 +6076,21 @@ func (w *Worker) reapOnce() {
 	// The worker's own tenant reaped cleanly; now every other tenant's runs
 	// (cleat#3570). After, and only if, the own pass succeeded: a failure there is
 	// the worker's own database trouble, which says nothing is safe to reclaim.
+	//
+	// And NOT when the own pass suppressed any unit this tick. cleat#2006's
+	// suppression decides that the stale set looks like a database stall and not
+	// dead workers, and it needs several distinct holders in scope to say so; a
+	// tenant with one holder never qualifies through its own store, so under the
+	// same stall it would be reclaimed while the own tenant waits. The own
+	// store's verdict is the only whole-database evidence this worker has, so it
+	// gates the rest. (cleat-review on #3574, measured with doubles.)
 	ownReaped := reaped
-	reaped += w.reapOtherTenants(staleTimeout, missedBeat)
+	if ownSuppressed {
+		w.logger.WarnContext(w.ctx, "Reaper: the own store's stale set looks like a suspected database stall -- not reaping other tenants this tick either",
+			"worker_id", w.id)
+	} else {
+		reaped += w.reapOtherTenants(staleTimeout, missedBeat)
+	}
 	if reaped > 0 {
 		w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
