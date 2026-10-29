@@ -145,8 +145,11 @@ func isSensitiveWord(words []string, i int) bool {
 		return true
 	}
 	switch {
-	case strings.Contains(w, "tokeniz"):
-		return false // tokenizer, tokenization: a text-processing term, never a credential
+	case strings.HasSuffix(w, "tokenizer") || strings.HasSuffix(w, "tokenizers"):
+		// A text-processing term. NARROW on purpose: tokenization_key (Braintree's
+		// client credential, by that name), tokenized_pan and detokenize hold
+		// "tokeniz" too and were redacted before, so they still are.
+		return false
 	case w == "tokens":
 		return !isTokenCount(words, i)
 	case strings.HasSuffix(w, "tokens") && isFusedTokenCount(w):
@@ -168,7 +171,7 @@ func isSensitiveWord(words []string, i int) bool {
 // LLM workflow carries, replaced with "[REDACTED]" before the workflow saw them
 // while the caller got a 2xx (cleat#3581). Any word holding `token` is still
 // sensitive, fused or not (token, accesstoken, tokenvalue, accesstokens), except
-// tokenizer-style words and the plural `tokens` when a count word is adjacent
+// tokenizer and tokenizers and the plural `tokens` when a count word is adjacent
 // (max_tokens, tokens_used, tokens_per_minute); a key whose LAST word is a
 // descriptor (token_usage, credential_type) is not sensitive.
 //

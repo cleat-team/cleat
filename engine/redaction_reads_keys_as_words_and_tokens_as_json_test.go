@@ -30,7 +30,7 @@ func TestOrdinaryDataIsNotRedacted(t *testing.T) {
 		`{"max_tokens":5}`,
 		`{"token_usage":{"input_tokens":3,"output_tokens":4}}`,
 		`{"usage":{"input_tokens":3,"output_tokens":4}}`,
-		`{"tokenizer":"cl100k","token_count":12,"tokens_per_minute":900}`,
+		`{"tokenizer":"cl100k","token_count":12,"tokens_per_minute":900,"access_tokens_used":4}`,
 		`{"password_policy":"strict","credential_type":"oauth","secret_name":"db","token_expires_at":"2026-10-29"}`,
 		`"1.2.3"`,
 	} {
@@ -109,8 +109,14 @@ func TestIsSensitiveFieldReadsWords(t *testing.T) {
 		"maxTokens": false, "tokens_per_minute": false, "tokens_used": false,
 		"cached_tokens": false, "used_tokens": false, "remaining_tokens": false, "tokens_remaining": false,
 		"maxtokens": false, "inputtokens": false, "completion_tokens_details": false,
-		"tokenization": false, "tokenizers": false, "tokenizer_name": false,
-		"token_usage": false, "token_count": false, "token_limit": false, "token_type": false,
+		"tokenizers": false, "tokenizer_name": false, "texttokenizer": false,
+		// "tokeniz" is NOT an exemption of its own: these hold it and are credentials
+		// or name one, and the old substring match redacted every one.
+		"tokenization": true, "tokenization_key": true, "tokenized_pan": true, "tokenizedcard": true, "detokenize": true,
+		// A count of access tokens used is a count, and max_access_tokens (above) is
+		// not: that asymmetry is the adjacency rule and it is deliberate.
+		"access_tokens_used": false,
+		"token_usage":        false, "token_count": false, "token_limit": false, "token_type": false,
 		"token_expires_at": false, "tokenizer": false,
 		"password_policy": false, "password_min_length": false, "credential_type": false,
 		"secret_name": false, "api_key_name": false,
