@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // An operator key can be NARROWED. cleat#3552 (B2b-1).
@@ -119,9 +121,28 @@ func (o Operator) MayReach(method string, u *url.URL) bool {
 // the mux does with each spelling, a scoped key is held to the one spelling that
 // cannot differ. A client has no reason to encode this path.
 //
-// The route's handler arrives in the next change (B2b-2). It is listed here first
-// because the gate has to exist before the thing it gates does: a handler added
-// without it would be reachable by every operator key the moment it was registered.
+// Two routes: the create, and the confirm that ends the handshake (see auth/tenant_provision.go).
+// Both were listed here before their handlers existed, because the gate has to exist before the
+// thing it gates does: a handler added without it would be reachable by every operator key
+// the moment it was registered.
 func provisionMayReach(method string, u *url.URL) bool {
-	return method == http.MethodPost && u.RawPath == "" && u.Path == OperatorRoutePrefix+"tenants"
+	if method != http.MethodPost || u.RawPath != "" {
+		return false
+	}
+	if u.Path == OperatorRoutePrefix+"tenants" {
+		return true
+	}
+	// The last step of the handshake: POST /api/admin/tenants/<id>/confirm. The id must be in
+	// the one canonical spelling (lower-case, hyphenated) so that the segment this gate saw is
+	// byte for byte the one the mux and the handler see.
+	rest, found := strings.CutPrefix(u.Path, OperatorRoutePrefix+"tenants/")
+	if !found {
+		return false
+	}
+	id, tail, hasTail := strings.Cut(rest, "/")
+	if !hasTail || tail != "confirm" {
+		return false
+	}
+	parsed, err := uuid.Parse(id)
+	return err == nil && parsed.String() == id
 }

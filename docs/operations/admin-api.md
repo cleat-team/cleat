@@ -42,11 +42,71 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 | `POST /api/admin/tenants/{tenant}/instances/{id}/force-fail` | one workflow, in the named tenant | as above |
 | `POST /api/admin/tenants/{tenant}/instances/{id}/re-replay` | one workflow, in the named tenant | as above |
 | `POST /api/admin/tenants/{tenant}/instances/{id}/steps/{n}/resolve` | one workflow's step, in the named tenant | as above |
+| `POST /api/admin/tenants` | creates a tenant (and its org, by name) and mints its first key | **operator credential only**: a tenant key gets `403` |
+| `POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": …}` | makes that key permanent | **operator credential only**, and only the principal that created the tenant |
 
 The id-only tenant-scoped routes are checked by `callerOwnsTarget` before anything runs, and answer 404 (never
 403) for another tenant's workflow, so they do not confirm it exists. They sit behind the flag because they are
 destructive operator actions, not because they cross tenants — the tenant-named form below is the one that
 crosses, and only for an operator.
+
+## Creating a tenant
+
+`POST /api/admin/tenants` creates a tenant, and `POST /api/admin/tenants/{tenant}/confirm` ends the handshake.
+Both need an **operator credential** (a tenant key is refused with `403`, because a tenant key reaches
+`/api/admin/*` when this flag is on and must not create tenants), and both answer `501` on a worker that cannot
+provision: MySQL, which is single-tenant, or a sharded worker.
+
+A service that only creates tenants should hold a **provision-scoped** operator key, not an admin one:
+
+```bash
+cleatctl operator-key create --scope provision --principal clew-service --description "tenant provisioning"
+```
+
+That key reaches exactly these two routes, and nothing else under `/api/admin/` (drain, force-complete and the
+rest are `403`). The `principal` is a name you choose; rotating the key keeps the principal, so it keeps
+authority over the tenants it created.
+
+```bash
+curl -X POST -H "Authorization: Bearer $PROVISION_KEY" -H 'Content-Type: application/json' \
+  http://worker:8080/api/admin/tenants \
+  -d '{"tenant_id":"<uuid, optional>","display_name":"Acme","org_name":"Acme Org","key":{"description":"first key"}}'
+```
+
+| Field | |
+|---|---|
+| `tenant_id` | optional. A UUID **you** choose makes the create idempotent. The nil UUID is refused (it is the default tenant). Omitted, one is generated. |
+| `name` | optional, unique across the whole deployment (not per org). Omitted, it is the tenant id. |
+| `display_name` | optional, not part of identity. |
+| `org_id` **or** `org_name` | exactly one. `org_name` finds the org or creates it. |
+| `key.description` | optional label for the first key. |
+
+**The key is provisional until you confirm it.** The create returns `201` with a key that authenticates
+immediately and **lapses after 15 minutes** (`valid_for_seconds`). Store it durably, then
+`POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": "<the key_id the create returned>"}`: that key becomes
+permanent. **Confirm names the key**, because a repeated create can replace it: if a retry and a stalled original both
+reach the worker, the second is issued a new key and the first is revoked, and a confirm that took no key id would
+make permanent whichever one was live, possibly one nobody holds. A confirm of a replaced key is `409`. If the response is lost, or you crash
+before storing, do nothing: the key lapses on its own, and repeating the same create returns `200` with a **fresh**
+key (the previous provisional one is revoked). Once a key is confirmed, repeating the create returns `200` with the
+tenant and **no key**, so a replay can never be used to obtain a second working key.
+
+| Request | Result |
+|---|---|
+| id free, name free | `201`, the tenant and a provisional key |
+| id exists, same name and org, created by this principal, no confirmed key | `200`, a fresh provisional key |
+| the same, with a confirmed key | `200`, no key |
+| id exists with a different name or org | `409 tenant_differs`, with `fields` naming which |
+| id exists and **another principal** created it, or it was made offline | `409 tenant_exists`, with nothing about the tenant |
+| name held by another tenant | `409 name_taken` |
+| `org_id` names no org | `404` |
+| confirm, the named key lapsed, was replaced by a repeat, or is not this tenant's | `409 no_provisional_key`: repeat the create |
+| confirm, not this principal's tenant | `404` |
+| confirm without a `key_id`, or a malformed one | `400` |
+
+A tenant made offline (`cleat-worker --create-tenant`) has no recorded creator, so no provisioner can replay or
+confirm it: this route can only ever mint a key for a tenant it created. The creation is audited on the new
+tenant's own chain, with the principal as the subject.
 
 ## Acting on another tenant
 

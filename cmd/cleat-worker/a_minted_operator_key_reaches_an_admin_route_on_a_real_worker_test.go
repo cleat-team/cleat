@@ -72,6 +72,7 @@ type chainFixture struct {
 	reachedB       *bool  // tenant B's store was opened for a force-complete
 	hostBindingAsk *bool
 	storeB         *mockStore
+	api            *apiServer
 	// noted is what the audit slot held when the request finished; see
 	// a_handler_names_the_tenant_it_acted_on_test.go.
 	noted *notedTarget
@@ -112,7 +113,7 @@ func buildChainAround(t *testing.T, requireHostMatch bool, wrap func(*notedTarge
 		tenantAKey: auth.GenerateAPIKey(), forgedOpKey: auth.GenerateOperatorKey(),
 		unknownTenant: auth.GenerateAPIKey(),
 		listed:        &listed, reachedB: &reachedB, hostBindingAsk: &asked,
-		storeB: storeB, noted: &notedTarget{},
+		storeB: storeB, noted: &notedTarget{}, api: api,
 	}
 	h := func(k string) [32]byte { return sha256.Sum256([]byte(k)) }
 	keys := &keyTable{

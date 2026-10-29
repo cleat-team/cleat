@@ -2522,6 +2522,7 @@ func main() {
 			taskQueues:           taskQueues,
 			requireAuth:          *requireAuth,
 			streamHub:            streamHub,
+			provisioner:          tenantProvisionerFor(*driver, store, authResolver),
 
 			maxStreamPollReaders: *maxStreamPollReadersFlag,
 			streamPollInterval:   *streamPollIntervalFlag,

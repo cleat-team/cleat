@@ -46,6 +46,12 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 func (s *apiServer) handleAdminRoutesForTenant(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/admin/tenants/")
 	tenant, tail, ok := strings.Cut(rest, "/")
+	if ok && tenant != "" && tail == "confirm" {
+		// cleat#3552: the last step of the provisioning handshake. Not an instance route, so it
+		// is dispatched before the instance-prefix check below would 404 it.
+		s.handleConfirmProvisionedTenant(w, r, tenant)
+		return
+	}
 	if !ok || tenant == "" || !strings.HasPrefix(tail, "instances/") {
 		s.writeError(w, 404, "not found")
 		return
