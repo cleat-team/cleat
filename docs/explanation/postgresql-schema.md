@@ -163,7 +163,12 @@ Two properties are enforced by the database, not by a route:
   `DELETE`, and nobody has `UPDATE`, so a member cannot change once published.
 - **A member in use cannot be deleted.** The foreign key from `workflow_defs` to
   `library.members` is `ON DELETE RESTRICT`, and it holds across tenants even though
-  row-level security hides other tenants' rows from the deleting session.
+  row-level security hides other tenants' rows from the deleting session. That key is
+  created `NOT VALID`, so `pg_constraint.convalidated` is false for it and that is not a
+  gap: validating it scans `workflow_defs` under `FORCE ROW LEVEL SECURITY`, which fails
+  for a migrating role that is not a superuser, every row that existed when it was added
+  has `library` NULL (which a foreign key never checks), and every later insert, update
+  and delete is checked.
 
 `tenant_library_installs` has `tenant_id` and a row-level security policy like every
 tenant table, and `admin.drop_tenant` removes it. The `library` tables have no
