@@ -191,9 +191,14 @@ func runACrashedTenantsRunIsReclaimed(t *testing.T, rig *hbRig) {
 		t.Fatalf("the reclaimed run was never claimable by the survivor (logs:\n%s)", logs.String())
 	}
 	w.inflight.Store(wfID, mine)
-	// This worker runs no heartbeat loop, and the reap above took longer than its
-	// reclaim window, so without this the guest's first durable call is refused as
-	// "heartbeat presumed lost" (cleat#2008): a fact about the harness, not the reaper.
+	// This worker runs no heartbeat loop, so once its reclaim window has passed the
+	// guest's first durable call is refused as "heartbeat presumed lost"
+	// (cleat#2008): a fact about the harness, not the reaper. The window was 1s so
+	// the reap above would see the crashed holder as stale quickly, and a cold
+	// wasmtime compile on a slow runner outlasts it (CI failed this test, and so did
+	// one of cleat-review's runs). It is not widened to a guess: the reap is done, so
+	// the window is now an hour and no timing of the guest can reach it.
+	w.reclaimTimeout = time.Hour
 	w.lastHeartbeatOK.Store(time.Now().UnixNano())
 	runExecuteWorkflow(w, mine)
 
