@@ -360,10 +360,13 @@ func TestResetPatterns(t *testing.T) {
 func TestLoadRedactPatterns_Duplicates(t *testing.T) {
 	defer ResetPatterns()
 
-	// Load patterns that duplicate built-in sensitive patterns.
+	// A repeated line is loaded once, whatever its case. A line that spells a
+	// built-in name is NOT a duplicate (see
+	// TestACustomPatternSpelledLikeABuiltinIsALoadedRule): since the built-ins read
+	// a key as words, the same spelling as a custom pattern is a wider rule.
 	dir := t.TempDir()
 	path := dir + "/dups.txt"
-	content := "# duplicate test\ntoken\nsecret\nmy-custom\n"
+	content := "# duplicate test\ntoken\nsecret\nmy-custom\nMY-CUSTOM\ntoken\n"
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -372,9 +375,14 @@ func TestLoadRedactPatterns_Duplicates(t *testing.T) {
 		t.Fatalf("LoadRedactPatterns: %v", err)
 	}
 
-	// "token" and "secret" are duplicates (in sensitivePatterns) and should not be added.
-	// Only "my-custom" is genuinely new.
-	if len(customPatterns) != 1 || customPatterns[0] != "my-custom" {
-		t.Errorf("customPatterns = %v, want [my-custom]", customPatterns)
+	want := []string{"token", "secret", "my-custom"}
+	if len(customPatterns) != len(want) {
+		t.Fatalf("customPatterns = %v, want %v", customPatterns, want)
+	}
+	for i := range want {
+		if customPatterns[i] != want[i] {
+			t.Errorf("customPatterns = %v, want %v", customPatterns, want)
+			break
+		}
 	}
 }

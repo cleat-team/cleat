@@ -74,3 +74,47 @@ func TestACustomRedactionPatternRedactsItsField(t *testing.T) {
 		t.Errorf("a custom pattern outlived ResetPatterns: %s", got)
 	}
 }
+
+// A custom pattern that spells a built-in name is a different rule, not a
+// duplicate of it. The built-in "token" reads a key as words, so it leaves
+// max_tokens, token_usage and tokenizer_name alone; a custom "token" is a
+// substring of the whole key and redacts all three. LoadRedactPatterns used to
+// drop the line as a duplicate of the built-in (it dated from when the built-ins
+// were substrings), so an operator who wrote "token" to catch max_tokens loaded
+// nothing and was told nothing.
+func TestACustomPatternSpelledLikeABuiltinIsALoadedRule(t *testing.T) {
+	defer ResetPatterns()
+
+	const body = `{"max_tokens":"v1","token_usage":"v2","tokenizer_name":"v3","name":"keep"}`
+
+	// The control: with no custom list, the built-in leaves these three alone. If a
+	// future change makes the built-in redact them, the case below proves nothing
+	// and this says so.
+	got := Redact(body)
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if !strings.Contains(got, v) {
+			t.Fatalf("the built-ins already redact the value %q, so this test no longer tests the custom list: %s", v, got)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "patterns.txt")
+	if err := os.WriteFile(path, []byte("token\nsecret\npassword\nprivate-key\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadRedactPatterns(path); err != nil {
+		t.Fatalf("LoadRedactPatterns: %v", err)
+	}
+	if len(customPatterns) != 4 {
+		t.Errorf("customPatterns = %v, want all four lines loaded", customPatterns)
+	}
+
+	got = Redact(body)
+	for _, v := range []string{"v1", "v2", "v3"} {
+		if strings.Contains(got, v) {
+			t.Errorf("custom \"token\" did not redact the value %q: %s", v, got)
+		}
+	}
+	if !strings.Contains(got, `"name":"keep"`) {
+		t.Errorf("a key the pattern does not name was changed: %s", got)
+	}
+}
