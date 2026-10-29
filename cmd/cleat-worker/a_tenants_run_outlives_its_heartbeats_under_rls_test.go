@@ -78,7 +78,12 @@ type hbRig struct {
 	visibleRows func(t *testing.T, tenant, wfID string) int
 	// heartbeatAt reads the run's heartbeat_at as the given tenant.
 	heartbeatAt func(t *testing.T, tenant, wfID string) time.Time
-	tenant      string
+	// expireDeferDeadline moves the run's defer-phase deadline an hour into the
+	// past, so a sweep sees a phase that has outrun it without the test waiting
+	// out deferPhaseTimeout. It writes a database-generated timestamp: the Go
+	// process and the server do not share a clock.
+	expireDeferDeadline func(t *testing.T, tenant, wfID string)
+	tenant              string
 }
 
 func TestATenantsRunOutlivesItsHeartbeatsUnderRLS(t *testing.T) {
@@ -154,6 +159,18 @@ func postgresHBRig(t *testing.T, owner, db *sql.DB, policyApplies bool, tenant s
 				t.Fatalf("reading heartbeat_at: %v", err)
 			}
 			return at
+		},
+		// workflow_leases is the only copy of the deadline that is written and swept.
+		// The superuser connection can see every tenant's row, so it can move it.
+		expireDeferDeadline: func(t *testing.T, _ string, wfID string) {
+			t.Helper()
+			res, err := owner.Exec(`UPDATE workflow_leases SET defer_phase_deadline = now() - interval '1 hour' WHERE id = $1`, wfID)
+			if err != nil {
+				t.Fatalf("expiring the defer-phase deadline: %v", err)
+			}
+			if n, _ := res.RowsAffected(); n != 1 {
+				t.Fatalf("expiring the defer-phase deadline touched %d lease row(s), want 1", n)
+			}
 		},
 	}
 }
@@ -273,6 +290,19 @@ func mssqlHBRig(t *testing.T, tenant string) *hbRig {
 				}
 			})
 			return at
+		},
+		expireDeferDeadline: func(t *testing.T, tenant, wfID string) {
+			t.Helper()
+			asTenant(t, tenant, func(c *sql.Conn) {
+				res, err := c.ExecContext(ctx,
+					`UPDATE workflow_instances SET defer_phase_deadline = DATEADD(SECOND, -3600, SYSUTCDATETIME()) WHERE id = @p1`, wfID)
+				if err != nil {
+					t.Fatalf("expiring the defer-phase deadline: %v", err)
+				}
+				if n, _ := res.RowsAffected(); n != 1 {
+					t.Fatalf("expiring the defer-phase deadline touched %d instance row(s), want 1", n)
+				}
+			})
 		},
 	}
 }
