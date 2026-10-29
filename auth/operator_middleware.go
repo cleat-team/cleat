@@ -121,6 +121,14 @@ func OperatorMiddleware(store OperatorResolver, admin http.Handler) func(http.Ha
 
 			r = r.WithContext(WithOperator(r.Context(), op))
 			if strings.HasPrefix(strings.ToLower(r.URL.Path), OperatorRoutePrefix) {
+				// The audit log reads the subject and records it as user_id. An operator request
+				// carries no tenant, so without this its row is the default tenant's own, with
+				// no sign of who acted (cleat#3559). Operator.String() is "operator:<KeyID>", the
+				// form the admin handlers already log. KeyID is a random UUID generated at mint
+				// time, shown by `cleatctl operator-key list`; it is not derived from the key and
+				// reveals nothing that could be used as one. Set only here: a request served by
+				// the tenant chain is not an operator action.
+				r = r.WithContext(WithSubject(r.Context(), op.String()))
 				// Around the tenant layer; see the doc comment.
 				admin.ServeHTTP(w, r)
 				return

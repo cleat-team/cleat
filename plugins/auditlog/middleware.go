@@ -63,6 +63,18 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 
 		tid, _ := auth.TenantIDFromContext(r.Context())
+		if _, isOperator := auth.OperatorFromContext(r.Context()); isOperator {
+			// An operator acts ON a tenant, it is not one, so its row goes on the chain of the
+			// tenant the route names -- the tenant's owner can then read, in their own
+			// tamper-evident log, who acted on them -- and otherwise on the default tenant's,
+			// where it can now be told apart by the operator:<KeyID> subject. cleat#3559.
+			//
+			// A tenant already in the context is IGNORED here, not preferred. An operator
+			// request has none, so one that is present was put there by something that does not
+			// authenticate (the header: tenant resolver reads a client-supplied header outside
+			// the auth chain), and trusting it would let a caller choose whose chain the row lands on.
+			tid, _ = auth.OperatorTargetTenant(r.URL.Path)
+		}
 		// ok is deliberately ignored: an unauthenticated request has no
 		// subject to record, and that is a fact worth an empty user_id, not a
 		// reason to refuse the request or fail this write. cleat#1881.
