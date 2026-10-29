@@ -5409,16 +5409,39 @@ func (e *stallSuppressionEpisode) evaluate(shape engine.StaleSetShape, reclaimAf
 // one shard of a MultiShard one.
 type reapUnit struct {
 	// name is the shard name for a MultiShard store, "" for a plain one.
-	name  string
-	store engine.WorkflowStore
+	name string
+	// tenant is "" for the worker's own tenant and the tenant's id for another
+	// tenant's store (cleat#3570).
+	tenant string
+	store  engine.WorkflowStore
 }
 
-// logLabel is what reapOnce logs and tags the suspected-stall metric with.
-func (u reapUnit) logLabel() string {
+// shardLabel is the shard alone, "default" for a plain store. It is what the
+// suspected-stall metric is tagged with, and deliberately carries no tenant: a
+// tenant id is an unbounded label.
+func (u reapUnit) shardLabel() string {
 	if u.name == "" {
 		return "default"
 	}
 	return u.name
+}
+
+// logLabel is what reapOnce logs: the shard, with the tenant in front when it is
+// not the worker's own.
+func (u reapUnit) logLabel() string {
+	if u.tenant == "" {
+		return u.shardLabel()
+	}
+	return u.tenant + "/" + u.shardLabel()
+}
+
+// episodeKey names the unit's cleat#2006 suppression episode. The worker's own
+// units keep the bare shard name they have always had.
+func (u reapUnit) episodeKey() string {
+	if u.tenant == "" {
+		return u.name
+	}
+	return u.tenant + "/" + u.name
 }
 
 // reapUnits enumerates what reapOnce processes this tick. A MultiShard
@@ -5428,15 +5451,22 @@ func (u reapUnit) logLabel() string {
 // a healthy sibling, and a healthy majority must not mask a genuinely
 // stalled minority. A plain store yields exactly one unit.
 func (w *Worker) reapUnits() []reapUnit {
-	ms, ok := w.store.(engine.MultiShard)
+	return w.reapUnitsOf(w.store, "")
+}
+
+// reapUnitsOf is reapUnits for any one store: the worker's own (tenant "") or
+// one tenant's. A tenant's store from the sharded factory is a ShardedStore
+// scoped to that tenant, so it yields one unit per shard like the worker's own.
+func (w *Worker) reapUnitsOf(store engine.WorkflowStore, tenant string) []reapUnit {
+	ms, ok := store.(engine.MultiShard)
 	if !ok {
-		return []reapUnit{{store: w.store}}
+		return []reapUnit{{tenant: tenant, store: store}}
 	}
 	names := ms.ShardNames()
 	units := make([]reapUnit, 0, len(names))
 	for _, name := range names {
-		if store, ok := ms.ShardStore(name); ok {
-			units = append(units, reapUnit{name: name, store: store})
+		if shard, ok := ms.ShardStore(name); ok {
+			units = append(units, reapUnit{name: name, tenant: tenant, store: shard})
 		}
 	}
 	return units
@@ -5868,6 +5898,131 @@ func (w *Worker) reapUnitOnce(unit reapUnit, staleTimeout time.Duration) (int, e
 	return n, err
 }
 
+// reapStore is one reap pass over one tenant's store: one unit per shard for a
+// MultiShard store, or one plain unit -- see reapUnits' doc. tenant is "" for the
+// worker's own store and the tenant's id for another tenant's (cleat#3570).
+//
+// Units are processed independently: cleat#2006's suspected-stall suppression,
+// and any failure, on one unit must not affect a healthy sibling's reclaim this
+// tick. It returns how many runs it reclaimed and the last unit failure, and
+// decides nothing about what a failure means for the worker: that is the
+// caller's, because a failure on the worker's own store is evidence about the
+// worker's database contact and a failure on one tenant's store is not.
+func (w *Worker) reapStore(store engine.WorkflowStore, tenant string, staleTimeout, missedBeat time.Duration) (int, error) {
+	var lastErr error
+	var reaped int
+	for _, unit := range w.reapUnitsOf(store, tenant) {
+		suppressed := false
+		if detector, ok := unit.store.(engine.DBStallDetector); ok {
+			var shape engine.StaleSetShape
+			shapeErr := w.probeBoundedCall(func(reapCtx context.Context) error {
+				var err error
+				shape, err = detector.StaleSetShape(reapCtx, staleTimeout, missedBeat)
+				return err
+			})
+			if shapeErr != nil {
+				// FAIL CLOSED, not open (cleat-review on cleat#2006,
+				// 2026-09-24). This used to fall through to the ordinary
+				// reclaim attempt below, unsuppressed -- but a slow or
+				// failing aggregate over the very table ReapStaleInstances
+				// is about to UPDATE is exactly the shape a genuine
+				// database stall takes. Treating "I could not check" as
+				// "assume it's fine" defeats the whole point of checking:
+				// the one tick this probe is most likely to fail is the
+				// one where suppressing matters most. Skip this unit's
+				// reclaim for the tick instead, the same as an explicit
+				// Suppress=true decision; recordDBTrouble below still
+				// covers the probe failure itself.
+				lastErr = shapeErr
+				w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall probe failed -- skipping this unit's reclaim this tick rather than reclaiming blind",
+					"worker_id", w.id, "shard", unit.logLabel(), "error", shapeErr)
+				suppressed = true
+			} else {
+				episode := w.stallEpisodeFor(unit.episodeKey())
+				decision := episode.evaluate(shape, staleTimeout, time.Now())
+				if decision.BoundHit {
+					w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall suppression bound reached -- reclaiming despite a stall-shaped stale set; this may be a genuine mass worker failure rather than a database stall",
+						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat, "bound", staleTimeout,
+						"protection_lower", stallProtectionLower(w.heartbeatInterval, staleTimeout),
+						"protection_upper", stallProtectionUpper(w.heartbeatInterval, staleTimeout))
+				}
+				if decision.Suppress {
+					w.logger.WarnContext(w.ctx, "Reaper: stale set looks like a suspected database stall, not dead workers -- deferring reclaim by one tick",
+						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat,
+						"missed_beat_distinct_assigned_to", shape.MissedBeatDistinctAssignedTo)
+					w.Metrics.RecordSuspectedDBStall(w.ctx, attribute.String("shard", unit.shardLabel()))
+					suppressed = true
+				}
+			}
+		}
+		if suppressed {
+			continue
+		}
+		n, err := w.reapUnitOnce(unit, staleTimeout)
+		reaped += n
+		if err != nil {
+			lastErr = err
+		}
+	}
+	return reaped, lastErr
+}
+
+// reapOtherTenants is the reaper's pass over every tenant other than the
+// worker's own, through that tenant's own store (cleat#3570).
+//
+// ReapStaleInstances carries no tenant predicate; what it can see is whatever
+// the row-level-security policy (PostgreSQL) or security policy (SQL Server)
+// admits for the store's tenant. The reaper used to run through w.store only, so
+// a crashed worker's run of any OTHER tenant was invisible to every survivor:
+// measured with two workers as cleat_app, the run stayed `running` on the dead
+// worker with a frozen heartbeat_at for as long as it was watched, while a run of
+// the survivor's own tenant was reclaimed within the window. The claim,
+// the schedule loop and, since cleat#3566, the heartbeat already visit each
+// tenant; the reaper is the one that carries the consequence of not doing so.
+//
+// A role that sees every tenant's rows was considered and rejected: it is a
+// standing privilege to defend, and the per-tenant enumeration already exists.
+//
+// A tenant's failure is that tenant's, and is not the worker's database trouble:
+// it is logged and counted, it does not call recordDBTrouble or recordReapSkip
+// (which keep THIS worker's reaper in grace), and the other tenants are still
+// reaped. A worker's own store failing is what says the database is in trouble,
+// and that is decided before this runs.
+//
+// Returns how many runs it reclaimed. It does nothing for a worker that cannot
+// serve other tenants (no factory, a store that cannot list them, or
+// --claim-across-tenants off): its own tenant was all it ever reaped.
+func (w *Worker) reapOtherTenants(staleTimeout, missedBeat time.Duration) int {
+	if !w.claimAcrossTenants {
+		return 0
+	}
+	var reaped, failedTenants int
+	var firstErr error
+	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+		n, rerr := w.reapStore(st, tenantID, staleTimeout, missedBeat)
+		reaped += n
+		if rerr != nil {
+			failedTenants++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("tenant %s: %w", tenantID, rerr)
+			}
+		}
+	})
+	if err != nil {
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			w.logger.ErrorContext(w.ctx, "Reaper: could not list tenants; other tenants' stale runs were not reaped this tick",
+				"worker_id", w.id, "error", err)
+		}
+		return 0
+	}
+	if sweep.OpenFailed > 0 || failedTenants > 0 {
+		w.logger.WarnContext(w.ctx, "Reaper: some tenants could not be reaped this tick; their stale runs wait for the next",
+			"worker_id", w.id, "tenants", sweep.Visited, "open_failed", sweep.OpenFailed, "reap_failed", failedTenants,
+			"first_open_error", sweep.FirstErr, "first_reap_error", firstErr)
+	}
+	return reaped
+}
+
 // reapOnce is one reaper tick, extracted from reaperLoop so a test can drive
 // it directly without a ticker. cleat#2005.
 func (w *Worker) reapOnce() {
@@ -5899,65 +6054,8 @@ func (w *Worker) reapOnce() {
 	staleTimeout := w.reclaimAfter()
 	missedBeat := missedBeatThreshold(w.heartbeatInterval)
 
-	// One unit per shard for a MultiShard store, or one plain unit -- see
-	// reapUnits' doc. Processed independently: cleat#2006's suspected-stall
-	// suppression, and any failure, on one unit must not affect a healthy
-	// sibling's reclaim this tick.
-	var reaped int
-	var lastErr error
-	for _, unit := range w.reapUnits() {
-		suppressed := false
-		if detector, ok := unit.store.(engine.DBStallDetector); ok {
-			var shape engine.StaleSetShape
-			shapeErr := w.probeBoundedCall(func(reapCtx context.Context) error {
-				var err error
-				shape, err = detector.StaleSetShape(reapCtx, staleTimeout, missedBeat)
-				return err
-			})
-			if shapeErr != nil {
-				// FAIL CLOSED, not open (cleat-review on cleat#2006,
-				// 2026-09-24). This used to fall through to the ordinary
-				// reclaim attempt below, unsuppressed -- but a slow or
-				// failing aggregate over the very table ReapStaleInstances
-				// is about to UPDATE is exactly the shape a genuine
-				// database stall takes. Treating "I could not check" as
-				// "assume it's fine" defeats the whole point of checking:
-				// the one tick this probe is most likely to fail is the
-				// one where suppressing matters most. Skip this unit's
-				// reclaim for the tick instead, the same as an explicit
-				// Suppress=true decision; recordDBTrouble below still
-				// covers the probe failure itself.
-				lastErr = shapeErr
-				w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall probe failed -- skipping this unit's reclaim this tick rather than reclaiming blind",
-					"worker_id", w.id, "shard", unit.logLabel(), "error", shapeErr)
-				suppressed = true
-			} else {
-				episode := w.stallEpisodeFor(unit.name)
-				decision := episode.evaluate(shape, staleTimeout, time.Now())
-				if decision.BoundHit {
-					w.logger.WarnContext(w.ctx, "Reaper: suspected-database-stall suppression bound reached -- reclaiming despite a stall-shaped stale set; this may be a genuine mass worker failure rather than a database stall",
-						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat, "bound", staleTimeout,
-						"protection_lower", stallProtectionLower(w.heartbeatInterval, staleTimeout),
-						"protection_upper", stallProtectionUpper(w.heartbeatInterval, staleTimeout))
-				}
-				if decision.Suppress {
-					w.logger.WarnContext(w.ctx, "Reaper: stale set looks like a suspected database stall, not dead workers -- deferring reclaim by one tick",
-						"worker_id", w.id, "shard", unit.logLabel(), "running", shape.Running, "missed_beat", shape.MissedBeat,
-						"missed_beat_distinct_assigned_to", shape.MissedBeatDistinctAssignedTo)
-					w.Metrics.RecordSuspectedDBStall(w.ctx, attribute.String("shard", unit.logLabel()))
-					suppressed = true
-				}
-			}
-		}
-		if suppressed {
-			continue
-		}
-		n, err := w.reapUnitOnce(unit, staleTimeout)
-		reaped += n
-		if err != nil {
-			lastErr = err
-		}
-	}
+	// The worker's own tenant first, through w.store, exactly as before.
+	reaped, lastErr := w.reapStore(w.store, "", staleTimeout, missedBeat)
 	if lastErr != nil {
 		w.recordDBTrouble()
 		skips := w.recordReapSkip()
@@ -5972,6 +6070,11 @@ func (w *Worker) reapOnce() {
 	}
 	w.consecutiveReapSkips.Store(0)
 	w.recordDBContactOK()
+	// The worker's own tenant reaped cleanly; now every other tenant's runs
+	// (cleat#3570). After, and only if, the own pass succeeded: a failure there is
+	// the worker's own database trouble, which says nothing is safe to reclaim.
+	ownReaped := reaped
+	reaped += w.reapOtherTenants(staleTimeout, missedBeat)
 	if reaped > 0 {
 		w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "reaper", int64(reaped))
@@ -5996,9 +6099,9 @@ func (w *Worker) reapOnce() {
 	// there is more to reclaim than one tick can carry. Both want an
 	// operator's attention, and neither is visible from the count
 	// alone. cleat#1320.
-	if w.maxReclaimPerTick > 0 && reaped >= w.maxReclaimPerTick {
+	if w.maxReclaimPerTick > 0 && ownReaped >= w.maxReclaimPerTick {
 		w.logger.WarnContext(w.ctx, "Reaper: hit the per-tick reclaim limit; more instances remain stale",
-			"worker_id", w.id, "count", reaped, "limit", w.maxReclaimPerTick,
+			"worker_id", w.id, "count", ownReaped, "limit", w.maxReclaimPerTick,
 			"hint", "a whole-set stall (a boot migration holding a lock, a failover, a paused volume) ages every heartbeat at once; recovery continues on later ticks")
 	}
 	w.expireDeferPhases()
