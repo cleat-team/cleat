@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -49,18 +50,127 @@ func TestAStaleConcurrencyKeyOfAnotherTenantIsReapedUnderRLS(t *testing.T) {
 	if bypass || super {
 		t.Fatalf("the RLS role has BYPASSRLS=%v SUPERUSER=%v; this test would measure nothing", bypass, super)
 	}
+	const other = "77777777-0000-4000-8000-000000003572"
+	env := postgresKeyEnv(owner, postgresHBRig(t, owner, rlsDB, true, other))
 	t.Run("a non-default tenant's stale key, reaped by a worker whose own tenant is the default", func(t *testing.T) {
-		runAStaleKeyIsReaped(t, owner, rlsDB, "77777777-0000-4000-8000-000000003572")
+		runAStaleKeyIsReaped(t, env, other)
 	})
 	t.Run("the worker's own tenant's stale key (the control: the old code frees this one too)", func(t *testing.T) {
-		runAStaleKeyIsReaped(t, owner, rlsDB, engine.DefaultTenantUUID)
+		runAStaleKeyIsReaped(t, env, engine.DefaultTenantUUID)
 	})
 }
 
-func runAStaleKeyIsReaped(t *testing.T, owner, rlsDB *sql.DB, tenant string) {
+// The SQL Server arm is its own test so that an unset CLEAT_TEST_MSSQL skips it
+// without taking the PostgreSQL arm with it, and the other way round. SQL Server
+// has no principal that bypasses its security policy, so every statement the
+// test itself makes runs on a connection scoped to the tenant it is about.
+func TestAStaleConcurrencyKeyOfAnotherTenantIsReapedUnderRLSOnSQLServer(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping the SQL Server cleat#3572 test")
+	}
+	const other = "88888888-0000-4000-8000-000000003572"
+	env := mssqlKeyEnv(mssqlHBRig(t, other))
+	t.Run("a non-default tenant's stale key, reaped by a worker whose own tenant is the default", func(t *testing.T) {
+		runAStaleKeyIsReaped(t, env, other)
+	})
+	t.Run("the worker's own tenant's stale key (the control: the old code frees this one too)", func(t *testing.T) {
+		runAStaleKeyIsReaped(t, env, engine.DefaultTenantUUID)
+	})
+}
+
+// keyEnv is what the test needs from a dialect beyond the stores: reading the
+// key rows, ending a run without releasing its key, and clearing the test's rows.
+type keyEnv struct {
+	rig       *hbRig
+	keyRows   func(t *testing.T, tenant string) int
+	endHolder func(t *testing.T, tenant, runID string)
+	clear     func(tenant string)
+}
+
+func postgresKeyEnv(owner *sql.DB, rig *hbRig) *keyEnv {
+	return &keyEnv{
+		rig: rig,
+		keyRows: func(t *testing.T, tenant string) int {
+			t.Helper()
+			var n int
+			if err := owner.QueryRow(`SELECT count(*) FROM concurrency_keys WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
+				t.Fatalf("counting key rows: %v", err)
+			}
+			return n
+		},
+		endHolder: func(t *testing.T, _, runID string) {
+			t.Helper()
+			// The lease row carries a run's status; workflow_instances has none.
+			if _, err := owner.Exec(`UPDATE workflow_leases SET status = 'failed' WHERE id = $1`, runID); err != nil {
+				t.Fatalf("ending the holder without releasing its key: %v", err)
+			}
+		},
+		clear: func(tenant string) {
+			_, _ = owner.Exec(`DELETE FROM concurrency_keys WHERE tenant_id = $1`, tenant)
+			_, _ = owner.Exec(`DELETE FROM workflow_leases WHERE id LIKE 'key-reap-3572-%' AND tenant_id = $1`, tenant)
+			_, _ = owner.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'key-reap-3572-%' AND tenant_id = $1`, tenant)
+		},
+	}
+}
+
+func mssqlKeyEnv(rig *hbRig) *keyEnv {
+	ctx := context.Background()
+	// asTenant runs fn on one connection whose SESSION_CONTEXT tenant is set, which
+	// is what every statement of the store's own transactions does.
+	asTenant := func(t *testing.T, tenant string, fn func(c *sql.Conn)) {
+		if t != nil {
+			t.Helper()
+		}
+		c, err := rig.db.Conn(ctx)
+		if err != nil {
+			if t != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		defer c.Close()
+		if _, err := c.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant); err != nil {
+			if t != nil {
+				t.Fatalf("scoping the connection to %s: %v", tenant, err)
+			}
+			return
+		}
+		fn(c)
+	}
+	return &keyEnv{
+		rig: rig,
+		keyRows: func(t *testing.T, tenant string) int {
+			t.Helper()
+			var n int
+			asTenant(t, tenant, func(c *sql.Conn) {
+				if err := c.QueryRowContext(ctx, `SELECT count(*) FROM concurrency_keys WHERE tenant_id = @p1`, tenant).Scan(&n); err != nil {
+					t.Fatalf("counting key rows: %v", err)
+				}
+			})
+			return n
+		},
+		endHolder: func(t *testing.T, tenant, runID string) {
+			t.Helper()
+			asTenant(t, tenant, func(c *sql.Conn) {
+				// SQL Server keeps a run's status on workflow_instances.
+				if _, err := c.ExecContext(ctx, `UPDATE workflow_instances SET status = 'failed' WHERE id = @p1`, runID); err != nil {
+					t.Fatalf("ending the holder without releasing its key: %v", err)
+				}
+			})
+		},
+		clear: func(tenant string) {
+			asTenant(nil, tenant, func(c *sql.Conn) {
+				_, _ = c.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE tenant_id = @p1`, tenant)
+				_, _ = c.ExecContext(ctx, `DELETE FROM workflow_instances WHERE id LIKE 'key-reap-3572-%' AND tenant_id = @p1`, tenant)
+			})
+		},
+	}
+}
+
+func runAStaleKeyIsReaped(t *testing.T, env *keyEnv, tenant string) {
 	t.Helper()
 	ctx := context.Background()
-	rig := postgresHBRig(t, owner, rlsDB, true, tenant)
+	rig := env.rig
 	if tenant != engine.DefaultTenantUUID {
 		rig.register(t, tenant)
 	}
@@ -74,11 +184,7 @@ func runAStaleKeyIsReaped(t *testing.T, owner, rlsDB *sql.DB, tenant string) {
 	// holding the key, which would make the next run's first claim fail for a reason
 	// that has nothing to do with the reaper. Clear this test's rows before and
 	// after, by their id prefix and the tenant's keys.
-	clear := func() {
-		_, _ = owner.Exec(`DELETE FROM concurrency_keys WHERE tenant_id = $1`, tenant)
-		_, _ = owner.Exec(`DELETE FROM workflow_leases WHERE id LIKE 'key-reap-3572-%' AND tenant_id = $1`, tenant)
-		_, _ = owner.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'key-reap-3572-%' AND tenant_id = $1`, tenant)
-	}
+	clear := func() { env.clear(tenant) }
 	clear()
 	t.Cleanup(clear)
 
@@ -103,13 +209,7 @@ func runAStaleKeyIsReaped(t *testing.T, owner, rlsDB *sql.DB, tenant string) {
 		}
 		return id
 	}
-	keyRows := func() int {
-		var n int
-		if err := owner.QueryRow(`SELECT count(*) FROM concurrency_keys WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
-			t.Fatalf("counting key rows: %v", err)
-		}
-		return n
-	}
+	keyRows := func() int { return env.keyRows(t, tenant) }
 	// claimsOf claims for up to n polls and reports whether wfID was among them,
 	// handing back anything else it took, so nothing is left held.
 	claimed := func(wfID string, polls int) bool {
@@ -141,10 +241,7 @@ func runAStaleKeyIsReaped(t *testing.T, owner, rlsDB *sql.DB, tenant string) {
 	if keyRows() != 1 {
 		t.Fatalf("the claimed run holds %d key row(s), want 1: the premise of this test does not hold", keyRows())
 	}
-	// The lease row carries a run's status; workflow_instances has none.
-	if _, err := owner.Exec(`UPDATE workflow_leases SET status = 'failed' WHERE id = $1`, first); err != nil {
-		t.Fatalf("ending the holder without releasing its key: %v", err)
-	}
+	env.endHolder(t, tenant, first)
 	if keyRows() != 1 {
 		t.Fatalf("ending the holder released its key (%d rows); the stale state this test needs was not made", keyRows())
 	}
