@@ -182,6 +182,29 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	// rejection too, so this must not rely on it staying permissive).
 	scoped := scopeToTenant(store, req.TenantID)
 
+	// A suspended tenant starts nothing, from a plugin as from the API.
+	// handleStart (server.go) refuses it with a 403; this path used to have no
+	// such check, so a suspended tenant's schedules, event subscriptions and
+	// job queue kept creating runs. They sat `ready` and unclaimed, because
+	// the rotating claim takes its tenants from ListTenantIDs, which omits a
+	// suspended one -- unstartable and uncancellable, and enough to make
+	// "suspended with no unsettled runs" unsatisfiable (cleat#3594).
+	//
+	// Asked of the SCOPED store, as handleStart asks its tenant-scoped one. A
+	// store that cannot answer (MySQL, which is single-tenant, and a sharded
+	// store) is not refused, which is also what handleStart does; a store that
+	// answers with an ERROR is, because an unreadable flag is not a clear one.
+	if susp, ok := scoped.(engine.TenantSuspensionReader); ok {
+		suspended, err := susp.IsTenantSuspended(ctx, req.TenantID)
+		if err != nil {
+			return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
+		}
+		if suspended {
+			return "", fmt.Errorf("start workflow %s: tenant %s is suspended; no new workflows may be started "+
+				"until an operator resumes it", req.DefName, req.TenantID)
+		}
+	}
+
 	versions, err := scoped.ListVersions(ctx, req.DefName)
 	if err != nil {
 		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)

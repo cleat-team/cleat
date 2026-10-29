@@ -173,6 +173,11 @@ undoes it. Both answer `200 {"tenant_id": "...", "suspended": true|false}` and a
 dropping a tenant (a later step) requires the tenant to be suspended first, and a service that creates tenants must
 be able to take that step for the ones it made without holding a key that can suspend anyone's.
 
+**What suspension does to work that arrives while it lasts.** A start by the API is refused with a `403`. A start by a
+plugin on the tenant's behalf (a cron schedule, an event trigger, a job-queue dispatch) is refused too, and what it
+was going to start is **dropped, not deferred**: resuming the tenant does not release a backlog of firings that
+came due while it was suspended. Runs that were already executing finish, and reads are unaffected (cleat#3594).
+
 | Caller | `suspend` | `resume` |
 |---|---|---|
 | admin operator key | **any** tenant, `200` | **any** tenant, `200` |
