@@ -176,13 +176,21 @@ func runAStaleHolder(t *testing.T, owner, rlsDB *sql.DB, tenant string, ageBelie
 		return w
 	}
 	leaseRow := func() string {
-		var st, assigned string
+		var st, assigned, completedBy, payload string
 		var gen, reclaims int64
-		err := owner.QueryRow(`SELECT status, COALESCE(assigned_to,'<null>'), generation, reclaim_count FROM workflow_leases WHERE id = $1`, wfID).Scan(&st, &assigned, &gen, &reclaims)
+		// completed_by and the payload's result and completed_at are in the row because an unfenced
+		// finalize by the stale holder rewrites THEM and leaves status, assigned_to, generation and
+		// reclaim_count exactly as the run's real finisher left them (measured by cleat-review-69
+		// with the fence pairs removed from finalize_workflow_status: status=done either way).
+		err := owner.QueryRow(`SELECT l.status, COALESCE(l.assigned_to,'<null>'), l.generation, l.reclaim_count,
+				COALESCE(l.completed_by,'<null>'),
+				COALESCE(md5(COALESCE(p.result::text,'')||'@'||COALESCE(p.completed_at::text,'')),'<no payload>')
+			FROM workflow_leases l LEFT JOIN workflow_payloads p ON p.id = l.id AND p.tenant_id = l.tenant_id
+			WHERE l.id = $1`, wfID).Scan(&st, &assigned, &gen, &reclaims, &completedBy, &payload)
 		if err != nil {
 			return "lease row: " + err.Error()
 		}
-		return fmt.Sprintf("status=%s assigned_to=%s generation=%d reclaim_count=%d", st, assigned, gen, reclaims)
+		return fmt.Sprintf("status=%s assigned_to=%s generation=%d reclaim_count=%d completed_by=%s payload=%s", st, assigned, gen, reclaims, completedBy, payload)
 	}
 
 	logsA, logsB := &syncBuffer{}, &syncBuffer{}
