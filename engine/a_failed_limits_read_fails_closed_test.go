@@ -260,3 +260,42 @@ func TestACancellationOnTheLastAttemptIsStillAStop(t *testing.T) {
 		t.Fatal("the guest ran")
 	}
 }
+
+// TestAnAbsentLimitsRowIsAnEmptyReadNotAnError is the other side of failing
+// closed, on every real dialect: a tenant with no settings row, and a run with
+// no row of its own, are the ordinary case, and a store that reported either as
+// an error would now refuse every execution on it. The fake stores above cannot
+// say anything about that, because they decide for themselves what an absent
+// row looks like.
+func TestAnAbsentLimitsRowIsAnEmptyReadNotAnError(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+
+			tr, ok := store.(TenantSettingsReader)
+			if !ok {
+				t.Fatalf("%T is not a TenantSettingsReader: every tenant on it would silently get the flags", store)
+			}
+			if s, err := tr.GetTenantSettings(ctx); err != nil || s != (TenantSettings{}) {
+				t.Fatalf("a tenant with no settings row read as %+v, err=%v; want an empty read and no error", s, err)
+			}
+			rr, ok := store.(RunLimitsReader)
+			if !ok {
+				t.Fatalf("%T is not a RunLimitsReader", store)
+			}
+			if s, err := rr.GetRunLimits(ctx, "no-such-run-"+backend.Name()); err != nil || s != (TenantSettings{}) {
+				t.Fatalf("a run with no row read as %+v, err=%v; want an empty read and no error", s, err)
+			}
+
+			// And through the engine's own preflight, which is what an execution calls.
+			e := NewEngine(nil, nil, WithWorkflowStore(store))
+			e.workflowID = "no-such-run-" + backend.Name()
+			if err := e.ensureLimits(ctx); err != nil {
+				t.Fatalf("ensureLimits on %s with no limits rows: %v", backend.Name(), err)
+			}
+		})
+	}
+}
