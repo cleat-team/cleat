@@ -50,13 +50,7 @@ import (
 // catch, and the guest branches on that secret, so a replay that read the
 // redacted copy takes the other branch. It must stay a body Redact rewrites;
 // the test checks.
-//
-// The marker is built from two pieces, and so is the guest's: a secret scanner
-// reads a whole `"api_key":"<value>"` literal as a credential, and this is a
-// placeholder that must not be one.
-const secretMarker = "sk-live-" + "SECRET123"
-
-const aBodyRedactionRewrites = `{"api_key":"` + secretMarker + `","version":"1.2.3"}`
+const aBodyRedactionRewrites = `{"api_key":"sk-live-SECRET123","version":"1.2.3"}`
 
 func TestReplayReadsWhatTheGuestWasGiven(t *testing.T) {
 	if got := engine.Redact(aBodyRedactionRewrites); got == aBodyRedactionRewrites {
@@ -160,7 +154,7 @@ func TestReplayReadsWhatTheGuestWasGiven(t *testing.T) {
 				t.Fatalf("reading the stored %s: %v", eventType, err)
 			}
 			if tc.childEntry == "" {
-				if dec, _ := base64.StdEncoding.DecodeString(stored); !strings.Contains(string(dec), secretMarker) {
+				if dec, _ := base64.StdEncoding.DecodeString(stored); !strings.Contains(string(dec), "sk-live-SECRET123") {
 					t.Fatalf("the stored response is %q, want the unredacted body: the premise of this test changed", dec)
 				}
 			}
