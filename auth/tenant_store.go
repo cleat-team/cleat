@@ -113,8 +113,8 @@ func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string
 // can be asserted without a database, like createAPIKeyStmt below.
 //
 // MySQL is refused, not given a shape: it is single-tenant by decision
-// (tiers.yaml; the singleton constraint in its migration 038 would reject a
-// second tenant anyway), so a statement for it would be one that cannot succeed.
+// (tiers.yaml, which also says where it is enforced: a database constraint would reject
+// a second tenant anyway), so a statement for it would be one that cannot succeed.
 func createTenantStmt(dialect string) (string, error) {
 	switch dialect {
 	case DialectPostgres:
