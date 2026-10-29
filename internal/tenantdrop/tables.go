@@ -46,9 +46,9 @@ type Table struct {
 // came to be missing from it for twenty migrations.
 var PostgresTables = []Table{
 	{"workflow_instances", `SELECT count(*) FROM workflow_instances WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from workflow_instances.id, via
-	// migrations/postgres/016_workflow_leases_and_payloads.sql (folded into
-	// migrations/postgres/001_schema.sql by #3358) (cleat#3245
+	// ON DELETE CASCADE from workflow_instances.id (workflow_leases_id_fkey and
+	// workflow_payloads_id_fkey in migrations/postgres/001_schema.sql, where
+	// #3358 folded the migration that added them) (cleat#3245
 	// Phase 3 step 1). Listed for the count, as queue_holders is above: a
 	// dropped tenant's lease and payload rows go with its workflow_instances,
 	// and the operator wants to see that. PostgreSQL-only, like
@@ -78,18 +78,21 @@ var PostgresTables = []Table{
 	// most: an operator deleting a tenant wants to see that its credentials
 	// went with it.
 	{"tenant_secrets", `SELECT count(*) FROM tenant_secrets WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from migrations/postgres/093 (cleat#1116). Listed
+	// ON DELETE CASCADE from admin.tenants (queues_tenant_id_fkey in
+	// migrations/postgres/001_schema.sql) (cleat#1116). Listed
 	// for the count, as tenant_domains and tenant_secrets are above: a
 	// dropped tenant's declared concurrency limits go with it, and the
 	// operator wants to see that.
 	{"queues", `SELECT count(*) FROM queues WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from workflow_instances, via migrations/postgres/094
-	// (cleat#1116's semaphore holder). Listed for the count, as queues is
+	// ON DELETE CASCADE from workflow_instances (queue_holders_workflow_id_fkey
+	// in migrations/postgres/001_schema.sql) (cleat#1116's semaphore holder).
+	// Listed for the count, as queues is
 	// above: a dropped tenant's queue holders go with its workflow_instances,
 	// and the operator wants to see that.
 	{"queue_holders", `SELECT count(*) FROM queue_holders WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from admin.tenants directly, via
-	// migrations/postgres/097 (cleat#1918's rate-limit counter). Deliberately
+	// ON DELETE CASCADE from admin.tenants directly
+	// (queue_rate_tokens_tenant_id_fkey in migrations/postgres/001_schema.sql)
+	// (cleat#1918's rate-limit counter). Deliberately
 	// NOT chained off workflow_instances the way queue_holders is -- a rate
 	// token's lifetime must not depend on how long completed workflows are
 	// retained, so it carries its own tenant FK. Listed for the count, as
@@ -113,7 +116,8 @@ var PostgresTables = []Table{
 	// by the coverage test rather than by reading the function -- it is deleted
 	// correctly and was simply never counted. cleat#1644.
 	{"admin.tenant_egress_allow", `SELECT count(*) FROM admin.tenant_egress_allow WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from migrations/postgres/104 (cleat#2230). Listed for
+	// ON DELETE CASCADE from admin.tenants (slack_workspace_tenant_id_fkey in
+	// migrations/postgres/001_schema.sql) (cleat#2230). Listed for
 	// the count, as tenant_domains and tenant_secrets are above: a dropped
 	// tenant's Slack workspace mapping(s) go with it, and the operator wants
 	// to see that.
@@ -123,7 +127,8 @@ var PostgresTables = []Table{
 
 // mssqlTablesSQL names every table carrying a tenant_id column.
 //
-// Deliberately the same predicate as the cursor in migrations/mssql/074, minus
+// Deliberately the same predicate as the tenant_tables cursor in
+// migrations/mssql/003_procedures.sql (admin.drop_tenant's sweep), minus
 // that procedure's exclusions: the procedure skips admin.tenants because it
 // deletes it last, and skips its five foreign-key-ordered tables because it
 // names them explicitly. Both are deleted, so both belong in the preview.

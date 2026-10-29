@@ -26,12 +26,7 @@ cmd/cleatctl/coretables.go	migrations/postgres/008
 cmd/cleatctl/coretables.go	migrations/postgres/016
 cmd/cleatctl/cost.go	migration 101
 cmd/cleatctl/cost.go	migrations/postgres/101
-cmd/cleatctl/droptenant.go	016_workflow_leases_and_payloads.sql
 cmd/cleatctl/droptenant.go	migrations/mssql/074
-cmd/cleatctl/droptenant.go	migrations/postgres/093
-cmd/cleatctl/droptenant.go	migrations/postgres/094
-cmd/cleatctl/droptenant.go	migrations/postgres/097
-cmd/cleatctl/droptenant.go	migrations/postgres/104
 cmd/cleatctl/droptenant_mssql.go	migrations/mssql/074
 cmd/cleatctl/droptenant_test.go	032_drop_tenant_deletes_tenant_data.sql
 cmd/cleatctl/every_subcommand_declares_its_dialects_test.go	008_operator_api_keys.sql
