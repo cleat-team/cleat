@@ -48,17 +48,45 @@ var descriptorWords = map[string]bool{
 	"length": true, "name": true, "names": true, "at": true,
 }
 
-// tokenCountWords, appearing beside the plural `tokens`, say that it is a
-// number of LLM tokens (max_tokens, input_tokens, tokens_per_minute) rather
-// than a list of credentials. A bare `tokens`, or access_tokens, stays
-// sensitive: a list of secrets is the likelier meaning and redacting a count
-// is the cheaper mistake.
+// tokenCountWords, ADJACENT to the plural `tokens`, say that it is a number of
+// LLM tokens (max_tokens, input_tokens, tokens_used) rather than a list of
+// credentials. Adjacent, not merely present: max_access_tokens is a list of
+// secrets that happens to carry `max`.
+//
+// Decided, because a reviewer asked which way these fell: `cached`, `used`,
+// `remaining` and `total` ARE count words, since they are the usage fields an
+// LLM API reports (cached_tokens, total_tokens) and #3581's motivating case is
+// exactly those. `per` is not one on its own; tokens_per_minute passes through
+// tokenRateUnits, and tokens_per_user does not, so it is redacted. A count that
+// is redacted is the cheaper mistake.
 var tokenCountWords = map[string]bool{
 	"max": true, "min": true, "input": true, "output": true, "prompt": true,
 	"completion": true, "total": true, "cached": true, "reasoning": true,
 	"num": true, "number": true, "count": true, "limit": true, "budget": true,
-	"remaining": true, "used": true, "usage": true, "estimated": true,
-	"avg": true, "per": true,
+	"remaining": true, "used": true, "usage": true, "estimated": true, "avg": true,
+}
+
+// tokenRateUnits follow "per" in tokens_per_minute.
+var tokenRateUnits = map[string]bool{
+	"second": true, "sec": true, "minute": true, "min": true, "hour": true,
+	"day": true, "request": true, "call": true,
+}
+
+// isTokenCount reports whether the word at i, a plural `tokens`, is used as a
+// count: a count word beside it, or "per <time unit>" after it.
+func isTokenCount(words []string, i int) bool {
+	if i > 0 && tokenCountWords[words[i-1]] {
+		return true
+	}
+	if i+1 < len(words) {
+		if tokenCountWords[words[i+1]] {
+			return true
+		}
+		if words[i+1] == "per" && i+2 < len(words) && tokenRateUnits[words[i+2]] {
+			return true
+		}
+	}
+	return false
 }
 
 // keyWords splits a field name into lowercase words at separators, at
@@ -98,6 +126,13 @@ func keyWords(name string) []string {
 	return words
 }
 
+// isFusedTokenCount reports whether w is a count word fused to "tokens"
+// (maxtokens, inputtokens), the one fused form that is a count and not a list of
+// credentials.
+func isFusedTokenCount(w string) bool {
+	return tokenCountWords[strings.TrimSuffix(w, "tokens")]
+}
+
 // isSensitiveWord reports whether words[i] marks the key as holding a secret.
 func isSensitiveWord(words []string, i int) bool {
 	w := words[i]
@@ -110,16 +145,16 @@ func isSensitiveWord(words []string, i int) bool {
 		return true
 	}
 	switch {
-	case w == "token":
-		return true
-	case strings.HasSuffix(w, "token"):
-		return true // accesstoken, authtoken: a fused word that ENDS in token
+	case strings.Contains(w, "tokeniz"):
+		return false // tokenizer, tokenization: a text-processing term, never a credential
 	case w == "tokens":
-		for j, o := range words {
-			if j != i && tokenCountWords[o] {
-				return false
-			}
-		}
+		return !isTokenCount(words, i)
+	case strings.HasSuffix(w, "tokens") && isFusedTokenCount(w):
+		return false // maxtokens, inputtokens
+	case strings.Contains(w, "token"):
+		// token, accesstoken, accesstokens, tokenvalue, tokenid, TOKENVALUE: any
+		// other word holding "token" is the credential or names one. A FUSED word
+		// is matched on its own, because a lowercase key has no separator to read.
 		return true
 	}
 	return false
@@ -131,10 +166,11 @@ func isSensitiveWord(words []string, i int) bool {
 // others) anywhere in the key, which also caught max_tokens, input_tokens,
 // token_usage, tokenizer and password_policy: counts and settings that every
 // LLM workflow carries, replaced with "[REDACTED]" before the workflow saw them
-// while the caller got a 2xx (cleat#3581). `token` is now a word of its own
-// (token, access_token, idToken, accesstoken) and `tokens` is sensitive unless
-// a count word sits beside it; a key whose LAST word is a descriptor
-// (token_usage, credential_type) is not sensitive.
+// while the caller got a 2xx (cleat#3581). Any word holding `token` is still
+// sensitive, fused or not (token, accesstoken, tokenvalue, accesstokens), except
+// tokenizer-style words and the plural `tokens` when a count word is adjacent
+// (max_tokens, tokens_used, tokens_per_minute); a key whose LAST word is a
+// descriptor (token_usage, credential_type) is not sensitive.
 //
 // secret, password, credential, authorization and apikey keep their old
 // meaning of "contained in a word", because a word containing one of them is
@@ -167,6 +203,9 @@ func isSensitiveField(name string) bool {
 // hostname (api.example.com), all of which were replaced with "[REDACTED]"
 // (cleat#3581). A real token's header and claims are JSON objects, so requiring
 // that keeps every real JWT and none of those.
+//
+// A JWS whose payload is not a JSON object (RFC 7515 allows any payload) is a
+// token this does not match; a JWT's claims set is always an object (RFC 7519).
 func looksLikeJWT(s string) bool {
 	parts := strings.Split(s, ".")
 	if len(parts) != 3 {
