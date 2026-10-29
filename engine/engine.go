@@ -105,16 +105,19 @@ type Engine struct {
 	hostRetryBudgetCeiling time.Duration
 	defaultWorkflowTimeout time.Duration
 
-	// This tenant's overrides for the two fields above, read from the store
-	// once per execution and clamped to them. See engine/tenant_settings.go.
-	// The Once is not for cross-workflow sharing -- an Engine carries one
-	// workflowID and one tenantID, so it cannot be shared -- but so that the
-	// two wallClockCeiling call sites in executor.go cost one query between
-	// them rather than one each.
-	tenantSettingsOnce  sync.Once
-	tenantSettingsValue TenantSettings
-	runLimitsOnce       sync.Once
-	runLimitsValue      TenantSettings
+	// This tenant's overrides for the two fields above, and this run's own,
+	// read from the store once per execution and clamped to them. See
+	// engine/tenant_settings.go. The values are kept so that the several
+	// call sites in executor.go cost one query between them rather than one
+	// each -- an Engine carries one workflowID and one tenantID, so nothing is
+	// shared across workflows. Only a successful read sets a *Loaded flag: a
+	// failed one is retried by the next call, and is never kept as "no
+	// overrides" (cleat#3565).
+	limitsMu             sync.Mutex
+	tenantSettingsLoaded bool
+	tenantSettingsValue  TenantSettings
+	runLimitsLoaded      bool
+	runLimitsValue       TenantSettings
 
 	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
 	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
@@ -671,38 +674,19 @@ func (e *Engine) resolveLimit(ctx context.Context, operator time.Duration, field
 	return ClampToCeiling(field(e.runLimits(ctx)), tenant)
 }
 
-// runLimits reads this run's own overrides once and memoises them, mirroring
-// tenantSettings -- including its failure posture.
-//
-// A read failure resolves to the tier above rather than failing the workflow.
-// The fallback direction is the safe one: a run that cannot read its override
-// gets its tenant's limits, which are already clamped to the operator's, so an
-// unreadable row can only ever produce a WIDER-than-intended bound up to the
-// operator's ceiling and never past it.
+// runLimits returns this run's own overrides, reading them if ensureLimits has
+// not. It mirrors tenantSettings, including how it fails: see there.
 //
 // Read rather than carried on the claim, deliberately. The claim projects
 // through fifteen sites and is the hottest statement in the system; this is one
-// query per execution, memoised, on the same shape the tenant tier already
-// uses. If per-execution reads ever become the bottleneck, both tiers should
-// move together.
+// query per execution, kept after the first success, on the same shape the
+// tenant tier uses. If per-execution reads ever become the bottleneck, both
+// tiers should move together.
 func (e *Engine) runLimits(ctx context.Context) TenantSettings {
-	e.runLimitsOnce.Do(func() {
-		if e.workflowID == "" {
-			return
-		}
-		reader, ok := e.workflowStore.(RunLimitsReader)
-		if !ok {
-			return
-		}
-		s, err := reader.GetRunLimits(ctx, e.workflowID)
-		if err != nil {
-			e.log().WarnContext(ctx,
-				"reading per-run limits failed, falling back to the tenant's",
-				"tenant_id", e.tenantID, "workflow_id", e.workflowID, "error", err)
-			return
-		}
-		e.runLimitsValue = s
-	})
+	if err := e.ensureLimits(ctx); err != nil {
+		e.log().ErrorContext(ctx, "per-run limits are unavailable; this call sees no overrides",
+			"tenant_id", e.tenantID, "workflow_id", e.workflowID, "error", err)
+	}
 	return e.runLimitsValue
 }
 

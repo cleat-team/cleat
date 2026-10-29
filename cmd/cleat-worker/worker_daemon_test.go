@@ -33,6 +33,7 @@ import (
 // Each method checks for a custom function field first; if set, it delegates
 // to that function. Otherwise it returns a safe zero-valued result.
 type mockStore struct {
+	getTenantSettingsFn                func(ctx context.Context) (engine.TenantSettings, error)
 	claimWorkflowFn                    func(ctx context.Context, workerID string) (*engine.WorkflowInstance, error)
 	countRunnableWorkflowsFn           func(context.Context) (int, error)
 	claimWorkflowsFn                   func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
@@ -226,6 +227,16 @@ func (m *mockStore) FailWorkflow(ctx context.Context, workflowID, workerID strin
 		return m.failWorkflowFn(ctx, workflowID, workerID, generation, errorMsg, errorCode, errorOp, queryState)
 	}
 	return nil
+}
+
+// GetTenantSettings makes mockStore an engine.TenantSettingsReader. With no hook
+// it answers "no overrides", which is what the engine read from a store that
+// was not a reader at all, so tests that never set one are unchanged.
+func (m *mockStore) GetTenantSettings(ctx context.Context) (engine.TenantSettings, error) {
+	if m.getTenantSettingsFn != nil {
+		return m.getTenantSettingsFn(ctx)
+	}
+	return engine.TenantSettings{}, nil
 }
 
 func (m *mockStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {

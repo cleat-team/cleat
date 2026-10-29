@@ -2283,28 +2283,24 @@ func (s *ShardedStore) ServerNow(ctx context.Context, workflowID string) (time.T
 //
 // ShardedStore implemented neither TenantSettingsReader nor RunLimitsReader,
 // which all three dialect stores do. Both are reached by a type assertion
-// that returns silently on failure -- deliberately, per each doc comment: a
-// read failure resolves to the tier above (tenant to operator, run to
-// tenant), and the fallback direction is safe because a tenant's own settings
-// are already clamped to the operator's, so an unreadable override can only
-// end up WIDER than intended, never past the operator's ceiling. Nothing here
-// is a limit escape.
+// that returns silently on failure, and a store that does not implement a
+// reader is read as having no overrides.
 //
-// But "cannot be asked at all" is not "asked and got nothing", and the two
-// were conflated. Every failed READ already logs a warning naming its
-// fallback (tenantSettings, runLimits in engine.go); the missing-capability
-// case logged nothing, because to the `ok` check a ShardedStore looked
-// identical to a store that implements the interface and returned the zero
-// value. The first is recoverable and worth watching for; the second is a
-// permanent property of the deployment shape and was invisible.
+// "Cannot be asked at all" is not "asked and got nothing", and the two were
+// conflated. A failed READ is retried and then fails the execution
+// (ErrLimitsUnavailable, cleat#3565; it used to resolve to the tier above, which
+// is wider than the limit for a tenant that set a tighter one). The
+// missing-capability case logged nothing, because to the `ok` check a
+// ShardedStore looked identical to a store that implements the interface and
+// returned the zero value. The first is recoverable and worth watching for; the
+// second is a permanent property of the deployment shape and was invisible.
 //
-// Neither warning needs its own dedup state. tenant_settings.go and engine.go
-// already gate GetTenantSettings/GetRunLimits behind a sync.Once per Engine,
-// and shardedStoreFactory.OpenStore builds a fresh ShardedStore per request --
-// so each warning fires at most once per request regardless, the same cadence
-// the read-failure warnings already have. GetTenantSettings additionally dedups
-// ACROSS shards within one call, so a store with several incapable shards logs
-// once rather than once per shard.
+// Neither warning needs its own dedup state. ensureLimits (tenant_settings.go)
+// reads each tier once per Engine and keeps a successful read, and
+// shardedStoreFactory.OpenStore builds a fresh ShardedStore per request -- so
+// each warning fires at most once per request. GetTenantSettings additionally
+// dedups ACROSS shards within one call, so a store with several incapable
+// shards logs once rather than once per shard.
 
 // GetTenantSettings has no workflow ID to route by -- the interface reads
 // "the settings row for this store's tenant" and every shard was opened for
