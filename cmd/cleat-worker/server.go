@@ -98,6 +98,10 @@ type apiServer struct {
 	// store polls the same queues as the process-wide one.
 	taskQueues []string
 
+	// keys serves POST/GET /api/keys and DELETE /api/keys/{key_id}: a tenant managing its own keys.
+	// Nil answers 501. cleat#3552, B2c.
+	keys tenantKeyManager
+
 	// provisioner serves POST /api/admin/tenants and its confirm. Nil on a worker that cannot
 	// provision (MySQL, which is single-tenant, and a sharded worker), where both routes answer 501.
 	// cleat#3552.

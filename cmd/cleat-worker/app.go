@@ -42,6 +42,10 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// subtree registered further down. Both need an OPERATOR credential, not merely a key.
 	mux.HandleFunc("/api/admin/tenants", api.adminAPIOnly(api.handleProvisionTenant))
 	mux.HandleFunc("/api/admin/retention/sweep", api.adminAPIOnly(api.handleRetentionSweep))
+	// A tenant managing its OWN keys (cleat#3552, B2c). Tenant plane: an operator credential cannot reach
+	// these, and they refuse when authentication is off.
+	mux.HandleFunc("/api/keys", api.handleKeys)
+	mux.HandleFunc("/api/keys/", api.handleKeyByID)
 	// Schedule routes before workflow routes so /api/schedules is not caught
 	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
