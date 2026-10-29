@@ -4302,12 +4302,16 @@ func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
 // worker's) trusts it again after a stall.
 func (w *Worker) heartbeatAndFenceInFlight() bool {
 	var runs []engine.GenerationKey
+	byTenant := map[string][]engine.GenerationKey{}
 	w.inflight.Range(func(key, value any) bool {
 		wf, ok := value.(*engine.WorkflowInstance)
 		if !ok {
 			return true
 		}
-		runs = append(runs, engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation})
+		gk := engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation}
+		runs = append(runs, gk)
+		group := w.heartbeatGroupFor(wf.TenantID)
+		byTenant[group] = append(byTenant[group], gk)
 		return true
 	})
 	if len(runs) == 0 {
@@ -4344,35 +4348,80 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		return true
 	}
 
+	// ONE CALL PER TENANT, each through that tenant's own store (cleat#3566).
+	//
+	// HeartbeatBatchFenced reads workflow_leases, which is FORCE ROW LEVEL
+	// SECURITY on PostgreSQL and a security policy on SQL Server, and the tenant
+	// it sees is a property of the store instance, not of the call. This used to
+	// send every in-flight run, of every tenant, through the worker's own store,
+	// so a run of any OTHER tenant was invisible to it: reported lost at its
+	// first beat, its heartbeat_at never renewed, its next durable call refused
+	// by the fence, and the run released and re-claimed instead of finishing. A
+	// run of the worker's own tenant was unaffected, which is why a suite that
+	// runs the default tenant, or a role that bypasses the policy, never saw it.
+	//
+	// The worker's own tenant keeps heartbeatBatchStore(), so cleat#2009's
+	// isolated heartbeat pool still serves the runs it was built for. Every other
+	// tenant goes through storeForTenant, as executeWorkflow does for the same run.
+	//
+	// A group that cannot be asked says nothing about its own runs, exactly as a
+	// failed call said nothing before: it is logged, recorded as trouble, and its
+	// runs are not fenced. The other groups' verdicts are still real and are
+	// applied, so one tenant's pool being down does not stop the fence for the
+	// rest. The call counts as landed only if every group was answered.
+	//
 	// Bounded so a stalled connection is recorded as trouble instead of
 	// silently outliving the stall -- see dbCallDeadline's doc. A database
 	// that merely delays rather than refuses (cleat#2005's docker-pause
 	// reproduction) never returns a connection error at all; only a
 	// deadline catches that shape.
 	var lost []string
-	err := w.probeBoundedCall(func(hbCtx context.Context) error {
-		var err error
-		lost, err = w.heartbeatBatchStore().HeartbeatBatchFenced(hbCtx, w.id, runs)
-		return err
-	})
-	if err != nil {
-		w.recordDBTrouble()
-		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
-		if isConnectionError(err) {
-			w.logger.WarnContext(w.ctx, "HeartbeatBatchFenced failed: DB appears down", "worker_id", w.id)
-		} else {
-			w.logger.ErrorContext(w.ctx, "HeartbeatBatchFenced error", "worker_id", w.id, "error", err)
+	allAnswered := true
+	for _, group := range heartbeatGroupOrder(byTenant) {
+		groupRuns := byTenant[group]
+		hbStore, release := w.heartbeatBatchStore(), func() {}
+		if group != "" {
+			var openErr error
+			hbStore, release, openErr = w.storeForTenant(group)
+			if openErr != nil {
+				allAnswered = false
+				w.recordDBTrouble()
+				w.logger.ErrorContext(w.ctx, "heartbeat: no store for a tenant's in-flight runs; they are not fenced this tick",
+					"worker_id", w.id, "tenant_id", group, "runs", len(groupRuns), "error", openErr)
+				continue
+			}
 		}
-		// A failed heartbeat tells us nothing about which runs are lost --
-		// only that we could not ask. Cancelling on an error here would
-		// stop every in-flight execution on a single transient DB blip.
-		// cleat#2008 decision 2 (stand down after sustained failure) is the
-		// deliberately separate, slower response to this case.
-		return false
+		var groupLost []string
+		err := w.probeBoundedCall(func(hbCtx context.Context) error {
+			var err error
+			groupLost, err = hbStore.HeartbeatBatchFenced(hbCtx, w.id, groupRuns)
+			return err
+		})
+		release()
+		if err != nil {
+			allAnswered = false
+			w.recordDBTrouble()
+			if isConnectionError(err) {
+				w.logger.WarnContext(w.ctx, "HeartbeatBatchFenced failed: DB appears down", "worker_id", w.id, "tenant_id", group)
+			} else {
+				w.logger.ErrorContext(w.ctx, "HeartbeatBatchFenced error", "worker_id", w.id, "tenant_id", group, "error", err)
+			}
+			// A failed heartbeat tells us nothing about which runs are lost --
+			// only that we could not ask. Cancelling on an error here would
+			// stop every in-flight execution on a single transient DB blip.
+			// cleat#2008 decision 2 (stand down after sustained failure) is the
+			// deliberately separate, slower response to this case.
+			continue
+		}
+		lost = append(lost, groupLost...)
 	}
-	w.recordDBContactOK()
-	w.lastHeartbeatOK.Store(time.Now().UnixNano())
-	w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
+	if allAnswered {
+		w.recordDBContactOK()
+		w.lastHeartbeatOK.Store(time.Now().UnixNano())
+		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
+	} else {
+		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
+	}
 
 	// cleat#2942: the generations as SENT, kept so the fence's WARN below can
 	// print the generation the store judged against beside the one it reads
@@ -4436,7 +4485,32 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		w.fencedRuns.Store(id, sentGen)
 		reg.cancel()
 	}
-	return true
+	return allAnswered
+}
+
+// heartbeatGroupFor names the group a run's heartbeat belongs to: "" for the
+// worker's own tenant, which heartbeatBatchStore serves, and the tenant id for
+// every other, which storeForTenant serves. It tracks storeForTenant's own first
+// condition (a second copy of that rule is how the two come apart), because the
+// group is only right if the store it selects is the store that run's lease row
+// is visible through. cleat#3566.
+func (w *Worker) heartbeatGroupFor(tenantID string) string {
+	if w.storeFactory == nil || tenantID == "" || tenantID == w.storeTenantID {
+		return ""
+	}
+	return tenantID
+}
+
+// heartbeatGroupOrder is the groups of byTenant in a fixed order, the worker's
+// own first: the order is not load-bearing, but a map's is random and a log or a
+// test that depends on which tenant was asked first should not be flaky.
+func heartbeatGroupOrder(byTenant map[string][]engine.GenerationKey) []string {
+	groups := make([]string, 0, len(byTenant))
+	for g := range byTenant {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	return groups
 }
 
 // reclaimAfter is how long a run may go without a heartbeat before another
