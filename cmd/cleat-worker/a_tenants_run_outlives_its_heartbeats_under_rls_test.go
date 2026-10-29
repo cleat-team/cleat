@@ -170,7 +170,14 @@ func mssqlHBRig(t *testing.T, tenant string) *hbRig {
 		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v", redactMSSQLDSN(base), err)
 	}
 	ctx := context.Background()
-	const dbName = "cleat_hb_3566_test"
+	// One database PER RIG, named from the tenant it is built for. It was one
+	// shared name, and each test's teardown puts the database in SINGLE_USER
+	// before dropping it, so a pooled connection still open from an earlier test
+	// could take the single slot and fail the next test's drop with error 5064
+	// (cleat#3572: the third test to share the name did it once in three runs of
+	// the same three tests). The tenants these tests pass are distinct, and so
+	// are their last twelve characters.
+	dbName := "cleat_hb_" + tenant[len(tenant)-12:] + "_test"
 	if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
 		"IF DB_ID('%s') IS NOT NULL BEGIN ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s; END",
 		dbName, dbName, dbName)); err != nil {
@@ -180,8 +187,13 @@ func mssqlHBRig(t *testing.T, tenant string) *hbRig {
 		t.Fatalf("create test database: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = adminDB.ExecContext(context.Background(), fmt.Sprintf(
-			"ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s", dbName, dbName))
+		// Logged, not discarded: a drop that fails leaves the database in
+		// SINGLE_USER, and the next setup of this name then fails with error 5064
+		// and nothing saying why (cleat#3572).
+		if _, err := adminDB.ExecContext(context.Background(), fmt.Sprintf(
+			"ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s", dbName, dbName)); err != nil {
+			t.Logf("dropping test database %s failed; it stays in SINGLE_USER: %v", dbName, err)
+		}
 	})
 	connStr, err := mssqlConnStrForDB(base, dbName)
 	if err != nil {
@@ -198,6 +210,16 @@ func mssqlHBRig(t *testing.T, tenant string) *hbRig {
 	}
 
 	factory := engine.NewMSSQLStoreFactory(connStr)
+	// The factory keeps a pool per tenant it has opened, and nothing closed them:
+	// they outlived the test and could retake the single-user slot between the
+	// teardown's SET SINGLE_USER and its DROP, failing the drop (cleat#3572,
+	// measured by cleat-review-69: the rename alone left the same test failing
+	// 3 of 4 against its own name; closing the factory took 24 of 24).
+	t.Cleanup(func() {
+		if err := factory.Close(); err != nil {
+			t.Logf("closing the store factory: %v", err)
+		}
+	})
 	own, closeOwn, err := factory.OpenStore(ctx, engine.DefaultTenantUUID, "default")
 	if err != nil {
 		t.Fatalf("opening the worker's own store: %v", err)

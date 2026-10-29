@@ -6270,26 +6270,90 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("concurrency_key_reaper")
-			ckStart := time.Now()
-			reaped, err := w.store.ReapExpiredConcurrencyKeys(w.ctx)
-			if err != nil {
-				if isConnectionError(err) {
-					w.logger.WarnContext(w.ctx, "Concurrency key reaper: DB appears down", "worker_id", w.id)
-				} else {
-					w.logger.ErrorContext(w.ctx, "Concurrency key reaper error", "worker_id", w.id, "error", err)
-				}
-				w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "error")
-				w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
-				continue
-			}
-			if reaped > 0 {
-				w.logger.InfoContext(w.ctx, "Concurrency key reaper: removed expired keys", "worker_id", w.id, "count", reaped)
-				w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "concurrency_key_reaper", reaped)
-			}
-			w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "ok")
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
+			w.reapConcurrencyKeysOnce()
 		}
 	}
+}
+
+// reapConcurrencyKeysOnce is one tick of concurrencyKeyReaperLoop, extracted so
+// a test can drive it without a ticker, as reapOnce is for the stale-run reaper.
+func (w *Worker) reapConcurrencyKeysOnce() {
+	ckStart := time.Now()
+	reaped, err := w.store.ReapExpiredConcurrencyKeys(w.ctx)
+	if err != nil {
+		if isConnectionError(err) {
+			w.logger.WarnContext(w.ctx, "Concurrency key reaper: DB appears down", "worker_id", w.id)
+		} else {
+			w.logger.ErrorContext(w.ctx, "Concurrency key reaper error", "worker_id", w.id, "error", err)
+		}
+		w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "error")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
+		return
+	}
+	// The other tenants, each through its own store (cleat#3572). Only after the
+	// worker's own store answered: a failure of THIS worker's database stops the
+	// tick above, and everything below is about other tenants.
+	reaped += w.reapConcurrencyKeysOfOtherTenants()
+	if reaped > 0 {
+		w.logger.InfoContext(w.ctx, "Concurrency key reaper: removed expired keys", "worker_id", w.id, "count", reaped)
+		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "concurrency_key_reaper", reaped)
+	}
+	w.Metrics.RecordBackgroundLoop(w.ctx, "concurrency_key_reaper", "ok")
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "concurrency_key_reaper", time.Since(ckStart).Seconds())
+}
+
+// reapConcurrencyKeysOfOtherTenants frees the concurrency keys, queue holders and
+// rate tokens of every tenant other than the worker's own, through that tenant's
+// own store.
+//
+// ReapExpiredConcurrencyKeys scopes itself to its store's tenant (an explicit
+// tenant_id predicate, and row-level security besides), and the loop ran it
+// through the worker's own store only. A key whose run had finished but whose
+// post-commit release had failed (releaseWorkflowResources is best-effort by
+// design) was therefore never freed for any tenant but the worker's own, and a
+// new run of that tenant under the same key was refused on every poll until the
+// key's seven-day backstop expired. Measured as cleat_app, cleat#3572. The claim,
+// the schedule loop, the heartbeat (cleat#3566) and the stale-run reaper
+// (cleat#3570) already visit each tenant; this is the same enumeration.
+//
+// A tenant's failure is that tenant's, and is not the worker's database trouble:
+// it is logged and counted, and the other tenants are still reaped. Nothing here
+// calls recordDBTrouble or recordReapSkip, which mean "this worker's database is
+// in trouble" and hold this worker's stale-run reaper in grace.
+//
+// Returns how many rows it removed. It does nothing for a worker that cannot
+// serve other tenants (no factory, a store that cannot list them, or
+// --claim-across-tenants off): its own tenant was all it ever reaped.
+func (w *Worker) reapConcurrencyKeysOfOtherTenants() int64 {
+	if !w.claimAcrossTenants {
+		return 0
+	}
+	var reaped int64
+	var failedTenants int
+	var firstErr error
+	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+		n, rerr := st.ReapExpiredConcurrencyKeys(w.ctx)
+		reaped += n
+		if rerr != nil {
+			failedTenants++
+			if firstErr == nil {
+				firstErr = fmt.Errorf("tenant %s: %w", tenantID, rerr)
+			}
+		}
+	})
+	if err != nil {
+		if !errors.Is(err, errRotatingClaimUnavailable) {
+			w.logger.ErrorContext(w.ctx, "Concurrency key reaper: could not list tenants; other tenants' keys were not reaped this tick",
+				"worker_id", w.id, "error", err)
+		}
+		return 0
+	}
+	if sweep.OpenFailed > 0 || failedTenants > 0 {
+		w.logger.WarnContext(w.ctx, "Concurrency key reaper: some tenants could not be reaped this tick; their keys wait for the next",
+			"worker_id", w.id, "tenants", sweep.Visited, "open_failed", sweep.OpenFailed, "reap_failed", failedTenants,
+			"first_open_error", sweep.FirstErr, "first_reap_error", firstErr)
+	}
+	return reaped
 }
 
 func (w *Worker) scheduleLoop() {
