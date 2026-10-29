@@ -78,8 +78,32 @@ func OperatorMiddleware(store OperatorResolver) func(http.Handler) http.Handler 
 			// at all, and the SPA and plugin routes have their own rules.
 			// Refusing an operator key there would make presenting one worse
 			// than presenting nothing, which is a trap rather than a policy.
-			if path := r.URL.Path; strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, OperatorRoutePrefix) {
+			//
+			// COMPARED IN LOWER CASE. The prefix checks here used to be exact, so
+			// /API/ADMIN/TENANTS was neither "outside /api/" nor "inside /api/admin/"
+			// and was passed down the chain with the operator in its context. The mux
+			// is case-sensitive, so nothing answers that path today; but a narrowed
+			// key's guarantee that it reaches only the routes its scope names should
+			// not rest on the mux's case rules, and a handler matching paths without
+			// regard to case would otherwise be reachable by every operator key.
+			if path := strings.ToLower(r.URL.Path); strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, OperatorRoutePrefix) {
 				http.Error(w, `{"error":"an operator key may only be used on /api/admin/* routes"}`, http.StatusForbidden)
+				return
+			}
+
+			// The scope check, AFTER the confinement above and only for a path that
+			// survived it. Confinement says an operator key belongs on /api/admin/*;
+			// this says which of those routes THIS key may reach. It is a separate
+			// answer, 403 for a good credential on a route its scope does not name,
+			// for the reason the comment on the 401/403 split gives: an operator
+			// debugging a deployment reads "authenticated but not permitted" first.
+			//
+			// Deny-by-default (see operator_scope.go): a key whose scopes admit
+			// nothing reaches nothing. Placed here and not in each handler because
+			// the failure it prevents is a handler somebody adds later and forgets
+			// to guard.
+			if strings.HasPrefix(strings.ToLower(r.URL.Path), OperatorRoutePrefix) && !op.MayReach(r.Method, r.URL) {
+				http.Error(w, `{"error":"this operator key's scope does not allow this route"}`, http.StatusForbidden)
 				return
 			}
 
