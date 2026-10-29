@@ -161,3 +161,37 @@ func TestATenantKeyAndAKeylessRequestAreUntouched(t *testing.T) {
 		})
 	}
 }
+
+// cleat#3559. The audit log records the request context's subject as user_id, and an operator
+// request has no tenant to attribute it to, so the subject is the only thing that says who acted.
+// It is set for a request served as an operator and for no other.
+func TestAnOperatorRequestCarriesItsKeyAsTheSubject(t *testing.T) {
+	op := Operator{KeyID: "6f5c1e9a-2b1f-4a3c-9d0e-77c8b5a4e012", Scopes: ScopeAdmin}
+	store := &fakeOperatorResolver{op: op}
+
+	var subject string
+	var hasSubject bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		subject, hasSubject = SubjectFromContext(r.Context())
+	})
+
+	for _, tc := range []struct {
+		name, path string
+		want       bool
+	}{
+		{"an admin route", "/api/admin/drain", true},
+		// Passed down the tenant chain, not served as an operator action.
+		{"a path outside /api/", "/livez", false},
+	} {
+		subject, hasSubject = "", false
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer "+GenerateOperatorKey())
+		OperatorMiddleware(store, inner)(inner).ServeHTTP(httptest.NewRecorder(), req)
+		if hasSubject != tc.want {
+			t.Errorf("%s: subject present = %v, want %v", tc.name, hasSubject, tc.want)
+		}
+		if tc.want && subject != op.String() {
+			t.Errorf("%s: subject = %q, want %q", tc.name, subject, op.String())
+		}
+	}
+}

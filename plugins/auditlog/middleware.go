@@ -1,6 +1,7 @@
 package auditlog
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -57,12 +58,32 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// An operator acts ON a tenant, it is not one, so its row goes on the chain of the tenant
+		// the HANDLER says it acted on -- the tenant's owner can then read, in their own
+		// tamper-evident log, who acted on them -- and otherwise on the default tenant's, where
+		// the operator:<KeyID> subject tells it apart. cleat#3559; see auth.AuditTarget for why
+		// the handler is asked rather than the path.
+		//
+		// A tenant already in the context is IGNORED for an operator request, not preferred. An
+		// operator request has none, so one that is present was put there by something that does
+		// not authenticate (the header: tenant resolver reads a client-supplied header outside the
+		// auth chain), and trusting it would let a caller choose whose chain the row lands on.
+		// A handler that acts on that tenant says so itself, after confirming the target exists.
+		var operatorTarget *auth.AuditTarget
+		if _, isOperator := auth.OperatorFromContext(r.Context()); isOperator {
+			var ctx context.Context
+			ctx, operatorTarget = auth.WithAuditTarget(r.Context())
+			r = r.WithContext(ctx)
+		}
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rw, r)
 		duration := time.Since(start)
 
 		tid, _ := auth.TenantIDFromContext(r.Context())
+		if operatorTarget != nil {
+			tid, _ = operatorTarget.Tenant() // the nil UUID, the default tenant's, when none was noted
+		}
 		// ok is deliberately ignored: an unauthenticated request has no
 		// subject to record, and that is a fact worth an empty user_id, not a
 		// reason to refuse the request or fail this write. cleat#1881.
