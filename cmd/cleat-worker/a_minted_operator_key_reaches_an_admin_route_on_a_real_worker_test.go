@@ -71,9 +71,26 @@ type chainFixture struct {
 	listed         *bool  // a tenant data route's handler ran, in any store
 	reachedB       *bool  // tenant B's store was opened for a force-complete
 	hostBindingAsk *bool
+	storeB         *mockStore
+	// noted is what the audit slot held when the request finished; see
+	// a_handler_names_the_tenant_it_acted_on_test.go.
+	noted *notedTarget
+}
+
+type notedTarget struct {
+	tenant uuid.UUID
+	set    bool
 }
 
 func buildChain(t *testing.T, requireHostMatch bool) chainFixture {
+	t.Helper()
+	return buildChainAround(t, requireHostMatch, nil)
+}
+
+// buildChainAround is buildChain with the plugin layer's place taken by wrap(f.noted): the chain's
+// inner handler is that wrapped around the mux, which is where the audit-log middleware sits on a
+// real worker.
+func buildChainAround(t *testing.T, requireHostMatch bool, wrap func(*notedTarget) func(http.Handler) http.Handler) chainFixture {
 	t.Helper()
 	enableAdminRoutes(t)
 	api, storeA, storeB, _ := twoTenantServer(t, true)
@@ -95,6 +112,7 @@ func buildChain(t *testing.T, requireHostMatch bool) chainFixture {
 		tenantAKey: auth.GenerateAPIKey(), forgedOpKey: auth.GenerateOperatorKey(),
 		unknownTenant: auth.GenerateAPIKey(),
 		listed:        &listed, reachedB: &reachedB, hostBindingAsk: &asked,
+		storeB: storeB, noted: &notedTarget{},
 	}
 	h := func(k string) [32]byte { return sha256.Sum256([]byte(k)) }
 	keys := &keyTable{
@@ -107,7 +125,11 @@ func buildChain(t *testing.T, requireHostMatch bool) chainFixture {
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, api)
-	f.handler = composeAuthChain(mux, mux, authChain{
+	var inner http.Handler = mux
+	if wrap != nil {
+		inner = wrap(f.noted)(mux)
+	}
+	f.handler = composeAuthChain(inner, mux, authChain{
 		Tenants: keys, Operators: keys, Domains: noDomains{asked: &asked}, RequireHostMatch: requireHostMatch,
 	})
 	return f

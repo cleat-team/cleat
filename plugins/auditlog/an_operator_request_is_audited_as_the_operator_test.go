@@ -38,15 +38,28 @@ func (o opKeys) ResolveOperatorFromAPIKey(_ context.Context, h []byte) (auth.Ope
 func TestAnOperatorRequestIsAuditedAsTheOperator(t *testing.T) {
 	const keyID = "8d264f39-9c52-4623-aa1d-258c7bcc34d7"
 	tenantB := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	tenantC := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 
 	p, _, store := setupTestPlugin(t)
 	// setupTestPlugin's handler has no operator layer; build the chain it would sit in. The mux is
-	// the bare one the plugin registered its routes on, so every /api/admin/* request answers 404
-	// from it -- which is fine: the audit row records the request whatever it answered.
+	// the one the plugin registered its routes on, plus three stand-ins for admin handlers. What an
+	// admin handler does to the slot is the contract under test here; that the real handlers do it
+	// is cmd/cleat-worker's a_handler_names_the_tenant_it_acted_on_test.go.
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatal(err)
 	}
+	mux.HandleFunc("/api/admin/health", func(http.ResponseWriter, *http.Request) {}) // names no tenant
+	mux.HandleFunc("/api/admin/acts-on-b", func(_ http.ResponseWriter, r *http.Request) {
+		auth.NoteAuditTarget(r.Context(), tenantB)
+	})
+	mux.HandleFunc("/api/admin/acts-on-b-then-c", func(_ http.ResponseWriter, r *http.Request) {
+		auth.NoteAuditTarget(r.Context(), tenantB)
+		auth.NoteAuditTarget(r.Context(), tenantC)
+	})
+	mux.HandleFunc("/api/admin/notes-the-nil-tenant", func(_ http.ResponseWriter, r *http.Request) {
+		auth.NoteAuditTarget(r.Context(), uuid.Nil)
+	})
 	audited := p.Middleware(mux)
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
@@ -67,36 +80,38 @@ func TestAnOperatorRequestIsAuditedAsTheOperator(t *testing.T) {
 		tenant uuid.UUID
 		user   string
 	}
+	op := "operator:" + keyID
 	rows := []struct {
 		name    string
 		handler http.Handler
-		method  string
 		path    string
 		key     string
 		want    want
 	}{
-		{"an operator on a route naming no tenant: the default chain, but attributed",
-			chain, "GET", "/api/admin/health", opKey, want{uuid.Nil, "operator:" + keyID}},
-		{"an operator on a route naming a tenant: that tenant's chain",
-			chain, "POST", "/api/admin/tenants/" + tenantB.String() + "/instances/wf-1/force-complete", opKey,
-			want{tenantB, "operator:" + keyID}},
-		{"the same, spelled with braces: the same chain",
-			chain, "POST", "/api/admin/tenants/{" + tenantB.String() + "}/instances/wf-1/force-complete", opKey,
-			want{tenantB, "operator:" + keyID}},
-		{"a tenant put in the context by something that does not authenticate is ignored: no target, default chain",
-			withForgedTenant, "GET", "/api/admin/health", opKey, want{uuid.Nil, "operator:" + keyID}},
-		{"...and so is one when the route does name a tenant",
-			withForgedTenant, "POST", "/api/admin/tenants/" + tenantB.String() + "/instances/wf-1/force-complete", opKey,
-			want{tenantB, "operator:" + keyID}},
-		// The control: a tenant key's own row, which must be what it always was.
-		{"the control: a tenant key on the same route, on its own chain with no subject",
-			chain, "GET", "/api/admin/health", "test-api-key", want{testTenantID, ""}},
+		{"a handler that names no tenant: the default chain, but attributed",
+			chain, "/api/admin/health", opKey, want{uuid.Nil, op}},
+		{"a handler that says it acted on tenant B: B's chain",
+			chain, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
+		{"the first tenant a handler names wins",
+			chain, "/api/admin/acts-on-b-then-c", opKey, want{tenantB, op}},
+		{"the nil tenant is not a target: the default chain",
+			chain, "/api/admin/notes-the-nil-tenant", opKey, want{uuid.Nil, op}},
+		{"a request no handler claims (a 404): the default chain, not a chain for whatever the path named",
+			chain, "/api/admin/tenants/" + tenantB.String() + "/instances/wf-1/force-complete", opKey, want{uuid.Nil, op}},
+		{"a tenant put in the context by something that does not authenticate is ignored",
+			withForgedTenant, "/api/admin/health", opKey, want{uuid.Nil, op}},
+		{"...but a handler that acts on it says so, and then it is B's chain",
+			withForgedTenant, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
+		// The control: a tenant key's own row is what it always was, and a handler that notes a
+		// target does not move it -- only an operator request listens to the slot.
+		{"the control: a tenant key on the same route stays on its own chain with no subject",
+			chain, "/api/admin/acts-on-b", "test-api-key", want{testTenantID, ""}},
 	}
 
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			before := eventCount(store)
-			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(""))
+			req := httptest.NewRequest("POST", tc.path, strings.NewReader(""))
 			req.Header.Set("Authorization", "Bearer "+tc.key)
 			tc.handler.ServeHTTP(httptest.NewRecorder(), req)
 			if !waitForEventCount(store, before+1, time.Second) {

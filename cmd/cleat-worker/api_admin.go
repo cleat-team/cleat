@@ -227,6 +227,13 @@ func (s *apiServer) adminTargetStore(w http.ResponseWriter, r *http.Request, id,
 		s.writeError(w, 404, "not found")
 		return nil, false
 	}
+	// The workflow exists in this tenant's store, so this is the tenant the operation acts on.
+	// Said AFTER the lookup, not when the store is opened: opening a store for a tenant does not
+	// show the tenant exists, and the audit log would start a chain for any UUID in a URL.
+	// A no-op unless the audit log is listening (cleat#3559).
+	if tid, err := uuid.Parse(namedTenant); err == nil {
+		auth.NoteAuditTarget(r.Context(), tid)
+	}
 	return st, true
 }
 
@@ -304,6 +311,11 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 		s.writeError(w, 404, "not found")
 		return nil, false
 	}
+	// The tenant whose store this just confirmed the workflow in. For an operator request that is
+	// the tenant the header: resolver put in the context -- the id-only routes name none in their
+	// path -- and the audit log needs it to keep the row on the chain it was on before the operator
+	// was attributed (cleat#3559).
+	auth.NoteAuditTarget(r.Context(), caller)
 	return st, true
 }
 
