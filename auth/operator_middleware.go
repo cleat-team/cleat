@@ -102,7 +102,7 @@ func OperatorMiddleware(store OperatorResolver) func(http.Handler) http.Handler 
 			// nothing reaches nothing. Placed here and not in each handler because
 			// the failure it prevents is a handler somebody adds later and forgets
 			// to guard.
-			if strings.HasPrefix(strings.ToLower(r.URL.Path), OperatorRoutePrefix) && !op.MayReach(r.Method, r.URL.Path) {
+			if strings.HasPrefix(strings.ToLower(r.URL.Path), OperatorRoutePrefix) && !op.MayReach(r.Method, r.URL) {
 				http.Error(w, `{"error":"this operator key's scope does not allow this route"}`, http.StatusForbidden)
 				return
 			}

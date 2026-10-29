@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,10 +57,10 @@ func TestAScopedOperatorKeyRoundTripsOnEveryDialect(t *testing.T) {
 				t.Errorf("resolved scopes %q principal %q, want %q and clew-service", got.Scopes, got.Principal, ScopeProvision)
 			}
 			// What was stored drives the gate, end to end: the create route and nothing else.
-			if !got.MayReach(http.MethodPost, "/api/admin/tenants") {
+			if !got.MayReach(http.MethodPost, &url.URL{Path: "/api/admin/tenants"}) {
 				t.Error("the resolved provision key cannot reach the create route")
 			}
-			if got.MayReach(http.MethodPost, "/api/admin/drain") {
+			if got.MayReach(http.MethodPost, &url.URL{Path: "/api/admin/drain"}) {
 				t.Error("the resolved provision key can reach /api/admin/drain")
 			}
 
@@ -99,7 +100,7 @@ func TestAScopedOperatorKeyRoundTripsOnEveryDialect(t *testing.T) {
 			if legacy.Scopes != ScopeAdmin || legacy.Principal != "" {
 				t.Errorf("a pre-004 key resolved to scopes %q principal %q, want admin and none", legacy.Scopes, legacy.Principal)
 			}
-			if !legacy.MayReach(http.MethodPost, "/api/admin/drain") {
+			if !legacy.MayReach(http.MethodPost, &url.URL{Path: "/api/admin/drain"}) {
 				t.Error("a pre-004 key lost its reach to /api/admin/drain")
 			}
 

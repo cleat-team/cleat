@@ -57,6 +57,15 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, dot-dot out to drain", ScopeProvision, http.MethodPost, create + "/../drain", 403},
 		{"provision, encoded slash makes the subtree", ScopeProvision, http.MethodPost, create + "%2F", 403},
 		{"provision, upper-cased path", ScopeProvision, http.MethodPost, strings.ToUpper(create), 403},
+		// Encodings. The decoded path equals the allowed one in the first two, which is the
+		// disagreement with the mux that cleat-review measured: the mux routes the ENCODED form.
+		{"provision, encoded slash between admin and tenants", ScopeProvision, http.MethodPost, "/api/admin%2Ftenants", 403},
+		{"provision, encoded slash after api", ScopeProvision, http.MethodPost, "/api%2Fadmin/tenants", 403},
+		{"provision, an encoded letter in the last segment", ScopeProvision, http.MethodPost, "/api/admin/%74enants", 403},
+		// A query string is not part of the path and does not change the route.
+		{"provision, create with a query string", ScopeProvision, http.MethodPost, create + "?x=1", 200},
+		// The admin scope is not held to the canonical form: it already reaches everything.
+		{"admin, an encoded path is still admin", ScopeAdmin, http.MethodPost, "/api/admin/%64rain", 200},
 
 		// A key whose scopes admit nothing reaches NOTHING -- the create route included.
 		{"no scopes, create", "", http.MethodPost, create, 403},

@@ -3,6 +3,7 @@ package auth
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -86,13 +87,13 @@ func ValidPrincipal(s string) bool { return principalRe.MatchString(s) }
 // MayReach reports whether any of the operator's scopes admits the request.
 // OperatorMiddleware calls it for every request an operator key makes, after the
 // /api/admin/ confinement, so it decides among the routes that confinement leaves.
-func (o Operator) MayReach(method, path string) bool {
+func (o Operator) MayReach(method string, u *url.URL) bool {
 	for _, s := range ParseOperatorScopes(o.Scopes) {
 		switch s {
 		case ScopeAdmin:
 			return true
 		case ScopeProvision:
-			if provisionMayReach(method, path) {
+			if provisionMayReach(method, u) {
 				return true
 			}
 		}
@@ -108,9 +109,19 @@ func (o Operator) MayReach(method, path string) bool {
 // prefix, or accepting the slash form, would hand a tenant-creating service every
 // admin action on every tenant. The one route is the collection itself.
 //
+// CANONICAL FORM ONLY: a request whose path carries any percent-encoding the
+// standard library would not itself have produced (url.URL.RawPath is non-empty) is
+// refused. The check compares the DECODED path, and the mux routes on the ENCODED
+// one: an encoded slash inside a segment decodes to the allowed path here while
+// the mux treats it as one opaque segment and hands it to a different handler
+// (cleat-review measured this against a real mux on cleat#3554: the SPA answered).
+// The two disagreeing is the whole class of bug, so rather than reason about what
+// the mux does with each spelling, a scoped key is held to the one spelling that
+// cannot differ. A client has no reason to encode this path.
+//
 // The route's handler arrives in the next change (B2b-2). It is listed here first
 // because the gate has to exist before the thing it gates does: a handler added
 // without it would be reachable by every operator key the moment it was registered.
-func provisionMayReach(method, path string) bool {
-	return method == http.MethodPost && path == OperatorRoutePrefix+"tenants"
+func provisionMayReach(method string, u *url.URL) bool {
+	return method == http.MethodPost && u.RawPath == "" && u.Path == OperatorRoutePrefix+"tenants"
 }
