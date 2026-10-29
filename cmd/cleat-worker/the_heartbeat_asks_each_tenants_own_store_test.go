@@ -332,3 +332,65 @@ func TestHeartbeatWhenTheOwnStoreFailsThatIsTheWorkersTroubleAndOnlyThatTenantsR
 		t.Error("the other tenant's beat landed, and the worker's own failure refused its new durable calls")
 	}
 }
+
+// The reaper reclaims at claim + reclaimAfter. A tenant whose very first beat
+// fails must therefore be presumed lost by then, and not at first tick +
+// reclaimAfter, which is later by up to a heartbeat interval and is the "longer
+// window" heartbeatPresumedLost's own doc rules out (cleat#3566 review). The
+// claim is placed an hour back so nothing depends on a wall clock.
+func TestHeartbeatAGroupWhoseFirstBeatFailsIsPresumedLostFromItsClaimNotItsFirstTick(t *testing.T) {
+	own := newHeartbeatProbe(nil, nil)
+	other := newHeartbeatProbe(nil, errors.New("pool for this tenant is down"))
+	w := newTestWorker(own.mockStore)
+	defer w.cancel()
+	w.storeTenantID = tenantSelf
+	w.reclaimTimeout = time.Second
+	w.storeFactory = &recordingFactory{store: other.mockStore}
+	registerTenantExecution(w, "own-run", tenantSelf, 1)
+	registerTenantExecution(w, "other-run", tenantOther, 1)
+	w.claimedAfter.Store(engine.GenerationKey{WorkflowID: "other-run", Generation: 1}, time.Now().Add(-time.Hour).UnixNano())
+
+	w.heartbeatAndFenceInFlight() // the group's first tick, and its beat fails
+
+	if !w.heartbeatPresumedLostFor(tenantOther) {
+		t.Error("a run claimed an hour ago, whose every beat failed, is not presumed lost: its clock started at the first tick, " +
+			"so it is presumed lost later than another worker may reclaim it")
+	}
+	if w.heartbeatPresumedLostFor(tenantSelf) {
+		t.Error("the worker's own runs were refused because another tenant's first beat failed")
+	}
+}
+
+// A clock is stamped with when its call BEGAN. The loop makes one call per group,
+// so stamping afterwards credits a group with the slack of every group after it.
+func TestHeartbeatStampsAnAnsweredGroupAtTheStartOfItsCall(t *testing.T) {
+	own := newHeartbeatProbe(nil, nil)
+	other := newHeartbeatProbe(nil, nil)
+	slow := other.mockStore.heartbeatBatchFencedFn
+	other.mockStore.heartbeatBatchFencedFn = func(ctx context.Context, id string, runs []engine.GenerationKey) ([]string, error) {
+		time.Sleep(300 * time.Millisecond)
+		return slow(ctx, id, runs)
+	}
+	w := newTestWorker(own.mockStore)
+	defer w.cancel()
+	w.storeTenantID = tenantSelf
+	w.storeFactory = &recordingFactory{store: other.mockStore}
+	registerTenantExecution(w, "own-run", tenantSelf, 1)
+	registerTenantExecution(w, "other-run", tenantOther, 1)
+
+	w.heartbeatAndFenceInFlight()
+	end := time.Now()
+
+	// The own group is first in the loop, so its call began ~300ms before the loop
+	// ended; its reading must say so.
+	if got := time.Unix(0, w.lastHeartbeatOK.Load()); end.Sub(got) < 250*time.Millisecond {
+		t.Errorf("the own group's reading is %v before the loop ended; it should be stamped at its call's start, ~300ms earlier", end.Sub(got))
+	}
+	v, ok := w.groupHeartbeatOK.Load(tenantOther)
+	if !ok {
+		t.Fatal("the answered tenant has no clock")
+	}
+	if got := time.Unix(0, v.(int64)); end.Sub(got) < 250*time.Millisecond {
+		t.Errorf("the tenant's clock is %v before its call returned; it should be stamped when the call began, ~300ms earlier", end.Sub(got))
+	}
+}

@@ -2355,9 +2355,21 @@ type Worker struct {
 	// tenant's own store answered, keyed by tenant id. A tenant's runs are
 	// presumed lost on THEIR group's silence (heartbeatPresumedLostFor), not on
 	// another tenant's, so one tenant's pool being down does not make the
-	// worker refuse new durable calls for every run it holds. Seeded the first
-	// time a tick sees the group, and dropped when a tick sees none of its runs.
+	// worker refuse new durable calls for every run it holds. A group never
+	// answered starts from the earliest claim among its runs (claimedAfter),
+	// and the entry is dropped when a tick sees none of its runs.
 	groupHeartbeatOK sync.Map // map[tenantID]int64
+
+	// claimedAfter is, per (workflow id, generation) in flight, an instant at or
+	// BEFORE the claim that produced it: the start of the dispatch iteration that
+	// made the claim call. A group's clock is seeded from the earliest of its
+	// runs' values, because the reaper reclaims at claim + reclaimAfter and a
+	// clock seeded any later (the first heartbeat tick, which is up to a
+	// heartbeat interval after the claim) would presume the run lost after the
+	// reaper may already have taken it -- the "longer window" that
+	// heartbeatPresumedLost's doc rules out. Keyed by generation so a same-worker
+	// re-claim's registration is never torn down by its predecessor's.
+	claimedAfter sync.Map // map[engine.GenerationKey]int64
 
 	// lastDBTrouble is the UnixNano of this worker's most recent database
 	// round trip -- on the heartbeat OR the reaper path -- that failed or
@@ -3329,6 +3341,7 @@ func (w *Worker) dispatchLoop() {
 			w.logger.InfoContext(w.ctx, "claimed workflow", "worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "def_version", wf.DefVersion)
 			w.Metrics.RecordDispatchLatency(w.ctx, time.Since(wf.CreatedAt), "")
 
+			w.claimedAfter.Store(engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation}, pollStart.UnixNano())
 			w.inflight.Store(wf.ID, wf)
 			w.wg.Add(1)
 			go w.executeWorkflow(wf)
@@ -3368,6 +3381,7 @@ type execRegistration struct {
 // generation (cleat#2942).
 func (w *Worker) deregisterExecution(wf *engine.WorkflowInstance, reg *execRegistration) {
 	w.inflight.CompareAndDelete(wf.ID, wf)
+	w.claimedAfter.Delete(engine.GenerationKey{WorkflowID: wf.ID, Generation: wf.Generation})
 	w.fencedRuns.CompareAndDelete(wf.ID, wf.Generation)
 	w.execCancel.CompareAndDelete(wf.ID, reg)
 }
@@ -4310,8 +4324,13 @@ func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
 // that matters for how soon this worker's own reaper (and every other
 // worker's) trusts it again after a stall.
 func (w *Worker) heartbeatAndFenceInFlight() bool {
+	tickStart := time.Now()
 	var runs []engine.GenerationKey
 	byTenant := map[string][]engine.GenerationKey{}
+	// groupSince is the earliest claimedAfter among a group's runs, or tickStart
+	// for a run registered without one: the instant a group's clock starts from
+	// if it has never been answered.
+	groupSince := map[string]int64{}
 	w.inflight.Range(func(key, value any) bool {
 		wf, ok := value.(*engine.WorkflowInstance)
 		if !ok {
@@ -4321,6 +4340,13 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		runs = append(runs, gk)
 		group := w.heartbeatGroupFor(wf.TenantID)
 		byTenant[group] = append(byTenant[group], gk)
+		since := tickStart.UnixNano()
+		if v, ok := w.claimedAfter.Load(gk); ok && v.(int64) < since {
+			since = v.(int64)
+		}
+		if cur, ok := groupSince[group]; !ok || since < cur {
+			groupSince[group] = since
+		}
 		return true
 	})
 	if len(runs) == 0 {
@@ -4377,9 +4403,14 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	// deadline catches that shape.
 	var lost []string
 	allAnswered := true
-	answered := map[string]bool{}
+	// answeredAt is the instant each answered group's call BEGAN. A clock is
+	// stamped with that and not with the time the loop finished: the store
+	// vouched for the lease as of the call, and stamping later would credit it
+	// with up to one dbCallDeadline per group still ahead of it in the loop.
+	answeredAt := map[string]int64{}
 	for _, group := range heartbeatGroupOrder(byTenant) {
 		groupRuns := byTenant[group]
+		callStart := time.Now().UnixNano()
 		hbStore, release := w.heartbeatBatchStore(), func() {}
 		if group != "" {
 			var openErr error
@@ -4420,7 +4451,7 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 			continue
 		}
 		lost = append(lost, groupLost...)
-		answered[group] = true
+		answeredAt[group] = callStart
 	}
 
 	// What each answer is evidence of. The worker-wide readings
@@ -4432,24 +4463,28 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	// tenant's unopenable store refuse new durable calls for every run, including
 	// runs whose own beat had landed (cleat#3566 review).
 	if _, hasOwn := byTenant[""]; hasOwn {
-		if answered[""] {
+		if at, ok := answeredAt[""]; ok {
 			w.recordDBContactOK()
-			w.lastHeartbeatOK.Store(time.Now().UnixNano())
+			w.lastHeartbeatOK.Store(at)
 		}
-	} else if w.pingOwnStore() {
-		w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	} else {
+		pingStart := time.Now().UnixNano()
+		if w.pingOwnStore() {
+			w.lastHeartbeatOK.Store(pingStart)
+		}
 	}
-	now := time.Now().UnixNano()
 	for group := range byTenant {
 		if group == "" {
 			continue
 		}
-		if answered[group] {
-			w.groupHeartbeatOK.Store(group, now)
+		if at, ok := answeredAt[group]; ok {
+			w.groupHeartbeatOK.Store(group, at)
 		} else {
-			// First sight of a group seeds its clock; a group that keeps failing
-			// then ages out of its grace from there.
-			w.groupHeartbeatOK.LoadOrStore(group, now)
+			// A group never answered starts its clock at the earliest claim among
+			// its runs, so a tenant whose very first beat fails is presumed lost
+			// at claim + reclaimAfter, when the reaper may take it, and not at
+			// first tick + reclaimAfter.
+			w.groupHeartbeatOK.LoadOrStore(group, groupSince[group])
 		}
 	}
 	w.groupHeartbeatOK.Range(func(k, _ any) bool {
