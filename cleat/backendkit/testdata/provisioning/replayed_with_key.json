@@ -1,0 +1,19 @@
+{
+  "status": 200,
+  "body": {
+    "outcome": "replayed",
+    "tenant": {
+      "tenant_id": "aaaaaaaa-0000-4000-8000-000000000001",
+      "name": "aaaaaaaa-0000-4000-8000-000000000001",
+      "display_name": "Acme",
+      "org_id": "bbbbbbbb-0000-4000-8000-000000000002"
+    },
+    "key": {
+      "key_id": "cccccccc-0000-4000-8000-000000000003",
+      "secret": "cleat_sk_the_secret",
+      "provisional": true,
+      "valid_for_seconds": 900,
+      "confirm": "POST /api/admin/tenants/aaaaaaaa-0000-4000-8000-000000000001/confirm with {\"key_id\":\"cccccccc-0000-4000-8000-000000000003\"}"
+    }
+  }
+}

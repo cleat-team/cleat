@@ -1,0 +1,7 @@
+{
+  "status": 409,
+  "body": {
+    "error": "auth: the tenant name is already taken by another tenant",
+    "reason": "name_taken"
+  }
+}

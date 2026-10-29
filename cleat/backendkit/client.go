@@ -746,7 +746,13 @@ func (c *Client) PluginRoute(ctx context.Context, method, path string, body, out
 			"client's base URL, and a relative path would be resolved against the wrong "+
 			"base", path, "/")
 	}
+	return c.doJSON(ctx, "plugin route", method, path, body, out)
+}
 
+// doJSON sends one JSON request and decodes a 2xx JSON reply into out (or drains it when out is nil). what
+// names the call in an error, so a failed tenant create does not read as a failed plugin route; the error
+// underneath is unchanged, so errors.As still finds the *UpstreamStatusError.
+func (c *Client) doJSON(ctx context.Context, what, method, path string, body, out any) error {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -766,7 +772,7 @@ func (c *Client) PluginRoute(ctx context.Context, method, path string, body, out
 
 	resp, err := c.doRequest(req)
 	if err != nil {
-		return fmt.Errorf("plugin route %s %s: %w", method, path, err)
+		return fmt.Errorf("%s %s %s: %w", what, method, path, err)
 	}
 	defer resp.Body.Close()
 

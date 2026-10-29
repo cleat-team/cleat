@@ -1,0 +1,12 @@
+{
+  "status": 200,
+  "body": {
+    "outcome": "replayed",
+    "tenant": {
+      "tenant_id": "aaaaaaaa-0000-4000-8000-000000000001",
+      "name": "aaaaaaaa-0000-4000-8000-000000000001",
+      "display_name": "Acme",
+      "org_id": "bbbbbbbb-0000-4000-8000-000000000002"
+    }
+  }
+}

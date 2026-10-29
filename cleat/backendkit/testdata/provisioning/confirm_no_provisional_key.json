@@ -1,0 +1,7 @@
+{
+  "status": 409,
+  "body": {
+    "error": "auth: no live provisional key to confirm; replay the create",
+    "reason": "no_provisional_key"
+  }
+}
