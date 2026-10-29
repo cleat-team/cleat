@@ -142,7 +142,7 @@ its migrations stop before this one.
 | `library.members` | `library` | One published workflow build: primary key `(library, name, version)`, its bytes, and its stored `wasm_sha256` and `wasm_length` (both checked against the bytes on every insert), plus the metadata an install copies |
 | `library.bundles` | `library` | A published release of a library: `(library, bundle_version)` |
 | `library.bundle_members` | `library` | Which members a bundle contains; a member unchanged between two bundles is listed by both |
-| `tenant_library_installs` | application schema | Which bundle of a library a tenant has installed; an explicit upgrade replaces the row |
+| `tenant_library_installs` | application schema | Which bundle of a library a tenant has installed; an explicit upgrade updates `bundle_version` and rewrites `installed_at` in place, so `installed_at` is when the current bundle was installed |
 
 ```sql
 CREATE TABLE tenant_library_installs (
