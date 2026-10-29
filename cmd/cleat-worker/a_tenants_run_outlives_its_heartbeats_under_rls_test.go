@@ -170,7 +170,14 @@ func mssqlHBRig(t *testing.T, tenant string) *hbRig {
 		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v", redactMSSQLDSN(base), err)
 	}
 	ctx := context.Background()
-	const dbName = "cleat_hb_3566_test"
+	// One database PER RIG, named from the tenant it is built for. It was one
+	// shared name, and each test's teardown puts the database in SINGLE_USER
+	// before dropping it, so a pooled connection still open from an earlier test
+	// could take the single slot and fail the next test's drop with error 5064
+	// (cleat#3572: the third test to share the name did it once in three runs of
+	// the same three tests). The tenants these tests pass are distinct, and so
+	// are their last twelve characters.
+	dbName := "cleat_hb_" + tenant[len(tenant)-12:] + "_test"
 	if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
 		"IF DB_ID('%s') IS NOT NULL BEGIN ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s; END",
 		dbName, dbName, dbName)); err != nil {
