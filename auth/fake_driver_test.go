@@ -96,11 +96,6 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "INSERT INTO admin.tenants") ||
-		strings.Contains(query, "INSERT INTO tenants"):
-		c.store.mu.Lock()
-		defer c.store.mu.Unlock()
-		return c.execInsertTenant(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query: %s", query)
 	}
@@ -112,6 +107,9 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	defer c.store.mu.Unlock()
 
 	switch {
+	case strings.Contains(query, "INSERT INTO admin.tenants") ||
+		strings.Contains(query, "INSERT INTO tenants"):
+		return c.execInsertTenant(args)
 	case strings.Contains(query, "INSERT INTO admin.tenant_api_keys") ||
 		strings.Contains(query, "INSERT INTO tenant_api_keys"):
 		return c.execInsertAPIKey(args)
@@ -149,35 +147,41 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 
 // execInsertTenant handles:
 //
-//	INSERT INTO tenants (name, display_name) VALUES ($1, $2) RETURNING tenant_id
-func (c *fakeConn) execInsertTenant(args []driver.NamedValue) (driver.Rows, error) {
-	name, err := argString(args, 1)
+//	INSERT INTO admin.tenants (tenant_id, name, display_name, org_id) VALUES ($1, $2, $3, $4)
+//
+// The id is the caller's (cleat#3552): CreateTenant used to read it back from
+// RETURNING, so this fake used to make one up; it now stores the one it is
+// given, which is what the real databases do.
+func (c *fakeConn) execInsertTenant(args []driver.NamedValue) (driver.Result, error) {
+	tid, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	displayName, err := argString(args, 2)
+	name, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	displayName, err := argString(args, 3)
 	if err != nil {
 		return nil, err
 	}
 
-	// Simulate UNIQUE constraint on name.
+	// Simulate UNIQUE constraints on the id and on the name.
 	for _, t := range c.store.tenants {
+		if t.tenantID == tid {
+			return nil, fmt.Errorf(`pq: duplicate key value violates unique constraint "tenants_pkey"`)
+		}
 		if t.name == name {
 			return nil, fmt.Errorf(`pq: duplicate key value violates unique constraint "tenants_name_key"`)
 		}
 	}
 
-	c.store.nextID++
-	tid := fmt.Sprintf("00000000-0000-0000-0000-%012d", c.store.nextID)
 	c.store.tenants = append(c.store.tenants, fakeTenantRow{
 		tenantID:    tid,
 		name:        name,
 		displayName: displayName,
 	})
-	return &fakeRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{tid}},
-	}, nil
+	return &fakeResult{rowsAffected: 1}, nil
 }
 
 // execInsertAPIKey handles:

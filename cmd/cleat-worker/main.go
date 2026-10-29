@@ -631,8 +631,8 @@ func main() {
 			logger.ErrorContext(context.Background(), "cannot create an org", "worker_id", workerID, "error", tsErr)
 			os.Exit(1)
 		}
-		// auth.CreateOrg refuses on MySQL and SQL Server for the same reason
-		// CreateTenant does -- surfaced as-is, naming the dialect.
+		// auth.CreateOrg refuses MySQL for the same reason CreateTenant does
+		// (single-tenant by decision) -- surfaced as-is, naming the dialect.
 		oid, cErr := store.CreateOrg(context.Background(), *createOrgNamed)
 		if cErr != nil {
 			logger.ErrorContext(context.Background(), "failed to create org", "worker_id", workerID, "name", *createOrgNamed, "error", cErr)
@@ -694,8 +694,8 @@ func main() {
 		if display == "" {
 			display = *createTenantNamed
 		}
-		// auth.CreateTenant refuses on MySQL and SQL Server rather than emitting
-		// PostgreSQL SQL at them. Surfaced as-is: the message names the dialect,
+		// auth.CreateTenant refuses MySQL, which is single-tenant by decision,
+		// rather than emitting SQL that cannot succeed. Surfaced as-is: the message names the dialect,
 		// which is more useful than anything this layer could add.
 		tid, cErr := store.CreateTenant(context.Background(), *createTenantNamed, display, orgUUID)
 		if cErr != nil {

@@ -216,11 +216,13 @@ var (
 	// admin.tenants directly, which puts raw SQL underneath the assertions that
 	// exist to test tenant isolation (cleat#1114).
 	//
-	// PostgreSQL only, and loudly: auth.CreateTenant refuses on MySQL and SQL
-	// Server rather than emitting PostgreSQL SQL at them, because RETURNING has
-	// no MySQL equivalent and SQL Server spells it OUTPUT. That refusal is the
-	// correct behaviour and this flag surfaces it verbatim.
-	createTenantNamed = flag.String("create-tenant", "", "Create a tenant with the given name, print its UUID, and exit (PostgreSQL only). Requires --org")
+	// PostgreSQL and SQL Server; MySQL is refused, and loudly. MySQL is
+	// single-tenant by decision, so auth.CreateTenant gives it no statement, and
+	// this flag surfaces that refusal verbatim. It used to refuse SQL Server too,
+	// for a reason that was only the statement shape: it asked the database for
+	// the new id with RETURNING, which SQL Server spells OUTPUT. The id is now
+	// made in Go (cleat#3552).
+	createTenantNamed = flag.String("create-tenant", "", "Create a tenant with the given name, print its UUID, and exit (PostgreSQL and SQL Server; MySQL is single-tenant). Requires --org")
 
 	// cleat#1898. admin.tenants.org_id is NOT NULL and immutable once set, so
 	// --create-tenant needs an org to put the new tenant under -- there is no
@@ -230,7 +232,7 @@ var (
 	// --create-org is the other half, mirroring --create-tenant exactly:
 	// admin.orgs has to have a row before anything can reference it, and
 	// until this flag there was no command that made one.
-	createOrgNamed = flag.String("create-org", "", "Create an org with the given name, print its UUID, and exit (PostgreSQL only)")
+	createOrgNamed = flag.String("create-org", "", "Create an org with the given name, print its UUID, and exit (PostgreSQL and SQL Server; MySQL is single-tenant)")
 	tenantOrgID    = flag.String("org", "", "Org UUID for --create-tenant (required). Create one first with --create-org")
 
 	// Migration.Down finally has a caller. cleat#1290.

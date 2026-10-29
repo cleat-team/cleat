@@ -123,10 +123,12 @@ anywhere in cleat.
 ### Which dialects this runs on
 
 **PostgreSQL only, and it is not an omission.** `cleat-worker --create-tenant`
-refuses outright on MySQL and SQL Server — `auth.CreateTenant`'s own dialect
-gate — so there is no second arm to run: the backend's signup path, which
-every part of this scenario depends on, simply does not exist on those two
-dialects. Compare `examples/order-lifecycle/README.md`, whose saga
+refuses outright on MySQL — `auth.CreateTenant`'s own dialect gate, because
+MySQL is single-tenant — so there is no MySQL arm to run: the backend's signup
+path, which every part of this scenario depends on, does not exist there. It
+used to refuse SQL Server as well, which was the other half of this reason;
+that stopped being true with cleat#3552, but this scenario has not been run on
+SQL Server, so it stays a PostgreSQL scenario until someone adds that arm. Compare `examples/order-lifecycle/README.md`, whose saga
 assertions genuinely are dialect-independent and run on all three; this
 scenario's *provisioning* path is not, by construction, one level below the
 workflow engine itself.
