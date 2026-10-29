@@ -155,9 +155,13 @@ h.DurableCall("http", "fetch", `{
 
 Write the reference, not the credential. Putting the real value in that request
 puts it in `event_history.request`, where the only thing in front of it is
-`engine.Redact` — a field-name heuristic, described below, which matches seven
-substrings and returns non-JSON input untouched. It does not match `X-Auth`, a
-`Cookie`, or a key in a URL query string, where the field name is `url`.
+`engine.Redact` — a field-name heuristic, described below. It reads a key as
+words and matches `token`, `secret`, `password`, `credential`, `authorization`
+and `api key`, plus any string value that is a real JWT (a header and claims
+that decode to JSON, with an `alg`), and it returns other non-JSON input
+untouched. It does not match `X-Auth`, a `Cookie`, or a key in a URL query
+string, where the field name is `url`. Keys that only describe a secret, such as
+`token_usage`, `max_tokens` or `password_policy`, are left alone.
 
 A reference naming a secret the tenant does not have is a **permanent** error,
 not a retryable one: retrying cannot create it, and a retry budget spent on a
