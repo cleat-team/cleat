@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -82,6 +83,12 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 			initOut, err := runCleatIn(t, root, "init", "--template", template, name)
 			if err != nil {
 				t.Fatalf("cleat init --template %s failed: %v\n%s", template, err, initOut)
+			}
+
+			// A successful init says nothing about dependencies: the closing warning
+			// (cleat#3533) is only for a tidy that failed.
+			if strings.Contains(initOut, "WARNING: ") {
+				t.Errorf("init resolved its dependencies, so it must not end with the warning:\n%s", initOut)
 			}
 
 			proj := filepath.Join(root, name)
