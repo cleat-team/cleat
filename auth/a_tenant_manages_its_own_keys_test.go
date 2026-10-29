@@ -322,6 +322,66 @@ func TestRevokingTheLastTwoKeysConcurrentlyLeavesOne(t *testing.T) {
 	}
 }
 
+// Eight mints racing for the last free slot under the cap. Without the tenant-row lock in MintKey the
+// count and the insert interleave and several succeed (cleat#3576 review: 5 to 6 of 6 rounds over the cap on
+// each of PostgreSQL, SQL Server and MySQL with the lock removed). MySQL is not in this test because its
+// fixture has one tenant, which would carry every round's keys into the next.
+func TestConcurrentMintsCannotPassTheLiveKeyCap(t *testing.T) {
+	for _, dialect := range []string{DialectPostgres, DialectMSSQL} {
+		dialect := dialect
+		t.Run(dialect, func(t *testing.T) {
+			f := newKeysFixture(t, dialect)
+			for round := 0; round < 25; round++ {
+				tid := f.tenant()
+				var live int
+				now := "now()"
+				if dialect == DialectMSSQL {
+					now = "SYSUTCDATETIME()"
+				}
+				liveSQL := `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = ` + f.ph(1) + ` AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > ` + now + `)`
+				if err := f.db.QueryRow(liveSQL, tid.String()).Scan(&live); err != nil {
+					t.Fatal(err)
+				}
+				for live < MaxLiveTenantKeys-1 {
+					f.mint(tid, "fill", nil)
+					live++
+				}
+				const racers = 8
+				errs := make([]error, racers)
+				var wg sync.WaitGroup
+				start := make(chan struct{})
+				for i := 0; i < racers; i++ {
+					wg.Add(1)
+					go func(i int) {
+						defer wg.Done()
+						<-start
+						_, _, errs[i] = f.ts.MintKey(context.Background(), tid, "racer", nil)
+					}(i)
+				}
+				close(start)
+				wg.Wait()
+				won, refused := 0, 0
+				for _, err := range errs {
+					switch {
+					case err == nil:
+						won++
+					case errors.Is(err, ErrKeyLimit):
+						refused++
+					default:
+						t.Fatalf("round %d: unexpected error %v", round, err)
+					}
+				}
+				if err := f.db.QueryRow(liveSQL, tid.String()).Scan(&live); err != nil {
+					t.Fatal(err)
+				}
+				if live != MaxLiveTenantKeys || won != 1 || refused != racers-1 {
+					t.Errorf("round %d: %d live keys (cap %d), %d mints succeeded, %d refused; want exactly the cap, 1 and %d", round, live, MaxLiveTenantKeys, won, refused, racers-1)
+				}
+			}
+		})
+	}
+}
+
 func TestATenantCannotHoldMoreThanTheLiveKeyCap(t *testing.T) {
 	for _, dialect := range []string{DialectPostgres, DialectMySQL, DialectMSSQL} {
 		dialect := dialect
