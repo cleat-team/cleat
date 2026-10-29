@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -228,5 +229,106 @@ func TestHeartbeatWithNoFactoryServesEveryRunFromTheWorkersOwnStore(t *testing.T
 		if g := w.heartbeatGroupFor(tenant); g != "" {
 			t.Errorf("heartbeatGroupFor(%q) = %q with no factory; storeForTenant returns the worker's own store for it", tenant, g)
 		}
+	}
+}
+
+// What a beat is evidence of (cleat#3566 review). The worker-wide readings --
+// lastHeartbeatOK, which heartbeatPresumedLost() turns into "refuse every new
+// durable call", and lastDBTrouble, which holds this worker's reaper back -- are
+// about whether THIS worker's own store can be reached. One tenant's store not
+// opening says nothing about that, and must not refuse new durable calls for runs
+// whose own beat landed.
+
+func ageOutTheWorkerWideReadings(w *Worker) {
+	old := time.Now().Add(-time.Hour).UnixNano()
+	w.lastHeartbeatOK.Store(old)
+	w.lastDBContactOK.Store(old)
+	w.lastDBTrouble.Store(old)
+}
+
+func TestHeartbeatOneTenantsSilenceDoesNotRefuseAnotherTenantsNewWork(t *testing.T) {
+	own := newHeartbeatProbe(nil, nil)
+	other := newHeartbeatProbe(nil, errors.New("pool for this tenant is down"))
+	w := newTestWorker(own.mockStore)
+	defer w.cancel()
+	w.storeTenantID = tenantSelf
+	w.reclaimTimeout = time.Second
+	w.storeFactory = &recordingFactory{store: other.mockStore}
+	registerTenantExecution(w, "own-run", tenantSelf, 1)
+	registerTenantExecution(w, "other-run", tenantOther, 1)
+
+	ageOutTheWorkerWideReadings(w)
+	troubleBefore := w.lastDBTrouble.Load()
+	w.heartbeatAndFenceInFlight()
+
+	if w.heartbeatPresumedLostFor(tenantSelf) {
+		t.Error("the worker's own beat landed, and another tenant's silence made its new durable calls refused: " +
+			"a worker-wide reading was held back by one group")
+	}
+	if got := w.lastDBTrouble.Load(); got != troubleBefore {
+		t.Error("another tenant's store failing was recorded as this worker's own DB trouble, which holds its reaper back")
+	}
+	if w.heartbeatPresumedLostFor(tenantOther) {
+		t.Error("a tenant first seen this tick is presumed lost at once; its clock should start now")
+	}
+
+	// The silent tenant's OWN clock does run out, and only its own.
+	w.groupHeartbeatOK.Store(tenantOther, time.Now().Add(-time.Hour).UnixNano())
+	if !w.heartbeatPresumedLostFor(tenantOther) {
+		t.Error("a tenant whose store has not answered for longer than reclaimAfter is not presumed lost")
+	}
+	if w.heartbeatPresumedLostFor(tenantSelf) {
+		t.Error("the silent tenant's clock running out refused the worker's own runs")
+	}
+}
+
+func TestHeartbeatWithNoOwnRunsStillProvesTheOwnStoreAndAFailingTenantDoesNotCountAgainstIt(t *testing.T) {
+	pinging := &pingingMockStore{mockStore: &mockStore{}}
+	w := newTestWorkerFromStore(pinging)
+	defer w.cancel()
+	w.storeTenantID = tenantSelf
+	w.reclaimTimeout = time.Second
+	w.storeFactory = &recordingFactory{openErr: errors.New("no pool for this tenant")}
+	registerTenantExecution(w, "other-run", tenantOther, 1)
+
+	ageOutTheWorkerWideReadings(w)
+	troubleBefore := w.lastDBTrouble.Load()
+	if landed := w.heartbeatAndFenceInFlight(); landed {
+		t.Error("the tenant's store could not be opened, so the call did not land")
+	}
+	if w.heartbeatPresumedLostFor(tenantSelf) {
+		t.Error("no run of the worker's own was in flight, its own store answered a ping, and it was still presumed lost")
+	}
+	if w.lastDBContactOK.Load() <= troubleBefore {
+		t.Error("the own store's ping answered and was not recorded as confirmed contact")
+	}
+	if got := w.lastDBTrouble.Load(); got != troubleBefore {
+		t.Error("a tenant's unopenable store was recorded as this worker's DB trouble")
+	}
+}
+
+func TestHeartbeatWhenTheOwnStoreFailsThatIsTheWorkersTroubleAndOnlyThatTenantsRunsAreAtRisk(t *testing.T) {
+	own := newHeartbeatProbe(nil, errors.New("connection reset by peer"))
+	other := newHeartbeatProbe(nil, nil)
+	w := newTestWorker(own.mockStore)
+	defer w.cancel()
+	w.storeTenantID = tenantSelf
+	w.reclaimTimeout = time.Second
+	w.storeFactory = &recordingFactory{store: other.mockStore}
+	registerTenantExecution(w, "own-run", tenantSelf, 1)
+	registerTenantExecution(w, "other-run", tenantOther, 1)
+
+	ageOutTheWorkerWideReadings(w)
+	troubleBefore := w.lastDBTrouble.Load()
+	w.heartbeatAndFenceInFlight()
+
+	if got := w.lastDBTrouble.Load(); got == troubleBefore {
+		t.Error("the worker's own store failed and no DB trouble was recorded")
+	}
+	if !w.heartbeatPresumedLostFor(tenantSelf) {
+		t.Error("the worker's own beat has not landed for longer than reclaimAfter and its runs are not presumed lost")
+	}
+	if w.heartbeatPresumedLostFor(tenantOther) {
+		t.Error("the other tenant's beat landed, and the worker's own failure refused its new durable calls")
 	}
 }

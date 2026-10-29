@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/wasm"
 )
 
@@ -27,25 +29,29 @@ import (
 //
 // # Why no existing suite saw it
 //
-// HeartbeatBatchFenced reads workflow_leases, which is FORCE ROW LEVEL SECURITY,
-// and the tenant it sees is a property of the store instance. So the bug needs
-// all three of: a role the policy applies to, a run of a tenant that is not the
-// worker's, and a run that is still executing when a beat lands. The suites that
-// run a real worker connect as a superuser, which bypasses the policy, so the
-// heartbeat saw every row; the ones that run another tenant use a recording store,
-// which can show a store was asked and not that it could see a row; and the one
+// HeartbeatBatchFenced reads the lease state (workflow_leases on PostgreSQL,
+// workflow_instances on SQL Server), and the tenant it sees is a property of the
+// store instance: row-level security on PostgreSQL, a security policy bound to
+// SESSION_CONTEXT on SQL Server. So the bug needs all three of: a principal the
+// policy applies to, a run of a tenant that is not the worker's, and a run that is
+// still executing when a beat lands. The suites that run a real worker on
+// PostgreSQL connect as a superuser, which bypasses the policy, so the heartbeat
+// saw every row; the ones that run another tenant use a recording store, which
+// can show that a store was asked and not that it could see a row; and the one
 // that ran this end to end (the integration-hub tenant sandbox scenario) ran
 // guests that end within seconds, so it failed only when a claim landed just
-// before a tick, once in thirty-one runs.
+// before a tick, once in thirty-one runs. SQL Server's own doc comment on
+// HeartbeatBatchFenced said the heartbeat must carry no tenant predicate because
+// it covers every tenant: the premise was that the SQL scopes it, when the policy
+// does regardless of the SQL.
 //
 // # What this does, and why it is not phase-dependent
 //
 // A real guest (the defer fixture: two sequential durable calls) runs a tenant's
-// run through a real worker as cleat_app. Inside the first call's HTTP handler,
-// while the guest is still executing, the test forces THREE beats by calling
+// run through a real worker. Inside the first call's HTTP handler, while the guest
+// is still executing, the test forces THREE beats by calling
 // heartbeatAndFenceInFlight itself, so the beats do not depend on when a ticker
-// happens to fire relative to the claim. It then asserts, from a connection that
-// bypasses the policy:
+// fires relative to the claim. It then asserts:
 //
 //   - heartbeat_at moved on every beat, which is the property the reaper rests on,
 //     and is what "not fenced" alone would not show;
@@ -53,16 +59,31 @@ import (
 //     marked lost;
 //   - the run is done, not released.
 //
-// The same body runs on a superuser handle, where the old code passed too: that is
-// the known-positive, the evidence that the difference is the role and not the
-// fixture.
+// PostgreSQL runs it twice: as cleat_app, which the policy applies to, and as a
+// superuser, which bypasses it. The superuser twin is the known-positive: the old
+// code passed there too, so the difference is the role and not the fixture. SQL
+// Server has no bypassing principal (the policy applies to sa and dbo too), so
+// its rig has no twin; its premise probe plays that part. MySQL is not
+// applicable: tenancy there is a database per tenant and it is single-tenant only
+// by decision.
+type hbRig struct {
+	name          string
+	policyApplies bool
+	db            *sql.DB
+	factory       engine.StoreFactory
+	ownStore      engine.WorkflowStore
+	register      func(t *testing.T, tenant string)
+	// visibleRows counts the run's lease row through a connection whose tenant
+	// context is set to tenant.
+	visibleRows func(t *testing.T, tenant, wfID string) int
+	// heartbeatAt reads the run's heartbeat_at as the given tenant.
+	heartbeatAt func(t *testing.T, tenant, wfID string) time.Time
+	tenant      string
+}
+
 func TestATenantsRunOutlivesItsHeartbeatsUnderRLS(t *testing.T) {
-	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
-		t.Skip("CLEAT_TEST_POSTGRES not set, skipping the database-backed cleat#3566 test")
-	}
 	owner := testutil.SuiteTestDB(t, "cleat_worker_hbtenant")
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, owner)
-
 	// PRECONDITION: the role this runs as neither bypasses the policy nor is a
 	// superuser. Without it a pass says nothing about the heartbeat.
 	var bypass, super bool
@@ -73,31 +94,174 @@ func TestATenantsRunOutlivesItsHeartbeatsUnderRLS(t *testing.T) {
 	if bypass || super {
 		t.Fatalf("the RLS role has BYPASSRLS=%v SUPERUSER=%v; this test would measure nothing", bypass, super)
 	}
-
-	t.Run("as cleat_app, which the policy applies to", func(t *testing.T) {
-		runATenantsRunThroughItsBeats(t, owner, rlsDB, "11111111-0000-4000-8000-000000003566", true)
+	t.Run("postgres as cleat_app, which the policy applies to", func(t *testing.T) {
+		runATenantsRunThroughItsBeats(t, postgresHBRig(t, owner, rlsDB, true, "11111111-0000-4000-8000-000000003566"))
 	})
-	t.Run("twin: as a superuser, which bypasses it (the old code passed here too)", func(t *testing.T) {
-		runATenantsRunThroughItsBeats(t, owner, owner, "22222222-0000-4000-8000-000000003566", false)
+	t.Run("postgres twin: as a superuser, which bypasses it (the old code passed here too)", func(t *testing.T) {
+		runATenantsRunThroughItsBeats(t, postgresHBRig(t, owner, owner, false, "22222222-0000-4000-8000-000000003566"))
 	})
 }
 
-func runATenantsRunThroughItsBeats(t *testing.T, owner, db *sql.DB, tenant string, policyApplies bool) {
-	t.Helper()
-	ctx := context.Background()
+// The SQL Server arm is its own test so that an unset CLEAT_TEST_MSSQL skips it
+// without taking the PostgreSQL arm with it, and the other way round.
+func TestATenantsRunOutlivesItsHeartbeatsUnderRLSOnSQLServer(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping the SQL Server cleat#3566 test")
+	}
+	runATenantsRunThroughItsBeats(t, mssqlHBRig(t, "33333333-0000-4000-8000-000000003566"))
+}
 
-	if _, err := owner.Exec(
-		`INSERT INTO admin.tenants (tenant_id, name, suspended) VALUES ($1, $2, false) ON CONFLICT (tenant_id) DO NOTHING`,
-		tenant, "cleat-3566-"+tenant[:8]); err != nil {
-		t.Fatalf("registering tenant: %v", err)
+func postgresHBRig(t *testing.T, owner, db *sql.DB, policyApplies bool, tenant string) *hbRig {
+	t.Helper()
+	return &hbRig{
+		name: "postgres", policyApplies: policyApplies, db: db, tenant: tenant,
+		factory:  engine.NewPostgresStoreFactory(db, "public"),
+		ownStore: engine.NewPostgresStore(db),
+		register: func(t *testing.T, tenant string) {
+			t.Helper()
+			if _, err := owner.Exec(
+				`INSERT INTO admin.tenants (tenant_id, name, suspended) VALUES ($1, $2, false) ON CONFLICT (tenant_id) DO NOTHING`,
+				tenant, "cleat-3566-"+tenant[:8]); err != nil {
+				t.Fatalf("registering tenant: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = owner.Exec(`DELETE FROM workflow_instances WHERE tenant_id = $1`, tenant)
+				_, _ = owner.Exec(`DELETE FROM admin.tenants WHERE tenant_id = $1`, tenant)
+			})
+		},
+		visibleRows: func(t *testing.T, tenant, wfID string) int {
+			t.Helper()
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.Exec(`SELECT set_config('cleat.tenant_id', $1, true)`, tenant); err != nil {
+				t.Fatal(err)
+			}
+			var n int
+			if err := tx.QueryRow(`SELECT count(*) FROM workflow_leases WHERE id = $1`, wfID).Scan(&n); err != nil {
+				t.Fatalf("counting visible lease rows as tenant %s: %v", tenant, err)
+			}
+			return n
+		},
+		// Read from the superuser connection, which bypasses the policy in both
+		// rigs, so the reading cannot itself be hidden.
+		heartbeatAt: func(t *testing.T, _ string, wfID string) time.Time {
+			t.Helper()
+			var at time.Time
+			if err := owner.QueryRow(`SELECT heartbeat_at FROM workflow_leases WHERE id = $1`, wfID).Scan(&at); err != nil {
+				t.Fatalf("reading heartbeat_at: %v", err)
+			}
+			return at
+		},
+	}
+}
+
+func mssqlHBRig(t *testing.T, tenant string) *hbRig {
+	t.Helper()
+	base := os.Getenv("CLEAT_TEST_MSSQL")
+	adminDB, err := sql.Open("sqlserver", base)
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	t.Cleanup(func() { _ = adminDB.Close() })
+	if err := adminDB.Ping(); err != nil {
+		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v", redactMSSQLDSN(base), err)
+	}
+	ctx := context.Background()
+	const dbName = "cleat_hb_3566_test"
+	if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
+		"IF DB_ID('%s') IS NOT NULL BEGIN ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s; END",
+		dbName, dbName, dbName)); err != nil {
+		t.Fatalf("drop stale test database: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = owner.Exec(`DELETE FROM workflow_instances WHERE tenant_id = $1`, tenant)
-		_, _ = owner.Exec(`DELETE FROM admin.tenants WHERE tenant_id = $1`, tenant)
+		_, _ = adminDB.ExecContext(context.Background(), fmt.Sprintf(
+			"ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s", dbName, dbName))
 	})
+	connStr, err := mssqlConnStrForDB(base, dbName)
+	if err != nil {
+		t.Fatalf("derive test DSN: %v", err)
+	}
+	db, err := sql.Open("sqlserver", connStr)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// The REAL shipped migrations: the security policies are the thing under test.
+	if err := migration.NewRunner(db, migration.DialectMSSQL, "../../migrations").Run(ctx); err != nil {
+		t.Fatalf("apply mssql migrations: %v", err)
+	}
 
-	factory := engine.NewPostgresStoreFactory(db, "public")
-	tenantStore, closeTenant, err := factory.OpenStore(ctx, tenant)
+	factory := engine.NewMSSQLStoreFactory(connStr)
+	own, closeOwn, err := factory.OpenStore(ctx, engine.DefaultTenantUUID, "default")
+	if err != nil {
+		t.Fatalf("opening the worker's own store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeOwn.Close() })
+
+	// asTenant runs fn on one connection whose SESSION_CONTEXT tenant is set, which
+	// is what every statement of the store's own transactions does.
+	asTenant := func(t *testing.T, tenant string, fn func(c *sql.Conn)) {
+		t.Helper()
+		c, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if _, err := c.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant); err != nil {
+			t.Fatalf("scoping the connection to %s: %v", tenant, err)
+		}
+		fn(c)
+	}
+	return &hbRig{
+		name: "mssql", policyApplies: true, db: db, tenant: tenant, factory: factory, ownStore: own,
+		register: func(t *testing.T, tenant string) {
+			t.Helper()
+			if _, err := db.ExecContext(ctx,
+				`MERGE admin.tenants AS t USING (SELECT @p1 AS tenant_id, @p2 AS name, CAST(0 AS bit) AS suspended) AS s
+				   ON t.tenant_id = s.tenant_id
+				 WHEN NOT MATCHED THEN INSERT (tenant_id, name, suspended) VALUES (s.tenant_id, s.name, s.suspended);`,
+				tenant, "cleat-3566-"+tenant[:8]); err != nil {
+				t.Fatalf("registering tenant: %v", err)
+			}
+		},
+		visibleRows: func(t *testing.T, tenant, wfID string) int {
+			t.Helper()
+			var n int
+			asTenant(t, tenant, func(c *sql.Conn) {
+				if err := c.QueryRowContext(ctx, `SELECT count(*) FROM workflow_instances WHERE id = @p1`, wfID).Scan(&n); err != nil {
+					t.Fatalf("counting visible instances as tenant %s: %v", tenant, err)
+				}
+			})
+			return n
+		},
+		// SQL Server has no bypassing principal, so the reading is taken scoped to the
+		// run's own tenant, where the run is visible (the premise probe checks that).
+		heartbeatAt: func(t *testing.T, tenant, wfID string) time.Time {
+			t.Helper()
+			var at time.Time
+			asTenant(t, tenant, func(c *sql.Conn) {
+				if err := c.QueryRowContext(ctx, `SELECT heartbeat_at FROM workflow_instances WHERE id = @p1`, wfID).Scan(&at); err != nil {
+					t.Fatalf("reading heartbeat_at: %v", err)
+				}
+			})
+			return at
+		},
+	}
+}
+
+func runATenantsRunThroughItsBeats(t *testing.T, rig *hbRig) {
+	t.Helper()
+	ctx := context.Background()
+	tenant := rig.tenant
+	rig.register(t, tenant)
+
+	tenantStore, closeTenant, err := rig.factory.OpenStore(ctx, tenant, "default")
 	if err != nil {
 		t.Fatalf("opening the tenant's store: %v", err)
 	}
@@ -124,9 +288,9 @@ func runATenantsRunThroughItsBeats(t *testing.T, owner, db *sql.DB, tenant strin
 	logs := &syncBuffer{}
 	// The worker's OWN store is the default tenant's, as in a worker started with
 	// no --tenant, and it reaches the tenant's run only through the factory.
-	w := newRealDeferPhaseWorker(t, db, engine.NewPostgresStore(db), logs)
+	w := newRealDeferPhaseWorker(t, rig.db, rig.ownStore, logs)
 	w.id = "hb-tenant-3566-worker"
-	w.storeFactory = factory
+	w.storeFactory = rig.factory
 	w.egress = &engine.EgressGuard{
 		AllowLoopback:  true,
 		TenantOptional: func(context.Context) bool { return true },
@@ -139,45 +303,38 @@ func runATenantsRunThroughItsBeats(t *testing.T, owner, db *sql.DB, tenant strin
 	w.inflight.Store(wfID, claimed)
 
 	// PREMISE, measured, so a pass cannot be for the wrong reason: through a
-	// connection scoped to the WORKER'S tenant the run's lease row is hidden when
+	// connection scoped to the WORKER'S tenant the run's lease state is hidden when
 	// the policy applies and visible when it does not; scoped to the run's own
 	// tenant it is visible either way.
-	if got := visibleLeaseRows(t, db, engine.DefaultTenantUUID, wfID); policyApplies && got != 0 || !policyApplies && got != 1 {
-		t.Fatalf("scoped to the worker's tenant the run's lease row is visible %d time(s) (policy applies: %v); "+
-			"the premise of this test does not hold on this database", got, policyApplies)
+	if got := rig.visibleRows(t, engine.DefaultTenantUUID, wfID); rig.policyApplies && got != 0 || !rig.policyApplies && got != 1 {
+		t.Fatalf("%s: scoped to the worker's tenant the run's lease state is visible %d time(s) (policy applies: %v); "+
+			"the premise of this test does not hold on this database", rig.name, got, rig.policyApplies)
 	}
-	if got := visibleLeaseRows(t, db, tenant, wfID); got != 1 {
-		t.Fatalf("scoped to the run's own tenant the lease row is visible %d time(s), want 1; "+
-			"\"hidden by the policy\" cannot be told from \"not there\"", got)
+	if got := rig.visibleRows(t, tenant, wfID); got != 1 {
+		t.Fatalf("%s: scoped to the run's own tenant the lease state is visible %d time(s), want 1; "+
+			"\"hidden by the policy\" cannot be told from \"not there\"", rig.name, got)
 	}
 
-	heartbeatAt := func() time.Time {
-		var at time.Time
-		if err := owner.QueryRow(`SELECT heartbeat_at FROM workflow_leases WHERE id = $1`, wfID).Scan(&at); err != nil {
-			t.Fatalf("reading heartbeat_at: %v", err)
-		}
-		return at
-	}
-	atClaim := heartbeatAt()
+	atClaim := rig.heartbeatAt(t, tenant, wfID)
 
 	calls := &recordedCalls{}
 	var mu sync.Mutex
 	beats := []time.Time{atClaim}
-	var fencedAfter []bool
-	var landed []bool
+	var fencedAfter, landed []bool
 	svc := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
 		op := strings.TrimPrefix(r.URL.Path, "/call/")
 		calls.add(op)
 		if op == "work/first" {
 			// The guest is executing right now. Force three beats, spaced so that
-			// now() differs, instead of waiting for a ticker whose phase against
+			// the clock differs, instead of waiting for a ticker whose phase against
 			// the claim is not ours to choose.
 			for i := 0; i < 3; i++ {
-				time.Sleep(20 * time.Millisecond)
+				time.Sleep(30 * time.Millisecond)
 				ok := w.heartbeatAndFenceInFlight()
 				mu.Lock()
 				landed = append(landed, ok)
-				beats = append(beats, heartbeatAt())
+				beats = append(beats, rig.heartbeatAt(t, tenant, wfID))
 				fencedAfter = append(fencedAfter, w.runIsFenced(wfID, claimed.Generation))
 				mu.Unlock()
 			}
@@ -204,7 +361,7 @@ func runATenantsRunThroughItsBeats(t *testing.T, owner, db *sql.DB, tenant strin
 		}
 		if fencedAfter[i-1] {
 			t.Errorf("beat %d fenced a run that is healthy and held by this worker. The heartbeat asked a store whose "+
-				"tenant is not the run's, so the run's lease row was invisible to it (cleat#3566)", i)
+				"tenant is not the run's, so the run's lease state was invisible to it (cleat#3566)", i)
 		}
 		if !beats[i].After(beats[i-1]) {
 			t.Errorf("heartbeat_at did not move on beat %d (%s then %s): the reaper reads this column, so a run whose "+
@@ -218,23 +375,4 @@ func runATenantsRunThroughItsBeats(t *testing.T, owner, db *sql.DB, tenant strin
 		t.Errorf("status after the run = %q, want \"done\": a fenced run is released and re-claimed, not finished (logs:\n%s)",
 			got, logs.String())
 	}
-}
-
-// visibleLeaseRows counts the run's lease row through a connection whose tenant
-// context is set to tenant, as the store's own transactions set it.
-func visibleLeaseRows(t *testing.T, db *sql.DB, tenant, wfID string) int {
-	t.Helper()
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`SELECT set_config('cleat.tenant_id', $1, true)`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	if err := tx.QueryRow(`SELECT count(*) FROM workflow_leases WHERE id = $1`, wfID).Scan(&n); err != nil {
-		t.Fatalf("counting visible lease rows as tenant %s: %v", tenant, err)
-	}
-	return n
 }

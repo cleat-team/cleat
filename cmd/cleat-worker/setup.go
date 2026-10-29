@@ -2350,6 +2350,15 @@ type Worker struct {
 	// it has had any chance to prove otherwise.
 	lastHeartbeatOK atomic.Int64
 
+	// groupHeartbeatOK is lastHeartbeatOK for every tenant other than the
+	// worker's own (cleat#3566): the UnixNano of the last beat that the
+	// tenant's own store answered, keyed by tenant id. A tenant's runs are
+	// presumed lost on THEIR group's silence (heartbeatPresumedLostFor), not on
+	// another tenant's, so one tenant's pool being down does not make the
+	// worker refuse new durable calls for every run it holds. Seeded the first
+	// time a tick sees the group, and dropped when a tick sees none of its runs.
+	groupHeartbeatOK sync.Map // map[tenantID]int64
+
 	// lastDBTrouble is the UnixNano of this worker's most recent database
 	// round trip -- on the heartbeat OR the reaper path -- that failed or
 	// did not return before dbCallDeadline. The reaper's own counterpart to
@@ -3764,7 +3773,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// for why decision 1 has to be checked here rather than left to
 		// execCtx cancellation.
 		engine.WithCanStartNewWork(func() bool {
-			return !w.heartbeatPresumedLost() && !w.runIsFenced(wf.ID, wf.Generation)
+			return !w.heartbeatPresumedLostFor(wf.TenantID) && !w.runIsFenced(wf.ID, wf.Generation)
 		}),
 		// cleat#2020: w.ctx is cancelled on SIGINT/SIGTERM (main.go's signal
 		// handler) and on the watchdog's poison-pill exit (w.cancel() in
@@ -4330,18 +4339,9 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		// idle must not let its reaper act on staleness while idle either --
 		// failing closed, not open. It still reaps normally once it has
 		// in-flight work of its own, via the busy path below.
-		if pinger, ok := w.store.(engine.DBPinger); ok {
-			if err := w.probeBoundedCall(pinger.PingDB); err != nil {
-				w.recordDBTrouble()
-				w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
-				if isConnectionError(err) {
-					w.logger.WarnContext(w.ctx, "idle heartbeat ping failed: DB appears down", "worker_id", w.id)
-				} else {
-					w.logger.ErrorContext(w.ctx, "idle heartbeat ping error", "worker_id", w.id, "error", err)
-				}
-				return false
-			}
-			w.recordDBContactOK()
+		if !w.pingOwnStore() {
+			w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
+			return false
 		}
 		w.lastHeartbeatOK.Store(time.Now().UnixNano())
 		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
@@ -4377,6 +4377,7 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	// deadline catches that shape.
 	var lost []string
 	allAnswered := true
+	answered := map[string]bool{}
 	for _, group := range heartbeatGroupOrder(byTenant) {
 		groupRuns := byTenant[group]
 		hbStore, release := w.heartbeatBatchStore(), func() {}
@@ -4384,8 +4385,11 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 			var openErr error
 			hbStore, release, openErr = w.storeForTenant(group)
 			if openErr != nil {
+				// Not recordDBTrouble: this is one tenant's pool, and what
+				// lastDBTrouble guards is whether THIS worker can trust a
+				// staleness reading from its own store. The worker's own group
+				// (or the idle ping) says that.
 				allAnswered = false
-				w.recordDBTrouble()
 				w.logger.ErrorContext(w.ctx, "heartbeat: no store for a tenant's in-flight runs; they are not fenced this tick",
 					"worker_id", w.id, "tenant_id", group, "runs", len(groupRuns), "error", openErr)
 				continue
@@ -4400,7 +4404,9 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		release()
 		if err != nil {
 			allAnswered = false
-			w.recordDBTrouble()
+			if group == "" {
+				w.recordDBTrouble()
+			}
 			if isConnectionError(err) {
 				w.logger.WarnContext(w.ctx, "HeartbeatBatchFenced failed: DB appears down", "worker_id", w.id, "tenant_id", group)
 			} else {
@@ -4414,10 +4420,45 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 			continue
 		}
 		lost = append(lost, groupLost...)
+		answered[group] = true
 	}
-	if allAnswered {
-		w.recordDBContactOK()
+
+	// What each answer is evidence of. The worker-wide readings
+	// (lastHeartbeatOK, lastDBContactOK) say whether THIS worker's own store can
+	// be reached, so they move on the own group's answer -- or, when none of the
+	// in-flight runs is the worker's own, on the idle ping the loop makes with
+	// nothing to beat. A tenant's answer moves only that tenant's reading.
+	// Letting any group's failure hold the worker-wide reading back made one
+	// tenant's unopenable store refuse new durable calls for every run, including
+	// runs whose own beat had landed (cleat#3566 review).
+	if _, hasOwn := byTenant[""]; hasOwn {
+		if answered[""] {
+			w.recordDBContactOK()
+			w.lastHeartbeatOK.Store(time.Now().UnixNano())
+		}
+	} else if w.pingOwnStore() {
 		w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	}
+	now := time.Now().UnixNano()
+	for group := range byTenant {
+		if group == "" {
+			continue
+		}
+		if answered[group] {
+			w.groupHeartbeatOK.Store(group, now)
+		} else {
+			// First sight of a group seeds its clock; a group that keeps failing
+			// then ages out of its grace from there.
+			w.groupHeartbeatOK.LoadOrStore(group, now)
+		}
+	}
+	w.groupHeartbeatOK.Range(func(k, _ any) bool {
+		if _, present := byTenant[k.(string)]; !present {
+			w.groupHeartbeatOK.Delete(k)
+		}
+		return true
+	})
+	if allAnswered {
 		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "ok")
 	} else {
 		w.Metrics.RecordBackgroundLoop(w.ctx, "heartbeat", "error")
@@ -4559,6 +4600,47 @@ func (w *Worker) reclaimAfter() time.Duration {
 func (w *Worker) heartbeatPresumedLost() bool {
 	last := time.Unix(0, w.lastHeartbeatOK.Load())
 	return time.Since(last) > w.reclaimAfter()
+}
+
+// heartbeatPresumedLostFor is heartbeatPresumedLost for one tenant's runs
+// (cleat#3566). The worker's own tenant is the worker-wide reading. Any other
+// tenant is its own group's: a tenant whose store has not answered a beat for
+// reclaimAfter() is one whose runs another worker may now take, and nobody
+// else's silence says anything about it. A tenant not yet seen by a tick has no
+// reading of its own, so it takes the worker-wide one, whose seed is "now".
+func (w *Worker) heartbeatPresumedLostFor(tenantID string) bool {
+	group := w.heartbeatGroupFor(tenantID)
+	if group == "" {
+		return w.heartbeatPresumedLost()
+	}
+	if v, ok := w.groupHeartbeatOK.Load(group); ok {
+		return time.Since(time.Unix(0, v.(int64))) > w.reclaimAfter()
+	}
+	return w.heartbeatPresumedLost()
+}
+
+// pingOwnStore asks the worker's own store whether it can be reached, as the
+// heartbeat does when it has nothing of the worker's own tenant to beat. It
+// records the outcome as DB trouble or confirmed contact. A store that does not
+// implement DBPinger (every test double today) is deliberately NOT treated as
+// clean, and reports true, as the idle path always has: recordDBContactOK is
+// called only after a REAL successful probe.
+func (w *Worker) pingOwnStore() bool {
+	pinger, ok := w.store.(engine.DBPinger)
+	if !ok {
+		return true
+	}
+	if err := w.probeBoundedCall(pinger.PingDB); err != nil {
+		w.recordDBTrouble()
+		if isConnectionError(err) {
+			w.logger.WarnContext(w.ctx, "idle heartbeat ping failed: DB appears down", "worker_id", w.id)
+		} else {
+			w.logger.ErrorContext(w.ctx, "idle heartbeat ping error", "worker_id", w.id, "error", err)
+		}
+		return false
+	}
+	w.recordDBContactOK()
+	return true
 }
 
 // runIsFenced reports whether THIS generation of this run has had its own fenced
