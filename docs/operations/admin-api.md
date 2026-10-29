@@ -108,6 +108,31 @@ A tenant made offline (`cleat-worker --create-tenant`) has no recorded creator, 
 confirm it: this route can only ever mint a key for a tenant it created. The creation is audited on the new
 tenant's own chain, with the principal as the subject.
 
+## Rotating a tenant's own key (`/api/keys`)
+
+A tenant manages its own API keys with its own key. These routes are **not** under `/api/admin/` and do not need
+`--enable-admin-api`; they need authentication (`--require-auth`, the default), because a tenant that the worker
+did not authenticate has no identity to rotate. With authentication off they answer `403`. An **operator** key is
+refused with `403` here too: an operator has no tenant, so there is no key set for it to manage.
+
+| Request | Result |
+|---|---|
+| `POST /api/keys` with `{"description"?, "expires_at"?}` | `201` with the key's metadata and its **`secret`, shown once**, `Cache-Control: no-store`. `expires_at` is RFC 3339 and must be in the future. The key is permanent from the start (there is no handshake). |
+| `GET /api/keys` | `200 {"keys": [...]}`, newest first: `key_id`, `description`, `created_at`, `expires_at`, `disabled_at`, `provisional` and a `status` of `active`, `provisional`, `expired` or `revoked`. Never a secret or a hash. |
+| `DELETE /api/keys/{key_id}` | `200 {"key_id", "revoked": true, "already_revoked"}`. A key id that is not this tenant's is `404`; revoking a revoked key is `200` with `already_revoked`. |
+| a revoke that would leave the tenant with **no live key** | `409 last_key`. Repeat with `?force=true` to do it anyway. |
+| a mint when the tenant holds 25 live keys | `409 key_limit`: revoke one first. |
+| a malformed body, an unknown field, trailing data, a past `expires_at`, a `key_id` that is not a UUID, a `force` that is not a boolean | `400`; a body over 16 KiB is `413`. |
+
+To rotate: mint the replacement **with the old key**, store it, check it works, then revoke the old key **with
+the new one**. The old key stops authenticating at once. The tenant is always the one the credential proves; there
+is no way to name another in the request.
+
+The last-key rule serialises on the tenant's row, so two concurrent revokes of a tenant's last two keys leave
+exactly one standing (measured: without the lock both succeed, on PostgreSQL and on SQL Server). It protects
+against a mistake, not against a determined caller: `?force=true` removes the last key, after which only
+`cleat-worker --generate-api-key` (offline) or a new operator-provisioned key restores access.
+
 ## Acting on another tenant
 
 `/api/admin/tenants/{tenant}/instances/{id}/…` is the same four operations addressed at an explicit tenant.

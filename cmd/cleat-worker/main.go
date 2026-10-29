@@ -2523,6 +2523,7 @@ func main() {
 			requireAuth:          *requireAuth,
 			streamHub:            streamHub,
 			provisioner:          tenantProvisionerFor(*driver, store, authResolver),
+			keys:                 authResolver,
 
 			maxStreamPollReaders: *maxStreamPollReadersFlag,
 			streamPollInterval:   *streamPollIntervalFlag,

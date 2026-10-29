@@ -1,0 +1,1 @@
+test-go/commands	1	^TestATenantRotatesItsKeyEndToEndAgainstRealDatabases/mssql$	dialect-gated per SUBTEST (cleat#3552, B2c): the end-to-end rotation runs PostgreSQL here and SQL Server where that DSN is set; no MySQL arm because the handshake that makes the first key is refused on MySQL (D41). Measured by NAME with only CLEAT_TEST_POSTGRES set.
