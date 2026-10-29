@@ -43,7 +43,7 @@ func runOperatorChain(t *testing.T, store OperatorResolver, method, path, key st
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	rec := httptest.NewRecorder()
-	OperatorMiddleware(store)(inner).ServeHTTP(rec, req)
+	OperatorMiddleware(store, inner)(inner).ServeHTTP(rec, req)
 
 	got.status = rec.Code
 	return got

@@ -2644,30 +2644,20 @@ func main() {
 						"worker_id", workerID, "error", err)
 					os.Exit(1)
 				}
-				handler = auth.HostBindingMiddlewareWithMux(authResolver, mux, pluginAuthExemptPatterns...)(handler)
 			}
 
-			handler = auth.MiddlewareWithMux(authResolver, true, mux, pluginAuthExemptPatterns...)(handler)
-
-			// WS-4's addition to WS-3's file, declared as WORKSTREAM.md asks:
-			// leaving this unwired is worse than the cross-stream edit, because
-			// an operator key that no middleware recognises is a credential the
-			// operator can mint, copy and present, and that is answered "invalid
-			// or revoked API key" on every route. cleat#2169.
-			//
-			// OUTERMOST, and applied after the line above so that it is. It has
-			// to be outside auth.MiddlewareWithMux: that one resolves the key
-			// against admin.tenant_api_keys and 401s everything else, so an
-			// operator key would be refused as a bad TENANT key before anything
-			// could tell it apart. Being outside also keeps an operator request
-			// out of HostBindingMiddlewareWithMux -- correct rather than
-			// incidental, since host binding stops one tenant's key being used
-			// against another tenant's domain and an operator has no domain.
-			//
-			// Installed with the rest of the auth chain, under --require-auth:
-			// with authentication off nothing is gated, so there is no decision
-			// for this to make.
-			handler = auth.OperatorMiddleware(operatorResolver)(handler)
+			// The order the layers go in, and why, is composeAuthChain's doc comment
+			// (auth_chain.go). It is a function so that the chain a worker runs is the chain a
+			// test runs: until cleat#3555 it was written out here, and an operator key was
+			// authenticated by the outermost layer and then refused by the tenant layer behind it.
+			// Installed under --require-auth: with authentication off nothing is gated, so there is
+			// no decision for the operator layer to make.
+			handler = composeAuthChain(handler, mux, authChain{
+				Tenants:          authResolver,
+				Operators:        operatorResolver,
+				Domains:          authResolver,
+				RequireHostMatch: *requireHostMatch,
+			})
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//
