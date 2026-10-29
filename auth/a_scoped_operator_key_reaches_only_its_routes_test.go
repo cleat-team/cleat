@@ -19,6 +19,7 @@ import (
 func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 	const create = "/api/admin/tenants"
 	forceComplete := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/instances/wf-1/force-complete"
+	confirm := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/confirm"
 
 	type row struct {
 		name   string
@@ -36,6 +37,8 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 
 		// provision: ONE route, and it is the known-positive for the whole table.
 		{"provision, create", ScopeProvision, http.MethodPost, create, 200},
+		// ...and the confirm that ends the handshake (B2b-2): one tenant, in canonical form, POST.
+		{"provision, confirm", ScopeProvision, http.MethodPost, confirm, 200},
 
 		// ...and nothing else. Same path, other methods.
 		{"provision, GET on the create path", ScopeProvision, http.MethodGet, create, 403},
@@ -45,6 +48,18 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, trailing slash", ScopeProvision, http.MethodPost, create + "/", 403},
 		{"provision, force-complete on a tenant", ScopeProvision, http.MethodPost, forceComplete, 403},
 		{"provision, a named tenant's instances", ScopeProvision, http.MethodGet, "/api/admin/tenants/x/instances", 403},
+		// Confirm's neighbours, each of which a loose match on the shape would hand over.
+		{"provision, confirm with GET", ScopeProvision, http.MethodGet, confirm, 403},
+		{"provision, confirm with DELETE", ScopeProvision, http.MethodDelete, confirm, 403},
+		{"provision, confirm with a trailing slash", ScopeProvision, http.MethodPost, confirm + "/", 403},
+		{"provision, confirm with a tail", ScopeProvision, http.MethodPost, confirm + "/x", 403},
+		{"provision, confirm of upper-case id", ScopeProvision, http.MethodPost, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7/confirm", 403},
+		{"provision, confirm of an id with braces", ScopeProvision, http.MethodPost, "/api/admin/tenants/{8d264f39-9c52-4623-aa1d-258c7bcc34d7}/confirm", 403},
+		{"provision, confirm of bare hex", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f399c524623aa1d258c7bcc34d7/confirm", 403},
+		{"provision, confirm of a name that is no id", ScopeProvision, http.MethodPost, "/api/admin/tenants/acme/confirm", 403},
+		{"provision, confirm with an empty id", ScopeProvision, http.MethodPost, "/api/admin/tenants//confirm", 403},
+		{"provision, other verbs under a tenant", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop", 403},
+		{"provision, an encoded slash in the confirm path", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7%2Fconfirm", 403},
 		// Every other admin route.
 		{"provision, drain", ScopeProvision, http.MethodPost, "/api/admin/drain", 403},
 		{"provision, retention sweep", ScopeProvision, http.MethodPost, "/api/admin/retention/sweep", 403},

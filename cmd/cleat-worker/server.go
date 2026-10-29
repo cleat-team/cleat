@@ -98,6 +98,11 @@ type apiServer struct {
 	// store polls the same queues as the process-wide one.
 	taskQueues []string
 
+	// provisioner serves POST /api/admin/tenants and its confirm. Nil on a worker that cannot
+	// provision (MySQL, which is single-tenant, and a sharded worker), where both routes answer 501.
+	// cleat#3552.
+	provisioner tenantProvisioner
+
 	// requireAuth mirrors --require-auth. It decides what an unauthenticated
 	// request means: with auth on, no tenant in context is a bug or a bypass
 	// attempt and is refused; with auth off, there is only ever one tenant and

@@ -38,6 +38,9 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// TestEveryAdminRouteIsAbsentUntilTheAdminAPIIsEnabled, which reads this file for the registrations and
 	// fails on one that is not gated.
 	mux.HandleFunc("/api/admin/drain", api.adminAPIOnly(api.handleDrain))
+	// Tenant provisioning (cleat#3552): create is the collection, confirm is under the tenant
+	// subtree registered further down. Both need an OPERATOR credential, not merely a key.
+	mux.HandleFunc("/api/admin/tenants", api.adminAPIOnly(api.handleProvisionTenant))
 	mux.HandleFunc("/api/admin/retention/sweep", api.adminAPIOnly(api.handleRetentionSweep))
 	// Schedule routes before workflow routes so /api/schedules is not caught
 	// by /api/workflows/.
