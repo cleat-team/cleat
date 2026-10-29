@@ -43,7 +43,7 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 | `POST /api/admin/tenants/{tenant}/instances/{id}/re-replay` | one workflow, in the named tenant | as above |
 | `POST /api/admin/tenants/{tenant}/instances/{id}/steps/{n}/resolve` | one workflow's step, in the named tenant | as above |
 | `POST /api/admin/tenants` | creates a tenant (and its org, by name) and mints its first key | **operator credential only**: a tenant key gets `403` |
-| `POST /api/admin/tenants/{tenant}/confirm` | makes the first key permanent | **operator credential only**, and only the principal that created the tenant |
+| `POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": …}` | makes that key permanent | **operator credential only**, and only the principal that created the tenant |
 
 The id-only tenant-scoped routes are checked by `callerOwnsTarget` before anything runs, and answer 404 (never
 403) for another tenant's workflow, so they do not confirm it exists. They sit behind the flag because they are
@@ -83,7 +83,10 @@ curl -X POST -H "Authorization: Bearer $PROVISION_KEY" -H 'Content-Type: applica
 
 **The key is provisional until you confirm it.** The create returns `201` with a key that authenticates
 immediately and **lapses after 15 minutes** (`valid_for_seconds`). Store it durably, then
-`POST /api/admin/tenants/{tenant}/confirm`: the key becomes permanent. If the response is lost, or you crash
+`POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": "<the key_id the create returned>"}`: that key becomes
+permanent. **Confirm names the key**, because a repeated create can replace it: if a retry and a stalled original both
+reach the worker, the second is issued a new key and the first is revoked, and a confirm that took no key id would
+make permanent whichever one was live, possibly one nobody holds. A confirm of a replaced key is `409`. If the response is lost, or you crash
 before storing, do nothing: the key lapses on its own, and repeating the same create returns `200` with a **fresh**
 key (the previous provisional one is revoked). Once a key is confirmed, repeating the create returns `200` with the
 tenant and **no key**, so a replay can never be used to obtain a second working key.
@@ -97,8 +100,9 @@ tenant and **no key**, so a replay can never be used to obtain a second working 
 | id exists and **another principal** created it, or it was made offline | `409 tenant_exists`, with nothing about the tenant |
 | name held by another tenant | `409 name_taken` |
 | `org_id` names no org | `404` |
-| confirm, key lapsed or replaced | `409 no_provisional_key`: repeat the create |
+| confirm, the named key lapsed, was replaced by a repeat, or is not this tenant's | `409 no_provisional_key`: repeat the create |
 | confirm, not this principal's tenant | `404` |
+| confirm without a `key_id`, or a malformed one | `400` |
 
 A tenant made offline (`cleat-worker --create-tenant`) has no recorded creator, so no provisioner can replay or
 confirm it: this route can only ever mint a key for a tenant it created. The creation is audited on the new

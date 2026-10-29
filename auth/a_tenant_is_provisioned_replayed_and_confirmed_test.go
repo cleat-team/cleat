@@ -31,7 +31,7 @@ func TestTheProvisionStatementsAreShapedPerDialect(t *testing.T) {
 			"tenantByID": st.tenantByID, "tenantByName": st.tenantByName, "orgByName": st.orgByName,
 			"insertOrg": st.insertOrg, "insertTenant": st.insertTenant, "insertKey": st.insertKey,
 			"lockTenant": st.lockTenant, "liveKeys": st.liveKeys,
-			"revokeProvisional": st.revokeProvisional, "confirmProvisional": st.confirmProvisional,
+			"revokeProvisional": st.revokeProvisional, "confirmProvisional": st.confirmProvisional, "keyConfirmed": st.keyConfirmed,
 		} {
 			up := strings.ToUpper(stmt)
 			if strings.Contains(up, "RETURNING") || strings.Contains(up, "OUTPUT") {
@@ -174,19 +174,19 @@ func TestATenantIsProvisionedReplayedAndConfirmedOnPostgresAndSQLServer(t *testi
 			if !errors.As(err, &conflict) || conflict.Reason != ConflictTenantExists || len(conflict.Fields) != 0 {
 				t.Errorf("another principal's replay = %v, want tenant_exists with no fields", err)
 			}
-			if _, err := f.ts.ConfirmProvisionedTenant(ctx, tid, "someone-else"); !errors.Is(err, ErrTenantNotFound) {
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, tid, replay1.Key.KeyID, "someone-else"); !errors.Is(err, ErrTenantNotFound) {
 				t.Errorf("another principal's confirm = %v, want ErrTenantNotFound", err)
 			}
 
 			// CONFIRM. The surviving key becomes permanent.
-			c1, err := f.ts.ConfirmProvisionedTenant(ctx, tid, "clew-service")
+			c1, err := f.ts.ConfirmProvisionedTenant(ctx, tid, replay1.Key.KeyID, "clew-service")
 			if err != nil || c1.Confirmed != 1 || c1.AlreadyConfirmed {
 				t.Fatalf("confirm = %+v, %v; want 1 key confirmed", c1, err)
 			}
 			if p, exp, _ := f.keyState(t, replay1.Key.KeyID); p || exp {
 				t.Errorf("confirmed key: provisional=%v expires=%v, want false false", p, exp)
 			}
-			c2, err := f.ts.ConfirmProvisionedTenant(ctx, tid, "clew-service")
+			c2, err := f.ts.ConfirmProvisionedTenant(ctx, tid, replay1.Key.KeyID, "clew-service")
 			if err != nil || c2.Confirmed != 0 || !c2.AlreadyConfirmed {
 				t.Errorf("a repeated confirm = %+v, %v; want already confirmed", c2, err)
 			}
@@ -238,6 +238,69 @@ func TestATenantIsProvisionedReplayedAndConfirmedOnPostgresAndSQLServer(t *testi
 	}
 }
 
+// The confirm names its key. cleat-review measured the failure this prevents, on both dialects: A creates
+// and holds K1; a same-principal replay (a retry, or the original arriving late) is issued K2 and K1 is
+// revoked; A confirms. A confirm that took no key made K2 permanent -- a key nobody holds -- and every
+// later replay returns no secret by design, so the tenant was unrecoverable without an operator.
+func TestAConfirmOfAReplacedKeyIsRefusedAndTheLiveKeyStaysProvisional(t *testing.T) {
+	for _, dialect := range []string{DialectPostgres, DialectMSSQL} {
+		dialect := dialect
+		t.Run(dialect, func(t *testing.T) {
+			f := newProvisionFixture(t, dialect)
+			ctx := context.Background()
+			req := ProvisionRequest{TenantID: uuid.New(), OrgName: "b2b2-named-" + uuid.NewString(), Creator: "clew-service"}
+
+			k1res, err := f.provision(t, req)
+			if err != nil || k1res.Key == nil {
+				t.Fatalf("create: %+v, %v", k1res, err)
+			}
+			k2res, err := f.provision(t, req) // the replay that replaces K1
+			if err != nil || k2res.Key == nil {
+				t.Fatalf("replay: %+v, %v", k2res, err)
+			}
+			k1, k2 := k1res.Key.KeyID, k2res.Key.KeyID
+
+			// The holder of K1 confirms. It must be refused, and it must not touch K2.
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, k1, "clew-service"); !errors.Is(err, ErrNoProvisionalKey) {
+				t.Fatalf("confirming the REPLACED key = %v, want ErrNoProvisionalKey", err)
+			}
+			if p, exp, dis := f.keyState(t, k2); !p || !exp || dis {
+				t.Errorf("K2 after K1's refused confirm: provisional=%v expires=%v disabled=%v, want true true false: a confirm for someone else's key made it permanent", p, exp, dis)
+			}
+			if got, ok := f.resolves(k2res.Key.Secret); !ok || got != req.TenantID {
+				t.Error("K2 stopped authenticating")
+			}
+
+			// The creator that holds K2 confirms it; a repeat is not an error.
+			if r, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, k2, "clew-service"); err != nil || r.Confirmed != 1 {
+				t.Fatalf("confirming K2 = %+v, %v", r, err)
+			}
+			if r, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, k2, "clew-service"); err != nil || !r.AlreadyConfirmed {
+				t.Errorf("repeating K2's confirm = %+v, %v; want already confirmed", r, err)
+			}
+
+			// A revoked key never becomes confirmed, even after the tenant has a confirmed key; nor does a
+			// key that does not exist, nor another tenant's confirmed key presented for this one.
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, k1, "clew-service"); !errors.Is(err, ErrNoProvisionalKey) {
+				t.Errorf("confirming the revoked K1 after K2 is confirmed = %v, want ErrNoProvisionalKey", err)
+			}
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, uuid.New(), "clew-service"); !errors.Is(err, ErrNoProvisionalKey) {
+				t.Errorf("confirming a key that does not exist = %v, want ErrNoProvisionalKey", err)
+			}
+			other, err := f.provision(t, ProvisionRequest{OrgName: req.OrgName, Creator: "clew-service"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, other.Tenant.ID, other.Key.KeyID, "clew-service"); err != nil {
+				t.Fatalf("confirming the other tenant's own key: %v", err)
+			}
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, other.Key.KeyID, "clew-service"); !errors.Is(err, ErrNoProvisionalKey) {
+				t.Errorf("confirming ANOTHER TENANT'S confirmed key for this tenant = %v, want ErrNoProvisionalKey (already-confirmed must be scoped to the tenant)", err)
+			}
+		})
+	}
+}
+
 // A provisional key that lapses is replaced by a replay and cannot be confirmed. The lapse is made
 // by writing expires_at into the past rather than by waiting, so nothing here depends on the clock.
 func TestALapsedProvisionalKeyIsReplacedByAReplayAndCannotBeConfirmed(t *testing.T) {
@@ -261,14 +324,14 @@ func TestALapsedProvisionalKeyIsReplacedByAReplayAndCannotBeConfirmed(t *testing
 			if _, ok := f.resolves(first.Key.Secret); ok {
 				t.Fatal("UNMEASURED: the lapsed key still authenticates, so the lapse did not happen")
 			}
-			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, "clew-service"); !errors.Is(err, ErrNoProvisionalKey) {
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, first.Key.KeyID, "clew-service"); !errors.Is(err, ErrNoProvisionalKey) {
 				t.Errorf("confirming a lapsed key = %v, want ErrNoProvisionalKey", err)
 			}
 			again, err := f.provision(t, req)
 			if err != nil || again.Key == nil {
 				t.Fatalf("replay after the lapse = %+v, %v; want a fresh key", again, err)
 			}
-			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, "clew-service"); err != nil {
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, req.TenantID, again.Key.KeyID, "clew-service"); err != nil {
 				t.Errorf("confirming the fresh key: %v", err)
 			}
 		})
@@ -302,7 +365,7 @@ func TestAPrincipalCannotMintAKeyForATenantItDidNotCreate(t *testing.T) {
 			if !errors.As(err, &conflict) || conflict.Reason != ConflictTenantExists {
 				t.Errorf("replaying an offline-made tenant = %v, want tenant_exists", err)
 			}
-			if _, err := f.ts.ConfirmProvisionedTenant(ctx, offline, "clew-service"); !errors.Is(err, ErrTenantNotFound) {
+			if _, err := f.ts.ConfirmProvisionedTenant(ctx, offline, uuid.New(), "clew-service"); !errors.Is(err, ErrTenantNotFound) {
 				t.Errorf("confirming an offline-made tenant = %v, want ErrTenantNotFound", err)
 			}
 			var keys int

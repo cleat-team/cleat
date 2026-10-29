@@ -27,7 +27,7 @@ import (
 // field rather than a branch scattered through the handlers.
 type tenantProvisioner interface {
 	ProvisionTenant(ctx context.Context, req auth.ProvisionRequest) (auth.ProvisionResult, error)
-	ConfirmProvisionedTenant(ctx context.Context, tenantID uuid.UUID, creator string) (auth.ConfirmResult, error)
+	ConfirmProvisionedTenant(ctx context.Context, tenantID, keyID uuid.UUID, creator string) (auth.ConfirmResult, error)
 }
 
 // provisionBodyLimit bounds the request. The largest legitimate body is a few short strings.
@@ -171,7 +171,7 @@ func (s *apiServer) handleProvisionTenant(w http.ResponseWriter, r *http.Request
 		out.Key = &provisionKeyJSON{
 			KeyID: res.Key.KeyID.String(), Secret: res.Key.Secret, Provisional: true,
 			ValidForSeconds: int64(res.Key.ValidFor.Seconds()),
-			Confirm:         "POST /api/admin/tenants/" + res.Tenant.ID.String() + "/confirm",
+			Confirm:         "POST /api/admin/tenants/" + res.Tenant.ID.String() + `/confirm with {"key_id":"` + res.Key.KeyID.String() + `"}`,
 		}
 	}
 	status := http.StatusOK
@@ -183,8 +183,12 @@ func (s *apiServer) handleProvisionTenant(w http.ResponseWriter, r *http.Request
 	s.writeJSON(w, status, out)
 }
 
-// handleConfirmProvisionedTenant makes the creator's provisional key permanent. It is sent LAST,
-// after the creator has stored the key durably: that ordering is the whole point.
+// handleConfirmProvisionedTenant makes ONE provisional key permanent: the one named in the body. It is
+// sent LAST, after the creator has stored that key durably: that ordering is the whole point.
+//
+// The key is named because a replay can reissue it. A confirm that took no key made permanent whichever
+// provisional key was live, which after a retry crossed with a stalled original is a key nobody holds
+// (cleat-review, #3568). Naming it turns that into a 409 and a replay.
 func (s *apiServer) handleConfirmProvisionedTenant(w http.ResponseWriter, r *http.Request, tenant string) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -199,7 +203,29 @@ func (s *apiServer) handleConfirmProvisionedTenant(w http.ResponseWriter, r *htt
 		s.writeError(w, http.StatusBadRequest, "tenant must be a UUID")
 		return
 	}
-	res, err := s.provisioner.ConfirmProvisionedTenant(r.Context(), tid, creator)
+	raw, ok := s.readBody(w, r, bodyLimit{provisionBodyLimit, "fixed for the tenant provisioning endpoint and not moved by --max-body-size"})
+	if !ok {
+		return
+	}
+	var body struct {
+		KeyID string `json:"key_id"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		s.writeError(w, http.StatusBadRequest, `invalid request body: send {"key_id": "<the key_id the create returned>"}: `+err.Error())
+		return
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		s.writeError(w, http.StatusBadRequest, "invalid request body: unexpected data after the JSON object")
+		return
+	}
+	kid, err := uuid.Parse(body.KeyID)
+	if err != nil || kid == uuid.Nil {
+		s.writeError(w, http.StatusBadRequest, "key_id must be the UUID of the key the create returned")
+		return
+	}
+	res, err := s.provisioner.ConfirmProvisionedTenant(r.Context(), tid, kid, creator)
 	switch {
 	case errors.Is(err, auth.ErrTenantNotFound):
 		// The same answer for an id that does not exist and for one this principal did not create.
@@ -217,10 +243,10 @@ func (s *apiServer) handleConfirmProvisionedTenant(w http.ResponseWriter, r *htt
 		return
 	}
 	auth.NoteAuditTarget(r.Context(), tid)
-	slog.Warn("admin: confirm tenant", "tenant_id", tid, "confirmed", res.Confirmed,
+	slog.Warn("admin: confirm tenant", "tenant_id", tid, "key_id", kid, "confirmed", res.Confirmed,
 		"already_confirmed", res.AlreadyConfirmed, "creator", creator, "operator", operatorFromContext(r))
 	s.writeJSON(w, http.StatusOK, map[string]any{
-		"tenant_id": tid.String(), "confirmed": res.Confirmed, "already_confirmed": res.AlreadyConfirmed,
+		"tenant_id": tid.String(), "key_id": kid.String(), "confirmed": res.Confirmed, "already_confirmed": res.AlreadyConfirmed,
 	})
 }
 

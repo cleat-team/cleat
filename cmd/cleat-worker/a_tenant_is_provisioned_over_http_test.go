@@ -26,14 +26,14 @@ import (
 )
 
 type fakeProvisioner struct {
-	provisionCalls, confirmCalls int
-	gotReq                       auth.ProvisionRequest
-	gotConfirmTenant             uuid.UUID
-	gotConfirmCreator            string
-	result                       auth.ProvisionResult
-	err                          error
-	confirmResult                auth.ConfirmResult
-	confirmErr                   error
+	provisionCalls, confirmCalls    int
+	gotReq                          auth.ProvisionRequest
+	gotConfirmTenant, gotConfirmKey uuid.UUID
+	gotConfirmCreator               string
+	result                          auth.ProvisionResult
+	err                             error
+	confirmResult                   auth.ConfirmResult
+	confirmErr                      error
 }
 
 func (f *fakeProvisioner) ProvisionTenant(_ context.Context, r auth.ProvisionRequest) (auth.ProvisionResult, error) {
@@ -42,9 +42,9 @@ func (f *fakeProvisioner) ProvisionTenant(_ context.Context, r auth.ProvisionReq
 	return f.result, f.err
 }
 
-func (f *fakeProvisioner) ConfirmProvisionedTenant(_ context.Context, id uuid.UUID, creator string) (auth.ConfirmResult, error) {
+func (f *fakeProvisioner) ConfirmProvisionedTenant(_ context.Context, id, keyID uuid.UUID, creator string) (auth.ConfirmResult, error) {
 	f.confirmCalls++
-	f.gotConfirmTenant, f.gotConfirmCreator = id, creator
+	f.gotConfirmTenant, f.gotConfirmKey, f.gotConfirmCreator = id, keyID, creator
 	return f.confirmResult, f.confirmErr
 }
 
@@ -78,6 +78,9 @@ func doBody(f chainFixture, method, path, key, body string) *httptest.ResponseRe
 	return w
 }
 
+// confirmBody is the body a confirm of okResult's key carries.
+const confirmBody = `{"key_id":"cccccccc-0000-4000-8000-000000000003"}`
+
 func okResult(outcome auth.ProvisionOutcome, withKey bool) auth.ProvisionResult {
 	tid := uuid.MustParse("aaaaaaaa-0000-4000-8000-000000000001")
 	r := auth.ProvisionResult{Outcome: outcome, Tenant: auth.ProvisionedTenant{
@@ -108,7 +111,7 @@ func TestProvisioningOverHTTPCreatesReplaysAndConfirms(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out.Outcome != "created" || out.Tenant.TenantID != tid || out.Key == nil || out.Key.Secret != "cleat_sk_the_secret" ||
-		!out.Key.Provisional || out.Key.ValidForSeconds != 900 || !strings.Contains(out.Key.Confirm, "/api/admin/tenants/"+tid+"/confirm") {
+		!out.Key.Provisional || out.Key.ValidForSeconds != 900 || !strings.Contains(out.Key.Confirm, "/api/admin/tenants/"+tid+"/confirm") || !strings.Contains(out.Key.Confirm, out.Key.KeyID) {
 		t.Errorf("create body = %+v", out)
 	}
 	// What the store was asked: the id in canonical lower case, the org name trimmed, the creator the
@@ -129,9 +132,10 @@ func TestProvisioningOverHTTPCreatesReplaysAndConfirms(t *testing.T) {
 
 	// CONFIRM.
 	fp.confirmResult = auth.ConfirmResult{Confirmed: 1}
-	w = doBody(f.chainFixture, http.MethodPost, create+"/"+tid+"/confirm", f.provisionKey, ``)
-	if w.Code != http.StatusOK || fp.gotConfirmTenant.String() != tid || fp.gotConfirmCreator != "clew-service" {
-		t.Errorf("confirm = %d %s (tenant %s, creator %q)", w.Code, w.Body.String(), fp.gotConfirmTenant, fp.gotConfirmCreator)
+	w = doBody(f.chainFixture, http.MethodPost, create+"/"+tid+"/confirm", f.provisionKey, confirmBody)
+	if w.Code != http.StatusOK || fp.gotConfirmTenant.String() != tid || fp.gotConfirmCreator != "clew-service" ||
+		fp.gotConfirmKey.String() != "cccccccc-0000-4000-8000-000000000003" {
+		t.Errorf("confirm = %d %s (tenant %s, key %s, creator %q): the key named in the body must reach the store", w.Code, w.Body.String(), fp.gotConfirmTenant, fp.gotConfirmKey, fp.gotConfirmCreator)
 	}
 
 	// An ADMIN key has no principal, so it is its own creator: "operator:<KeyID>".
@@ -214,6 +218,33 @@ func TestAMalformedProvisionRequestNeverReachesTheStore(t *testing.T) {
 	}
 }
 
+// A confirm names its key (cleat-review, #3568). Without one there is no way to know which provisional
+// key the creator holds, so the request is refused before the store is asked.
+func TestAConfirmMustNameItsKey(t *testing.T) {
+	f, fp := buildProvisionHTTP(t, nil)
+	tid := "aaaaaaaa-0000-4000-8000-000000000001"
+	for name, body := range map[string]string{
+		"no body":              ``,
+		"an empty object":      `{}`,
+		"a key id that is not": `{"key_id":"k1"}`,
+		"the nil key id":       `{"key_id":"00000000-0000-0000-0000-000000000000"}`,
+		"an unknown field":     `{"key_id":"cccccccc-0000-4000-8000-000000000003","all":true}`,
+		"trailing data":        `{"key_id":"cccccccc-0000-4000-8000-000000000003"} {}`,
+	} {
+		if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid+"/confirm", f.provisionKey, body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d %s, want 400", name, w.Code, strings.TrimSpace(w.Body.String()))
+		}
+	}
+	if fp.confirmCalls != 0 {
+		t.Errorf("a confirm that named no key reached the store %d times", fp.confirmCalls)
+	}
+	// Upper case is the same key; the store receives the parsed value.
+	if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid+"/confirm", f.provisionKey, `{"key_id":"CCCCCCCC-0000-4000-8000-000000000003"}`); w.Code != http.StatusOK ||
+		fp.gotConfirmKey.String() != "cccccccc-0000-4000-8000-000000000003" {
+		t.Errorf("an upper-case key id = %d, store saw %s", w.Code, fp.gotConfirmKey)
+	}
+}
+
 func TestStoreErrorsBecomeTheDocumentedStatuses(t *testing.T) {
 	f, fp := buildProvisionHTTP(t, nil)
 	tid := "aaaaaaaa-0000-4000-8000-000000000001"
@@ -256,20 +287,20 @@ func TestStoreErrorsBecomeTheDocumentedStatuses(t *testing.T) {
 
 	// Confirm.
 	fp.confirmErr = auth.ErrTenantNotFound
-	if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid+"/confirm", f.provisionKey, ``); w.Code != http.StatusNotFound {
+	if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid+"/confirm", f.provisionKey, confirmBody); w.Code != http.StatusNotFound {
 		t.Errorf("confirming a tenant that is not this principal's = %d, want 404", w.Code)
 	}
 	fp.confirmErr = auth.ErrNoProvisionalKey
-	w = doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid+"/confirm", f.provisionKey, ``)
+	w = doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid+"/confirm", f.provisionKey, confirmBody)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "no_provisional_key") {
 		t.Errorf("confirming a lapsed key = %d %s, want 409 no_provisional_key", w.Code, w.Body.String())
 	}
 	fp.confirmErr = nil
-	if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/acme/confirm", f.provisionKey, ``); w.Code != http.StatusForbidden {
+	if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/acme/confirm", f.provisionKey, confirmBody); w.Code != http.StatusForbidden {
 		// A name that is no id never gets past the scope gate (it is not canonical); an admin key reaches the handler.
 		t.Errorf("a provision key confirming a non-id = %d, want 403 from the scope", w.Code)
 	}
-	if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/acme/confirm", f.adminKey, ``); w.Code != http.StatusBadRequest {
+	if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/acme/confirm", f.adminKey, confirmBody); w.Code != http.StatusBadRequest {
 		t.Errorf("an admin key confirming a non-id = %d, want 400", w.Code)
 	}
 }
@@ -309,7 +340,7 @@ func TestProvisioningNamesTheTenantItActedOnForTheAuditLog(t *testing.T) {
 
 	*f.noted = notedTarget{}
 	fp.confirmResult = auth.ConfirmResult{Confirmed: 1}
-	doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid.String()+"/confirm", f.provisionKey, ``)
+	doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid.String()+"/confirm", f.provisionKey, confirmBody)
 	if !f.noted.set || f.noted.tenant != tid {
 		t.Errorf("a confirm noted %v (set=%v), want %v", f.noted.tenant, f.noted.set, tid)
 	}
@@ -324,7 +355,7 @@ func TestProvisioningNamesTheTenantItActedOnForTheAuditLog(t *testing.T) {
 		},
 		"a confirm that found nothing": func() {
 			fp.confirmErr = auth.ErrTenantNotFound
-			doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid.String()+"/confirm", f.provisionKey, ``)
+			doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid.String()+"/confirm", f.provisionKey, confirmBody)
 		},
 	} {
 		*f.noted = notedTarget{}
@@ -400,7 +431,7 @@ func TestProvisioningOverHTTPAgainstRealDatabases(t *testing.T) {
 				t.Fatalf("the returned secret resolves to %v, %v; want the new tenant %s", got, err, tid)
 			}
 
-			if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid.String()+"/confirm", f.provisionKey, ``); w.Code != http.StatusOK {
+			if w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+tid.String()+"/confirm", f.provisionKey, `{"key_id":"`+out.Key.KeyID+`"}`); w.Code != http.StatusOK {
 				t.Fatalf("confirm = %d %s", w.Code, w.Body.String())
 			}
 			if got, err := resolve(); err != nil || got != tid {

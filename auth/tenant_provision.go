@@ -17,7 +17,7 @@ import (
 //
 //  1. The creator asks for a tenant. The tenant is created and a PROVISIONAL key is minted with
 //     it: it authenticates immediately, and it expires in ProvisionalKeyTTL.
-//  2. The creator stores the key durably, then CONFIRMS. Confirming makes the key permanent.
+//  2. The creator stores the key durably, then CONFIRMS IT BY ITS KEY ID. Confirming makes that key permanent.
 //  3. If the response is lost, or the creator crashes before storing, the key lapses by itself.
 //     Replaying the same create finds a tenant with no confirmed key, revokes what is left of
 //     the provisional ones and issues a fresh one. Once a key is confirmed a replay returns the
@@ -108,17 +108,17 @@ func (e *ProvisionConflictError) Error() string {
 
 var (
 	ErrOrgNotFound = errors.New("auth: org not found")
-	// ErrNoProvisionalKey: nothing to confirm, because the provisional key lapsed or was replaced
-	// and no confirmed key exists. The creator replays the create to get a fresh one.
+	// ErrNoProvisionalKey: the key named is not a live provisional key of the tenant -- it lapsed, was
+	// replaced by a replay, or is not this tenant's. The creator replays the create to get a fresh one.
 	ErrNoProvisionalKey = errors.New("auth: no live provisional key to confirm; replay the create")
 )
 
 // provisionStmts are the statements one dialect uses. A struct of strings so the shapes can be
 // asserted without a database.
 type provisionStmts struct {
-	tenantByID, tenantByName, orgByName, orgExists              string
-	insertOrg, insertTenant, insertKey                          string
-	lockTenant, liveKeys, revokeProvisional, confirmProvisional string
+	tenantByID, tenantByName, orgByName, orgExists                            string
+	insertOrg, insertTenant, insertKey                                        string
+	lockTenant, liveKeys, revokeProvisional, confirmProvisional, keyConfirmed string
 }
 
 func provisionStatements(dialect string) (provisionStmts, error) {
@@ -133,11 +133,15 @@ func provisionStatements(dialect string) (provisionStmts, error) {
 			insertTenant: `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id, created_by) VALUES ($1, $2, $3, $4, $5)`,
 			// The expiry is the DATABASE's clock plus a number of seconds, so the key lapses by the
 			// same clock that judges it at authentication.
-			insertKey:          `INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at, provisional) VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), true)`,
-			lockTenant:         `SELECT COALESCE(created_by, '') FROM admin.tenants WHERE tenant_id = $1 FOR UPDATE`,
-			liveKeys:           `SELECT COALESCE(SUM(CASE WHEN provisional THEN 0 ELSE 1 END), 0), COALESCE(SUM(CASE WHEN provisional THEN 1 ELSE 0 END), 0) FROM admin.tenant_api_keys WHERE tenant_id = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
-			revokeProvisional:  `UPDATE admin.tenant_api_keys SET disabled_at = now(), updated_at = now() WHERE tenant_id = $1 AND provisional AND disabled_at IS NULL`,
-			confirmProvisional: `UPDATE admin.tenant_api_keys SET provisional = false, expires_at = NULL, updated_at = now() WHERE tenant_id = $1 AND provisional AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
+			insertKey:         `INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at, provisional) VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), true)`,
+			lockTenant:        `SELECT COALESCE(created_by, '') FROM admin.tenants WHERE tenant_id = $1 FOR UPDATE`,
+			liveKeys:          `SELECT COALESCE(SUM(CASE WHEN provisional THEN 0 ELSE 1 END), 0), COALESCE(SUM(CASE WHEN provisional THEN 1 ELSE 0 END), 0) FROM admin.tenant_api_keys WHERE tenant_id = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
+			revokeProvisional: `UPDATE admin.tenant_api_keys SET disabled_at = now(), updated_at = now() WHERE tenant_id = $1 AND provisional AND disabled_at IS NULL`,
+			// THE KEY IS NAMED. Confirming "whichever provisional key is live" lets a retry and a stalled
+			// original cross: the retry's key is replaced by the original's replay, and the confirm then
+			// makes permanent a key nobody holds. cleat-review measured it on both dialects.
+			confirmProvisional: `UPDATE admin.tenant_api_keys SET provisional = false, expires_at = NULL, updated_at = now() WHERE tenant_id = $1 AND key_id = $2 AND provisional AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
+			keyConfirmed:       `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1 AND key_id = $2 AND NOT provisional AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`,
 		}, nil
 	case DialectMSSQL:
 		return provisionStmts{
@@ -151,7 +155,8 @@ func provisionStatements(dialect string) (provisionStmts, error) {
 			lockTenant:         `SELECT ISNULL(created_by, N'') FROM admin.tenants WITH (UPDLOCK, ROWLOCK) WHERE tenant_id = @p1`,
 			liveKeys:           `SELECT COALESCE(SUM(CASE WHEN provisional = 1 THEN 0 ELSE 1 END), 0), COALESCE(SUM(CASE WHEN provisional = 1 THEN 1 ELSE 0 END), 0) FROM admin.tenant_api_keys WHERE tenant_id = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`,
 			revokeProvisional:  `UPDATE admin.tenant_api_keys SET disabled_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME() WHERE tenant_id = @p1 AND provisional = 1 AND disabled_at IS NULL`,
-			confirmProvisional: `UPDATE admin.tenant_api_keys SET provisional = 0, expires_at = NULL, updated_at = SYSUTCDATETIME() WHERE tenant_id = @p1 AND provisional = 1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`,
+			confirmProvisional: `UPDATE admin.tenant_api_keys SET provisional = 0, expires_at = NULL, updated_at = SYSUTCDATETIME() WHERE tenant_id = @p1 AND key_id = @p2 AND provisional = 1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`,
+			keyConfirmed:       `SELECT COUNT(*) FROM admin.tenant_api_keys WHERE tenant_id = @p1 AND key_id = @p2 AND provisional = 0 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`,
 		}, nil
 	default:
 		return provisionStmts{}, fmt.Errorf("auth: tenant provisioning is not supported for %s: multi-tenancy is PostgreSQL and SQL Server only", dialect)
@@ -403,9 +408,17 @@ type ConfirmResult struct {
 	AlreadyConfirmed bool
 }
 
-// ConfirmProvisionedTenant makes the creator's provisional key permanent. Only the creator may; for
-// anyone else, and for an id that does not exist, the answer is the same ErrTenantNotFound.
-func (s *TenantStore) ConfirmProvisionedTenant(ctx context.Context, tenantID uuid.UUID, creator string) (ConfirmResult, error) {
+// ConfirmProvisionedTenant makes ONE provisional key permanent: the one the creator holds, named by keyID.
+// Only the creator may; for anyone else, and for an id that does not exist, the answer is the same
+// ErrTenantNotFound.
+//
+// The key is named because "whichever provisional key is live" is not the creator's key once a replay
+// can reissue it. A retry that is processed first creates K1 and the client gets it; the stalled
+// original is then processed as a replay, revokes K1 and mints K2, whose response is lost; a confirm
+// that took no key would make K2 permanent, a key nobody holds, and every later replay returns no
+// secret by design. Naming the key makes that confirm fail with ErrNoProvisionalKey instead, and the
+// creator replays. Repeating a confirm of a key that is already confirmed is not an error.
+func (s *TenantStore) ConfirmProvisionedTenant(ctx context.Context, tenantID, keyID uuid.UUID, creator string) (ConfirmResult, error) {
 	st, err := provisionStatements(s.dialect)
 	if err != nil {
 		return ConfirmResult{}, err
@@ -425,7 +438,7 @@ func (s *TenantStore) ConfirmProvisionedTenant(ctx context.Context, tenantID uui
 	if createdBy == "" || createdBy != creator {
 		return ConfirmResult{}, ErrTenantNotFound
 	}
-	res, err := tx.ExecContext(ctx, st.confirmProvisional, tenantID.String())
+	res, err := tx.ExecContext(ctx, st.confirmProvisional, tenantID.String(), keyID.String())
 	if err != nil {
 		return ConfirmResult{}, err
 	}
@@ -435,11 +448,14 @@ func (s *TenantStore) ConfirmProvisionedTenant(ctx context.Context, tenantID uui
 	}
 	out := ConfirmResult{Confirmed: n}
 	if n == 0 {
-		var confirmed, provisional int64
-		if err := tx.QueryRowContext(ctx, st.liveKeys, tenantID.String()).Scan(&confirmed, &provisional); err != nil {
+		// Nothing became permanent. Either this very key already is (a repeat of a confirm that
+		// happened), or it is not a live provisional key of this tenant at all: replaced, lapsed,
+		// revoked, unknown, or another tenant's.
+		var already int64
+		if err := tx.QueryRowContext(ctx, st.keyConfirmed, tenantID.String(), keyID.String()).Scan(&already); err != nil {
 			return ConfirmResult{}, err
 		}
-		if confirmed == 0 {
+		if already == 0 {
 			return ConfirmResult{}, ErrNoProvisionalKey
 		}
 		out.AlreadyConfirmed = true
