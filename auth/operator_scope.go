@@ -86,6 +86,18 @@ func FormatOperatorScopes(scopes []string) (string, error) {
 // ValidPrincipal reports whether s is an acceptable principal name.
 func ValidPrincipal(s string) bool { return principalRe.MatchString(s) }
 
+// IsAdmin reports whether the key holds the admin scope, which reaches every route and every tenant.
+// A handler asks this when the answer is "any tenant" versus "only tenants this key's principal
+// created"; which ROUTES a key may reach is MayReach's question, and this is not a way around it.
+func (o Operator) IsAdmin() bool {
+	for _, s := range ParseOperatorScopes(o.Scopes) {
+		if s == ScopeAdmin {
+			return true
+		}
+	}
+	return false
+}
+
 // MayReach reports whether any of the operator's scopes admits the request.
 // OperatorMiddleware calls it for every request an operator key makes, after the
 // /api/admin/ confinement, so it decides among the routes that confinement leaves.
@@ -132,15 +144,18 @@ func provisionMayReach(method string, u *url.URL) bool {
 	if u.Path == OperatorRoutePrefix+"tenants" {
 		return true
 	}
-	// The last step of the handshake: POST /api/admin/tenants/<id>/confirm. The id must be in
+	// The last step of the handshake, and a tenant's suspension, which a drop requires first
+	// (cleat#3552, B3a): POST /api/admin/tenants/<id>/{confirm,suspend,resume}. The id must be in
 	// the one canonical spelling (lower-case, hyphenated) so that the segment this gate saw is
-	// byte for byte the one the mux and the handler see.
+	// byte for byte the one the mux and the handler see. The gate says only that the KEY may
+	// reach the route; that it may act on THIS tenant (one its principal created) is the
+	// handler's check, because it needs the tenant's row.
 	rest, found := strings.CutPrefix(u.Path, OperatorRoutePrefix+"tenants/")
 	if !found {
 		return false
 	}
 	id, tail, hasTail := strings.Cut(rest, "/")
-	if !hasTail || tail != "confirm" {
+	if !hasTail || (tail != "confirm" && tail != "suspend" && tail != "resume") {
 		return false
 	}
 	parsed, err := uuid.Parse(id)

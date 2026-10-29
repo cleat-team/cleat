@@ -28,6 +28,12 @@ import (
 type tenantProvisioner interface {
 	ProvisionTenant(ctx context.Context, req auth.ProvisionRequest) (auth.ProvisionResult, error)
 	ConfirmProvisionedTenant(ctx context.Context, tenantID, keyID uuid.UUID, creator string) (auth.ConfirmResult, error)
+
+	// SetTenantSuspended acts on ANY tenant, and is reached only by an admin-scoped key.
+	// SetTenantSuspendedByCreator acts only on a tenant the named creator made, and is what every
+	// other operator key gets (cleat#3552, B3a).
+	SetTenantSuspended(ctx context.Context, tenantID uuid.UUID, suspended bool) error
+	SetTenantSuspendedByCreator(ctx context.Context, tenantID uuid.UUID, suspended bool, creator string) error
 }
 
 // provisionBodyLimit bounds the request. The largest legitimate body is a few short strings.
@@ -76,7 +82,7 @@ type provisionTenantResponse struct {
 func (s *apiServer) provisionActor(w http.ResponseWriter, r *http.Request) (creator string, ok bool) {
 	op, isOperator := auth.OperatorFromContext(r.Context())
 	if !isOperator {
-		s.writeError(w, http.StatusForbidden, "provisioning a tenant requires an operator credential")
+		s.writeError(w, http.StatusForbidden, "this route requires an operator credential")
 		return "", false
 	}
 	if s.provisioner == nil {

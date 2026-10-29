@@ -34,12 +34,32 @@ type fakeProvisioner struct {
 	err                             error
 	confirmResult                   auth.ConfirmResult
 	confirmErr                      error
+
+	anySuspendCalls, creatorSuspendCalls int
+	gotSuspendTenant                     uuid.UUID
+	gotSuspended                         bool
+	gotSuspendCreator                    string
+	suspendErr                           error
 }
 
 func (f *fakeProvisioner) ProvisionTenant(_ context.Context, r auth.ProvisionRequest) (auth.ProvisionResult, error) {
 	f.provisionCalls++
 	f.gotReq = r
 	return f.result, f.err
+}
+
+// The suspension pair (cleat#3552, B3a): which of the two a request reached is the whole point, so each
+// records its own calls.
+func (f *fakeProvisioner) SetTenantSuspended(_ context.Context, id uuid.UUID, suspended bool) error {
+	f.anySuspendCalls++
+	f.gotSuspendTenant, f.gotSuspended = id, suspended
+	return f.suspendErr
+}
+
+func (f *fakeProvisioner) SetTenantSuspendedByCreator(_ context.Context, id uuid.UUID, suspended bool, creator string) error {
+	f.creatorSuspendCalls++
+	f.gotSuspendTenant, f.gotSuspended, f.gotSuspendCreator = id, suspended, creator
+	return f.suspendErr
 }
 
 func (f *fakeProvisioner) ConfirmProvisionedTenant(_ context.Context, id, keyID uuid.UUID, creator string) (auth.ConfirmResult, error) {
