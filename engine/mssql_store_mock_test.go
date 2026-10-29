@@ -389,7 +389,7 @@ func TestMSSQLStore_TenantPreservedOnCopy(t *testing.T) {
 
 func TestMSSQLGetWASMLength(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		queryRowOk("len(wasm_bytes)", int64(2048)),
+		queryRowOk("len(wasm_bytes)", int64(2048), nil), // length, library (NULL: an ordinary definition)
 	}, nil)
 	defer db.Close()
 
@@ -423,7 +423,7 @@ func TestMSSQLGetWASMLength_Error(t *testing.T) {
 func TestMSSQLLoadWASM(t *testing.T) {
 	wasmData := []byte("mock-wasm-binary-data")
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		queryRowOk("wasm_bytes FROM workflow_defs", wasmData),
+		queryRowOk("FROM workflow_defs", wasmData, nil), // wasm_bytes, library (NULL: an ordinary definition)
 	}, nil)
 	defer db.Close()
 
@@ -439,7 +439,7 @@ func TestMSSQLLoadWASM(t *testing.T) {
 
 func TestMSSQLLoadWASM_NotFound(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "wasm_bytes FROM workflow_defs"},
+		{match: "FROM workflow_defs"},
 	}, nil)
 	defer db.Close()
 

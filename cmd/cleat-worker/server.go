@@ -3054,6 +3054,16 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error() + `; build the new bytes with a higher --version and upload them with that same "version", so the open runs keep the code they started on`})
 			return
 		}
+		// cleat#3540: the tenant's row for this name and version was installed from
+		// a library, so it holds no bytes and cannot be given any. A conflict with
+		// the state of the definition, like the open-runs refusal above, and the
+		// error says what to do (install a newer library version), so it needs no
+		// hint appended.
+		if errors.Is(err, engine.ErrWorkflowDefIsLibraryMember) {
+			slog.Warn("deploy workflow def refused: installed from a library", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		slog.Error("deploy workflow def failed", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
 		return

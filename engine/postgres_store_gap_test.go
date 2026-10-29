@@ -275,7 +275,7 @@ func TestGap_GetChildCount_Error(t *testing.T) {
 
 func TestGap_GetWASMLength(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "length(wasm_bytes)", data: [][]driver.Value{{int64(1024)}}},
+		{match: "length(wasm_bytes)", data: [][]driver.Value{{int64(1024), nil}}}, // length, library (NULL)
 	}, nil)
 	defer db.Close()
 

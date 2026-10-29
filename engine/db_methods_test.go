@@ -337,7 +337,7 @@ func TestPostgresStore_ReapExpiredConcurrencyKeys_Zero(t *testing.T) {
 func TestPostgresStore_LoadWASM_Success(t *testing.T) {
 	expected := []byte("some-wasm-bytes")
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT wasm_bytes", data: [][]driver.Value{{expected}}},
+		{match: "SELECT wasm_bytes", data: [][]driver.Value{{expected, nil}}}, // wasm_bytes, library (NULL: an ordinary definition)
 	}, nil)
 	defer db.Close()
 
@@ -585,6 +585,7 @@ func TestPostgresStore_GetWorkflowDef_Success(t *testing.T) {
 				"test-wf",             // name
 				int64(2),              // version
 				[]byte("wasm-data"),   // wasm_bytes
+				nil,                   // library (NULL: an ordinary definition)
 				int64(1),              // abi_version
 				int64(0),              // min_version
 				[]byte(`{"p":"1.0"}`), // plugin_deps
@@ -627,6 +628,7 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 				"test-wf",   // name
 				int64(1),    // version
 				[]byte(nil), // wasm_bytes
+				nil,         // library (NULL: an ordinary definition)
 				int64(1),    // abi_version
 				int64(0),    // min_version
 				[]byte(nil), // plugin_deps (NULL)

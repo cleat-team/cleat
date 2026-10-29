@@ -62,6 +62,25 @@ func TestAnUploadRefusedForOpenRunsIsAConflictNotAServerError(t *testing.T) {
 		}
 	})
 
+	// cleat#3540: a definition installed from a library cannot be given bytes. The
+	// same kind of conflict, and its message already says what to do.
+	t.Run("a refusal because the definition is a library member is a 409 that says to install a newer library version", func(t *testing.T) {
+		code, msg := upload(t, &engine.WorkflowDefIsLibraryMemberError{Name: "uploaded", Version: 1, Library: "acme-lib"})
+		if code != http.StatusConflict {
+			t.Fatalf("HTTP %d (%q), want 409", code, msg)
+		}
+		for _, want := range []string{"uploaded", "version 1", `"acme-lib"`, "immutable", "install a newer version of the library"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the 409 body %q does not mention %q", msg, want)
+			}
+		}
+		// It is not the open-runs refusal, and must not borrow that one's advice
+		// about building a higher --version: that would not help here.
+		if strings.Contains(msg, "--version") {
+			t.Errorf("the 409 body %q gives the open-runs advice, which does not apply to a library member", msg)
+		}
+	})
+
 	t.Run("control: any other deploy error is still a 500", func(t *testing.T) {
 		code, msg := upload(t, errors.New("disk on fire"))
 		if code != http.StatusInternalServerError {

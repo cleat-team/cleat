@@ -19,14 +19,26 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 	defer tx.Rollback()
 
 	var wasmBytes []byte
+	var library sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT wasm_bytes FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&wasmBytes)
+		SELECT wasm_bytes, library FROM workflow_defs WHERE name = $1 AND version = $2
+	`, defName, defVersion).Scan(&wasmBytes, &library)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load wasm: %w", err)
+	}
+	if library.Valid {
+		// An installed library definition has no bytes of its own: it names an
+		// immutable member of a published library (cleat#3540). A second read,
+		// and only for such a row, so an ordinary definition never touches the
+		// library schema and does not depend on the role's grant on it.
+		if err := tx.QueryRowContext(ctx, `
+			SELECT wasm_bytes FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+		`, library.String, defName, defVersion).Scan(&wasmBytes); err != nil {
+			return nil, libraryMemberReadError("load wasm", library.String, defName, defVersion, err)
+		}
 	}
 	return wasmBytes, tx.Commit()
 }
@@ -55,13 +67,25 @@ func (s *PostgresStore) GetWASMLength(ctx context.Context, defName string, defVe
 	}
 	defer tx.Rollback()
 
-	var length int64
+	var length sql.NullInt64
+	var library sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		`SELECT length(wasm_bytes) FROM workflow_defs WHERE name = $1 AND version = $2`,
-		defName, defVersion).Scan(&length); err != nil {
+		`SELECT length(wasm_bytes), library FROM workflow_defs WHERE name = $1 AND version = $2`,
+		defName, defVersion).Scan(&length, &library); err != nil {
 		return 0, err
 	}
-	return length, tx.Commit()
+	if library.Valid {
+		// The member's stored length, checked against its bytes when it was
+		// published, so a library definition is validated without reading them.
+		var memberLength int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT wasm_length FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+		`, library.String, defName, defVersion).Scan(&memberLength); err != nil {
+			return 0, libraryMemberReadError("get wasm length", library.String, defName, defVersion, err)
+		}
+		return memberLength, tx.Commit()
+	}
+	return length.Int64, tx.Commit()
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.
@@ -379,17 +403,29 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	var pluginDepsRaw []byte
 	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
+	var library sql.NullString
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
+		SELECT name, version, wasm_bytes, library, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
 		FROM workflow_defs WHERE name = $1 AND version = $2
-	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
+	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &library, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get workflow def: %w", err)
+	}
+	if library.Valid {
+		// WorkflowDef.WASMBytes is the code the definition RUNS, wherever it is
+		// stored. The start route resolves an entry point from it to pick the
+		// input schema, and for a library definition an empty slice made that
+		// resolution fail silently, which skipped input validation altogether.
+		if err := tx.QueryRowContext(ctx, `
+			SELECT wasm_bytes FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+		`, library.String, name, version).Scan(&wasmBytes); err != nil {
+			return nil, libraryMemberReadError("get workflow def", library.String, name, version, err)
+		}
 	}
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt

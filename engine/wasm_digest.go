@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 )
@@ -53,13 +54,26 @@ func (s *PostgresStore) GetWASMDigest(ctx context.Context, defName string, defVe
 	}
 	defer tx.Rollback()
 
-	var digest string
+	var digest sql.NullString
+	var library sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		`SELECT encode(sha256(wasm_bytes), 'hex') FROM workflow_defs WHERE name = $1 AND version = $2`,
-		defName, defVersion).Scan(&digest); err != nil {
+		`SELECT encode(sha256(wasm_bytes), 'hex'), library FROM workflow_defs WHERE name = $1 AND version = $2`,
+		defName, defVersion).Scan(&digest, &library); err != nil {
 		return "", err
 	}
-	return digest, tx.Commit()
+	if library.Valid {
+		// A library member's digest is a stored column, checked against its bytes
+		// when it was published, so asking for it hashes nothing. sha256 of the
+		// definition's own NULL bytes, above, is NULL and unused.
+		var memberDigest string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT wasm_sha256 FROM library.members WHERE library = $1 AND name = $2 AND version = $3
+		`, library.String, defName, defVersion).Scan(&memberDigest); err != nil {
+			return "", libraryMemberReadError("get wasm digest", library.String, defName, defVersion, err)
+		}
+		return memberDigest, tx.Commit()
+	}
+	return digest.String, tx.Commit()
 }
 
 // GetWASMDigest returns the SHA-256 of the stored WASM binary, computed by
@@ -83,11 +97,25 @@ func (s *MSSQLStore) GetWASMDigest(ctx context.Context, defName string, defVersi
 	}
 	defer tx.Rollback()
 
-	var digest string
+	var digest sql.NullString
+	var library sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', wasm_bytes), 2)) FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
-		defName, defVersion, s.tenantID).Scan(&digest)
-	return digest, err
+		`SELECT LOWER(CONVERT(varchar(64), HASHBYTES('SHA2_256', wasm_bytes), 2)), library FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3`,
+		defName, defVersion, s.tenantID).Scan(&digest, &library)
+	if err != nil {
+		return "", err
+	}
+	if library.Valid {
+		// Stored at publish and checked against the bytes there: nothing is hashed.
+		var memberDigest string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT wasm_sha256 FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, defName, defVersion).Scan(&memberDigest); err != nil {
+			return "", libraryMemberReadError("get wasm digest", library.String, defName, defVersion, err)
+		}
+		return memberDigest, nil
+	}
+	return digest.String, nil
 }
 
 // GetWASMDigest asks each shard in turn, like GetWASMLength.

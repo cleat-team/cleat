@@ -40,23 +40,48 @@ import (
 // WASM LRU cache
 // ---------------------------------------------------------------------------
 
+// wasmBlob is one distinct set of WASM bytes held by the cache, and how many
+// entries hold it.
+//
+// digest is the SHA-256 of bytes AS THE WORKER COMPUTED IT, never a value the
+// store reported. That is the safeguard on sharing: a blob is looked up by the
+// hash of what the worker itself holds, so a corrupt row, or a digest column that
+// disagrees with its bytes, can only ever produce an entry whose bytes are its
+// own, and cannot place wrong bytes in front of another tenant's key. Whether the
+// store AGREES with those bytes is a separate question, answered per entry by
+// wasmLRUEntry.digest and checkedAt.
+type wasmBlob struct {
+	digest string
+	bytes  []byte
+	refs   int
+}
+
 // wasmLRUEntry is stored in container/list for LRU ordering.
 type wasmLRUEntry struct {
-	key   string
-	bytes []byte
-	// digest is the SHA-256 of bytes, and checkedAt is when the store last
-	// agreed it is the stored one. Both are zero for an entry put without
-	// them, which loadWASM treats as "not yet verified" (cleat#3516).
+	key  string
+	blob *wasmBlob
+	// digest is the SHA-256 the store last agreed these bytes have, and
+	// checkedAt is when. Both are zero for an entry put without them, which
+	// loadWASM treats as "not yet verified" (cleat#3516). They belong to the
+	// ENTRY, not the blob: two tenants holding one blob are revalidated against
+	// their own rows.
 	digest    string
 	checkedAt time.Time
 }
 
 // wasmLRUCache is a bounded LRU cache for WASM byte slices keyed by
-// "defName:version". Evicts LRU when entry count or total bytes exceeded.
+// "tenant/defName:version". Evicts LRU when entry count or total bytes exceeded.
+//
+// BYTES ARE SHARED BY CONTENT (cleat#3540). N tenants that installed one library
+// version, or deployed identical bytes, are N entries over ONE blob, and the byte
+// budget counts each distinct blob once. Before, each key held its own copy, so a
+// library installed by 1000 tenants cost 1000 copies of up to ~19MB and the
+// budget evicted real work to hold duplicates.
 type wasmLRUCache struct {
 	mu       sync.Mutex
 	list     *list.List
 	index    map[string]*list.Element
+	blobs    map[string]*wasmBlob
 	maxBytes int64
 	maxEnts  int
 }
@@ -65,6 +90,7 @@ func newWasmLRUCache(maxEntries, maxMB int) *wasmLRUCache {
 	return &wasmLRUCache{
 		list:     list.New(),
 		index:    make(map[string]*list.Element),
+		blobs:    make(map[string]*wasmBlob),
 		maxEnts:  maxEntries,
 		maxBytes: int64(maxMB) * 1024 * 1024,
 	}
@@ -75,31 +101,81 @@ func (c *wasmLRUCache) get(key string) ([]byte, bool) {
 	defer c.mu.Unlock()
 	if elem, ok := c.index[key]; ok {
 		c.list.MoveToFront(elem)
-		return elem.Value.(*wasmLRUEntry).bytes, true
+		return elem.Value.(*wasmLRUEntry).blob.bytes, true
 	}
 	return nil, false
 }
 
+// put stores data under key. It hashes data to find the blob that shares it, so
+// every caller gets the sharing, at the cost of one SHA-256 on a miss.
 func (c *wasmLRUCache) put(key string, data []byte) {
+	c.putDigested(key, data, engine.WASMDigest(data))
+}
+
+// putDigested is put for a caller that has already hashed data. digest MUST be
+// the SHA-256 of data computed by this process: it names the blob, and a digest
+// that was merely reported by the store would let wrong bytes be shared. Both
+// callers in this file (adoptWASM, and loadWASM's disk path, which compares the
+// store's digest with engine.WASMDigest of the bytes before putting them) pass
+// the worker's own hash.
+func (c *wasmLRUCache) putDigested(key string, data []byte, digest string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if elem, ok := c.index[key]; ok {
 		c.list.MoveToFront(elem)
 		e := elem.Value.(*wasmLRUEntry)
-		e.bytes, e.digest, e.checkedAt = data, "", time.Time{}
+		old := e.blob
+		e.blob = c.internLocked(digest, data)
+		c.releaseLocked(old)
+		e.digest, e.checkedAt = "", time.Time{}
 		return
 	}
-	for c.list.Len() >= c.maxEnts || c.sizeBytesLocked()+int64(len(data)) > c.maxBytes {
+	// Room for the new entry. What it costs in bytes depends on whether its blob is
+	// already held, and evicting can change that answer, so it is asked each time
+	// round. The Len() > 0 guard is for an entry larger than the whole budget: with
+	// nothing left to evict the loop could not make progress, and it is held anyway.
+	for c.list.Len() > 0 && (c.list.Len() >= c.maxEnts || c.sizeBytesLocked()+c.costLocked(digest, len(data)) > c.maxBytes) {
 		c.evictLocked()
 	}
-	entry := &wasmLRUEntry{key: key, bytes: data}
-	elem := c.list.PushFront(entry)
-	c.index[key] = elem
+	blob := c.internLocked(digest, data)
+	entry := &wasmLRUEntry{key: key, blob: blob}
+	c.index[key] = c.list.PushFront(entry)
 }
 
-// putVerified stores data with the digest the store agreed it had at `at`.
+// costLocked is the bytes a new entry for (digest, n) adds to the budget: nothing
+// if its blob is already held.
+func (c *wasmLRUCache) costLocked(digest string, n int) int64 {
+	if _, held := c.blobs[digest]; held {
+		return 0
+	}
+	return int64(n)
+}
+
+// internLocked returns the blob for digest, creating it from data if no entry
+// holds it, and counts one more holder.
+func (c *wasmLRUCache) internLocked(digest string, data []byte) *wasmBlob {
+	b, ok := c.blobs[digest]
+	if !ok {
+		b = &wasmBlob{digest: digest, bytes: data}
+		c.blobs[digest] = b
+	}
+	b.refs++
+	return b
+}
+
+// releaseLocked drops one holder, and the blob with the last of them.
+func (c *wasmLRUCache) releaseLocked(b *wasmBlob) {
+	b.refs--
+	if b.refs <= 0 {
+		delete(c.blobs, b.digest)
+	}
+}
+
+// putVerified stores data with the digest the store agreed it had at `at`. digest
+// must be the worker's own hash of data (see putDigested); the two call sites
+// compare it with the store's before relying on it.
 func (c *wasmLRUCache) putVerified(key string, data []byte, digest string, at time.Time) {
-	c.put(key, data)
+	c.putDigested(key, data, digest)
 	c.markChecked(key, digest, at)
 }
 
@@ -124,10 +200,11 @@ func (c *wasmLRUCache) verification(key string) (digest string, checkedAt time.T
 	return "", time.Time{}
 }
 
+// sizeBytesLocked is the bytes held, each distinct blob counted once.
 func (c *wasmLRUCache) sizeBytesLocked() int64 {
 	var total int64
-	for e := c.list.Front(); e != nil; e = e.Next() {
-		total += int64(len(e.Value.(*wasmLRUEntry).bytes))
+	for _, b := range c.blobs {
+		total += int64(len(b.bytes))
 	}
 	return total
 }
@@ -140,8 +217,9 @@ func (c *wasmLRUCache) sizeBytesLocked() int64 {
 // Reuses sizeBytesLocked rather than tracking a running total, because a
 // running total is a second source of truth for a number this already computes
 // and would drift silently on any future eviction path that forgot to update
-// it. The walk is over at most --wasm-cache-max-entries elements, once per
-// memory tick.
+// it. The walk is over at most --wasm-cache-max-entries blobs, once per memory
+// tick. Bytes are the DISTINCT bytes held, so entries can exceed what the bytes
+// figure divided by a module's size would suggest: that gap is the sharing.
 func (c *wasmLRUCache) stats() (entries int, bytes int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -153,6 +231,7 @@ func (c *wasmLRUCache) evictLocked() {
 		entry := elem.Value.(*wasmLRUEntry)
 		delete(c.index, entry.key)
 		c.list.Remove(elem)
+		c.releaseLocked(entry.blob)
 	}
 }
 
@@ -160,8 +239,10 @@ func (c *wasmLRUCache) remove(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if elem, ok := c.index[key]; ok {
+		entry := elem.Value.(*wasmLRUEntry)
 		delete(c.index, key)
 		c.list.Remove(elem)
+		c.releaseLocked(entry.blob)
 	}
 }
 

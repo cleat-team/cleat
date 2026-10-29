@@ -66,22 +66,64 @@ const WorkflowDefInUseCLIAdvice = "To proceed: build with a higher version (clea
 // Is reports a match against ErrWorkflowDefInUse.
 func (e *WorkflowDefInUseError) Is(target error) bool { return target == ErrWorkflowDefInUse }
 
+// ErrWorkflowDefIsLibraryMember is matched by errors.Is for a refusal to write bytes
+// over a definition that is installed from a library (cleat#3540).
+var ErrWorkflowDefIsLibraryMember = errors.New("workflow definition is installed from a library")
+
+// WorkflowDefIsLibraryMemberError names what was refused. A library member is
+// immutable: the tenant's row holds no bytes, it points at a published member, and
+// the table's CHECK (bytes XOR reference) would refuse the write with a constraint
+// name. Refusing here says why, and does so whether or not the bytes are identical
+// and whatever ReplaceUnderOpenRuns says, because nothing can be written to such a
+// row, not because runs are open.
+type WorkflowDefIsLibraryMemberError struct {
+	Name    string
+	Version int
+	Library string
+}
+
+func (e *WorkflowDefIsLibraryMemberError) Error() string {
+	return fmt.Sprintf("refusing to deploy over workflow %q version %d: it is installed from library %q, and a library member is immutable. "+
+		"To change what this tenant runs, install a newer version of the library", e.Name, e.Version, e.Library)
+}
+
+// Is reports a match against ErrWorkflowDefIsLibraryMember.
+func (e *WorkflowDefIsLibraryMemberError) Is(target error) bool {
+	return target == ErrWorkflowDefIsLibraryMember
+}
+
+// libraryMemberReadError is what a definition's reference to a library member that
+// cannot be read becomes. The foreign key means a referenced member cannot be deleted,
+// so a missing one is a database that was changed underneath the engine, and it is
+// reported as that rather than as a bare "no rows".
+func libraryMemberReadError(op, library, name string, version int, err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%s: workflow %s v%d is installed from library %q but that library member is missing, "+
+			"which its foreign key should make impossible", op, name, version, library)
+	}
+	return fmt.Errorf("%s: library member %s/%s v%d: %w", op, library, name, version, err)
+}
+
 // CheckWorkflowDefReplacementPostgres applies the rule inside tx, which must
 // already carry the tenant (beginTxWithRLS, or `cleat deploy`'s own set_config).
 // PostgresStore.DeployWorkflowDef and `cleat deploy` both call it, so the two share
 // one rule instead of each carrying a copy.
 func CheckWorkflowDefReplacementPostgres(ctx context.Context, tx *sql.Tx, tenantID, name string, version int, wasm []byte, force bool) error {
 	var same bool
+	var library sql.NullString
 	err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(wasm_bytes = $4, false) FROM workflow_defs
+		SELECT COALESCE(wasm_bytes = $4, false), library FROM workflow_defs
 		WHERE tenant_id = $1 AND name = $2 AND version = $3
 		FOR UPDATE
-	`, tenantID, name, version, wasm).Scan(&same)
+	`, tenantID, name, version, wasm).Scan(&same, &library)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // the first deploy of this version
 	}
 	if err != nil {
 		return fmt.Errorf("check workflow def replacement: read existing: %w", err)
+	}
+	if library.Valid {
+		return &WorkflowDefIsLibraryMemberError{Name: name, Version: version, Library: library.String}
 	}
 	if same || force {
 		return nil
@@ -137,15 +179,19 @@ func (s *MySQLStore) checkWorkflowDefReplacement(ctx context.Context, tx *sql.Tx
 // WITH (UPDLOCK, HOLDLOCK), the same lock the MERGE that follows takes.
 func (s *MSSQLStore) checkWorkflowDefReplacement(ctx context.Context, tx *sql.Tx, def *WorkflowDef) error {
 	var same int
+	var library sql.NullString
 	err := tx.QueryRowContext(ctx, `
-		SELECT CASE WHEN wasm_bytes = @p4 THEN 1 ELSE 0 END FROM workflow_defs WITH (UPDLOCK, HOLDLOCK)
+		SELECT CASE WHEN wasm_bytes = @p4 THEN 1 ELSE 0 END, library FROM workflow_defs WITH (UPDLOCK, HOLDLOCK)
 		WHERE tenant_id = @p1 AND name = @p2 AND version = @p3
-	`, s.tenantID, def.Name, def.Version, def.WASMBytes).Scan(&same)
+	`, s.tenantID, def.Name, def.Version, def.WASMBytes).Scan(&same, &library)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: read existing: %w", err)
+	}
+	if library.Valid {
+		return &WorkflowDefIsLibraryMemberError{Name: def.Name, Version: def.Version, Library: library.String}
 	}
 	if same == 1 || def.ReplaceUnderOpenRuns {
 		return nil
