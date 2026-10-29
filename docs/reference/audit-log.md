@@ -203,6 +203,20 @@ may call it, exactly as `GET /audit/events`. There is no cross-tenant HTTP endpo
 `cleatctl audit export --all-tenants`, which connects to the database directly, and writes one
 complete stream per tenant, one after another.
 
+**An export is raw, and sensitive.** Every row is written exactly as it was stored and hashed. It is
+**not redacted**, by decision (D49-1a): a redacted export cannot be verified against the chain, and the
+export exists to be verified. Which fields can carry content:
+
+- A row recorded for an **HTTP request** carries the method, the URL path (not the query string, not the
+  body), the status, the user, the client address, the user agent, the duration, and `metadata` of `{}`.
+  It carries no workflow payload and no request body.
+- A row written by a **workflow** through the `record_event` host function carries whatever that workflow
+  supplied: `event_type` in `path` and the `details` object in `metadata`. `user_id` is the workflow id.
+  If a workflow puts a secret in `details`, the export has it.
+
+Treat the file like a secret: restrict who can read it, and do not paste it into a ticket. Workflow-data
+exports, where any exist, are redacted under D49-1a; this one is the integrity artifact and is not.
+
 `from` and `to` are RFC 3339, inclusive, at microsecond resolution. A malformed value is a `400`,
 not an ignored filter (`GET /audit/events` ignores one). An export of a range has gaps in `seq`
 where the range excluded rows; consecutive records still link.

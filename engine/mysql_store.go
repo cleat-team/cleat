@@ -107,11 +107,6 @@ type MySQLStore struct {
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
 
-	// disableReadRedaction when true bypasses RedactOnRead on the read path.
-	// Set to true during replay to avoid the overhead of retroactive redaction
-	// on every event load. Default false.
-	disableReadRedaction bool
-
 	// perTenantDatabase records that this store was built by
 	// MySQLStoreFactory, whose topology gives each tenant its own physical
 	// database (cleat_<tenant_id>). It existed for ClaimWorkflowsAcrossTenants
@@ -147,15 +142,6 @@ func NewMySQLStore(db *sql.DB, taskQueues ...string) *MySQLStore {
 func (s *MySQLStore) WithIdempotencyKeyTTL(ttl time.Duration) *MySQLStore {
 	cp := *s
 	cp.idempotencyKeyTTL = ttl
-	return &cp
-}
-
-// WithReadRedactionDisabled returns a copy of the store with redaction on
-// the read path disabled. This is used during replay to avoid the overhead
-// of retroactive redaction on every event load.
-func (s *MySQLStore) WithReadRedactionDisabled(disabled bool) *MySQLStore {
-	cp := *s
-	cp.disableReadRedaction = disabled
 	return &cp
 }
 

@@ -96,20 +96,6 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
-		// Retroactive redaction on read path.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
-		}
-
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
 		}
@@ -230,7 +216,6 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				rec.PromiseResult = promiseResult.String
 				rec.PromiseError = promiseError.String
 
-				// Decryption must happen BEFORE redaction: redacting ciphertext is meaningless.
 				// The fields below are encrypted by flushEvent when encryption is enabled.
 				// NOTE: On MSSQL this block is a forward-compatibility guard only --
 				// encryption is not yet supported and will never be true.
@@ -259,23 +244,6 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginOutput); err == nil {
 						rec.PluginOutput = decrypted
 					}
-				}
-
-				// Retroactive redaction on read path: ensure sensitive fields are
-				// redacted even if they were stored before redaction was mandatory.
-				// Redaction runs AFTER decryption (see block above) since redacting
-				// ciphertext would yield meaningless "[REDACTED]" placeholders.
-				if !s.disableReadRedaction {
-					rec.Request = RedactOnRead(rec.Request)
-					rec.Response = RedactOnRead(rec.Response)
-					rec.Err = RedactOnRead(rec.Err)
-					rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-					rec.ChildInput = RedactOnRead(rec.ChildInput)
-					rec.NewInput = RedactOnRead(rec.NewInput)
-					rec.PluginInput = RedactOnRead(rec.PluginInput)
-					rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-					rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-					rec.PromiseError = RedactOnRead(rec.PromiseError)
 				}
 
 				if payload.Valid {
@@ -413,20 +381,6 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		rec.PromiseID = promiseID.String
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
-
-		// Retroactive redaction on read path.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
-		}
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))

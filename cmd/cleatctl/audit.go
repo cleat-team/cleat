@@ -51,6 +51,12 @@ const auditUsage = `Usage: cleatctl audit verify (--tenant <uuid> | --all-tenant
 Recomputes a tenant's audit-log hash chain and reports the first place it does not
 verify. Reads only.
 
+audit export writes every row exactly as it was stored and hashed. It is NOT redacted,
+because a redacted export cannot be verified against the chain. A row a workflow
+recorded (record_event) carries whatever event_type and details that workflow supplied,
+in path and metadata; a row recorded for an HTTP request carries no payload or body.
+Treat the output file as sensitive, like a secret.
+
 Flags:
   --tenant <uuid>   Verify one tenant's chain.
   --all-tenants     Verify every tenant that has a chain, including one whose head

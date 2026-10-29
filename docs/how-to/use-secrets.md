@@ -198,6 +198,19 @@ resolved value.
 would write the plaintext into history with no behavioural test failing — the
 call would still succeed.
 
+**Workflow data is stored as sent and redacted where it leaves the system.** Since
+cleat#3581 nothing rewrites a start input, a signal payload or a recorded event on
+the way in or out of the database, so a replay reads exactly what the workflow was
+given. The history and event APIs, the live stream, the dashboard, the log lines and
+`cleatctl debug`/`replay` output apply `engine.Redact` to what they show (`cleatctl`
+prints the stored value with `--no-redact`). A tenant reading its own workflow's
+status and result over the API gets it as stored; `?redact=true` asks for the
+redacted view. **What that means for a secret you put in workflow data: it is in
+`event_history`.** Turn on payload encryption (`--encrypt-sensitive-payloads` with
+`--encryption-key-file`; see `docs/how-to/rotate-payload-encryption-key.md`) if that
+can happen, and prefer a `${secret:...}` reference, which keeps the value out of the
+record entirely. Rows stored before the change stay redacted.
+
 That distinction matters because `engine.Redact` is a **field-name heuristic**:
 it catches `password` and `token`, and would not catch a credential under a
 field named `config`. Keeping the value out of the recorded string entirely does

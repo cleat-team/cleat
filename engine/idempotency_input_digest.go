@@ -24,12 +24,11 @@ import (
 // is digested as-is: there is nothing to canonicalise, and a byte comparison is
 // the only honest answer available.
 //
-// WHAT THIS DIGEST CANNOT SEE. On the HTTP path the input has already been
-// through engine.Redact by the time any store sees it, so a sensitive field
-// arrives as "[REDACTED]" and two requests differing ONLY in such a field
-// digest equal and replay. That residue is stated rather than hidden: closing
-// it means digesting before redaction, which means computing it in the handler
-// and passing it down. See cleat#1170.
+// WHAT THIS DIGEST USED TO NOT SEE. Until cleat#3581 the HTTP path ran the input
+// through engine.Redact before any store saw it, so a sensitive field arrived as
+// "[REDACTED]" and two requests differing ONLY in such a field digested equal and
+// replayed (cleat#1170). The input is stored and digested as sent now, so that
+// residue is gone for any input stored from then on.
 func IdempotencyInputDigest(input json.RawMessage) string {
 	b := []byte(input)
 	var v any

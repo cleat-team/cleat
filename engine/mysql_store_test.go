@@ -82,15 +82,6 @@ func TestMySQLStoreConfigOptions(t *testing.T) {
 		t.Error("original store should not be mutated by WithIdempotencyKeyTTL")
 	}
 
-	// WithReadRedactionDisabled
-	s3 := store.WithReadRedactionDisabled(true)
-	if !s3.disableReadRedaction {
-		t.Error("disableReadRedaction should be true")
-	}
-	if store.disableReadRedaction {
-		t.Error("original store should not be mutated by WithReadRedactionDisabled")
-	}
-
 	// WithEncryption
 	s4 := store.WithEncryption(nil, false)
 	if s4 == nil {

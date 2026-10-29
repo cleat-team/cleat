@@ -36,12 +36,16 @@ async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
 }
 
 export async function listWorkflows(status?: string): Promise<WorkflowInstance[]> {
-  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+  // redact=true: the dashboard is somewhere people look at what happened, so it
+  // asks for the redacted view (cleat#3581). The flag can only add redaction; a
+  // programmatic caller that omits it gets the data as stored. A test pins that
+  // every data-bearing call below carries it.
+  const qs = status ? `?status=${encodeURIComponent(status)}&redact=true` : '?redact=true';
   return fetchJSON<WorkflowInstance[]>(`/api/workflows${qs}`);
 }
 
 export async function getWorkflow(id: string): Promise<WorkflowInstance> {
-  return fetchJSON<WorkflowInstance>(`/api/workflows/${id}`);
+  return fetchJSON<WorkflowInstance>(`/api/workflows/${id}?redact=true`);
 }
 
 export async function startWorkflow(name: string, input?: object, entryPoint?: string): Promise<{ id: string }> {
@@ -77,7 +81,7 @@ export async function getWorkflowDAG(workflowId: string): Promise<DAGResponse> {
 }
 
 export async function getQueryState(id: string, key: string): Promise<{ key: string; value: string }> {
-  return fetchJSON(`/api/workflows/${id}/query?key=${encodeURIComponent(key)}`);
+  return fetchJSON(`/api/workflows/${id}/query?key=${encodeURIComponent(key)}&redact=true`);
 }
 
 export async function listSchedules(): Promise<Schedule[]> {
@@ -111,7 +115,7 @@ export async function listDefinitions(): Promise<WorkflowDefInfo[]> {
 // ── Dead Letter Queue API ──────────────────────────────────────────
 
 export async function listDeadLetters(): Promise<WorkflowInstance[]> {
-  return fetchJSON<WorkflowInstance[]>('/api/dead-letters');
+  return fetchJSON<WorkflowInstance[]>('/api/dead-letters?redact=true');
 }
 
 export async function reprocessDeadLetter(id: string): Promise<{ id: string }> {

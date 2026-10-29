@@ -137,7 +137,7 @@ func (s *PostgresStore) readEventHistoryTx(ctx context.Context, tx *sql.Tx, work
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
-		// Decrypt and redact event record.
+		// Decrypt event record.
 		//
 		// A field that will not decrypt fails the LOAD. This is the read that
 		// replay acts on, and the placeholder is not data: with it accepted,
@@ -147,25 +147,8 @@ func (s *PostgresStore) readEventHistoryTx(ctx context.Context, tx *sql.Tx, work
 		// ErrPayloadDecryption so the worker can tell "this worker cannot
 		// read it" from "the database is down" and release the run.
 		// cleat#2311.
-		if err := s.decryptAndRedactEventRecord(&rec, workflowID); err != nil {
+		if err := s.decryptEventRecord(&rec, workflowID); err != nil {
 			return nil, fmt.Errorf("load history: %w", err)
-		}
-
-		// Retroactive redaction on read path: ensure sensitive fields are
-		// redacted even if they were stored before redaction was mandatory.
-		// Redaction runs AFTER decryption (see block above) since redacting
-		// ciphertext would yield meaningless "[REDACTED]" placeholders.
-		if !s.disableReadRedaction {
-			rec.Request = RedactOnRead(rec.Request)
-			rec.Response = RedactOnRead(rec.Response)
-			rec.Err = RedactOnRead(rec.Err)
-			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-			rec.ChildInput = RedactOnRead(rec.ChildInput)
-			rec.NewInput = RedactOnRead(rec.NewInput)
-			rec.PluginInput = RedactOnRead(rec.PluginInput)
-			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-			rec.PromiseError = RedactOnRead(rec.PromiseError)
 		}
 
 		if payload.Valid {

@@ -73,7 +73,11 @@ regexes = [
   # cmd/cleat-worker/a_replay_reads_what_the_guest_was_given_test.go and
   # testdata/deferfunc/workflow.go -- the placeholder secret the replay test feeds a guest, so
   # that it has a value engine.Redact rewrites to prove replay does not read the redacted copy
-  # (cleat#3581). ANCHORED, so a longer or different sk-live-... value is still reported.
+  # (cleat#3581). Also the body the egress-redaction tests feed Redact so they can show the secret
+  # absent at each egress surface and present in the store: engine/egress_redaction_test.go,
+  # engine/db_methods_test.go, cmd/cleat-worker/redaction_happens_at_egress_not_at_the_store_test.go
+  # and cmd/cleatctl/printed_output_is_redacted_test.go. ANCHORED, so a longer or different
+  # sk-live-... value is still reported.
   '''^sk-live-SECRET123$''',
   # .github/workflows/ci.yml -- the lint job's known-positive: a scratch module with a hard-coded credential that
   # gosec (G101) MUST report, or the job fails as UNMEASURED (cleat#2216). It exists to be found by a scanner;

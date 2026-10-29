@@ -402,20 +402,6 @@ func TestMySQLStore_WithTenant(t *testing.T) {
 	}
 }
 
-func TestMySQLStore_WithReadRedactionDisabled(t *testing.T) {
-	db := newNoopDB(t)
-	defer db.Close()
-
-	store := NewMySQLStore(db)
-	result := store.WithReadRedactionDisabled(true)
-	if !result.disableReadRedaction {
-		t.Error("disableReadRedaction should be true")
-	}
-	if store.disableReadRedaction {
-		t.Error("original store should not be mutated")
-	}
-}
-
 func TestMySQLStore_WithIdempotencyKeyTTL(t *testing.T) {
 	db := newNoopDB(t)
 	defer db.Close()

@@ -256,15 +256,6 @@ func TestMySQLIntegration_StoreConfigOptions(t *testing.T) {
 		t.Error("WithIdempotencyKeyTTL mutated the original store")
 	}
 
-	// WithReadRedactionDisabled returns a copy with redaction disabled.
-	s3 := s.WithReadRedactionDisabled(true)
-	if !s3.disableReadRedaction {
-		t.Error("WithReadRedactionDisabled should set disableReadRedaction=true")
-	}
-	if s.disableReadRedaction {
-		t.Error("WithReadRedactionDisabled mutated the original store")
-	}
-
 	// WithEncryption returns a copy.
 	s4 := s.WithEncryption(nil, false)
 	if s4 == nil {

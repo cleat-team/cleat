@@ -97,5 +97,5 @@ func (s *apiServer) handleGetInstanceState(w http.ResponseWriter, r *http.Reques
 	if s.refuseIfInternalRunLoaded(w, r, st, wf, "workflow not found") {
 		return
 	}
-	s.writeJSON(w, 200, wf)
+	s.writeWorkflow(w, r, wf)
 }

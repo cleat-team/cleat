@@ -37,9 +37,6 @@ func TestOrdinaryDataIsNotRedacted(t *testing.T) {
 		if got := Redact(in); got != in {
 			t.Errorf("Redact rewrote ordinary data\n  in : %s\n  out: %s", in, got)
 		}
-		if got := RedactOnRead(in); got != in {
-			t.Errorf("RedactOnRead rewrote ordinary data\n  in : %s\n  out: %s", in, got)
-		}
 	}
 	// A bare string that is not JSON takes the other branch of Redact.
 	for _, in := range []string{"1.2.3", "a.b.c", "report.final.pdf"} {

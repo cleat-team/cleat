@@ -83,13 +83,13 @@ func TestEveryEncryptedFieldReportsAFailureToDecrypt(t *testing.T) {
 			// Known-positive: the same record under the RIGHT key is clean.
 			// Without it, "reports an error" could be "reports one always".
 			okStore := NewPostgresStore(nil).WithEncryption(encA, true)
-			if err := okStore.decryptAndRedactEventRecord(sealedRecordFor(t, encA, field), "wf-1"); err != nil {
+			if err := okStore.decryptEventRecord(sealedRecordFor(t, encA, field), "wf-1"); err != nil {
 				t.Fatalf("PRECONDITION FAILED: %s under the key that sealed it reported %v", field, err)
 			}
 
 			wrongStore := NewPostgresStore(nil).WithEncryption(encB, true)
 			rec := sealedRecordFor(t, encA, field)
-			err := wrongStore.decryptAndRedactEventRecord(rec, "wf-1")
+			err := wrongStore.decryptEventRecord(rec, "wf-1")
 			if !errors.Is(err, ErrPayloadDecryption) {
 				t.Fatalf("%s sealed under another key: err = %v, want ErrPayloadDecryption", field, err)
 			}
@@ -109,7 +109,7 @@ func TestAFailureToDecryptOneFieldDoesNotStopTheRest(t *testing.T) {
 	rec.SignalPayload = sealedRecordFor(t, encA, "SignalPayload").SignalPayload
 	rec.ChildInput = sealedRecordFor(t, encA, "ChildInput").ChildInput
 
-	err := NewPostgresStore(nil).WithEncryption(encB, true).decryptAndRedactEventRecord(rec, "wf-1")
+	err := NewPostgresStore(nil).WithEncryption(encB, true).decryptEventRecord(rec, "wf-1")
 	if !errors.Is(err, ErrPayloadDecryption) {
 		t.Fatalf("err = %v", err)
 	}
@@ -351,7 +351,6 @@ func TestAdminOperationsRefuseAnUnreadableHistoryBeforeWriting(t *testing.T) {
 func TestAPlaintextFieldIsNotADecryptionFailure(t *testing.T) {
 	enc, _ := NewPayloadEncryption(validKey(t))
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
-	store.disableReadRedaction = true
 
 	rec := &EventRecord{
 		Step: 4, EventType: EventTypeChildWorkflow,
@@ -361,7 +360,7 @@ func TestAPlaintextFieldIsNotADecryptionFailure(t *testing.T) {
 		PluginOutput: `{"q":4}`, PromiseResult: `"done"`, PromiseError: "boom",
 	}
 	want := *rec
-	if err := store.decryptAndRedactEventRecord(rec, "wf-1"); err != nil {
+	if err := store.decryptEventRecord(rec, "wf-1"); err != nil {
 		t.Fatalf("a plaintext record was reported as a decryption failure: %v", err)
 	}
 	if *rec != want {
