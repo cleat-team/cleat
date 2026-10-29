@@ -1,0 +1,9 @@
+{
+  "status": 200,
+  "body": {
+    "already_confirmed": true,
+    "confirmed": 0,
+    "key_id": "cccccccc-0000-4000-8000-000000000003",
+    "tenant_id": "aaaaaaaa-0000-4000-8000-000000000001"
+  }
+}
