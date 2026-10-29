@@ -252,6 +252,7 @@ func dataPlaneFixture() *mockStore {
 		return []engine.WorkflowInstance{*wf()}, nil
 	}
 	ms.getQueryStateFn = func(context.Context, string, string) (string, error) { return egressSecret, nil }
+	ms.getTerminalRunFn = func(context.Context, string) (*engine.WorkflowInstance, error) { return wf(), nil }
 	ms.listQueryStateFn = func(context.Context, string) (map[string]string, error) {
 		return map[string]string{"k": egressSecret}, nil
 	}
@@ -269,6 +270,7 @@ func TestADataPlaneReadIsUnredactedUnlessTheCallerAsks(t *testing.T) {
 		{"GET /api/workflows/{id}", "/api/workflows/wf-1", api.handleWorkflows},
 		{"GET /api/instances/{id}", "/api/instances/wf-1", api.handleInstancesRoutes},
 		{"GET /api/workflows (list)", "/api/workflows", api.handleWorkflowsList},
+		{"GET /api/workflows/{id}/terminal", "/api/workflows/wf-1/terminal", api.handleWorkflows},
 		{"GET /api/workflows/{id}/query?key=", "/api/workflows/wf-1/query?key=k", api.handleWorkflows},
 		{"GET /api/workflows/{id}/query (every key)", "/api/workflows/wf-1/query", api.handleWorkflows},
 	} {
@@ -314,24 +316,42 @@ func suffixWith(sep, suffix string) string {
 // The census: a handler that writes JSON around the choke point is a hole.
 // ---------------------------------------------------------------------------
 
-// TestNoHandlerEncodesJSONAroundTheResponseWriter fails when a non-test file in
-// this package calls json.NewEncoder other than where it is known to. The choke
-// point in writeJSON redacts event records, so a handler that encodes its own
-// response can leak them without anything failing; this makes that a decision.
-// Each exception is named with what it writes and why it carries no event data.
-func TestNoHandlerEncodesJSONAroundTheResponseWriter(t *testing.T) {
-	known := map[string]string{
-		"app.go: json.NewEncoder(w).Encode(map[string]string{\"error\": \"not found\"})":       "an error body",
-		"internal_holds.go: _ = json.NewEncoder(rw).Encode(internalHoldsResponse{Held: held})": "concurrency-key holds, no event data",
-		"main.go: json.NewEncoder(w).Encode(statuses)":                                         "component health statuses",
-		"server.go: json.NewEncoder(w).Encode(v)":                                              "writeJSON itself, the choke point",
-		"server.go: json.NewEncoder(w).Encode(map[string]any{":                                 "a fixed-shape response; read it before adding data to it",
+// TestNoHandlerSerialisesJSONAroundTheResponseWriter fails when a non-test file in
+// this package serialises JSON (json.NewEncoder, json.Marshal, json.MarshalIndent)
+// anywhere it is not known to, or more times than it is known to. The choke point in
+// writeJSON redacts event records, so a handler that serialises its own response can
+// leak them without anything failing; this makes that a decision. Each exception is
+// named with what it writes and why it carries no event data.
+//
+// The sites are COUNTED, not looked up in a set. A set cannot tell one occurrence of a
+// line from two, so a second `json.NewEncoder(w).Encode(v)` pasted into server.go beside
+// writeJSON's own would have passed (measured on review of cleat#3593).
+//
+// What this does NOT see: a response built another way (fmt.Fprintf of a struct, a bare
+// w.Write of bytes from elsewhere) and any serialiser outside this package. It is a
+// census of the two ways this package serialises JSON today, not a proof that no
+// handler can emit an event record unredacted.
+func TestNoHandlerSerialisesJSONAroundTheResponseWriter(t *testing.T) {
+	type site struct {
+		count int
+		why   string
 	}
+	known := map[string]site{
+		"app.go: json.NewEncoder(w).Encode(map[string]string{\"error\": \"not found\"})":       {1, "an error body"},
+		"internal_holds.go: _ = json.NewEncoder(rw).Encode(internalHoldsResponse{Held: held})": {1, "concurrency-key holds, no event data"},
+		"main.go: json.NewEncoder(w).Encode(statuses)":                                         {1, "component health statuses"},
+		"server.go: json.NewEncoder(w).Encode(v)":                                              {1, "writeJSON itself, the choke point"},
+		"server.go: json.NewEncoder(w).Encode(map[string]any{":                                 {1, "a fixed-shape response; read it before adding data to it"},
+		"setup.go: result, _ := json.Marshal(map[string]any{":                                  {1, "the durable fetch's result, handed back to the guest and recorded as the call's response; not an HTTP response"},
+		"setup.go: input, _ = json.Marshal(m)":                                                 {1, "a schedule's input with its entry point added, handed to the new workflow and stored as sent"},
+		"stream_sse.go: body, err := json.Marshal(payload)":                                    {1, "sseWriter.event, the SSE sink; content is redacted in emit before it reaches here"},
+	}
+	needles := []string{"json.NewEncoder(", "json.Marshal(", "json.MarshalIndent("}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found []string
+	found := map[string]int{}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -341,24 +361,37 @@ func TestNoHandlerEncodesJSONAroundTheResponseWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, line := range strings.Split(string(src), "\n") {
-			if strings.Contains(line, "json.NewEncoder(") && !strings.HasPrefix(strings.TrimSpace(line), "//") {
-				found = append(found, f+": "+strings.TrimSpace(line))
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") {
+				continue
+			}
+			for _, n := range needles {
+				if strings.Contains(trimmed, n) {
+					found[f+": "+trimmed]++
+					break
+				}
 			}
 		}
 	}
 	if len(found) == 0 {
-		t.Fatal("CONTROL: found no json.NewEncoder call at all, so this census read nothing")
+		t.Fatal("CONTROL: found no JSON serialiser call at all, so this census read nothing")
 	}
-	sort.Strings(found)
-	seen := map[string]bool{}
-	for _, line := range found {
-		seen[line] = true
-		if _, ok := known[line]; !ok {
-			t.Errorf("a JSON encoder outside writeJSON: %s\nIf it can carry an event record, route it through writeJSON, which redacts them (cleat#3581). If it cannot, add it to this list with the reason.", line)
+	keys := make([]string, 0, len(found))
+	for k := range found {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, line := range keys {
+		k, ok := known[line]
+		switch {
+		case !ok:
+			t.Errorf("a JSON serialiser outside the known sites: %s\nIf it can carry an event record, route it through writeJSON, which redacts them (cleat#3581). If it cannot, add it to this census with the reason.", line)
+		case found[line] != k.count:
+			t.Errorf("%s appears %d time(s), and this census knows of %d (%s).\nA second copy is a second place that serialises; decide it, do not let it ride on the first.", line, found[line], k.count, k.why)
 		}
 	}
 	for line := range known {
-		if !seen[line] {
+		if found[line] == 0 {
 			t.Errorf("this census names %q, which no longer exists: remove it, or the list stops meaning anything", line)
 		}
 	}

@@ -928,7 +928,7 @@ func (s *apiServer) handleGetTerminalRun(w http.ResponseWriter, r *http.Request,
 		s.writeError(w, 404, "workflow not found")
 		return
 	}
-	s.writeJSON(w, 200, wf)
+	s.writeWorkflow(w, r, wf)
 }
 
 func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
