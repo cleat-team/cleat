@@ -144,8 +144,12 @@ func TestAScopedOperatorKeyRoundTripsOnEveryDialect(t *testing.T) {
 }
 
 // Migration 004 must be safe to run twice. PostgreSQL has ADD COLUMN IF NOT EXISTS and SQL Server
-// a COL_LENGTH guard; MySQL has neither, which is why its file is one atomic ALTER and not
-// something this test applies again.
+// a COL_LENGTH guard. MySQL has neither and guards with a throwaway procedure over
+// information_schema; it is not applied again HERE because its file uses DELIMITER, which only the
+// migration runner understands. It is measured where the runner is:
+// cmd/cleat-worker TestMigrationIsADeployStepOnEveryDialect, step 6, which deletes the newest
+// migration's tracking row and re-applies it. That test is what caught the first version of the MySQL
+// file, a bare ALTER, failing with Error 1060 on the Tier 1 gate.
 func TestTheOperatorKeyScopeMigrationIsSafeToRunTwice(t *testing.T) {
 	for _, dialect := range []string{DialectPostgres, DialectMSSQL} {
 		t.Run(dialect, func(t *testing.T) {
