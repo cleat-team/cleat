@@ -624,22 +624,6 @@ func applyMSSQLCrossTenantOptIn(t *testing.T, db *sql.DB) {
 	execMSSQLBatchFile(t, db, path)
 }
 
-// execMSSQLBatchFile runs a .sql file's GO-separated batches over db, in
-// order. Shared by applyMSSQLCrossTenantOptIn and restoreMSSQLPlainPredicate,
-// which switch dbo.fn_tenant_filter between its two forms.
-//
-// Uses migration.SplitMSSQL -- the same splitter migration.Runner applies to
-// every shipped migration -- rather than a bare strings.Split(raw, "\nGO\n").
-// That simpler form is what this function used until cleat#2125: it requires
-// an exact "\nGO\n" and 075_the_admin_bypass_is_opt_in.sql's GO lines carry no
-// guarantee of that exact spacing, so a batch boundary was missed and the
-// #cleat_bound_policies temp table 075 creates in one batch and reads in a
-// later one came apart into two separate batches sent as one -- "Invalid
-// object name '#cleat_bound_policies'", the temp table having gone out of
-// scope with the batch that never actually ended where this function thought
-// it did. migration.SplitMSSQL matches GO case-insensitively and tolerates
-// trailing whitespace, which is what the real migration Runner has always
-// required this exact file to survive.
 // mssqlDropFilterPoliciesSQL drops every security policy that has a predicate on
 // dbo.fn_tenant_filter. Dynamic, so a policy added by a migration this file has
 // never heard of is dropped too.
@@ -662,6 +646,22 @@ func execMSSQLBatch(t *testing.T, db *sql.DB, batch string) {
 	}
 }
 
+// execMSSQLBatchFile runs a .sql file's GO-separated batches over db, in
+// order. Shared by applyMSSQLCrossTenantOptIn and restoreMSSQLPlainPredicate,
+// which switch dbo.fn_tenant_filter between its two forms.
+//
+// Uses migration.SplitMSSQL -- the same splitter migration.Runner applies to
+// every shipped migration -- rather than a bare strings.Split(raw, "\nGO\n").
+// That simpler form is what this function used until cleat#2125: it requires
+// an exact "\nGO\n" and 075_the_admin_bypass_is_opt_in.sql's GO lines carry no
+// guarantee of that exact spacing, so a batch boundary was missed and the
+// #cleat_bound_policies temp table 075 creates in one batch and reads in a
+// later one came apart into two separate batches sent as one -- "Invalid
+// object name '#cleat_bound_policies'", the temp table having gone out of
+// scope with the batch that never actually ended where this function thought
+// it did. migration.SplitMSSQL matches GO case-insensitively and tolerates
+// trailing whitespace, which is what the real migration Runner has always
+// required this exact file to survive.
 func execMSSQLBatchFile(t *testing.T, db *sql.DB, path string) {
 	t.Helper()
 	raw, err := os.ReadFile(path)

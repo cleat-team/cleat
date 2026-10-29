@@ -45,6 +45,10 @@ admin.tenant_egress_allow	member	migration 079; absent from the issue's list of 
 public.tenant_domains	member	migration 080; absent from the issue's list of eleven
 public.queues	member	cleat#1116, #1702's twelfth instance; migration 093/092/092
 public.slack_workspace	exempt	cleat#2230; unlike deployment_secrets/tenant_domains, unmap-workspace is a real DELETE by design (immediate revocation, no disabled_at check to wait out) -- there is no soft-disable state to carry created_at's siblings for
+library.members	exempt	cleat#3540; a published workflow build, immutable by design -- no role is granted UPDATE, so there is no updated_at and nothing to disable; published_at stands in for created_at, and the only removal is a DELETE by the publisher role
+library.bundles	exempt	cleat#3540; a published release of a library, immutable for the same reason as library.members (published_at, no updated_at or disabled_at)
+library.bundle_members	not-an-entity	cleat#3540; which members a bundle lists -- a join table between two published rows, with no lifecycle of its own
+public.tenant_library_installs	exempt	cleat#3540; which bundle of a library a tenant has installed -- an explicit upgrade replaces the row and an uninstall deletes it, so there is no soft-disable state to carry updated_at or disabled_at
 public.workflow_instances	not-an-entity	the run
 public.workflow_leases	not-an-entity	cleat#3245 Phase 3 step 1; the run's claim/heartbeat/reclaim state, physically split off workflow_instances -- same entity, not a new one
 public.workflow_payloads	not-an-entity	cleat#3245 Phase 3 step 1; the run's input/result/query_state/compaction payload, physically split off workflow_instances -- same entity, not a new one
