@@ -122,6 +122,12 @@ func TestLoadRedactPatterns(t *testing.T) {
 	if strings.Contains(got, "sensitive-data") {
 		t.Errorf("custom pattern value should be redacted: %s", got)
 	}
+	// "my-secret" already matches the built-in "secret", so the two checks above
+	// hold with the custom list ignored, as they did for as long as nothing read
+	// it. "private-key" is covered by no built-in, so this one cannot.
+	if strings.Contains(got, "abc123") {
+		t.Errorf("a field only a custom pattern names was not redacted: %s", got)
+	}
 }
 
 func TestLoadRedactPatternsMissingFile(t *testing.T) {

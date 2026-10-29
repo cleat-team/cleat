@@ -185,6 +185,20 @@ func isSensitiveWord(words []string, i int) bool {
 // and are always ASCII. Normalization via golang.org/x/text/unicode/norm is
 // a future enhancement if non-ASCII field names become relevant.
 func isSensitiveField(name string) bool {
+	// An operator's own patterns (--redact-patterns-file) are substrings of the
+	// key, case-insensitively, as the flag documents. They are consulted here and
+	// only here, and nothing consulted them before cleat#3583, so the flag was
+	// accepted and redacted nothing. They are not subject to the descriptor
+	// exception below: an operator who names a fragment means every key that
+	// holds it.
+	if len(customPatterns) > 0 {
+		lower := strings.ToLower(name)
+		for _, p := range customPatterns {
+			if strings.Contains(lower, strings.ToLower(p)) {
+				return true
+			}
+		}
+	}
 	words := keyWords(name)
 	last := len(words) - 1
 	for i := range words {
