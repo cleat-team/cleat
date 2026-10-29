@@ -163,6 +163,10 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryGetConfig(args)
+	case strings.Contains(query, "SELECT 1 FROM dd_config"):
+		c.store.mu.RLock()
+		defer c.store.mu.RUnlock()
+		return c.queryConfigExists(args)
 	case strings.Contains(query, "SELECT 1 FROM plugin_lease"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
@@ -457,6 +461,26 @@ func (c *fakeConn) queryListConfigs(args []driver.NamedValue) (driver.Rows, erro
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
+}
+
+// queryConfigExists answers the existence re-select a handler makes when an
+// UPDATE reports no rows (cleat#3550): one row if the tenant has the config,
+// none otherwise.
+func (c *fakeConn) queryConfigExists(args []driver.NamedValue) (driver.Rows, error) {
+	id, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	for _, cfg := range c.store.configs {
+		if cfg.id == id && cfg.tenantID == tid {
+			return &fakeRows{columns: []string{"1"}, data: [][]driver.Value{{int64(1)}}}, nil
+		}
+	}
+	return &fakeRows{columns: []string{"1"}}, nil
 }
 
 func (c *fakeConn) queryGetConfig(args []driver.NamedValue) (driver.Rows, error) {
