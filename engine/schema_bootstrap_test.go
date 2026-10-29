@@ -524,7 +524,10 @@ func TestShippedSchema_CreatesObjectsInPublic(t *testing.T) {
 			"somewhere else entirely. Table counts by schema: %v", counts)
 	}
 	for ns, n := range counts {
-		if ns != "public" && ns != "admin" {
+		// library is a fixed-name schema like admin: the operator-published
+		// workflow libraries (cleat#3540), kept apart so the application role can
+		// be granted read and nothing else on it.
+		if ns != "public" && ns != "admin" && ns != "library" {
 			t.Errorf("%d table(s) created in schema %q; the migrations must create "+
 				"application tables in public regardless of the connecting role's "+
 				"name (search_path is \"$user\", public). Counts by schema: %v",

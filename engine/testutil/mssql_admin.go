@@ -486,6 +486,14 @@ func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
 	if err != nil {
 		t.Fatalf("derive the plain-predicate replay list from %s: %v", dir, err)
 	}
+	// 003 drops the policies it knows by name and then replaces
+	// dbo.fn_tenant_filter, which fails with error 3729 while ANY policy still
+	// references the function -- including one a later migration created
+	// (cleat#3540's TenantFilter_LibraryInstalls). So drop every policy bound to
+	// the function here, the way migrations/mssql/optional/cross_tenant_claim.sql
+	// finds them, and let the replay below recreate them: 003's own, then each later
+	// file that creates one (mssqlPlainPredicateReplayFiles).
+	execMSSQLBatch(t, restoreDB, mssqlDropFilterPoliciesSQL)
 	for _, name := range names {
 		execMSSQLBatchFile(t, restoreDB, filepath.Join(dir, name))
 	}
@@ -632,6 +640,28 @@ func applyMSSQLCrossTenantOptIn(t *testing.T, db *sql.DB) {
 // it did. migration.SplitMSSQL matches GO case-insensitively and tolerates
 // trailing whitespace, which is what the real migration Runner has always
 // required this exact file to survive.
+// mssqlDropFilterPoliciesSQL drops every security policy that has a predicate on
+// dbo.fn_tenant_filter. Dynamic, so a policy added by a migration this file has
+// never heard of is dropped too.
+const mssqlDropFilterPoliciesSQL = `
+DECLARE @sql nvarchar(max) = N'';
+SELECT @sql = @sql + N'DROP SECURITY POLICY ' + QUOTENAME(sch.name) + N'.' + QUOTENAME(sp.name) + N';' + CHAR(10)
+  FROM sys.security_policies AS sp
+  JOIN sys.schemas AS sch ON sch.schema_id = sp.schema_id
+ WHERE EXISTS (SELECT 1 FROM sys.security_predicates AS pred
+                WHERE pred.object_id = sp.object_id
+                  AND pred.predicate_definition LIKE N'%fn_tenant_filter%');
+IF LEN(@sql) > 0 EXEC sp_executesql @sql;
+`
+
+// execMSSQLBatch runs one batch on one connection.
+func execMSSQLBatch(t *testing.T, db *sql.DB, batch string) {
+	t.Helper()
+	if _, err := db.Exec(batch); err != nil {
+		t.Fatalf("exec batch: %v", err)
+	}
+}
+
 func execMSSQLBatchFile(t *testing.T, db *sql.DB, path string) {
 	t.Helper()
 	raw, err := os.ReadFile(path)

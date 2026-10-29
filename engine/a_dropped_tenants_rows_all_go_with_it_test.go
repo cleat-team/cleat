@@ -233,6 +233,12 @@ func seedRemainingTenantTables(t *testing.T, ctx context.Context, db *sql.DB, te
 			`INSERT INTO workflow_memory_stats (tenant_id, def_name, mean_bytes, sample_count)
 			 VALUES ($1, $2, 1048576, 1)`,
 			[]any{tenant, "memprofile-" + tag}},
+		// cleat#3540. No foreign key to anything (the bundle is named, not
+		// referenced), so nothing cascades to it; admin.drop_tenant names it.
+		{"public.tenant_library_installs",
+			`INSERT INTO tenant_library_installs (tenant_id, library, bundle_version)
+			 VALUES ($1, $2, '1')`,
+			[]any{tenant, "library-" + tag}},
 		{"public.workflow_memory_samples",
 			`INSERT INTO workflow_memory_samples (tenant_id, def_name, sample_bytes)
 			 VALUES ($1, $2, 1048576)`,

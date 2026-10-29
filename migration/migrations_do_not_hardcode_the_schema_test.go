@@ -65,6 +65,7 @@ func TestMigrationsDoNotHardcodeTheSchema(t *testing.T) {
 		`CREATE POLICY kv_store_tenant_isolation ON public.kv_store`:                                                            "063: same",
 		`CHECK (exposure IN ('public', 'auth', 'internal'));`:                                                                   "005 (cleat#1986): 'public' here is one of three exposure-class VALUES in a CHECK constraint, not the schema -- the bare-word regex cannot tell a string literal from a schema name",
 		`CONSTRAINT ck_workflow_defs_exposure CHECK ((exposure = ANY (ARRAY['public'::text, 'auth'::text, 'internal'::text])))`: "001 (cleat#3347): same constraint as 005's cleat#1986 entry, re-rendered by pg_dump during the baseline rebaseline -- pg_dump emits CHECK(x IN (...)) as CHECK(x = ANY(ARRAY[...])), with each value cast ('public'::text), so the exact-text allowlist key from the pre-dump source does not match the post-dump one",
+		`CONSTRAINT ck_members_exposure CHECK (exposure = ANY (ARRAY['public'::text, 'auth'::text, 'internal'::text])),`:        "005 (cleat#3540): library.members repeats workflow_defs' exposure constraint, and 'public' here is one of three exposure-class VALUES, not the schema, as in the two entries above",
 	}
 
 	var findings []string

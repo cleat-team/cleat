@@ -65,7 +65,9 @@ func TestMigrationsHonourANonDefaultSchema(t *testing.T) {
 					"built almost nothing (all schemas: %v)", got[tc.want], tc.want, got)
 			}
 			for schema, n := range got {
-				if schema == tc.want || schema == "admin" || schema == "cleat" {
+				// library (cleat#3540) is fixed-name like admin: operator-only tables whose whole
+				// point is a schema of their own, so the application role has no write grant on it.
+				if schema == tc.want || schema == "admin" || schema == "cleat" || schema == "library" {
 					continue
 				}
 				t.Errorf("%d table(s) landed in %q, not in the configured %q: %v",

@@ -80,7 +80,7 @@ new version.
 CREATE TABLE workflow_defs (
     name TEXT NOT NULL,
     version INTEGER NOT NULL,
-    wasm_bytes BYTEA NOT NULL,
+    wasm_bytes BYTEA,
     entry_points TEXT[] NOT NULL DEFAULT '{}',
     min_version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -96,7 +96,10 @@ CREATE TABLE workflow_defs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     exposure TEXT NOT NULL DEFAULT 'auth' CHECK (exposure IN ('public', 'auth', 'internal')),
     input_validation_disabled BOOLEAN NOT NULL DEFAULT false,
-    PRIMARY KEY (tenant_id, name, version)
+    library TEXT,
+    PRIMARY KEY (tenant_id, name, version),
+    CHECK ((library IS NULL) <> (wasm_bytes IS NULL)),
+    FOREIGN KEY (library, name, version) REFERENCES library.members (library, name, version) ON DELETE RESTRICT
 );
 ```
 
@@ -110,7 +113,8 @@ that prose yet — not that the column does not exist.
 |--------|------|-------------|
 | `name` | TEXT | Workflow name (part of composite PK) |
 | `version` | INTEGER | Monotonically increasing version number |
-| `wasm_bytes` | BYTEA | Compiled WASM module binary |
+| `wasm_bytes` | BYTEA | Compiled WASM module binary. NULL exactly when `library` is set: a row has its own bytes or a library reference, never both and never neither (a CHECK) |
+| `library` | TEXT | NULL for an ordinary deploy. Set when the row was installed from a published library: the bytes then live in `library.members`, keyed by this row's `(library, name, version)` (see Workflow libraries below) |
 | `entry_points` | TEXT[] | Exported entry point names (e.g., `{"place_order","cancel_order"}`) |
 | `min_version` | INTEGER | Minimum compatible version for replay |
 | `max_history_length` | INTEGER | Max events before compaction triggers (0 = default) |
@@ -124,6 +128,51 @@ that prose yet — not that the column does not exist.
 
 - `idx_defs_active` on `(name, version DESC)` -- speeds up latest-version
   lookups for deployment.
+
+### Workflow libraries
+
+A library is a set of immutable, versioned workflow members that the cleat operator
+publishes once and a tenant installs **by reference** (cleat#3540). The tenant's
+`workflow_defs` row keeps its own key and all of its metadata; only the bytes live in
+`library.members`. PostgreSQL and SQL Server only: MySQL has no `library` schema, and
+its migrations stop before this one.
+
+| Table | Schema | Purpose |
+|-------|--------|---------|
+| `library.members` | `library` | One published workflow build: primary key `(library, name, version)`, its bytes, and its stored `wasm_sha256` and `wasm_length` (both checked against the bytes on every insert), plus the metadata an install copies |
+| `library.bundles` | `library` | A published release of a library: `(library, bundle_version)` |
+| `library.bundle_members` | `library` | Which members a bundle contains; a member unchanged between two bundles is listed by both |
+| `tenant_library_installs` | application schema | Which bundle of a library a tenant has installed; an explicit upgrade replaces the row |
+
+```sql
+CREATE TABLE tenant_library_installs (
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    library TEXT NOT NULL,
+    bundle_version TEXT NOT NULL,
+    installed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    installed_by TEXT,
+    PRIMARY KEY (tenant_id, library)
+);
+```
+
+Two properties are enforced by the database, not by a route:
+
+- **Only the operator publishes.** `library` is its own schema, so nothing grants the
+  application role write access to it by default. The application role has `USAGE` and
+  `SELECT`; a separate `NOLOGIN` role, `cleat_library_publisher`, has `INSERT` and
+  `DELETE`, and nobody has `UPDATE`, so a member cannot change once published.
+- **A member in use cannot be deleted.** The foreign key from `workflow_defs` to
+  `library.members` is `ON DELETE RESTRICT`, and it holds across tenants even though
+  row-level security hides other tenants' rows from the deleting session.
+
+`tenant_library_installs` has `tenant_id` and a row-level security policy like every
+tenant table, and `admin.drop_tenant` removes it. The `library` tables have no
+`tenant_id` and are shared by every tenant, so any tenant may install any published
+library.
+
+On SQL Server the same tables exist, with one difference worth knowing: the index that
+backs the foreign key is **not** filtered, because with a filtered index every
+`DELETE FROM library.members` fails to compile (Msg 8624).
 
 ### workflow_instances
 
@@ -564,6 +613,7 @@ rows of one workflow may share.
 | `idx_leases_sticky` | `workflow_leases` | Sticky worker fast path | Non-unique, partial |
 | `idx_leases_concurrency_key` | `workflow_leases` | Claim path: skip a run whose concurrency key is held | Non-unique, partial |
 | `idx_defs_active` | `workflow_defs` | Latest-version lookup | Non-unique |
+| `idx_defs_library` | `workflow_defs` | The foreign key to `library.members`: finds the rows that reference a member when it is deleted | Non-unique, partial (`library IS NOT NULL`) |
 | `idx_promises_status` | `workflow_promises` | Promise resolution lookup | Non-unique |
 | `idx_concurrency_keys_workflow` | `concurrency_keys` | Key-to-workflow lookup | Non-unique |
 | `idx_update_requests_pending` | `workflow_update_requests` | Pending update lookup | Non-unique |
