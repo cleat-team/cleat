@@ -24,24 +24,36 @@ import (
 // off closes it to operators too rather than leaving a second door.
 const OperatorRoutePrefix = "/api/admin/"
 
-// OperatorMiddleware authenticates a request that carries an operator key and
-// confines it to OperatorRoutePrefix.
+// OperatorMiddleware authenticates a request that carries an operator key,
+// confines it to OperatorRoutePrefix, and serves an admitted request with admin
+// rather than with next.
 //
-// It goes OUTSIDE MiddlewareWithMux in the chain (cmd/cleat-worker/main.go),
+// It goes OUTSIDE MiddlewareWithMux in the chain (cmd/cleat-worker/auth_chain.go),
 // and has to: that middleware resolves a key against admin.tenant_api_keys and
 // answers 401 "invalid or revoked API key" to everything else, so an operator
 // key would be refused as a bad tenant key before anything could recognise it.
-// Being outside also means an operator request never reaches
-// HostBindingMiddlewareWithMux, which is correct rather than incidental -- host
-// binding exists to stop one tenant's key being used against another tenant's
-// domain, and an operator has no domain to compare.
+//
+// BEING OUTSIDE WAS NOT ENOUGH, which is cleat#3555. This middleware used to hand
+// an admitted request to next, and next was the tenant layer, so a good operator
+// key was authenticated here and then re-resolved there as a tenant key and
+// refused. Every unit test installed the operator in the request context or ran
+// this middleware over a stub, so nothing ever composed the two; the first real
+// worker to receive a minted key answered 401 on /api/admin/health.
+//
+// admin is the handler the tenant layer wraps, and an admitted operator request is
+// served by IT, around authentication and host binding. Around host binding
+// because that exists to stop one tenant's key being used against another tenant's
+// domain and an operator has no domain to compare; around tenant authentication
+// because the operator has just been authenticated, by the stricter of the two
+// questions. next serves everything else: a request with no operator key, and a
+// path outside /api/ that an operator key merely accompanies.
 //
 // Every request that does NOT carry an operator-shaped key is passed through
 // untouched, so this is additive: with no operator keys in the table the chain
 // behaves exactly as it did before, and a request with an ordinary tenant key,
 // no key at all, or an unknown bearer token reaches the same code it always
 // did.
-func OperatorMiddleware(store OperatorResolver) func(http.Handler) http.Handler {
+func OperatorMiddleware(store OperatorResolver, admin http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := extractAPIKey(r)
@@ -107,7 +119,13 @@ func OperatorMiddleware(store OperatorResolver) func(http.Handler) http.Handler 
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(WithOperator(r.Context(), op)))
+			r = r.WithContext(WithOperator(r.Context(), op))
+			if strings.HasPrefix(strings.ToLower(r.URL.Path), OperatorRoutePrefix) {
+				// Around the tenant layer; see the doc comment.
+				admin.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }
