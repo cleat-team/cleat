@@ -12,7 +12,7 @@ import (
 // This is the store half; the routes and the credential matrix are cmd/cleat-worker's. It is measured
 // against the table, not the return value: the question is whether admin.tenants.suspended changed.
 
-func TestAProvisionerSuspendsAndResumesOnlyTheTenantsItsPrincipalCreated(t *testing.T) {
+func TestAProvisionerSuspendsOnlyTheTenantsItsPrincipalCreatedAndNeverResumes(t *testing.T) {
 	for _, dialect := range []string{DialectPostgres, DialectMSSQL} {
 		dialect := dialect
 		t.Run(dialect, func(t *testing.T) {
@@ -50,14 +50,30 @@ func TestAProvisionerSuspendsAndResumesOnlyTheTenantsItsPrincipalCreated(t *test
 				t.Fatal("UNMEASURED: a fresh tenant starts suspended, so a suspend proves nothing")
 			}
 
-			// The known positive: its own tenant, both directions, and a repeat of each.
-			for i, want := range []bool{true, true, false, false} {
-				if err := f.ts.SetTenantSuspendedByCreator(ctx, mine.Tenant.ID, want, "clew-service"); err != nil {
-					t.Fatalf("step %d: %v", i, err)
+			// The known positive: its own tenant, and a repeat of it.
+			for i := 0; i < 2; i++ {
+				if err := f.ts.SuspendTenantByCreator(ctx, mine.Tenant.ID, "clew-service"); err != nil {
+					t.Fatalf("suspend %d: %v", i, err)
 				}
-				if got := suspended(mine.Tenant.ID); got != want {
-					t.Errorf("step %d: suspended = %v, want %v", i, got, want)
+				if !suspended(mine.Tenant.ID) {
+					t.Errorf("suspend %d: the tenant is not suspended", i)
 				}
+			}
+			// Only an admin-path call clears the flag. There is no creator-scoped way to: the flag records
+			// nothing about who set it, so a provisioner that could clear it could lift an operator's
+			// suspension (cleat#3582 review, measured on both dialects before the method lost its argument).
+			if err := f.ts.SetTenantSuspended(ctx, mine.Tenant.ID, false); err != nil || suspended(mine.Tenant.ID) {
+				t.Fatalf("the unrestricted path resuming = %v, suspended=%v", err, suspended(mine.Tenant.ID))
+			}
+			// An admin suspends; the creator's suspend then changes nothing and takes nothing.
+			if err := f.ts.SetTenantSuspended(ctx, mine.Tenant.ID, true); err != nil || !suspended(mine.Tenant.ID) {
+				t.Fatalf("the unrestricted path suspending = %v, suspended=%v", err, suspended(mine.Tenant.ID))
+			}
+			if err := f.ts.SuspendTenantByCreator(ctx, mine.Tenant.ID, "clew-service"); err != nil || !suspended(mine.Tenant.ID) {
+				t.Errorf("a creator's suspend over an admin's = %v, suspended=%v; want success and still suspended", err, suspended(mine.Tenant.ID))
+			}
+			if err := f.ts.SetTenantSuspended(ctx, mine.Tenant.ID, false); err != nil {
+				t.Fatal(err)
 			}
 
 			// Refusals, each leaving the tenant exactly as it was.
@@ -70,7 +86,7 @@ func TestAProvisionerSuspendsAndResumesOnlyTheTenantsItsPrincipalCreated(t *test
 				"a tenant that does not exist":                      {uuid.New(), "clew-service"},
 				"the right tenant, a different case of the creator": {mine.Tenant.ID, "Clew-Service"},
 			} {
-				err := f.ts.SetTenantSuspendedByCreator(ctx, tc.id, true, tc.creator)
+				err := f.ts.SuspendTenantByCreator(ctx, tc.id, tc.creator)
 				if !errors.Is(err, ErrTenantNotFound) {
 					t.Errorf("%s: %v, want ErrTenantNotFound (one answer for all of them)", name, err)
 				}
@@ -80,7 +96,7 @@ func TestAProvisionerSuspendsAndResumesOnlyTheTenantsItsPrincipalCreated(t *test
 			}
 
 			// An empty creator is never "any creator".
-			if err := f.ts.SetTenantSuspendedByCreator(ctx, mine.Tenant.ID, true, ""); err == nil || errors.Is(err, ErrTenantNotFound) {
+			if err := f.ts.SuspendTenantByCreator(ctx, mine.Tenant.ID, ""); err == nil || errors.Is(err, ErrTenantNotFound) {
 				t.Errorf("an empty creator = %v, want a distinct error", err)
 			}
 			if suspended(mine.Tenant.ID) {
@@ -92,7 +108,7 @@ func TestAProvisionerSuspendsAndResumesOnlyTheTenantsItsPrincipalCreated(t *test
 
 func TestSuspendingByCreatorIsRefusedOnMySQL(t *testing.T) {
 	ts := &TenantStore{dialect: DialectMySQL}
-	if err := ts.SetTenantSuspendedByCreator(context.Background(), uuid.New(), true, "clew-service"); err == nil {
+	if err := ts.SuspendTenantByCreator(context.Background(), uuid.New(), "clew-service"); err == nil {
 		t.Error("MySQL has no created_by column, so there is no creator to compare; it must refuse")
 	}
 }

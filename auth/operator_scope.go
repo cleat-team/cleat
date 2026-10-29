@@ -145,7 +145,8 @@ func provisionMayReach(method string, u *url.URL) bool {
 		return true
 	}
 	// The last step of the handshake, and a tenant's suspension, which a drop requires first
-	// (cleat#3552, B3a): POST /api/admin/tenants/<id>/{confirm,suspend,resume}. The id must be in
+	// (cleat#3552, B3a): POST /api/admin/tenants/<id>/{confirm,suspend}. NOT resume: a provisioner
+	// that could clear the flag could lift a suspension an operator made. The id must be in
 	// the one canonical spelling (lower-case, hyphenated) so that the segment this gate saw is
 	// byte for byte the one the mux and the handler see. The gate says only that the KEY may
 	// reach the route; that it may act on THIS tenant (one its principal created) is the
@@ -155,7 +156,7 @@ func provisionMayReach(method string, u *url.URL) bool {
 		return false
 	}
 	id, tail, hasTail := strings.Cut(rest, "/")
-	if !hasTail || (tail != "confirm" && tail != "suspend" && tail != "resume") {
+	if !hasTail || (tail != "confirm" && tail != "suspend") {
 		return false
 	}
 	parsed, err := uuid.Parse(id)

@@ -45,20 +45,22 @@ func TestSuspendAndResumeReachTheStoreThatMatchesTheCredential(t *testing.T) {
 		t.Errorf("admin, upper-case id = %d (tenant %v), want 200 on the canonical tenant", w.Code, fp.gotSuspendTenant)
 	}
 
-	// A provision key reaches only the creator-scoped call, naming its own principal.
-	for _, tc := range []struct {
-		path string
-		want bool
-	}{{"/suspend", true}, {"/resume", false}} {
-		*fp = fakeProvisioner{}
-		w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+suspendTenantID+tc.path, f.provisionKey, ``)
-		if w.Code != http.StatusOK {
-			t.Errorf("provision %s = %d %s", tc.path, w.Code, w.Body.String())
-		}
-		if fp.creatorSuspendCalls != 1 || fp.anySuspendCalls != 0 || fp.gotSuspendTenant != tid || fp.gotSuspended != tc.want || fp.gotSuspendCreator == "" {
-			t.Errorf("provision %s reached any=%d creator=%d tenant=%v suspended=%v creator=%q; want the creator call once with a creator",
-				tc.path, fp.anySuspendCalls, fp.creatorSuspendCalls, fp.gotSuspendTenant, fp.gotSuspended, fp.gotSuspendCreator)
-		}
+	// A provision key reaches only the creator-scoped call, naming its own principal, and only to SUSPEND.
+	*fp = fakeProvisioner{}
+	w := doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+suspendTenantID+"/suspend", f.provisionKey, ``)
+	if w.Code != http.StatusOK {
+		t.Errorf("provision /suspend = %d %s", w.Code, w.Body.String())
+	}
+	if fp.creatorSuspendCalls != 1 || fp.anySuspendCalls != 0 || fp.gotSuspendTenant != tid || !fp.gotSuspended || fp.gotSuspendCreator == "" {
+		t.Errorf("provision /suspend reached any=%d creator=%d tenant=%v suspended=%v creator=%q; want the creator call once with a creator",
+			fp.anySuspendCalls, fp.creatorSuspendCalls, fp.gotSuspendTenant, fp.gotSuspended, fp.gotSuspendCreator)
+	}
+
+	// ...and it can NEVER resume: that would let a provisioner lift a suspension an operator made.
+	*fp = fakeProvisioner{}
+	w = doBody(f.chainFixture, http.MethodPost, "/api/admin/tenants/"+suspendTenantID+"/resume", f.provisionKey, ``)
+	if w.Code != http.StatusForbidden || fp.anySuspendCalls+fp.creatorSuspendCalls != 0 {
+		t.Errorf("provision /resume = %d %s (store calls %d), want 403 and none", w.Code, w.Body.String(), fp.anySuspendCalls+fp.creatorSuspendCalls)
 	}
 }
 
@@ -76,6 +78,7 @@ func TestOnlyAnOperatorCredentialCanSuspendATenant(t *testing.T) {
 		// The scope gate: a provision key reaches only the canonical spelling, and only POST.
 		{"a provision key, upper-case id", http.MethodPost, "/api/admin/tenants/" + strings.ToUpper(suspendTenantID) + "/suspend", f.provisionKey, http.StatusForbidden},
 		{"a provision key, bare hex id", http.MethodPost, "/api/admin/tenants/" + strings.ReplaceAll(suspendTenantID, "-", "") + "/suspend", f.provisionKey, http.StatusForbidden},
+		{"a provision key, resume", http.MethodPost, "/api/admin/tenants/" + suspendTenantID + "/resume", f.provisionKey, http.StatusForbidden},
 		{"a provision key, GET", http.MethodGet, path, f.provisionKey, http.StatusForbidden},
 		{"a provision key, DELETE", http.MethodDelete, path, f.provisionKey, http.StatusForbidden},
 		{"a provision key, a tail", http.MethodPost, path + "/x", f.provisionKey, http.StatusForbidden},
@@ -156,9 +159,9 @@ func TestSuspendNamesTheTenantItActedOnOnlyOnSuccess(t *testing.T) {
 	fp.suspendErr = auth.ErrTenantNotFound
 	for _, key := range []string{f.adminKey, f.provisionKey} {
 		*f.noted = notedTarget{}
-		doBody(f.chainFixture, http.MethodPost, path+"/resume", key, ``)
+		doBody(f.chainFixture, http.MethodPost, path+"/suspend", key, ``)
 		if f.noted.set {
-			t.Errorf("a resume that found nothing noted %v: the audit row would land on a chain for a tenant that may not exist", f.noted.tenant)
+			t.Errorf("a suspend that found nothing noted %v: the audit row would land on a chain for a tenant that may not exist", f.noted.tenant)
 		}
 	}
 }
@@ -220,15 +223,37 @@ func TestSuspendingOverHTTPAgainstRealDatabases(t *testing.T) {
 			if w := doBody(f.chainFixture, http.MethodPost, url(mine, "suspend"), f.provisionKey, ``); w.Code != http.StatusOK || !suspended(mine) {
 				t.Errorf("the provision key suspending its own tenant = %d %s, suspended=%v", w.Code, w.Body.String(), suspended(mine))
 			}
-			if w := doBody(f.chainFixture, http.MethodPost, url(mine, "resume"), f.provisionKey, ``); w.Code != http.StatusOK || suspended(mine) {
-				t.Errorf("resuming it = %d %s, suspended=%v", w.Code, w.Body.String(), suspended(mine))
+			// A repeat is a success that changes nothing.
+			if w := doBody(f.chainFixture, http.MethodPost, url(mine, "suspend"), f.provisionKey, ``); w.Code != http.StatusOK || !suspended(mine) {
+				t.Errorf("a repeated suspend = %d %s, suspended=%v", w.Code, w.Body.String(), suspended(mine))
+			}
+			// THE REVIEWER'S KNOWN POSITIVE (cleat#3582): the provision key cannot undo even a suspension it made
+			// itself, because the flag does not record who set it and an admin's would look identical.
+			if w := doBody(f.chainFixture, http.MethodPost, url(mine, "resume"), f.provisionKey, ``); w.Code != http.StatusForbidden || !suspended(mine) {
+				t.Errorf("the provision key resuming = %d %s, suspended=%v; want 403 and still suspended", w.Code, w.Body.String(), suspended(mine))
+			}
+			if w := doBody(f.chainFixture, http.MethodPost, url(mine, "resume"), f.adminKey, ``); w.Code != http.StatusOK || suspended(mine) {
+				t.Errorf("the admin key resuming = %d %s, suspended=%v", w.Code, w.Body.String(), suspended(mine))
+			}
+			// An ADMIN's suspension survives the provision key's attempts to lift it.
+			if w := doBody(f.chainFixture, http.MethodPost, url(mine, "suspend"), f.adminKey, ``); w.Code != http.StatusOK || !suspended(mine) {
+				t.Fatalf("the admin key suspending = %d %s, suspended=%v", w.Code, w.Body.String(), suspended(mine))
+			}
+			for _, attempt := range []string{"resume", "suspend"} {
+				doBody(f.chainFixture, http.MethodPost, url(mine, attempt), f.provisionKey, ``)
+				if !suspended(mine) {
+					t.Errorf("after the provision key's %s, an admin's suspension was lifted", attempt)
+				}
 			}
 			if w := doBody(f.chainFixture, http.MethodPost, url(theirs, "suspend"), f.provisionKey, ``); w.Code != http.StatusNotFound || suspended(theirs) {
 				t.Errorf("the provision key suspending someone else's tenant = %d %s, suspended=%v; want 404 and unchanged", w.Code, w.Body.String(), suspended(theirs))
 			}
-			// The admin key may.
+			// The admin key may act on any tenant, in both directions.
 			if w := doBody(f.chainFixture, http.MethodPost, url(theirs, "suspend"), f.adminKey, ``); w.Code != http.StatusOK || !suspended(theirs) {
 				t.Errorf("the admin key suspending any tenant = %d %s, suspended=%v", w.Code, w.Body.String(), suspended(theirs))
+			}
+			if w := doBody(f.chainFixture, http.MethodPost, url(theirs, "resume"), f.adminKey, ``); w.Code != http.StatusOK || suspended(theirs) {
+				t.Errorf("the admin key resuming any tenant = %d %s, suspended=%v", w.Code, w.Body.String(), suspended(theirs))
 			}
 			// A tenant that does not exist is the same 404 for both.
 			ghost := uuid.New()

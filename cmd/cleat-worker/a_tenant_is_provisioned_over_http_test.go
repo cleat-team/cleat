@@ -56,9 +56,9 @@ func (f *fakeProvisioner) SetTenantSuspended(_ context.Context, id uuid.UUID, su
 	return f.suspendErr
 }
 
-func (f *fakeProvisioner) SetTenantSuspendedByCreator(_ context.Context, id uuid.UUID, suspended bool, creator string) error {
+func (f *fakeProvisioner) SuspendTenantByCreator(_ context.Context, id uuid.UUID, creator string) error {
 	f.creatorSuspendCalls++
-	f.gotSuspendTenant, f.gotSuspended, f.gotSuspendCreator = id, suspended, creator
+	f.gotSuspendTenant, f.gotSuspended, f.gotSuspendCreator = id, true, creator
 	return f.suspendErr
 }
 

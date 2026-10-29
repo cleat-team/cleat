@@ -29,11 +29,11 @@ type tenantProvisioner interface {
 	ProvisionTenant(ctx context.Context, req auth.ProvisionRequest) (auth.ProvisionResult, error)
 	ConfirmProvisionedTenant(ctx context.Context, tenantID, keyID uuid.UUID, creator string) (auth.ConfirmResult, error)
 
-	// SetTenantSuspended acts on ANY tenant, and is reached only by an admin-scoped key.
-	// SetTenantSuspendedByCreator acts only on a tenant the named creator made, and is what every
-	// other operator key gets (cleat#3552, B3a).
+	// SetTenantSuspended acts on ANY tenant in either direction, and is reached only by an admin-scoped
+	// key. SuspendTenantByCreator can only suspend, and only a tenant the named creator made; it is what
+	// every other operator key gets (cleat#3552, B3a). There is deliberately no resume-by-creator.
 	SetTenantSuspended(ctx context.Context, tenantID uuid.UUID, suspended bool) error
-	SetTenantSuspendedByCreator(ctx context.Context, tenantID uuid.UUID, suspended bool, creator string) error
+	SuspendTenantByCreator(ctx context.Context, tenantID uuid.UUID, creator string) error
 }
 
 // provisionBodyLimit bounds the request. The largest legitimate body is a few short strings.

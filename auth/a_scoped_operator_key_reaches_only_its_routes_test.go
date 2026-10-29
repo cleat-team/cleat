@@ -41,9 +41,10 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, create", ScopeProvision, http.MethodPost, create, 200},
 		// ...and the confirm that ends the handshake (B2b-2): one tenant, in canonical form, POST.
 		{"provision, confirm", ScopeProvision, http.MethodPost, confirm, 200},
-		// ...and the two steps a drop needs first (B3a): suspend and resume, one tenant, canonical form, POST.
+		// ...and the step a drop needs first (B3a): suspend, one tenant, canonical form, POST.
 		{"provision, suspend", ScopeProvision, http.MethodPost, suspend, 200},
-		{"provision, resume", ScopeProvision, http.MethodPost, resume, 200},
+		// ...but NOT resume: a provisioner that could clear the flag could lift a suspension an operator made.
+		{"provision, resume", ScopeProvision, http.MethodPost, resume, 403},
 
 		// ...and nothing else. Same path, other methods.
 		{"provision, GET on the create path", ScopeProvision, http.MethodGet, create, 403},
@@ -78,6 +79,7 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, drop-plan (a later PR, not this scope)", ScopeProvision, http.MethodGet, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop-plan", 403},
 		{"provision, drop", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7", 403},
 		{"admin, suspend", ScopeAdmin, http.MethodPost, suspend, 200},
+		{"admin, resume", ScopeAdmin, http.MethodPost, resume, 200},
 		{"provision, other verbs under a tenant", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop", 403},
 		{"provision, an encoded slash in the confirm path", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7%2Fconfirm", 403},
 		// Every other admin route.

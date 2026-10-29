@@ -19,8 +19,9 @@ import (
 //
 // Who may call:
 //   - an admin-scoped operator key: any tenant;
-//   - any other operator key (a provision-scoped one): only a tenant its principal created, the check
-//     the confirm route makes;
+//   - any other operator key (a provision-scoped one): SUSPEND ONLY, and only a tenant its principal
+//     created, the check the confirm route makes. It cannot resume: the flag is one bit and records who set
+//     it, so a provisioner that could clear it could lift a suspension an operator made (cleat#3582 review);
 //   - a tenant key never. A tenant key reaches /api/admin/* when --enable-admin-api is on, and a tenant
 //     must not be able to suspend itself or another tenant.
 //
@@ -43,10 +44,17 @@ func (s *apiServer) handleSetTenantSuspended(w http.ResponseWriter, r *http.Requ
 
 	// provisionActor has already established that this is an operator credential.
 	op, _ := auth.OperatorFromContext(r.Context())
-	if op.IsAdmin() {
+	switch {
+	case op.IsAdmin():
 		err = s.provisioner.SetTenantSuspended(r.Context(), tid, suspended)
-	} else {
-		err = s.provisioner.SetTenantSuspendedByCreator(r.Context(), tid, suspended, creator)
+	case suspended:
+		err = s.provisioner.SuspendTenantByCreator(r.Context(), tid, creator)
+	default:
+		// The scope gate does not admit resume to a non-admin key, so this is unreachable through the
+		// chain. It is here so that a change to the gate cannot turn into a provisioner lifting an
+		// operator's suspension: the handler refuses on its own.
+		s.writeError(w, http.StatusForbidden, "resuming a tenant requires an admin operator key")
+		return
 	}
 	switch {
 	case errors.Is(err, auth.ErrTenantNotFound):
