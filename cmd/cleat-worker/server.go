@@ -301,9 +301,65 @@ func (s *apiServer) scopedStore(w http.ResponseWriter, r *http.Request) (engine.
 }
 
 func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v any) {
+	// THE CHOKE POINT FOR OBSERVABILITY. An event record leaves the worker only
+	// through here, so redacting its type here covers a handler nobody has
+	// written yet. The data-plane types (WorkflowInstance and friends) are
+	// deliberately NOT in this switch: a tenant reading its own workflow's status
+	// and result gets what the workflow produced (cleat#3581, D49-1a). A caller
+	// that wants those redacted asks for it, see wantsRedaction.
+	switch t := v.(type) {
+	case []engine.EventRecord:
+		v = engine.RedactEventRecordsForEgress(t)
+	case engine.EventRecord:
+		v = engine.RedactEventRecordForEgress(t)
+	case *engine.EventRecord:
+		if t != nil {
+			red := engine.RedactEventRecordForEgress(*t)
+			v = &red
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// wantsRedaction reports whether the caller asked for the redacted view of a
+// data-plane read, with ?redact=true. The dashboard does, because it is a place
+// people look at what happened; a programmatic caller such as a service reading
+// a workflow's result does not, and gets the data as stored.
+//
+// The flag can only ADD redaction. Absent, empty, "false" or anything but the
+// exact word "true" is the data-plane default, so no value of it can be used to
+// unredact an observability route: those do not read it at all.
+func wantsRedaction(r *http.Request) bool { return r.URL.Query().Get("redact") == "true" }
+
+// writeWorkflow writes one workflow instance, redacted when the caller asked.
+func (s *apiServer) writeWorkflow(w http.ResponseWriter, r *http.Request, wf *engine.WorkflowInstance) {
+	if wf != nil && wantsRedaction(r) {
+		red := engine.RedactWorkflowInstanceForEgress(*wf)
+		wf = &red
+	}
+	s.writeJSON(w, 200, wf)
+}
+
+// writeWorkflows is writeWorkflow for a list.
+func (s *apiServer) writeWorkflows(w http.ResponseWriter, r *http.Request, workflows []engine.WorkflowInstance) {
+	if wantsRedaction(r) {
+		out := make([]engine.WorkflowInstance, len(workflows))
+		for i := range workflows {
+			out[i] = engine.RedactWorkflowInstanceForEgress(workflows[i])
+		}
+		workflows = out
+	}
+	s.writeJSON(w, 200, workflows)
+}
+
+// queryValueFor returns a published query value, redacted when the caller asked.
+func queryValueFor(r *http.Request, value string) string {
+	if wantsRedaction(r) {
+		return engine.Redact(value)
+	}
+	return value
 }
 
 func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
@@ -702,7 +758,7 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}
-	s.writeJSON(w, 200, workflows)
+	s.writeWorkflows(w, r, workflows)
 }
 
 // handleWorkflows routes /api/workflows/* requests.
@@ -819,7 +875,7 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 			s.writeError(w, 500, err.Error())
 			return
 		}
-		s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+		s.writeJSON(w, 200, map[string]string{"key": key, "value": queryValueFor(r, value)})
 		return
 	}
 
@@ -833,7 +889,7 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 		s.writeError(w, 404, "workflow not found")
 		return
 	}
-	s.writeJSON(w, 200, wf)
+	s.writeWorkflow(w, r, wf)
 }
 
 // handleGetTerminalRun serves GET /api/workflows/:id/terminal -- the last run
@@ -1126,8 +1182,9 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 
 	// Support Idempotency-Key header for exactly-once semantics.
 	idempotencyKey := r.Header.Get("Idempotency-Key")
-	// Redact sensitive fields in the input before storing.
-	in = json.RawMessage(engine.Redact(string(in)))
+	// The input is stored and delivered as sent. Redaction happens where data
+	// leaves the system, not here: rewriting it on the way in changed the values
+	// a workflow consumed while the caller got a 201 (cleat#3581).
 	// The key is recorded BY THE INSERT when the store can do it, so the run is
 	// never claimable-without-its-key even for an instant (cleat#1186). Stores
 	// that cannot fall through to the plain StartNewRun and keep the old
@@ -1441,7 +1498,6 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	payload := req.Payload
-	payload = engine.Redact(payload)
 	// Check signal authorization for HTTP API callers.
 	// External callers have no defName; they must be allowed via "*" wildcard.
 	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
@@ -2169,6 +2225,13 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 			s.writeError(w, 500, err.Error())
 			return
 		}
+		if wantsRedaction(r) {
+			red := make(map[string]string, len(all))
+			for k, v := range all {
+				red[k] = engine.Redact(v)
+			}
+			all = red
+		}
 		s.writeJSON(w, 200, map[string]any{"state": all})
 		return
 	}
@@ -2178,7 +2241,7 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 500, err.Error())
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+	s.writeJSON(w, 200, map[string]string{"key": key, "value": queryValueFor(r, value)})
 }
 
 func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id string) {
@@ -2497,8 +2560,6 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	if payload == "" {
 		payload = "{}"
 	}
-	// Redact sensitive fields from the payload before persisting.
-	payload = engine.Redact(payload)
 
 	// Check if there's already a pending update with the same name.
 	pending, pErr := st.GetPendingUpdateRequests(r.Context(), id)

@@ -415,10 +415,14 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 				"message": "chunks in this range are no longer in event_history and cannot be replayed",
 			})
 		}
+		// EVERY chunk leaves through here -- served from history, followed from
+		// history, and relayed live -- so this is where the stream is redacted
+		// (cleat#3581). Before, only the history reads redacted and a live chunk
+		// of the same text did not.
 		payload := map[string]any{
 			"step":    step,
 			"index":   index,
-			"content": content,
+			"content": engine.Redact(content),
 			"finish":  finish,
 			"replay":  replay,
 			// An explicit boundary, so a client does not have to know that

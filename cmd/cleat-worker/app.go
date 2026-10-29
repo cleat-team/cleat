@@ -245,7 +245,7 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}
-	s.writeJSON(w, 200, workflows)
+	s.writeWorkflows(w, r, workflows)
 }
 
 func (s *apiServer) handleDeadLetters(w http.ResponseWriter, r *http.Request) {

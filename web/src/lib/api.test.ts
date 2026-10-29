@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  listDeadLetters,
   listWorkflows,
   getWorkflow,
   startWorkflow,
@@ -95,11 +96,15 @@ describe('API Client', () => {
   // -- listWorkflows --------------------------------------------------------
 
   describe('listWorkflows', () => {
-    it('calls /api/workflows without query when no status filter', async () => {
+    // Every data-bearing call the dashboard makes asks for the redacted view
+    // (cleat#3581): the dashboard is somewhere people look at what happened. The
+    // flag can only add redaction, and dropping it from a call is what these
+    // expectations exist to catch.
+    it('calls /api/workflows asking for the redacted view when no status filter', async () => {
       mockFetchOk([mockWorkflowInstance]);
       const result = await listWorkflows();
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows',
+        '/api/workflows?redact=true',
         undefined,
       );
       expect(result).toEqual([mockWorkflowInstance]);
@@ -109,7 +114,7 @@ describe('API Client', () => {
       mockFetchOk([mockWorkflowInstance]);
       await listWorkflows('running');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows?status=running',
+        '/api/workflows?status=running&redact=true',
         undefined,
       );
     });
@@ -118,7 +123,7 @@ describe('API Client', () => {
       mockFetchOk([]);
       await listWorkflows('dead letter');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows?status=dead%20letter',
+        '/api/workflows?status=dead%20letter&redact=true',
         undefined,
       );
     });
@@ -147,11 +152,11 @@ describe('API Client', () => {
   // -- getWorkflow ----------------------------------------------------------
 
   describe('getWorkflow', () => {
-    it('calls /api/workflows/:id', async () => {
+    it('calls /api/workflows/:id asking for the redacted view', async () => {
       mockFetchOk(mockWorkflowInstance);
       const result = await getWorkflow('wf-abc123');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf-abc123',
+        '/api/workflows/wf-abc123?redact=true',
         undefined,
       );
       expect(result).toEqual(mockWorkflowInstance);
@@ -161,7 +166,7 @@ describe('API Client', () => {
       mockFetchOk(mockWorkflowInstance);
       await getWorkflow('wf/123');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf/123',
+        '/api/workflows/wf/123?redact=true',
         undefined,
       );
     });
@@ -312,6 +317,19 @@ describe('API Client', () => {
     });
   });
 
+  // -- listDeadLetters ------------------------------------------------------
+
+  describe('listDeadLetters', () => {
+    it('asks for the redacted view (cleat#3581)', async () => {
+      mockFetchOk([mockWorkflowInstance]);
+      await listDeadLetters();
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/dead-letters?redact=true',
+        undefined,
+      );
+    });
+  });
+
   // -- getQueryState --------------------------------------------------------
 
   describe('getQueryState', () => {
@@ -319,7 +337,7 @@ describe('API Client', () => {
       mockFetchOk({ key: 'my-key', value: 'my-value' });
       const result = await getQueryState('wf-123', 'my-key');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf-123/query?key=my-key',
+        '/api/workflows/wf-123/query?key=my-key&redact=true',
         undefined,
       );
       expect(result).toEqual({ key: 'my-key', value: 'my-value' });
@@ -329,7 +347,7 @@ describe('API Client', () => {
       mockFetchOk({ key: '', value: '' });
       await getQueryState('wf-123', 'key with spaces');
       expect(globalThis.fetch).toHaveBeenCalledWith(
-        '/api/workflows/wf-123/query?key=key%20with%20spaces',
+        '/api/workflows/wf-123/query?key=key%20with%20spaces&redact=true',
         undefined,
       );
     });

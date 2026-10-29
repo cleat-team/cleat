@@ -55,10 +55,6 @@ type PostgresStore struct {
 	// (readEventHistoryTx). The counter is unaffected. cleat#2311.
 	quietDecryptLogs bool
 
-	// disableReadRedaction when true bypasses RedactOnRead on the read path.
-	// Set to true during replay to avoid the overhead of retroactive redaction.
-	disableReadRedaction bool
-
 	syncCommitOff bool // SET LOCAL synchronous_commit = off in finalize tx
 
 	logger *slog.Logger
@@ -127,14 +123,6 @@ func (s *PostgresStore) WithEncryption(enc *PayloadEncryption, enabled bool) *Po
 	return &cp
 }
 
-// WithReadRedactionDisabled returns a copy of the store with redaction on
-// the read path disabled. Used during replay to avoid overhead.
-func (s *PostgresStore) WithReadRedactionDisabled(disabled bool) *PostgresStore {
-	cp := *s
-	cp.disableReadRedaction = disabled
-	return &cp
-}
-
 // WithNotifyChannel returns a copy of the store that sends PostgreSQL NOTIFY
 // on dispatchable state changes (new workflows, released timers, signals, promises).
 func (s *PostgresStore) WithNotifyChannel(channel string) *PostgresStore {
@@ -155,8 +143,10 @@ func (s *PostgresStore) WithNotifyChannel(channel string) *PostgresStore {
 // error deliberately, and say so where they do.
 var ErrPayloadDecryption = errors.New("payload decryption failed")
 
-// decryptAndRedactEventRecord decrypts sensitive event record fields (when
-// encryption is enabled) and applies retroactive redaction.
+// decryptEventRecord decrypts sensitive event record fields (when
+// encryption is enabled). It does not redact: a store hands back what was
+// stored, because replay acts on it, and redaction is applied where data
+// leaves the system (egress.go).
 //
 // A field that cannot be decrypted is logged and set to "[DECRYPTION_FAILED]"
 // so it is clear the data is unreadable rather than silently keeping
@@ -266,7 +256,7 @@ func sealedShape(v string, raw bool) bool {
 	return err == nil && len(b) >= minSealedLen
 }
 
-func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID string) error {
+func (s *PostgresStore) decryptEventRecord(rec *EventRecord, workflowID string) error {
 	var firstErr error
 	if s.encryption != nil && s.encryptSensitivePayloads {
 		// ONE DERIVATION FOR THE WHOLE ROW; see decryptField's doc.
@@ -302,19 +292,6 @@ func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID
 		rec.PromiseError = keep(s.decryptField(tc, rec.PromiseError, "PromiseError", workflowID, rec.Step, false))
 	}
 
-	// Retroactive redaction on read path.
-	if !s.disableReadRedaction {
-		rec.Request = RedactOnRead(rec.Request)
-		rec.Response = RedactOnRead(rec.Response)
-		rec.Err = RedactOnRead(rec.Err)
-		rec.SignalPayload = RedactOnRead(rec.SignalPayload)
-		rec.ChildInput = RedactOnRead(rec.ChildInput)
-		rec.NewInput = RedactOnRead(rec.NewInput)
-		rec.PluginInput = RedactOnRead(rec.PluginInput)
-		rec.PluginOutput = RedactOnRead(rec.PluginOutput)
-		rec.PromiseResult = RedactOnRead(rec.PromiseResult)
-		rec.PromiseError = RedactOnRead(rec.PromiseError)
-	}
 	return firstErr
 }
 
@@ -358,7 +335,7 @@ func (s *PostgresStore) decryptPayloadJSON(payloadStr string) (string, error) {
 //
 // Replay does NOT use these. See LoadEventHistory.
 func (s *PostgresStore) decryptEventRecordForDisplay(rec *EventRecord, workflowID string) {
-	_ = s.decryptAndRedactEventRecord(rec, workflowID)
+	_ = s.decryptEventRecord(rec, workflowID)
 }
 
 func (s *PostgresStore) decryptPayloadForDisplay(payloadStr string) string {
@@ -810,7 +787,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	}
 
 	// cleat#2312: decrypt every sensitive-at-rest column this query reads.
-	// The first failure is returned (matching decryptAndRedactEventRecord's
+	// The first failure is returned (matching decryptEventRecord's
 	// own "report the first, keep going so the rest of the record is still
 	// populated" contract), but every field is still processed so a caller
 	// that ignores the error still gets a fully-attempted record.

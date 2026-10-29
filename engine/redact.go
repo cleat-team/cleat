@@ -554,14 +554,6 @@ func LoadRedactPatterns(path string) error {
 	return nil
 }
 
-// RedactOnRead applies retroactive redaction to a string that was loaded from
-// persistent storage. It behaves identically to Redact but is named differently
-// to clarify the caller's intent: this is read-path redaction for data that may
-// have been stored before redaction was mandatory.
-func RedactOnRead(data string) string {
-	return Redact(data)
-}
-
 // ResetPatterns clears all custom patterns (for testing only).
 func ResetPatterns() {
 	customPatterns = nil

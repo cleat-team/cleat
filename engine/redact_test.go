@@ -82,18 +82,6 @@ func TestRedactNonJSON(t *testing.T) {
 	}
 }
 
-func TestRedactOnRead(t *testing.T) {
-	// RedactOnRead should behave identically to Redact.
-	input := `{"token": "secret", "name": "hello"}`
-	got := RedactOnRead(input)
-	if !strings.Contains(got, `"[REDACTED]"`) {
-		t.Errorf("RedactOnRead should redact sensitive fields: %s", got)
-	}
-	if !strings.Contains(got, "hello") {
-		t.Errorf("RedactOnRead should preserve non-sensitive fields: %s", got)
-	}
-}
-
 func TestLoadRedactPatterns(t *testing.T) {
 	defer ResetPatterns()
 

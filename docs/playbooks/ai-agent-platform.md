@@ -377,13 +377,15 @@ wins when it is lower. An agent that needs ninety seconds under a tenant-set thi
 clock fails, and it fails per-tenant, which is hard to reproduce centrally. Report the effective
 ceiling in the run's error.
 
-**Prompt payloads carry secrets into event history.** `engine.Redact` **is** applied to plugin call
-payloads before they are persisted — `cmd/cleat-worker/setup.go` redacts `newEvents[i].Request` and
-`.Response` on the plugin-event paths, which is exactly where a prompt and its answer land. This page
-used to record that as unverified; it is checked now, and the answer is the good one.
+**Prompt payloads carry secrets into event history.** They are stored as sent. This page used to say
+that `engine.Redact` was applied to plugin call payloads before they were persisted; that was never
+the protection it read as (events are flushed before the segment ends, cleat#3584) and it is removed
+(cleat#3581): redaction is applied where history is shown, in the history and event APIs, the stream,
+the dashboard and the logs. A prompt and its answer are therefore **in `event_history`**, so turn on
+payload encryption if prompts can carry secrets.
 
-What remains is that `Redact` is a **field-name heuristic**, not a content classifier: a secret in a
-field it does not recognise still goes to the database. The stronger guarantee is elsewhere —
+`Redact` is also a **field-name heuristic**, not a content classifier: a secret in a
+field it does not recognise is shown. The stronger guarantee is elsewhere —
 `${secret:…}` substitution happens *after* the recorder, so the resolved value is never in the event
 at all. Put credentials in secrets, not in prompts.
 
@@ -401,10 +403,9 @@ than under `cmd/` and `engine/` only — which is what corrected the streaming c
 **Asserted, not measured:** every cost claim. The "resumed runs do not re-pay" argument follows
 from the replay semantics above, not from a measurement of a running system.
 
-**Resolved since drafting:** whether `engine.Redact` reaches plugin host-function arguments. It does
-— the plugin-event paths redact `Request` and `Response` before persisting, in
-`cmd/cleat-worker/setup.go`. See the prompt-payload failure mode above for what that covers and what
-it does not.
+**Corrected since drafting:** this said `engine.Redact` reached plugin host-function arguments before
+they were persisted. It did not take effect for flushed events and was removed (cleat#3581); see the
+prompt-payload failure mode above for where redaction applies now.
 
 **Corrected since drafting (2026-09-25, cleat#2053).** Three things, and two of them were the page's
 load-bearing claims:
@@ -417,7 +418,7 @@ load-bearing claims:
   no importer; two `cleat init` templates carried separate untested copies; cleat#1983 replaced them
   with the workflow above. Builders were being told to build a product on a loop the engine did not
   yet own.
-- **`engine.Redact` on plugin payloads was checked**, so that "not verified" is discharged.
+- **`engine.Redact` on plugin payloads was checked**, and the check was wrong: see the correction above (cleat#3584).
 
 Line citations were replaced with symbol names throughout — `FuncOptions` was cited at
 `plugin/plugin.go:208-243` and is at `:623`.

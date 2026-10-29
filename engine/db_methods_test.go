@@ -2519,7 +2519,7 @@ func TestPostgresStore_ReapExpiredConcurrencyKeys_BeginError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// decryptField and decryptAndRedactEventRecord tests
+// decryptField and decryptEventRecord tests
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_DecryptField_DecryptError(t *testing.T) {
@@ -2550,7 +2550,6 @@ func TestPostgresStore_DecryptField_DecryptError(t *testing.T) {
 func TestPostgresStore_DecryptField_NilKey(t *testing.T) {
 	store := NewPostgresStore(nil)
 	store.encryptSensitivePayloads = true
-	store.disableReadRedaction = true
 
 	rec := &EventRecord{
 		Step:      0,
@@ -2558,7 +2557,7 @@ func TestPostgresStore_DecryptField_NilKey(t *testing.T) {
 		Request:   `{"hello":"world"}`,
 		Response:  `{"ok":true}`,
 	}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 	if rec.Request != `{"hello":"world"}` {
 		t.Errorf("expected original request, got %q", rec.Request)
 	}
@@ -4746,26 +4745,26 @@ func newTestPayloadEncryption(t *testing.T) *PayloadEncryption {
 }
 
 // ---------------------------------------------------------------------------
-// decryptAndRedactEventRecord tests
+// decryptEventRecord tests
 // ---------------------------------------------------------------------------
 
-func TestDecryptAndRedactEventRecord_NoEncryption(t *testing.T) {
+func TestDecryptEventRecord_NoEncryption(t *testing.T) {
 	store := NewPostgresStore(nil)
 	rec := &EventRecord{Step: 0, Request: "hello", Response: "world"}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 	if rec.Request == "" {
 		t.Error("expected Request to be preserved (redacted or not)")
 	}
 }
 
-func TestDecryptAndRedactEventRecord_InvalidEncryptedData(t *testing.T) {
+func TestDecryptEventRecord_InvalidEncryptedData(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
 	rec := &EventRecord{
 		Step: 0, Request: garbageSealedRaw(), Response: garbageSealedRaw(),
 		Err: garbageSealedString(),
 	}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 	if rec.Request != "[DECRYPTION_FAILED]" {
 		t.Errorf("expected [DECRYPTION_FAILED] for Request, got %q", rec.Request)
 	}
@@ -4956,12 +4955,18 @@ func TestClaimWorkflowImpl_ReturnsNil(t *testing.T) {
 // Encryption edge cases
 // ---------------------------------------------------------------------------
 
-func TestDecryptAndRedactEventRecord_WithRedactionDisabled(t *testing.T) {
-	store := NewPostgresStore(nil).WithReadRedactionDisabled(true)
-	rec := &EventRecord{Step: 0, Request: "sensitive-data"}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
-	if rec.Request != "sensitive-data" {
-		t.Errorf("expected original data when redaction disabled, got %q", rec.Request)
+// A store hands back what it stored (cleat#3581): replay acts on this read, and a
+// redacted copy would be a different value from the one the workflow was given.
+func TestDecryptEventRecord_DoesNotRedact(t *testing.T) {
+	store := NewPostgresStore(nil)
+	const secretBody = `{"api_key":"sk-live-SECRET123","version":"1.2.3"}`
+	rec := &EventRecord{Step: 0, Request: secretBody, Response: secretBody}
+	if got := Redact(secretBody); got == secretBody {
+		t.Fatalf("CONTROL: Redact does not rewrite %s", secretBody)
+	}
+	store.decryptEventRecord(rec, "wf-1")
+	if rec.Request != secretBody || rec.Response != secretBody {
+		t.Errorf("the store redacted what it read: request=%q response=%q", rec.Request, rec.Response)
 	}
 }
 
@@ -5414,12 +5419,12 @@ func TestPostgresStore_ClaimWorkflows_ScanError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// decryptAndRedactEventRecord — successful decryption of all fields
+// decryptEventRecord — successful decryption of all fields
 // ---------------------------------------------------------------------------
 
-func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
+func TestDecryptEventRecord_SuccessfulDecryption(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
-	store := NewPostgresStore(nil).WithEncryption(enc, true).WithReadRedactionDisabled(true)
+	store := NewPostgresStore(nil).WithEncryption(enc, true)
 
 	// Request and Response are stored as raw ciphertext bytes (already
 	// base64-decoded by tryDecodeBase64), so decryptField uses
@@ -5449,7 +5454,7 @@ func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
 		Response: string(rawResp),
 		Err:      encodedErr,
 	}
-	store.decryptAndRedactEventRecord(rec, "wf-1")
+	store.decryptEventRecord(rec, "wf-1")
 
 	if rec.Request != plainReq {
 		t.Errorf("expected Request=%q, got %q", plainReq, rec.Request)

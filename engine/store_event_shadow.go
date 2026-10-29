@@ -29,12 +29,13 @@ import (
 //
 // # What this deliberately does not cover
 //
-// Only fields that are neither encrypted nor redacted. Request, Response, Err,
-// SignalPayload, ChildInput, NewInput, PluginInput, PluginOutput,
-// PromiseResult and PromiseError all pass through decryptAndRedactEventRecord
-// and RedactOnRead on the way out of the column path, while the payload path
-// is decrypted but never redacted. Comparing those two would report a
-// divergence for every redacted field in the database.
+// Only fields that are not encrypted. Request, Response, Err, SignalPayload,
+// ChildInput, NewInput, PluginInput, PluginOutput, PromiseResult and PromiseError
+// pass through decryptEventRecord on the way out of the column path and are
+// sealed when payload encryption is on. A row stored before cleat#3581 can also
+// hold a REDACTED column beside a payload that kept the live value (the segment-end
+// redaction reached one and not the other, cleat#3584), so comparing them would
+// report a divergence for stored history nobody tampered with.
 //
 // It also only detects divergence on keys the payload actually carries.
 // eventRecordToPayload omits several of these when they are empty (duration_ms
@@ -44,7 +45,7 @@ import (
 // call event, is always present and is detected.
 
 // shadowField is a field mirrored in both an individual column and the payload
-// JSONB, and touched by neither encryption nor redaction.
+// JSONB, and not encrypted.
 type shadowField struct {
 	column string
 	get    func(*EventRecord) string

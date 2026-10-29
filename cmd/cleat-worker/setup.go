@@ -4203,12 +4203,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// Collect new events (if any) so the same slice is available to all branches.
 	var newEvents []engine.EventRecord
 	if len(resultHistory) > len(history) {
+		// Persisted as the engine produced them. Redaction is applied where data
+		// leaves the system, not here (cleat#3581); the loop that used to redact
+		// Request and Response at this point was also not the protection it read
+		// as, because events are flushed before the segment ends (cleat#3584).
 		newEvents = resultHistory[len(history):]
-		// Redact sensitive fields in new events before persisting.
-		for i := range newEvents {
-			newEvents[i].Request = engine.Redact(newEvents[i].Request)
-			newEvents[i].Response = engine.Redact(newEvents[i].Response)
-		}
 	}
 
 	// A defer segment ends by applying the outcome its first phase recorded,
@@ -8289,10 +8288,6 @@ func (w *Worker) finishDeferPhase(wf *engine.WorkflowInstance, execStore engine.
 	var newEvents []engine.EventRecord
 	if len(resultHistory) > len(history) {
 		newEvents = resultHistory[len(history):]
-		for i := range newEvents {
-			newEvents[i].Request = engine.Redact(newEvents[i].Request)
-			newEvents[i].Response = engine.Redact(newEvents[i].Response)
-		}
 	}
 
 	err := dps.FinalizeDeferPhase(ctx, wf.ID, w.id, wf.Generation, newEvents)

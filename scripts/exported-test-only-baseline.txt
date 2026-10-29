@@ -8,7 +8,6 @@ engine/app.go	func NewApp
 engine/callerrors.go	func GuestCallErrorCodes
 engine/child_version.go	func ResolveChildVersion
 engine/cron.go	func NextCronTime
-engine/db.go	func PostgresStore.WithReadRedactionDisabled
 engine/encryption.go	func NewPayloadEncryption
 engine/engine.go	func Engine.ExecuteCompiled
 engine/engine.go	func RunsOnWasmtime
@@ -35,10 +34,8 @@ engine/helpers.go	func DeferralsFromHistory
 engine/idempotency.go	func Engine.CallerHonoursIdempotencyKeys
 engine/mssql_errors.go	func MSSQLConnectionString
 engine/mssql_lifecycle.go	func MSSQLStore.StartNewRunWithConcurrencyKey
-engine/mssql_store.go	func MSSQLStore.WithReadRedactionDisabled
 engine/mssql_store.go	func MSSQLStoreFactory.TenantPoolCount
 engine/mysql_lifecycle.go	func MySQLStore.StartNewRunWithConcurrencyKey
-engine/mysql_store.go	func MySQLStore.WithReadRedactionDisabled
 engine/mysql_store.go	func MySQLStoreFactory.DropTenantDatabase
 engine/mysql_store.go	func MySQLStoreFactory.TenantPoolCount
 engine/plugin_call_guard.go	func NewPluginCallGuard

@@ -187,10 +187,6 @@ type MSSQLStore struct {
 	encryption               *PayloadEncryption
 	encryptSensitivePayloads bool
 
-	// disableReadRedaction when true bypasses RedactOnRead on the read path.
-	// Set to true during replay to avoid the overhead of retroactive redaction.
-	disableReadRedaction bool
-
 	logger *slog.Logger
 }
 
@@ -216,14 +212,6 @@ func NewMSSQLStore(db *sql.DB, taskQueues ...string) *MSSQLStore {
 func (s *MSSQLStore) WithIdempotencyKeyTTL(ttl time.Duration) *MSSQLStore {
 	cp := *s
 	cp.idempotencyKeyTTL = ttl
-	return &cp
-}
-
-// WithReadRedactionDisabled returns a copy of the store with redaction on
-// the read path disabled. Used during replay to avoid overhead.
-func (s *MSSQLStore) WithReadRedactionDisabled(disabled bool) *MSSQLStore {
-	cp := *s
-	cp.disableReadRedaction = disabled
 	return &cp
 }
 

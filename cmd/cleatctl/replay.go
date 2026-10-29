@@ -72,6 +72,7 @@ func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d di
 		fmt.Println()
 		fmt.Println("Event history:")
 		for _, ev := range events {
+			ev = printable(ev)
 			fmt.Printf("  step=%d type=%s", ev.Step, ev.EventType)
 			if ev.Service != "" {
 				fmt.Printf(" service=%s op=%s", ev.Service, ev.Op)
@@ -104,18 +105,19 @@ func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d di
 
 	fmt.Println()
 	fmt.Println("Replay results:")
-	fmt.Printf("  Result: %s\n", truncate(result, 200))
+	fmt.Printf("  Result: %s\n", truncate(printableValue(result), 200))
 	if suspended != nil {
 		fmt.Printf("  Suspended: reason=%s suspend_until=%v\n", suspended.Reason, suspended.SuspendUntil)
 	}
 	fmt.Printf("  Deferrals: %d\n", len(deferrals))
 	fmt.Printf("  Query state: %d keys\n", len(queryState))
 	for k, v := range queryState {
-		fmt.Printf("    %s = %s\n", k, truncate(v, 80))
+		fmt.Printf("    %s = %s\n", k, truncate(printableValue(v), 80))
 	}
 	fmt.Printf("  Replayed events: %d\n", len(resultHistory))
 	if verbose {
 		for i, ev := range resultHistory {
+			ev = printable(ev)
 			fmt.Printf("    [%d] step=%d type=%s", i, ev.Step, ev.EventType)
 			if ev.Response != "" {
 				fmt.Printf(" response=%s", truncate(ev.Response, 60))
@@ -154,6 +156,8 @@ func parseReplayFlags(args []string) *replayFlags {
 			f.entryPoint = args[i]
 		case "--verbose", "-v":
 			f.verbose = true
+		case "--no-redact":
+			printRaw = true
 		default:
 			positional = append(positional, arg)
 		}
@@ -177,7 +181,7 @@ func parseReplayFlags(args []string) *replayFlags {
 
 // printReplayUsage prints the help text for the replay command.
 func printReplayUsage() {
-	fmt.Fprintf(os.Stderr, `Usage: cleatctl [--db <dsn>] replay <workflow-id> --entry-point <name> [--verbose]
+	fmt.Fprintf(os.Stderr, `Usage: cleatctl [--db <dsn>] replay <workflow-id> --entry-point <name> [--verbose] [--no-redact]
 
 Replay a workflow's event history for diagnostic purposes.
 
@@ -187,6 +191,8 @@ Arguments:
 Flags:
   --entry-point <name>  WASM export name to invoke (required).
   --verbose, -v         Print detailed event history and replay output.
+  --no-redact           Print stored values as they are. By default what is printed
+                        is redacted (the engine is always given the raw history).
 
 This command reads the workflow's event history and WASM binary from the
 database, replays through the engine, and reports the result. It does NOT

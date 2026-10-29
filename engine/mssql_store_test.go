@@ -120,9 +120,6 @@ func TestMSSQLStore_NewStoreDefaults(t *testing.T) {
 	if store.encryptSensitivePayloads {
 		t.Fatal("encryptSensitivePayloads should default to false")
 	}
-	if store.disableReadRedaction {
-		t.Fatal("disableReadRedaction should default to false")
-	}
 }
 
 // TestMSSQLStore_NewStoreTaskQueues verifies custom task queue handling.
@@ -163,24 +160,6 @@ func TestMSSQLStore_WithIdempotencyKeyTTL(t *testing.T) {
 	}
 	if updated.idempotencyKeyTTL != 24*time.Hour {
 		t.Fatalf("idempotencyKeyTTL = %v, want 24h", updated.idempotencyKeyTTL)
-	}
-}
-
-// TestMSSQLStore_WithReadRedactionDisabled verifies the redaction toggle.
-func TestMSSQLStore_WithReadRedactionDisabled(t *testing.T) {
-	store := NewMSSQLStore(nil)
-
-	disabled := store.WithReadRedactionDisabled(true)
-	if !disabled.disableReadRedaction {
-		t.Fatal("disableReadRedaction should be true")
-	}
-	if store.disableReadRedaction {
-		t.Fatal("original store was mutated")
-	}
-
-	reEnabled := disabled.WithReadRedactionDisabled(false)
-	if reEnabled.disableReadRedaction {
-		t.Fatal("disableReadRedaction should be false after re-enabling")
 	}
 }
 
@@ -403,15 +382,6 @@ func TestMSSQLStoreConfigOptions(t *testing.T) {
 	store := NewMSSQLStore(nil, "default")
 	if store == nil {
 		t.Fatal("NewMSSQLStore returned nil")
-	}
-
-	// WithReadRedactionDisabled
-	s2 := store.WithReadRedactionDisabled(true)
-	if !s2.disableReadRedaction {
-		t.Error("disableReadRedaction should be true")
-	}
-	if store.disableReadRedaction {
-		t.Error("original store should not be mutated by WithReadRedactionDisabled")
 	}
 
 	// WithEncryption

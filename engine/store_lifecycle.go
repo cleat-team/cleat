@@ -2370,14 +2370,14 @@ func coerceResultJSON(ctx context.Context, log *slog.Logger, workflowID, result 
 				"but no consumer can rely on its shape. A result that starts with a quote is "+
 				"usually an SDK encoding a value that was already JSON",
 				"workflow_id", workflowID, "result_len", len(result),
-				"result", truncateForLog(result))
+				"result", truncateForLog(Redact(result)))
 		}
 		return result
 	}
 	if log != nil {
 		log.ErrorContext(ctx, "workflow result is not valid JSON and was replaced with {} -- "+
 			"whatever it carried, including any error the workflow returned, is not stored anywhere",
-			"workflow_id", workflowID, "result_len", len(result), "result", truncateForLog(result))
+			"workflow_id", workflowID, "result_len", len(result), "result", truncateForLog(Redact(result)))
 	}
 	return "{}"
 }
