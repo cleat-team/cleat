@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
@@ -159,5 +162,135 @@ func TestAPluginStartIsRefusedForASuspendedTenantOnAStoreWithRows(t *testing.T) 
 	}
 	if got := runs(); got != 2 {
 		t.Errorf("%d run rows after resume and one more start; want 2", got)
+	}
+}
+
+// The SQL Server half. Multi-tenant SQL Server is a supported configuration, and the
+// check is a type assertion on the scoped store, so what this adds over the
+// PostgreSQL test is that MSSQLStore.WithTenant returns a store that still answers
+// IsTenantSuspended, and that the answer is read from the same admin.tenants row
+// SetTenantSuspended writes. It builds its own database from the shipped
+// migrations, as TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessionContext
+// does, because engine/testutil's hand-rolled schema defines none of the security
+// policies.
+func TestAPluginStartIsRefusedForASuspendedTenantOnSQLServer(t *testing.T) {
+	base := os.Getenv("CLEAT_TEST_MSSQL")
+	if base == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping database-backed cleat#3594 test")
+	}
+	adminDB, err := sql.Open("sqlserver", base)
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	defer adminDB.Close()
+	if err := adminDB.Ping(); err != nil {
+		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v", redactMSSQLDSN(base), err)
+	}
+
+	const dbName = "cleat_plugin_start_3594_test"
+	ctx := context.Background()
+	if _, err := adminDB.ExecContext(ctx,
+		fmt.Sprintf("IF DB_ID('%s') IS NOT NULL BEGIN ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s; END",
+			dbName, dbName, dbName)); err != nil {
+		t.Fatalf("drop stale test database: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = adminDB.ExecContext(context.Background(),
+			fmt.Sprintf("ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s", dbName, dbName))
+	})
+	connStr, err := mssqlConnStrForDB(base, dbName)
+	if err != nil {
+		t.Fatalf("derive test DSN: %v", err)
+	}
+	testDB, err := sql.Open("sqlserver", connStr)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	defer testDB.Close()
+	if err := migration.NewRunner(testDB, migration.DialectMSSQL, "../../migrations").Run(ctx); err != nil {
+		t.Fatalf("apply mssql migrations: %v", err)
+	}
+
+	ts, err := auth.NewTenantStoreForDialect(testDB, auth.DialectMSSQL)
+	if err != nil {
+		t.Fatalf("NewTenantStoreForDialect: %v", err)
+	}
+	orgID, err := ts.CreateOrg(ctx, "susp-start-"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	tid, err := ts.CreateTenant(ctx, "susp-start-"+uuid.NewString(), "t", orgID)
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	tenant := tid.String()
+
+	factory := engine.NewMSSQLStoreFactory(connStr)
+	tenantStore, closer, err := factory.OpenStore(ctx, tenant, "default")
+	if err != nil {
+		t.Fatalf("OpenStore(tenant): %v", err)
+	}
+	defer closer.Close()
+	if err := tenantStore.DeployWorkflowDef(ctx, &engine.WorkflowDef{
+		Name: "plugin-start-3594-mssql", Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	processStore, pcloser, err := factory.OpenStore(ctx, engine.DefaultTenantUUID, "default")
+	if err != nil {
+		t.Fatalf("OpenStore(default): %v", err)
+	}
+	defer pcloser.Close()
+
+	start := func(key string) (string, error) {
+		return startPluginWorkflow(ctx, processStore, plugin.StartRequest{
+			DefName: "plugin-start-3594-mssql", Input: json.RawMessage(`{}`), IdempotencyKey: key, TenantID: tenant,
+		})
+	}
+	// Whether a run exists is asked of the tenant's own scoped store by id, not by a
+	// count over a table whose row-level policy may filter it for this connection. A
+	// refused start returns no id, so "created nothing" is shown by the start
+	// returning an error and, after resume, by the SAME key creating a run of its own:
+	// had the refusal left a run behind under that key, the key would return it.
+	exists := func(runID string) bool {
+		t.Helper()
+		wf, err := scopeToTenant(processStore, tenant).GetWorkflowByID(ctx, runID)
+		if err != nil {
+			t.Fatalf("GetWorkflowByID(%s): %v", runID, err)
+		}
+		return wf != nil
+	}
+
+	// CONTROL: unsuspended, the start creates a run the tenant can read back.
+	first, err := start("before")
+	if err != nil || first == "" {
+		t.Fatalf("CONTROL FAILED: an unsuspended tenant's plugin start: id=%q err=%v", first, err)
+	}
+	if !exists(first) {
+		t.Fatalf("CONTROL FAILED: the run %s just started cannot be read back, so this test cannot see a run", first)
+	}
+
+	if err := ts.SetTenantSuspended(ctx, tid, true); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if id, err := start("during"); err == nil {
+		t.Fatalf("a suspended tenant's plugin start succeeded: run %q", id)
+	}
+
+	if err := ts.SetTenantSuspended(ctx, tid, false); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	// The refused key was never spent: the same key now creates a run, and it is a new one.
+	// (A refusal that had created a run would fail at the "during" start above; this
+	// half shows resuming restores the tenant, so the refusal was the flag.)
+	after, err := start("during")
+	if err != nil || after == "" {
+		t.Fatalf("a resumed tenant's plugin start with the key that was refused: id=%q err=%v", after, err)
+	}
+	if after == first || !exists(after) {
+		t.Errorf("resumed start returned %q (first run %q, readable=%v); want a new, readable run", after, first, exists(after))
 	}
 }
