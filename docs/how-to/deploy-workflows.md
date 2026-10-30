@@ -307,10 +307,12 @@ PostgreSQL and SQL Server only.
   `cleat deploy` and `cleatctl deploy workflow`), at any version, whether or not the library holds that name.
   An install is refused (`409`) when the tenant already holds workflows of its own under the prefix, and the
   error names them. Both are what stop a tenant's `acme.checkout` version 2 from silently shadowing an installed
-  `acme.checkout` version 1, because a start without a version runs the highest one whatever its origin. Rows a
-  tenant already has under a prefix are not touched: they keep running, and only a later deploy or install is
-  refused until they are renamed or removed. The comparison is the database's own, so on SQL Server, whose names
-  are case-insensitive, `ACME.checkout` is under the `acme.` prefix, and on PostgreSQL it is a different name.
+  `acme.checkout` version 1, because a start without a version runs the highest one whatever its origin. A row
+  a tenant already holds under a prefix (possible only for a library published before this rule) is not
+  touched: it keeps running, and only a later deploy or install is refused until it is renamed or removed. The
+  comparison is the database's own, so while SQL Server's names are case-insensitive `ACME.checkout` is under
+  the `acme.` prefix there and is a different name on PostgreSQL; making SQL Server's names case-sensitive
+  (owner decision D60, cleat#3635) removes that difference.
 - **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
   of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
   does not contain. A name appears once per bundle.

@@ -467,21 +467,110 @@ func TestADeployWaitsForAPublishInFlightAndIsThenRefused(t *testing.T) {
 	})
 }
 
-// The second line of defence: the same three actors released together, over and over. After each
-// round the tenant must not hold both its own `<lib>.x` and rows installed from the library. Run it
-// with -count=30 on head and on base (clew#411): a window this narrow is not found by one run.
+// All three actors released together, over and over: a deploy of <lib>.x, the publish of <lib>, and an
+// install of <lib> that retries until the bundle exists. The install has to be in the race. An install
+// that runs after the deploy has committed finds the tenant's own name and is refused whatever the lock
+// does, which is what this test did in its first version, and it then passed with the lock removed.
+// With the install concurrent, the window the lock closes is real: the install reads the tenant's own
+// names while the deploy is between its prefix check and its commit.
+//
+// This is a backstop and not the proof: the two deterministic tests above hold one side open and fail
+// every time, and this one can only find an interleaving by luck, so it asserts the invariant ("never
+// both origins") and not an outcome. Measured 2026-10-30, 10 runs of 40 rounds each, with the lock
+// removed from lockLibraryNames (all of it / the shared half / the exclusive half):
+//
+//	PostgreSQL                  red in 10 / 10 / 10 runs
+//	SQL Server, RCSI on         red in 10 / 7 / 10 runs
+//	SQL Server, RCSI off        red in 1 / 1 / 0 runs
+//
+// and green in 10 of 10 on head in every mode. RCSI off is the default and the rig's starting state,
+// and there a read of the tenant's own names BLOCKS on the deploy's uncommitted row, which closes the
+// window without the lock; so that mode is here to show head is correct, not to find a missing lock.
+// To re-derive: delete the body of lockLibraryNames (or half of it), then
+// `go test ./engine/ -count=10 -run TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins`.
+//
+// Run it with -count=30 on head and on base (clew#411). Retrying only on ErrLibraryBundleNotFound keeps
+// a different refusal from looping.
 func TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins(t *testing.T) {
-	const rounds = 6
 	eachPrefixRig(t, func(t *testing.T, c *prefixCase) {
+		if c.rig.dialect != DialectMSSQL {
+			raceDeployPublishInstall(t, c)
+			return
+		}
+		// docs/reference/database-backends.md recommends READ_COMMITTED_SNAPSHOT on, and under it a read
+		// does not wait for an uncommitted row. With it off (the default, and what the rig starts as) a
+		// read of the tenant's own names BLOCKS on the deploy's uncommitted row, which closes this
+		// window by itself and leaves the race test unable to tell whether the lock is there. So SQL
+		// Server runs both ways, and the setting is put back.
+		for _, rcsi := range []bool{false, true} {
+			t.Run(fmt.Sprintf("rcsi=%v", rcsi), func(t *testing.T) {
+				c.setRCSI(t, rcsi)
+				raceDeployPublishInstall(t, c)
+			})
+		}
+	})
+}
+
+// setRCSI sets READ_COMMITTED_SNAPSHOT for the rig's database and restores what it was.
+func (c *prefixCase) setRCSI(t *testing.T, on bool) {
+	t.Helper()
+	var was bool
+	if err := c.rig.admin.QueryRow(`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`).Scan(&was); err != nil {
+		t.Fatalf("UNMEASURED: reading the isolation setting: %v", err)
+	}
+	set := func(v bool) {
+		mode := "OFF"
+		if v {
+			mode = "ON"
+		}
+		// ROLLBACK IMMEDIATE kills every other session, including the pool's idle connections, and the
+		// store would then fail its first statement on a dead one (Read: EOF). Closing the idle ones
+		// first leaves it only the connection that issues the ALTER.
+		c.rig.admin.SetMaxIdleConns(0)
+		defer c.rig.admin.SetMaxIdleConns(2)
+		if _, err := c.rig.admin.Exec(`DECLARE @s nvarchar(400) = N'ALTER DATABASE ' + QUOTENAME(DB_NAME()) + N' SET READ_COMMITTED_SNAPSHOT ` + mode + ` WITH ROLLBACK IMMEDIATE'; EXEC (@s)`); err != nil {
+			t.Fatalf("UNMEASURED: setting READ_COMMITTED_SNAPSHOT %s: %v", mode, err)
+		}
+	}
+	if was != on {
+		set(on)
+	}
+	t.Cleanup(func() {
+		if was != on {
+			set(was)
+		}
+	})
+	var now bool
+	if err := c.rig.admin.QueryRow(`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`).Scan(&now); err != nil || now != on {
+		t.Fatalf("UNMEASURED: READ_COMMITTED_SNAPSHOT is %v after asking for %v: %v", now, on, err)
+	}
+}
+
+func raceDeployPublishInstall(t *testing.T, c *prefixCase) {
+	t.Helper()
+	const rounds = 40
+	{
 		c.openPublisher(t)
+		measured := 0
 		for i := 0; i < rounds; i++ {
 			lib := c.library(t, "race"+strconv.Itoa(i))
 			var wg sync.WaitGroup
 			start := make(chan struct{})
-			var deployErr, publishErr error
-			wg.Add(2)
+			var deployErr, publishErr, installErr error
+			wg.Add(3)
 			go func() { defer wg.Done(); <-start; deployErr = c.deploy(pfxTenantA, lib+".x", 1) }()
 			go func() { defer wg.Done(); <-start; publishErr = c.publishAsOperator(t, lib) }()
+			go func() {
+				defer wg.Done()
+				<-start
+				deadline := time.Now().Add(20 * time.Second)
+				for {
+					installErr = c.install(pfxTenantA, lib)
+					if !errors.Is(installErr, ErrLibraryBundleNotFound) || time.Now().After(deadline) {
+						return
+					}
+				}
+			}()
 			close(start)
 			wg.Wait()
 			if publishErr != nil {
@@ -490,7 +579,10 @@ func TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins(t *testing.T) {
 			if deployErr != nil && !errors.Is(deployErr, ErrWorkflowNameUnderLibraryPrefix) {
 				t.Fatalf("round %d: the deploy failed for another reason: %v", i, deployErr)
 			}
-			installErr := c.install(pfxTenantA, lib)
+			var held *LibraryPrefixHeldError
+			if installErr != nil && !errors.As(installErr, &held) {
+				t.Fatalf("round %d: the install failed for another reason: %v", i, installErr)
+			}
 			own := c.count(t, pfxTenantA, `library IS NULL AND name = ?`, lib+".x")
 			installed := c.installedRows(t, pfxTenantA, lib)
 			if own > 0 && installed > 0 {
@@ -500,8 +592,12 @@ func TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins(t *testing.T) {
 			if own == 0 && installed == 0 {
 				t.Fatalf("round %d: neither the tenant's name nor the install exists (deploy=%v install=%v): the round measured nothing", i, deployErr, installErr)
 			}
+			measured++
 		}
-	})
+		if measured != rounds {
+			t.Fatalf("UNMEASURED: %d of %d rounds measured", measured, rounds)
+		}
+	}
 }
 
 // The rows an install itself wrote sit under the library's prefix, because every member is named
