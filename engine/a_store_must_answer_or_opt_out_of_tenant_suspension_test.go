@@ -35,6 +35,11 @@ func TestTenantSuspendedRefusesAStoreThatNeitherAnswersNorOptsOut(t *testing.T) 
 		if !strings.Contains(err.Error(), "mockShardStore") {
 			t.Errorf("error %q does not name the store type, so an operator cannot tell which store to fix", err)
 		}
+		for _, want := range []string{"IsTenantSuspended(", "NoTenantSuspension()"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not say to add %s, so it names the problem and not the fix", err, want)
+			}
+		}
 		if got {
 			t.Errorf("an unanswerable store reported suspended=true")
 		}

@@ -204,7 +204,7 @@ func TenantSuspended(ctx context.Context, store any, tenantID string) (bool, err
 	if _, ok := store.(NoTenantSuspensionMarker); ok {
 		return false, nil
 	}
-	return false, fmt.Errorf("%w: %T (implement TenantSuspensionReader, or NoTenantSuspensionMarker if it has no tenants to suspend)",
+	return false, fmt.Errorf("%w: %T (add IsTenantSuspended(ctx, tenantID) (bool, error), or NoTenantSuspension() if the store has no tenants to suspend)",
 		ErrTenantSuspensionUnanswerable, store)
 }
 
