@@ -22,9 +22,10 @@ import (
 )
 
 // cleat#3611: a webhook receiver can refuse an event for good, and only for the statuses that mean
-// that. 400, 410, 413 and 422 make the delivery `failed` on the FIRST attempt; 401, 403, 404, 408,
+// that. 410, 413 and 422 make the delivery `failed` on the FIRST attempt; 400, 401, 403, 404, 408,
 // 425, 429 and every 5xx stay `retrying`, because nothing can resend a failed delivery yet
-// (cleat#3612) and those are what an operator repairs from the outside.
+// (cleat#3612) and those are what an operator repairs from the outside. 400 is among them because
+// receivers commonly answer it for a failed signature check, which a rotated secret repairs.
 //
 // A real receiver, a real delivery created through the real host function, one real sweep, and the
 // delivery read back through the real route, on all three dialects. Before this a 4xx was retried
@@ -34,8 +35,8 @@ func TestAReceiverCanRefuseAnEventForGoodAndOnlyBySayingSo(t *testing.T) {
 		status    int
 		permanent bool
 	}{
-		{400, true}, {410, true}, {413, true}, {422, true},
-		{401, false}, {403, false}, {404, false}, {408, false}, {425, false}, {429, false},
+		{410, true}, {413, true}, {422, true},
+		{400, false}, {401, false}, {403, false}, {404, false}, {408, false}, {425, false}, {429, false},
 		{500, false}, {502, false}, {503, false}, {504, false},
 	}
 	for _, be := range testutil.NewPluginTestBackends(t) {

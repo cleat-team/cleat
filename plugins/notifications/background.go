@@ -405,19 +405,21 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 }
 
 // isPermanentWebhookRefusal reports whether a receiver's non-2xx status is a refusal of the event
-// itself, which no repeat can change: 400 (it is malformed), 410 (the endpoint is gone), 413 (it
-// is too large) and 422 (it cannot be processed).
+// itself, which no repeat can change: 410 (the endpoint is gone), 413 (it is too large) and 422
+// (it cannot be processed).
 //
 // Every OTHER status stays retryable, 4xx included, and that is deliberate rather than an
 // omission. 401, 403 and 404 are what a receiver answers while its credentials, its allow-list or
 // its route are wrong or not yet deployed, all of which an operator repairs from the outside; 408,
-// 425 and 429 are explicitly "try again"; every 5xx is the receiver's own fault. There is no way
-// to resend a delivery once it is `failed` (cleat#3612), so classifying one of those as permanent
-// would turn a repairable outage into lost events. With a redeliver route more codes could move
-// here.
+// 425 and 429 are explicitly "try again"; every 5xx is the receiver's own fault. 400 was left out
+// on a review of cleat#3616 and the coordinator's decision of 2026-10-30: receivers commonly answer
+// 400 for a failed signature check, which a rotated secret repairs from the outside, so it is the
+// same case as 401. There is no way to resend a delivery once it is `failed` (cleat#3612), so
+// classifying one of those as permanent would turn a repairable outage into lost events. With a
+// redeliver route more codes could move here, 400 first.
 func isPermanentWebhookRefusal(status int) bool {
 	switch status {
-	case http.StatusBadRequest, http.StatusGone, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+	case http.StatusGone, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
 		return true
 	}
 	return false
