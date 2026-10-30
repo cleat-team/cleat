@@ -76,6 +76,13 @@ var mysqlBaselineCollationExceptions = map[string]string{
 	// Opaque external identifier: case-insensitive comparison would let two
 	// distinct Slack workspaces collide on the primary key.
 	"slack_workspace.team_id": "utf8mb4_bin",
+	// A plugin name is matched EXACTLY by the worker's own claim-time check, so the
+	// deploy-time check against this registry has to match the same way (cleat#3600):
+	// under the default case-insensitive collation a deploy needing "slack-notify" would
+	// be accepted on the strength of a worker that registered only "Slack-Notify", and
+	// then be refused at claim time. Measured: the default collation returned a row for
+	// the wrong-case name on MySQL and SQL Server.
+	"registered_plugins.plugin_name": "utf8mb4_bin",
 }
 
 func TestTheMySQLBaselineKeepsWhatCatalogdiffCannotSee(t *testing.T) {
