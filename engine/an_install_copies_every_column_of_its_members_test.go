@@ -68,6 +68,12 @@ type libInstallRig struct {
 	// database it is, for the tests that need a statement the closures above do not cover.
 	admin   *sql.DB
 	dialect Dialect
+	// logins are the extra pools useLeastPrivilegeLogins opened, so a test that changes a database-wide
+	// setting can drop their idle connections first.
+	logins []*sql.DB
+	// deployStore, when set, is the store a DEPLOY goes through (useLeastPrivilegeLogins); an install
+	// still goes through store, because the application role is the only one 005 grants the library to.
+	deployStore func(tenant string) installableStore
 	// registerPlugins records plugin names in the registry the way a worker's registration
 	// does (recordPluginsOn), and forgetPlugin removes one, which only a test may do:
 	// nothing in the product deletes from the registry (cleat#3600).

@@ -110,27 +110,30 @@ SELECT @r;`, libraryNamesLockResource, mode, libraryNamesLockWaitMS)).Scan(&rc)
 }
 
 // refuseNameUnderLibraryPrefix refuses a deploy of a name under a published library's prefix, at any
-// version. The comparison is the database's own: starts_with is exact on PostgreSQL and the
-// case-insensitive collation decides on SQL Server, where the prefix is the right-hand side of LEN
-// so that a library name is measured and a candidate name is only cut to it. No LIKE: `_` is a wildcard.
+// version. The question goes to a SECURITY DEFINER function (migration 009), not to library.bundles
+// itself: the deploying role is not allowed to read the library schema, and the first version of this
+// check selected from the table and failed every deploy through a per-tenant login. The comparison
+// inside the function is the database's own (starts_with on PostgreSQL; LEFT/LEN with the library as
+// the right-hand side on SQL Server), never LIKE, where the "_" a library name may hold is a wildcard,
+// and never in Go.
 func refuseNameUnderLibraryPrefix(ctx context.Context, tx *sql.Tx, d Dialect, name string) error {
 	var q string
 	switch d {
 	case DialectPostgres:
-		q = `SELECT library FROM library.bundles WHERE starts_with($1, library || '.') ORDER BY library LIMIT 1`
+		q = `SELECT library_owning_prefix($1)`
 	case DialectMSSQL:
-		q = `SELECT TOP 1 library FROM library.bundles WHERE LEFT(@p1, LEN(library) + 1) = library + N'.' ORDER BY library`
+		q = `SELECT dbo.library_owning_prefix(@p1)`
 	default:
 		return nil
 	}
-	var library string
-	switch err := tx.QueryRowContext(ctx, q, name).Scan(&library); {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil
-	case err != nil:
+	var library sql.NullString
+	if err := tx.QueryRowContext(ctx, q, name).Scan(&library); err != nil {
 		return fmt.Errorf("checking %q against the published libraries' prefixes: %w", name, err)
 	}
-	return &WorkflowNameUnderLibraryPrefixError{Name: name, Library: library}
+	if !library.Valid {
+		return nil
+	}
+	return &WorkflowNameUnderLibraryPrefixError{Name: name, Library: library.String}
 }
 
 // refuseOwnNamesUnderPrefix refuses an install when the tenant holds names of its OWN (not installed

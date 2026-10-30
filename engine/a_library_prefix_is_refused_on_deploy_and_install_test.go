@@ -84,7 +84,11 @@ func (c *prefixCase) publishBundle(t *testing.T, lib, bundleVersion string, fres
 }
 
 func (c *prefixCase) deploy(tenant, name string, version int) error {
-	return c.rig.store(tenant).DeployWorkflowDef(c.ctx, &WorkflowDef{Name: name, Version: version, WASMBytes: []byte("own:" + name), ABIVersion: 2})
+	store := c.rig.store
+	if c.rig.deployStore != nil {
+		store = c.rig.deployStore
+	}
+	return store(tenant).DeployWorkflowDef(c.ctx, &WorkflowDef{Name: name, Version: version, WASMBytes: []byte("own:" + name), ABIVersion: 2})
 }
 
 func (c *prefixCase) install(tenant, lib string) error { return c.installVersion(tenant, lib, "1.0.0") }
@@ -112,9 +116,22 @@ func (c *prefixCase) installedRows(t *testing.T, tenant, lib string) int {
 	return c.count(t, tenant, `library = ?`, lib)
 }
 
-// eachPrefixRig runs body once per dialect, building that dialect's rig INSIDE the subtest so a
-// dialect with no database configured skips only itself.
+// eachPrefixRig runs body once per dialect and per login, building that dialect's rig INSIDE the
+// subtest so a dialect with no database configured skips only itself. "app" is the role the rigs were
+// built with; "tenant login" is the least-privilege login a deployment deploys through
+// (useLeastPrivilegeLogins), which cannot read the library schema. Everything the prefix rules do is
+// measured as both, because a check that needs a privilege the deploying login lacks passes as the
+// first and fails in production.
 func eachPrefixRig(t *testing.T, body func(t *testing.T, c *prefixCase)) {
+	t.Helper()
+	eachPrefixRigModes(t, nil, body)
+}
+
+// eachPrefixRigModes is eachPrefixRig with, on SQL Server only, an outer loop over READ_COMMITTED_SNAPSHOT
+// settings. The setting is changed BEFORE the least-privilege login's pool is opened: changing it kills
+// every other session (ROLLBACK IMMEDIATE), including the connection testutil.MSSQLAdminDB pins for the
+// lifetime of that pool, and a pool opened first fails its teardown with "Read: EOF".
+func eachPrefixRigModes(t *testing.T, rcsiModes []bool, body func(t *testing.T, c *prefixCase)) {
 	t.Helper()
 	for _, d := range []struct {
 		name string
@@ -125,9 +142,37 @@ func eachPrefixRig(t *testing.T, body func(t *testing.T, c *prefixCase)) {
 		{"sqlserver", newMSSQLLibRig, testutil.DialectMSSQL},
 	} {
 		t.Run(d.name, func(t *testing.T) {
-			c := newPrefixCase(t, d.mk(t))
-			c.tdialect = d.t
-			body(t, c)
+			base := d.mk(t)
+			variants := func(t *testing.T) {
+				for _, login := range []string{"app", "tenant login"} {
+					t.Run(login, func(t *testing.T) {
+						rig := *base
+						if login != "app" {
+							who, reads := rig.useLeastPrivilegeLogins(t, []string{pfxTenantA, pfxTenantB, pfxTenantC})
+							// What the login can read is a measurement, not an assumption: on SQL Server the
+							// admin login cannot (and the first version of the check failed for that
+							// reason), and whether a per-tenant PostgreSQL role can is reported here either way.
+							t.Logf("tenant login %s reads library.bundles: %v", who, reads)
+							if reads && rig.dialect == DialectMSSQL {
+								t.Fatalf("UNMEASURED: %s can read library.bundles, so this run does not test a login that cannot", who)
+							}
+						}
+						c := newPrefixCase(t, &rig)
+						c.tdialect = d.t
+						body(t, c)
+					})
+				}
+			}
+			if d.t != testutil.DialectMSSQL || len(rcsiModes) == 0 {
+				variants(t)
+				return
+			}
+			for _, rcsi := range rcsiModes {
+				t.Run(fmt.Sprintf("rcsi=%v", rcsi), func(t *testing.T) {
+					base.setRCSI(t, rcsi)
+					variants(t)
+				})
+			}
 		})
 	}
 }
@@ -476,46 +521,42 @@ func TestADeployWaitsForAPublishInFlightAndIsThenRefused(t *testing.T) {
 //
 // This is a backstop and not the proof: the two deterministic tests above hold one side open and fail
 // every time, and this one can only find an interleaving by luck, so it asserts the invariant ("never
-// both origins") and not an outcome. Measured 2026-10-30, 10 runs of 40 rounds each, with the lock
-// removed from lockLibraryNames (all of it / the shared half / the exclusive half):
+// both origins") and not an outcome. It runs once per login (see eachPrefixRigModes). Measured
+// 2026-10-30, 10 runs of 40 rounds each, with the lock removed from lockLibraryNames (all of it / the
+// shared half / the exclusive half), as the number of runs that went red:
 //
-//	PostgreSQL                  red in 10 / 10 / 10 runs
-//	SQL Server, RCSI on         red in 10 / 7 / 10 runs
-//	SQL Server, RCSI off        red in 1 / 1 / 0 runs
+//	PostgreSQL, app role                          10 / 10 / 10
+//	PostgreSQL, per-tenant login                  10 / 10 / 10
+//	SQL Server, RCSI on,  app role                10 /  8 / 10
+//	SQL Server, RCSI on,  cleat_admin login       10 /  9 / 10
+//	SQL Server, RCSI off, cleat_admin login        9 /  5 /  7
+//	SQL Server, RCSI off, app role                 1 /  0 /  1
 //
-// and green in 10 of 10 on head in every mode. RCSI off is the default and the rig's starting state,
-// and there a read of the tenant's own names BLOCKS on the deploy's uncommitted row, which closes the
-// window without the lock; so that mode is here to show head is correct, not to find a missing lock.
-// To re-derive: delete the body of lockLibraryNames (or half of it), then
+// and green in 10 of 10 on head in every row. The last row is the one this test cannot see: with
+// READ_COMMITTED_SNAPSHOT off (the default, and the rig's starting state) the app role's read of the
+// tenant's own names BLOCKS on the deploy's uncommitted row, which closes the window without the lock,
+// so there the lock rests on the deterministic tests. docs/reference/database-backends.md recommends
+// RCSI on. To re-derive: delete the body of lockLibraryNames (or half of it), then
 // `go test ./engine/ -count=10 -run TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins`.
 //
 // Run it with -count=30 on head and on base (clew#411). Retrying only on ErrLibraryBundleNotFound keeps
 // a different refusal from looping.
 func TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins(t *testing.T) {
-	eachPrefixRig(t, func(t *testing.T, c *prefixCase) {
-		if c.rig.dialect != DialectMSSQL {
-			raceDeployPublishInstall(t, c)
-			return
-		}
-		// docs/reference/database-backends.md recommends READ_COMMITTED_SNAPSHOT on, and under it a read
-		// does not wait for an uncommitted row. With it off (the default, and what the rig starts as) a
-		// read of the tenant's own names BLOCKS on the deploy's uncommitted row, which closes this
-		// window by itself and leaves the race test unable to tell whether the lock is there. So SQL
-		// Server runs both ways, and the setting is put back.
-		for _, rcsi := range []bool{false, true} {
-			t.Run(fmt.Sprintf("rcsi=%v", rcsi), func(t *testing.T) {
-				c.setRCSI(t, rcsi)
-				raceDeployPublishInstall(t, c)
-			})
-		}
+	// docs/reference/database-backends.md recommends READ_COMMITTED_SNAPSHOT on, and under it a read
+	// does not wait for an uncommitted row. With it off (the default, and what the rig starts as) a
+	// read of the tenant's own names BLOCKS on the deploy's uncommitted row, which closes this
+	// window by itself and leaves the race test unable to tell whether the lock is there. So SQL
+	// Server runs both ways, and the setting is put back.
+	eachPrefixRigModes(t, []bool{false, true}, func(t *testing.T, c *prefixCase) {
+		raceDeployPublishInstall(t, c)
 	})
 }
 
 // setRCSI sets READ_COMMITTED_SNAPSHOT for the rig's database and restores what it was.
-func (c *prefixCase) setRCSI(t *testing.T, on bool) {
+func (rig *libInstallRig) setRCSI(t *testing.T, on bool) {
 	t.Helper()
 	var was bool
-	if err := c.rig.admin.QueryRow(`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`).Scan(&was); err != nil {
+	if err := rig.admin.QueryRow(`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`).Scan(&was); err != nil {
 		t.Fatalf("UNMEASURED: reading the isolation setting: %v", err)
 	}
 	set := func(v bool) {
@@ -526,9 +567,11 @@ func (c *prefixCase) setRCSI(t *testing.T, on bool) {
 		// ROLLBACK IMMEDIATE kills every other session, including the pool's idle connections, and the
 		// store would then fail its first statement on a dead one (Read: EOF). Closing the idle ones
 		// first leaves it only the connection that issues the ALTER.
-		c.rig.admin.SetMaxIdleConns(0)
-		defer c.rig.admin.SetMaxIdleConns(2)
-		if _, err := c.rig.admin.Exec(`DECLARE @s nvarchar(400) = N'ALTER DATABASE ' + QUOTENAME(DB_NAME()) + N' SET READ_COMMITTED_SNAPSHOT ` + mode + ` WITH ROLLBACK IMMEDIATE'; EXEC (@s)`); err != nil {
+		for _, db := range append([]*sql.DB{rig.admin}, rig.logins...) {
+			db.SetMaxIdleConns(0)
+			defer db.SetMaxIdleConns(2)
+		}
+		if _, err := rig.admin.Exec(`DECLARE @s nvarchar(400) = N'ALTER DATABASE ' + QUOTENAME(DB_NAME()) + N' SET READ_COMMITTED_SNAPSHOT ` + mode + ` WITH ROLLBACK IMMEDIATE'; EXEC (@s)`); err != nil {
 			t.Fatalf("UNMEASURED: setting READ_COMMITTED_SNAPSHOT %s: %v", mode, err)
 		}
 	}
@@ -541,7 +584,7 @@ func (c *prefixCase) setRCSI(t *testing.T, on bool) {
 		}
 	})
 	var now bool
-	if err := c.rig.admin.QueryRow(`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`).Scan(&now); err != nil || now != on {
+	if err := rig.admin.QueryRow(`SELECT is_read_committed_snapshot_on FROM sys.databases WHERE name = DB_NAME()`).Scan(&now); err != nil || now != on {
 		t.Fatalf("UNMEASURED: READ_COMMITTED_SNAPSHOT is %v after asking for %v: %v", now, on, err)
 	}
 }

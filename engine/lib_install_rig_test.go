@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // The two real-database rigs for the workflow-library tests (cleat#3540, cleat#3629): PostgreSQL
@@ -226,4 +227,82 @@ func newMSSQLLibRig(t *testing.T) *libInstallRig {
 			_, _ = db.ExecContext(ctx, `DELETE FROM library.members WHERE library = @p1`, library)
 		},
 	}
+}
+
+// useLeastPrivilegeLogins points rig.deployStore at the logins a deployment really DEPLOYS through,
+// instead of the role the rig was built with, and says who they are and whether they can read the
+// library schema. An install is left on rig.store: the application role (cleat_app_role on SQL
+// Server) is the only one 005 grants the library to, so an install through the other logins was never
+// supported, and `cleat_admin` in particular is the cross-tenant role cleatctl and the TestAdminLogin
+// tests use for deploys. The rigs above connect as a role that CAN read it (005 grants the application role,
+// the sweeper and the default tenant's role), which is how the first version of the D59 deploy check,
+// a plain SELECT from library.bundles, passed every test here and failed every deploy through a
+// per-tenant login in CI.
+//
+//	PostgreSQL: one login role per tenant, made by admin.create_tenant_role, the way plugin.TenantPools
+//	            connects; cleat.tenant_id arrives as a role default.
+//	SQL Server: the pool testutil.MSSQLAdminDB opens, a login in cleat_admin, which the TestAdminLogin
+//	            tests use and which holds no SELECT on the library schema.
+func (rig *libInstallRig) useLeastPrivilegeLogins(t *testing.T, tenants []string) (who string, readsLibrary bool) {
+	t.Helper()
+	probe := func(db *sql.DB) {
+		var n int
+		readsLibrary = db.QueryRow(`SELECT count(*) FROM library.bundles`).Scan(&n) == nil
+	}
+	switch rig.dialect {
+	case DialectMSSQL:
+		pool := testutil.MSSQLAdminDB(t, rig.admin)
+		rig.logins = append(rig.logins, pool)
+		if err := pool.QueryRow(`SELECT SUSER_NAME()`).Scan(&who); err != nil {
+			t.Fatalf("UNMEASURED: reading the login's name: %v", err)
+		}
+		probe(pool)
+		rig.deployStore = func(tenant string) installableStore { return NewMSSQLStore(pool).WithTenant(tenant) }
+	default:
+		secret := make([]byte, plugin.TenantRoleSecretMinBytes)
+		for i := range secret {
+			secret[i] = byte(i + 1)
+		}
+		pools := map[string]*sql.DB{}
+		for _, tenant := range tenants {
+			// The whole id in the name: these ids share their first eight characters, and
+			// admin.tenants.name is unique.
+			if _, err := rig.admin.Exec(`INSERT INTO admin.tenants (tenant_id, name, display_name) VALUES ($1, $2, $2) ON CONFLICT (tenant_id) DO NOTHING`, tenant, "t-"+tenant); err != nil {
+				t.Fatalf("UNMEASURED: seeding tenant %s: %v", tenant, err)
+			}
+			password, err := plugin.TenantRolePassword(secret, tenant)
+			if err != nil {
+				t.Fatalf("derive the tenant password: %v", err)
+			}
+			var role sql.NullString
+			if err := rig.admin.QueryRow(`SELECT admin.create_tenant_role($1::uuid, $2)`, tenant, password).Scan(&role); err != nil || !role.Valid {
+				t.Fatalf("UNMEASURED: admin.create_tenant_role for %s: %v (valid=%v)", tenant, err, role.Valid)
+			}
+			db, err := sql.Open("postgres", testutil.TagPostgresDSN(rewriteDSNCredential(t, testutil.PostgresTestDSN(), role.String, password)))
+			if err != nil {
+				t.Fatalf("open the tenant login: %v", err)
+			}
+			pools[tenant] = db
+			rig.logins = append(rig.logins, db)
+			who = role.String
+			tenantID, roleName := tenant, role.String
+			t.Cleanup(func() {
+				db.Close()
+				rig.admin.Exec(`DELETE FROM workflow_defs WHERE tenant_id = $1`, tenantID)
+				rig.admin.Exec(`DELETE FROM admin.tenant_roles WHERE tenant_id = $1`, tenantID)
+				rig.admin.Exec(`DELETE FROM admin.tenants WHERE tenant_id = $1`, tenantID)
+				rig.admin.Exec(fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, "tenant_"+strings.ReplaceAll(tenantID, "-", "_")))
+				rig.admin.Exec(fmt.Sprintf(`DROP ROLE IF EXISTS %q`, roleName))
+			})
+		}
+		probe(pools[tenants[0]])
+		rig.deployStore = func(tenant string) installableStore {
+			db, ok := pools[tenant]
+			if !ok {
+				t.Fatalf("UNMEASURED: no login was made for tenant %s", tenant)
+			}
+			return NewPostgresStore(db).WithTenant(tenant)
+		}
+	}
+	return who, readsLibrary
 }
