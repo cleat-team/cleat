@@ -256,29 +256,41 @@ func createAPIKeyStmt(dialect string) (stmt string, needsKeyID bool) {
 // wrote keys to the base database and read them from the tenant's, and every
 // authenticated request 401'd. See cleat#866.
 func (s *TenantStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), which the middleware
+// records as the request's subject. It is the one statement for both: ResolveTenantFromAPIKey answers
+// through it, so the tenant and the key id can never come from two lookups that disagree, and the
+// expiry and disabled clauses below are written once.
+func (s *TenantStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
 	// SQL Server returns UNIQUEIDENTIFIER in a byte order the uuid package does
-	// not scan directly, so the column is converted in the projection and parsed
-	// here -- the same shape as MSSQLStore.ResolveTenantFromAPIKey
-	// (engine/mssql_deployment.go:122). engine's TestMSSQLUUIDColumnsAreConverted
-	// InProjections enforces this across the tree and caught the first version
-	// of this function, which selected the raw column.
+	// not scan directly, so BOTH columns are converted in the projection and parsed
+	// here -- the same shape as MSSQLStore.ResolveAPIKey (engine/mssql_deployment.go).
+	// engine's TestMSSQLUUIDColumnsAreConvertedInProjections enforces this across
+	// the tree and caught the first version of this function, which selected the
+	// raw column.
 	if s.dialect == DialectMSSQL {
-		var raw string
-		if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&raw); err != nil {
-			return uuid.Nil, err
+		var rawTenant, rawKey string
+		if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&rawTenant, &rawKey); err != nil {
+			return uuid.Nil, uuid.Nil, err
 		}
-		tenantID, err := uuid.Parse(raw)
+		tenantID, err := uuid.Parse(rawTenant)
 		if err != nil {
-			return uuid.Nil, fmt.Errorf("resolve tenant from api key: parse uuid: %w", err)
+			return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant from api key: parse tenant uuid: %w", err)
 		}
-		return tenantID, nil
+		keyID, err := uuid.Parse(rawKey)
+		if err != nil {
+			return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant from api key: parse key uuid: %w", err)
+		}
+		return tenantID, keyID, nil
 	}
 
-	var tenantID uuid.UUID
-	if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&tenantID); err != nil {
-		return uuid.Nil, err
+	if err := s.db.QueryRowContext(ctx, resolveAPIKeyStmt(s.dialect), keyHash).Scan(&tenantID, &keyID); err != nil {
+		return uuid.Nil, uuid.Nil, err
 	}
-	return tenantID, nil
+	return tenantID, keyID, nil
 }
 
 // resolveAPIKeyStmt mirrors createAPIKeyStmt: same table per dialect, same
@@ -295,11 +307,11 @@ func resolveAPIKeyStmt(dialect string) string {
 	case DialectMySQL:
 		// No admin schema: schema and database are one namespace in MySQL, and
 		// the keys live in the base database the DSN names.
-		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
+		return `SELECT tenant_id, key_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
 	case DialectMSSQL:
-		return `SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
+		return `SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)), LOWER(CONVERT(NVARCHAR(36), key_id)) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
 	default:
-		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
+		return `SELECT tenant_id, key_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
 	}
 }
 

@@ -123,8 +123,11 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 	},
 	// Digest moved when cleat#2370 added the expiry clause -- same statement,
 	// same reason (mysqlMustNotScope), text only.
-	"mysql_store.go:ResolveTenantFromAPIKey#443dc681a32d": {
-		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nu",
+	// Digest moved again when cleat#3623 added key_id to the projection -- same statement, same
+	// reason (mysqlMustNotScope), text only. The function is now ResolveAPIKey; ResolveTenantFromAPIKey
+	// answers through it.
+	"mysql_store.go:ResolveAPIKey#958bc1eb0a55": {
+		SQL:    "select tenant_id, key_id from tenant_api_keys where key_hash = ? and disabled_",
 		Reason: mysqlMustNotScope,
 	},
 
@@ -141,8 +144,8 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 	// expiry clause"). Same reason, for the same cause: tenant_id is the
 	// UNKNOWN this statement exists to resolve from a key hash, not something
 	// already known to scope by.
-	"tenant_store.go:resolveAPIKeyStmt#443dc681a32d": {
-		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nu",
+	"tenant_store.go:resolveAPIKeyStmt#958bc1eb0a55": {
+		SQL:    "select tenant_id, key_id from tenant_api_keys where key_hash = ? and disabled_",
 		Reason: mysqlMustNotScope,
 	},
 	// apikeycount.go:liveAPIKeyCountQuery runs at worker startup, before any

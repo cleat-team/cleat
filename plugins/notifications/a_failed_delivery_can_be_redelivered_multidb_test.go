@@ -25,18 +25,26 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// apiKeyResolver is the one thing auth.MiddlewareWithMux needs from a store: the tenant a key hash
-// belongs to. It knows a single key.
+// apiKeyResolver is what auth.MiddlewareWithMux needs from a store: the tenant a key hash belongs
+// to and, as an auth.KeyResolver, the key's own id. It knows a single key.
 type apiKeyResolver struct {
 	hash   []byte
 	tenant uuid.UUID
+	keyID  uuid.UUID
 }
 
-func (r apiKeyResolver) ResolveTenantFromAPIKey(_ context.Context, keyHash []byte) (uuid.UUID, error) {
+var _ auth.KeyResolver = apiKeyResolver{}
+
+func (r apiKeyResolver) ResolveAPIKey(_ context.Context, keyHash []byte) (uuid.UUID, uuid.UUID, error) {
 	if bytes.Equal(keyHash, r.hash) {
-		return r.tenant, nil
+		return r.tenant, r.keyID, nil
 	}
-	return uuid.Nil, sql.ErrNoRows
+	return uuid.Nil, uuid.Nil, sql.ErrNoRows
+}
+
+func (r apiKeyResolver) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	tenant, _, err := r.ResolveAPIKey(ctx, keyHash)
+	return tenant, err
 }
 
 // cleat#3612: POST /webhooks/{id}/deliveries/{delivery_id}/redeliver puts one FAILED delivery
@@ -380,10 +388,9 @@ func TestAFailedDeliveryCanBeRedeliveredAndOnlyAFailedOne(t *testing.T) {
 			// The normal caller: a tenant API key, through the real auth middleware and the plugin's
 			// real route table, not a handler called with a hand-built context. It pins two things.
 			// The route is reachable that way (path values and all), and the identity it records is
-			// NONE: MiddlewareWithMux resolves only the tenant from a key and sets nothing else, so
-			// no subject exists for the handler to read (cleat#3623). When that issue lands this
-			// assertion is the one that changes, to the key's id, never to the key or its hash.
-			t.Run("an API-key caller through the real auth middleware: it goes through and records no identity", func(t *testing.T) {
+			// the key's id, "key:<id>" (cleat#3623): never the key or its hash. Before that issue
+			// MiddlewareWithMux set no subject for a key, and this recorded none.
+			t.Run("an API-key caller through the real auth middleware: it goes through and records the key it used", func(t *testing.T) {
 				wh, r := newWebhook(t, 410)
 				id := failedDelivery(t, wh, r, 8)
 
@@ -393,7 +400,8 @@ func TestAFailedDeliveryCanBeRedeliveredAndOnlyAFailedOne(t *testing.T) {
 				}
 				const apiKey = "cleat_test_redeliver_key"
 				sum := sha256.Sum256([]byte(apiKey))
-				handler := auth.MiddlewareWithMux(apiKeyResolver{hash: sum[:], tenant: tenantID}, true, mux)(mux)
+				keyID := uuid.New()
+				handler := auth.MiddlewareWithMux(apiKeyResolver{hash: sum[:], tenant: tenantID, keyID: keyID}, true, mux)(mux)
 				do := func(bearer string) *httptest.ResponseRecorder {
 					req := httptest.NewRequest("POST", "/webhooks/"+wh+"/deliveries/"+id+"/redeliver", nil)
 					if bearer != "" {
@@ -426,9 +434,8 @@ func TestAFailedDeliveryCanBeRedeliveredAndOnlyAFailedOne(t *testing.T) {
 				if got.Status != "pending" || got.RedeliveryCount != 1 || got.LastRedeliveredAt == nil {
 					t.Errorf("the resend did not take: status=%q count=%d at=%v", got.Status, got.RedeliveryCount, got.LastRedeliveredAt)
 				}
-				if got.LastRedeliveredBy != nil {
-					t.Errorf("last_redelivered_by = %q for an API-key caller; nothing resolves an identity for one today (cleat#3623), so this must be absent, and the key itself must never be recorded",
-						*got.LastRedeliveredBy)
+				if want := auth.KeySubjectPrefix + keyID.String(); got.LastRedeliveredBy == nil || *got.LastRedeliveredBy != want {
+					t.Errorf("last_redelivered_by = %v for an API-key caller, want %q (cleat#3623): the key's id, never the key or its hash", got.LastRedeliveredBy, want)
 				}
 			})
 		})

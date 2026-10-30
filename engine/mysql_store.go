@@ -822,14 +822,20 @@ func (s *MySQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflo
 // touched this store, so an expired key authenticated against any host that
 // wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *MySQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
-	var tenantID uuid.UUID
-	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id FROM tenant_api_keys
-		 WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`, keyHash).Scan(&tenantID)
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), the one statement both
+// answer through. It satisfies auth.KeyResolver. key_id is a char(36) here, which scans into a uuid.
+func (s *MySQLStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT tenant_id, key_id FROM tenant_api_keys
+		 WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`, keyHash).Scan(&tenantID, &keyID)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
-	return tenantID, nil
+	return tenantID, keyID, nil
 }
 
 // ---------------------------------------------------------------------------

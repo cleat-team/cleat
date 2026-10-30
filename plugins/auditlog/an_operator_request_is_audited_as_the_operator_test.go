@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,10 +111,12 @@ func TestAnOperatorRequestIsAuditedAsTheOperator(t *testing.T) {
 			"", withForgedTenant, "/api/admin/health", opKey, want{uuid.Nil, op}},
 		{"...but a handler that acts on it says so, and then it is B's chain",
 			"", withForgedTenant, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
-		// The control: a tenant key's own row is what it always was, and a handler that notes a
-		// target does not move it -- only an operator request listens to the slot.
-		{"the control: a tenant key on the same route stays on its own chain with no subject",
-			"", chain, "/api/admin/acts-on-b", "test-api-key", want{testTenantID, ""}},
+		// The control: a tenant key's own row stays on its own chain, and a handler that notes a
+		// target does not move it -- only an operator request listens to the slot. What changed with
+		// cleat#3623 is the SUBJECT: this row used to record none ("") because an API-key request
+		// carried no subject, and it now records the key it came in on, never the secret or its hash.
+		{"the control: a tenant key on the same route stays on its own chain, attributed to that key",
+			"", chain, "/api/admin/acts-on-b", "test-api-key", want{testTenantID, tenantKeySubject("test-api-key")}},
 	}
 
 	for _, tc := range rows {
@@ -144,4 +147,11 @@ func eventCount(s *fakeDBStore) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.events)
+}
+
+// tenantKeySubject is the subject a tenant API key's request is recorded under, computed from the key
+// the way the fake database derives its id.
+func tenantKeySubject(rawKey string) string {
+	h := sha256.Sum256([]byte(rawKey))
+	return auth.KeySubjectPrefix + fakeKeyID(fmt.Sprintf("%x", h)).String()
 }

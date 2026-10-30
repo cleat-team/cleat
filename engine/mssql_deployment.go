@@ -198,18 +198,30 @@ func (s *MSSQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 // touched this store, so an expired key authenticated against any host that
 // wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
-	var tenantIDStr string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenant_api_keys
-		 WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`, keyHash).Scan(&tenantIDStr)
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), the one statement both
+// answer through. It satisfies auth.KeyResolver. BOTH uuid columns are converted in the projection,
+// because SQL Server returns UNIQUEIDENTIFIER in a byte order the uuid package does not scan directly.
+func (s *MSSQLStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
+	var tenantIDStr, keyIDStr string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)), LOWER(CONVERT(NVARCHAR(36), key_id)) FROM admin.tenant_api_keys
+		 WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`, keyHash).Scan(&tenantIDStr, &keyIDStr)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
-	tenantID, err := uuid.Parse(tenantIDStr)
+	tenantID, err = uuid.Parse(tenantIDStr)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("resolve tenant: parse uuid: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant: parse tenant uuid: %w", err)
 	}
-	return tenantID, nil
+	keyID, err = uuid.Parse(keyIDStr)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("resolve tenant: parse key uuid: %w", err)
+	}
+	return tenantID, keyID, nil
 }
 
 // ListWorkflows returns workflow instances filtered by the given filter parameters.

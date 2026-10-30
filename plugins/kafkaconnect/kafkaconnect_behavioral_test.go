@@ -310,12 +310,12 @@ func (c *fakeConn) queryTenantByKeyHash(args []driver.NamedValue) (driver.Rows, 
 	hashHex := fmt.Sprintf("%x", keyHash)
 	tid, ok := c.store.apiKeys[hashHex]
 	if !ok {
-		return &fakeRows{columns: []string{"tenant_id"}}, nil
+		return &fakeRows{columns: []string{"tenant_id", "key_id"}}, nil
 	}
 
 	return &fakeRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{tid}},
+		columns: []string{"tenant_id", "key_id"},
+		data:    [][]driver.Value{{tid, "11111111-1111-1111-1111-111111111111"}},
 	}, nil
 }
 

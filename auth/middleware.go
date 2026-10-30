@@ -98,9 +98,42 @@ type TenantResolver interface {
 	ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error)
 }
 
+// KeyResolver is a TenantResolver that can also say WHICH key it resolved (cleat#3623).
+//
+// It is a separate, optional interface so a resolver that cannot return a key id still works: it
+// simply yields no subject, which is what every API-key request did before. Every production
+// resolver implements it (auth.TenantStore, and the engine's Postgres, MySQL, MSSQL and sharded
+// stores), and a test asserts that, because an optional interface that a resolver quietly fails to
+// satisfy is a mechanism that exists and is wired to nothing.
+//
+// The method returns plain uuid values and not a shared struct, because auth and the engine
+// package import neither each other.
+type KeyResolver interface {
+	TenantResolver
+	// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id. It applies exactly the same
+	// rules (not disabled, not expired), because the engine stores and auth.TenantStore each answer
+	// ResolveTenantFromAPIKey by calling it: one statement per store, so the two cannot drift.
+	ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error)
+}
+
 // TenantFromAPIKey looks up a tenant by API key hash.
 func TenantFromAPIKey(ctx context.Context, store TenantResolver, keyHash []byte) (uuid.UUID, error) {
 	return store.ResolveTenantFromAPIKey(ctx, keyHash)
+}
+
+// KeySubjectPrefix begins the subject recorded for a request authenticated by a tenant API key:
+// "key:<key id>". The id is the key's own row id, shown by the key-listing routes; it is not derived
+// from the secret and reveals nothing that could be used as one. NEVER the secret, and never its hash.
+const KeySubjectPrefix = "key:"
+
+// resolveKey resolves an API key hash to its tenant and, when the resolver can say, the key's id.
+// keyID is uuid.Nil for a resolver that cannot (a TenantResolver that is not a KeyResolver).
+func resolveKey(ctx context.Context, store TenantResolver, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
+	if kr, ok := store.(KeyResolver); ok {
+		return kr.ResolveAPIKey(ctx, keyHash)
+	}
+	tenantID, err = TenantFromAPIKey(ctx, store, keyHash)
+	return tenantID, uuid.Nil, err
 }
 
 // infrastructurePaths are answered without a credential because the things that call them (a kubelet,
@@ -188,12 +221,31 @@ func MiddlewareWithMux(store TenantResolver, requireAuth bool, mux *http.ServeMu
 				return
 			}
 			keyHash := sha256Hash(key)
-			tenantID, err := TenantFromAPIKey(r.Context(), store, keyHash)
+			tenantID, keyID, err := resolveKey(r.Context(), store, keyHash)
 			if err != nil {
 				http.Error(w, `{"error":"invalid or revoked API key"}`, http.StatusUnauthorized)
 				return
 			}
 			ctx := tenantctx.With(r.Context(), tenantID)
+			// WHO made the request, for anything that attributes an action (the audit log's user_id, a
+			// library install's installed_by, a plugin-dependency override's actor). Before cleat#3623
+			// an API-key caller, which is the normal way a request authenticates, carried no subject
+			// and those columns recorded nothing.
+			//
+			// ONLY WHEN NOTHING HAS SET ONE. WithSubject overwrites, so this layer must not replace an
+			// identity that a layer OUTSIDE it already established with the weaker fact that a key was
+			// presented. cleat-worker has no such layer: plugin middleware, oauthprovider included,
+			// runs INSIDE this one (composeAuthChain wraps the plugin handler), so there an OAuth
+			// email set later wins by overwriting the key's subject, and this guard decides nothing.
+			// It is kept for a host that puts an identity layer outside this one. The two do not
+			// overlap on a successful request in the worker either way -- a cleat API key carries a
+			// cleat_sk_ prefix and a session token does not -- which is a property of two token
+			// formats, not something this line should lean on.
+			if keyID != uuid.Nil {
+				if existing, ok := SubjectFromContext(ctx); !ok || existing == "" {
+					ctx = WithSubject(ctx, KeySubjectPrefix+keyID.String())
+				}
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

@@ -968,7 +968,7 @@ func TestMSSQLStore_GetActiveInstanceCountsByVersion_BeginTxError(t *testing.T) 
 func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 	expectedUUID := uuid.New()
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{expectedUUID.String()}}},
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{expectedUUID.String(), uuid.New().String()}}},
 	}, nil)
 	defer db.Close()
 
@@ -979,6 +979,24 @@ func TestMSSQLStore_ResolveTenantFromAPIKey(t *testing.T) {
 	}
 	if got != expectedUUID {
 		t.Errorf("UUID = %v, want %v", got, expectedUUID)
+	}
+}
+
+// ResolveAPIKey returns the key's own id beside the tenant (cleat#3623), parsed from the converted
+// projection. The two ids are different values so a swapped scan cannot pass.
+func TestMSSQLStore_ResolveAPIKey_ReturnsTheKeyIDBesideTheTenant(t *testing.T) {
+	tenant, key := uuid.New(), uuid.New()
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM admin.tenant_api_keys", data: [][]driver.Value{{tenant.String(), key.String()}}},
+	}, nil)
+	defer db.Close()
+
+	gotTenant, gotKey, err := NewMSSQLStore(db).ResolveAPIKey(context.Background(), []byte("test-key-hash"))
+	if err != nil {
+		t.Fatalf("ResolveAPIKey: %v", err)
+	}
+	if gotTenant != tenant || gotKey != key {
+		t.Errorf("ResolveAPIKey = (%v, %v), want tenant %v and key %v", gotTenant, gotKey, tenant, key)
 	}
 }
 

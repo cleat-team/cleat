@@ -379,12 +379,15 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 	// MySQL side of this same pair (mysql_store.go:ResolveTenantFromAPIKey
 	// / tenant_store.go's MySQL branch) was verified and allowlisted the
 	// same way in cleat#3318/#3320.
-	"tenant_store.go:resolveAPIKeyStmt#7d4bb9b58ba1": {
-		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+	// Digest moved when cleat#3623 added key_id to the projection, so the middleware can record
+	// WHICH key authenticated a request. Same statement, same reason (mustNotScope), text only. The
+	// engine store's function is now ResolveAPIKey: ResolveTenantFromAPIKey answers through it.
+	"tenant_store.go:resolveAPIKeyStmt#e27b83837841": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)), lower(convert(nvarchar(36), ke",
 		Reason: mustNotScope,
 	},
-	"mssql_deployment.go:ResolveTenantFromAPIKey#7d4bb9b58ba1": {
-		SQL:    "select lower(convert(nvarchar(36), tenant_id)) from admin.tenant_api_keys wher",
+	"mssql_deployment.go:ResolveAPIKey#e27b83837841": {
+		SQL:    "select lower(convert(nvarchar(36), tenant_id)), lower(convert(nvarchar(36), ke",
 		Reason: mustNotScope,
 	},
 	// apikeycount.go:liveAPIKeyCountQuery runs at worker startup, before any

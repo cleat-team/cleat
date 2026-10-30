@@ -384,11 +384,11 @@ func (c *fakeKafkaConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows
 	hashHex := fmt.Sprintf("%x", keyHash)
 	tid, ok := c.store.apiKeys[hashHex]
 	if !ok {
-		return &fakeKafkaRows{cols: []string{"tenant_id"}}, nil
+		return &fakeKafkaRows{cols: []string{"tenant_id", "key_id"}}, nil
 	}
 	return &fakeKafkaRows{
-		cols: []string{"tenant_id"},
-		data: [][]driver.Value{{tid}},
+		cols: []string{"tenant_id", "key_id"},
+		data: [][]driver.Value{{tid, "11111111-1111-1111-1111-111111111111"}},
 	}, nil
 }
 

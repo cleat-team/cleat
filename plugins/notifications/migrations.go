@@ -667,9 +667,10 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// redelivery_count says it happened and how often, last_redelivered_at when (the
 			// database clock, like every other timestamp in this table), and
 			// last_redelivered_by who asked, as auth.SubjectFromContext resolved the request.
-			// last_redelivered_by is NULL when nothing resolved one, which is the usual case for
-			// an API-key caller (auth.WithSubject says so): recording that the identity was not
-			// captured is the honest value, and refusing the resend over it would be the wrong one.
+			// last_redelivered_by is NULL when nothing resolved one: recording that the identity
+			// was not captured is the honest value, and refusing the resend over it would be the
+			// wrong one. (Until cleat#3623 that was the usual case for an API-key caller, which
+			// now records "key:<key id>".)
 			//
 			// A NEW VERSION, NEVER AN EDIT TO v1, for the same reason v6, v7 and v8 are. MySQL has
 			// no ADD COLUMN IF NOT EXISTS and its DDL is not transactional, so every step is
