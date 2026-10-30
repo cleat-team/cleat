@@ -801,6 +801,16 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 		// stand-in created after the migrations ran, so it is not in 005's loop and
 		// gets the same grants here. Guarded, because a database that predates 005
 		// has no such schema.
+		// SELECT, INSERT and UPDATE on the plugin-name registry, which is what migration 008
+		// grants the real application role (and DELETE is revoked from it): a worker records
+		// its plugins at registration and the deploy and install checks read them
+		// (cleat#3600). Guarded, because a database that predates 008 has no such table.
+		`DO $$ BEGIN
+			IF to_regclass('admin.registered_plugins') IS NOT NULL THEN
+				EXECUTE 'GRANT SELECT, INSERT, UPDATE ON admin.registered_plugins TO ` + PostgresRLSTestRole + `';
+			END IF;
+		END $$;`,
+
 		`DO $$ BEGIN
 			IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'library') THEN
 				EXECUTE 'GRANT USAGE ON SCHEMA library TO ` + PostgresRLSTestRole + `';

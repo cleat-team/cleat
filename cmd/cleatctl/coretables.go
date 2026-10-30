@@ -16,6 +16,7 @@ package main
 var coreTables = []string{
 	"admin.orgs",
 	"admin.plugin_tables",
+	"admin.registered_plugins",
 	"admin.operator_api_keys",
 	"admin.tenant_api_keys",
 	"admin.tenant_roles",
@@ -70,7 +71,7 @@ var coreTables = []string{
 // found by running check-db against a real, freshly-migrated MySQL database
 // (cleat-review2, #2924 round 7).
 //
-// payload_encryption_ever_enabled (cleat#2324, migrations/postgres/008) is
+// payload_encryption_ever_enabled (cleat#2324, defined in migrations/postgres/001_schema.sql) is
 // the first entry: encrypt-sensitive-payloads is a PostgreSQL-only feature --
 // MySQL and SQL Server have no equivalent key-ring flag and no migration
 // defining this table -- so a MySQL or SQL Server database lacking it is

@@ -64,6 +64,12 @@ type WorkerRegistration struct {
 	// nil means "no master key", which is stored as the empty string and is NOT
 	// the same as NULL, which means a row that predates this column.
 	SecretKeyVersions []int
+
+	// Plugins are the names of the plugins this worker has loaded. They are recorded in
+	// the plugin-name registry (plugin_registry.go) in the same statement span as the
+	// worker's own row, and that record outlives the row: nothing deletes from it
+	// (cleat#3600). Names only; a plugin's version is checked at claim time.
+	Plugins []string
 }
 
 // table is admin.workers everywhere except MySQL, which has no schemas -- its
@@ -130,6 +136,13 @@ func (r *WorkerRegistry) Register(ctx context.Context, reg WorkerRegistration) e
 // how RegisterUnderKeyGate makes the registration part of the span that holds
 // the secret-key gate.
 func (r *WorkerRegistry) registerOn(ctx context.Context, q querier, reg WorkerRegistration) error {
+	// Before the worker's own row, so a name the plugin table would reject leaves no
+	// half-registered worker behind on a connection that is not in a transaction.
+	for _, n := range reg.Plugins {
+		if err := validRegisteredPluginName(n); err != nil {
+			return fmt.Errorf("worker registry: register %s: plugin registry: %w", reg.WorkerID, err)
+		}
+	}
 	_, err := q.ExecContext(ctx, r.stmt(
 		"INSERT INTO ", r.table(),
 		" (worker_id, hostname, address, pid, concurrency, connection_budget,",
@@ -142,6 +155,11 @@ func (r *WorkerRegistry) registerOn(ctx context.Context, q querier, reg WorkerRe
 		reg.WorkerID, reg.Hostname, reg.Address, reg.PID, reg.Concurrency, reg.ConnectionBudget,
 		encodeKeyVersions(reg.SecretKeyVersions))
 	if err != nil {
+		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
+	}
+	// On the same q, so under RegisterUnderKeyGate the names commit or roll back with the
+	// worker's row. An error here fails the registration, as any other statement in it does.
+	if err := recordPluginsOn(ctx, q, r.Dialect, reg.Plugins); err != nil {
 		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
 	}
 	return nil

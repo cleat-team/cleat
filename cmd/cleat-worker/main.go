@@ -1891,6 +1891,7 @@ func main() {
 		PID:              os.Getpid(),
 		Concurrency:      *concurrency,
 		ConnectionBudget: *clusterConnectionBudgetFlag,
+		Plugins:          loadedPluginNames(plugList),
 	}, func(msg string) {
 		logger.WarnContext(context.Background(), msg, "worker_id", workerID)
 	}); err != nil {

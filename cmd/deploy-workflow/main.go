@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -32,6 +33,9 @@ func main() {
 	// refused unless this is given. The embedded stamp wins here (chooseDeployVersion),
 	// and `cleat build` stamps 1 by default, so a rebuild-and-redeploy lands on v1.
 	force := flag.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code, and a running worker can keep the previous bytes for up to about 5 seconds after a replacement of the same length)")
+	// cleat#3600 (owner D52): the explicit override of the plugin-dependency check, for a
+	// definition deployed before the first worker carrying its plugin has registered.
+	allowMissingPlugins := flag.Bool("allow-missing-plugins", false, "deploy even though a plugin this binary depends on has never been registered by any worker (logged; a run that needs it is released until a worker carrying it registers)")
 	flag.Parse()
 
 	args := flag.Args()
@@ -64,6 +68,8 @@ func main() {
 	ctx := context.Background()
 	var store engine.WorkflowStore
 	var closer io.Closer
+	// registryDB is the connection the plugin-name registry is read through (cleat#3600).
+	var registryDB *sql.DB
 
 	switch *driver {
 	case "postgres":
@@ -73,6 +79,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
+		registryDB = db
 		factory := engine.NewPostgresStoreFactory(db, "public")
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
 		if err != nil {
@@ -88,6 +95,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
+		registryDB = db
 		baseDSN := mysqlBaseDSN(*dbURL)
 		factory := engine.NewMySQLStoreFactory(db, baseDSN)
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
@@ -98,6 +106,14 @@ func main() {
 		defer closer.Close()
 
 	case "mssql":
+		// The store factory holds its own pools; the registry read needs a plain connection.
+		mdb, merr := sql.Open("sqlserver", *dbURL)
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "failed to open mssql: %v\n", merr)
+			os.Exit(1)
+		}
+		defer mdb.Close()
+		registryDB = mdb
 		factory := engine.NewMSSQLStoreFactory(*dbURL)
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
 		if err != nil {
@@ -222,6 +238,19 @@ func main() {
 		CreatedAt:  time.Now(),
 
 		ReplaceUnderOpenRuns: *force,
+	}
+	// cleat#3600. Before the write, so a refusal leaves no row. This command records no
+	// plugin_deps on the row, so the binary's embedded deps are the only declaration.
+	var pluginSrc engine.PluginSource
+	if registryDB != nil {
+		pluginSrc = &engine.PluginNameRegistry{DB: registryDB, Dialect: engine.Dialect(*driver)}
+	}
+	if perr := engine.EnforcePluginDeps(ctx, pluginSrc, engine.BinaryPluginDeps(wasmBytes), nil, *allowMissingPlugins, slog.Default()); perr != nil {
+		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, version, perr)
+		if errors.Is(perr, engine.ErrUnmetPluginDeps) {
+			fmt.Fprintln(os.Stderr, engine.UnmetPluginDepsCLIAdvice)
+		}
+		os.Exit(1)
 	}
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {
 		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, version, err)

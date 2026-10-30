@@ -342,5 +342,6 @@ func (w *Worker) registerInWorkerRegistry(ctx context.Context) error {
 		PID:              os.Getpid(),
 		Concurrency:      w.concurrency,
 		ConnectionBudget: w.clusterConnectionBudget,
+		Plugins:          loadedPluginNames(w.plugList),
 	}, func(msg string) { w.logger.WarnContext(ctx, msg, "worker_id", w.id) })
 }

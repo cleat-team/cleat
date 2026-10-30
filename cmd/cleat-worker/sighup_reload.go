@@ -147,6 +147,7 @@ func (w *Worker) reloadKeyRingsOnSIGHUP(ctx context.Context) {
 		Concurrency:       w.concurrency,
 		ConnectionBudget:  w.clusterConnectionBudget,
 		SecretKeyVersions: candidateSecrets.Versions(),
+		Plugins:           loadedPluginNames(w.plugList),
 	}
 	// revertSecretsTo/secretsMoved cover a gap cleat-review found and
 	// falsified live: RegisterUnderKeyGate runs this callback, including the
