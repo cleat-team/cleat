@@ -123,6 +123,44 @@ func (s *ShardedStore) PayloadEncryptionEverEnabled(ctx context.Context) (bool, 
 
 var _ PayloadEncryptionState = (*ShardedStore)(nil)
 
+// IsTenantSuspended implements TenantSuspensionReader by reporting true if ANY shard says the tenant
+// is suspended (cleat#3596).
+//
+// Both start paths decide whether to refuse a suspended tenant with a type assertion on the store they
+// hold. This type used to implement nothing of the kind, so the assertion failed and the check was
+// skipped without a word: on a sharded deployment a suspended tenant could still start work.
+//
+// WHY "ANY": a shard is a database or a schema in a shared one, and nothing here knows which of them
+// carries a given tenant's row (routing is by workflow key, not tenant). Where shards are separate
+// databases each has its own admin.tenants, and asking one would make the answer depend on which; where
+// they share one, every shard answers alike. Reading the flag off all of them and refusing on a single
+// yes is right in both cases.
+// A tenant with no row on any shard is not suspended, matching the single-store reading.
+//
+// AN UNREADABLE FLAG IS NOT A CLEAR ONE. A shard that errors, or whose store cannot answer, makes this
+// an error rather than "not suspended"; the start paths turn an error into a refusal. It stops at the
+// first shard that answers yes, so a sibling's failure after that point is not consulted.
+func (s *ShardedStore) IsTenantSuspended(ctx context.Context, tenantID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sh := range s.shards {
+		r, ok := sh.Store.(TenantSuspensionReader)
+		if !ok {
+			return false, fmt.Errorf("is tenant suspended: shard %q store %T does not support it", sh.Config.Name, sh.Store)
+		}
+		suspended, err := r.IsTenantSuspended(ctx, tenantID)
+		if err != nil {
+			return false, fmt.Errorf("is tenant suspended: shard %q: %w", sh.Config.Name, err)
+		}
+		if suspended {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var _ TenantSuspensionReader = (*ShardedStore)(nil)
+
 // NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore
 // instances (one per shard). Each store is already initialized and migrated.
 // The stores slice must be non-empty and have the same length as configs.

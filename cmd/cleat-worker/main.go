@@ -191,8 +191,9 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	// "suspended with no unsettled runs" unsatisfiable (cleat#3594).
 	//
 	// Asked of the SCOPED store, as handleStart asks its tenant-scoped one. A
-	// store that cannot answer (MySQL, which is single-tenant, and a sharded
-	// store) is not refused, which is also what handleStart does; a store that
+	// store that cannot answer (MySQL, which is single-tenant) is not refused,
+	// which is also what handleStart does; a sharded store answers by asking
+	// every shard (cleat#3596), which it did not until then; a store that
 	// answers with an ERROR is, because an unreadable flag is not a clear one.
 	if susp, ok := scoped.(engine.TenantSuspensionReader); ok {
 		suspended, err := susp.IsTenantSuspended(ctx, req.TenantID)
