@@ -185,11 +185,15 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, doRequestErrorBodyLimit))
 		return nil, classifyError(resp.StatusCode, body)
 	}
 	return resp, nil
 }
+
+// doRequestErrorBodyLimit is how much of a refusal's body doRequest keeps. A caller that
+// decodes a refusal's JSON has to expect it cut here (see UnmetLibraryPluginsError.Truncated).
+const doRequestErrorBodyLimit = 4096
 
 // UpstreamStatusError carries the HTTP status the Cleat worker actually
 // returned, recoverable with errors.As.
@@ -209,7 +213,7 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 type UpstreamStatusError struct {
 	// Status is the HTTP status code the worker returned.
 	Status int
-	// Body is the raw response body, truncated to 4096 bytes by doRequest.
+	// Body is the raw response body, truncated to doRequestErrorBodyLimit (4096) bytes by doRequest.
 	Body []byte
 }
 
