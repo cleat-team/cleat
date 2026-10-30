@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
+
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 )
@@ -50,14 +52,64 @@ func TestADryRunReportsWithoutDeleting(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	id := "rdr-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	stamp := strconv.FormatInt(time.Now().UnixNano(), 10)
+	id := "rdr-" + stamp
+
+	// CLAIM ONLY THIS TEST'S RUN (cleat#3603). ClaimWorkflow takes the next ready run on the store's task
+	// queues, and the suite database is shared by every test in the package and persists between runs, so
+	// a run another test left `ready` on the default queue would be claimed and finalized INSTEAD of the
+	// one seeded here. The seeded row would then never complete, and whether the test still passed would
+	// depend on whether the stranger's finalized row happened to match the preview too -- which it does or
+	// does not according to the database clock's offset from this process's. So this definition gets a
+	// queue of its own, and the claim goes through a store that polls only that queue.
+	queue := "dry-run-" + stamp
+
+	// A STRANGER IS PLANTED ON THE DEFAULT QUEUE, every run, so the isolation above is exercised instead of
+	// merely assumed. It is the realistic leak: a run another test left `ready`. It is cancelled when this
+	// test ends, so the test cannot become the leaker it guards against. Started under a definition of its
+	// own, because `def` is about to be moved to this test's queue.
+	const strangerDef = "retention-dry-run-stranger"
+	if err := store.DeployWorkflowDef(ctx, &engine.WorkflowDef{
+		Name: strangerDef, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1, MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("deploy the stranger: %v", err)
+	}
+	strangerID := "rdr-stranger-" + stamp
+	if _, _, err := store.StartNewRun(ctx, strangerID, strangerDef, 1, json.RawMessage(`{}`), "",
+		engine.DefaultTenantUUID, 0); err != nil {
+		t.Fatalf("StartNewRun (stranger): %v", err)
+	}
+	// Both runs are settled on the way out, but only if they are still `ready`: the seeded run normally
+	// finishes `done` and keeps that status, and it is the run a FAILING test leaves behind, which is how a
+	// test turns into the next test's leak.
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(context.Background(),
+			`UPDATE workflow_leases SET status = 'cancelled' WHERE id = ANY($1) AND status = 'ready'`,
+			pq.Array([]string{strangerID, "rdr-" + stamp})); err != nil {
+			t.Errorf("cancel the planted stranger %s and the seeded run: %v -- they are now ready runs in the shared suite database",
+				strangerID, err)
+		}
+	})
+	if _, err := db.ExecContext(ctx,
+		`UPDATE workflow_defs SET task_queue = $1 WHERE name = $2 AND version = 1 AND tenant_id = $3`,
+		queue, def, engine.DefaultTenantUUID); err != nil {
+		t.Fatalf("give the definition its own task queue: %v", err)
+	}
 	if _, _, err := store.StartNewRun(ctx, id, def, 1, json.RawMessage(`{}`), "",
 		engine.DefaultTenantUUID, 0); err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
-	claimed, err := store.ClaimWorkflow(ctx, "dry-run-worker")
+	claimed, err := engine.NewPostgresStore(db, queue).ClaimWorkflow(ctx, "dry-run-worker")
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimWorkflow: %v %v", claimed, err)
+	}
+	// Belt and braces, and what names the cause if the isolation above ever stops holding: a failure here
+	// says a run that is not this test's was claimed, instead of the fixture-shaped "the preview reported
+	// 0 completed workflows" it would otherwise surface as.
+	if claimed.ID != id {
+		t.Fatalf("claimed %q, but this test seeded %q on its own task queue %q: the claim reached a run that is not this test's",
+			claimed.ID, id, queue)
 	}
 	if err := store.FinalizeWorkflowSegment(ctx, claimed.ID, "dry-run-worker",
 		claimed.Generation, nil, "done", `{"ok":true}`, "", "", nil, time.Time{}); err != nil {

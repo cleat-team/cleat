@@ -432,7 +432,10 @@ func TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
-	defer adminDB.Close()
+	// Closed by a cleanup registered BEFORE the one that drops the scratch database, so it runs AFTER it
+	// (cleanups run last in, first out). A `defer` here ran when the test function returned, which is before
+	// any t.Cleanup, so the DROP DATABASE found a closed connection and its error was discarded (cleat#3609).
+	t.Cleanup(func() { _ = adminDB.Close() })
 	if err := adminDB.Ping(); err != nil {
 		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v",
 			redactMSSQLDSN(base), err)
