@@ -97,6 +97,7 @@ func TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant(t *testing.T) {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()
@@ -257,6 +258,7 @@ func TestSignalPluginWorkflow_PostgresShardedStoreScopesToTheTargetsTenant(t *te
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()
@@ -637,6 +639,7 @@ func TestSignalPluginWorkflowWithAuth_OnlyAnAllowedCallerCanSignal(t *testing.T)
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2209 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()

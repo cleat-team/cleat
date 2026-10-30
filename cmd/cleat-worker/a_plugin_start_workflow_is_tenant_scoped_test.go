@@ -40,6 +40,7 @@ func TestStartPluginWorkflow_PostgresScopesToTheDestinationTenant(t *testing.T) 
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2187 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 
 	// See tenant_isolation_db_test.go: a superuser connection bypasses RLS
 	// unconditionally, and CLEAT_TEST_POSTGRES conventionally points at one.
@@ -156,6 +157,7 @@ func TestStartPluginWorkflow_PostgresShardedStoreScopesToTheDestinationTenant(t 
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#2187 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()

@@ -87,6 +87,7 @@ func TestAPluginStartIsRefusedForASuspendedTenantOnAStoreWithRows(t *testing.T) 
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#3594 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()

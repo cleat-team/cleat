@@ -31,6 +31,7 @@ import (
 // reminder of what that dependency costs.)
 func TestExpiresAtGovernsCleanupNotCreatedAt(t *testing.T) {
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
