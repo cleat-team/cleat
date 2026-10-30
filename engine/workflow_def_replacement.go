@@ -109,6 +109,13 @@ func libraryMemberReadError(op, library, name string, version int, err error) er
 // PostgresStore.DeployWorkflowDef and `cleat deploy` both call it, so the two share
 // one rule instead of each carrying a copy.
 func CheckWorkflowDefReplacementPostgres(ctx context.Context, tx *sql.Tx, tenantID, name string, version int, wasm []byte, force bool) error {
+	// D59 (cleat#3629): before anything is read or locked on the row, so a refusal leaves no trace.
+	if err := lockLibraryNames(ctx, tx, DialectPostgres, false); err != nil {
+		return err
+	}
+	if err := refuseNameUnderLibraryPrefix(ctx, tx, DialectPostgres, name); err != nil {
+		return err
+	}
 	var same bool
 	var library sql.NullString
 	err := tx.QueryRowContext(ctx, `
@@ -178,6 +185,13 @@ func (s *MySQLStore) checkWorkflowDefReplacement(ctx context.Context, tx *sql.Tx
 // checkWorkflowDefReplacement is the rule on SQL Server. The existing row is read
 // WITH (UPDLOCK, HOLDLOCK), the same lock the MERGE that follows takes.
 func (s *MSSQLStore) checkWorkflowDefReplacement(ctx context.Context, tx *sql.Tx, def *WorkflowDef) error {
+	// D59 (cleat#3629): before anything is read or locked on the row, so a refusal leaves no trace.
+	if err := lockLibraryNames(ctx, tx, DialectMSSQL, false); err != nil {
+		return err
+	}
+	if err := refuseNameUnderLibraryPrefix(ctx, tx, DialectMSSQL, def.Name); err != nil {
+		return err
+	}
 	var same int
 	var library sql.NullString
 	err := tx.QueryRowContext(ctx, `

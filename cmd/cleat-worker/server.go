@@ -3151,6 +3151,13 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
+		// cleat#3629 (owner decision D59): the name starts with a published library's prefix.
+		// A conflict with what is published, like the refusal above; the error says what to do.
+		if errors.Is(err, engine.ErrWorkflowNameUnderLibraryPrefix) {
+			slog.Warn("deploy workflow def refused: under a published library's prefix", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		slog.Error("deploy workflow def failed", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
 		return

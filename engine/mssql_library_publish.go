@@ -39,6 +39,11 @@ func (m mssqlLibraryPublisher) publishOnce(ctx context.Context, req PublishLibra
 	}
 	defer tx.Rollback()
 
+	// D59 (cleat#3629): wait for every deploy that has passed its prefix check and not committed.
+	if err := lockLibraryNames(ctx, tx, DialectMSSQL, true); err != nil {
+		return res, err
+	}
+
 	for _, m := range req.Members {
 		c, err := prepareLibraryMember(m)
 		if err != nil {

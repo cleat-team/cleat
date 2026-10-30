@@ -18,6 +18,7 @@ cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
 cmd/cleat	TestBuildRefusesAnEntryPointsManifestMismatch	1
 cmd/cleat	TestBuildRefusesTheOldMapShapedManifest	1
 cmd/cleat	TestBuildStillAcceptsTheDocumentedOrder	1
+cmd/cleat	TestCLIDeployUnderAPublishedLibraryPrefixIsRefused	1
 cmd/cleat	TestDeployDryRunNeedsNoDatabaseAndExitsZero	1
 cmd/cleat	TestDeployReadsSchemaSidecar	1
 cmd/cleat	TestDeployUnderTheAppRoleSetsTenantContext	1

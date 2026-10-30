@@ -998,7 +998,10 @@ func TestPostgresStore_ListVersions_QueryError(t *testing.T) {
 }
 
 func TestPostgresStore_DeployWorkflowDef_QueryError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		// The D59 prefix check (cleat#3629) asks first; NULL is "no published library owns this name".
+		{match: "library_owning_prefix", data: [][]driver.Value{{nil}}},
+	}, []mockExecResult{
 		{
 			match: "INSERT INTO workflow_defs",
 			err:   fmt.Errorf("simulated exec error"),
@@ -1014,6 +1017,41 @@ func TestPostgresStore_DeployWorkflowDef_QueryError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "deploy workflow def") {
 		t.Errorf("expected error to contain 'deploy workflow def', got: %v", err)
+	}
+}
+
+// The prefix check fails CLOSED: a lookup that errors stops the deploy with the error, and is not read
+// as "no library owns the name". The INSERT is set to succeed, so a check that swallowed the error
+// would let the deploy through and this would see nil. (cleat#3629)
+func TestPostgresStore_DeployWorkflowDef_FailsClosedWhenThePrefixCheckErrors(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "library_owning_prefix", err: fmt.Errorf("simulated lookup error")},
+	}, []mockExecResult{{match: "INSERT INTO workflow_defs", affected: 1}})
+	defer db.Close()
+
+	err := NewPostgresStore(db).DeployWorkflowDef(testCtx, &WorkflowDef{Name: "wf", Version: 1, WASMBytes: []byte("wasm"), ABIVersion: 1})
+	if err == nil {
+		t.Fatal("the deploy went through although the prefix check errored")
+	}
+	if !strings.Contains(err.Error(), "published libraries' prefixes") || !strings.Contains(err.Error(), "simulated lookup error") {
+		t.Errorf("the error does not say the prefix check failed: %v", err)
+	}
+	if errors.Is(err, ErrWorkflowNameUnderLibraryPrefix) {
+		t.Errorf("a lookup error was reported as a prefix refusal: %v", err)
+	}
+}
+
+// A library name from the lookup is the refusal, with that library named.
+func TestPostgresStore_DeployWorkflowDef_RefusesAnOwnedName(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "library_owning_prefix", data: [][]driver.Value{{"acme"}}},
+	}, []mockExecResult{{match: "INSERT INTO workflow_defs", affected: 1}})
+	defer db.Close()
+
+	err := NewPostgresStore(db).DeployWorkflowDef(testCtx, &WorkflowDef{Name: "acme.checkout", Version: 1, WASMBytes: []byte("wasm"), ABIVersion: 1})
+	var pe *WorkflowNameUnderLibraryPrefixError
+	if !errors.Is(err, ErrWorkflowNameUnderLibraryPrefix) || !errors.As(err, &pe) || pe.Library != "acme" || pe.Name != "acme.checkout" {
+		t.Fatalf("got %v, want a refusal naming library acme and workflow acme.checkout", err)
 	}
 }
 
