@@ -89,8 +89,9 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, suspend spelled in capitals", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/SUSPEND", 403},
 		// The drop itself (B3b-2): DELETE on the bare canonical id, and nothing else. Whether the key may drop THIS
 		// tenant (one its principal created, suspended, with no unsettled run) is the handler's check.
-		// THAT A PROVISION KEY REACHES IT AT ALL IS AN OWNER DECISION THAT IS PENDING (cleat#3552): this row said
-		// 403 as a placeholder until the drop existed. If the answer is no, this row goes back to 403.
+		// A provision key reaches the drop for a tenant its principal created: owner decision D54 (2026-10-30,
+		// cleat#3552). This row said 403 as a placeholder until the drop existed; D54 makes 200 the answer, and the
+		// handler's creator check is what limits it to that principal's own tenants.
 		{"provision, drop", ScopeProvision, http.MethodDelete, bare, 200},
 		{"admin, drop", ScopeAdmin, http.MethodDelete, bare, 200},
 		{"provision, drop of upper-case id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7", 403},

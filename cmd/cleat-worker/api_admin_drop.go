@@ -32,11 +32,11 @@ import (
 // the tombstone migration), which is what makes a repeat answer 200 already_dropped, and what stops the id being
 // reused unless an operator deletes the tombstone.
 //
-// A PROVISION-SCOPED KEY MAY DROP A TENANT ITS PRINCIPAL CREATED. That is an OWNER DECISION THAT IS STILL
-// PENDING (cleat#3552): the design comment said a drop would be operator-only, the instruction that followed
-// was "the same callers as suspend", and this is the second. The scope gate and the matrix row in
-// auth/a_scoped_operator_key_reaches_only_its_routes_test.go say the same, so the three agree; if the answer
-// is no, those two lines are the change.
+// A PROVISION-SCOPED KEY MAY DROP A TENANT ITS PRINCIPAL CREATED (owner decision D54, 2026-10-30, recorded
+// on cleat#3608). That SUPERSEDES the design comment that said a drop would be operator-only and never the
+// provisioner's: the instruction that followed it was "the same callers as suspend", which is what is built,
+// and D54 settled the question that way. The scope gate and the matrix row in
+// auth/a_scoped_operator_key_reaches_only_its_routes_test.go say the same, so the three agree.
 //
 // IT DOES NOT CALL NoteAuditTarget, on purpose. The audit log puts an operator's request on the chain of
 // the tenant the handler names, and this tenant's chain is deleted with it; naming it would put the record

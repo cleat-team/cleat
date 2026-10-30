@@ -287,11 +287,10 @@ Who may call it is the same as `suspend`, except that a provision-scoped key rea
 else: an admin-scoped key for any tenant, a provision-scoped key only for a tenant its own principal created, a tenant
 key never. PostgreSQL and SQL Server only, and not on a sharded worker.
 
-**A provision-scoped key dropping the tenants it created is an owner decision that is pending** (cleat#3552). The design
-discussion first said a drop would be operator-only and never the provisioner's; the later instruction was the same
-callers as `suspend`, which is what is built, because a service that deletes an org removes the org's tenant with the key it
-created it with. The drop is refused while any run is unsettled, is tombstoned and is audited, but it is irreversible, so
-until the decision is recorded here this is the behaviour to expect and not a settled one.
+**A provision-scoped key may drop the tenants its own principal created** (owner decision D54, 2026-10-30). This
+supersedes the design discussion's earlier line that a drop would be operator-only and never the provisioner's: a service
+that deletes an org removes the org's tenant with the key it created it with, so the callers are the same as for `suspend`.
+The drop is refused while any run is unsettled, is tombstoned and is audited, and it is irreversible.
 
 **Nothing deletes a tombstone yet.** A dropped id therefore stays unusable (`409 tenant_id_dropped`) until the route that
 removes one lands, which is a separate change.
