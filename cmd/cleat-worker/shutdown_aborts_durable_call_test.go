@@ -54,6 +54,7 @@ func TestWorkerShutdownAbortsADurableCallsHostBackoffWait(t *testing.T) {
 	ctx := context.Background()
 
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	settleRunsLeftBehind(t, db)
 	store := engine.NewPostgresStore(db)
 
 	wasmBytes := buildDeferFixture(t)
@@ -190,6 +191,7 @@ func TestShutdownDuringABackoffNeverReachesAGuestThatCompensates(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			db := testutil.SuiteTestDB(t, "cleat_worker")
+			settleRunsLeftBehind(t, db)
 			store := engine.NewPostgresStore(db)
 
 			wasmBytes := buildDeferFixture(t)

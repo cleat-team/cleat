@@ -207,6 +207,7 @@ func TestExecuteWorkflowInstallsTheFetcherOnlyWhenTheFlagIsSet(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			db := testutil.SuiteTestDB(t, "cleat_worker")
+			settleRunsLeftBehind(t, db)
 			store := engine.NewPostgresStore(db)
 
 			wasmBytes := buildDeferFixture(t)
