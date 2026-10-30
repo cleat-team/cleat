@@ -24,6 +24,13 @@ import (
 //	  IS THE REPAIR for a shard that was down or unreachable
 //	the error names the shards that were written, the ones that failed and the ones not tried
 //
+// The admin shard is also what arbitrates two publishes of one bundle version running at once
+// with DIFFERENT content. Measured (cleat-review, 30 rounds per dialect, three real shards): one
+// wins everywhere, and the other fails at the first shard with a conflict and writes nowhere
+// else, so every shard holds the winner's bytes. That holds because both name the same shard
+// first; two publishers that disagree about which shard is first are not covered by anything
+// here or measured.
+//
 // THERE IS NO CROSS-DATABASE TRANSACTION, so a fan-out can stop half way, and this does not
 // pretend otherwise. What a conflict means is different from what a failure means: a shard that
 // already holds DIFFERENT content under a member or bundle key refuses, published content is
