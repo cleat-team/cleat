@@ -171,6 +171,43 @@ func (s *MSSQLStore) IsTenantSuspended(ctx context.Context, tenantID string) (bo
 	return suspended, nil
 }
 
+// NoTenantSuspensionMarker is implemented by a store that deliberately has no notion of a suspended
+// tenant, and says so. MySQLStore is the one such store: it is single-tenant by construction (D1,
+// mysql/038), so there is no admin.tenants row to consult.
+//
+// It exists because the start paths used to decide "may this tenant start work" with a bare type
+// assertion on TenantSuspensionReader, and a store that failed the assertion was NOT refused -- the check
+// was skipped without a word. That made "cannot answer" and "answered no" the same thing, which is how a
+// sharded store (cleat#3596) and a suspended tenant's plugin starts (cleat#3594) went unguarded without
+// anything failing. A store now has to be one or the other: a reader, or a declared opt-out.
+type NoTenantSuspensionMarker interface {
+	NoTenantSuspension()
+}
+
+// ErrTenantSuspensionUnanswerable is what TenantSuspended returns for a store that is neither a
+// TenantSuspensionReader nor a NoTenantSuspensionMarker. A start path turns it into a refusal.
+var ErrTenantSuspensionUnanswerable = errors.New(
+	"store can neither report whether a tenant is suspended nor declares that it has no such notion")
+
+// TenantSuspended asks a store whether tenantID is suspended, and refuses to guess.
+//
+//   - a TenantSuspensionReader answers (and its error is returned, never read as "not suspended");
+//   - a NoTenantSuspensionMarker is "not suspended" -- by its own declaration, not by default;
+//   - anything else is ErrTenantSuspensionUnanswerable, naming the store's type.
+//
+// A reader wins over a marker if a type somehow carries both: the more specific answer is the one to
+// believe.
+func TenantSuspended(ctx context.Context, store any, tenantID string) (bool, error) {
+	if r, ok := store.(TenantSuspensionReader); ok {
+		return r.IsTenantSuspended(ctx, tenantID)
+	}
+	if _, ok := store.(NoTenantSuspensionMarker); ok {
+		return false, nil
+	}
+	return false, fmt.Errorf("%w: %T (implement TenantSuspensionReader, or NoTenantSuspensionMarker if it has no tenants to suspend)",
+		ErrTenantSuspensionUnanswerable, store)
+}
+
 // TenantExposurePolicyReader reports whether an operator has opted a tenant
 // into the `public` exposure class (cleat#1986). It is the read half of the
 // per-tenant operator opt-in ResolveDeployableExposure's doc comment names as

@@ -138,6 +138,12 @@ func NewMySQLStore(db *sql.DB, taskQueues ...string) *MySQLStore {
 	}
 }
 
+// NoTenantSuspension implements NoTenantSuspensionMarker: MySQL is single-tenant by construction (D1,
+// mysql/038), so there is no admin.tenants row and nothing to suspend. This is a declaration, not a gap --
+// TenantSuspended reports "not suspended" for it only because it says so here, and a store type that
+// forgets to say either thing is refused by the start paths instead of skipped.
+func (*MySQLStore) NoTenantSuspension() {}
+
 // WithIdempotencyKeyTTL returns a copy of the store with the given idempotency key TTL.
 func (s *MySQLStore) WithIdempotencyKeyTTL(ttl time.Duration) *MySQLStore {
 	cp := *s

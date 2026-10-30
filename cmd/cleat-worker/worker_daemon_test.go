@@ -201,6 +201,12 @@ func (m *mockStore) GetWASMLength(ctx context.Context, defName string, defVersio
 	return 0, nil
 }
 
+// NoTenantSuspension declares that this mock has no notion of a suspended tenant (cleat#3552), which is
+// what the start paths now require of a store that does not answer IsTenantSuspended: a store must be a
+// reader or say it opts out, and is refused otherwise. A test that wants a suspended tenant embeds this
+// mock and adds the reader (suspendableStore), and a reader is believed over this declaration.
+func (m *mockStore) NoTenantSuspension() {}
+
 func (m *mockStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	if m.listVersionsFn != nil {
 		return m.listVersionsFn(ctx, defName)

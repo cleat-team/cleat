@@ -36,6 +36,7 @@ engine/mssql_errors.go	func MSSQLConnectionString
 engine/mssql_lifecycle.go	func MSSQLStore.StartNewRunWithConcurrencyKey
 engine/mssql_store.go	func MSSQLStoreFactory.TenantPoolCount
 engine/mysql_lifecycle.go	func MySQLStore.StartNewRunWithConcurrencyKey
+engine/mysql_store.go	func MySQLStore.NoTenantSuspension
 engine/mysql_store.go	func MySQLStoreFactory.DropTenantDatabase
 engine/mysql_store.go	func MySQLStoreFactory.TenantPoolCount
 engine/plugin_call_guard.go	func NewPluginCallGuard

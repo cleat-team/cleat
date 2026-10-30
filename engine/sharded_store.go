@@ -137,18 +137,15 @@ var _ PayloadEncryptionState = (*ShardedStore)(nil)
 // yes is right in both cases.
 // A tenant with no row on any shard is not suspended, matching the single-store reading.
 //
-// AN UNREADABLE FLAG IS NOT A CLEAR ONE. A shard that errors, or whose store cannot answer, makes this
-// an error rather than "not suspended"; the start paths turn an error into a refusal. It stops at the
+// AN UNREADABLE FLAG IS NOT A CLEAR ONE. A shard that errors, or whose store neither answers nor declares
+// NoTenantSuspensionMarker, makes this an error rather than "not suspended" (a shard that DOES declare it
+// has no flag to read and counts as not suspended); the start paths turn an error into a refusal. It stops at the
 // first shard that answers yes, so a sibling's failure after that point is not consulted.
 func (s *ShardedStore) IsTenantSuspended(ctx context.Context, tenantID string) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, sh := range s.shards {
-		r, ok := sh.Store.(TenantSuspensionReader)
-		if !ok {
-			return false, fmt.Errorf("is tenant suspended: shard %q store %T does not support it", sh.Config.Name, sh.Store)
-		}
-		suspended, err := r.IsTenantSuspended(ctx, tenantID)
+		suspended, err := TenantSuspended(ctx, sh.Store, tenantID)
 		if err != nil {
 			return false, fmt.Errorf("is tenant suspended: shard %q: %w", sh.Config.Name, err)
 		}
