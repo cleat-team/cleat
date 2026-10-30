@@ -511,6 +511,7 @@ the target dialect's syntax.
 | **No RETURNING** | SQL Server uses `UPDATE ... OUTPUT INSERTED.*` instead. This is a single-statement pattern — arguably cleaner than PostgreSQL's approach. |
 | **RLS maps cleanly** | `set_config()` becomes `sp_set_session_context()`; `CREATE POLICY` becomes `CREATE SECURITY POLICY` with inline TVF. Same isolation model. |
 | **LIKE is case-insensitive** | SQL Server's `LIKE` is case-insensitive by default with default collation, matching PostgreSQL's `ILIKE` behavior. |
+| **Workflow names compare exactly** | Every workflow-definition name column is `Latin1_General_100_BIN2` (migration `011`, cleat#3635), so `Acme.checkout` and `acme.checkout` are two workflows, as on PostgreSQL. The database default collation, which is case-insensitive, still applies to every other string column, including the names plugins store (cleat#3641). MySQL still folds case and accent (cleat#3640). |
 | **OFFSET/LIMIT becomes OFFSET/FETCH** | Use `ORDER BY ... OFFSET 0 ROWS FETCH NEXT N ROWS ONLY`. |
 | **ON CONFLICT becomes MERGE** | SQL Server uses `MERGE` for upsert. For idempotent insert, use `INSERT ... SELECT ... WHERE NOT EXISTS`. |
 | **JSONB becomes NVARCHAR(MAX)** | JSON stored as Unicode text. Use `JSON_VALUE` / `JSON_QUERY` for extraction. |

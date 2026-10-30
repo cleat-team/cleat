@@ -22,7 +22,7 @@ import (
 //	                     collation of workflow_defs.name    'placeorder' = 'PlaceOrder'
 //	PostgreSQL 16        en_US.utf8, deterministic `=`      false
 //	MySQL 8.4.11         utf8mb4_0900_ai_ci                 TRUE
-//	SQL Server 2022      SQL_Latin1_General_CP1_CI_AS       TRUE
+//	SQL Server 2022      Latin1_General_100_BIN2 (011)      false   (was SQL_Latin1_General_CP1_CI_AS, TRUE, until cleat#3635)
 //
 // So `WHERE name = ?` is an exact lookup on ONE dialect of three, and registering
 // both `PlaceOrder` and `placeorder` succeeds on PostgreSQL while both other
@@ -120,13 +120,13 @@ func caseFoldingDialects() []caseFoldingDialect {
 			name:      "mssql",
 			dialect:   testutil.DialectMSSQL,
 			setup:     testutil.SetupMSSQLFullSchema,
-			foldsCase: true,
-			why: "SQL Server's container default is SQL_Latin1_General_CP1_CI_AS -- the " +
-				"CI is case-insensitive. cleat#936 EXPECTED this and said so, " +
-				"explicitly flagging it as unmeasured; IMPROVEMENT-PLAN 3.316 then " +
-				"asserted the opposite, that SQL Server is case-sensitive. Measured " +
-				"2026-09-16: #936's expectation was right and 3.316 was wrong, which " +
-				"moves SQL Server from the minority column to the majority one.",
+			foldsCase: false,
+			why: "Migration 011 (cleat#3635, owner D60) gave every workflow-definition name " +
+				"column the binary collation Latin1_General_100_BIN2, so `=` is byte " +
+				"equality here as on PostgreSQL. Until then these columns inherited the " +
+				"database default, SQL_Latin1_General_CP1_CI_AS, and this entry read true " +
+				"(measured 2026-09-16). This test's name predates that: it now describes " +
+				"one dialect of three, MySQL, which is still case- and accent-insensitive.",
 		},
 	}
 }
