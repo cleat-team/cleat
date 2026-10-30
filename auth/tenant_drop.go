@@ -344,12 +344,18 @@ func (s *TenantStore) readChainHead(ctx context.Context, tx *sql.Tx, tenantID uu
 
 // readTombstone reads a tenant's tombstone inside the drop's transaction.
 func readTombstone(ctx context.Context, tx *sql.Tx, st dropStmts, tenantID uuid.UUID) (Tombstone, bool, error) {
-	return scanTombstone(tx.QueryRowContext(ctx, st.readTombstone, tenantID.String()).Scan, tenantID)
+	t, found, err := scanTombstone(tx.QueryRowContext(ctx, st.readTombstone, tenantID.String()).Scan, tenantID)
+	if err != nil {
+		return Tombstone{}, false, fmt.Errorf("auth: read the tombstone: %w", err)
+	}
+	return t, found, nil
 }
 
 // scanTombstone reads one tombstone row from a statement that selects, in this order, name, org_id, created_by,
 // dropped_by, dropped_at, audit_chain_seq and audit_chain_hash. The read and the delete share it so that the row
-// a caller was shown before a delete and the row the delete returns are scanned the same way.
+// a caller was shown before a delete and the row the delete returns are scanned the same way. It returns the
+// driver's error as it is: each caller says which statement failed, because "read the tombstone" on a failed
+// DELETE sends whoever is debugging it to the wrong statement.
 func scanTombstone(scan func(dest ...any) error, tenantID uuid.UUID) (Tombstone, bool, error) {
 	t := Tombstone{TenantID: tenantID}
 	var orgID string
@@ -360,7 +366,7 @@ func scanTombstone(scan func(dest ...any) error, tenantID uuid.UUID) (Tombstone,
 		return Tombstone{}, false, nil
 	}
 	if err != nil {
-		return Tombstone{}, false, fmt.Errorf("auth: read the tombstone: %w", err)
+		return Tombstone{}, false, err
 	}
 	if oid, perr := uuid.Parse(orgID); perr == nil {
 		t.OrgID = oid

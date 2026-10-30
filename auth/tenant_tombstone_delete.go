@@ -56,7 +56,7 @@ func (s *TenantStore) DeleteTombstone(ctx context.Context, tenantID uuid.UUID) (
 	}
 	t, found, err := scanTombstone(s.db.QueryRowContext(ctx, stmt, tenantID.String()).Scan, tenantID)
 	if err != nil {
-		return Tombstone{}, err
+		return Tombstone{}, fmt.Errorf("auth: delete the tombstone: %w", err)
 	}
 	if !found {
 		return Tombstone{}, ErrTombstoneNotFound
