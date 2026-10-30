@@ -130,9 +130,11 @@ var _ PayloadEncryptionState = (*ShardedStore)(nil)
 // hold. This type used to implement nothing of the kind, so the assertion failed and the check was
 // skipped without a word: on a sharded deployment a suspended tenant could still start work.
 //
-// WHY "ANY": every shard is its own database with its own admin.tenants, and nothing here knows which
-// of them carries a given tenant's row (routing is by workflow key, not tenant). Asking one shard would
-// make the answer depend on which one, so the flag is read off all of them and a single yes refuses.
+// WHY "ANY": a shard is a database or a schema in a shared one, and nothing here knows which of them
+// carries a given tenant's row (routing is by workflow key, not tenant). Where shards are separate
+// databases each has its own admin.tenants, and asking one would make the answer depend on which; where
+// they share one, every shard answers alike. Reading the flag off all of them and refusing on a single
+// yes is right in both cases.
 // A tenant with no row on any shard is not suspended, matching the single-store reading.
 //
 // AN UNREADABLE FLAG IS NOT A CLEAR ONE. A shard that errors, or whose store cannot answer, makes this
