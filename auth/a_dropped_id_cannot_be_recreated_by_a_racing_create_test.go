@@ -45,7 +45,10 @@ func TestACreateCannotReuseAnIdThatWasDroppedAfterItsFirstCheckOnSQLServer(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer adminDB.Close()
+	// A cleanup and not a defer, and registered BEFORE the one that drops the database: cleanups run last in,
+	// first out, and a deferred Close runs when the test function returns, which is before any cleanup, so the
+	// DROP DATABASE below would find a closed connection and its error is not read.
+	t.Cleanup(func() { _ = adminDB.Close() })
 	const dbName = "cleat_auth_reuse_3552_test"
 	dropDB := fmt.Sprintf("IF DB_ID('%s') IS NOT NULL BEGIN ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s; END", dbName, dbName, dbName)
 	if _, err := adminDB.ExecContext(ctx, dropDB); err != nil {
