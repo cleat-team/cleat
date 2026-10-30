@@ -385,8 +385,8 @@ in `admin.plugin_tables`, and `admin.drop_tenant` deletes from each of them.
 
 So a dropped tenant's `kv_store`, `audit_events`, `oauth_sessions`,
 `webhook_events` and `blob_index` rows go with it, along with nine core tables
-and the admin rows that name the tenant. `cmd/cleatctl/droptenant.go`'s
-`dropTenantTables` is the maintained list of what an operator sees counted
+and the admin rows that name the tenant. `internal/tenantdrop`'s
+`PostgresTables` (which `cmd/cleatctl`'s `dropTenantTables` is built from) is the maintained list of what an operator sees counted
 before confirming, and its own comment explains why it is **not** derived from
 the function's `DELETE` statements: several entries go by foreign-key cascade,
 and reading only the `DELETE`s is how `tenant_settings` came to be missing from

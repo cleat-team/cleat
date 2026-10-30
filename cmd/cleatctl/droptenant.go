@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/tenantdrop"
 	"github.com/cleat-team/cleat/plugin"
 )
 
@@ -56,107 +57,17 @@ import (
 //     already -- is what stands in for one. Documented here rather than
 //     assumed.
 
-// dropTenantTableCounts mirrors the rows dropping a tenant removes, for the
-// dry-run / confirmation / audit output. Keep this list in sync with
-// admin.drop_tenant (migrations/postgres/001_schema.sql).
-//
-// "Removes", not "admin.drop_tenant deletes", because two of these go by
-// foreign key rather than by a DELETE inside the function, and the operator
-// does not care which mechanism took their data:
-//
-//   - tenant_settings, ON DELETE CASCADE from 039_tenant_settings.sql
-//   - tenant_domains, ON DELETE CASCADE from
-//     080_a_hostname_belongs_to_one_tenant.sql (cleat#1568)
-//   - tenant_secrets, ON DELETE CASCADE from
-//     081_a_secret_never_reaches_the_guest.sql (cleat#1570)
-//   - workflow_defs, ON DELETE CASCADE from
-//     059_a_dropped_tenants_definitions_go_with_it.sql (cleat#1201)
-//   - queues, ON DELETE CASCADE from
-//     093_a_queue_declares_its_own_concurrency_limit.sql (cleat#1116)
-//
-// All cascade off admin.tenants, which drop_tenant deletes LAST -- that
-// ordering is what 039 relied on and what 059 relies on. Reading only the
-// function's DELETE statements to maintain this list is how tenant_settings
-// came to be missing from it for twenty migrations.
-var dropTenantTables = []struct {
-	label string
-	query string
-}{
-	{"workflow_instances", `SELECT count(*) FROM workflow_instances WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from workflow_instances.id, via
-	// migrations/postgres/016_workflow_leases_and_payloads.sql (folded into
-	// migrations/postgres/001_schema.sql by #3358) (cleat#3245
-	// Phase 3 step 1). Listed for the count, as queue_holders is above: a
-	// dropped tenant's lease and payload rows go with its workflow_instances,
-	// and the operator wants to see that. PostgreSQL-only, like
-	// payload_encryption_ever_enabled elsewhere in this package -- SQL Server
-	// and MySQL have no equivalent migration and carry this state on
-	// workflow_instances itself, so mssqlTenantTables (read from sys.columns)
-	// never needs to know about either name.
-	{"workflow_leases", `SELECT count(*) FROM workflow_leases WHERE tenant_id = $1`},
-	{"workflow_payloads", `SELECT count(*) FROM workflow_payloads WHERE tenant_id = $1`},
-	{"event_history", `SELECT count(*) FROM event_history WHERE tenant_id = $1`},
-	{"workflow_signals", `SELECT count(*) FROM workflow_signals WHERE tenant_id = $1`},
-	{"workflow_promises", `SELECT count(*) FROM workflow_promises WHERE tenant_id = $1`},
-	{"concurrency_keys", `SELECT count(*) FROM concurrency_keys WHERE tenant_id = $1`},
-	{"workflow_update_requests", `SELECT count(*) FROM workflow_update_requests WHERE tenant_id = $1`},
-	{"workflow_schedules", `SELECT count(*) FROM workflow_schedules WHERE tenant_id = $1`},
-	{"workflow_tags", `SELECT count(*) FROM workflow_tags WHERE tenant_id = $1`},
-	{"workflow_routing", `SELECT count(*) FROM workflow_routing WHERE tenant_id = $1`},
-	{"idempotency_keys", `SELECT count(*) FROM idempotency_keys WHERE tenant_id = $1`},
-	{"tenant_settings", `SELECT count(*) FROM tenant_settings WHERE tenant_id = $1`},
-	// Also ON DELETE CASCADE rather than a DELETE inside admin.drop_tenant --
-	// from 080_a_hostname_belongs_to_one_tenant.sql, which followed 039's
-	// reasoning deliberately. Listed here for the same reason 039 is: the
-	// operator wants the count, not the mechanism.
-	{"tenant_domains", `SELECT count(*) FROM tenant_domains WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from 081_a_secret_never_reaches_the_guest.sql. Listed
-	// for the count, as tenant_settings is -- and this one matters more than
-	// most: an operator deleting a tenant wants to see that its credentials
-	// went with it.
-	{"tenant_secrets", `SELECT count(*) FROM tenant_secrets WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from migrations/postgres/093 (cleat#1116). Listed
-	// for the count, as tenant_domains and tenant_secrets are above: a
-	// dropped tenant's declared concurrency limits go with it, and the
-	// operator wants to see that.
-	{"queues", `SELECT count(*) FROM queues WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from workflow_instances, via migrations/postgres/094
-	// (cleat#1116's semaphore holder). Listed for the count, as queues is
-	// above: a dropped tenant's queue holders go with its workflow_instances,
-	// and the operator wants to see that.
-	{"queue_holders", `SELECT count(*) FROM queue_holders WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from admin.tenants directly, via
-	// migrations/postgres/097 (cleat#1918's rate-limit counter). Deliberately
-	// NOT chained off workflow_instances the way queue_holders is -- a rate
-	// token's lifetime must not depend on how long completed workflows are
-	// retained, so it carries its own tenant FK. Listed for the count, as
-	// queue_holders is above.
-	{"queue_rate_tokens", `SELECT count(*) FROM queue_rate_tokens WHERE tenant_id = $1`},
-	// cleat#1644. Both carry tenant_id since 056 and neither has a foreign key
-	// to anything, so neither was deleted OR counted: a dropped tenant's memory
-	// profile -- which workflows it ran, and how much memory each used --
-	// survived, and did not appear in the preview an operator confirms.
-	{"workflow_memory_stats", `SELECT count(*) FROM workflow_memory_stats WHERE tenant_id = $1`},
-	{"workflow_memory_samples", `SELECT count(*) FROM workflow_memory_samples WHERE tenant_id = $1`},
-	// cleat#3540. A DELETE in admin.drop_tenant, not a cascade: no foreign key reaches it.
-	// PostgreSQL only here; SQL Server's preview is read from sys.columns and MySQL has no
-	// such table.
-	{"tenant_library_installs", `SELECT count(*) FROM tenant_library_installs WHERE tenant_id = $1`},
-	{"workflow_defs", `SELECT count(*) FROM workflow_defs WHERE tenant_id = $1`},
-	{"admin.tenant_api_keys", `SELECT count(*) FROM admin.tenant_api_keys WHERE tenant_id = $1`},
-	{"admin.tenant_roles", `SELECT count(*) FROM admin.tenant_roles WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from admin.tenants, like tenant_settings above and for
-	// the same reason: the operator wants the count, not the mechanism. Found
-	// by the coverage test rather than by reading the function -- it is deleted
-	// correctly and was simply never counted. cleat#1644.
-	{"admin.tenant_egress_allow", `SELECT count(*) FROM admin.tenant_egress_allow WHERE tenant_id = $1`},
-	// ON DELETE CASCADE from migrations/postgres/104 (cleat#2230). Listed for
-	// the count, as tenant_domains and tenant_secrets are above: a dropped
-	// tenant's Slack workspace mapping(s) go with it, and the operator wants
-	// to see that.
-	{"slack_workspace", `SELECT count(*) FROM slack_workspace WHERE tenant_id = $1`},
-	{"admin.tenants", `SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`},
-}
+// dropTenantTables is the shared list (internal/tenantdrop.PostgresTables) in this
+// command's counting shape. It moved to internal/tenantdrop so the worker can plan a
+// drop from the same list; TestThePreviewNamesEveryTenantOwnedTable still pins it,
+// through this variable, against the migrations.
+var dropTenantTables = func() []struct{ label, query string } {
+	out := make([]struct{ label, query string }, len(tenantdrop.PostgresTables))
+	for i, t := range tenantdrop.PostgresTables {
+		out[i] = struct{ label, query string }{t.Label, t.Query}
+	}
+	return out
+}()
 
 // rowCounter is the subset of *sql.DB and *sql.Conn this command counts
 // through.
