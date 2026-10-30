@@ -221,7 +221,7 @@ service that provisioned the tenant. It answers `200` with counts only, never a 
   they are already in `tables`). A registered table the tenant's scope could not read is named in
   `uncounted_plugin_tables` instead of being reported as empty, and a registry row that names a table that does not exist
   in `skipped_plugin_tables`; `admin.drop_tenant` still deletes the former and skips the latter.
-- It describes one moment. It is not a lock: runs can start or finish between the plan and a drop.
+- It is a snapshot taken statement by statement, not a moment and not a lock: each count is read separately, so a run that starts or finishes while the plan is read can make two counts disagree by one, and runs can start or finish between the plan and a drop. A drop checks what it requires for itself.
 
 Who may call it is the same as `suspend`: an admin-scoped operator key for any tenant; a provision-scoped key only for a
 tenant its own principal created; a tenant key never. A tenant that does not exist, one the caller did not create and

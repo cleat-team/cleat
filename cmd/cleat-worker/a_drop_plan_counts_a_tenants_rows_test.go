@@ -136,6 +136,10 @@ func TestTheDropPlanSeesUnsettledRunsOnPostgres(t *testing.T) {
 
 	plan := func() tenantdrop.Plan {
 		t.Helper()
+		header, err := ts.DropPlanHeader(ctx, target)
+		if err != nil {
+			t.Fatalf("DropPlanHeader: %v", err)
+		}
 		facts, err := ts.DropPlanFacts(ctx, target)
 		if err != nil {
 			t.Fatalf("DropPlanFacts: %v", err)
@@ -145,7 +149,7 @@ func TestTheDropPlanSeesUnsettledRunsOnPostgres(t *testing.T) {
 			t.Fatalf("OpenStore(target): %v", err)
 		}
 		defer c.Close()
-		p, err := buildDropPlan(ctx, st.(engine.TenantRowCounter), st, target.String(), facts)
+		p, err := buildDropPlan(ctx, st.(engine.TenantRowCounter), st, target.String(), header, facts)
 		if err != nil {
 			t.Fatalf("buildDropPlan: %v", err)
 		}
@@ -325,6 +329,10 @@ func TestTheDropPlanSeesUnsettledRunsOnSQLServer(t *testing.T) {
 
 	plan := func() tenantdrop.Plan {
 		t.Helper()
+		header, err := ts.DropPlanHeader(ctx, target)
+		if err != nil {
+			t.Fatalf("DropPlanHeader: %v", err)
+		}
 		facts, err := ts.DropPlanFacts(ctx, target)
 		if err != nil {
 			t.Fatalf("DropPlanFacts: %v", err)
@@ -334,7 +342,7 @@ func TestTheDropPlanSeesUnsettledRunsOnSQLServer(t *testing.T) {
 			t.Fatalf("OpenStore(target): %v", err)
 		}
 		defer c.Close()
-		p, err := buildDropPlan(ctx, st.(engine.TenantRowCounter), st, target.String(), facts)
+		p, err := buildDropPlan(ctx, st.(engine.TenantRowCounter), st, target.String(), header, facts)
 		if err != nil {
 			t.Fatalf("buildDropPlan: %v", err)
 		}

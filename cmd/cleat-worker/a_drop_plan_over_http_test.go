@@ -53,10 +53,8 @@ func planFixture(t *testing.T) (*provisionHTTP, *fakeProvisioner, *planStore) {
 	f, fp := buildProvisionHTTP(t, nil)
 	ps := &planStore{mockStore: &mockStore{}}
 	f.api.factory = planFactory{store: ps}
-	fp.planFacts = auth.DropPlanFacts{
-		Name: "acme", Suspended: true, CreatedBy: "the-provisioner",
-		AdminTables: []tenantdrop.RowCount{{Table: "admin.tenants", Rows: 1}},
-	}
+	fp.planHeader = auth.DropPlanHeader{Name: "acme", Suspended: true, CreatedBy: "the-provisioner"}
+	fp.planFacts = auth.DropPlanFacts{AdminTables: []tenantdrop.RowCount{{Table: "admin.tenants", Rows: 1}}}
 	return f, fp, ps
 }
 
@@ -92,7 +90,7 @@ func TestADropPlanAnswersAnAdminKeyForAnyTenantAndItsCreatorOnlyForItsOwn(t *tes
 	// A provision key reads the plan of a tenant its OWN principal created (the fixture mints it as
 	// "clew-service"), and gets the same plan. This is the case that makes the refusals below mean
 	// something: without it they would pass against a route that refuses every provision key.
-	*fp = fakeProvisioner{planFacts: auth.DropPlanFacts{Name: "acme", Suspended: true, CreatedBy: "clew-service"}}
+	*fp = fakeProvisioner{planHeader: auth.DropPlanHeader{Name: "acme", Suspended: true, CreatedBy: "clew-service"}}
 	psBefore := ps.asked
 	own := doBody(f.chainFixture, http.MethodGet, path, f.provisionKey, ``)
 	if own.Code != http.StatusOK {
@@ -103,11 +101,11 @@ func TestADropPlanAnswersAnAdminKeyForAnyTenantAndItsCreatorOnlyForItsOwn(t *tes
 	}
 
 	// A provision key, for a tenant it did not create: the same 404 as a tenant that does not exist.
-	*fp = fakeProvisioner{planFacts: auth.DropPlanFacts{Name: "acme", CreatedBy: "someone-else"}}
+	*fp = fakeProvisioner{planHeader: auth.DropPlanHeader{Name: "acme", CreatedBy: "someone-else"}}
 	other := doBody(f.chainFixture, http.MethodGet, path, f.provisionKey, ``)
-	*fp = fakeProvisioner{planErr: auth.ErrTenantNotFound}
+	*fp = fakeProvisioner{planHeaderErr: auth.ErrTenantNotFound}
 	missing := doBody(f.chainFixture, http.MethodGet, path, f.provisionKey, ``)
-	*fp = fakeProvisioner{planFacts: auth.DropPlanFacts{Name: "acme", CreatedBy: ""}}
+	*fp = fakeProvisioner{planHeader: auth.DropPlanHeader{Name: "acme", CreatedBy: ""}}
 	offline := doBody(f.chainFixture, http.MethodGet, path, f.provisionKey, ``)
 	for name, got := range map[string]*struct {
 		code int
@@ -151,14 +149,15 @@ func TestOnlyAnOperatorCredentialCanReadADropPlan(t *testing.T) {
 			t.Errorf("%s = %d %s, want %d", tc.name, w.Code, strings.TrimSpace(w.Body.String()), tc.want)
 		}
 	}
-	if fp.planCalls != 0 || ps.asked != 0 {
-		t.Errorf("a refused request reached the facts %d times and the tenant store %d times", fp.planCalls, ps.asked)
+	if fp.headerCalls != 0 || fp.factsCalls != 0 || ps.asked != 0 {
+		t.Errorf("a refused request reached the header %d times, the counts %d times and the tenant store %d times",
+			fp.headerCalls, fp.factsCalls, ps.asked)
 	}
 }
 
 func TestADropPlanThatCannotReadItsFactsIsAnErrorNotAnEmptyPlan(t *testing.T) {
 	f, fp, ps := planFixture(t)
-	fp.planErr = errors.New("admin connection lost: password=hunter2")
+	fp.planFactsErr = errors.New("admin connection lost: password=hunter2")
 	w := doBody(f.chainFixture, http.MethodGet, "/api/admin/tenants/"+planTenantID+"/drop-plan", f.adminKey, ``)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("= %d %s; want 500", w.Code, w.Body.String())
@@ -168,5 +167,38 @@ func TestADropPlanThatCannotReadItsFactsIsAnErrorNotAnEmptyPlan(t *testing.T) {
 	}
 	if ps.asked != 0 {
 		t.Errorf("the tenant store was asked to count %d times although the facts could not be read", ps.asked)
+	}
+}
+
+// A caller with no claim to a tenant must not be able to tell it exists. The creator check therefore runs on
+// the cheap header read, BEFORE any counting: reading the counts first answered 500 for a non-creator
+// whenever a count failed, where an absent tenant answered 404, and cost four-plus queries where an absent
+// tenant cost one (cleat-review, cleat#3601). The counts half is made to fail here, so a handler that
+// reads it first shows as a 500 or as a counts call, and a handler that checks first shows as neither.
+func TestADropPlanRefusesAnUnrelatedCallerBeforeItCountsAnything(t *testing.T) {
+	path := "/api/admin/tenants/" + planTenantID + "/drop-plan"
+	for name, header := range map[string]auth.DropPlanHeader{
+		"a tenant it did not create": {Name: "acme", CreatedBy: "someone-else"},
+		"a tenant made offline":      {Name: "acme", CreatedBy: ""},
+	} {
+		f, fp, ps := planFixture(t)
+		fp.planHeader = header
+		fp.planFactsErr = errors.New("the counts would fail")
+		w := doBody(f.chainFixture, http.MethodGet, path, f.provisionKey, ``)
+		if w.Code != http.StatusNotFound || strings.TrimSpace(w.Body.String()) != `{"error":"not found"}` {
+			t.Errorf("%s = %d %s; want the one 404", name, w.Code, strings.TrimSpace(w.Body.String()))
+		}
+		if fp.factsCalls != 0 || ps.asked != 0 {
+			t.Errorf("%s: the counts half ran (admin counts %d, tenant store %d) before the creator check", name, fp.factsCalls, ps.asked)
+		}
+	}
+
+	// CONTROL: the same failing counts half, asked by the tenant's own creator, IS an error. Without it the
+	// 404s above would pass against a route that never reached the counts for anyone.
+	f, fp, _ := planFixture(t)
+	fp.planHeader = auth.DropPlanHeader{Name: "acme", CreatedBy: "clew-service"}
+	fp.planFactsErr = errors.New("the counts would fail")
+	if w := doBody(f.chainFixture, http.MethodGet, path, f.provisionKey, ``); w.Code != http.StatusInternalServerError || fp.factsCalls != 1 {
+		t.Errorf("the creator with failing counts = %d (counts calls %d); want 500 and 1", w.Code, fp.factsCalls)
 	}
 }

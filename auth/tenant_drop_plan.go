@@ -11,20 +11,53 @@ import (
 	"github.com/cleat-team/cleat/internal/tenantdrop"
 )
 
-// DropPlanFacts is the part of a drop plan that is read on the ADMIN connection (cleat#3552, B3b-1b).
-//
-// The rest of a plan, the counts of a tenant's data, must be read in that tenant's own scope (see
-// engine.TenantRowCounter). What is here is what that scope cannot read, measured on PostgreSQL with
-// the RLS role: admin.tenant_api_keys, admin.tenant_roles and admin.tenant_egress_allow are refused to
-// it. They carry no row-level security, so the admin connection counts them without a tenant key.
-type DropPlanFacts struct {
+// DropPlanHeader is what the route needs to decide whether the caller may see a plan at all (cleat#3552,
+// B3b-1b): the tenant's identity, the flag a drop requires, and who created it. It is one cheap read, and it
+// is read FIRST, so that a caller with no claim to the tenant is refused before anything else is touched.
+type DropPlanHeader struct {
 	Name      string
 	Suspended bool
 
 	// CreatedBy is the principal that created the tenant, or "" for one made offline. The caller
 	// compares it, as the suspend and confirm routes do.
 	CreatedBy string
+}
 
+// DropPlanHeader reads the header. A tenant that does not exist answers ErrTenantNotFound. It changes
+// nothing, and it is the whole of what a caller without a claim to the tenant causes to run.
+//
+// PostgreSQL and SQL Server only; MySQL is single-tenant and has no drop to plan.
+func (s *TenantStore) DropPlanHeader(ctx context.Context, tenantID uuid.UUID) (DropPlanHeader, error) {
+	var h DropPlanHeader
+	var q string
+	switch s.dialect {
+	case DialectPostgres:
+		q = `SELECT name, suspended, COALESCE(created_by, '') FROM admin.tenants WHERE tenant_id = $1`
+	case DialectMSSQL:
+		q = `SELECT name, suspended, ISNULL(created_by, N'') FROM admin.tenants WHERE tenant_id = @p1`
+	default:
+		return h, fmt.Errorf("auth: a drop plan is not available on %s", s.dialect)
+	}
+	if err := s.db.QueryRowContext(ctx, q, tenantID.String()).Scan(&h.Name, &h.Suspended, &h.CreatedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return h, ErrTenantNotFound
+		}
+		return h, err
+	}
+	return h, nil
+}
+
+// DropPlanFacts is the part of a drop plan that is read on the ADMIN connection (cleat#3552, B3b-1b).
+//
+// The rest of a plan, the counts of a tenant's data, must be read in that tenant's own scope (see
+// engine.TenantRowCounter). What is here is what that scope cannot read, measured on PostgreSQL with
+// the RLS role: admin.tenant_api_keys, admin.tenant_roles and admin.tenant_egress_allow are refused to
+// it. They carry no row-level security, so the admin connection counts them without a tenant key.
+//
+// It is read only AFTER DropPlanHeader has shown the caller may see this tenant. Reading it first made a
+// count error answer 500 where an absent tenant answered 404, and cost four-plus queries where an absent
+// tenant cost one, so a caller with no claim to a tenant could tell whether it existed.
+type DropPlanFacts struct {
 	// AdminTables are the admin.* counts. PostgreSQL only: SQL Server counts every table, admin ones
 	// included, from one derived list in the tenant's scope, so it has nothing to put here.
 	AdminTables []tenantdrop.RowCount
@@ -36,27 +69,10 @@ type DropPlanFacts struct {
 	SkippedPluginTables []string
 }
 
-// DropPlanFacts reads what a drop plan needs from the admin connection. A tenant that does not exist
-// answers ErrTenantNotFound. It changes nothing.
-//
-// PostgreSQL and SQL Server only; MySQL is single-tenant and has no drop to plan.
+// DropPlanFacts reads the admin-connection half of a plan. Call it only after DropPlanHeader has shown the
+// caller may see the tenant. It changes nothing.
 func (s *TenantStore) DropPlanFacts(ctx context.Context, tenantID uuid.UUID) (DropPlanFacts, error) {
 	var facts DropPlanFacts
-	var q string
-	switch s.dialect {
-	case DialectPostgres:
-		q = `SELECT name, suspended, COALESCE(created_by, '') FROM admin.tenants WHERE tenant_id = $1`
-	case DialectMSSQL:
-		q = `SELECT name, suspended, ISNULL(created_by, N'') FROM admin.tenants WHERE tenant_id = @p1`
-	default:
-		return facts, fmt.Errorf("auth: a drop plan is not available on %s", s.dialect)
-	}
-	if err := s.db.QueryRowContext(ctx, q, tenantID.String()).Scan(&facts.Name, &facts.Suspended, &facts.CreatedBy); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return facts, ErrTenantNotFound
-		}
-		return facts, err
-	}
 	if s.dialect != DialectPostgres {
 		return facts, nil
 	}

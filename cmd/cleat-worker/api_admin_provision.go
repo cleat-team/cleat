@@ -35,7 +35,9 @@ type tenantProvisioner interface {
 	SetTenantSuspended(ctx context.Context, tenantID uuid.UUID, suspended bool) error
 	SuspendTenantByCreator(ctx context.Context, tenantID uuid.UUID, creator string) error
 
-	// DropPlanFacts is the admin-connection half of a drop plan (cleat#3552, B3b-1b); read-only.
+	// DropPlanHeader is the cheap read that decides whether a caller may see a plan; DropPlanFacts is the
+	// admin-connection half of the counts and is read only after it (cleat#3552, B3b-1b). Both read-only.
+	DropPlanHeader(ctx context.Context, tenantID uuid.UUID) (auth.DropPlanHeader, error)
 	DropPlanFacts(ctx context.Context, tenantID uuid.UUID) (auth.DropPlanFacts, error)
 }
 

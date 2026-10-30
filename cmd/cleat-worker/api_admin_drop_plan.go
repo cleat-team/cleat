@@ -49,7 +49,11 @@ func (s *apiServer) handleTenantDropPlan(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	facts, err := s.provisioner.DropPlanFacts(r.Context(), tid)
+	// The header first, and the creator check before ANYTHING else runs. Counting first would make a caller
+	// with no claim to the tenant pay for the counts (four-plus queries against one for an absent tenant)
+	// and see a 500 where an absent tenant answers 404, so the "same 404" below would be a promise the
+	// timing and the error behaviour broke.
+	header, err := s.provisioner.DropPlanHeader(r.Context(), tid)
 	if err != nil {
 		if errors.Is(err, auth.ErrTenantNotFound) {
 			s.writeError(w, http.StatusNotFound, "not found")
@@ -60,8 +64,14 @@ func (s *apiServer) handleTenantDropPlan(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	op, _ := auth.OperatorFromContext(r.Context())
-	if !op.IsAdmin() && (facts.CreatedBy == "" || facts.CreatedBy != creator) {
+	if !op.IsAdmin() && (header.CreatedBy == "" || header.CreatedBy != creator) {
 		s.writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	facts, err := s.provisioner.DropPlanFacts(r.Context(), tid)
+	if err != nil {
+		slog.Error("drop plan: reading the admin counts failed", "tenant", tenant, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "reading the drop plan failed")
 		return
 	}
 
@@ -75,7 +85,7 @@ func (s *apiServer) handleTenantDropPlan(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	plan, err := buildDropPlan(r.Context(), counter, st, tenant, facts)
+	plan, err := buildDropPlan(r.Context(), counter, st, tenant, header, facts)
 	if err != nil {
 		slog.Error("drop plan: counting failed", "tenant", tenant, "error", err)
 		s.writeError(w, http.StatusInternalServerError, "reading the drop plan failed")
@@ -90,8 +100,8 @@ func (s *apiServer) handleTenantDropPlan(w http.ResponseWriter, r *http.Request,
 // Which dialect is in use is read from what the store offers, not from a flag: only the SQL Server store can
 // derive its table list from the catalogue, and it is the one that does. That list already contains the
 // admin.* and plugin tables, so on SQL Server there is nothing for the admin half to add.
-func buildDropPlan(ctx context.Context, counter engine.TenantRowCounter, store engine.WorkflowStore, tenant string, facts auth.DropPlanFacts) (tenantdrop.Plan, error) {
-	plan := tenantdrop.Plan{TenantID: tenant, Name: facts.Name, Suspended: facts.Suspended}
+func buildDropPlan(ctx context.Context, counter engine.TenantRowCounter, store engine.WorkflowStore, tenant string, header auth.DropPlanHeader, facts auth.DropPlanFacts) (tenantdrop.Plan, error) {
+	plan := tenantdrop.Plan{TenantID: tenant, Name: header.Name, Suspended: header.Suspended}
 
 	var queries []tenantdrop.Table
 	var plugin []tenantdrop.PluginTable
@@ -109,8 +119,10 @@ func buildDropPlan(ctx context.Context, counter engine.TenantRowCounter, store e
 		queries = tenantdrop.PostgresDataTables()
 		plugin = facts.PluginTables
 	}
-	// The table counts and the unsettled count are read in one transaction, so they cannot disagree about
-	// which moment they describe.
+	// The table counts and the unsettled count are read in one transaction, but at READ COMMITTED each
+	// statement still takes its own snapshot, so a run that starts or finishes while they are read can make
+	// the counts disagree with each other by one. The plan is a snapshot taken statement by statement, not a
+	// moment; a drop re-checks what it requires for itself.
 	queries = append(queries, unsettled)
 
 	counts, err := counter.CountTenantRows(ctx, queries)
