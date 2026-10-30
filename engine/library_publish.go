@@ -37,6 +37,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -213,6 +214,10 @@ var libraryMemberNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`
 
 const maxLibraryMemberNameLen = 255
 
+// libraryMemberPrefix is what every member name of a library starts with: the library name and a
+// dot. A library name cannot contain a dot, so no two libraries' prefixes overlap.
+func libraryMemberPrefix(library string) string { return library + "." }
+
 func publishRefused(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrLibraryPublishRefused, fmt.Sprintf(format, args...))
 }
@@ -230,6 +235,13 @@ func ValidatePublishLibraryRequest(req PublishLibraryRequest) error {
 	for _, m := range req.Members {
 		if m.Name == "" || len(m.Name) > maxLibraryMemberNameLen || !libraryMemberNamePattern.MatchString(m.Name) {
 			return publishRefused("member name %q is not valid: 1 to %d characters of letters, digits, '.', '_' and '-', starting with a letter or digit", m.Name, maxLibraryMemberNameLen)
+		}
+		// D59 (cleat#3629): a library's members are named "<library>.<name>". The prefix is what
+		// keeps a library's names and a tenant's own names apart, and the deploy and install
+		// refusals compare against it. Case-sensitive, and something must follow the dot.
+		if prefix := libraryMemberPrefix(req.Library); !strings.HasPrefix(m.Name, prefix) || len(m.Name) == len(prefix) {
+			return publishRefused("member %q does not carry the library's prefix %q: every member of library %q must be named %q followed by a name (owner decision D59). "+
+				"Set the workflow's name to e.g. %q in its stamp and rebuild it", m.Name, prefix, req.Library, prefix, prefix+"review")
 		}
 		if m.Version < 1 {
 			return publishRefused("member %q has stamp version %d: the stamp must carry a workflow_version of at least 1", m.Name, m.Version)

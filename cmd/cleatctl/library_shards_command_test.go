@@ -48,7 +48,7 @@ func TestRedactedTargetNeverShowsWhoOrWithWhat(t *testing.T) {
 
 func TestShardedPublishRefusesBeforeWritingWhenAShardCannotBeUsed(t *testing.T) {
 	req := engine.PublishLibraryRequest{Library: "acme", BundleVersion: "1", Members: []engine.PublishLibraryMember{
-		{Name: "m", Version: 1, WasmBytes: []byte("x"), ABIVersion: 1, MinVersion: 1},
+		{Name: "acme.m", Version: 1, WasmBytes: []byte("x"), ABIVersion: 1, MinVersion: 1},
 	}}
 	t.Run("a shard of another kind of database", func(t *testing.T) {
 		stderr := withExitPanic(t, func() {
@@ -98,7 +98,6 @@ func TestTheBuiltCleatctlPublishesToEveryShardAndAReRunCompletesOne(t *testing.T
 				_, pubDSN[i] = testutil.LibraryLoginDSN(t, owner[i], tc.tdialect, true)
 				_, readerDSN[i] = testutil.LibraryLoginDSN(t, owner[i], tc.tdialect, false)
 			}
-			member := stampedMember(t, t.TempDir(), "solo", 1, nil, "s")
 			rows := func(i int, lib string) int {
 				n := 0
 				for _, table := range []string{"library.members", "library.bundles", "library.bundle_members"} {
@@ -123,6 +122,8 @@ func TestTheBuiltCleatctlPublishesToEveryShardAndAReRunCompletesOne(t *testing.T
 				return cmd.ProcessState.ExitCode(), string(out)
 			}
 			lib := fmt.Sprintf("cli-shard-%d", time.Now().UnixNano()%1_000_000_000_000)
+			// D59 (cleat#3629): a member is named "<library>.<name>", so the stamp follows the library.
+			member := stampedMember(t, t.TempDir(), lib+".solo", 1, nil, "s")
 
 			// shard 2 is reached through a login that is not a publisher: the database refuses it.
 			code, out := run("--db", pubDSN[0], "library", "publish", lib, "1.0.0", member,
@@ -158,12 +159,13 @@ func TestTheBuiltCleatctlPublishesToEveryShardAndAReRunCompletesOne(t *testing.T
 
 			// an unreachable shard is found before the first write, so nothing changed anywhere.
 			lib2 := lib + "-pre"
+			member2 := stampedMember(t, t.TempDir(), lib2+".solo", 1, nil, "s")
 			u, err := url.Parse(pubDSN[2])
 			if err != nil {
 				t.Fatal(err)
 			}
 			u.Host = "127.0.0.1:1"
-			code, out = run("--db", pubDSN[0], "library", "publish", lib2, "1.0.0", member, "--replicate-to", pubDSN[1], "--replicate-to", u.String())
+			code, out = run("--db", pubDSN[0], "library", "publish", lib2, "1.0.0", member2, "--replicate-to", pubDSN[1], "--replicate-to", u.String())
 			if code == 0 || !strings.Contains(out, "cannot be reached") || !strings.Contains(out, "Nothing was written to any shard") {
 				t.Errorf("an unreachable shard: exit %d, output:\n%s", code, out)
 			}

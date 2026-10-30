@@ -40,16 +40,37 @@ func pubMember(name string, version int, body string, children map[string]int) P
 	}
 }
 
+// inLibrary names a request's members the way D59 requires (cleat#3629): "<library>.<name>",
+// with every child pin renamed to match. The tests write bare names because the point of each is
+// elsewhere, and this applies the rule in one place so a test says what it is about.
+func inLibrary(req PublishLibraryRequest) PublishLibraryRequest {
+	prefix := libraryMemberPrefix(req.Library)
+	members := make([]PublishLibraryMember, len(req.Members))
+	for i, m := range req.Members {
+		m.Name = prefix + m.Name
+		if m.ChildVersions != nil {
+			pins := make(map[string]int, len(m.ChildVersions))
+			for child, v := range m.ChildVersions {
+				pins[prefix+child] = v
+			}
+			m.ChildVersions = pins
+		}
+		members[i] = m
+	}
+	req.Members = members
+	return req
+}
+
 func uniqueLibrary(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano()%1_000_000_000_000)
 }
 
 func TestTheValidationRefusesABundleThatIsWrongOnItsFace(t *testing.T) {
 	ok := func() PublishLibraryRequest {
-		return PublishLibraryRequest{Library: "acme", BundleVersion: "1.0.0", Members: []PublishLibraryMember{
+		return inLibrary(PublishLibraryRequest{Library: "acme", BundleVersion: "1.0.0", Members: []PublishLibraryMember{
 			pubMember("parent", 1, "p", map[string]int{"child": 2}),
 			pubMember("child", 2, "c", nil),
-		}}
+		}})
 	}
 	if err := ValidatePublishLibraryRequest(ok()); err != nil {
 		t.Fatalf("a valid bundle was refused: %v", err)
@@ -59,9 +80,9 @@ func TestTheValidationRefusesABundleThatIsWrongOnItsFace(t *testing.T) {
 		mutate func(*PublishLibraryRequest)
 		want   string
 	}{
-		{"a pin names a member the bundle does not have", func(r *PublishLibraryRequest) { r.Members[0].ChildVersions = map[string]int{"ghost": 1} }, `no member named "ghost"`},
-		{"a pin names the wrong version", func(r *PublishLibraryRequest) { r.Members[0].ChildVersions = map[string]int{"child": 9} }, `the bundle's "child" is version 2`},
-		{"a name appears twice", func(r *PublishLibraryRequest) { r.Members = append(r.Members, pubMember("child", 3, "c3", nil)) }, `appears twice`},
+		{"a pin names a member the bundle does not have", func(r *PublishLibraryRequest) { r.Members[0].ChildVersions = map[string]int{"acme.ghost": 1} }, `no member named "acme.ghost"`},
+		{"a pin names the wrong version", func(r *PublishLibraryRequest) { r.Members[0].ChildVersions = map[string]int{"acme.child": 9} }, `the bundle's "acme.child" is version 2`},
+		{"a name appears twice", func(r *PublishLibraryRequest) { r.Members = append(r.Members, pubMember("acme.child", 3, "c3", nil)) }, `appears twice`},
 		{"an empty bundle", func(r *PublishLibraryRequest) { r.Members = nil }, `at least one member`},
 		{"a member with no bytes", func(r *PublishLibraryRequest) { r.Members[1].WasmBytes = nil }, `has no bytes`},
 		{"a stamp with no version", func(r *PublishLibraryRequest) { r.Members[1].Version = 0 }, `workflow_version of at least 1`},
@@ -81,7 +102,7 @@ func TestTheValidationRefusesABundleThatIsWrongOnItsFace(t *testing.T) {
 }
 
 func TestPublishingOnMySQLIsRefusedAsUnsupported(t *testing.T) {
-	req := PublishLibraryRequest{Library: "acme", BundleVersion: "1", Members: []PublishLibraryMember{pubMember("a", 1, "a", nil)}}
+	req := inLibrary(PublishLibraryRequest{Library: "acme", BundleVersion: "1", Members: []PublishLibraryMember{pubMember("a", 1, "a", nil)}})
 	if _, err := PublishLibraryBundle(context.Background(), nil, DialectMySQL, req); !errors.Is(err, ErrLibrariesUnsupported) {
 		t.Fatalf("publish on MySQL: %v, want ErrLibrariesUnsupported", err)
 	}
@@ -102,10 +123,10 @@ func TestABundleIsPublishedByTheOperatorsRoleAndNoOneElses(t *testing.T) {
 			lib := uniqueLibrary("pub")
 			cleanupLibrary(t, owner, tc.edialect, lib)
 
-			req := PublishLibraryRequest{Library: lib, BundleVersion: "1.0.0", PublishedBy: "operator-x", Members: []PublishLibraryMember{
+			req := inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "1.0.0", PublishedBy: "operator-x", Members: []PublishLibraryMember{
 				pubMember("parent", 1, "parent-bytes", map[string]int{"child": 2}),
 				pubMember("child", 2, "child-bytes", nil),
-			}}
+			}})
 
 			// The negative control first: a login that is not the publisher writes nothing.
 			if _, err := PublishLibraryBundle(ctx, reader, tc.edialect, req); err == nil {
@@ -152,9 +173,9 @@ func TestAPublishedMemberAndBundleAreImmutable(t *testing.T) {
 			lib := uniqueLibrary("imm")
 			cleanupLibrary(t, owner, tc.edialect, lib)
 
-			base := PublishLibraryRequest{Library: lib, BundleVersion: "1", Members: []PublishLibraryMember{
+			base := inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "1", Members: []PublishLibraryMember{
 				pubMember("a", 1, "a-bytes", nil), pubMember("b", 1, "b-bytes", nil),
-			}}
+			}})
 			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, base); err != nil {
 				t.Fatalf("first publish: %v", err)
 			}
@@ -162,15 +183,15 @@ func TestAPublishedMemberAndBundleAreImmutable(t *testing.T) {
 
 			// Different bytes under an existing (library, name, version): refused, naming both digests,
 			// and NOTHING from the request is written, including the new member listed before it.
-			changed := PublishLibraryRequest{Library: lib, BundleVersion: "2", Members: []PublishLibraryMember{
+			changed := inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "2", Members: []PublishLibraryMember{
 				pubMember("fresh", 1, "fresh-bytes", nil), pubMember("a", 1, "a-CHANGED", nil),
-			}}
+			}})
 			_, err := PublishLibraryBundle(ctx, pub, tc.edialect, changed)
 			var mc *LibraryMemberConflictError
 			if !errors.As(err, &mc) || !errors.Is(err, ErrLibraryMemberConflict) {
 				t.Fatalf("different bytes under a published member: %v, want a LibraryMemberConflictError", err)
 			}
-			if mc.Name != "a" || mc.Stored == mc.Supplied || len(mc.Stored) != 64 {
+			if mc.Name != lib+".a" || mc.Stored == mc.Supplied || len(mc.Stored) != 64 {
 				t.Fatalf("the conflict does not name the member and two different digests: %+v", mc)
 			}
 			if after := countLibraryRows(t, owner, tc.edialect, lib); after != before {
@@ -178,9 +199,9 @@ func TestAPublishedMemberAndBundleAreImmutable(t *testing.T) {
 			}
 
 			// The same bundle version with a different member set: refused, and nothing is written.
-			other := PublishLibraryRequest{Library: lib, BundleVersion: "1", Members: []PublishLibraryMember{
+			other := inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "1", Members: []PublishLibraryMember{
 				pubMember("a", 1, "a-bytes", nil), pubMember("c", 1, "c-bytes", nil),
-			}}
+			}})
 			_, err = PublishLibraryBundle(ctx, pub, tc.edialect, other)
 			var bc *LibraryBundleConflictError
 			if !errors.As(err, &bc) || !errors.Is(err, ErrLibraryBundleConflict) {
@@ -215,7 +236,7 @@ func TestAPublishedMemberIsImmutableInItsSchemasToo(t *testing.T) {
 	storedSchemas := func(t *testing.T, owner *sql.DB, d Dialect, lib string) sql.NullString {
 		t.Helper()
 		var s sql.NullString
-		if err := owner.QueryRow(`SELECT entry_point_schemas FROM library.members WHERE library = `+d.placeholder(1)+` AND name = 'm'`, lib).Scan(&s); err != nil {
+		if err := owner.QueryRow(`SELECT entry_point_schemas FROM library.members WHERE library = `+d.placeholder(1)+` AND name = `+d.placeholder(2), lib, lib+".m").Scan(&s); err != nil {
 			t.Fatalf("read the stored schemas: %v", err)
 		}
 		return s
@@ -229,7 +250,7 @@ func TestAPublishedMemberIsImmutableInItsSchemasToo(t *testing.T) {
 			ctx := context.Background()
 
 			publish := func(lib, bundle string, m PublishLibraryMember) (PublishLibraryResult, error) {
-				return PublishLibraryBundle(ctx, pub, tc.edialect, PublishLibraryRequest{Library: lib, BundleVersion: bundle, Members: []PublishLibraryMember{m}})
+				return PublishLibraryBundle(ctx, pub, tc.edialect, inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: bundle, Members: []PublishLibraryMember{m}}))
 			}
 			refused := func(t *testing.T, err error) *LibraryMemberConflictError {
 				t.Helper()
@@ -331,8 +352,8 @@ func TestASecondBundleSharesTheMembersThatDidNotChange(t *testing.T) {
 			lib := uniqueLibrary("share")
 			cleanupLibrary(t, owner, tc.edialect, lib)
 
-			v1 := PublishLibraryRequest{Library: lib, BundleVersion: "1", Members: []PublishLibraryMember{pubMember("a", 1, "a1", nil), pubMember("b", 1, "b1", nil)}}
-			v2 := PublishLibraryRequest{Library: lib, BundleVersion: "2", Members: []PublishLibraryMember{pubMember("a", 1, "a1", nil), pubMember("b", 2, "b2", nil)}}
+			v1 := inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "1", Members: []PublishLibraryMember{pubMember("a", 1, "a1", nil), pubMember("b", 1, "b1", nil)}})
+			v2 := inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "2", Members: []PublishLibraryMember{pubMember("a", 1, "a1", nil), pubMember("b", 2, "b2", nil)}})
 			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, v1); err != nil {
 				t.Fatalf("bundle 1: %v", err)
 			}
@@ -359,13 +380,13 @@ func TestListingShowsWhatIsPublishedWithoutTheBytes(t *testing.T) {
 			cleanupLibrary(t, owner, tc.edialect, lib)
 			cleanupLibrary(t, owner, tc.edialect, other)
 
-			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, PublishLibraryRequest{Library: lib, BundleVersion: "1", PublishedBy: "op", Members: []PublishLibraryMember{pubMember("a", 1, "aaaa", nil)}}); err != nil {
+			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "1", PublishedBy: "op", Members: []PublishLibraryMember{pubMember("a", 1, "aaaa", nil)}})); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, PublishLibraryRequest{Library: lib, BundleVersion: "2", Members: []PublishLibraryMember{pubMember("a", 1, "aaaa", nil), pubMember("b", 1, "bb", nil)}}); err != nil {
+			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "2", Members: []PublishLibraryMember{pubMember("a", 1, "aaaa", nil), pubMember("b", 1, "bb", nil)}})); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, PublishLibraryRequest{Library: other, BundleVersion: "9", Members: []PublishLibraryMember{pubMember("z", 1, "z", nil)}}); err != nil {
+			if _, err := PublishLibraryBundle(ctx, pub, tc.edialect, inLibrary(PublishLibraryRequest{Library: other, BundleVersion: "9", Members: []PublishLibraryMember{pubMember("z", 1, "z", nil)}})); err != nil {
 				t.Fatal(err)
 			}
 
@@ -386,7 +407,7 @@ func TestListingShowsWhatIsPublishedWithoutTheBytes(t *testing.T) {
 			if b := byVersion["1"]; len(b.Members) != 1 || b.PublishedBy != "op" || b.Members[0].WasmLength != 4 || len(b.Members[0].WasmSHA256) != 64 || b.Members[0].Exposure != ExposureAuth {
 				t.Errorf("bundle 1 is listed wrongly: %+v", b)
 			}
-			if b := byVersion["2"]; len(b.Members) != 2 || b.Members[0].Name != "a" || b.Members[1].Name != "b" {
+			if b := byVersion["2"]; len(b.Members) != 2 || b.Members[0].Name != lib+".a" || b.Members[1].Name != lib+".b" {
 				t.Errorf("bundle 2 is listed wrongly (want members a and b, in name order): %+v", b)
 			}
 			if none, err := ListLibraryBundles(ctx, pub, tc.edialect, "no-such-library"); err != nil || len(none) != 0 {

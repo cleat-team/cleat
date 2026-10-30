@@ -14,7 +14,9 @@ package main
 // A member is named by its own stamp. The binary's cleat.metadata carries workflow_name,
 // workflow_version, the ABI, plugin_deps, child_versions, entry points and exposure; publish
 // reads them from the file and does not let the command line rename or renumber it, so a
-// member cannot be filed under a name its bytes do not claim.
+// member cannot be filed under a name its bytes do not claim. That name must start with the
+// library's name and a dot (owner decision D59, cleat#3629): the engine's validation refuses
+// anything else, naming the prefix.
 
 import (
 	"context"
@@ -40,7 +42,8 @@ the operator's superuser login works too, and the application role does not.
 Commands:
   library publish <library> <bundle-version> <member.wasm>... [--published-by <name>] [--json]
                   [--replicate-to <publisher-dsn>]...
-      publish one immutable bundle. Each member is named by its own cleat.metadata stamp.
+      publish one immutable bundle. Each member is named by its own cleat.metadata stamp,
+      and that name must be "<library>.<name>" (a library name cannot contain a '.').
       A member or bundle that is already published with the same content is a no-op;
       different content under the same key is refused. One transaction per database:
       all or nothing there.

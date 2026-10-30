@@ -296,6 +296,12 @@ PostgreSQL and SQL Server only.
 - **A member is named by its own stamp.** Each binary's `cleat.metadata` carries its `workflow_name` and
   `workflow_version`; publish reads them from the file and lets nothing on the command line rename or
   renumber it. A binary with no readable stamp, or a `<file>.schema.json` that is not valid JSON, is refused.
+- **A member's name starts with its library's name and a dot.** In the example above the stamps must say
+  `acme.checkout` and `acme.pay`, and publish refuses a member named `checkout`, `acme.` (nothing after the
+  dot), `Acme.checkout` (the prefix is case-sensitive) or `other.checkout` (another library's prefix). The
+  refusal names the prefix and a name that would pass; set the workflow's name in its stamp and rebuild. The
+  prefix is what keeps a library's workflows and a tenant's own apart (owner decision D59, cleat#3629), so a
+  **library name cannot contain a dot** either: it would make two libraries' prefixes overlap.
 - **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
   of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
   does not contain. A name appears once per bundle.
