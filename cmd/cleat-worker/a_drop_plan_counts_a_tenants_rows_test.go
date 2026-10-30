@@ -123,6 +123,12 @@ func TestTheDropPlanSeesUnsettledRunsOnPostgres(t *testing.T) {
 		t.Fatalf("register the plugin tables: %v", err)
 	}
 	t.Cleanup(func() {
+		// The OTHER tenant's run is still `ready` here, and the suite database is shared. A later test in
+		// this package that claims "the next ready workflow" (TestADryRunReportsWithoutDeleting does) claims
+		// this one instead of its own, and fails on a fixture that looks correct -- deterministically, 4 runs
+		// of 4 on a fresh suite database, when this test ran immediately before it. The target tenant is
+		// dropped by the test body; this drops the other, and with it that run.
+		_, _ = db.ExecContext(context.Background(), `SELECT admin.drop_tenant($1::uuid, 'public')`, other.String())
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM admin.plugin_tables WHERE plugin_name = 'zz3552'`)
 		_, _ = db.ExecContext(context.Background(), fmt.Sprintf(`DROP TABLE IF EXISTS public.%s, public.%s`, plugTable, deniedTable))
 	})
