@@ -12,9 +12,28 @@ import (
 	"fmt"
 )
 
-// mssqlInstalledByMax is installed_by's width. A long subject is cut rather than
-// failing the whole install on a column limit.
+// mssqlInstalledByMax is installed_by's width in UTF-16 code units, which is what
+// nvarchar(255) counts: a character outside the Basic Multilingual Plane is two. A long
+// subject is cut to it rather than failing the whole install on a column limit.
 const mssqlInstalledByMax = 255
+
+// truncateUTF16 cuts s to at most maxUnits UTF-16 code units without splitting a
+// character. Cutting by rune is not enough for nvarchar: 128 characters outside the BMP
+// are 256 units and the insert fails (Msg 2628).
+func truncateUTF16(s string, maxUnits int) string {
+	units := 0
+	for i, r := range s {
+		w := 1
+		if r > 0xFFFF {
+			w = 2
+		}
+		if units+w > maxUnits {
+			return s[:i]
+		}
+		units += w
+	}
+	return s
+}
 
 // InstallLibraryBundle installs one bundle for this store's tenant, in one transaction.
 func (s *MSSQLStore) InstallLibraryBundle(ctx context.Context, req InstallLibraryRequest) (InstallLibraryResult, error) {
@@ -127,11 +146,7 @@ func (s *MSSQLStore) InstallLibraryBundle(ctx context.Context, req InstallLibrar
 
 	var installedBy any
 	if req.InstalledBy != "" {
-		by := []rune(req.InstalledBy)
-		if len(by) > mssqlInstalledByMax {
-			by = by[:mssqlInstalledByMax]
-		}
-		installedBy = string(by)
+		installedBy = truncateUTF16(req.InstalledBy, mssqlInstalledByMax)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		MERGE tenant_library_installs WITH (HOLDLOCK) AS target

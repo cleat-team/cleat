@@ -34,6 +34,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
@@ -697,6 +698,30 @@ func runAnInstallCopiesEveryColumn(t *testing.T, rig *libInstallRig) {
 		_, err := rig.store(tenantB).InstallLibraryBundle(ctx, InstallLibraryRequest{Library: library, BundleVersion: "1.0.0"})
 		if !errors.Is(err, ErrLibraryDefinitionCollision) {
 			t.Errorf("%s: B's install over its own same-named definition: err = %v, want a collision", rig.name, err)
+		}
+	})
+
+	t.Run("a very long subject does not fail the install, and is cut where the column has a width", func(t *testing.T) {
+		library := newLibrary(t)
+		m := member("by-def", 1, "auth", 1)
+		rig.seedMember(t, library, m)
+		bundle(t, library, "1.0.0", m)
+		// 200 characters outside the Basic Multilingual Plane: 400 UTF-16 units, over
+		// SQL Server's nvarchar(255). A cut by rune count leaves 255 runes, which is 510
+		// units, and the insert fails with Msg 2628.
+		by := strings.Repeat("\U0001F600", 200)
+		if _, err := rig.store(tenantA).InstallLibraryBundle(ctx, InstallLibraryRequest{Library: library, BundleVersion: "1.0.0", InstalledBy: by}); err != nil {
+			t.Fatalf("%s: a long InstalledBy failed the install: %v", rig.name, err)
+		}
+		rec, ok := installRow(t, tenantA, library)
+		if !ok {
+			t.Fatalf("%s: no install record", rig.name)
+		}
+		if rec["installed_by"] == "" || rec["installed_by"] == "<NULL>" || !strings.HasPrefix(by, rec["installed_by"]) {
+			t.Errorf("%s: installed_by is not a non-empty prefix of the subject", rig.name)
+		}
+		if rig.name == "sqlserver" && len(utf16.Encode([]rune(rec["installed_by"]))) > 255 {
+			t.Errorf("%s: installed_by is %d UTF-16 units, over the column's 255", rig.name, len(utf16.Encode([]rune(rec["installed_by"]))))
 		}
 	})
 
