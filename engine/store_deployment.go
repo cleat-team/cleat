@@ -115,14 +115,20 @@ func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID s
 // touched this store, so an expired key authenticated against any host that
 // wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *PostgresStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
-	var tenantID uuid.UUID
-	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id FROM admin.tenant_api_keys
-		 WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`, keyHash).Scan(&tenantID)
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), the one statement both
+// answer through, so the expiry and disabled clauses are written once. It satisfies auth.KeyResolver.
+func (s *PostgresStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT tenant_id, key_id FROM admin.tenant_api_keys
+		 WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`, keyHash).Scan(&tenantID, &keyID)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
-	return tenantID, nil
+	return tenantID, keyID, nil
 }
 
 // LoadWorkflowConfig returns configuration for a workflow definition.

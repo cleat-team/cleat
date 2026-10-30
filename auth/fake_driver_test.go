@@ -91,8 +91,8 @@ func (*fakeTx) Rollback() error { return nil }
 // (they mutate the store).
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	switch {
-	case strings.Contains(query, "SELECT tenant_id FROM admin.tenant_api_keys") ||
-		strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(query, "SELECT tenant_id, key_id FROM admin.tenant_api_keys") ||
+		strings.Contains(query, "SELECT tenant_id, key_id FROM tenant_api_keys"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
@@ -127,7 +127,7 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 
 // queryTenantLookup handles:
 //
-//	SELECT tenant_id FROM tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL
+//	SELECT tenant_id, key_id FROM tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL
 func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, error) {
 	keyHash, err := argBytes(args, 1)
 	if err != nil {
@@ -137,11 +137,11 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	key, ok := c.store.apiKeys[hashHex]
 	if !ok || key.disabledAt != nil {
 		// Return empty rows → Next() returns io.EOF → sql.ErrNoRows
-		return &fakeRows{columns: []string{"tenant_id"}}, nil
+		return &fakeRows{columns: []string{"tenant_id", "key_id"}}, nil
 	}
 	return &fakeRows{
-		columns: []string{"tenant_id"},
-		data:    [][]driver.Value{{key.tenantID}},
+		columns: []string{"tenant_id", "key_id"},
+		data:    [][]driver.Value{{key.tenantID, key.keyID}},
 	}, nil
 }
 

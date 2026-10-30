@@ -2073,16 +2073,36 @@ func (s *ShardedStore) StreamEventHistory(ctx context.Context, workflowID string
 
 // ResolveTenantFromAPIKey looks up a tenant UUID by API key hash across all shards.
 func (s *ShardedStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	tenantID, _, err := s.ResolveAPIKey(ctx, keyHash)
+	return tenantID, err
+}
+
+// keyIDResolver is what a shard's store offers when it can say which key it resolved. It is the
+// engine-side spelling of auth.KeyResolver's method, repeated here because the two packages import
+// neither each other.
+type keyIDResolver interface {
+	ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error)
+}
+
+// ResolveAPIKey is ResolveTenantFromAPIKey plus the key's own id (cleat#3623), asked of the shards in
+// the same order. A shard whose store cannot name the key still resolves the tenant, with a nil key id,
+// which the middleware reads as "no subject" -- the behaviour before this existed.
+func (s *ShardedStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantID, keyID uuid.UUID, err error) {
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
 	for _, shard := range shards {
-		tid, err := shard.Store.ResolveTenantFromAPIKey(ctx, keyHash)
-		if err == nil {
-			return tid, nil
+		if kr, ok := shard.Store.(keyIDResolver); ok {
+			if tid, kid, err := kr.ResolveAPIKey(ctx, keyHash); err == nil {
+				return tid, kid, nil
+			}
+			continue
+		}
+		if tid, err := shard.Store.ResolveTenantFromAPIKey(ctx, keyHash); err == nil {
+			return tid, uuid.Nil, nil
 		}
 	}
-	return uuid.Nil, fmt.Errorf("tenant not found for API key")
+	return uuid.Nil, uuid.Nil, fmt.Errorf("tenant not found for API key")
 }
 
 // AdminForceComplete marks a workflow as done, bypassing worker ownership.
