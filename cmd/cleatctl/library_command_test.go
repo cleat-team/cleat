@@ -125,8 +125,9 @@ func TestPublishingThroughThePublisherLoginAndListing(t *testing.T) {
 			lib := fmt.Sprintf("cli-%d", time.Now().UnixNano()%1_000_000_000_000)
 			cleanupCLILibrary(t, owner, tc.edialect, lib)
 			dir := t.TempDir()
-			parent := stampedMember(t, dir, "parent", 1, map[string]int{"child": 2}, "p")
-			child := stampedMember(t, dir, "child", 2, nil, "c")
+			// D59 (cleat#3629): members are named "<library>.<name>".
+			parent := stampedMember(t, dir, lib+".parent", 1, map[string]int{lib + ".child": 2}, "p")
+			child := stampedMember(t, dir, lib+".child", 2, nil, "c")
 			ctx := context.Background()
 
 			out := captureStdout(t, func() {
@@ -146,7 +147,7 @@ func TestPublishingThroughThePublisherLoginAndListing(t *testing.T) {
 				t.Fatalf("list --json = %q (%v, %+v), want one bundle of two members published by ci", js, err, listed)
 			}
 			table := captureStdout(t, func() { libraryList(ctx, pub, tc.edialect, []string{lib}) })
-			if !strings.Contains(table, "child@2, parent@1") || !strings.Contains(table, "1.0.0") {
+			if !strings.Contains(table, lib+".child@2, "+lib+".parent@1") || !strings.Contains(table, "1.0.0") {
 				t.Fatalf("list table: %q", table)
 			}
 			if empty := captureStdout(t, func() { libraryList(ctx, pub, tc.edialect, []string{"nothing-here"}) }); !strings.Contains(empty, "no published bundles") {
@@ -154,9 +155,9 @@ func TestPublishingThroughThePublisherLoginAndListing(t *testing.T) {
 			}
 
 			// A pin outside the bundle is refused before anything is written.
-			orphan := stampedMember(t, dir, "orphan", 1, map[string]int{"ghost": 1}, "o")
+			orphan := stampedMember(t, dir, lib+".orphan", 1, map[string]int{lib + ".ghost": 1}, "o")
 			stderr := withExitPanic(t, func() { libraryPublish(ctx, pub, tc.edialect, []string{lib, "2.0.0", orphan}) })
-			if !strings.Contains(stderr, `no member named "ghost"`) {
+			if !strings.Contains(stderr, `no member named "`+lib+`.ghost"`) {
 				t.Fatalf("stderr = %q, want the pin refused", stderr)
 			}
 			var n int
@@ -193,7 +194,7 @@ func TestTheBuiltCleatctlPublishesWithOnlyThePublisherRole(t *testing.T) {
 			_, dsn := testutil.LibraryLoginDSN(t, owner, tc.tdialect, true)
 			lib := fmt.Sprintf("bin-%d", time.Now().UnixNano()%1_000_000_000_000)
 			cleanupCLILibrary(t, owner, tc.edialect, lib)
-			member := stampedMember(t, t.TempDir(), "solo", 1, nil, "s")
+			member := stampedMember(t, t.TempDir(), lib+".solo", 1, nil, "s")
 
 			run := func(args ...string) (int, string) {
 				cmd := exec.Command(bin, append([]string{"--db", dsn}, args...)...)

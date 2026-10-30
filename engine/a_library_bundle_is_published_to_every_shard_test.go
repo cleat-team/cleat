@@ -50,10 +50,10 @@ func shardList(conns ...*sql.DB) []LibraryShard {
 }
 
 func shardedReq(lib string) PublishLibraryRequest {
-	return PublishLibraryRequest{Library: lib, BundleVersion: "1.0.0", PublishedBy: "operator-x", Members: []PublishLibraryMember{
+	return inLibrary(PublishLibraryRequest{Library: lib, BundleVersion: "1.0.0", PublishedBy: "operator-x", Members: []PublishLibraryMember{
 		pubMember("parent", 1, "parent-bytes", map[string]int{"child": 2}),
 		pubMember("child", 2, "child-bytes", nil),
-	}}
+	}})
 }
 
 func TestABundleIsPublishedToEveryShardAndAReRunIsTheRepair(t *testing.T) {
@@ -173,7 +173,7 @@ func TestABundleIsPublishedToEveryShardAndAReRunIsTheRepair(t *testing.T) {
 				lib := uniqueLibrary("shardconf")
 				// Shard 2 already holds DIFFERENT bytes under parent@1, from some earlier publish.
 				stale := shardedReq(lib)
-				stale.Members[0] = pubMember("parent", 1, "parent-STALE-bytes", map[string]int{"child": 2})
+				stale.Members[0] = pubMember(lib+".parent", 1, "parent-STALE-bytes", map[string]int{lib + ".child": 2})
 				if _, err := PublishLibraryBundle(ctx, f.pub[1], tc.edialect, stale); err != nil {
 					t.Fatalf("UNMEASURED: seeding the stale member on shard 2: %v", err)
 				}

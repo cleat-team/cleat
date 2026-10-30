@@ -110,7 +110,7 @@ type LibraryInstaller interface {
 }
 
 var (
-	libraryNamePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	libraryNamePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 	libraryBundleVersionExpr = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 )
 
@@ -124,7 +124,7 @@ const (
 // plain token: no slash, no whitespace, no control characters.
 func ValidateLibraryRef(library, bundleVersion string) error {
 	if library == "" || len(library) > maxLibraryNameLen || !libraryNamePattern.MatchString(library) {
-		return fmt.Errorf("library %q is not a valid name: 1 to %d characters of letters, digits, '.', '_' and '-', starting with a letter or digit", library, maxLibraryNameLen)
+		return fmt.Errorf("library %q is not a valid name: 1 to %d characters of letters, digits, '_' and '-', starting with a letter or digit; a '.' is not allowed because it separates the library name from its members' names (cleat#3629)", library, maxLibraryNameLen)
 	}
 	if bundleVersion == "" || len(bundleVersion) > maxBundleVersionLen || !libraryBundleVersionExpr.MatchString(bundleVersion) {
 		return fmt.Errorf("bundle version %q is not valid: 1 to %d characters of letters, digits, '.', '_', '+' and '-', starting with a letter or digit", bundleVersion, maxBundleVersionLen)
