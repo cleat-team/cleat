@@ -29,8 +29,9 @@ import (
 // other things on other routes, and a sentinel that named a library for a workflow-start
 // refusal would be wrong.
 var (
-	// ErrLibraryBundleNotFound: 404 with the worker's JSON error. The library or the bundle
-	// version has not been published. Retrying does not help; publishing does.
+	// ErrLibraryBundleNotFound: 404 carrying the worker's detail code "library_bundle_not_found",
+	// which only the install handler writes. The library or the bundle version has not been
+	// published. Retrying does not help; publishing does.
 	ErrLibraryBundleNotFound = errors.New("the library or bundle version is not published")
 
 	// ErrLibraryDefinitionCollision: 409. The tenant already holds a definition under a name
@@ -59,11 +60,18 @@ var (
 	// Retrying never helps.
 	ErrLibraryInstallUnsupported = errors.New("this deployment cannot install workflow libraries")
 
-	// ErrLibraryRouteMissing: 404 WITHOUT the worker's JSON error, which is what the HTTP mux
-	// itself answers for a route it does not have. The worker predates workflow libraries.
-	// It is not ErrLibraryBundleNotFound, and publishing the bundle would not help.
-	ErrLibraryRouteMissing = errors.New("the worker has no library install route; it predates workflow libraries")
+	// ErrLibraryRouteMissing: any 404 WITHOUT that detail code, so one the install handler did
+	// not write. The worker answers an unmatched /api/ path with a JSON 404 of its own
+	// ({"error":"not found"}), the same status and shape as a missing bundle, so the body
+	// alone cannot tell them apart; only the detail code can. The worker does not serve this
+	// route: it is older than this client, or is a build without workflow libraries. It is not
+	// ErrLibraryBundleNotFound, and publishing the bundle would not help.
+	ErrLibraryRouteMissing = errors.New("the worker does not answer the library install route; it is older than this client or a build without workflow libraries")
 )
+
+// libraryBundleNotFoundDetail is the detail code the worker's install handler puts on its 404
+// for a bundle that is not published (cmd/cleat-worker/library_install.go, which pins it).
+const libraryBundleNotFoundDetail = "library_bundle_not_found"
 
 // InstalledLibraryMember is one definition an install wrote or refreshed.
 type InstalledLibraryMember struct {
@@ -183,13 +191,13 @@ func classifyLibraryInstall(up *UpstreamStatusError) error {
 	case http.StatusNotImplemented:
 		return fmt.Errorf("%w: %w", ErrLibraryInstallUnsupported, up)
 	case http.StatusNotFound:
-		// The worker writes {"error": "..."} for a bundle it could not find. The mux writes
-		// plain text for a route it does not have, and only the second means the worker is
-		// too old to know libraries.
+		// Only the install handler writes the detail code, so its presence means the handler
+		// ran and the bundle is what is missing. Its absence is NOT evidence of a missing
+		// bundle: a worker without this route answers {"error":"not found"} here.
 		var e struct {
-			Error string `json:"error"`
+			Detail string `json:"detail"`
 		}
-		if json.Unmarshal(up.Body, &e) == nil && e.Error != "" {
+		if json.Unmarshal(up.Body, &e) == nil && e.Detail == libraryBundleNotFoundDetail {
 			return fmt.Errorf("%w: %w", ErrLibraryBundleNotFound, up)
 		}
 		return fmt.Errorf("%w: %w", ErrLibraryRouteMissing, up)

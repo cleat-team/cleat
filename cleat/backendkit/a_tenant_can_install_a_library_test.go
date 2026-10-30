@@ -26,6 +26,20 @@ import (
 // "DeclaredBy" as an empty string.
 const realUnmetPluginsBody = `{"error":"plugin dependencies are not met; no worker has ever registered a plugin named: \"slack-notify\" (>=1.2), declared by acme-wf@3","missing_plugins":[{"Name":"slack-notify","Constraint":">=1.2","DeclaredBy":"acme-wf@3"}]}`
 
+// The two 404 bodies a worker can send for an install, as literals. cmd/cleat-worker is package main
+// in another module and cannot be imported here, so the worker's own test
+// (an_install_404_says_which_not_found_it_is_test.go) pins the same two bodies through its real
+// route table, and a change to either side fails there. This is the half that reads them.
+//
+// realUnmatchedAPIPathBody is what the worker's apiAware404 writes for an /api/ path no handler
+// claims, which is what a worker WITHOUT the install route answers. It is a JSON 404 with an
+// "error", the same status and shape as a missing bundle; the first version of this client read
+// that as "publish the bundle" and the assumption was only caught in review.
+const (
+	realBundleNotFoundBody   = `{"detail":"library_bundle_not_found","error":"library \"acme\" bundle \"9\" is not published"}`
+	realUnmatchedAPIPathBody = "{\"error\":\"not found\"}\n"
+)
+
 func installServer(t *testing.T, status int, body string) (*httptest.Server, *int) {
 	t.Helper()
 	calls := 0
@@ -130,8 +144,10 @@ func TestAnInstallRefusalIsMatchableAndOnlyAsItself(t *testing.T) {
 		body   string
 		want   string // a key of sentinels, or "" for no library sentinel at all
 	}{
-		{"404 with the worker's error is a missing bundle", 404, `{"error":"library \"acme\" bundle \"9\" is not published"}`, "bundle not found"},
-		{"404 from the mux is a worker that predates libraries", 404, "404 page not found\n", "route missing"},
+		{"404 with the install handler's detail code is a missing bundle", 404, realBundleNotFoundBody, "bundle not found"},
+		{"404 from the worker's own apiAware404 is a worker without the route", 404, realUnmatchedAPIPathBody, "route missing"},
+		{"a JSON 404 with an error and no detail code is NOT a missing bundle", 404, `{"error":"library \"acme\" bundle \"9\" is not published"}`, "route missing"},
+		{"a plain-text 404 is a worker without the route", 404, "404 page not found\n", "route missing"},
 		{"409 is a definition collision", 409, `{"error":"the tenant already has a definition"}`, "definition collision"},
 		{"422 is unmet plugins", 422, realUnmetPluginsBody, "plugins unmet"},
 		{"400 is a bad request", 400, `{"error":"bundle version \"\" is not valid"}`, "bad request"},

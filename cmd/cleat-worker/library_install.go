@@ -20,6 +20,10 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
+// libraryBundleNotFoundDetail is the machine-readable code on the 404 an install answers when the
+// library or bundle version is not published. A 404 without it did not come from this handler.
+const libraryBundleNotFoundDetail = "library_bundle_not_found"
+
 // libraryEntitlementCheck decides whether a tenant may install a library. A non-nil
 // error refuses, and the install writes nothing.
 type libraryEntitlementCheck func(ctx context.Context, tenantID, library string) error
@@ -106,7 +110,12 @@ func (s *apiServer) handleInstallLibrary(w http.ResponseWriter, r *http.Request)
 		case errors.Is(err, engine.ErrLibrariesUnsupported):
 			s.writeError(w, http.StatusNotImplemented, err.Error())
 		case errors.Is(err, engine.ErrLibraryBundleNotFound):
-			s.writeError(w, http.StatusNotFound, err.Error())
+			// 404 alone cannot say what was not found: apiAware404 answers every unmatched
+			// /api/ path with a JSON 404 too, so a client talking to a worker that lacks this
+			// route sees the same status and the same {"error": ...} shape. The detail is the
+			// positive marker that THIS handler ran and the bundle is what is missing
+			// (backendkit.Client.InstallLibrary reads it).
+			s.writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error(), "detail": libraryBundleNotFoundDetail})
 		case errors.Is(err, engine.ErrLibraryDefinitionCollision):
 			s.writeError(w, http.StatusConflict, err.Error())
 		case errors.As(err, &notOptedIn):
