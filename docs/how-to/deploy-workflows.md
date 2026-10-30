@@ -279,8 +279,9 @@ member of the bundle, naming the member it came from and holding no bytes of its
 
 Every published library is installable by every tenant. A `404` means that library has no such bundle.
 
-> A **sharded** PostgreSQL deployment answers `501` to an install, and `cleatctl library publish` is not
-> available against one, until the sharded half of cleat#3597 lands.
+> A **sharded** deployment answers `501` to an install: serving many tenants on a sharded worker is not
+> supported yet. A library can still be **published to every shard**, ready for when it is; see
+> [Publishing to a sharded deployment](#publishing-to-a-sharded-deployment).
 
 ## Publishing a workflow library
 
@@ -309,6 +310,33 @@ PostgreSQL and SQL Server only.
   their digest and size. It never prints the bytes.
 - A plugin a member declares in `plugin_deps` is not checked at publish: it is checked, against the registry of
   plugins workers have registered, when a tenant installs.
+
+### Publishing to a sharded deployment
+
+A sharded worker keeps a library's members in the same database as the tenant rows that reference them, so a
+bundle has to be published to **every shard**. Give `--db` the **admin shard** (the first entry in the worker's
+`--shards-file`, see [`--shards-file`](../reference/worker-config.md#--shards-file)) and each other shard once
+with `--replicate-to`, in the worker's order, each with **that shard's own publisher login**. The role is granted
+per database, and the worker's own connection strings are not publisher logins:
+
+    cleatctl --db "$SHARD1_PUBLISHER_DSN" library publish acme 1.2.0 checkout.wasm pay.wasm \
+      --replicate-to "$SHARD2_PUBLISHER_DSN" --replicate-to "$SHARD3_PUBLISHER_DSN"
+
+- **Every shard is opened and pinged before the first write**, so a mistyped or unreachable DSN, or a shard that
+  is another kind of database, is found with nothing changed.
+- **The admin shard is written first**, and a failure there changes nothing anywhere.
+- **Every other shard is then written**, and one failing does not stop the rest. There is no transaction across
+  databases, so a publish can reach some shards and not others. The error names the shards written, the ones
+  that failed and the ones not tried, and **running the same command again completes it**: a shard that already
+  holds the bundle is left as it is.
+- **A conflict is not repaired by running it again.** A shard that already holds *different* content under the
+  same member or bundle key refuses it, because published content is immutable. The error says so; publish the
+  changed build under a new version.
+- Shards are called `shard-1`, `shard-2`, ... in every message, with the host and database each one means printed
+  beside an error. A connection string's user and password are never printed.
+- `cleatctl` cannot check that `--db` really is the admin shard or that the shards are in the worker's order:
+  the shards file is the authority. `library list` reads the one database `--db` names, so run it against each
+  shard's publisher DSN to see what that shard holds.
 
 ## Production deployment checklist
 

@@ -205,7 +205,9 @@ func TestInstallRouteMapsEachRefusalToItsStatus(t *testing.T) {
 }
 
 // A store that cannot install (a sharded deployment, today) is told so in words that
-// name the issue that will change it, not a bare 404 or 500.
+// name the issue that tracks it, not a bare 404 or 500. That is cleat#3606, the home of the
+// sharded multi-tenancy question; cleat#3597 named it until its sharded half became publish
+// replication alone.
 func TestInstallRouteSaysWhyAStoreCannotInstall(t *testing.T) {
 	ms := &mockStore{}
 	api := newTestAPIServer(ms) // *mockStore has no InstallLibraryBundle
@@ -213,7 +215,7 @@ func TestInstallRouteSaysWhyAStoreCannotInstall(t *testing.T) {
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("status %d, want 501: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "cleat#3597") {
+	if !strings.Contains(rec.Body.String(), "cleat#3606") {
 		t.Errorf("the 501 does not name the issue that tracks it: %s", rec.Body.String())
 	}
 }
