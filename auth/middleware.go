@@ -132,7 +132,7 @@ func resolveKey(ctx context.Context, store TenantResolver, keyHash []byte) (tena
 	if kr, ok := store.(KeyResolver); ok {
 		return kr.ResolveAPIKey(ctx, keyHash)
 	}
-	tenantID, err = store.ResolveTenantFromAPIKey(ctx, keyHash)
+	tenantID, err = TenantFromAPIKey(ctx, store, keyHash)
 	return tenantID, uuid.Nil, err
 }
 
