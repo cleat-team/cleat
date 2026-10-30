@@ -45,6 +45,11 @@ var ErrTenantNotFound = errors.New("auth: tenant not found")
 type TenantStore struct {
 	db      *sql.DB
 	dialect string
+
+	// afterTombstonePrecheck, when set, runs in ProvisionTenant between the early tombstone check and
+	// everything that follows. It exists so a test can drop a tenant in exactly that gap; it is nil in
+	// production and nothing outside this package can set it.
+	afterTombstonePrecheck func()
 }
 
 // NewTenantStore creates a TenantStore for PostgreSQL.

@@ -207,6 +207,10 @@ func (s *TenantStore) ProvisionTenant(ctx context.Context, req ProvisionRequest)
 
 	// A dropped id is refused BEFORE the org is resolved: resolving creates the org by name, and a request that
 	// is going to be refused must not leave one behind. A generated id cannot have been dropped.
+	//
+	// This check is a PRE-FILTER, not the guard. A drop can commit between it and the insert below, after
+	// which the tenant row is absent and the id looks free; provisionOnce re-checks inside the insert's own
+	// transaction, which is the check that holds.
 	if req.TenantID != uuid.Nil {
 		var one int
 		switch err := s.db.QueryRowContext(ctx, st.tombstoneExists, tid.String()).Scan(&one); {
@@ -215,6 +219,9 @@ func (s *TenantStore) ProvisionTenant(ctx context.Context, req ProvisionRequest)
 		case !errors.Is(err, sql.ErrNoRows):
 			return ProvisionResult{}, err
 		}
+	}
+	if s.afterTombstonePrecheck != nil {
+		s.afterTombstonePrecheck()
 	}
 
 	orgID, err := s.resolveOrg(ctx, st, req)
@@ -321,6 +328,11 @@ func (s *TenantStore) provisionOnce(ctx context.Context, st provisionStmts, req 
 		return ProvisionResult{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Inside the transaction, AFTER the insert, and in that order on purpose. A drop of the same id holds the
+	// tenant's row until it commits, so the insert below WAITS for it (the primary key is the same); once it
+	// proceeds, the drop has committed and its tombstone is visible to the next statement. Checked before the
+	// insert instead, a drop could still commit in between and the tenant would be created under a dropped id.
+	// Reading it after is what makes the tombstone check and the insert one decision.
 	if _, err := tx.ExecContext(ctx, st.insertTenant, want.ID.String(), want.Name, want.DisplayName, want.OrgID.String(), req.Creator); err != nil {
 		// A failed insert is not necessarily a failure: a racing create of the same id or name is the
 		// ordinary cause, and the re-read decides. Anything the re-read does not explain is returned.
@@ -328,6 +340,13 @@ func (s *TenantStore) provisionOnce(ctx context.Context, st provisionStmts, req 
 		if again, readErr := s.somethingAppeared(ctx, st, want); readErr == nil && again {
 			return ProvisionResult{}, true, err
 		}
+		return ProvisionResult{}, false, err
+	}
+	var dropped int
+	switch err := tx.QueryRowContext(ctx, st.tombstoneExists, want.ID.String()).Scan(&dropped); {
+	case err == nil:
+		return ProvisionResult{}, false, &ProvisionConflictError{Reason: ConflictTenantIDDropped} // rolled back by the defer
+	case !errors.Is(err, sql.ErrNoRows):
 		return ProvisionResult{}, false, err
 	}
 	if err := insertProvisionalKey(ctx, tx, st, keyID, want.ID, secret, req.KeyDescription); err != nil {
