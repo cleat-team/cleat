@@ -40,6 +40,15 @@ type fakeProvisioner struct {
 	gotSuspended                         bool
 	gotSuspendCreator                    string
 	suspendErr                           error
+
+	planFacts auth.DropPlanFacts
+	planErr   error
+	planCalls int
+}
+
+func (f *fakeProvisioner) DropPlanFacts(context.Context, uuid.UUID) (auth.DropPlanFacts, error) {
+	f.planCalls++
+	return f.planFacts, f.planErr
 }
 
 func (f *fakeProvisioner) ProvisionTenant(_ context.Context, r auth.ProvisionRequest) (auth.ProvisionResult, error) {
