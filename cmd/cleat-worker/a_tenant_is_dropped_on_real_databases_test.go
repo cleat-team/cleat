@@ -100,6 +100,10 @@ func TestATenantIsDroppedOnPostgres(t *testing.T) {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed cleat#3552 test")
 	}
 	db := testutil.SuiteTestDB(t, "cleat_worker")
+	// The bystander's run is left `ready` ON PURPOSE: it is the negative control that a drop touches only its
+	// own tenant. A run left there is claimable by the next test that reads "the next ready run", and the
+	// package fails if one remains (cleat#3614), so it is settled after the assertions have run.
+	settleRunsLeftBehind(t, db)
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, db)
 	factory := engine.NewPostgresStoreFactory(rlsDB, "public")
 	ctx := context.Background()
