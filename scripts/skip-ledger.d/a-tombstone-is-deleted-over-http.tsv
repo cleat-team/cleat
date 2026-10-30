@@ -1,0 +1,1 @@
+test-go/commands	1	^TestATombstoneIsDeletedOverHTTPAgainstRealDatabases/mssql$	dialect-gated per SUBTEST (cleat#3552, B3b-2b): one subtest per dialect, so mssql skips in this PostgreSQL-only job while postgres RUNS. Measured by NAME with only CLEAT_TEST_POSTGRES set, not derived from a delta. Same shape as TestProvisioningOverHTTPAgainstRealDatabases/mssql.

@@ -24,6 +24,7 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 	dropPlan := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop-plan"
 	resume := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/resume"
 	bare := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7"
+	tombstone := bare + "/tombstone"
 
 	type row struct {
 		name   string
@@ -94,6 +95,15 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		// handler's creator check is what limits it to that principal's own tenants.
 		{"provision, drop", ScopeProvision, http.MethodDelete, bare, 200},
 		{"admin, drop", ScopeAdmin, http.MethodDelete, bare, 200},
+		// Deleting a tombstone (B3b-2b) is the one act that lets a dropped id be provisioned again, and it is
+		// admin-only on purpose: a service that can create tenants must not be able to recreate an id that was
+		// dropped. Every method and spelling a provision key could try is refused; the admin key is the control.
+		{"admin, delete a tombstone", ScopeAdmin, http.MethodDelete, tombstone, 200},
+		{"provision, delete a tombstone", ScopeProvision, http.MethodDelete, tombstone, 403},
+		{"provision, tombstone with GET", ScopeProvision, http.MethodGet, tombstone, 403},
+		{"provision, tombstone with POST", ScopeProvision, http.MethodPost, tombstone, 403},
+		{"provision, tombstone of upper-case id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7/tombstone", 403},
+		{"provision, tombstone with a tail", ScopeProvision, http.MethodDelete, tombstone + "/x", 403},
 		{"provision, drop of upper-case id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7", 403},
 		{"provision, drop of bare hex", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8d264f399c524623aa1d258c7bcc34d7", 403},
 		{"provision, drop of a name that is no id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/acme", 403},

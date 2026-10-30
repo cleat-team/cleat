@@ -269,7 +269,7 @@ returns, so a crash in between can lose it; the tombstone cannot be lost without
   so a caller whose response was lost can repeat the request. Who may see that is decided as for the tenant: a
   provision-scoped key sees it only for a tenant it created.
 - **The id cannot be reused by accident.** `POST /api/admin/tenants` with a dropped id answers `409`,
-  `"reason": "tenant_id_dropped"`, and creates nothing (no org either). What the worker, its caches and the logs still hold
+  `"reason": "tenant_id_dropped"`, and creates nothing (no org either), until an admin deletes the tombstone (below). What the worker, its caches and the logs still hold
   under the id would otherwise be inherited by a new tenant.
 - **A start for a dropped tenant is refused**, as for a suspended one.
 
@@ -292,8 +292,45 @@ supersedes the design discussion's earlier line that a drop would be operator-on
 that deletes an org removes the org's tenant with the key it created it with, so the callers are the same as for `suspend`.
 The drop is refused while any run is unsettled, is tombstoned and is audited, and it is irreversible.
 
-**Nothing deletes a tombstone yet.** A dropped id therefore stays unusable (`409 tenant_id_dropped`) until the route that
-removes one lands, which is a separate change.
+### Deleting a tombstone, so a dropped id can be used again
+
+```
+DELETE /api/admin/tenants/{tenant}/tombstone
+X-Confirm: {tenant}
+```
+
+A dropped id answers `409 tenant_id_dropped` on create until its tombstone is deleted. This is the one act that removes
+it. It is **admin-only**: an admin-scoped operator key. A provision-scoped key is refused with `403` (by the scope gate,
+and again by the handler), a tenant key is not an operator, and the default tenant has no tombstone. Reuse is its own
+route and not a flag on create so that a service which can create tenants can never recreate an id that was dropped,
+because what the worker, its caches and the logs still hold under that id would be inherited by whoever gets it.
+
+`X-Confirm` must be the tenant's id, typed back, in the canonical lower-case spelling. It is checked before anything
+is read.
+
+```json
+{"tenant_id": "...", "tombstone_deleted": true,
+ "tombstone": {"tenant_id": "...", "name": "acme", "org_id": "...", "created_by": "clew-service",
+               "dropped_by": "operator:...", "dropped_at": "2026-10-30T04:00:00.123456Z",
+               "audit_chain": {"seq": 41, "hash": "…"}}}
+```
+
+`created_by` and `audit_chain` are `null` when the tombstone had none.
+
+**THIS DISCARDS THE AUDIT CHAIN ANCHOR, and you must archive the response.** The tombstone is the only record of where
+the dropped tenant's own audit chain ended (`audit_chain.seq` and `hash`); the chain itself was deleted with the tenant.
+After the delete nothing says where it stopped, so a copy of that chain taken earlier can no longer be checked against
+its end. The reply carries everything the row held, and the worker logs the same fields at `WARN` (ids, a name, a chain
+position and a hash: observability data, not secrets), but neither is a durable record, so keep the response.
+
+**The audit row records that it happened and not what was deleted.** The request is audited on the **default**
+tenant's chain, attributed to the operator, with the tenant's id in the path and the status; an audit row has no field for
+the tombstone's contents. (A durable record of deleted tombstones, and a detail field on the audit row, were considered
+and not built.)
+
+A repeat is **`404`**, not `200`: deleting a tombstone is a one-off operator act and not a step a saga repeats, and once
+the id has been reused it may belong to a live tenant. An id that was never dropped is the same `404`. PostgreSQL and SQL
+Server only, and not on a sharded worker.
 
 ## Acting on another tenant
 

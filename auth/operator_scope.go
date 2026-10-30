@@ -156,6 +156,12 @@ func provisionMayReach(method string, u *url.URL) bool {
 		return false
 	}
 	id, tail, hasTail := strings.Cut(rest, "/")
+	// DELETE <id>/tombstone is deliberately NOT here (cleat#3552, B3b-2b). Deleting a tombstone is what lets a
+	// dropped id be provisioned again, and that is an admin-only act so that a service which can create tenants
+	// can never recreate an id that was dropped. It falls out of the switch below with no case to name it, and
+	// a matrix row pins it, because a refusal that exists only as the absence of a line is the kind a later
+	// edit removes without noticing.
+	//
 	// The method belongs to the route: the plan is read with GET and nothing else is, so a GET to
 	// confirm or suspend, or a POST to the plan, is not a route a provisioner may reach. A drop is
 	// DELETE on the bare tenant id and nothing else is: the one route with no tail (cleat#3552, B3b-2).

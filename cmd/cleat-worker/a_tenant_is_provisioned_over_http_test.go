@@ -53,12 +53,23 @@ type fakeProvisioner struct {
 	gotDrop   auth.DropRequest
 	dropRes   auth.DropResult
 	dropErr   error
+
+	tombstoneCalls int
+	gotTombstoneID uuid.UUID
+	tombstone      auth.Tombstone
+	tombstoneErr   error
 }
 
 func (f *fakeProvisioner) DropTenant(_ context.Context, r auth.DropRequest) (auth.DropResult, error) {
 	f.dropCalls++
 	f.gotDrop = r
 	return f.dropRes, f.dropErr
+}
+
+func (f *fakeProvisioner) DeleteTombstone(_ context.Context, id uuid.UUID) (auth.Tombstone, error) {
+	f.tombstoneCalls++
+	f.gotTombstoneID = id
+	return f.tombstone, f.tombstoneErr
 }
 
 func (f *fakeProvisioner) DropPlanHeader(context.Context, uuid.UUID) (auth.DropPlanHeader, error) {

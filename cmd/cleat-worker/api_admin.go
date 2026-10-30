@@ -63,6 +63,12 @@ func (s *apiServer) handleAdminRoutesForTenant(w http.ResponseWriter, r *http.Re
 		s.handleSetTenantSuspended(w, r, tenant, tail == "suspend")
 		return
 	}
+	if ok && tenant != "" && tail == "tombstone" {
+		// cleat#3552, B3b-2b: the one act that lets a dropped id be provisioned again. Admin-only; the
+		// handler and the scope gate both say so. Not an instance route either.
+		s.handleDeleteTombstone(w, r, tenant)
+		return
+	}
 	if !ok && tenant != "" && r.Method == http.MethodDelete {
 		// cleat#3552, B3b-2: DELETE /api/admin/tenants/{tenant}. The only route with no tail, so it is
 		// told apart by having none; any other method on a bare tenant id is the 404 it always was.
