@@ -108,6 +108,12 @@ func (s *MSSQLStore) InstallLibraryBundle(ctx context.Context, req InstallLibrar
 		return InstallLibraryResult{}, fmt.Errorf("install library: check for a colliding definition: %w", err)
 	}
 
+	// D59 (cleat#3629): nor may it run beside workflows the tenant deployed itself under this
+	// library's prefix, at any version.
+	if err := refuseOwnNamesUnderPrefix(ctx, tx, DialectMSSQL, s.tenantID, req.Library); err != nil {
+		return InstallLibraryResult{}, err
+	}
+
 	// cleat#3600 (owner D52): see PostgresStore.InstallLibraryBundle. Refused before any
 	// write, no override, read on this transaction.
 	if err := CheckMemberPluginDeps(ctx, querierPluginSource{q: tx, d: DialectMSSQL}, req.Library, memberDeps); err != nil {

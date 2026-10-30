@@ -81,6 +81,23 @@ func TestAnUploadRefusedForOpenRunsIsAConflictNotAServerError(t *testing.T) {
 		}
 	})
 
+	// cleat#3629 (owner decision D59): a name under a published library's prefix. A conflict with
+	// what is published, not a fault, and the message already says how to proceed.
+	t.Run("a refusal because the name is under a published library's prefix is a 409 that names the prefix", func(t *testing.T) {
+		code, msg := upload(t, &engine.WorkflowNameUnderLibraryPrefixError{Name: "acme-lib.checkout", Library: "acme-lib"})
+		if code != http.StatusConflict {
+			t.Fatalf("HTTP %d (%q), want 409", code, msg)
+		}
+		for _, want := range []string{`"acme-lib.checkout"`, `"acme-lib"`, `"acme-lib."`, "D59"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the 409 body %q does not mention %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "--version") {
+			t.Errorf("the 409 body %q gives the open-runs advice, which does not apply to a name under a prefix", msg)
+		}
+	})
+
 	t.Run("control: any other deploy error is still a 500", func(t *testing.T) {
 		code, msg := upload(t, errors.New("disk on fire"))
 		if code != http.StatusInternalServerError {

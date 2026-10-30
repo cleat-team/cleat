@@ -302,6 +302,15 @@ PostgreSQL and SQL Server only.
   refusal names the prefix and a name that would pass; set the workflow's name in its stamp and rebuild. The
   prefix is what keeps a library's workflows and a tenant's own apart (owner decision D59, cleat#3629), so a
   **library name cannot contain a dot** either: it would make two libraries' prefixes overlap.
+- **A published prefix is reserved, in both directions.** Once a library is published, a tenant's own deploy of
+  any name that starts with `<library>.` is refused (`409` on `POST /api/definitions`, a non-zero exit from
+  `cleat deploy` and `cleatctl deploy workflow`), at any version, whether or not the library holds that name.
+  An install is refused (`409`) when the tenant already holds workflows of its own under the prefix, and the
+  error names them. Both are what stop a tenant's `acme.checkout` version 2 from silently shadowing an installed
+  `acme.checkout` version 1, because a start without a version runs the highest one whatever its origin. Rows a
+  tenant already has under a prefix are not touched: they keep running, and only a later deploy or install is
+  refused until they are renamed or removed. The comparison is the database's own, so on SQL Server, whose names
+  are case-insensitive, `ACME.checkout` is under the `acme.` prefix, and on PostgreSQL it is a different name.
 - **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
   of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
   does not contain. A name appears once per bundle.
