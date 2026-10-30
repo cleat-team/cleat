@@ -177,6 +177,62 @@ There is no `namespace` or `task_queue` field: neither is a concept this endpoin
 }
 ```
 
+## Plugin dependencies are checked at deploy
+
+A definition can declare the plugins it needs (`plugin_deps`: plugin name to version constraint). A deploy
+**refuses** one that names a plugin no worker has ever registered, with `422` on the REST API and a
+non-zero exit from the commands, naming **every** missing plugin and which declaration named it (the WASM
+binary's embedded `plugin_deps`, the definition's own, or both). Nothing is written when it refuses
+(cleat#3600).
+
+"Registered" means a worker recorded a plugin of that **name** when it started. That record is kept
+(nothing deletes from it), so a deploy does not fail across a rolling restart or a maintenance window, and
+it catches a typo or a plugin that was never installed anywhere. It does not check versions, and it does not
+check that a worker carrying the plugin is up now: a worker still checks its own loaded plugins and their
+versions when it claims a run, and releases a run it cannot serve. So a deploy that passes is not a promise
+that a run will start.
+
+Because the record is written by workers, a **first** deploy that names a plugin must come after a worker
+carrying that plugin has started once, or must say it is deliberate:
+
+    cleatctl deploy workflow <name> <wasm> --allow-missing-plugins
+    deploy-workflow --allow-missing-plugins ...
+    cleat deploy --allow-missing-plugins ...
+    POST /api/definitions   {..., "allow_missing_plugins": true}
+
+An override changes **only the deploy that carries it**, and it is **recorded, not just logged**: before the
+definition is written, one row goes into `admin.plugin_dep_overrides` (the tenant, the definition and version,
+who asked, which path took it, and each missing plugin with its constraint and which declaration named it), and
+it is also logged at `WARN`. That table is append-only for the application role on PostgreSQL and SQL Server. It is kept after the tenant is dropped, as an audit record is. If
+the row cannot be written the deploy is **refused**: there is no override without a record of it. The row says the
+check was bypassed, not that the deploy then succeeded. An override covers a missing plugin only: it does not turn
+"the registry could not be read" into "allowed". **A library install has no override**: it refuses a bundle whose
+members name an unregistered plugin (`422`, naming each plugin and the member that declared it) and writes
+nothing, because an install goes into a running system.
+
+`cleatctl deploy` carries the previous version's `plugin_deps` forward, so a redeploy is refused when one of
+those plugin names has not been registered by any worker **since migration `008` was applied to that
+database**; a plugin that registered once stays registered, even after it is retired. A definition that
+declares no plugin dependencies is not affected. Nothing the repository ships declares any.
+
+**Sharded deployments.** The registry, and the override record, live in the worker's own database, which for a
+sharded worker is the **first shard's**: the same database worker registration writes and where the schema's
+other administrative tables are. A deploy asks that one registry once, before the first shard is written, then
+writes every shard or none: a refusal leaves nothing on any shard. A name registered only in another shard's
+registry does not count. A command-line deploy (`cleatctl`, `cleat deploy`, `deploy-workflow`) reads the registry of the
+database it is given, so **a CLI run against a non-first shard's DSN reads that shard's (empty) registry** and refuses
+every declared plugin; point it at the first shard's DSN, or use `--allow-missing-plugins`, which is recorded. Library
+install is not available on a sharded store yet.
+
+**Upgrading.** The registry starts empty, and only a worker running a version that carries it writes to it: an
+older worker writes nothing, and the worker table has no plugin column to fill it from. So from the moment
+migration `008` runs until the first upgraded worker starts, every deploy or install that declares
+`plugin_deps` is refused. **Upgrade at least one worker before deploying definitions that declare
+`plugin_deps`, or pass `--allow-missing-plugins`** (deploy only; an install has no override, so install after
+an upgraded worker has started). During a rolling upgrade an older worker still claims and releases runs
+exactly as before: the check a worker makes against its own loaded plugins when it claims a run is unchanged,
+and the registry plays no part in it.
+
 ## Locking child workflow versions
 
 If your workflow calls child workflows, pin their versions at build time for reproducible deployments:

@@ -194,7 +194,7 @@ const crashDatabase = "cleat_crash"
 // payloadEncryptionKnownPositiveDatabase are cleat#2324's isolation fix for a
 // defect this suite's own feature introduced into its own test infrastructure.
 //
-// cleat#2324 made payload_encryption_ever_enabled (migrations/postgres/008) a
+// cleat#2324 made payload_encryption_ever_enabled (defined in migrations/postgres/001_schema.sql) a
 // ONE-WAY, per-database ratchet: once any worker has ever started with
 // --encrypt-sensitive-payloads against a database, cmd/cleat-worker refuses to
 // start keyless against that SAME database, forever. That is the feature

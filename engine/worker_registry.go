@@ -64,6 +64,12 @@ type WorkerRegistration struct {
 	// nil means "no master key", which is stored as the empty string and is NOT
 	// the same as NULL, which means a row that predates this column.
 	SecretKeyVersions []int
+
+	// Plugins are the names of the plugins this worker has loaded. They are recorded in
+	// the plugin-name registry (plugin_registry.go) in the same statement span as the
+	// worker's own row, and that record outlives the row: nothing deletes from it
+	// (cleat#3600). Names only; a plugin's version is checked at claim time.
+	Plugins []string
 }
 
 // table is admin.workers everywhere except MySQL, which has no schemas -- its
@@ -130,6 +136,16 @@ func (r *WorkerRegistry) Register(ctx context.Context, reg WorkerRegistration) e
 // how RegisterUnderKeyGate makes the registration part of the span that holds
 // the secret-key gate.
 func (r *WorkerRegistry) registerOn(ctx context.Context, q querier, reg WorkerRegistration) error {
+	// BEFORE the worker's own row, and that order is load-bearing on MySQL. The span is a
+	// transaction on PostgreSQL and SQL Server, so a failure here rolls the worker's row back
+	// whichever order the statements run in; on MySQL it is not (RegisterUnderKeyGate holds a
+	// named lock, not a transaction), so a plugin write that failed AFTER the worker INSERT left
+	// the worker published with the secrets check never run. Measured by cleat-review on
+	// cleat#3604: with the registry table gone, 0 worker rows were left on PostgreSQL and SQL
+	// Server and 1 on MySQL. A name the table would reject is refused here for the same reason.
+	if err := recordPluginsOn(ctx, q, r.Dialect, reg.Plugins); err != nil {
+		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
+	}
 	_, err := q.ExecContext(ctx, r.stmt(
 		"INSERT INTO ", r.table(),
 		" (worker_id, hostname, address, pid, concurrency, connection_budget,",

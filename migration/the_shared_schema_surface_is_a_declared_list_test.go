@@ -47,6 +47,16 @@ var (
 		// org_id exists to answer.
 		"admin.orgs",
 		"admin.plugin_tables",
+		// Migration 008, cleat#3600. Shared for the reason admin.workers is: a worker
+		// loads one plugin set for every tenant and pool it serves, so which plugin
+		// NAMES have ever been registered is a fact about the deployment, and a
+		// per-pool copy would let two pools disagree about whether a deploy may name a
+		// plugin. Never deleted from, so unlike admin.workers a pool upgrading cannot
+		// make it lose rows.
+		"admin.registered_plugins",
+		// Migration 008, cleat#3600. The record of each use of the plugin-dependency override.
+		// Shared for the same reason: it describes a deploy, and a deploy is of the database.
+		"admin.plugin_dep_overrides",
 		"admin.tenant_api_keys",
 		"admin.tenant_roles",
 		// Migration 079, cleat#1565. Shared like the rest of admin: a

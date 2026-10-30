@@ -1477,6 +1477,12 @@ func TestDeployWorkflow_WithExistingVersions(t *testing.T) {
 		},
 	}
 
+	// The previous version declares plugin p1 and a deploy carries that over, so under the
+	// plugin-dependency check (cleat#3600) p1 must be a registered plugin for this to deploy.
+	prevSource := deployPluginSource
+	deployPluginSource = func(*sql.DB) engine.PluginRegistryAccess { return knownPlugins{"p1": true} }
+	t.Cleanup(func() { deployPluginSource = prevSource })
+
 	stdout := captureStdout(t, func() {
 		deployWorkflow(context.Background(), store, nil, []string{"existing-wf", path})
 	})

@@ -43,7 +43,7 @@ func (s *PostgresStore) InstallLibraryBundle(ctx context.Context, req InstallLib
 
 	// The bundle's members and what each declares.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT m.name, m.version, m.exposure
+		SELECT m.name, m.version, m.exposure, m.plugin_deps::text
 		FROM library.bundle_members bm
 		JOIN library.members m ON m.library = bm.library AND m.name = bm.name AND m.version = bm.version
 		WHERE bm.library = $1 AND bm.bundle_version = $2
@@ -52,10 +52,12 @@ func (s *PostgresStore) InstallLibraryBundle(ctx context.Context, req InstallLib
 		return InstallLibraryResult{}, fmt.Errorf("install library: read the bundle: %w", err)
 	}
 	var members []InstalledLibraryMember
+	var memberDeps []MemberPluginDeps
 	for rows.Next() {
 		var m InstalledLibraryMember
 		var declared string
-		if err := rows.Scan(&m.Name, &m.Version, &declared); err != nil {
+		var deps sql.NullString
+		if err := rows.Scan(&m.Name, &m.Version, &declared, &deps); err != nil {
 			rows.Close()
 			return InstallLibraryResult{}, fmt.Errorf("install library: scan a member: %w", err)
 		}
@@ -67,6 +69,7 @@ func (s *PostgresStore) InstallLibraryBundle(ctx context.Context, req InstallLib
 			return InstallLibraryResult{}, fmt.Errorf("install library %q bundle %q: member %q: %w", req.Library, req.BundleVersion, m.Name, err)
 		}
 		members = append(members, m)
+		memberDeps = append(memberDeps, MemberPluginDeps{Name: m.Name, Version: m.Version, Raw: []byte(deps.String)})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -95,6 +98,13 @@ func (s *PostgresStore) InstallLibraryBundle(ctx context.Context, req InstallLib
 		return InstallLibraryResult{}, &LibraryDefinitionCollisionError{Name: colName, Version: colVersion, HeldFromLibrary: colLibrary}
 	case !errors.Is(err, sql.ErrNoRows):
 		return InstallLibraryResult{}, fmt.Errorf("install library: check for a colliding definition: %w", err)
+	}
+
+	// cleat#3600 (owner D52): refused for the whole bundle, before any write, when a member
+	// declares a plugin no worker has ever registered. No override: an install goes into a
+	// running system. Read on this transaction.
+	if err := CheckMemberPluginDeps(ctx, querierPluginSource{q: tx, d: DialectPostgres}, req.Library, memberDeps); err != nil {
+		return InstallLibraryResult{}, fmt.Errorf("install library %q bundle %q: %w", req.Library, req.BundleVersion, err)
 	}
 
 	// One statement copies every non-bytes column. wasm_bytes stays NULL and library

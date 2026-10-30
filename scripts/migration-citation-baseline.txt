@@ -13,7 +13,6 @@ cmd/cleat-worker/main.go	migration 079
 cmd/cleat-worker/main.go	migration 080
 cmd/cleat-worker/no_tenant_pools_test.go	038_single_tenant_guard.sql
 cmd/cleat-worker/plugin_egress.go	migration 063
-cmd/cleat-worker/setup.go	migration 008
 cmd/cleat-worker/setup.go	migration 052
 cmd/cleat-worker/setup.go	migration 077
 cmd/cleat-worker/setup.go	migration 080
@@ -22,7 +21,6 @@ cmd/cleat-worker/setup.go	migrations/postgres/077
 cmd/cleat-worker/stream_sse.go	migration 076
 cmd/cleat-worker/tenant_isolation_mssql_test.go	migrations/mssql/055
 cmd/cleatctl/checkdb.go	migrations/postgres/033
-cmd/cleatctl/coretables.go	migrations/postgres/008
 cmd/cleatctl/coretables.go	migrations/postgres/016
 cmd/cleatctl/cost.go	migration 101
 cmd/cleatctl/cost.go	migrations/postgres/101
@@ -77,7 +75,6 @@ docs/plugin-table-handling.md	migrations/postgres/063
 docs/reference/database-backends.md	migrations/mysql/036
 docs/reference/database-backends.md	migrations/mysql/070
 docs/reference/multi-tenancy.md	migration 016
-docs/reference/worker-config.md	migration 008
 docs/reference/workflow-lifecycle.md	038_defer_phase_marker.sql
 docs/reference/workflow-lifecycle.md	migration 101
 docs/reference/workflow-lifecycle.md	migrations/postgres/038
@@ -304,7 +301,6 @@ specs/CleatQueueAdmission.tla	migration 097
 specs/CleatQueueAdmission.tla	migrations/postgres/094
 specs/CleatQueueAdmission.tla	migrations/postgres/098
 tests/crash/dialects_test.go	migration 075
-tests/crash/harness_test.go	migrations/postgres/008
 tests/plugin-harness/mssql_migration_rerun_test.go	migration 031
 tests/plugin-harness/testdb.go	migration 031
 tiers.yaml	038_single_tenant_guard.sql

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -80,13 +81,18 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		"exposure class for this version: auth, internal, or public (public requires an operator opt-in -- cleatctl allow-public-exposure). "+
 			"Omitted means no opinion: the class the artifact declares in its own source, or auth if it declares none. "+
 			"May tighten that class but never loosen it (cleat#1986)")
+	// cleat#3600 (owner D52): the explicit override of the plugin-dependency check, for the
+	// normal bootstrap order in which a definition is deployed before the first worker that
+	// carries its plugin has registered. Each use is logged at WARN with the names.
+	allowMissingPlugins := fs.Bool("allow-missing-plugins", false,
+		"deploy even though a plugin this definition depends on has never been registered by any worker (logged; a run that needs it is released until a worker carrying it registers)")
 	positional, err := parseFlagsAnywhere(fs, args)
 	if err != nil {
 		osExit(1)
 	}
 
 	if len(positional) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file> [--no-validate-input] [--exposure auth|internal]")
+		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file> [--no-validate-input] [--exposure auth|internal] [--allow-missing-plugins]")
 		osExit(1)
 	}
 
@@ -320,6 +326,22 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		InputValidationDisabled: *noValidateInput,
 		Exposure:                exposure,
 		CreatedAt:               time.Now(),
+	}
+
+	// cleat#3600. Before the write, so a refusal leaves no row. The row's deps here are the
+	// previous version's (copied above), the binary's are whatever it embeds.
+	pluginSrc, pluginRec := engine.RegistrySplit(deployPluginSource(db))
+	if perr := engine.EnforcePluginDeps(ctx, pluginSrc, engine.BinaryPluginDeps(wasmBytes), pluginDeps, engine.EnforceOptions{
+		AllowMissing: *allowMissingPlugins,
+		Log:          slog.Default(),
+		Recorder:     pluginRec,
+		Override:     engine.PluginDepOverride{TenantID: engine.DefaultTenantUUID, Definition: name, Version: nextVersion, Via: "cleatctl", Actor: engine.CommandLineActor()},
+	}); perr != nil {
+		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, nextVersion, perr)
+		if errors.Is(perr, engine.ErrUnmetPluginDeps) {
+			fmt.Fprintln(os.Stderr, engine.UnmetPluginDepsCLIAdvice)
+		}
+		osExit(1)
 	}
 
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {

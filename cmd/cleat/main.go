@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"go/token"
+	"log/slog"
 	"time"
 
 	"os"
@@ -1161,6 +1162,8 @@ func runDeploy(args []string) {
 	// cleat#3497. Without it, redeploying different bytes onto a version that
 	// still has open runs is refused: they replay their history under whatever
 	// bytes the version holds, so replacing them under a live run can diverge it.
+	// cleat#3600 (owner D52): the explicit override of the plugin-dependency check.
+	allowMissingPlugins := fs.Bool("allow-missing-plugins", false, "deploy even though a plugin this binary depends on has never been registered by any worker (logged; a run that needs it is released until a worker carrying it registers)")
 	forceFlag := fs.Bool("force", false, "replace the WASM of a version that has open runs and different bytes (a deliberate hot-fix: those runs will replay their history under the new code, and a running worker can keep the previous bytes for up to about 5 seconds after a replacement of the same length)")
 	fs.Parse(args)
 
@@ -1298,6 +1301,30 @@ func runDeploy(args []string) {
 	// tenant-scoped statement in it. (The role that owns migrations bypasses
 	// RLS, so this only bites the app role -- which is the one deploy is
 	// supposed to work under.)
+	// cleat#3600. Before the transaction, so a refusal writes nothing. This path writes
+	// the binary's plugin_deps to the row, so the two declarations are the same map.
+	var declaredDeps map[string]string
+	pluginDepVersion := 0 // 0: the next free number, which is not known until the transaction below
+	if metaErr == nil {
+		declaredDeps = meta.PluginDeps
+		if meta.WorkflowVersion > 0 {
+			pluginDepVersion = meta.WorkflowVersion
+		}
+	}
+	pluginReg := &engine.PluginNameRegistry{DB: db, Dialect: engine.DialectPostgres}
+	if perr := engine.EnforcePluginDeps(context.Background(), pluginReg, declaredDeps, declaredDeps, engine.EnforceOptions{
+		AllowMissing: *allowMissingPlugins,
+		Log:          slog.Default(),
+		Recorder:     pluginReg,
+		Override:     engine.PluginDepOverride{TenantID: deployTenantID, Definition: name, Version: pluginDepVersion, Via: "cleat-deploy", Actor: engine.CommandLineActor()},
+	}); perr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", perr)
+		if errors.Is(perr, engine.ErrUnmetPluginDeps) {
+			fmt.Fprintln(os.Stderr, engine.UnmetPluginDepsCLIAdvice)
+		}
+		os.Exit(1)
+	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting deploy transaction: %v\n", err)

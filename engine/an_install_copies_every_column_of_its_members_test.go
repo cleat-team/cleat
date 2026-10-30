@@ -66,6 +66,11 @@ type libInstallRig struct {
 	seedStale func(t *testing.T, tenant, library string, m libMember)
 	// cleanup removes everything the test wrote.
 	cleanup func(tenants []string, library string)
+	// registerPlugins records plugin names in the registry the way a worker's registration
+	// does (recordPluginsOn), and forgetPlugin removes one, which only a test may do:
+	// nothing in the product deletes from the registry (cleat#3600).
+	registerPlugins func(t *testing.T, names ...string)
+	forgetPlugin    func(t *testing.T, name string)
 }
 
 // libMember is a member with a value in every column that is not the column's default.
@@ -75,6 +80,8 @@ type libMember struct {
 	exposure string
 	// variant perturbs every value, so two members of one library differ.
 	variant int
+	// deps, when set, is the member's plugin_deps instead of the default one.
+	deps string
 }
 
 func (m libMember) wasm() []byte {
@@ -90,8 +97,13 @@ func (m libMember) digest() string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (m libMember) taskQueue() string  { return fmt.Sprintf("lib-queue-%d", 10+m.variant) }
-func (m libMember) pluginDeps() string { return fmt.Sprintf(`{"slack-notify":"1.%d.0"}`, m.variant) }
+func (m libMember) taskQueue() string { return fmt.Sprintf("lib-queue-%d", 10+m.variant) }
+func (m libMember) pluginDeps() string {
+	if m.deps != "" {
+		return m.deps
+	}
+	return fmt.Sprintf(`{"slack-notify":"1.%d.0"}`, m.variant)
+}
 func (m libMember) dagSpec() string {
 	return fmt.Sprintf(`{"nodes":["a%d","b%d"]}`, m.variant, m.variant)
 }
@@ -176,6 +188,18 @@ func TestAnInstallCopiesEveryColumnOfItsMembers(t *testing.T) {
 					fmt.Sprintf("{alpha%d,beta%d}", stale.variant, stale.variant), stale.taskQueue(), stale.maxHistory(),
 					stale.dagSpec(), stale.entrySchemas(), stale.exposure, false); err != nil {
 					t.Fatalf("seed a stale row for %s: %v", tenant, err)
+				}
+			},
+			registerPlugins: func(t *testing.T, names ...string) {
+				t.Helper()
+				if err := recordPluginsOn(context.Background(), adminDB, DialectPostgres, names); err != nil {
+					t.Fatalf("register plugins %v: %v", names, err)
+				}
+			},
+			forgetPlugin: func(t *testing.T, name string) {
+				t.Helper()
+				if _, err := adminDB.Exec(`DELETE FROM admin.registered_plugins WHERE plugin_name = $1`, name); err != nil {
+					t.Fatalf("forget plugin %q: %v", name, err)
 				}
 			},
 			cleanup: func(tenants []string, library string) {
@@ -281,6 +305,18 @@ func TestAnInstallCopiesEveryColumnOfItsMembers(t *testing.T) {
 					}
 				})
 			},
+			registerPlugins: func(t *testing.T, names ...string) {
+				t.Helper()
+				if err := recordPluginsOn(ctx, db, DialectMSSQL, names); err != nil {
+					t.Fatalf("register plugins %v: %v", names, err)
+				}
+			},
+			forgetPlugin: func(t *testing.T, name string) {
+				t.Helper()
+				if _, err := db.ExecContext(ctx, `DELETE FROM admin.registered_plugins WHERE plugin_name = @p1`, name); err != nil {
+					t.Fatalf("forget plugin %q: %v", name, err)
+				}
+			},
 			cleanup: func(tenants []string, library string) {
 				for _, tenant := range tenants {
 					asTenant(t, tenant, func(c *sql.Conn) {
@@ -347,6 +383,11 @@ func runAnInstallCopiesEveryColumn(t *testing.T, rig *libInstallRig) {
 		tenantC = "f2000000-0000-4000-8000-0000000035c0"
 	)
 	tenants := []string{tenantA, tenantB, tenantC}
+
+	// Every member this test publishes declares the plugin below by default, and an install
+	// is refused when a declared plugin was never registered (cleat#3600), so the way a
+	// worker would have registered it is the setup. The refusal itself has its own cases.
+	rig.registerPlugins(t, "slack-notify")
 
 	// newLibrary gives each case its own library and clears what a previous run left.
 	newLibrary := func(t *testing.T) string {
@@ -722,6 +763,61 @@ func runAnInstallCopiesEveryColumn(t *testing.T, rig *libInstallRig) {
 		}
 		if rig.name == "sqlserver" && len(utf16.Encode([]rune(rec["installed_by"]))) > 255 {
 			t.Errorf("%s: installed_by is %d UTF-16 units, over the column's 255", rig.name, len(utf16.Encode([]rune(rec["installed_by"]))))
+		}
+	})
+
+	t.Run("an install naming plugins no worker has registered is refused, names every one, and writes nothing (cleat#3600)", func(t *testing.T) {
+		library := newLibrary(t)
+		const pluginA, pluginB = "unregistered-a-3600", "unregistered-b-3600"
+		rig.forgetPlugin(t, pluginA)
+		rig.forgetPlugin(t, pluginB)
+		// Two members, each declaring a plugin nobody registered, and one that is registered.
+		m1 := libMember{name: "deps-def-a", version: 1, exposure: "auth", variant: 1, deps: `{"` + pluginA + `":">=1.0.0","slack-notify":"1.0.0"}`}
+		m2 := libMember{name: "deps-def-b", version: 1, exposure: "auth", variant: 2, deps: `{"` + pluginB + `":"2.0.0"}`}
+		rig.seedMember(t, library, m1)
+		rig.seedMember(t, library, m2)
+		bundle(t, library, "1.0.0", m1, m2)
+
+		_, err := rig.store(tenantA).InstallLibraryBundle(ctx, InstallLibraryRequest{Library: library, BundleVersion: "1.0.0", InstalledBy: "t"})
+		if !errors.Is(err, ErrUnmetPluginDeps) {
+			t.Fatalf("%s: install = %v, want an error wrapping ErrUnmetPluginDeps", rig.name, err)
+		}
+		var unmet *UnmetPluginDepsError
+		if !errors.As(err, &unmet) {
+			t.Fatalf("%s: %v is not an *UnmetPluginDepsError", rig.name, err)
+		}
+		var got []string
+		for _, m := range unmet.Missing {
+			got = append(got, m.Name+"<-"+m.DeclaredBy)
+		}
+		sort.Strings(got)
+		want := []string{
+			pluginA + `<-member "deps-def-a" version 1 of library "` + library + `"`,
+			pluginB + `<-member "deps-def-b" version 1 of library "` + library + `"`,
+		}
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%s: missing = %v, want exactly %v (the registered plugin must not be listed, and each missing one names its member)", rig.name, got, want)
+		}
+		assertNothingWritten(t, tenantA, library)
+
+		// The refusal was the cause: once a worker has registered them, the same install lands.
+		rig.registerPlugins(t, pluginA, pluginB)
+		t.Cleanup(func() { rig.forgetPlugin(t, pluginA); rig.forgetPlugin(t, pluginB) })
+		if _, err := rig.store(tenantA).InstallLibraryBundle(ctx, InstallLibraryRequest{Library: library, BundleVersion: "1.0.0", InstalledBy: "t"}); err != nil {
+			t.Fatalf("%s: the same install after the plugins were registered failed: %v", rig.name, err)
+		}
+		if _, ok := installRow(t, tenantA, library); !ok {
+			t.Errorf("%s: no install record after the plugins were registered", rig.name)
+		}
+	})
+
+	t.Run("a member that declares no plugin_deps installs with no registry entry (cleat#3600)", func(t *testing.T) {
+		library := newLibrary(t)
+		m := libMember{name: "no-deps-def", version: 1, exposure: "auth", variant: 5, deps: `{}`}
+		rig.seedMember(t, library, m)
+		bundle(t, library, "1.0.0", m)
+		if _, err := rig.store(tenantA).InstallLibraryBundle(ctx, InstallLibraryRequest{Library: library, BundleVersion: "1.0.0", InstalledBy: "t"}); err != nil {
+			t.Fatalf("%s: an install with nothing to check failed: %v", rig.name, err)
 		}
 	})
 

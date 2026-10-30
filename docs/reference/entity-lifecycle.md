@@ -189,6 +189,15 @@ Deletion is the other end: `cleatctl drop-tenant` removes the tenant's rows acro
 tenant-scoped tables. Retiring one entity and deleting a whole tenant are the two ends of the same
 lifecycle, and nothing in between removes a single entity permanently.
 
+**Kept after a drop.** A drop does not remove the audit record of what an operator did, and two kinds of row
+outlive the tenant they name: the tenant's audit chain (see [the audit log](audit-log.md)), and
+`admin.plugin_dep_overrides`, the append-only record that someone deployed a definition past an unmet
+`plugin_deps` with `--allow-missing-plugins` ([deploying workflows](../how-to/deploy-workflows.md)). That record
+holds, about the tenant, exactly its id (in `for_tenant_id`), the definition name and version, who asked and by
+which path, and the names and constraints of the plugins that were missing. It never holds a payload. Its column is
+not called `tenant_id` on purpose: SQL Server's `admin.drop_tenant` deletes from every table with a column of that
+name.
+
 See the [B2B control-plane playbook](../playbooks/b2b-saas-control-plane.md) for the operational
 cases these serve.
 

@@ -65,6 +65,11 @@ type createDefRequest struct {
 	WASMBase64  string            `json:"wasm_bytes_base64"`
 	EntryPoints []string          `json:"entry_points,omitempty"`
 	PluginDeps  map[string]string `json:"plugin_deps,omitempty"`
+	// AllowMissingPlugins is the explicit override of the plugin-dependency check
+	// (cleat#3600, owner D52): without it a definition naming a plugin that no worker
+	// has ever registered is refused with 422. With it the deploy proceeds and the
+	// missing names are logged at WARN. There is no such override on a library install.
+	AllowMissingPlugins bool `json:"allow_missing_plugins,omitempty"`
 }
 
 // ---- HTTP API server ----
@@ -83,6 +88,12 @@ type apiServer struct {
 	// libraryEntitlement is the one hook point for a per-tenant entitlement to install
 	// a library (cleat#3540, D45). nil allows every tenant every library.
 	libraryEntitlement libraryEntitlementCheck
+
+	// pluginReg answers which plugin names are known to the deploy route's plugin-dependency
+	// check and records an override (cleat#3600, D52). nil in production, where both use the
+	// plugin-name registry in db; it exists so a test can supply them without registering a
+	// real worker.
+	pluginReg engine.PluginRegistryAccess
 
 	// maxPriorityMagnitude mirrors --max-priority-magnitude and bounds the
 	// `priority` field of a start request in either direction. 0 means the
@@ -3086,6 +3097,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		// 400 rather than 500: this is the caller's artifact that cannot be
 		// stored, and the message names which class and why.
 		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": expErr.Error()})
+		return
+	}
+
+	// cleat#3600. Before anything is written: a refusal leaves no row.
+	if s.refusePluginDeps(w, r, req.Name, version, engine.BinaryPluginDeps(wasmBytes), req.PluginDeps, req.AllowMissingPlugins) {
 		return
 	}
 

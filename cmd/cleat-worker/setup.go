@@ -1866,7 +1866,7 @@ func resolvePayloadKeyVersion(direct, file, flagName string, def int) (int, erro
 // can be unit tested without a process exiting out from under the test.
 //
 // Called once, in main.go, AFTER the migrate-or-verify block (the table this
-// checks is itself migration 008) and before a non-migrate-only worker does
+// checks is created by the baseline schema, migrations/postgres/001_schema.sql) and before a non-migrate-only worker does
 // anything else -- a --migrate-only job exits before reaching this point and
 // never needs to answer the question, and checking any earlier would refuse
 // a worker on a database that is merely not yet migrated, for the wrong

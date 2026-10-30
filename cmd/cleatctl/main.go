@@ -40,6 +40,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.
@@ -100,6 +102,10 @@ func main() {
 	if err := rejectMySQLScheme(*dsn); err != nil {
 		log.Fatalf("%v", err)
 	}
+
+	// cleat#3600: the deploy path reads the plugin-name registry through this connection and
+	// needs the engine's name for the dialect, which is the same string.
+	currentDialect = engine.Dialect(d.name)
 
 	db, err := sql.Open(d.driver, *dsn)
 	if err != nil {

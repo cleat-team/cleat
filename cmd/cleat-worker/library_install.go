@@ -91,7 +91,18 @@ func (s *apiServer) handleInstallLibrary(w http.ResponseWriter, r *http.Request)
 	})
 	if err != nil {
 		var notOptedIn *engine.ErrExposurePublicNotOptedIn
+		var unmet *engine.UnmetPluginDepsError
 		switch {
+		case errors.As(err, &unmet):
+			// cleat#3600 (owner D52): a member declares a plugin no worker has ever
+			// registered. 422 like a refused deploy, with every missing plugin and the member
+			// that declared it. There is no override on an install.
+			s.writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error":           err.Error(),
+				"missing_plugins": unmet.Missing,
+			})
+		case errors.Is(err, engine.ErrPluginSourceUnavailable):
+			s.writeError(w, http.StatusNotImplemented, err.Error())
 		case errors.Is(err, engine.ErrLibrariesUnsupported):
 			s.writeError(w, http.StatusNotImplemented, err.Error())
 		case errors.Is(err, engine.ErrLibraryBundleNotFound):
