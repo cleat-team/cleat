@@ -793,6 +793,10 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 		// AllowsPublicExposure's falsification found the gap, because the
 		// only test exercising IsTenantSuspended over HTTP uses a mock store.
 		`GRANT SELECT ON admin.tenants TO ` + PostgresRLSTestRole,
+		// The tombstone a dropped tenant leaves (cleat#3552, B3b-2). IsTenantSuspended reads it on every
+		// start, so the application role needs SELECT; the tombstone migration (007_a_dropped_tenant_leaves_a_tombstone.sql) grants cleat_app SELECT, INSERT and
+		// DELETE, and this role models a worker the same RLS applies to, which only ever reads it.
+		`GRANT SELECT ON admin.tenant_tombstones TO ` + PostgresRLSTestRole,
 
 		// READ ONLY on the library schema, which is what migration 005 grants the
 		// real application role: a definition installed from a library reads its

@@ -1,3 +1,5 @@
+auth	TestACreateCannotReuseAnIdThatWasDroppedAfterItsFirstCheckOnPostgres	1
+auth	TestACreateCannotReuseAnIdThatWasDroppedAfterItsFirstCheckOnSQLServer	1
 benchmarks	buildBenchWasm	2
 benchmarks	newBenchEngine	1
 cmd/cleat	TestADBBuildKeepsAHandAddedLockEntry	1
@@ -76,6 +78,8 @@ cmd/cleat-worker	TestABootedWorkerMintsAnOAuthAPIKeyOnARealLogin	2
 cmd/cleat-worker	TestABootedWorkerSuspendsAnExpiredTrial	2
 cmd/cleat-worker	TestABootedWorkerSweepsAnAbandonedLogin	2
 cmd/cleat-worker	TestACrashedTenantsRunIsReclaimedUnderRLSOnSQLServer	1
+cmd/cleat-worker	TestADropWaitsForAResumeAndForASecondDropOnPostgres	1
+cmd/cleat-worker	TestADropWaitsForAResumeAndForASecondDropOnSQLServer	1
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
 cmd/cleat-worker	TestAForceReplacedDefinitionIsWhatAWarmWorkerRuns	1
 cmd/cleat-worker	TestAForeignMigrationChainIsRefusedBeforeAnyChange	2
@@ -88,6 +92,8 @@ cmd/cleat-worker	TestARealPythonFixtureWorkflowValidatesStartInput	1
 cmd/cleat-worker	TestAShardedDeployChecksTheFirstShardsRegistryAndWritesEveryShardOrNone	1
 cmd/cleat-worker	TestAShardedWorkerBootsWithAPerShardHeartbeatPool	1
 cmd/cleat-worker	TestAStaleConcurrencyKeyOfAnotherTenantIsReapedUnderRLSOnSQLServer	1
+cmd/cleat-worker	TestATenantIsDroppedOnPostgres	1
+cmd/cleat-worker	TestATenantIsDroppedOnSQLServer	1
 cmd/cleat-worker	TestATenantsDeferPhaseDeadlineIsSweptByAnotherTenantsWorkerUnderRLSOnSQLServer	1
 cmd/cleat-worker	TestATenantsRunOutlivesItsHeartbeatsUnderRLSOnSQLServer	1
 cmd/cleat-worker	TestAWorkerBootsAndServesAsTheAppLoginOnEveryDialect	2

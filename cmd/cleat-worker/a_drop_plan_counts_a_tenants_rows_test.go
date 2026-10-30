@@ -256,7 +256,10 @@ func TestTheDropPlanSeesUnsettledRunsOnSQLServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
-	defer adminDB.Close()
+	// A cleanup and not a defer, and registered BEFORE the one that drops the database: cleanups run last in,
+	// first out, and a deferred Close runs when the test function returns, which is before any cleanup, so the
+	// DROP DATABASE below would find a closed connection and its error is not read.
+	t.Cleanup(func() { _ = adminDB.Close() })
 	if err := adminDB.Ping(); err != nil {
 		t.Fatalf("CLEAT_TEST_MSSQL is set but SQL Server is unreachable at %s: %v", redactMSSQLDSN(base), err)
 	}

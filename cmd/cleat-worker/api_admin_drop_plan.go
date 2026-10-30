@@ -113,7 +113,13 @@ func buildDropPlan(ctx context.Context, counter engine.TenantRowCounter, store e
 		if err != nil {
 			return plan, err
 		}
-		queries = derived
+		// A retained table is reported as retained and not as removed, even if a catalogue sweep would
+		// have listed it: the plan must not say a drop deletes what it keeps.
+		for _, q := range derived {
+			if !tenantdrop.IsRetained(q.Label) {
+				queries = append(queries, q)
+			}
+		}
 		unsettled.Query = tenantdrop.UnsettledMSSQL
 	} else {
 		queries = tenantdrop.PostgresDataTables()
@@ -154,5 +160,6 @@ func buildDropPlan(ctx context.Context, counter engine.TenantRowCounter, store e
 		plan.TotalRows += c[0]
 	}
 	plan.SkippedPluginTables = facts.SkippedPluginTables
+	plan.Retained = append([]tenantdrop.RetainedTable(nil), tenantdrop.Retained...)
 	return plan, nil
 }

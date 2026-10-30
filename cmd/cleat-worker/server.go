@@ -122,6 +122,10 @@ type apiServer struct {
 	// cleat#3552.
 	provisioner tenantProvisioner
 
+	// schema is the PostgreSQL schema holding this deployment's cleat tables, the worker's --schema. A
+	// drop passes it to admin.drop_tenant, which refuses an empty one rather than resolve through search_path.
+	schema string
+
 	// requireAuth mirrors --require-auth. It decides what an unauthenticated
 	// request means: with auth on, no tenant in context is a bug or a bypass
 	// attempt and is refused; with auth off, there is only ever one tenant and
@@ -1062,7 +1066,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	}
 	if suspended {
 		s.writeError(w, http.StatusForbidden,
-			"tenant is suspended; no new workflows may be started. "+
+			"tenant is suspended or has been dropped; no new workflows may be started. "+
 				"Runs already executing finish normally, and reads are unaffected.")
 		return
 	}

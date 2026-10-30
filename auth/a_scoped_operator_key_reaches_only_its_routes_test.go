@@ -23,6 +23,7 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 	suspend := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/suspend"
 	dropPlan := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop-plan"
 	resume := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/resume"
+	bare := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7"
 
 	type row struct {
 		name   string
@@ -86,7 +87,29 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, suspend with an empty id", ScopeProvision, http.MethodPost, "/api/admin/tenants//suspend", 403},
 		{"provision, an encoded slash in the suspend path", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7%2Fsuspend", 403},
 		{"provision, suspend spelled in capitals", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/SUSPEND", 403},
-		{"provision, drop", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7", 403},
+		// The drop itself (B3b-2): DELETE on the bare canonical id, and nothing else. Whether the key may drop THIS
+		// tenant (one its principal created, suspended, with no unsettled run) is the handler's check.
+		// A provision key reaches the drop for a tenant its principal created: owner decision D54 (2026-10-30,
+		// cleat#3552). This row said 403 as a placeholder until the drop existed; D54 makes 200 the answer, and the
+		// handler's creator check is what limits it to that principal's own tenants.
+		{"provision, drop", ScopeProvision, http.MethodDelete, bare, 200},
+		{"admin, drop", ScopeAdmin, http.MethodDelete, bare, 200},
+		{"provision, drop of upper-case id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7", 403},
+		{"provision, drop of bare hex", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8d264f399c524623aa1d258c7bcc34d7", 403},
+		{"provision, drop of a name that is no id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/acme", 403},
+		{"provision, drop with an empty id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/", 403},
+		{"provision, drop of the collection", ScopeProvision, http.MethodDelete, "/api/admin/tenants", 403},
+		{"provision, drop with a trailing slash", ScopeProvision, http.MethodDelete, bare + "/", 403},
+		{"provision, drop with an encoded slash", ScopeProvision, http.MethodDelete, bare + "%2F", 403},
+		// The method belongs to the route: another verb on the bare id is not a route a provisioner may reach,
+		// and DELETE is not accepted on any route that has a tail.
+		{"provision, GET of the bare id", ScopeProvision, http.MethodGet, bare, 403},
+		{"provision, POST to the bare id", ScopeProvision, http.MethodPost, bare, 403},
+		{"provision, PUT to the bare id", ScopeProvision, http.MethodPut, bare, 403},
+		{"provision, DELETE of suspend", ScopeProvision, http.MethodDelete, suspend, 403},
+		{"provision, DELETE of confirm", ScopeProvision, http.MethodDelete, confirm, 403},
+		{"provision, DELETE of resume", ScopeProvision, http.MethodDelete, resume, 403},
+		{"provision, DELETE of an instance route", ScopeProvision, http.MethodDelete, forceComplete, 403},
 		{"admin, suspend", ScopeAdmin, http.MethodPost, suspend, 200},
 		{"admin, drop-plan", ScopeAdmin, http.MethodGet, dropPlan, 200},
 		{"admin, resume", ScopeAdmin, http.MethodPost, resume, 200},

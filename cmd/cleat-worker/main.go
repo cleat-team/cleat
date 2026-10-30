@@ -202,7 +202,7 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
 	}
 	if suspended {
-		return "", fmt.Errorf("start workflow %s: tenant %s is suspended; no new workflows may be started "+
+		return "", fmt.Errorf("start workflow %s: tenant %s is suspended or has been dropped; no new workflows may be started "+
 			"until an operator resumes it", req.DefName, req.TenantID)
 	}
 
@@ -2534,6 +2534,7 @@ func main() {
 			requireAuth:          *requireAuth,
 			streamHub:            streamHub,
 			provisioner:          tenantProvisionerFor(*driver, store, authResolver),
+			schema:               *schemaName,
 			keys:                 authResolver,
 
 			maxStreamPollReaders: *maxStreamPollReadersFlag,

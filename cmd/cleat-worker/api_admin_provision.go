@@ -39,6 +39,9 @@ type tenantProvisioner interface {
 	// admin-connection half of the counts and is read only after it (cleat#3552, B3b-1b). Both read-only.
 	DropPlanHeader(ctx context.Context, tenantID uuid.UUID) (auth.DropPlanHeader, error)
 	DropPlanFacts(ctx context.Context, tenantID uuid.UUID) (auth.DropPlanFacts, error)
+
+	// DropTenant removes a tenant and leaves its tombstone, in one transaction (cleat#3552, B3b-2).
+	DropTenant(ctx context.Context, req auth.DropRequest) (auth.DropResult, error)
 }
 
 // provisionBodyLimit bounds the request. The largest legitimate body is a few short strings.

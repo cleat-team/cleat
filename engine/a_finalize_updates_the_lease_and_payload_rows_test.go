@@ -130,8 +130,9 @@ func TestFinalizeWorkflowSegmentReadyWithALiveSignalWakesNow(t *testing.T) {
 	// A settlement that arrived mid-segment: signal_seq has moved past the
 	// claim-time snapshot. The resolved next_wake_at should come back as
 	// "now" rather than the far-future argument. Since cleat#3245 B3c
-	// (migration 007) finalize computes that from workflow_leases' own
-	// counters, the only copy DeliverSignal bumps.
+	// (a migration of that step's, since retired into the baseline) finalize
+	// computes that from workflow_leases' own counters, the only copy
+	// DeliverSignal bumps.
 	if _, err := db.ExecContext(ctx, `UPDATE workflow_leases SET signal_seq = 1 WHERE id = $1`, id); err != nil {
 		t.Fatalf("bump signal_seq: %v", err)
 	}
