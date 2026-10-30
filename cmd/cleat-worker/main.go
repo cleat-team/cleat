@@ -191,19 +191,19 @@ func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req pl
 	// "suspended with no unsettled runs" unsatisfiable (cleat#3594).
 	//
 	// Asked of the SCOPED store, as handleStart asks its tenant-scoped one. A
-	// store that cannot answer (MySQL, which is single-tenant) is not refused,
-	// which is also what handleStart does; a sharded store answers by asking
-	// every shard (cleat#3596), which it did not until then; a store that
-	// answers with an ERROR is, because an unreadable flag is not a clear one.
-	if susp, ok := scoped.(engine.TenantSuspensionReader); ok {
-		suspended, err := susp.IsTenantSuspended(ctx, req.TenantID)
-		if err != nil {
-			return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
-		}
-		if suspended {
-			return "", fmt.Errorf("start workflow %s: tenant %s is suspended; no new workflows may be started "+
-				"until an operator resumes it", req.DefName, req.TenantID)
-		}
+	// store that declares engine.NoTenantSuspensionMarker (MySQL, which is
+	// single-tenant) is not refused, which is also what handleStart does; a
+	// sharded store answers by asking every shard (cleat#3596); a store that
+	// answers with an ERROR is refused, because an unreadable flag is not a clear
+	// one -- and so is a store that neither answers nor declares the marker,
+	// which this path used to skip without a word.
+	suspended, err := engine.TenantSuspended(ctx, scoped, req.TenantID)
+	if err != nil {
+		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
+	}
+	if suspended {
+		return "", fmt.Errorf("start workflow %s: tenant %s is suspended; no new workflows may be started "+
+			"until an operator resumes it", req.DefName, req.TenantID)
 	}
 
 	versions, err := scoped.ListVersions(ctx, req.DefName)

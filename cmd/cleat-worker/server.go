@@ -1051,18 +1051,20 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	//
 	// Costs one primary-key lookup on a small table per start, next to the
 	// ListVersions call below that every start already makes.
-	if susp, ok := st.(engine.TenantSuspensionReader); ok {
-		suspended, serr := susp.IsTenantSuspended(r.Context(), tenantID)
-		if serr != nil {
-			s.writeError(w, 500, serr.Error())
-			return
-		}
-		if suspended {
-			s.writeError(w, http.StatusForbidden,
-				"tenant is suspended; no new workflows may be started. "+
-					"Runs already executing finish normally, and reads are unaffected.")
-			return
-		}
+	//
+	// A store that can neither answer nor declare engine.NoTenantSuspensionMarker is a 500, not a
+	// pass: the check used to be a bare type assertion, so a store that failed it was skipped without
+	// a word (cleat#3552).
+	suspended, serr := engine.TenantSuspended(r.Context(), st, tenantID)
+	if serr != nil {
+		s.writeError(w, 500, serr.Error())
+		return
+	}
+	if suspended {
+		s.writeError(w, http.StatusForbidden,
+			"tenant is suspended; no new workflows may be started. "+
+				"Runs already executing finish normally, and reads are unaffected.")
+		return
 	}
 
 	// Find the latest version of this workflow.

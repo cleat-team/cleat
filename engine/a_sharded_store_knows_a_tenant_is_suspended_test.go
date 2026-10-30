@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -133,8 +132,8 @@ func TestAShardedStoreThatCannotReadTheFlagRefuses(t *testing.T) {
 			&suspendingShard{mockShardStore: &mockShardStore{}},
 			&mockShardStore{})
 		got, err := asReader(t, ss).IsTenantSuspended(ctx, uuid.NewString())
-		if err == nil || !strings.Contains(err.Error(), "does not support") {
-			t.Errorf("IsTenantSuspended = %v, %v; want an error saying the shard does not support it", got, err)
+		if err == nil || !errors.Is(err, ErrTenantSuspensionUnanswerable) {
+			t.Errorf("IsTenantSuspended = %v, %v; want ErrTenantSuspensionUnanswerable for a shard that neither answers nor opts out", got, err)
 		}
 	})
 
