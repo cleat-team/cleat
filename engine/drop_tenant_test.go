@@ -269,6 +269,7 @@ func cleanupDropTenantExtras(t *testing.T, ctx context.Context, adminDB *sql.DB,
 		`DELETE FROM workflow_routing WHERE tenant_id = $1`,
 		`DELETE FROM admin.tenant_api_keys WHERE tenant_id = $1`,
 		`DELETE FROM admin.tenant_roles WHERE tenant_id = $1`,
+		`DELETE FROM admin.plugin_dep_overrides WHERE tenant_id = $1`,
 		`DELETE FROM admin.tenants WHERE tenant_id = $1`,
 	} {
 		if _, err := adminDB.ExecContext(ctx, stmt, tenant); err != nil {

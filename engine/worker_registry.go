@@ -136,12 +136,15 @@ func (r *WorkerRegistry) Register(ctx context.Context, reg WorkerRegistration) e
 // how RegisterUnderKeyGate makes the registration part of the span that holds
 // the secret-key gate.
 func (r *WorkerRegistry) registerOn(ctx context.Context, q querier, reg WorkerRegistration) error {
-	// Before the worker's own row, so a name the plugin table would reject leaves no
-	// half-registered worker behind on a connection that is not in a transaction.
-	for _, n := range reg.Plugins {
-		if err := validRegisteredPluginName(n); err != nil {
-			return fmt.Errorf("worker registry: register %s: plugin registry: %w", reg.WorkerID, err)
-		}
+	// BEFORE the worker's own row, and that order is load-bearing on MySQL. The span is a
+	// transaction on PostgreSQL and SQL Server, so a failure here rolls the worker's row back
+	// whichever order the statements run in; on MySQL it is not (RegisterUnderKeyGate holds a
+	// named lock, not a transaction), so a plugin write that failed AFTER the worker INSERT left
+	// the worker published with the secrets check never run. Measured by cleat-review on
+	// cleat#3604: with the registry table gone, 0 worker rows were left on PostgreSQL and SQL
+	// Server and 1 on MySQL. A name the table would reject is refused here for the same reason.
+	if err := recordPluginsOn(ctx, q, r.Dialect, reg.Plugins); err != nil {
+		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
 	}
 	_, err := q.ExecContext(ctx, r.stmt(
 		"INSERT INTO ", r.table(),
@@ -155,11 +158,6 @@ func (r *WorkerRegistry) registerOn(ctx context.Context, q querier, reg WorkerRe
 		reg.WorkerID, reg.Hostname, reg.Address, reg.PID, reg.Concurrency, reg.ConnectionBudget,
 		encodeKeyVersions(reg.SecretKeyVersions))
 	if err != nil {
-		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
-	}
-	// On the same q, so under RegisterUnderKeyGate the names commit or roll back with the
-	// worker's row. An error here fails the registration, as any other statement in it does.
-	if err := recordPluginsOn(ctx, q, r.Dialect, reg.Plugins); err != nil {
 		return fmt.Errorf("worker registry: register %s: %w", reg.WorkerID, err)
 	}
 	return nil

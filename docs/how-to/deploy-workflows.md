@@ -200,8 +200,13 @@ carrying that plugin has started once, or must say it is deliberate:
     cleat deploy --allow-missing-plugins ...
     POST /api/definitions   {..., "allow_missing_plugins": true}
 
-An override is logged at `WARN` with the missing names. It covers a missing plugin only: it does not turn "the
-registry could not be read" into "allowed". **A library install has no override**: it refuses a bundle whose
+An override changes **only the deploy that carries it**, and it is **recorded, not just logged**: before the
+definition is written, one row goes into `admin.plugin_dep_overrides` (the tenant, the definition and version,
+who asked, which path took it, and each missing plugin with its constraint and which declaration named it), and
+it is also logged at `WARN`. That table is append-only for the application role on PostgreSQL and SQL Server. If
+the row cannot be written the deploy is **refused**: there is no override without a record of it. The row says the
+check was bypassed, not that the deploy then succeeded. An override covers a missing plugin only: it does not turn
+"the registry could not be read" into "allowed". **A library install has no override**: it refuses a bundle whose
 members name an unregistered plugin (`422`, naming each plugin and the member that declared it) and writes
 nothing, because an install goes into a running system.
 
@@ -209,6 +214,15 @@ nothing, because an install goes into a running system.
 those plugin names has not been registered by any worker **since migration `008` was applied to that
 database**; a plugin that registered once stays registered, even after it is retired. A definition that
 declares no plugin dependencies is not affected. Nothing the repository ships declares any.
+
+**Sharded deployments.** The registry, and the override record, live in the worker's own database, which for a
+sharded worker is the **first shard's**: the same database worker registration writes and where the schema's
+other administrative tables are. A deploy asks that one registry once, before the first shard is written, then
+writes every shard or none: a refusal leaves nothing on any shard. A name registered only in another shard's
+registry does not count. A command-line deploy (`cleatctl`, `cleat deploy`, `deploy-workflow`) reads the registry of the
+database it is given, so **a CLI run against a non-first shard's DSN reads that shard's (empty) registry** and refuses
+every declared plugin; point it at the first shard's DSN, or use `--allow-missing-plugins`, which is recorded. Library
+install is not available on a sharded store yet.
 
 **Upgrading.** The registry starts empty, and only a worker running a version that carries it writes to it: an
 older worker writes nothing, and the worker table has no plugin column to fill it from. So from the moment

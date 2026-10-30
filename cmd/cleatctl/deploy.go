@@ -330,7 +330,13 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 
 	// cleat#3600. Before the write, so a refusal leaves no row. The row's deps here are the
 	// previous version's (copied above), the binary's are whatever it embeds.
-	if perr := engine.EnforcePluginDeps(ctx, deployPluginSource(db), engine.BinaryPluginDeps(wasmBytes), pluginDeps, *allowMissingPlugins, slog.Default()); perr != nil {
+	pluginSrc, pluginRec := engine.RegistrySplit(deployPluginSource(db))
+	if perr := engine.EnforcePluginDeps(ctx, pluginSrc, engine.BinaryPluginDeps(wasmBytes), pluginDeps, engine.EnforceOptions{
+		AllowMissing: *allowMissingPlugins,
+		Log:          slog.Default(),
+		Recorder:     pluginRec,
+		Override:     engine.PluginDepOverride{TenantID: engine.DefaultTenantUUID, Definition: name, Version: nextVersion, Via: "cleatctl", Actor: engine.CommandLineActor()},
+	}); perr != nil {
 		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, nextVersion, perr)
 		if errors.Is(perr, engine.ErrUnmetPluginDeps) {
 			fmt.Fprintln(os.Stderr, engine.UnmetPluginDepsCLIAdvice)

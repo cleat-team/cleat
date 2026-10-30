@@ -809,6 +809,9 @@ func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 			IF to_regclass('admin.registered_plugins') IS NOT NULL THEN
 				EXECUTE 'GRANT SELECT, INSERT, UPDATE ON admin.registered_plugins TO ` + PostgresRLSTestRole + `';
 			END IF;
+			IF to_regclass('admin.plugin_dep_overrides') IS NOT NULL THEN
+				EXECUTE 'GRANT SELECT, INSERT ON admin.plugin_dep_overrides TO ` + PostgresRLSTestRole + `';
+			END IF;
 		END $$;`,
 
 		`DO $$ BEGIN

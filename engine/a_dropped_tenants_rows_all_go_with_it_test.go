@@ -86,6 +86,22 @@ const tenantOwnedTablesSQL = `
 	      )
 	ORDER BY c.table_schema, c.table_name`
 
+// retainedWhenATenantIsDropped names the tables that carry a tenant_id column and are
+// deliberately NOT emptied by admin.drop_tenant, each with the reason. The ratchet below
+// demands a decision for every tenant-owned table; "genuinely not tenant-owned despite the
+// column" is one of the three it offers, and this is where such a decision is written down.
+//
+// A table here is not skipped. The test seeds a row for each tenant through the table's own
+// writer and asserts the victim's row is STILL THERE after the drop, so the exemption is a
+// property under test and not an absence of one. An entry whose table has left the universe
+// fails, so the list cannot outlive what it excuses.
+var retainedWhenATenantIsDropped = map[string]string{
+	"admin.plugin_dep_overrides": "the append-only record that an operator took --allow-missing-plugins past an " +
+		"unmet plugin dependency (cleat#3600). It exists to be permanent and to be read after the fact, and it holds " +
+		"a tenant_id, a definition name and version, an actor and plugin names -- not tenant data. It carries no " +
+		"foreign key to admin.tenants on purpose; deleting it with the tenant would erase the one record of the override.",
+}
+
 // tenantOwnedTables reads the universe from the live catalogue.
 func tenantOwnedTables(t *testing.T, ctx context.Context, db *sql.DB) []string {
 	t.Helper()
@@ -328,6 +344,29 @@ func TestEveryTenantOwnedTableIsEmptiedByDropTenant(t *testing.T) {
 		}
 	}
 
+	// The exempt tables: each named table must still be in the universe (a stale entry
+	// fails), and gets one row per tenant through its own writer, so the survival
+	// assertion at the end reads a row that is really there.
+	inUniverse := map[string]bool{}
+	for _, table := range universe {
+		inUniverse[table] = true
+	}
+	for table := range retainedWhenATenantIsDropped {
+		if !inUniverse[table] {
+			t.Fatalf("retainedWhenATenantIsDropped names %s, which no longer carries a tenant_id "+
+				"column in the live schema; remove the entry", table)
+		}
+	}
+	seedRetainedTenantTables(t, ctx, adminDB, []string{victim, bystander})
+	var dropped []string
+	for _, table := range universe {
+		if _, kept := retainedWhenATenantIsDropped[table]; !kept {
+			dropped = append(dropped, table)
+		}
+	}
+	retained := universe
+	universe = dropped
+
 	// THE RATCHET. A tenant-owned table with no seed here would answer zero
 	// after the drop whether or not admin.drop_tenant reaches it, so the
 	// emptiness check below would pass it silently -- which is exactly how
@@ -410,5 +449,35 @@ func TestEveryTenantOwnedTableIsEmptiedByDropTenant(t *testing.T) {
 	}
 	if len(collateral) > 0 {
 		t.Errorf("dropping one tenant emptied the bystander's rows in %v", collateral)
+	}
+
+	// The exempt tables keep BOTH tenants' rows: the victim's is the property the
+	// exemption claims, the bystander's shows the drop did not reach them either.
+	for _, table := range retained {
+		if _, kept := retainedWhenATenantIsDropped[table]; !kept {
+			continue
+		}
+		for _, tn := range []struct{ id, label string }{{victim, "victim"}, {bystander, "bystander"}} {
+			if got := countTenantRowsIn(t, ctx, adminDB, table, tn.id); got != 1 {
+				t.Errorf("%s holds %d row(s) for the %s after the drop, want 1: it is named in "+
+					"retainedWhenATenantIsDropped, so the drop must leave it alone", table, got, tn.label)
+			}
+		}
+	}
+}
+
+// seedRetainedTenantTables writes one row per tenant into every table in
+// retainedWhenATenantIsDropped, through that table's own writer.
+func seedRetainedTenantTables(t *testing.T, ctx context.Context, db *sql.DB, tenants []string) {
+	t.Helper()
+	reg := &PluginNameRegistry{DB: db, Dialect: DialectPostgres}
+	for _, tenant := range tenants {
+		if err := reg.RecordPluginDepOverride(ctx, PluginDepOverride{
+			TenantID: tenant, Definition: "drop-tenant-retained", Version: 1, Via: "rest",
+			Actor:   "drop-tenant-test",
+			Missing: []MissingPlugin{{Name: "never-registered", Constraint: ">=1", DeclaredBy: "binary"}},
+		}); err != nil {
+			t.Fatalf("seed admin.plugin_dep_overrides for %s: %v", tenant, err)
+		}
 	}
 }

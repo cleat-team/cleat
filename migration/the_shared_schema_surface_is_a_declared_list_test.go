@@ -54,6 +54,9 @@ var (
 		// plugin. Never deleted from, so unlike admin.workers a pool upgrading cannot
 		// make it lose rows.
 		"admin.registered_plugins",
+		// Migration 008, cleat#3600. The record of each use of the plugin-dependency override.
+		// Shared for the same reason: it describes a deploy, and a deploy is of the database.
+		"admin.plugin_dep_overrides",
 		"admin.tenant_api_keys",
 		"admin.tenant_roles",
 		// Migration 079, cleat#1565. Shared like the rest of admin: a

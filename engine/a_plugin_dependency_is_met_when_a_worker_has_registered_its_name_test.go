@@ -16,6 +16,17 @@ type fakePluginSource struct {
 	err   error
 	calls int
 	asked []string
+	// overrides are the records written through RecordPluginDepOverride; recordErr makes it fail.
+	overrides []PluginDepOverride
+	recordErr error
+}
+
+func (f *fakePluginSource) RecordPluginDepOverride(_ context.Context, o PluginDepOverride) error {
+	if f.recordErr != nil {
+		return f.recordErr
+	}
+	f.overrides = append(f.overrides, o)
+	return nil
 }
 
 func (f *fakePluginSource) KnownPlugins(_ context.Context, names []string) (map[string]bool, error) {
@@ -120,37 +131,79 @@ func TestCheckPluginDepsReportsAnUnreadableRegistryAsThatAndNotAsAMissingPlugin(
 	}
 }
 
-func TestEnforcePluginDepsAllowMissingLogsTheNamesAndPassesButNotTheOtherFailures(t *testing.T) {
+func TestEnforcePluginDepsAllowMissingRecordsLogsAndPassesButNotTheOtherFailures(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	deps := map[string]string{"never-registered": ">=1", "also-never": ""}
+	about := PluginDepOverride{TenantID: "t-1", Definition: "wf", Version: 3, Via: "rest", Actor: "alice"}
+	opts := func(allow bool, rec OverrideRecorder) EnforceOptions {
+		return EnforceOptions{AllowMissing: allow, Log: log, Recorder: rec, Override: about}
+	}
 
-	// Without the override: refused.
-	if err := EnforcePluginDeps(context.Background(), &fakePluginSource{}, deps, nil, false, log); !errors.Is(err, ErrUnmetPluginDeps) {
+	// Without the override: refused, nothing logged, nothing recorded.
+	src := &fakePluginSource{}
+	if err := EnforcePluginDeps(context.Background(), src, deps, nil, opts(false, src)); !errors.Is(err, ErrUnmetPluginDeps) {
 		t.Fatalf("without the override err = %v, want ErrUnmetPluginDeps", err)
 	}
-	if buf.Len() != 0 {
-		t.Fatalf("a refusal logged %q; only an override logs", buf.String())
+	if buf.Len() != 0 || len(src.overrides) != 0 {
+		t.Fatalf("a refusal logged %q and recorded %d overrides; only an override does either", buf.String(), len(src.overrides))
 	}
 
-	// With it: passes, and the names are logged at WARN.
-	if err := EnforcePluginDeps(context.Background(), &fakePluginSource{}, deps, nil, true, log); err != nil {
+	// With it: passes, the use is RECORDED with who, what and which names, and logged at WARN.
+	if err := EnforcePluginDeps(context.Background(), src, deps, nil, opts(true, src)); err != nil {
 		t.Fatalf("with the override err = %v, want nil", err)
 	}
+	if len(src.overrides) != 1 {
+		t.Fatalf("recorded %d overrides, want exactly one", len(src.overrides))
+	}
+	rec := src.overrides[0]
+	if rec.TenantID != "t-1" || rec.Definition != "wf" || rec.Version != 3 || rec.Via != "rest" || rec.Actor != "alice" {
+		t.Errorf("the record = %+v, lost who or what it is about", rec)
+	}
+	names := map[string]bool{}
+	for _, m := range rec.Missing {
+		names[m.Name] = true
+	}
+	if len(names) != 2 || !names["never-registered"] || !names["also-never"] {
+		t.Errorf("the record's missing = %+v, want both plugin names", rec.Missing)
+	}
 	out := buf.String()
-	for _, want := range []string{"level=WARN", "never-registered", "also-never", "allow-missing-plugins"} {
+	for _, want := range []string{"level=WARN", "never-registered", "also-never", "allow-missing-plugins", "definition=wf", "via=rest"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the override's log line %q lacks %q", out, want)
 		}
 	}
 
-	// The override does not cover "the check could not be made".
-	if err := EnforcePluginDeps(context.Background(), nil, deps, nil, true, log); !errors.Is(err, ErrPluginSourceUnavailable) {
+	// An override that cannot be recorded is not honoured: no recorder, and a recorder that fails.
+	if err := EnforcePluginDeps(context.Background(), &fakePluginSource{}, deps, nil, opts(true, nil)); !errors.Is(err, ErrOverrideNotRecordable) {
+		t.Errorf("an override with no recorder = %v, want ErrOverrideNotRecordable", err)
+	}
+	boomRec := errors.New("audit table unwritable")
+	failing := &fakePluginSource{recordErr: boomRec}
+	if err := EnforcePluginDeps(context.Background(), failing, deps, nil, opts(true, failing)); !errors.Is(err, boomRec) {
+		t.Errorf("an override whose record fails = %v, want that error (the override must not be honoured)", err)
+	}
+
+	// The override does not cover "the check could not be made", and records nothing then.
+	none := &fakePluginSource{}
+	if err := EnforcePluginDeps(context.Background(), nil, deps, nil, opts(true, none)); !errors.Is(err, ErrPluginSourceUnavailable) {
 		t.Errorf("a nil source under the override = %v, want ErrPluginSourceUnavailable", err)
 	}
 	boom := errors.New("registry unreadable")
-	if err := EnforcePluginDeps(context.Background(), &fakePluginSource{err: boom}, deps, nil, true, log); !errors.Is(err, boom) {
+	if err := EnforcePluginDeps(context.Background(), &fakePluginSource{err: boom}, deps, nil, opts(true, none)); !errors.Is(err, boom) {
 		t.Errorf("an unreadable registry under the override = %v, want that error", err)
+	}
+	if len(none.overrides) != 0 {
+		t.Errorf("recorded %d overrides for a check that could not be made", len(none.overrides))
+	}
+
+	// Registered plugins need no override and leave no record even when it is asked for.
+	ok := &fakePluginSource{known: map[string]bool{"never-registered": true, "also-never": true}}
+	if err := EnforcePluginDeps(context.Background(), ok, deps, nil, opts(true, ok)); err != nil {
+		t.Fatalf("registered plugins = %v, want nil", err)
+	}
+	if len(ok.overrides) != 0 {
+		t.Errorf("recorded %d overrides for a deploy that needed none", len(ok.overrides))
 	}
 }
 

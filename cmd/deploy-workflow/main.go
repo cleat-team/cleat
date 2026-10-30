@@ -241,11 +241,17 @@ func main() {
 	}
 	// cleat#3600. Before the write, so a refusal leaves no row. This command records no
 	// plugin_deps on the row, so the binary's embedded deps are the only declaration.
-	var pluginSrc engine.PluginSource
+	var pluginReg engine.PluginRegistryAccess
 	if registryDB != nil {
-		pluginSrc = &engine.PluginNameRegistry{DB: registryDB, Dialect: engine.Dialect(*driver)}
+		pluginReg = &engine.PluginNameRegistry{DB: registryDB, Dialect: engine.Dialect(*driver)}
 	}
-	if perr := engine.EnforcePluginDeps(ctx, pluginSrc, engine.BinaryPluginDeps(wasmBytes), nil, *allowMissingPlugins, slog.Default()); perr != nil {
+	pluginSrc, pluginRec := engine.RegistrySplit(pluginReg)
+	if perr := engine.EnforcePluginDeps(ctx, pluginSrc, engine.BinaryPluginDeps(wasmBytes), nil, engine.EnforceOptions{
+		AllowMissing: *allowMissingPlugins,
+		Log:          slog.Default(),
+		Recorder:     pluginRec,
+		Override:     engine.PluginDepOverride{TenantID: engine.DefaultTenantUUID, Definition: name, Version: version, Via: "deploy-workflow", Actor: engine.CommandLineActor()},
+	}); perr != nil {
 		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, version, perr)
 		if errors.Is(perr, engine.ErrUnmetPluginDeps) {
 			fmt.Fprintln(os.Stderr, engine.UnmetPluginDepsCLIAdvice)

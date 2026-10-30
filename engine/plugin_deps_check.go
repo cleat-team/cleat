@@ -152,21 +152,48 @@ func CheckPluginDeps(ctx context.Context, src PluginSource, binary, row map[stri
 	return &UnmetPluginDepsError{Missing: missing}
 }
 
-// EnforcePluginDeps is the one call every deploy path makes. allowMissing is the explicit
-// override (--allow-missing-plugins, or the REST field): the check still runs, so the names
-// are known, and when something is missing it logs them at WARN and returns nil. It does NOT
-// suppress an error from reading the registry or ErrPluginSourceUnavailable, because those
-// say the check could not be made, which is not the same as "a plugin is missing".
-// There is no override on library install: that path calls CheckPluginDeps directly.
-func EnforcePluginDeps(ctx context.Context, src PluginSource, binary, row map[string]string, allowMissing bool, log *slog.Logger) error {
+// ErrOverrideNotRecordable is returned when the override was asked for, a plugin is missing, and the
+// use cannot be recorded. The override is never honoured without its record.
+var ErrOverrideNotRecordable = errors.New("the plugin-dependency override needs somewhere to record its use, and there is none")
+
+// EnforceOptions is how a deploy path calls EnforcePluginDeps.
+type EnforceOptions struct {
+	// AllowMissing is the explicit override (--allow-missing-plugins, or the REST field).
+	AllowMissing bool
+	// Log receives the WARN line for an override; nil means slog.Default().
+	Log *slog.Logger
+	// Recorder writes the durable record of an override. Required for the override to be honoured.
+	Recorder OverrideRecorder
+	// Override says who and what the record is about. Missing is filled in from the check.
+	Override PluginDepOverride
+}
+
+// EnforcePluginDeps is the one call every deploy path makes. With AllowMissing the check still
+// runs, so the names are known; when something is missing it WRITES THE RECORD of the override
+// (opts.Recorder, before the caller writes anything), logs the names at WARN, and returns nil.
+// It does NOT suppress an error from reading the registry or ErrPluginSourceUnavailable, because
+// those say the check could not be made, which is not the same as "a plugin is missing"; and if the
+// record cannot be written it returns that error and the deploy is refused. There is no override on
+// library install: that path calls CheckMemberPluginDeps directly.
+func EnforcePluginDeps(ctx context.Context, src PluginSource, binary, row map[string]string, opts EnforceOptions) error {
 	err := CheckPluginDeps(ctx, src, binary, row)
 	var unmet *UnmetPluginDepsError
-	if allowMissing && errors.As(err, &unmet) {
+	if opts.AllowMissing && errors.As(err, &unmet) {
+		if opts.Recorder == nil {
+			return fmt.Errorf("%w: %s", ErrOverrideNotRecordable, unmet.Error())
+		}
+		rec := opts.Override
+		rec.Missing = unmet.Missing
+		if rerr := opts.Recorder.RecordPluginDepOverride(ctx, rec); rerr != nil {
+			return fmt.Errorf("the override was not honoured because its use could not be recorded: %w", rerr)
+		}
+		log := opts.Log
 		if log == nil {
 			log = slog.Default()
 		}
 		log.WarnContext(ctx, "deploying with unmet plugin dependencies because of --allow-missing-plugins; a run that needs them will be released until a worker carrying them registers",
-			"missing_plugins", unmet.MissingNames(), "detail", unmet.Error())
+			"missing_plugins", unmet.MissingNames(), "detail", unmet.Error(),
+			"tenant_id", rec.TenantID, "definition", rec.Definition, "version", rec.Version, "via", rec.Via, "actor", rec.Actor)
 		return nil
 	}
 	return err

@@ -14,9 +14,10 @@ var currentDialect engine.Dialect
 
 // deployPluginSource is where a deploy learns which plugins are known (cleat#3600): the
 // plugin-name registry in the database the command is connected to. nil when there is no
-// connection or no dialect, which CheckPluginDeps reads as "cannot check", never "all known".
+// connection or no dialect, which the check reads as "cannot check" and the override as "cannot
+// record", never "all known" and never "allowed".
 // A variable so a test over a mock store can supply the answer.
-var deployPluginSource = func(db *sql.DB) engine.PluginSource {
+var deployPluginSource = func(db *sql.DB) engine.PluginRegistryAccess {
 	if db == nil || currentDialect == "" {
 		return nil
 	}

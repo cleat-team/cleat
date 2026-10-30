@@ -89,11 +89,11 @@ type apiServer struct {
 	// a library (cleat#3540, D45). nil allows every tenant every library.
 	libraryEntitlement libraryEntitlementCheck
 
-	// pluginSrc answers which plugin names are known to the deploy route's
-	// plugin-dependency check (cleat#3600, D52). nil in production, where the check reads
-	// the plugin-name registry in db; it exists so a test can supply the answer without
-	// registering a real worker.
-	pluginSrc engine.PluginSource
+	// pluginReg answers which plugin names are known to the deploy route's plugin-dependency
+	// check and records an override (cleat#3600, D52). nil in production, where both use the
+	// plugin-name registry in db; it exists so a test can supply them without registering a
+	// real worker.
+	pluginReg engine.PluginRegistryAccess
 
 	// maxPriorityMagnitude mirrors --max-priority-magnitude and bounds the
 	// `priority` field of a start request in either direction. 0 means the
@@ -3101,7 +3101,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	}
 
 	// cleat#3600. Before anything is written: a refusal leaves no row.
-	if s.refusePluginDeps(w, r, engine.BinaryPluginDeps(wasmBytes), req.PluginDeps, req.AllowMissingPlugins) {
+	if s.refusePluginDeps(w, r, req.Name, version, engine.BinaryPluginDeps(wasmBytes), req.PluginDeps, req.AllowMissingPlugins) {
 		return
 	}
 

@@ -32,3 +32,29 @@ CREATE TABLE IF NOT EXISTS admin.registered_plugins (
 
 GRANT SELECT, INSERT, UPDATE ON admin.registered_plugins TO cleat_app;
 REVOKE DELETE ON admin.registered_plugins FROM cleat_app;
+
+-- cleat#3600: one row for every use of the explicit override (--allow-missing-plugins, or
+-- allow_missing_plugins on the REST body), so "this deploy was allowed past the plugin check" is a
+-- record and not only a log line. Written BEFORE the definition is, and the deploy is refused if the
+-- row cannot be written: there is no override without a record of it. A row says the check was
+-- bypassed for that attempt and which plugin names it was bypassed for; it does not say the deploy
+-- then succeeded (a later refusal, such as open runs on the version, leaves the row).
+--
+-- Append-only by privilege, like the registry: the application role may read and insert and may not
+-- update or delete. Global and in `admin` for the reason registered_plugins is; tenant_id is a
+-- column (text, the tenant's UUID, or the default tenant's for a command-line deploy) and not a row
+-- policy, because the reader of this table is the operator.
+CREATE TABLE IF NOT EXISTS admin.plugin_dep_overrides (
+    override_id        text NOT NULL,
+    occurred_at        timestamptz NOT NULL DEFAULT now(),
+    tenant_id          text NOT NULL,
+    definition_name    text NOT NULL,
+    definition_version integer NOT NULL,
+    via                text NOT NULL,
+    actor              text NOT NULL DEFAULT '',
+    missing_plugins    text NOT NULL,
+    CONSTRAINT pk_plugin_dep_overrides PRIMARY KEY (override_id)
+);
+
+GRANT SELECT, INSERT ON admin.plugin_dep_overrides TO cleat_app;
+REVOKE UPDATE, DELETE ON admin.plugin_dep_overrides FROM cleat_app;

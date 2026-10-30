@@ -199,3 +199,142 @@ func TestTheApplicationRoleCannotDeleteFromThePluginNameRegistry(t *testing.T) {
 		}
 	})
 }
+
+// cleat#3600, found by cleat-review on cleat#3604. A registration whose plugin write fails must
+// leave NO published worker, on every dialect. RegisterUnderKeyGate is a transaction on PostgreSQL
+// and SQL Server, so the worker's row rolls back whatever the order of its statements; on MySQL it
+// is a named lock, not a transaction, so the order is the only thing standing between a failed
+// plugin write and a worker that stays published with its secrets check never run. The registry
+// table is renamed away to make the write fail (the control: the registry cannot be read while it
+// is gone), and put back, by content of the name, however the test ends.
+func TestAFailedPluginWriteLeavesNoPublishedWorker(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		tdialect     testutil.Dialect
+		edialect     Dialect
+		gone, back   string
+		tableForRead string
+	}{
+		{"postgres", testutil.DialectPostgres, DialectPostgres,
+			`ALTER TABLE admin.registered_plugins RENAME TO registered_plugins_gone`,
+			`ALTER TABLE admin.registered_plugins_gone RENAME TO registered_plugins`, "admin.registered_plugins_gone"},
+		{"mysql", testutil.DialectMySQL, DialectMySQL,
+			`RENAME TABLE registered_plugins TO registered_plugins_gone`,
+			`RENAME TABLE registered_plugins_gone TO registered_plugins`, "registered_plugins_gone"},
+		{"mssql", testutil.DialectMSSQL, DialectMSSQL,
+			`EXEC sp_rename N'admin.registered_plugins', N'registered_plugins_gone'`,
+			`EXEC sp_rename N'admin.registered_plugins_gone', N'registered_plugins'`, "admin.registered_plugins_gone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.tdialect)
+			t.Cleanup(func() { db.Close() })
+			testutil.SetupFullSchema(t, db, tc.tdialect)
+			ctx := context.Background()
+			workers := &WorkerRegistry{DB: db, Dialect: tc.edialect}
+			plugins := &PluginNameRegistry{DB: db, Dialect: tc.edialect}
+
+			// A crashed earlier run may have left the table renamed; put it back first.
+			var leftover int
+			if err := db.QueryRow(`SELECT count(*) FROM ` + tc.tableForRead).Scan(&leftover); err == nil {
+				if _, err := db.Exec(tc.back); err != nil {
+					t.Fatalf("restore a registry table a previous run left renamed: %v", err)
+				}
+			}
+			if _, err := db.Exec(tc.gone); err != nil {
+				t.Fatalf("rename the registry away: %v", err)
+			}
+			restored := false
+			restore := func() {
+				if !restored {
+					restored = true
+					if _, err := db.Exec(tc.back); err != nil {
+						t.Errorf("RESTORE FAILED, the registry table is still renamed: %v", err)
+					}
+				}
+			}
+			t.Cleanup(restore)
+
+			// The control: the failure the test depends on is real.
+			if _, err := plugins.KnownPlugins(ctx, []string{"anything"}); err == nil {
+				t.Fatal("the registry was readable with its table renamed away, so this would not test a failed plugin write")
+			}
+
+			id := fmt.Sprintf("failed-plugin-write-%d-%s", time.Now().UnixNano(), tc.name)
+			t.Cleanup(func() { _ = workers.Deregister(context.Background(), id) })
+			checkRan := false
+			err := workers.RegisterUnderKeyGate(ctx, WorkerRegistration{WorkerID: id, Hostname: "h", PID: 1, Plugins: []string{"some-plugin"}},
+				func(context.Context) error { checkRan = true; return nil })
+			if err == nil {
+				t.Fatal("a registration whose plugin write failed reported success")
+			}
+			if checkRan {
+				t.Error("the secrets check ran for a registration that never completed")
+			}
+			var n int
+			if qerr := db.QueryRow(`SELECT count(*) FROM `+workers.table()+` WHERE worker_id = `+tc.edialect.placeholder(1), id).Scan(&n); qerr != nil {
+				t.Fatalf("count the worker row: %v", qerr)
+			}
+			if n != 0 {
+				t.Errorf("%d worker row(s) left published after a failed plugin write, want 0 (on MySQL the span is not a transaction)", n)
+			}
+			restore()
+		})
+	}
+}
+
+// The registry answers the way the worker will: a plugin name is matched exactly. Two of the three
+// dialects fold case by default, so without an explicit binary collation "Slack-Notify" would match
+// a registered "slack-notify" there and not on PostgreSQL, while a worker's claim-time check
+// (checkPluginDeps) is an exact map lookup and would refuse it.
+func TestAPluginNameIsMatchedExactlyOnEveryDialect(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		tdialect testutil.Dialect
+		edialect Dialect
+	}{
+		{"postgres", testutil.DialectPostgres, DialectPostgres},
+		{"mysql", testutil.DialectMySQL, DialectMySQL},
+		{"mssql", testutil.DialectMSSQL, DialectMSSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.tdialect)
+			t.Cleanup(func() { db.Close() })
+			testutil.SetupFullSchema(t, db, tc.tdialect)
+			ctx := context.Background()
+			plugins := &PluginNameRegistry{DB: db, Dialect: tc.edialect}
+
+			stamp := time.Now().UnixNano()
+			lower := fmt.Sprintf("case-plugin-%d-%s", stamp, tc.name)
+			upper := strings.ToUpper(lower)
+			forget := func() {
+				for _, n := range []string{lower, upper} {
+					_, _ = db.Exec(`DELETE FROM `+tc.edialect.registeredPluginsTable()+` WHERE plugin_name = `+tc.edialect.placeholder(1), n)
+				}
+			}
+			forget()
+			t.Cleanup(forget)
+
+			if err := plugins.Record(ctx, []string{lower}); err != nil {
+				t.Fatalf("Record: %v", err)
+			}
+			k, err := plugins.KnownPlugins(ctx, []string{lower, upper})
+			if err != nil {
+				t.Fatalf("KnownPlugins: %v", err)
+			}
+			if !k[lower] || k[upper] {
+				t.Errorf("known = %v, want exactly %q and not its upper-case spelling", k, lower)
+			}
+			// And the other spelling is a different row, not a refresh of the first.
+			if err := plugins.Record(ctx, []string{upper}); err != nil {
+				t.Fatalf("Record the upper-case spelling: %v", err)
+			}
+			var n int
+			if err := db.QueryRow(`SELECT count(*) FROM `+tc.edialect.registeredPluginsTable()+` WHERE plugin_name IN (`+tc.edialect.placeholder(1)+`, `+tc.edialect.placeholder(2)+`)`, lower, upper).Scan(&n); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if n != 2 {
+				t.Errorf("%d rows for the two spellings, want 2 (case-variant names must be distinct)", n)
+			}
+		})
+	}
+}

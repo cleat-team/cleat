@@ -16,6 +16,7 @@ package main
 var coreTables = []string{
 	"admin.orgs",
 	"admin.plugin_tables",
+	"admin.plugin_dep_overrides",
 	"admin.registered_plugins",
 	"admin.operator_api_keys",
 	"admin.tenant_api_keys",

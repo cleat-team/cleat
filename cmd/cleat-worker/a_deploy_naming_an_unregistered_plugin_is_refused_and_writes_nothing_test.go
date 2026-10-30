@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,11 +21,24 @@ import (
 	"github.com/cleat-team/cleat/wasm"
 )
 
-// recordingPluginSource answers from a fixed set and counts how often it was asked.
+// recordingPluginSource answers from a fixed set, counts how often it was asked, and keeps the
+// overrides written to it (or refuses them when recordErr is set).
 type recordingPluginSource struct {
-	mu    sync.Mutex
-	known map[string]bool
-	calls int
+	mu        sync.Mutex
+	known     map[string]bool
+	calls     int
+	overrides []engine.PluginDepOverride
+	recordErr error
+}
+
+func (r *recordingPluginSource) RecordPluginDepOverride(_ context.Context, o engine.PluginDepOverride) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.recordErr != nil {
+		return r.recordErr
+	}
+	r.overrides = append(r.overrides, o)
+	return nil
 }
 
 func (r *recordingPluginSource) KnownPlugins(_ context.Context, names []string) (map[string]bool, error) {
@@ -70,7 +84,7 @@ func TestADeployNamingAnUnregisteredPluginIsRefusedAndWritesNothing(t *testing.T
 			}
 
 			src := &recordingPluginSource{known: map[string]bool{"registered-plugin": true}}
-			api := &apiServer{store: store, worker: newTestWorker(&mockStore{}), maxBodySize: 1 << 20, pluginSrc: src}
+			api := &apiServer{store: store, worker: newTestWorker(&mockStore{}), maxBodySize: 1 << 20, pluginReg: src}
 			mux := http.NewServeMux()
 			registerRoutes(mux, api)
 
@@ -179,13 +193,14 @@ func TestADeployNamingAnUnregisteredPluginIsRefusedAndWritesNothing(t *testing.T
 				}
 			})
 
-			t.Run("the explicit override deploys, and logs the missing names at WARN", func(t *testing.T) {
+			t.Run("the explicit override deploys, records itself before the write, and logs the missing names at WARN", func(t *testing.T) {
 				var buf bytes.Buffer
 				prev := slog.Default()
 				slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 				t.Cleanup(func() { slog.SetDefault(prev) })
 
 				name := unique("deps-allow")
+				before := len(src.overrides)
 				code, resp := upload(t, request(name, binary(t, name, nil), map[string]string{"bootstrap-plugin": ">=1"}, true))
 				if code != http.StatusCreated {
 					t.Fatalf("status = %d, want 201; body = %v", code, resp)
@@ -193,11 +208,49 @@ func TestADeployNamingAnUnregisteredPluginIsRefusedAndWritesNothing(t *testing.T
 				if n := rows(t, name); n != 1 {
 					t.Errorf("%d rows after an overridden deploy, want 1", n)
 				}
+				if len(src.overrides) != before+1 {
+					t.Fatalf("recorded %d overrides, want exactly one for this deploy", len(src.overrides)-before)
+				}
+				rec := src.overrides[len(src.overrides)-1]
+				if rec.Definition != name || rec.Via != "rest" || rec.Version != 1 || rec.TenantID != engine.DefaultTenantUUID ||
+					len(rec.Missing) != 1 || rec.Missing[0].Name != "bootstrap-plugin" {
+					t.Errorf("record = %+v, want this definition, via rest, version 1, the default tenant and bootstrap-plugin", rec)
+				}
 				out := buf.String()
 				for _, want := range []string{"level=WARN", "bootstrap-plugin", "allow-missing-plugins"} {
 					if !strings.Contains(out, want) {
 						t.Errorf("the override's log %q lacks %q", out, want)
 					}
+				}
+			})
+
+			t.Run("the override changes only the deploy that carries it", func(t *testing.T) {
+				first := unique("deps-once-a")
+				if code, resp := upload(t, request(first, binary(t, first, nil), map[string]string{"bootstrap-plugin": ">=1"}, true)); code != http.StatusCreated {
+					t.Fatalf("the overridden deploy: status = %d; body = %v", code, resp)
+				}
+				second := unique("deps-once-b")
+				code, resp := upload(t, request(second, binary(t, second, nil), map[string]string{"bootstrap-plugin": ">=1"}, false))
+				if code != http.StatusUnprocessableEntity {
+					t.Errorf("the next deploy of the same missing plugin without the field: status = %d, want 422; body = %v", code, resp)
+				}
+				if n := rows(t, second); n != 0 {
+					t.Errorf("%d rows written by the deploy that did not carry the override, want 0", n)
+				}
+			})
+
+			t.Run("an override that cannot be recorded is refused and writes nothing", func(t *testing.T) {
+				src.mu.Lock()
+				src.recordErr = errors.New("audit table unwritable")
+				src.mu.Unlock()
+				t.Cleanup(func() { src.mu.Lock(); src.recordErr = nil; src.mu.Unlock() })
+				name := unique("deps-unrecordable")
+				code, resp := upload(t, request(name, binary(t, name, nil), map[string]string{"bootstrap-plugin": ">=1"}, true))
+				if code == http.StatusCreated {
+					t.Fatalf("an override whose record failed deployed; body = %v", resp)
+				}
+				if n := rows(t, name); n != 0 {
+					t.Errorf("%d rows written by an override that could not be recorded, want 0", n)
 				}
 			})
 
