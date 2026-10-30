@@ -166,10 +166,24 @@ func leftoverRunsByDatabase(ctx context.Context, base string) (map[string]bool, 
 // before and after, so a run an earlier invocation left (the databases persist)
 // is not charged to this one.
 //
-// It does not fail when it cannot look: with no PostgreSQL configured every
-// database test skips itself, and a guard that failed there would fail a
-// machine that has nothing to measure. It says UNMEASURED on stderr instead,
-// so a green run that measured nothing reads as one.
+// When it cannot look it says UNMEASURED on stderr, and what that does to the
+// exit status depends on whether a database was asked for. With none
+// configured every database test skips itself, there is nothing to measure,
+// and a guard that failed there would fail a machine for having no server.
+// With one configured (CLEAT_TEST_POSTGRES or CLEAT_TEST_DB, the same test
+// SuiteTestDB uses to turn an unreachable server from a skip into a failure) a
+// guard that could not look is a failure of the check, not a finding about the
+// tree, and it must not read as a pass: the run exits non-zero.
+//
+// Two go test processes against one PostgreSQL are charged to each other: a
+// run the other process added during this one's m.Run looks like this one's
+// leak. CI runs the package once per database; locally, run one at a time.
+// databaseConfigured is whether a PostgreSQL was asked for, by the same
+// variables SuiteTestDB reads.
+func databaseConfigured() bool {
+	return os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
+}
+
 func runGuarded(m *testing.M) int {
 	flag.Parse()
 	if f := flag.Lookup("test.list"); testing.Short() || (f != nil && f.Value.String() != "") {
@@ -180,8 +194,15 @@ func runGuarded(m *testing.M) int {
 	before, err := leftoverRunsByDatabase(ctx, base)
 	cancel()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ready-run guard: UNMEASURED, no PostgreSQL to look at (%v)\n", err)
-		return m.Run()
+		fmt.Fprintf(os.Stderr, "ready-run guard: UNMEASURED, could not look before the run (%v)\n", err)
+		code := m.Run()
+		if databaseConfigured() {
+			fmt.Fprintln(os.Stderr, "ready-run guard: a database is configured, so this is a failure of the check, not a finding about the tree")
+			if code == 0 {
+				code = 1
+			}
+		}
+		return code
 	}
 
 	code := m.Run()
@@ -190,7 +211,13 @@ func runGuarded(m *testing.M) int {
 	defer cancel()
 	after, err := leftoverRunsByDatabase(ctx, base)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ready-run guard: UNMEASURED after the run (%v)\n", err)
+		fmt.Fprintf(os.Stderr, "ready-run guard: UNMEASURED, could not look after the run (%v)\n", err)
+		if databaseConfigured() {
+			fmt.Fprintln(os.Stderr, "ready-run guard: a database is configured, so this is a failure of the check, not a finding about the tree")
+			if code == 0 {
+				code = 1
+			}
+		}
 		return code
 	}
 	if left := newer(before, after); len(left) > 0 {
