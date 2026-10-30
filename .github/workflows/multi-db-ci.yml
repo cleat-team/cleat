@@ -569,6 +569,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # --self-test first: it needs no database, and it is the only thing that
+      # exercises the floor's REFUSING case, which a passing real run never does.
+      - name: Self-test the PostgreSQL baseline verifier's floor
+        run: python3 scripts/verify-postgres-baseline.py --self-test
+
       # The committed PostgreSQL baseline is a claim about the PROCESS -- "these
       # three files are exactly what the generator produces" -- and until this step
       # nothing checked it of the ARTIFACT. Two guards in engine/ were narrowed on

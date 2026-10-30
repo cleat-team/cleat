@@ -140,7 +140,68 @@ PLACEHOLDER_002 = (
 PG_DUMP_FLAGS = ["--schema-only", "--no-owner"]
 
 
+def floor_failure(chain_len, committed_dir):
+    """The message for a prior chain that is not longer than the baseline, else None.
+
+    A prior-rebaseline chain must have had MORE files than the baseline it produced, or
+    it is not a chain being compacted at all -- it is the committed baseline itself (or an
+    earlier one), pointed at by mistake.
+
+    **The baseline is counted by NAME, not by listing the directory.** This counted every
+    `.sql` file in --committed, which is a census of a growing population: the first
+    migration added after the baseline (the seventh file, with the prior chain at seven)
+    made the floor read "7 is not more than 7" and refuse a correct prior tree with exit 2.
+    Only the files the generator emits and this mode compares (BASELINE) are what the prior
+    chain was compacted INTO; a migration written after the compaction is not one of them.
+    """
+    committed_count = len([x for x in BASELINE
+                           if os.path.exists(os.path.join(committed_dir, x))])
+    if chain_len <= committed_count:
+        return (f"the prior tree yielded {chain_len} migration file(s), not more than "
+                f"the {committed_count} baseline file(s) in --committed ({committed_dir}); "
+                "that is not a pre-rebaseline chain -- is --prior-rebaseline the right commit?")
+    return None
+
+
+def self_test():
+    """Exercise floor_failure on trees built here. Exit 0 pass, 1 a case went wrong.
+
+    The cases that matter are the two that DISAGREE with each other: a baseline plus later
+    migrations against a longer prior chain must pass, and against a baseline-sized prior
+    chain must refuse. A test with only the first would pass a floor that never refuses.
+    """
+    bad = []
+
+    def committed(extra):
+        d = tempfile.mkdtemp(prefix="verify-postgres-baseline-selftest-")
+        for name in list(BASELINE) + extra:
+            open(os.path.join(d, name), "w").close()
+        return d
+
+    later = ["004_a.sql", "005_b.sql", "006_c.sql", "007_d.sql"]
+    cases = [
+        # (what it is, committed extras, prior chain length, want refusal)
+        ("baseline only, prior chain longer", [], 7, False),
+        ("baseline plus four later migrations, prior chain of seven", later, 7, False),
+        ("baseline plus four later migrations, prior tree IS the baseline", later, 3, True),
+        ("baseline only, prior tree IS the baseline", [], 3, True),
+        ("baseline plus four later migrations, prior chain shorter than baseline", later, 2, True),
+    ]
+    for what, extra, n, want in cases:
+        d = committed(extra)
+        try:
+            got = floor_failure(n, d) is not None
+        finally:
+            shutil.rmtree(d)
+        print(f"{'ok  ' if got == want else 'FAIL'} {what}: refused={got} want={want}")
+        if got != want:
+            bad.append(what)
+    return 1 if bad else 0
+
+
 def main():
+    if sys.argv[1:] == ["--self-test"]:
+        return self_test()
     ap = argparse.ArgumentParser()
     ap.add_argument("--dsn", required=True, help="an EMPTY database this mode may build into")
     ap.add_argument("--prior-rebaseline", required=True,
@@ -280,20 +341,10 @@ def main():
                        if x.endswith(".sql"))
         # cleat#3347: this used to be a hardcoded "< 30", tuned to cleat#2059's
         # own ~87-file chain and never meant to survive a SECOND compaction.
-        # The invariant that actually matters is relative, not absolute: a
-        # prior-rebaseline chain must have had MORE files than the baseline it
-        # produced, or it is not a chain being compacted at all -- it is the
-        # committed baseline itself (or an earlier one), pointed at by mistake.
-        # A fixed floor would need re-tuning after every future compaction,
-        # the same "a count of a growing population drifts" trap this repo's
-        # own CLAUDE.md warns about; this does not, because it is checked
-        # against what IS committed rather than against a number frozen at
-        # the moment this script was written.
-        committed_count = len([x for x in os.listdir(args.committed) if x.endswith(".sql")])
-        if len(chain) <= committed_count:
-            fail(f"the prior tree yielded {len(chain)} migration file(s), not more than "
-                 f"the {committed_count} in --committed ({args.committed}); that is not a "
-                 "pre-rebaseline chain -- is --prior-rebaseline the right commit?", 2)
+        # The invariant is relative: see floor_failure.
+        msg = floor_failure(len(chain), args.committed)
+        if msg:
+            fail(msg, 2)
         # No abbreviated SHA here: the full one is printed once, above, and a short
         # form appearing a second time invites someone to copy that one.
         print(f"prior chain: {len(chain)} file(s)")
