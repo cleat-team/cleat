@@ -107,7 +107,9 @@ var portedOn = map[string][]string{
 	// migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql defining
 	// admin.drop_tenant there and TestATenantCanBeDroppedOnSQLServer behind it.
 	// MySQL still has no `admin` schema, which is the reason this map exists.
-	"drop-tenant":    {"postgres", "mssql"},
+	"drop-tenant": {"postgres", "mssql"},
+	// cleat#3597: the library schema exists on PostgreSQL and SQL Server only (D41).
+	"library":        {"postgres", "mssql"},
 	"revoke-api-key": {"postgres"},
 
 	// suspend-tenant / resume-tenant, cleat#1956's audit. These were absent
