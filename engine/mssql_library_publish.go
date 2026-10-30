@@ -43,6 +43,10 @@ func (m mssqlLibraryPublisher) publishOnce(ctx context.Context, req PublishLibra
 	if err := lockLibraryNames(ctx, tx, DialectMSSQL, true); err != nil {
 		return res, err
 	}
+	// D59-b (cleat#3629): refuse a library that would sit beside a tenant's own names.
+	if err := refusePublishThatClashes(ctx, tx, DialectMSSQL, req.Library); err != nil {
+		return res, err
+	}
 
 	for _, m := range req.Members {
 		c, err := prepareLibraryMember(m)

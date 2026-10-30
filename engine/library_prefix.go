@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -171,4 +172,110 @@ func refuseOwnNamesUnderPrefix(ctx context.Context, tx *sql.Tx, d Dialect, tenan
 		return &LibraryPrefixHeldError{Library: library, Names: names}
 	}
 	return nil
+}
+
+// LibraryPrefixClash is one tenant's workflow name under a library's prefix, with the versions it holds.
+type LibraryPrefixClash struct {
+	TenantID string
+	Name     string
+	Versions []int
+}
+
+// libraryPrefixQueryer is what the clash reader needs: a *sql.Tx inside a publish, or a *sql.DB for the
+// sharded pre-pass that runs before any shard is written.
+type libraryPrefixQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// libraryPrefixClashes returns every tenant's own workflow names under the library's prefix, with the
+// versions each holds. The reader is a SECURITY DEFINER function or an EXECUTE AS OWNER procedure
+// (migration 010), because the publisher cannot read tenant rows; it sees only tenants that have an
+// admin.tenants row unless its owner bypasses row-level security (PostgreSQL).
+func libraryPrefixClashes(ctx context.Context, q libraryPrefixQueryer, d Dialect, library string) ([]LibraryPrefixClash, error) {
+	var query string
+	switch d {
+	case DialectPostgres:
+		query = `SELECT tenant_id::text, name, versions FROM library_clashing_names($1)`
+	case DialectMSSQL:
+		query = `EXEC dbo.library_clashing_names @p1`
+	default:
+		return nil, nil
+	}
+	rows, err := q.QueryContext(ctx, query, libraryMemberPrefix(library))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LibraryPrefixClash
+	for rows.Next() {
+		var c LibraryPrefixClash
+		var versions string
+		if err := rows.Scan(&c.TenantID, &c.Name, &versions); err != nil {
+			return nil, err
+		}
+		for _, v := range strings.Split(versions, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				return nil, fmt.Errorf("reading the versions %q of %s: %w", versions, c.Name, err)
+			}
+			c.Versions = append(c.Versions, n)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// maxClashesListed bounds how much of a clash list goes into one error message.
+const maxClashesListed = 100
+
+// clashRefusal is the publish refusal for a non-empty clash list. It lists each tenant and name, as
+// owner decision D59-b asks, so the operator can rename them first.
+func clashRefusal(library string, clashes []LibraryPrefixClash) error {
+	var b strings.Builder
+	shown := clashes
+	if len(shown) > maxClashesListed {
+		shown = shown[:maxClashesListed]
+	}
+	for _, c := range shown {
+		vs := make([]string, len(c.Versions))
+		for i, v := range c.Versions {
+			vs[i] = fmt.Sprint(v)
+		}
+		fmt.Fprintf(&b, "\n  tenant %s: %s (version %s)", c.TenantID, c.Name, strings.Join(vs, ", "))
+	}
+	if more := len(clashes) - len(shown); more > 0 {
+		fmt.Fprintf(&b, "\n  ... and %d more", more)
+	}
+	return publishRefused("library %q cannot be published: %d workflow name(s) already held by tenants start with its prefix %q, "+
+		"and an installed library would run beside them (owner decision D59-b). Rename or remove these, then publish again:%s",
+		library, len(clashes), libraryMemberPrefix(library), b.String())
+}
+
+// refusePublishThatClashes refuses a publish when any tenant already holds names under the library's
+// prefix. It runs inside the publish transaction, after the exclusive library-names lock: every deploy
+// that passed its check has committed by then, so the reader sees it, and a deploy that starts after
+// waits for this publish and is refused.
+func refusePublishThatClashes(ctx context.Context, tx *sql.Tx, d Dialect, library string) error {
+	clashes, err := libraryPrefixClashes(ctx, tx, d, library)
+	if err != nil {
+		return fmt.Errorf("checking %q against the tenants' own workflow names: %w", library, err)
+	}
+	if len(clashes) == 0 {
+		return nil
+	}
+	return clashRefusal(library, clashes)
+}
+
+// CheckLibraryPrefixClashes is the same question asked without a transaction or a lock. A sharded
+// publish asks it of every shard before it writes the first, so a clash on a later shard does not leave
+// the earlier ones published; the check inside each shard's own publish stays authoritative.
+func CheckLibraryPrefixClashes(ctx context.Context, db *sql.DB, d Dialect, library string) error {
+	clashes, err := libraryPrefixClashes(ctx, db, d, library)
+	if err != nil {
+		return fmt.Errorf("checking %q against the tenants' own workflow names: %w", library, err)
+	}
+	if len(clashes) == 0 {
+		return nil
+	}
+	return clashRefusal(library, clashes)
 }

@@ -390,11 +390,17 @@ func (c *prefixCase) deployInTx(t *testing.T, tx *sql.Tx, tenant, name string, v
 }
 
 func (c *prefixCase) publishAsOperator(t *testing.T, lib string) error {
+	return c.publishBundleAsOperator(t, lib, "1.0.0", 1)
+}
+
+// publishBundleAsOperator publishes a one-member bundle through the real publish path as the
+// publisher login; memberVersion lets a later bundle carry a newer version of the same member.
+func (c *prefixCase) publishBundleAsOperator(t *testing.T, lib, bundleVersion string, memberVersion int) error {
 	if c.pub == nil {
 		t.Fatalf("UNMEASURED: openPublisher was not called before publishing")
 	}
 	_, err := PublishLibraryBundle(c.ctx, c.pub, c.rig.dialect, inLibrary(PublishLibraryRequest{
-		Library: lib, BundleVersion: "1.0.0", Members: []PublishLibraryMember{pubMember("review", 1, "r", nil)},
+		Library: lib, BundleVersion: bundleVersion, Members: []PublishLibraryMember{pubMember("review", memberVersion, "r"+bundleVersion, nil)},
 	}))
 	return err
 }
@@ -405,15 +411,17 @@ func (c *prefixCase) openPublisher(t *testing.T) {
 }
 
 // The window #3629 found by tracing the interleaving: a deploy passes its check before the library
-// exists, the library is published and committed, an install checks the tenant's own names and sees
-// nothing (the deploy has not committed), and then the deploy commits. The lock closes it: a publish
-// cannot commit while a deploy that passed its check is open.
+// exists, the library is published and committed, and then the deploy commits, leaving the tenant's own
+// name beside the published library. The lock closes it: a publish cannot read the tenants' names, and
+// so cannot commit, while a deploy that passed its check is open; when the deploy has committed the
+// publish sees the name and is refused (owner decision D59-b).
 //
 // These two cases hold one side open and watch the other BLOCK, so they test the mechanism and not
 // luck. Remove the lock and the first one fails because the publish does not wait.
 func TestAPublishWaitsForADeployThatHasPassedItsCheck(t *testing.T) {
 	eachPrefixRig(t, func(t *testing.T, c *prefixCase) {
 		lib := c.library(t, "lk1")
+		c.registerTenants(t)
 		c.openPublisher(t)
 		tx, closeTx := c.heldTx(t, pfxTenantA)
 		defer closeTx()
@@ -435,21 +443,17 @@ func TestAPublishWaitsForADeployThatHasPassedItsCheck(t *testing.T) {
 		}
 		select {
 		case err := <-done:
-			if err != nil {
-				t.Fatalf("the publish failed after the deploy committed: %v", err)
+			// D59-b: the publish that waited now sees the deploy's committed name and refuses. Without
+			// the lock it would have read before the commit, found nothing, and published.
+			if !errors.Is(err, ErrLibraryPublishRefused) || !strings.Contains(err.Error(), lib+".held") {
+				t.Fatalf("the publish that waited: got %v, want it refused for the tenant's own %s.held", err, lib)
 			}
 		case <-time.After(30 * time.Second):
 			t.Fatal("the publish never finished after the deploy committed")
 		}
-
-		// Now the install sees the committed own name and refuses: the window is closed.
-		err := c.install(pfxTenantA, lib)
-		var he *LibraryPrefixHeldError
-		if !errors.As(err, &he) {
-			t.Fatalf("install after the deploy committed: got %v, want it refused for the tenant's own %s.held", err, lib)
-		}
-		if n := c.installedRows(t, pfxTenantA, lib); n != 0 {
-			t.Errorf("%d installed row(s) beside the tenant's own name, want 0", n)
+		rows := c.rig.query(t, "", `SELECT count(*) AS n FROM library.bundles WHERE library = ?`, lib)
+		if rows[0]["n"] != "0" {
+			t.Errorf("the refused publish left %s bundle row(s), want 0", rows[0]["n"])
 		}
 	})
 }
@@ -497,35 +501,29 @@ func TestADeployWaitsForAPublishInFlightAndIsThenRefused(t *testing.T) {
 	})
 }
 
-// All three actors released together, over and over: a deploy of <lib>.x, the publish of <lib>, and an
-// install of <lib> that retries until the bundle exists. The install has to be in the race. An install
-// that runs after the deploy has committed finds the tenant's own name and is refused whatever the lock
-// does, which is what this test did in its first version, and it then passed with the lock removed.
-// With the install concurrent, the window the lock closes is real: the install reads the tenant's own
-// names while the deploy is between its prefix check and its commit.
+// A deploy of <lib>.x and the publish of <lib>, released together, over and over. Exactly one may win:
+// the deploy committing first makes the publish refuse (owner decision D59-b), and the publish
+// committing first makes the deploy refuse (D59). Both succeeding is the shadowing D59 exists to
+// prevent, so the test asserts that invariant and not an outcome; both being refused would mean a round
+// measured nothing, and that fails too.
 //
-// This is a backstop and not the proof: the two deterministic tests above hold one side open and fail
-// every time, and this one can only find an interleaving by luck, so it asserts the invariant ("never
-// both origins") and not an outcome. It runs once per login (see eachPrefixRigModes). Measured
-// 2026-10-30, 10 runs of 40 rounds each, with the lock removed from lockLibraryNames (all of it / the
-// shared half / the exclusive half), as the number of runs that went red:
+// The first version of this test (part 2) raced a deploy against a publish and an INSTALL, and its
+// install ran after the deploy had committed, so it passed with the lock removed. That was found in
+// review. This one has no install in it.
 //
-//	PostgreSQL, app role                          10 / 10 / 10
-//	PostgreSQL, per-tenant login                  10 / 10 / 10
-//	SQL Server, RCSI on,  app role                10 /  8 / 10
-//	SQL Server, RCSI on,  cleat_admin login       10 /  9 / 10
-//	SQL Server, RCSI off, cleat_admin login        9 /  5 /  7
-//	SQL Server, RCSI off, app role                 1 /  0 /  1
-//
-// and green in 10 of 10 on head in every row. The last row is the one this test cannot see: with
-// READ_COMMITTED_SNAPSHOT off (the default, and the rig's starting state) the app role's read of the
-// tenant's own names BLOCKS on the deploy's uncommitted row, which closes the window without the lock,
-// so there the lock rests on the deterministic tests. docs/reference/database-backends.md recommends
-// RCSI on. To re-derive: delete the body of lockLibraryNames (or half of it), then
+// It is a backstop and not the proof, since it can only find an interleaving by luck, but with the
+// publish-side check it finds it every time here. Measured 2026-10-30, 10 runs of 40 rounds each, with
+// the lock removed from lockLibraryNames (all of it / the shared half / the exclusive half), as the
+// number of runs that went red, in each row: 10 / 10 / 10. The rows are PostgreSQL as the app role and
+// as a per-tenant login, and SQL Server with READ_COMMITTED_SNAPSHOT on and off, each as the app role
+// and as the cleat_admin login (see eachPrefixRigModes). On head every row is green in 10 of 10.
+// (Part 2's install-based version could not see the app role at SQL Server's default isolation, where
+// its read blocked on the deploy's uncommitted row; the publish-side reader does not have that gap.)
+// docs/reference/database-backends.md recommends RCSI on. To re-derive: delete the body of
+// lockLibraryNames (or half of it), then
 // `go test ./engine/ -count=10 -run TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins`.
 //
-// Run it with -count=30 on head and on base (clew#411). Retrying only on ErrLibraryBundleNotFound keeps
-// a different refusal from looping.
+// Run it with -count=30 on head and on base (clew#411).
 func TestARaceBetweenDeployAndPublishNeverLeavesBothOrigins(t *testing.T) {
 	// docs/reference/database-backends.md recommends READ_COMMITTED_SNAPSHOT on, and under it a read
 	// does not wait for an uncommitted row. With it off (the default, and what the rig starts as) a
@@ -577,53 +575,32 @@ func (rig *libInstallRig) setRCSI(t *testing.T, on bool) {
 func raceDeployPublishInstall(t *testing.T, c *prefixCase) {
 	t.Helper()
 	const rounds = 40
-	{
-		c.openPublisher(t)
-		measured := 0
-		for i := 0; i < rounds; i++ {
-			lib := c.library(t, "race"+strconv.Itoa(i))
-			var wg sync.WaitGroup
-			start := make(chan struct{})
-			var deployErr, publishErr, installErr error
-			wg.Add(3)
-			go func() { defer wg.Done(); <-start; deployErr = c.deploy(pfxTenantA, lib+".x", 1) }()
-			go func() { defer wg.Done(); <-start; publishErr = c.publishAsOperator(t, lib) }()
-			go func() {
-				defer wg.Done()
-				<-start
-				deadline := time.Now().Add(20 * time.Second)
-				for {
-					installErr = c.install(pfxTenantA, lib)
-					if !errors.Is(installErr, ErrLibraryBundleNotFound) || time.Now().After(deadline) {
-						return
-					}
-				}
-			}()
-			close(start)
-			wg.Wait()
-			if publishErr != nil {
-				t.Fatalf("round %d: the publish failed: %v", i, publishErr)
-			}
-			if deployErr != nil && !errors.Is(deployErr, ErrWorkflowNameUnderLibraryPrefix) {
-				t.Fatalf("round %d: the deploy failed for another reason: %v", i, deployErr)
-			}
-			var held *LibraryPrefixHeldError
-			if installErr != nil && !errors.As(installErr, &held) {
-				t.Fatalf("round %d: the install failed for another reason: %v", i, installErr)
-			}
-			own := c.count(t, pfxTenantA, `library IS NULL AND name = ?`, lib+".x")
-			installed := c.installedRows(t, pfxTenantA, lib)
-			if own > 0 && installed > 0 {
-				t.Fatalf("round %d: the tenant holds its own %s.x AND %d row(s) installed from the library (deploy=%v install=%v): shadowing",
-					i, lib, installed, deployErr, installErr)
-			}
-			if own == 0 && installed == 0 {
-				t.Fatalf("round %d: neither the tenant's name nor the install exists (deploy=%v install=%v): the round measured nothing", i, deployErr, installErr)
-			}
-			measured++
+	c.registerTenants(t)
+	c.openPublisher(t)
+	for i := 0; i < rounds; i++ {
+		lib := c.library(t, "race"+strconv.Itoa(i))
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		var deployErr, publishErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; deployErr = c.deploy(pfxTenantA, lib+".x", 1) }()
+		go func() { defer wg.Done(); <-start; publishErr = c.publishAsOperator(t, lib) }()
+		close(start)
+		wg.Wait()
+		if deployErr != nil && !errors.Is(deployErr, ErrWorkflowNameUnderLibraryPrefix) {
+			t.Fatalf("round %d: the deploy failed for another reason: %v", i, deployErr)
 		}
-		if measured != rounds {
-			t.Fatalf("UNMEASURED: %d of %d rounds measured", measured, rounds)
+		if publishErr != nil && !errors.Is(publishErr, ErrLibraryPublishRefused) {
+			t.Fatalf("round %d: the publish failed for another reason: %v", i, publishErr)
+		}
+		// Exactly one of them wins. Both succeeding is the shadowing D59 exists to prevent: the
+		// tenant holds its own <lib>.x AND the library is published. Both failing means nothing was
+		// measured.
+		if deployErr == nil && publishErr == nil {
+			t.Fatalf("round %d: the deploy of %s.x AND the publish of %s both succeeded: the tenant's own name sits beside the published library", i, lib, lib)
+		}
+		if deployErr != nil && publishErr != nil {
+			t.Fatalf("round %d: the deploy (%v) and the publish (%v) were both refused: the round measured nothing", i, deployErr, publishErr)
 		}
 	}
 }

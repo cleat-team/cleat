@@ -116,6 +116,20 @@ func PublishLibraryBundleToShards(ctx context.Context, shards []LibraryShard, d 
 		return res, err
 	}
 
+	// D59-b (cleat#3629): ask every shard whether a tenant already holds names under the prefix BEFORE
+	// writing any, so a clash on a later shard does not leave the earlier ones published. Each shard's
+	// own publish asks again under its lock, which is the authoritative answer.
+	//
+	// Only a CLASH stops the whole publish here. A shard that cannot be asked (unreachable, or reached
+	// through a login that may not publish) is left to the write loop below, which fails closed on the
+	// same lookup inside that shard's transaction and reports it as a ShardedLibraryPublishError, so a
+	// shard that fails still does not stop the rest and the same publish again still completes it.
+	for _, sh := range shards {
+		if err := CheckLibraryPrefixClashes(ctx, sh.DB, d, req.Library); errors.Is(err, ErrLibraryPublishRefused) {
+			return res, fmt.Errorf("shard %q: %w (nothing was written to any shard)", sh.Name, err)
+		}
+	}
+
 	fail := &ShardedLibraryPublishError{Library: req.Library, BundleVersion: req.BundleVersion}
 	for i, sh := range shards {
 		one, err := PublishLibraryBundle(ctx, sh.DB, d, req)

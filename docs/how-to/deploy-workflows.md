@@ -313,6 +313,14 @@ PostgreSQL and SQL Server only.
   comparison is the database's own, and on PostgreSQL and SQL Server it is exact: `ACME.checkout` is a different
   name from `acme.checkout` and is not under the `acme.` prefix. (SQL Server compared names
   case-insensitively until migration `011`, cleat#3635, owner decision D60.)
+- **A publish is refused while a tenant holds names under the prefix.** Before it writes anything, publish asks
+  which tenants already hold workflow names that start with `<library>.` and refuses if any do, listing each
+  tenant and name with its versions; rename or remove them, then publish again. This is the other half of the
+  reserved prefix above: a tenant cannot deploy under a published prefix, and a library cannot be published over
+  names a tenant already has. On a sharded deployment every shard is asked before any is written. The check
+  reads tenants through a function the publisher may call and nothing else (migration `010`), and it sees
+  the tenants listed in `admin.tenants` plus the default tenant; on SQL Server a tenant with workflow rows and
+  no `admin.tenants` row would not be seen.
 - **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
   of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
   does not contain. A name appears once per bundle.
