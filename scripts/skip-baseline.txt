@@ -311,6 +311,7 @@ engine	testHeartbeatReservedPoolSeesARealClaimedRunPostgres	1
 engine	withWasmtimeBackend	1
 engine/testutil	MSSQLTestDB	1
 engine/testutil	MySQLTestDB	1
+engine/testutil	ScratchDatabase	1
 engine/testutil	SuiteTestDB	2
 engine/testutil	TestDB	4
 engine/testutil	TestMSSQLAdminDBRefcountsOverlappingCallers	1
@@ -323,6 +324,8 @@ engine/testutil	TestSetupMSSQLFullSchemaSelfHealsAnAdminPredicateLeftDirtyByAnIn
 engine/testutil	TestZZCrossProcessHoldAdminWorker	1
 engine/testutil	TestZZCrossProcessReleaseWorker	1
 engine/testutil	TestZZCrossProcessSetupOnlyWorker	1
+engine/testutil	createScratchMSSQL	1
+engine/testutil	createScratchPostgres	1
 internal/pgclusterlock	requireDSN	1
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
 migration	TestConcurrentMigratorsAreSerialisedOnMySQLAndSQLServer	1

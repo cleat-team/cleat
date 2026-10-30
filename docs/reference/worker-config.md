@@ -1597,6 +1597,30 @@ JSON format:
 ]
 ```
 
+**The first entry is the admin shard.** A sharded worker uses the first shard's database for plugin migrations
+and administration (`db = shardDBs[0]`, `cmd/cleat-worker/main.go`), so an entry's place in the file is not
+cosmetic. Today, on that shard:
+
+- plugin migrations run, and plugin tables (event subscriptions, webhook sources and the like) live;
+- API keys and tenants are resolved: the worker's key and tenant store is built on that database;
+- the plugin-name registry and the override records of a deploy's plugin check are read and written
+  (see [Deploying workflows](../how-to/deploy-workflows.md)).
+
+Do not reorder the entries of a running deployment: the worker would start administering a different database.
+`cleatctl --db` names one database; for anything that reads the plugin registry, give it the admin shard's
+connection string.
+
+**A sharded worker answers `501` to tenant provisioning, tenant drop, suspend and resume, and to a library
+install, by design for now.** Provisioning, drop, suspend and resume go through the tenant provisioner, which
+a sharded worker does not have: the rotating claim that serves many tenants is unavailable on it, so a tenant
+created there would never run anything. A library install needs a store that can install, and a sharded store
+cannot. Serving many tenants on a sharded worker is not part of 0.6.0; cleat#3606 tracks the whole limit (suspend
+and resume, and with them the library install) and stays open for after it.
+
+What does work across shards: a workflow definition is written to every shard, and a library bundle can be
+published to every shard with `cleatctl library publish --replicate-to`
+([Publishing to a sharded deployment](../how-to/deploy-workflows.md#publishing-to-a-sharded-deployment)).
+
 ---
 
 ## Utility Flags

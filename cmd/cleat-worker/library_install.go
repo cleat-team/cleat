@@ -55,7 +55,7 @@ func (s *apiServer) handleInstallLibrary(w http.ResponseWriter, r *http.Request)
 	installer, ok := st.(engine.LibraryInstaller)
 	if !ok {
 		s.writeError(w, http.StatusNotImplemented,
-			"this deployment's store cannot install workflow libraries (a sharded PostgreSQL deployment does not yet: cleat#3597)")
+			"this deployment's store cannot install workflow libraries (a sharded deployment does not: serving many tenants on a sharded worker is not supported yet, cleat#3606, though a library can be published to every shard)")
 		return
 	}
 
