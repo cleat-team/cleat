@@ -10,6 +10,41 @@ import (
 	"github.com/google/uuid"
 )
 
+// stampDefCreatedAt sets a definition's created_at to an instant the TEST names, taken from the
+// host clock, then reads it back through the store. PurgeVersions compares created_at (written
+// by the database, on its clock) with a cutoff taken on the host's clock, so a test that purges
+// straight after a deploy is comparing two clocks; stamping the definition from the host's own
+// clock leaves one (cleat#3563). The read-back is the precondition: a stamp that did not take, or
+// took in another time zone, would make the purge below measure nothing.
+func stampDefCreatedAt(t *testing.T, store WorkflowStore, name string, version int, at time.Time) {
+	t.Helper()
+	at = at.UTC()
+	switch s := store.(type) {
+	case *PostgresStore:
+		if _, err := s.db.Exec(`UPDATE workflow_defs SET created_at = $1 WHERE name = $2 AND version = $3`, at, name, version); err != nil {
+			t.Fatalf("UNMEASURED: stampDefCreatedAt (postgres): %v", err)
+		}
+	case *MySQLStore:
+		if _, err := s.db.Exec(`UPDATE workflow_defs SET created_at = ? WHERE name = ? AND version = ?`, at, name, version); err != nil {
+			t.Fatalf("UNMEASURED: stampDefCreatedAt (mysql): %v", err)
+		}
+	case *MSSQLStore:
+		if _, err := s.db.Exec(`UPDATE workflow_defs SET created_at = @p1 WHERE name = @p2 AND version = @p3`, at, name, version); err != nil {
+			t.Fatalf("UNMEASURED: stampDefCreatedAt (mssql): %v", err)
+		}
+	default:
+		t.Fatalf("UNMEASURED: stampDefCreatedAt: unknown store type %T", store)
+	}
+	defs, err := store.ListWorkflowDefs(context.Background(), name)
+	if err != nil || len(defs) != 1 {
+		t.Fatalf("UNMEASURED: reading %s back after stamping it: %d definition(s), %v", name, len(defs), err)
+	}
+	if d := defs[0].CreatedAt.Sub(at); d < -time.Second || d > time.Second {
+		t.Fatalf("UNMEASURED: created_at reads back as %s after stamping %s (off by %s), so the purge below would compare the wrong instants",
+			defs[0].CreatedAt.UTC().Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), d)
+	}
+}
+
 // cleat#3506. CountActiveInstances and GetActiveInstanceCountsByVersion counted only
 // 'ready' and 'running'. A 'terminating' run is mid-shutdown, running its defer phase,
 // so it is not settled (engine/status_vocabulary.go), and the defer phase executes guest
@@ -91,6 +126,7 @@ func TestATerminatingRunCountsAsActive(t *testing.T) {
 				if err := store.MarkVersionDeprecated(ctx, name, 1, true); err != nil {
 					t.Fatalf("UNMEASURED: MarkVersionDeprecated: %v", err)
 				}
+				stampDefCreatedAt(t, store, name, 1, time.Now().Add(-time.Hour))
 
 				res, err := PurgeVersions(ctx, store, name, time.Duration(0))
 				if err != nil {
@@ -112,6 +148,7 @@ func TestATerminatingRunCountsAsActive(t *testing.T) {
 				if err := store.MarkVersionDeprecated(ctx, name, 1, true); err != nil {
 					t.Fatalf("UNMEASURED: MarkVersionDeprecated: %v", err)
 				}
+				stampDefCreatedAt(t, store, name, 1, time.Now().Add(-time.Hour))
 				res, err := PurgeVersions(ctx, store, name, time.Duration(0))
 				if err != nil {
 					t.Fatalf("PurgeVersions: %v", err)
@@ -119,6 +156,31 @@ func TestATerminatingRunCountsAsActive(t *testing.T) {
 				if res.VersionsRemoved != 1 {
 					t.Fatalf("UNMEASURED: PurgeVersions removed=%d skipped=%d errors=%v; the control must purge an idle version, or 'not purged' above means nothing",
 						res.VersionsRemoved, res.VersionsSkipped, res.Errors)
+				}
+			})
+
+			// The failure cleat#3563 recorded, made deterministic. A definition whose created_at is
+			// after the host's cutoff is not a candidate at all, so PurgeVersions reports it neither
+			// removed nor skipped, with no error. That is what a database clock a few tens of
+			// milliseconds ahead of the host's looked like to the two subtests above, which is why
+			// they stamp created_at from the host clock instead of trusting the database's.
+			t.Run("a definition stamped after the cutoff is not a candidate, which is how a clock ahead reads", func(t *testing.T) {
+				name := "terminating-ahead-" + uuid.New().String()[:8]
+				deploy(t, name)
+				if err := store.MarkVersionDeprecated(ctx, name, 1, true); err != nil {
+					t.Fatalf("UNMEASURED: MarkVersionDeprecated: %v", err)
+				}
+				stampDefCreatedAt(t, store, name, 1, time.Now().Add(time.Hour))
+				res, err := PurgeVersions(ctx, store, name, time.Duration(0))
+				if err != nil {
+					t.Fatalf("PurgeVersions: %v", err)
+				}
+				if res.VersionsRemoved != 0 || res.VersionsSkipped != 0 || len(res.Errors) != 0 {
+					t.Errorf("PurgeVersions removed=%d skipped=%d errors=%v; want 0, 0 and none: a definition newer than the cutoff is not a candidate",
+						res.VersionsRemoved, res.VersionsSkipped, res.Errors)
+				}
+				if _, err := store.LoadWASM(ctx, name, 1); err != nil {
+					t.Errorf("the definition is gone after PurgeVersions: %v", err)
 				}
 			})
 		})
