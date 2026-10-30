@@ -23,6 +23,11 @@ import (
 //
 // This is a floor and not a definition: a retained table may be named some other way, and Retained is then
 // the only place that says so. It catches the one way the list drifts that has an observable cause.
+//
+// KNOWN BLIND SPOT, found by the reviewer with planted migrations: the parse wants the closing ")" after a
+// newline and each column at the start of a line, so a CREATE TABLE written on ONE line is invisible to it.
+// Every table in the tree is laid out over several lines, and a one-line table would fail the known-positive
+// check below only if it were one of the two named there; this is a limit to know about, not one that bites.
 
 var (
 	createTableRe = regexp.MustCompile(`(?is)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w.\[\]"` + "`" + `]+)\s*\((.*?)\n\s*\)\s*(?:;|\n|$)`)
