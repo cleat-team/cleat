@@ -181,7 +181,7 @@ func TestADeployReadsTheRealPluginRegistryAndAuditsItsOverride(t *testing.T) {
 				}
 				var tenant, via, missingJSON string
 				var version int
-				if err := be.DB.QueryRow(`SELECT tenant_id, definition_version, via, missing_plugins FROM `+ovTable+` WHERE definition_name = `+ph(1), name).
+				if err := be.DB.QueryRow(`SELECT for_tenant_id, definition_version, via, missing_plugins FROM `+ovTable+` WHERE definition_name = `+ph(1), name).
 					Scan(&tenant, &version, &via, &missingJSON); err != nil {
 					t.Fatalf("read the audit row: %v (no row means the override was not recorded)", err)
 				}

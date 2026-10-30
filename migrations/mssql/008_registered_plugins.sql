@@ -29,12 +29,14 @@ GO
 
 -- cleat#3600: one row for every use of the explicit override. See migrations/postgres/008 for the
 -- full reasoning; this is the same change. Guarded on the table, so a re-run is a no-op.
+-- The column is for_tenant_id, not tenant_id, ON PURPOSE: admin.drop_tenant below (003) deletes from
+-- every table that has a tenant_id column, and this record is kept after a drop.
 IF OBJECT_ID(N'admin.plugin_dep_overrides', N'U') IS NULL
     CREATE TABLE admin.plugin_dep_overrides (
         override_id        NVARCHAR(64) NOT NULL,
         occurred_at        DATETIMEOFFSET(7) NOT NULL
             CONSTRAINT df_plugin_dep_overrides_at DEFAULT SYSUTCDATETIME(),
-        tenant_id          NVARCHAR(64) NOT NULL,
+        for_tenant_id      NVARCHAR(64) NOT NULL,
         definition_name    NVARCHAR(255) NOT NULL,
         definition_version INT NOT NULL,
         via                NVARCHAR(64) NOT NULL,

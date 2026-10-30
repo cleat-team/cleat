@@ -203,7 +203,7 @@ carrying that plugin has started once, or must say it is deliberate:
 An override changes **only the deploy that carries it**, and it is **recorded, not just logged**: before the
 definition is written, one row goes into `admin.plugin_dep_overrides` (the tenant, the definition and version,
 who asked, which path took it, and each missing plugin with its constraint and which declaration named it), and
-it is also logged at `WARN`. That table is append-only for the application role on PostgreSQL and SQL Server. If
+it is also logged at `WARN`. That table is append-only for the application role on PostgreSQL and SQL Server. It is kept after the tenant is dropped, as an audit record is. If
 the row cannot be written the deploy is **refused**: there is no override without a record of it. The row says the
 check was bypassed, not that the deploy then succeeded. An override covers a missing plugin only: it does not turn
 "the registry could not be read" into "allowed". **A library install has no override**: it refuses a bundle whose

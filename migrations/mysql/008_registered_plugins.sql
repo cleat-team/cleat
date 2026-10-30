@@ -21,10 +21,12 @@ CREATE TABLE IF NOT EXISTS registered_plugins (
 -- cleat#3600: one row for every use of the explicit override. See migrations/postgres/008 for the
 -- full reasoning; this is the same change. CREATE TABLE IF NOT EXISTS is already safe to run twice.
 -- MySQL has no per-table privilege model here, so append-only is the comment and the test.
+-- The column is for_tenant_id, not tenant_id, to match the other two dialects, where it must not
+-- be named tenant_id: this record is kept after a tenant drop.
 CREATE TABLE IF NOT EXISTS plugin_dep_overrides (
   override_id        varchar(64) NOT NULL,
   occurred_at        timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-  tenant_id          varchar(64) NOT NULL,
+  for_tenant_id      varchar(64) NOT NULL,
   definition_name    varchar(255) NOT NULL,
   definition_version int NOT NULL,
   via                varchar(64) NOT NULL,

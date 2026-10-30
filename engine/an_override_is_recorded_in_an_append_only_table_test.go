@@ -67,7 +67,7 @@ func TestAnOverrideIsRecordedInADurableRow(t *testing.T) {
 			var tenant, via, actor, missing string
 			var version int
 			var at time.Time
-			if err := db.QueryRow(`SELECT tenant_id, definition_version, via, actor, missing_plugins, occurred_at FROM `+tbl+` WHERE definition_name = `+tc.edialect.placeholder(1), def).
+			if err := db.QueryRow(`SELECT for_tenant_id, definition_version, via, actor, missing_plugins, occurred_at FROM `+tbl+` WHERE definition_name = `+tc.edialect.placeholder(1), def).
 				Scan(&tenant, &version, &via, &actor, &missing, &at); err != nil {
 				t.Fatalf("read the row back: %v", err)
 			}

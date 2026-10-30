@@ -41,13 +41,21 @@ REVOKE DELETE ON admin.registered_plugins FROM cleat_app;
 -- then succeeded (a later refusal, such as open runs on the version, leaves the row).
 --
 -- Append-only by privilege, like the registry: the application role may read and insert and may not
--- update or delete. Global and in `admin` for the reason registered_plugins is; tenant_id is a
+-- update or delete. Global and in `admin` for the reason registered_plugins is; for_tenant_id is a
 -- column (text, the tenant's UUID, or the default tenant's for a command-line deploy) and not a row
 -- policy, because the reader of this table is the operator.
+--
+-- KEPT AFTER A TENANT DROP, DELIBERATELY. This is an audit record of an operator-level act, the same
+-- kind as a drop's own audit row, and it outlives the tenant it names. It holds, about that tenant,
+-- exactly: the tenant id, the definition name and version, who asked (actor, via) and the names and
+-- version constraints of the plugins that were missing. No payloads, ever. It has no foreign key to
+-- admin.tenants, and the column is NOT named tenant_id: SQL Server's admin.drop_tenant deletes from
+-- every table that has a column of that name, so a table carrying it is not retained there. The
+-- engine tests pin both halves (the column name, and that a drop leaves the row).
 CREATE TABLE IF NOT EXISTS admin.plugin_dep_overrides (
     override_id        text NOT NULL,
     occurred_at        timestamptz NOT NULL DEFAULT now(),
-    tenant_id          text NOT NULL,
+    for_tenant_id      text NOT NULL,
     definition_name    text NOT NULL,
     definition_version integer NOT NULL,
     via                text NOT NULL,

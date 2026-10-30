@@ -84,7 +84,7 @@ func recordOverrideOn(ctx context.Context, q querier, d Dialect, o PluginDepOver
 		ph[i] = d.placeholder(i + 1)
 	}
 	stmt := "INSERT INTO " + d.pluginDepOverridesTable() +
-		" (override_id, tenant_id, definition_name, definition_version, via, actor, missing_plugins) VALUES (" +
+		" (override_id, for_tenant_id, definition_name, definition_version, via, actor, missing_plugins) VALUES (" +
 		strings.Join(ph, ", ") + ")"
 	if _, err := q.ExecContext(ctx, stmt, uuid.NewString(), o.TenantID, o.Definition, o.Version, o.Via, o.Actor, string(raw)); err != nil {
 		return fmt.Errorf("plugin dependency override: record: %w", err)
