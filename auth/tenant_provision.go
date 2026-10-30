@@ -85,6 +85,10 @@ const (
 	ConflictNameTaken     = "name_taken"
 	ConflictTenantDiffers = "tenant_differs"
 	ConflictTenantExists  = "tenant_exists"
+	// ConflictTenantIDDropped: a tenant with this id was dropped and its tombstone is still there. The id is
+	// not refused for being taken but for having been used: what the worker and the logs still hold under it
+	// would be inherited. An operator deletes the tombstone to allow reuse (cleat#3552, B3b-2).
+	ConflictTenantIDDropped = "tenant_id_dropped"
 )
 
 // ProvisionConflictError is a request that cannot succeed as stated and will not succeed on a retry.
@@ -101,6 +105,8 @@ func (e *ProvisionConflictError) Error() string {
 		return "auth: the tenant name is already taken by another tenant"
 	case ConflictTenantDiffers:
 		return "auth: a tenant with this id exists and differs in: " + strings.Join(e.Fields, ", ")
+	case ConflictTenantIDDropped:
+		return "auth: a tenant with this id was dropped; an operator must delete its tombstone before the id can be used again"
 	default:
 		return "auth: a tenant with this id exists and was not created by this principal"
 	}
@@ -119,6 +125,7 @@ type provisionStmts struct {
 	tenantByID, tenantByName, orgByName, orgExists                            string
 	insertOrg, insertTenant, insertKey                                        string
 	lockTenant, liveKeys, revokeProvisional, confirmProvisional, keyConfirmed string
+	tombstoneExists                                                           string
 }
 
 func provisionStatements(dialect string) (provisionStmts, error) {
@@ -129,8 +136,10 @@ func provisionStatements(dialect string) (provisionStmts, error) {
 			tenantByName: `SELECT tenant_id::text FROM admin.tenants WHERE name = $1`,
 			orgByName:    `SELECT org_id::text FROM admin.orgs WHERE name = $1`,
 			orgExists:    `SELECT 1 FROM admin.orgs WHERE org_id = $1`,
-			insertOrg:    `INSERT INTO admin.orgs (org_id, name) VALUES ($1, $2)`,
-			insertTenant: `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id, created_by) VALUES ($1, $2, $3, $4, $5)`,
+			// dropped_tenant_id, not tenant_id: see 007_a_dropped_tenant_leaves_a_tombstone.sql for why the column is not named for it.
+			tombstoneExists: `SELECT 1 FROM admin.tenant_tombstones WHERE dropped_tenant_id = $1`,
+			insertOrg:       `INSERT INTO admin.orgs (org_id, name) VALUES ($1, $2)`,
+			insertTenant:    `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id, created_by) VALUES ($1, $2, $3, $4, $5)`,
 			// The expiry is the DATABASE's clock plus a number of seconds, so the key lapses by the
 			// same clock that judges it at authentication.
 			insertKey:         `INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at, provisional) VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), true)`,
@@ -149,6 +158,7 @@ func provisionStatements(dialect string) (provisionStmts, error) {
 			tenantByName:       `SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id)) FROM admin.tenants WHERE name = @p1`,
 			orgByName:          `SELECT LOWER(CONVERT(NVARCHAR(36), org_id)) FROM admin.orgs WHERE name = @p1`,
 			orgExists:          `SELECT 1 FROM admin.orgs WHERE org_id = @p1`,
+			tombstoneExists:    `SELECT 1 FROM admin.tenant_tombstones WHERE dropped_tenant_id = @p1`,
 			insertOrg:          `INSERT INTO admin.orgs (org_id, name) VALUES (@p1, @p2)`,
 			insertTenant:       `INSERT INTO admin.tenants (tenant_id, name, display_name, org_id, created_by) VALUES (@p1, @p2, @p3, @p4, @p5)`,
 			insertKey:          `INSERT INTO admin.tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at, provisional) VALUES (@p1, @p2, @p3, @p4, DATEADD(second, @p5, SYSUTCDATETIME()), 1)`,
@@ -193,6 +203,18 @@ func (s *TenantStore) ProvisionTenant(ctx context.Context, req ProvisionRequest)
 	}
 	if len(name) > 255 {
 		return ProvisionResult{}, errors.New("auth: the tenant name is longer than 255 characters")
+	}
+
+	// A dropped id is refused BEFORE the org is resolved: resolving creates the org by name, and a request that
+	// is going to be refused must not leave one behind. A generated id cannot have been dropped.
+	if req.TenantID != uuid.Nil {
+		var one int
+		switch err := s.db.QueryRowContext(ctx, st.tombstoneExists, tid.String()).Scan(&one); {
+		case err == nil:
+			return ProvisionResult{}, &ProvisionConflictError{Reason: ConflictTenantIDDropped}
+		case !errors.Is(err, sql.ErrNoRows):
+			return ProvisionResult{}, err
+		}
 	}
 
 	orgID, err := s.resolveOrg(ctx, st, req)

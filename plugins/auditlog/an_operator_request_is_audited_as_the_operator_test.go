@@ -57,6 +57,9 @@ func TestAnOperatorRequestIsAuditedAsTheOperator(t *testing.T) {
 		auth.NoteAuditTarget(r.Context(), tenantB)
 		auth.NoteAuditTarget(r.Context(), tenantC)
 	})
+	// The shape of a tenant drop (cleat#3552, B3b-2): DELETE on a bare tenant id, whose handler names NO
+	// tenant, because the tenant's own chain is deleted with it.
+	mux.HandleFunc("/api/admin/tenants/"+tenantB.String(), func(http.ResponseWriter, *http.Request) {})
 	mux.HandleFunc("/api/admin/notes-the-nil-tenant", func(_ http.ResponseWriter, r *http.Request) {
 		auth.NoteAuditTarget(r.Context(), uuid.Nil)
 	})
@@ -83,35 +86,44 @@ func TestAnOperatorRequestIsAuditedAsTheOperator(t *testing.T) {
 	op := "operator:" + keyID
 	rows := []struct {
 		name    string
+		method  string // POST when empty
 		handler http.Handler
 		path    string
 		key     string
 		want    want
 	}{
 		{"a handler that names no tenant: the default chain, but attributed",
-			chain, "/api/admin/health", opKey, want{uuid.Nil, op}},
+			"", chain, "/api/admin/health", opKey, want{uuid.Nil, op}},
+		// A drop is recorded, on the DEFAULT chain, naming the operator, with the tenant's id in the path. Its
+		// own chain is deleted with it, so a row on that chain would be recorded and then removed.
+		{"a DELETE of a tenant, whose handler names none: the default chain, attributed, path kept",
+			http.MethodDelete, chain, "/api/admin/tenants/" + tenantB.String(), opKey, want{uuid.Nil, op}},
 		{"a handler that says it acted on tenant B: B's chain",
-			chain, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
+			"", chain, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
 		{"the first tenant a handler names wins",
-			chain, "/api/admin/acts-on-b-then-c", opKey, want{tenantB, op}},
+			"", chain, "/api/admin/acts-on-b-then-c", opKey, want{tenantB, op}},
 		{"the nil tenant is not a target: the default chain",
-			chain, "/api/admin/notes-the-nil-tenant", opKey, want{uuid.Nil, op}},
+			"", chain, "/api/admin/notes-the-nil-tenant", opKey, want{uuid.Nil, op}},
 		{"a request no handler claims (a 404): the default chain, not a chain for whatever the path named",
-			chain, "/api/admin/tenants/" + tenantB.String() + "/instances/wf-1/force-complete", opKey, want{uuid.Nil, op}},
+			"", chain, "/api/admin/tenants/" + tenantB.String() + "/instances/wf-1/force-complete", opKey, want{uuid.Nil, op}},
 		{"a tenant put in the context by something that does not authenticate is ignored",
-			withForgedTenant, "/api/admin/health", opKey, want{uuid.Nil, op}},
+			"", withForgedTenant, "/api/admin/health", opKey, want{uuid.Nil, op}},
 		{"...but a handler that acts on it says so, and then it is B's chain",
-			withForgedTenant, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
+			"", withForgedTenant, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
 		// The control: a tenant key's own row is what it always was, and a handler that notes a
 		// target does not move it -- only an operator request listens to the slot.
 		{"the control: a tenant key on the same route stays on its own chain with no subject",
-			chain, "/api/admin/acts-on-b", "test-api-key", want{testTenantID, ""}},
+			"", chain, "/api/admin/acts-on-b", "test-api-key", want{testTenantID, ""}},
 	}
 
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			before := eventCount(store)
-			req := httptest.NewRequest("POST", tc.path, strings.NewReader(""))
+			method := tc.method
+			if method == "" {
+				method = "POST"
+			}
+			req := httptest.NewRequest(method, tc.path, strings.NewReader(""))
 			req.Header.Set("Authorization", "Bearer "+tc.key)
 			tc.handler.ServeHTTP(httptest.NewRecorder(), req)
 			if !waitForEventCount(store, before+1, time.Second) {

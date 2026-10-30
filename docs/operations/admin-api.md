@@ -208,7 +208,8 @@ service that provisioned the tenant. It answers `200` with counts only, never a 
 {"tenant_id": "...", "name": "acme", "suspended": true, "unsettled_runs": 0,
  "tables": [{"table": "workflow_instances", "rows": 12}, ...], "total_rows": 140,
  "plugin_tables": [{"table": "public.my_plugin_rows", "rows": 3}],
- "uncounted_plugin_tables": [], "skipped_plugin_tables": []}
+ "uncounted_plugin_tables": [], "skipped_plugin_tables": [],
+ "retained": [{"table": "admin.tenant_tombstones", "reason": "the record this drop leaves: ..."}]}
 ```
 
 - `unsettled_runs` is the number of the tenant's runs that have not reached a terminal status (not `done`, `failed`,
@@ -221,11 +222,77 @@ service that provisioned the tenant. It answers `200` with counts only, never a 
   they are already in `tables`). A registered table the tenant's scope could not read is named in
   `uncounted_plugin_tables` instead of being reported as empty, and a registry row that names a table that does not exist
   in `skipped_plugin_tables`; `admin.drop_tenant` still deletes the former and skips the latter.
+- `retained` names the tables a drop **keeps**, each with the reason, so that a reader is not left to infer from what is
+  removed what survives. Nothing in it is counted into `total_rows`, and nothing is on both lists. Today it holds the
+  tombstone a drop writes (see below); a table that must outlive its tenant (an append-only audit record) is added
+  here, and must not carry a column named `tenant_id` on SQL Server, whose `admin.drop_tenant` deletes from every table
+  that does.
 - It is a snapshot taken statement by statement, not a moment and not a lock: each count is read separately, so a run that starts or finishes while the plan is read can make two counts disagree by one, and runs can start or finish between the plan and a drop. A drop checks what it requires for itself.
 
 Who may call it is the same as `suspend`: an admin-scoped operator key for any tenant; a provision-scoped key only for a
 tenant its own principal created; a tenant key never. A tenant that does not exist, one the caller did not create and
 one made offline all answer the same `404`. The default tenant answers `400`. PostgreSQL and SQL Server only.
+
+## Dropping a tenant
+
+`DELETE /api/admin/tenants/{tenant}` removes a tenant and everything it owns (cleat#3552). It is the destructive step
+of the provisioning API, so it is refused unless every one of these holds, checked in this order:
+
+1. The caller is an operator whose scope reaches the route, and the id is a UUID that is not the default tenant (`400`).
+2. The **`X-Confirm` header is the tenant's id, typed back**, exactly as the lower-case canonical string (`400` otherwise).
+   It is a header and not a query parameter because query strings are logged. It is checked before anything is read, so
+   a malformed request reveals nothing about a tenant.
+3. The tenant exists and the caller has a claim to it: an admin-scoped key has one to any tenant, a provision-scoped key
+   only to a tenant its own principal created. A tenant that does not exist, one the caller did not create and one made
+   offline all answer the same `404`.
+4. The tenant is **suspended** (`409`, `"reason": "not_suspended"`), so no new work is arriving.
+5. The tenant has **no unsettled run** (`409`, `"reason": "unsettled_runs"`, with `"unsettled_runs": N`). Settle or
+   cancel them first; `GET …/drop-plan` shows the count. A drop does not stop a run that is executing, because
+   removing its rows makes its next heartbeat fail on a fence it no longer has.
+
+Steps 4 and 5 are checked in the same transaction as the drop, under a lock on the tenant's row, so a resume cannot slip
+in between the check and the delete.
+
+```json
+{"tenant_id": "...", "dropped": true, "already_dropped": false, "dropped_at": "2026-10-30T04:00:00.000000Z",
+ "dropped_by": "clew-service", "audit_chain": {"seq": 41, "hash": "…"}}
+```
+
+**The tombstone.** The same transaction writes a row to `admin.tenant_tombstones` (`007_a_dropped_tenant_leaves_a_tombstone.sql`, PostgreSQL and SQL
+Server) holding the tenant's name, org, creator, who dropped it, when, and where its own audit chain ended
+(`audit_chain` is `null` when the tenant had none). The audit log's row for the request is enqueued after the handler
+returns, so a crash in between can lose it; the tombstone cannot be lost without the drop. It does three things:
+
+- **A repeat is safe.** Repeating a drop that succeeded answers `200` with `"already_dropped": true` and changes nothing,
+  so a caller whose response was lost can repeat the request. Who may see that is decided as for the tenant: a
+  provision-scoped key sees it only for a tenant it created.
+- **The id cannot be reused by accident.** `POST /api/admin/tenants` with a dropped id answers `409`,
+  `"reason": "tenant_id_dropped"`, and creates nothing (no org either). What the worker, its caches and the logs still hold
+  under the id would otherwise be inherited by a new tenant.
+- **A start for a dropped tenant is refused**, as for a suspended one.
+
+**What the audit log records.** The request is recorded on the **default** tenant's chain, attributed to the operator, with
+the dropped tenant's id in the path. It is deliberately not recorded on the dropped tenant's own chain: that chain is
+deleted with the tenant, so a row there would be recorded and then removed. The tombstone holds the head of the deleted
+chain (its last `seq` and `hash`), so a copy of the chain taken earlier can still be checked against where it ended.
+
+**What the reply does not promise.** The tenant's keys and rows are gone when it returns. The one thing a worker still
+holds for it is the egress allowlist, which is cached per tenant: a dropped tenant's entry is honoured until its TTL
+(30 seconds by default) runs out, after which the lookup finds nothing and denies. Do not read the reply as "no worker is
+still acting for this tenant" within that window.
+
+Who may call it is the same as `suspend`, except that a provision-scoped key reaches it with `DELETE` and nothing
+else: an admin-scoped key for any tenant, a provision-scoped key only for a tenant its own principal created, a tenant
+key never. PostgreSQL and SQL Server only, and not on a sharded worker.
+
+**A provision-scoped key dropping the tenants it created is an owner decision that is pending** (cleat#3552). The design
+discussion first said a drop would be operator-only and never the provisioner's; the later instruction was the same
+callers as `suspend`, which is what is built, because a service that deletes an org removes the org's tenant with the key it
+created it with. The drop is refused while any run is unsettled, is tombstoned and is audited, but it is irreversible, so
+until the decision is recorded here this is the behaviour to expect and not a settled one.
+
+**Nothing deletes a tombstone yet.** A dropped id therefore stays unusable (`409 tenant_id_dropped`) until the route that
+removes one lands, which is a separate change.
 
 ## Acting on another tenant
 

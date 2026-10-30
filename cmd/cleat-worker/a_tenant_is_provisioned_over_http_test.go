@@ -47,6 +47,18 @@ type fakeProvisioner struct {
 	planFactsErr  error
 	headerCalls   int
 	factsCalls    int
+
+	// The drop (cleat#3552, B3b-2): what the handler passed, and what the fake answers.
+	dropCalls int
+	gotDrop   auth.DropRequest
+	dropRes   auth.DropResult
+	dropErr   error
+}
+
+func (f *fakeProvisioner) DropTenant(_ context.Context, r auth.DropRequest) (auth.DropResult, error) {
+	f.dropCalls++
+	f.gotDrop = r
+	return f.dropRes, f.dropErr
 }
 
 func (f *fakeProvisioner) DropPlanHeader(context.Context, uuid.UUID) (auth.DropPlanHeader, error) {

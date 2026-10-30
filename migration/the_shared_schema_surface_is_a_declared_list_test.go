@@ -59,6 +59,14 @@ var (
 		"admin.plugin_dep_overrides",
 		"admin.tenant_api_keys",
 		"admin.tenant_roles",
+		// 007_a_dropped_tenant_leaves_a_tombstone.sql, cleat#3552 (B3b-2). Shared for the same reason
+		// admin.tenants is, and more strongly: it is the record that a tenant id was dropped, and the
+		// thing it exists to refuse -- creating a tenant under that id -- is a decision about the whole
+		// database. A per-pool copy would let one pool recreate an id another pool had dropped, which
+		// is the reuse the tombstone is there to stop. It is written once and never altered by a later
+		// migration, so the cleat#1375 hazard (a pool upgrading rewrites it for the others) has nothing
+		// to rewrite.
+		"admin.tenant_tombstones",
 		// Migration 079, cleat#1565. Shared like the rest of admin: a
 		// tenant's egress allowlist is read by every worker, so a per-pool
 		// copy would mean two workers disagreeing about what a guest may

@@ -81,6 +81,41 @@ func quoteIdent(ident string) string {
 	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }
 
+// RetainedTable is a table that a drop deliberately LEAVES holding rows that name the tenant, and the
+// reason. A plan that lists only what is removed leaves a reader to infer that everything else is kept, and
+// an inference is not a statement: the retained list is the statement, and a test pins that nothing is on
+// both lists.
+type RetainedTable struct {
+	Table  string `json:"table"`
+	Reason string `json:"reason"`
+}
+
+// Retained is every table a tenant drop keeps. A table is added here when something decides its rows must
+// outlive the tenant, and it must then be absent from PostgresTables and from what SQL Server's catalogue
+// sweep deletes -- which on SQL Server means it has no column named tenant_id, because admin.drop_tenant
+// there deletes from every table that does (migrations/mssql/003_procedures.sql). The tombstone is keyed by
+// dropped_tenant_id for exactly that reason.
+//
+// The second entry a reader may expect, admin.plugin_dep_overrides, is added by whichever of cleat#3604
+// and the tenant-drop change lands second: the plan cannot name a table that is not yet on develop.
+var Retained = []RetainedTable{
+	{
+		Table: "admin.tenant_tombstones",
+		Reason: "the record this drop leaves: who dropped the tenant, when, and where its own audit chain ended. " +
+			"It is written in the drop's transaction and is what stops the id being reused",
+	},
+}
+
+// IsRetained reports whether a table label names a retained table.
+func IsRetained(label string) bool {
+	for _, r := range Retained {
+		if r.Table == label {
+			return true
+		}
+	}
+	return false
+}
+
 // RowCount is one table's row count in a plan.
 type RowCount struct {
 	Table string `json:"table"`
@@ -116,4 +151,8 @@ type Plan struct {
 	// SkippedPluginTables are registry rows that name a table that does not exist. admin.drop_tenant
 	// skips them with a warning, so the plan says so instead of counting zero.
 	SkippedPluginTables []string `json:"skipped_plugin_tables,omitempty"`
+
+	// Retained are the tables a drop keeps, with the reason. Always present, never counted: what is kept is
+	// not part of total_rows, which is what the drop removes.
+	Retained []RetainedTable `json:"retained"`
 }

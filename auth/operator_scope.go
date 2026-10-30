@@ -138,7 +138,7 @@ func (o Operator) MayReach(method string, u *url.URL) bool {
 // thing it gates does: a handler added without it would be reachable by every operator key
 // the moment it was registered.
 func provisionMayReach(method string, u *url.URL) bool {
-	if (method != http.MethodPost && method != http.MethodGet) || u.RawPath != "" {
+	if (method != http.MethodPost && method != http.MethodGet && method != http.MethodDelete) || u.RawPath != "" {
 		return false
 	}
 	if u.Path == OperatorRoutePrefix+"tenants" {
@@ -157,9 +157,20 @@ func provisionMayReach(method string, u *url.URL) bool {
 	}
 	id, tail, hasTail := strings.Cut(rest, "/")
 	// The method belongs to the route: the plan is read with GET and nothing else is, so a GET to
-	// confirm or suspend, or a POST to the plan, is not a route a provisioner may reach.
-	if !hasTail || !((method == http.MethodPost && (tail == "confirm" || tail == "suspend")) ||
-		(method == http.MethodGet && tail == "drop-plan")) {
+	// confirm or suspend, or a POST to the plan, is not a route a provisioner may reach. A drop is
+	// DELETE on the bare tenant id and nothing else is: the one route with no tail (cleat#3552, B3b-2).
+	// Whether the key may drop THIS tenant (one its principal created, suspended, with no unsettled run)
+	// is the handler's check, like every other route here.
+	routeOK := false
+	switch {
+	case !hasTail:
+		routeOK = method == http.MethodDelete
+	case method == http.MethodPost:
+		routeOK = tail == "confirm" || tail == "suspend"
+	case method == http.MethodGet:
+		routeOK = tail == "drop-plan"
+	}
+	if !routeOK {
 		return false
 	}
 	parsed, err := uuid.Parse(id)

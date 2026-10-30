@@ -63,6 +63,12 @@ func (s *apiServer) handleAdminRoutesForTenant(w http.ResponseWriter, r *http.Re
 		s.handleSetTenantSuspended(w, r, tenant, tail == "suspend")
 		return
 	}
+	if !ok && tenant != "" && r.Method == http.MethodDelete {
+		// cleat#3552, B3b-2: DELETE /api/admin/tenants/{tenant}. The only route with no tail, so it is
+		// told apart by having none; any other method on a bare tenant id is the 404 it always was.
+		s.handleDropTenant(w, r, tenant)
+		return
+	}
 	if !ok || tenant == "" || !strings.HasPrefix(tail, "instances/") {
 		s.writeError(w, 404, "not found")
 		return

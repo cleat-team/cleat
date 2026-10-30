@@ -21,6 +21,7 @@ var coreTables = []string{
 	"admin.operator_api_keys",
 	"admin.tenant_api_keys",
 	"admin.tenant_roles",
+	"admin.tenant_tombstones",
 	"admin.tenant_egress_allow",
 	"admin.tenants",
 	"admin.workers",
@@ -93,9 +94,12 @@ var postgresOnlyTables = map[string]bool{
 // notOnMySQLTables is the subset of coreTables that PostgreSQL and SQL Server have and
 // MySQL does not, by decision: workflow libraries are PostgreSQL and SQL Server only
 // (cleat#3540, migrations/{postgres,mssql}/005_workflow_libraries.sql), and MySQL has no
-// 005. A MySQL deployment lacking them is healthy, for the reason postgresOnlyTables
-// gives about its own members.
+// 005. The tenant tombstone is the same kind of table: dropping a tenant over the API is
+// PostgreSQL and SQL Server only (cleat#3552, 007_a_dropped_tenant_leaves_a_tombstone.sql
+// on both, and MySQL has none). A MySQL deployment lacking them is healthy, for the
+// reason postgresOnlyTables gives about its own members.
 var notOnMySQLTables = map[string]bool{
+	"admin.tenant_tombstones": true,
 	"library.bundle_members":  true,
 	"library.bundles":         true,
 	"library.members":         true,
