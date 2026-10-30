@@ -13,9 +13,11 @@ package engine
 // What a publish guarantees:
 //
 //   - A member is IMMUTABLE and content-addressed. Publishing a (library, name, version)
-//     that already exists with the same bytes is a no-op; with different bytes it is
-//     refused. Nothing is overwritten, because the schema grants no UPDATE and a tenant
-//     may be running the old bytes.
+//     that already exists with the same bytes AND the same entry-point schemas is a no-op;
+//     with different bytes, or the same bytes and different schemas (which come from a
+//     sidecar file, so the digest cannot vouch for them), it is refused. Nothing is
+//     overwritten, because the schema grants no UPDATE and a tenant may be running the
+//     old bytes.
 //   - A bundle is IMMUTABLE too. Publishing a bundle version that already exists with
 //     exactly the same members is a no-op (so a publish that stopped halfway is repaired
 //     by running it again); with a different member set it is refused.
@@ -26,17 +28,21 @@ package engine
 //     written, or none are.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"time"
 )
 
 // ErrLibraryMemberConflict is returned, wrapped in a LibraryMemberConflictError, when a
-// member with that key is already published with different bytes.
+// member with that key is already published with different bytes, or with the same bytes and
+// different entry-point schemas.
 var ErrLibraryMemberConflict = errors.New("a different build is already published under this library member")
 
 // ErrLibraryBundleConflict is returned, wrapped in a LibraryBundleConflictError, when the
@@ -52,14 +58,76 @@ type LibraryMemberConflictError struct {
 	Library, Name    string
 	Version          int
 	Stored, Supplied string
+	// SchemasDiffer is set when the bytes are the same (Stored == Supplied) and the
+	// entry-point schemas, which come from a sidecar file and not from the bytes, are not.
+	SchemasDiffer bool
 }
 
 func (e *LibraryMemberConflictError) Error() string {
+	if e.SchemasDiffer {
+		return fmt.Sprintf("library %q already has %q version %d published with these exact bytes and different entry_point_schemas. "+
+			"The schemas come from the .schema.json beside the binary, not from the bytes, and a published member is immutable "+
+			"(install copies the stored schemas to every tenant): publish the changed build under a new version", e.Library, e.Name, e.Version)
+	}
 	return fmt.Sprintf("library %q already has %q version %d published with sha256 %s; the bytes supplied are %s. "+
 		"A published member is immutable: publish the changed build under a new version", e.Library, e.Name, e.Version, e.Stored, e.Supplied)
 }
 
 func (e *LibraryMemberConflictError) Is(target error) bool { return target == ErrLibraryMemberConflict }
+
+// checkPublishedMember decides what to do when a member's key is already taken: the same bytes
+// AND the same entry-point schemas make the publish a no-op; anything else is refused. The
+// schemas are compared as well as the digest because they do not come from the bytes: they are
+// read from a sidecar file, so the digest cannot vouch for them, and install copies the stored
+// column into every tenant's definition.
+func checkPublishedMember(library string, m PublishLibraryMember, c libraryMemberColumns, storedDigest string, storedSchemas sql.NullString) error {
+	if storedDigest != c.digest {
+		return &LibraryMemberConflictError{Library: library, Name: m.Name, Version: m.Version, Stored: storedDigest, Supplied: c.digest}
+	}
+	same, err := sameEntryPointSchemas(storedSchemas, c.entryPointSchemas)
+	if err != nil {
+		return fmt.Errorf("publish library: compare the schemas of member %s@%d: %w", m.Name, m.Version, err)
+	}
+	if !same {
+		return &LibraryMemberConflictError{Library: library, Name: m.Name, Version: m.Version, Stored: storedDigest, Supplied: c.digest, SchemasDiffer: true}
+	}
+	return nil
+}
+
+// sameEntryPointSchemas compares what is stored with what was supplied by MEANING, not by text:
+// PostgreSQL's jsonb returns its own spelling (key order, spacing) and SQL Server keeps the text
+// it was given, so a text comparison would refuse an honest re-run on one of them. Numbers are
+// decoded exactly. No schemas at all is NULL, an empty object, or nothing supplied: all one thing.
+func sameEntryPointSchemas(stored sql.NullString, supplied []byte) (bool, error) {
+	decode := func(raw []byte) (any, error) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			return nil, nil
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			return nil, err
+		}
+		if m, ok := v.(map[string]any); ok && len(m) == 0 {
+			return nil, nil
+		}
+		return v, nil
+	}
+	var storedRaw []byte
+	if stored.Valid {
+		storedRaw = []byte(stored.String)
+	}
+	a, err := decode(storedRaw)
+	if err != nil {
+		return false, fmt.Errorf("stored schemas: %w", err)
+	}
+	b, err := decode(supplied)
+	if err != nil {
+		return false, fmt.Errorf("supplied schemas: %w", err)
+	}
+	return reflect.DeepEqual(a, b), nil
+}
 
 // LibraryBundleConflictError says how the stored bundle differs from the one supplied.
 type LibraryBundleConflictError struct {
@@ -114,7 +182,7 @@ type PublishLibraryResult struct {
 	Library       string `json:"library"`
 	BundleVersion string `json:"bundle_version"`
 	// MembersWritten is the members this publish added; MembersAlreadyPublished is the
-	// members that were already there with the same bytes.
+	// members that were already there with the same bytes and schemas.
 	MembersWritten          int `json:"members_written"`
 	MembersAlreadyPublished int `json:"members_already_published"`
 	// BundleAlreadyPublished is true when the bundle and its full listing already existed,

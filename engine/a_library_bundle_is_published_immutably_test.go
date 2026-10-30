@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -192,6 +193,129 @@ func TestAPublishedMemberAndBundleAreImmutable(t *testing.T) {
 			if after := countLibraryRows(t, owner, tc.edialect, lib); after != before {
 				t.Fatalf("a refused bundle left rows behind: %d before, %d after (member c must be rolled back)", before, after)
 			}
+		})
+	}
+}
+
+// The entry-point schemas of a member come from a sidecar file next to the binary, not from the
+// bytes, so the digest cannot vouch for them. Install copies the stored column into a tenant's
+// definition, which makes a schema that was forgotten at publish time permanent: republishing
+// the same bytes with the sidecar added must be refused, not reported as already published.
+func TestAPublishedMemberIsImmutableInItsSchemasToo(t *testing.T) {
+	// b is declared before a, and the JSON is written the way a person would, so what the
+	// database hands back (PostgreSQL's jsonb reorders and respaces it) differs in text from what
+	// was supplied while meaning the same thing.
+	schemas := func(exposure ExposureClass) map[string]EntryPointSchema {
+		return map[string]EntryPointSchema{"handle_m": {
+			Params:   json.RawMessage(`{"type": "object", "properties": {"b": {"type": "integer"}, "a": {"type": "string"}}}`),
+			Result:   json.RawMessage(`{"type": "string"}`),
+			Exposure: exposure,
+		}}
+	}
+	storedSchemas := func(t *testing.T, owner *sql.DB, d Dialect, lib string) sql.NullString {
+		t.Helper()
+		var s sql.NullString
+		if err := owner.QueryRow(`SELECT entry_point_schemas FROM library.members WHERE library = `+d.placeholder(1)+` AND name = 'm'`, lib).Scan(&s); err != nil {
+			t.Fatalf("read the stored schemas: %v", err)
+		}
+		return s
+	}
+	for _, tc := range publishDialects {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := testutil.TestDB(t, tc.tdialect)
+			t.Cleanup(func() { owner.Close() })
+			testutil.SetupFullSchema(t, owner, tc.tdialect)
+			pub := testutil.OpenLibraryLoginDB(t, owner, tc.tdialect, true)
+			ctx := context.Background()
+
+			publish := func(lib, bundle string, m PublishLibraryMember) (PublishLibraryResult, error) {
+				return PublishLibraryBundle(ctx, pub, tc.edialect, PublishLibraryRequest{Library: lib, BundleVersion: bundle, Members: []PublishLibraryMember{m}})
+			}
+			refused := func(t *testing.T, err error) *LibraryMemberConflictError {
+				t.Helper()
+				var mc *LibraryMemberConflictError
+				if !errors.As(err, &mc) || !errors.Is(err, ErrLibraryMemberConflict) {
+					t.Fatalf("got %v, want a LibraryMemberConflictError", err)
+				}
+				if mc.Stored != mc.Supplied || !mc.SchemasDiffer || !strings.Contains(err.Error(), "entry_point_schemas") {
+					t.Fatalf("the bytes are identical, so the conflict must be about the schemas and say so: %+v / %v", mc, err)
+				}
+				return mc
+			}
+
+			t.Run("a sidecar added to bytes published without one is refused", func(t *testing.T) {
+				lib := uniqueLibrary("schemaadd")
+				cleanupLibrary(t, owner, tc.edialect, lib)
+				if _, err := publish(lib, "1", pubMember("m", 1, "m-bytes", nil)); err != nil {
+					t.Fatalf("first publish: %v", err)
+				}
+				before := countLibraryRows(t, owner, tc.edialect, lib)
+				withSchema := pubMember("m", 1, "m-bytes", nil)
+				withSchema.EntryPointSchemas = schemas(ExposureInternal)
+				_, err := publish(lib, "2", withSchema)
+				refused(t, err)
+				if after := countLibraryRows(t, owner, tc.edialect, lib); after != before {
+					t.Fatalf("a refused publish left rows behind: %d before, %d after", before, after)
+				}
+				if s := storedSchemas(t, owner, tc.edialect, lib); s.Valid {
+					t.Fatalf("the stored schemas changed to %q; a published member is immutable", s.String)
+				}
+			})
+
+			t.Run("a different schema for the same bytes is refused", func(t *testing.T) {
+				lib := uniqueLibrary("schemadiff")
+				cleanupLibrary(t, owner, tc.edialect, lib)
+				first := pubMember("m", 1, "m-bytes", nil)
+				first.EntryPointSchemas = schemas(ExposurePublic)
+				if _, err := publish(lib, "1", first); err != nil {
+					t.Fatalf("first publish: %v", err)
+				}
+				changed := pubMember("m", 1, "m-bytes", nil)
+				changed.EntryPointSchemas = schemas(ExposureInternal)
+				_, err := publish(lib, "2", changed)
+				refused(t, err)
+			})
+
+			t.Run("a sidecar forgotten on a republish is refused", func(t *testing.T) {
+				lib := uniqueLibrary("schemadrop")
+				cleanupLibrary(t, owner, tc.edialect, lib)
+				first := pubMember("m", 1, "m-bytes", nil)
+				first.EntryPointSchemas = schemas(ExposureInternal)
+				if _, err := publish(lib, "1", first); err != nil {
+					t.Fatalf("first publish: %v", err)
+				}
+				_, err := publish(lib, "2", pubMember("m", 1, "m-bytes", nil))
+				refused(t, err)
+			})
+
+			t.Run("control: the same bytes and the same schema are a no-op, however the database spells them", func(t *testing.T) {
+				lib := uniqueLibrary("schemasame")
+				cleanupLibrary(t, owner, tc.edialect, lib)
+				m := pubMember("m", 1, "m-bytes", nil)
+				m.EntryPointSchemas = schemas(ExposureInternal)
+				if _, err := publish(lib, "1", m); err != nil {
+					t.Fatalf("first publish: %v", err)
+				}
+				if s := storedSchemas(t, owner, tc.edialect, lib); !s.Valid {
+					t.Fatalf("UNMEASURED: the schemas were not stored, so 'the same schema' above compares nothing")
+				}
+				res, err := publish(lib, "2", m)
+				if err != nil || res.MembersAlreadyPublished != 1 || res.MembersWritten != 0 {
+					t.Fatalf("republishing the identical member: %+v, %v; want it already published", res, err)
+				}
+			})
+
+			t.Run("control: bytes published without a schema and republished without one are a no-op", func(t *testing.T) {
+				lib := uniqueLibrary("schemanone")
+				cleanupLibrary(t, owner, tc.edialect, lib)
+				if _, err := publish(lib, "1", pubMember("m", 1, "m-bytes", nil)); err != nil {
+					t.Fatalf("first publish: %v", err)
+				}
+				res, err := publish(lib, "2", pubMember("m", 1, "m-bytes", nil))
+				if err != nil || res.MembersAlreadyPublished != 1 {
+					t.Fatalf("republishing with no schema on either side: %+v, %v; want it already published", res, err)
+				}
+			})
 		})
 	}
 }

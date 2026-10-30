@@ -299,8 +299,9 @@ PostgreSQL and SQL Server only.
   of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
   does not contain. A name appears once per bundle.
 - **Members and bundles are immutable.** Publishing a `(library, name, version)` that already exists with the
-  same bytes is a no-op; with different bytes it is refused, naming both digests (publish the changed build
-  under a new version). Publishing a bundle version that exists with exactly the same members is a no-op, which
+  same bytes and the same entry-point schemas (the `.schema.json` beside the binary, which the bytes do not
+  carry) is a no-op; with different bytes it is refused, naming both digests, and with the same bytes and
+  different schemas it is refused saying so (publish the changed build under a new version). Publishing a bundle version that exists with exactly the same members is a no-op, which
   is how a publish that stopped partway is repaired; with a different member set it is refused and says what
   differs.
 - **One transaction.** The members, the bundle and its listing are all written, or none are.

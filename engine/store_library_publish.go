@@ -86,15 +86,16 @@ func publishLibraryPostgres(ctx context.Context, db *sql.DB, req PublishLibraryR
 			res.MembersWritten++
 			continue
 		}
-		// The key was taken. The same bytes make this a no-op; different bytes are refused.
+		// The key was taken. The same bytes and schemas make this a no-op; anything else is refused.
 		var stored string
+		var storedSchemas sql.NullString
 		if err := tx.QueryRowContext(ctx,
-			`SELECT wasm_sha256 FROM library.members WHERE library = $1 AND name = $2 AND version = $3`,
-			req.Library, m.Name, m.Version).Scan(&stored); err != nil {
+			`SELECT wasm_sha256, entry_point_schemas FROM library.members WHERE library = $1 AND name = $2 AND version = $3`,
+			req.Library, m.Name, m.Version).Scan(&stored, &storedSchemas); err != nil {
 			return res, fmt.Errorf("publish library: read member %s@%d: %w", m.Name, m.Version, err)
 		}
-		if stored != c.digest {
-			return res, &LibraryMemberConflictError{Library: req.Library, Name: m.Name, Version: m.Version, Stored: stored, Supplied: c.digest}
+		if err := checkPublishedMember(req.Library, m, c, stored, storedSchemas); err != nil {
+			return res, err
 		}
 		res.MembersAlreadyPublished++
 	}

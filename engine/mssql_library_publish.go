@@ -60,13 +60,14 @@ func (m mssqlLibraryPublisher) publishOnce(ctx context.Context, req PublishLibra
 			continue
 		}
 		var stored string
+		var storedSchemas sql.NullString
 		if err := tx.QueryRowContext(ctx,
-			`SELECT wasm_sha256 FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
-			req.Library, m.Name, m.Version).Scan(&stored); err != nil {
+			`SELECT wasm_sha256, entry_point_schemas FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			req.Library, m.Name, m.Version).Scan(&stored, &storedSchemas); err != nil {
 			return res, fmt.Errorf("publish library: read member %s@%d: %w", m.Name, m.Version, err)
 		}
-		if stored != c.digest {
-			return res, &LibraryMemberConflictError{Library: req.Library, Name: m.Name, Version: m.Version, Stored: stored, Supplied: c.digest}
+		if err := checkPublishedMember(req.Library, m, c, stored, storedSchemas); err != nil {
+			return res, err
 		}
 		res.MembersAlreadyPublished++
 	}
