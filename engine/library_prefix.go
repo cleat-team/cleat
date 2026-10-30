@@ -112,7 +112,7 @@ SELECT @r;`, libraryNamesLockResource, mode, libraryNamesLockWaitMS)).Scan(&rc)
 // refuseNameUnderLibraryPrefix refuses a deploy of a name under a published library's prefix, at any
 // version. The question goes to a SECURITY DEFINER function (migration 009), not to library.bundles
 // itself: the deploying role is not allowed to read the library schema, and the first version of this
-// check selected from the table and failed every deploy through a per-tenant login. The comparison
+// check selected from the table and failed every deploy through SQL Server's cleat_admin login. The comparison
 // inside the function is the database's own (starts_with on PostgreSQL; LEFT/LEN with the library as
 // the right-hand side on SQL Server), never LIKE, where the "_" a library name may hold is a wildcard,
 // and never in Go.

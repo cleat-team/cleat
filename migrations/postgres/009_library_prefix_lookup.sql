@@ -1,10 +1,12 @@
 -- cleat#3629 (owner decision D59, part 2 of 3): which published library, if any, owns a workflow name.
 --
--- A deploy refuses a name that starts with a published library's prefix "<library>.". The deploying
--- role cannot read the library schema (005 gives it to the application role, the sweeper and the
--- default tenant's role, and a per-tenant role created by admin.create_tenant is none of those), so the
--- check cannot SELECT library.bundles itself: the first version did, and every deploy through a
--- per-tenant login failed with "permission denied for schema library".
+-- A deploy refuses a name that starts with a published library's prefix "<library>.". On SQL Server the
+-- deploying login (cleat_admin, which cleatctl and the cross-tenant tooling deploy through) cannot read
+-- the library schema, so a check that SELECTed library.bundles itself failed every deploy through it;
+-- see migrations/mssql/009. On PostgreSQL nothing failed: 005 gives the library to the application role,
+-- the sweeper and the default tenant's role, and a per-tenant role from admin.create_tenant_role CAN read
+-- it too (measured). This function is here so that both dialects answer the question the same way, and so
+-- that the check does not depend on the library grant reaching every role that deploys.
 --
 -- The check asks this function instead. It is SECURITY DEFINER, so the library schema stays closed to
 -- the deploying role, and it answers one question for one name: the NAME of the library whose prefix
