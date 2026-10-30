@@ -642,6 +642,9 @@ func (c *fakeConn) queryDeliveries(args []driver.NamedValue, query string) (driv
 		"id", "webhook_id", "event_type", "payload", "status",
 		"attempt_count", "last_attempt_at", "next_attempt_at",
 		"delivered_at", "response_code", "response_body", "created_at",
+		// Migration 9 (cleat#3612). This store does not model a redelivery: the real route
+		// is exercised against real databases in a_failed_delivery_can_be_redelivered_multidb_test.go.
+		"redelivery_count", "last_redelivered_at", "last_redelivered_by",
 	}
 	var data [][]driver.Value
 	for _, d := range c.store.deliveries {
@@ -686,6 +689,9 @@ func (c *fakeConn) queryDeliveries(args []driver.NamedValue, query string) (driv
 			responseCode,
 			responseBody,
 			d.createdAt,
+			int64(0),
+			nil,
+			nil,
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil

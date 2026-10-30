@@ -659,5 +659,121 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_config DROP COLUMN name;
 			`,
 		},
+		{
+			// A resend of a failed delivery is recorded on the delivery it resent (cleat#3612).
+			// A delivery that ends `failed` was lost to the operator until a route could put it
+			// back; that route resets status, attempt_count and next_attempt_at, which would
+			// erase the only evidence that anyone had. These three columns keep it:
+			// redelivery_count says it happened and how often, last_redelivered_at when (the
+			// database clock, like every other timestamp in this table), and
+			// last_redelivered_by who asked, as auth.SubjectFromContext resolved the request.
+			// last_redelivered_by is NULL when nothing resolved one, which is the usual case for
+			// an API-key caller (auth.WithSubject says so): recording that the identity was not
+			// captured is the honest value, and refusing the resend over it would be the wrong one.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1, for the same reason v6, v7 and v8 are. MySQL has
+			// no ADD COLUMN IF NOT EXISTS and its DDL is not transactional, so every step is
+			// guarded and a crash between two of them finishes on the next boot.
+			Version: 9,
+			Up: `
+				ALTER TABLE webhook_delivery ADD COLUMN IF NOT EXISTS redelivery_count INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE webhook_delivery ADD COLUMN IF NOT EXISTS last_redelivered_at TIMESTAMPTZ;
+				ALTER TABLE webhook_delivery ADD COLUMN IF NOT EXISTS last_redelivered_by TEXT;
+			`,
+			UpMySQL: `
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'redelivery_count'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_delivery ADD COLUMN redelivery_count INT NOT NULL DEFAULT 0',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_at'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_delivery ADD COLUMN last_redelivered_at TIMESTAMP(6) NULL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_by'
+				);
+				SET @ddl := IF(@col = 0,
+					'ALTER TABLE webhook_delivery ADD COLUMN last_redelivered_by VARCHAR(512) NULL',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'redelivery_count')
+				ALTER TABLE webhook_delivery ADD redelivery_count INT NOT NULL DEFAULT 0;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_at')
+				ALTER TABLE webhook_delivery ADD last_redelivered_at DATETIMEOFFSET NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_by')
+				ALTER TABLE webhook_delivery ADD last_redelivered_by NVARCHAR(512) NULL;
+			`,
+			Down: `
+				ALTER TABLE webhook_delivery DROP COLUMN IF EXISTS last_redelivered_by;
+				ALTER TABLE webhook_delivery DROP COLUMN IF EXISTS last_redelivered_at;
+				ALTER TABLE webhook_delivery DROP COLUMN IF EXISTS redelivery_count;
+			`,
+			DownMySQL: `
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_by'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_by', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'last_redelivered_at'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_at', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'webhook_delivery' AND column_name = 'redelivery_count'
+				);
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_delivery DROP COLUMN redelivery_count', 'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_by')
+				ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_by;
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'last_redelivered_at')
+				ALTER TABLE webhook_delivery DROP COLUMN last_redelivered_at;
+
+				DECLARE @dfname sysname
+				SELECT @dfname = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_delivery') AND c.name = 'redelivery_count'
+				IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_delivery DROP CONSTRAINT [' + @dfname + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_delivery') AND name = 'redelivery_count')
+				ALTER TABLE webhook_delivery DROP COLUMN redelivery_count;
+			`,
+		},
 	}
 }
