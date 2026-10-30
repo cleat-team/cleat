@@ -25,6 +25,7 @@ func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	mux.HandleFunc("PUT /webhooks/{id}", p.handleUpdateWebhook)
 	mux.HandleFunc("DELETE /webhooks/{id}", p.handleDeleteWebhook)
 	mux.HandleFunc("GET /webhooks/{id}/deliveries", p.handleListDeliveries)
+	mux.HandleFunc("POST /webhooks/{id}/deliveries/{delivery_id}/redeliver", p.handleRedeliver)
 	return nil
 }
 
@@ -145,6 +146,67 @@ type deliveryJSON struct {
 	ResponseCode  *int            `json:"response_code,omitempty"`
 	ResponseBody  *string         `json:"response_body,omitempty"`
 	CreatedAt     time.Time       `json:"created_at"`
+
+	// RedeliveryCount is how many times an operator has put this delivery back after it failed
+	// (cleat#3612). LastRedeliveredAt and LastRedeliveredBy say when and who; the latter is
+	// absent when nothing resolved an identity for the request, which is not an error.
+	RedeliveryCount   int        `json:"redelivery_count"`
+	LastRedeliveredAt *time.Time `json:"last_redelivered_at,omitempty"`
+	LastRedeliveredBy *string    `json:"last_redelivered_by,omitempty"`
+}
+
+// deliverySelectColumns is the column list scanDelivery reads, in its order.
+const deliverySelectColumns = `id, webhook_id, event_type, payload, status, attempt_count,
+			       last_attempt_at, next_attempt_at, delivered_at,
+			       response_code, response_body, created_at,
+			       redelivery_count, last_redelivered_at, last_redelivered_by`
+
+// scanDelivery reads one row selected with deliverySelectColumns.
+func scanDelivery(s interface{ Scan(...any) error }) (deliveryJSON, error) {
+	var (
+		d                 deliveryJSON
+		payloadRaw        []byte
+		lastAttemptAt     sql.NullTime
+		nextAttemptAt     sql.NullTime
+		deliveredAt       sql.NullTime
+		responseCode      sql.NullInt64
+		responseBody      sql.NullString
+		lastRedeliveredAt sql.NullTime
+		lastRedeliveredBy sql.NullString
+	)
+	if err := plugin.ScanRow(s,
+		&d.ID, &d.WebhookID, &d.EventType, &payloadRaw,
+		&d.Status, &d.AttemptCount,
+		&lastAttemptAt, &nextAttemptAt, &deliveredAt,
+		&responseCode, &responseBody, &d.CreatedAt,
+		&d.RedeliveryCount, &lastRedeliveredAt, &lastRedeliveredBy,
+	); err != nil {
+		return d, err
+	}
+	d.Payload = json.RawMessage(payloadRaw)
+	if lastAttemptAt.Valid {
+		d.LastAttemptAt = &lastAttemptAt.Time
+	}
+	if nextAttemptAt.Valid {
+		d.NextAttemptAt = &nextAttemptAt.Time
+	}
+	if deliveredAt.Valid {
+		d.DeliveredAt = &deliveredAt.Time
+	}
+	if responseCode.Valid {
+		v := int(responseCode.Int64)
+		d.ResponseCode = &v
+	}
+	if responseBody.Valid {
+		d.ResponseBody = &responseBody.String
+	}
+	if lastRedeliveredAt.Valid {
+		d.LastRedeliveredAt = &lastRedeliveredAt.Time
+	}
+	if lastRedeliveredBy.Valid {
+		d.LastRedeliveredBy = &lastRedeliveredBy.String
+	}
+	return d, nil
 }
 
 // ---- POST /webhooks ----
@@ -640,9 +702,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-			SELECT id, webhook_id, event_type, payload, status, attempt_count,
-			       last_attempt_at, next_attempt_at, delivered_at,
-			       response_code, response_body, created_at
+			SELECT ` + deliverySelectColumns + `
 			FROM webhook_delivery
 			WHERE webhook_id = $1
 		`
@@ -674,40 +734,10 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	var deliveries []deliveryJSON
 	for rows.Next() {
-		var (
-			d             deliveryJSON
-			payloadRaw    []byte
-			lastAttemptAt sql.NullTime
-			nextAttemptAt sql.NullTime
-			deliveredAt   sql.NullTime
-			responseCode  sql.NullInt64
-			responseBody  sql.NullString
-		)
-		if err := plugin.ScanRow(rows,
-			&d.ID, &d.WebhookID, &d.EventType, &payloadRaw,
-			&d.Status, &d.AttemptCount,
-			&lastAttemptAt, &nextAttemptAt, &deliveredAt,
-			&responseCode, &responseBody, &d.CreatedAt,
-		); err != nil {
+		d, err := scanDelivery(rows)
+		if err != nil {
 			p.logger.Error("notifications: scan delivery", "error", err)
 			continue
-		}
-		d.Payload = json.RawMessage(payloadRaw)
-		if lastAttemptAt.Valid {
-			d.LastAttemptAt = &lastAttemptAt.Time
-		}
-		if nextAttemptAt.Valid {
-			d.NextAttemptAt = &nextAttemptAt.Time
-		}
-		if deliveredAt.Valid {
-			d.DeliveredAt = &deliveredAt.Time
-		}
-		if responseCode.Valid {
-			v := int(responseCode.Int64)
-			d.ResponseCode = &v
-		}
-		if responseBody.Valid {
-			d.ResponseBody = &responseBody.String
 		}
 		deliveries = append(deliveries, d)
 	}
@@ -717,6 +747,125 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.writeJSON(w, 200, deliveries)
+}
+
+// ---- POST /webhooks/{id}/deliveries/{delivery_id}/redeliver ----
+
+// redeliveredByMax bounds the recorded identity to what the narrowest column holds
+// (VARCHAR(512) on MySQL, NVARCHAR(512) on SQL Server), counted in runes so a UTF-16
+// pair cannot push it over.
+const redeliveredByMax = 256
+
+// handleRedeliver puts one FAILED delivery back to pending so the sweep sends it again
+// (cleat#3612). A delivery that ends failed was otherwise lost to the operator: the payload is
+// in the row and no route sent it, which is why a status that an operator repairs from outside
+// (a rotated secret, a wrong URL, a receiver that was down longer than the retry window) cannot
+// be classed permanent in isPermanentWebhookRefusal.
+//
+// It accepts a delivery of THIS webhook, in THIS tenant, whose status is failed, and nothing
+// else: a pending or retrying one is already going out, a delivered one would be sent twice,
+// and a cancelled one belongs to a deleted webhook. Those, and a webhook that is disabled (the
+// sweep does not send for it, so the delivery would sit pending and look like a send that did
+// not happen), are 409. The reset uses the database clock, as the retry path does.
+func (p *Plugin) handleRedeliver(w http.ResponseWriter, r *http.Request) {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
+		p.writeError(w, 401, "tenant required")
+		return
+	}
+	webhookID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		p.writeError(w, 400, "invalid webhook id")
+		return
+	}
+	deliveryID, err := uuid.Parse(r.PathValue("delivery_id"))
+	if err != nil {
+		p.writeError(w, 400, "invalid delivery id")
+		return
+	}
+	ctx := r.Context()
+
+	var enabled bool
+	err = p.db.QueryRow(ctx,
+		`SELECT enabled FROM webhook_config WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+		webhookID, tid).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		p.writeError(w, 404, "webhook not found")
+		return
+	}
+	if err != nil {
+		p.logger.Error("notifications: verify webhook", "error", err)
+		p.writeError(w, 500, "failed to verify webhook")
+		return
+	}
+	if !enabled {
+		p.writeError(w, 409, "webhook is disabled: enable it, then redeliver, or the delivery would wait unsent")
+		return
+	}
+
+	// The identity is whatever authentication resolved, and NULL when nothing did.
+	var by any
+	if subject, ok := auth.SubjectFromContext(ctx); ok && subject != "" {
+		by = truncateRunes(subject, redeliveredByMax)
+	}
+
+	// Every placeholder is numbered once, in the order it appears in the text (CLAUDE.md,
+	// "MySQL binds ? by APPEARANCE"). The status guard is the whole decision, and it is in the
+	// same single UPDATE as the write, so resends that arrive together cannot both match. That is
+	// by construction; the tests do not race two resends.
+	query := fmt.Sprintf(`
+			UPDATE webhook_delivery
+			SET status = 'pending',
+			    attempt_count = 0,
+			    next_attempt_at = %s,
+			    redelivery_count = redelivery_count + 1,
+			    last_redelivered_at = %s,
+			    last_redelivered_by = $1
+			WHERE id = $2 AND webhook_id = $3 AND status = 'failed'
+		`, nowSQLExpr(p.dialect), nowSQLExpr(p.dialect))
+	n, err := p.db.Exec(ctx, query, by, deliveryID, webhookID)
+	if err != nil {
+		p.logger.Error("notifications: redeliver", "error", err)
+		p.writeError(w, 500, "failed to redeliver")
+		return
+	}
+	if n == 0 {
+		// Nothing was reset. Say why, which a rows-affected count cannot.
+		var status string
+		err := p.db.QueryRow(ctx,
+			`SELECT status FROM webhook_delivery WHERE id = $1 AND webhook_id = $2`,
+			deliveryID, webhookID).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			p.writeError(w, 404, "delivery not found")
+			return
+		}
+		if err != nil {
+			p.logger.Error("notifications: read delivery after refused redeliver", "error", err)
+			p.writeError(w, 500, "failed to redeliver")
+			return
+		}
+		p.writeError(w, 409, fmt.Sprintf("delivery is %s: only a failed delivery can be redelivered", status))
+		return
+	}
+
+	d, err := scanDelivery(p.db.QueryRow(ctx,
+		`SELECT `+deliverySelectColumns+` FROM webhook_delivery WHERE id = $1 AND webhook_id = $2`,
+		deliveryID, webhookID))
+	if err != nil {
+		p.logger.Error("notifications: read redelivered delivery", "error", err)
+		p.writeError(w, 500, "redelivered, but the delivery could not be read back")
+		return
+	}
+	p.logger.Info("notifications: delivery redelivered", "id", deliveryID, "webhook", webhookID, "by", by)
+	p.writeJSON(w, 200, d)
+}
+
+// truncateRunes returns s cut to at most max runes.
+func truncateRunes(s string, max int) string {
+	if r := []rune(s); len(r) > max {
+		return string(r[:max])
+	}
+	return s
 }
 
 // joinSetClauses joins SET clause fragments with ", ".
