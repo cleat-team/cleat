@@ -14,8 +14,11 @@
 -- decision D45 any tenant may install any library, so the catalogue is not tenant-secret.
 --
 -- The comparison is the database's own equality (starts_with is exact on PostgreSQL), never LIKE: the
--- "_" a library name may contain is a wildcard there. search_path is pinned to pg_catalog and the
--- table is schema-qualified, so a caller's search_path cannot redirect it.
+-- "_" a library name may contain is a wildcard there. The function's search_path is fixed at the one this
+-- migration ran under (SET search_path FROM CURRENT, as admin.get_due_schedules does; the runner owns
+-- the search_path, and migrations/ does not name a schema), so a caller's search_path cannot redirect it,
+-- and the built-ins it uses are found in pg_catalog, which is always searched first. The table it reads is
+-- schema-qualified.
 --
 -- It is created UNQUALIFIED, beside workflow_defs and the rest of the application tables, and called
 -- unqualified. A role that can reach workflow_defs reaches it by the same search_path, which is the
@@ -27,7 +30,7 @@
 -- Idempotent: CREATE OR REPLACE.
 CREATE OR REPLACE FUNCTION library_owning_prefix(p_name text) RETURNS text
     LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path = pg_catalog
+    SET search_path FROM CURRENT
     AS $$
     SELECT b.library
     FROM library.bundles b
