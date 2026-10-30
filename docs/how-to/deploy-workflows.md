@@ -198,6 +198,35 @@ This generates a `cleat.lock` file that pins each child workflow to a specific v
 > reader maintains by hand, which is the shape this audit looks for: a step
 > justified by a limitation the tool does not have.
 
+## Installing a workflow library
+
+A **workflow library** is a set of immutable, versioned workflows the cleat operator publishes once,
+and a tenant installs by reference instead of deploying the same code itself (cleat#3540). It is
+PostgreSQL and SQL Server only; MySQL answers `501`.
+
+    POST /api/libraries/{library}/install
+    {"bundle_version": "1.2.0"}
+
+It is called with the tenant's **own** API key and writes only that tenant's definitions: one row per
+member of the bundle, naming the member it came from and holding no bytes of its own. What it does:
+
+- **One transaction for the whole bundle.** Every member is installed and the install is recorded, or
+  nothing is written. A half-installed upgrade cannot exist.
+- **An upgrade is the same call with a different `bundle_version`.** It refreshes the tenant's
+  definitions from their members, records the new bundle, and rewrites when. It does not delete a version
+  an earlier bundle installed, because that version's runs replay it. Installing the bundle you already
+  hold changes nothing, and does not re-enable a version you disabled.
+- **It never replaces your own code.** If the tenant already deployed a definition under a name and version
+  the bundle installs, or holds one from a different library, the install stops with `409` and writes nothing.
+- **Exposure is resolved as a deploy resolves it.** A member that declares `public` is refused (`400`) for a
+  tenant the operator has not opted in.
+
+Every published library is installable by every tenant. A `404` means that library has no such bundle.
+
+> **Nothing can publish a bundle yet.** Publishing is the operator's act, through a command that is not
+> in this release (cleat#3597), so on a deployment today every install answers `404`. A sharded PostgreSQL
+> deployment answers `501` until that issue lands too.
+
 ## Production deployment checklist
 
 Before deploying to production:

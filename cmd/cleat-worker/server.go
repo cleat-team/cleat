@@ -80,6 +80,10 @@ type apiServer struct {
 	maxBodySize int64
 	db          *sql.DB
 
+	// libraryEntitlement is the one hook point for a per-tenant entitlement to install
+	// a library (cleat#3540, D45). nil allows every tenant every library.
+	libraryEntitlement libraryEntitlementCheck
+
 	// maxPriorityMagnitude mirrors --max-priority-magnitude and bounds the
 	// `priority` field of a start request in either direction. 0 means the
 	// operator set no bound. See engine.ValidatePriority for why the bound is

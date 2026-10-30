@@ -80,6 +80,10 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
 	mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
+	// Install a published workflow library bundle for the caller's own tenant
+	// (cleat#3540). Callable with the tenant's own key; publishing is not a route.
+	mux.HandleFunc("POST /api/libraries/{library}/install", api.handleInstallLibrary)
+
 	// The per-tenant OpenAPI document (cleat#2913). A metadata read like
 	// GET /api/definitions above -- assembled from workflow_defs, not a read
 	// through a durable run, so it is not Tier C.
