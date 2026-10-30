@@ -209,7 +209,8 @@ service that provisioned the tenant. It answers `200` with counts only, never a 
  "tables": [{"table": "workflow_instances", "rows": 12}, ...], "total_rows": 140,
  "plugin_tables": [{"table": "public.my_plugin_rows", "rows": 3}],
  "uncounted_plugin_tables": [], "skipped_plugin_tables": [],
- "retained": [{"table": "admin.tenant_tombstones", "reason": "the record this drop leaves: ..."}]}
+ "retained": [{"table": "admin.tenant_tombstones", "reason": "the record this drop leaves: ..."},
+              {"table": "admin.plugin_dep_overrides", "reason": "append-only audit record of an operator using ..."}]}
 ```
 
 - `unsettled_runs` is the number of the tenant's runs that have not reached a terminal status (not `done`, `failed`,
@@ -224,7 +225,8 @@ service that provisioned the tenant. It answers `200` with counts only, never a 
   in `skipped_plugin_tables`; `admin.drop_tenant` still deletes the former and skips the latter.
 - `retained` names the tables a drop **keeps**, each with the reason, so that a reader is not left to infer from what is
   removed what survives. Nothing in it is counted into `total_rows`, and nothing is on both lists. Today it holds the
-  tombstone a drop writes (see below); a table that must outlive its tenant (an append-only audit record) is added
+  tombstone a drop writes (see below) and `admin.plugin_dep_overrides`, the append-only record of an operator deploying
+  past an unmet plugin dependency, whose tenant column is `for_tenant_id` for that reason; a table that must outlive its tenant (an append-only audit record) is added
   here, and must not carry a column named `tenant_id` on SQL Server, whose `admin.drop_tenant` deletes from every table
   that does.
 - It is a snapshot taken statement by statement, not a moment and not a lock: each count is read separately, so a run that starts or finishes while the plan is read can make two counts disagree by one, and runs can start or finish between the plan and a drop. A drop checks what it requires for itself.

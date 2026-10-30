@@ -96,13 +96,20 @@ type RetainedTable struct {
 // there deletes from every table that does (migrations/mssql/003_procedures.sql). The tombstone is keyed by
 // dropped_tenant_id for exactly that reason.
 //
-// The second entry a reader may expect, admin.plugin_dep_overrides, is added by whichever of cleat#3604
-// and the tenant-drop change lands second: the plan cannot name a table that is not yet on develop.
+// admin.plugin_dep_overrides is the second entry. Its tenant column is for_tenant_id and not tenant_id for the
+// same SQL Server reason as the tombstone's key, and engine/an_override_record_outlives_its_tenant_test.go pins
+// both halves: the column name on all three dialects, and a real drop leaving the record behind.
 var Retained = []RetainedTable{
 	{
 		Table: "admin.tenant_tombstones",
 		Reason: "the record this drop leaves: who dropped the tenant, when, and where its own audit chain ended. " +
 			"It is written in the drop's transaction and is what stops the id being reused",
+	},
+	{
+		Table: "admin.plugin_dep_overrides",
+		Reason: "append-only audit record of an operator using --allow-missing-plugins past an unmet plugin " +
+			"dependency; kept after a tenant drop deliberately. It holds the tenant id, the definition name and " +
+			"version, who asked and by which path, and the missing plugin names and constraints, and no payloads",
 	},
 }
 
