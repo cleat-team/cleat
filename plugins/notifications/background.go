@@ -395,7 +395,32 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 		return "delivered", p.markDelivered(ctx, d.ID, d.AttemptCount+1, resp.StatusCode, respBody)
 	}
 
-	return p.retryOrFail(ctx, d, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+	reason := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody)
+	if isPermanentWebhookRefusal(resp.StatusCode) {
+		// The receiver said, in a form HTTP defines, that THIS request will never be accepted.
+		// Retrying it for another ~6h21m only repeats the refusal (cleat#3611).
+		return "failed", p.markFailed(ctx, d.ID, d.AttemptCount+1, reason)
+	}
+	return p.retryOrFail(ctx, d, reason)
+}
+
+// isPermanentWebhookRefusal reports whether a receiver's non-2xx status is a refusal of the event
+// itself, which no repeat can change: 400 (it is malformed), 410 (the endpoint is gone), 413 (it
+// is too large) and 422 (it cannot be processed).
+//
+// Every OTHER status stays retryable, 4xx included, and that is deliberate rather than an
+// omission. 401, 403 and 404 are what a receiver answers while its credentials, its allow-list or
+// its route are wrong or not yet deployed, all of which an operator repairs from the outside; 408,
+// 425 and 429 are explicitly "try again"; every 5xx is the receiver's own fault. There is no way
+// to resend a delivery once it is `failed` (cleat#3612), so classifying one of those as permanent
+// would turn a repairable outage into lost events. With a redeliver route more codes could move
+// here.
+func isPermanentWebhookRefusal(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusGone, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // retryOrFail marks a delivery for another attempt, or permanently failed
