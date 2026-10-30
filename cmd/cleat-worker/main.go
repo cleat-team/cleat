@@ -936,13 +936,7 @@ func main() {
 		}
 		payloadEncryption = pe
 		payloadRing = pring
-		if payloadEncryption != nil {
-			if *encryptionKeyFilePrevious != "" {
-				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
-			} else {
-				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
-			}
-		}
+		logPayloadEncryption(logger, workerID, payloadEncryption != nil, *encryptSensitivePayloads, *encryptionKeyFilePrevious != "")
 		// Build stores, DB connections, and closers for each shard.
 		stores := make([]engine.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
@@ -1380,13 +1374,8 @@ func main() {
 				os.Exit(1)
 			}
 			payloadEncryption = pe
-			if payloadEncryption != nil {
-				if *encryptionKeyFilePrevious != "" {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
-				} else {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
-				}
-			}
+			// Not logged here: the duplicate load below logs the state, and logging
+			// in both printed the same line twice (cleat#3589).
 		}
 
 		// Propagate encryption to the store factory.
@@ -1417,13 +1406,7 @@ func main() {
 			}
 			payloadEncryption = pe
 			payloadRing = pring
-			if payloadEncryption != nil {
-				if *encryptionKeyFilePrevious != "" {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
-				} else {
-					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
-				}
-			}
+			logPayloadEncryption(logger, workerID, payloadEncryption != nil, *encryptSensitivePayloads, *encryptionKeyFilePrevious != "")
 		}
 
 		// Propagate encryption to the store factory.
@@ -1718,8 +1701,11 @@ func main() {
 		// cleat#1992. Both adapters are safe on a nil target -- secretStore is
 		// never nil (see where it is built, above) but has no usable master key
 		// when secretRing is nil, and payloadEncryption is a plain nil
-		// *engine.PayloadEncryption when --encrypt-sensitive-payloads is off.
-		// Every method on both then returns a clear "not configured" error
+		// *engine.PayloadEncryption when --encryption-key-file is not set. It is
+		// NOT nil when only the key file is set: the key loads regardless of
+		// --encrypt-sensitive-payloads (cleat#2308), so plugins get a working
+		// plugin.Payloads from the key file alone while the engine seals nothing
+		// (cleat#3589). When it is nil, every method on both returns a clear "not configured" error
 		// rather than panicking, which is what lets these be assigned
 		// unconditionally instead of behind an if.
 		Secrets:           engine.NewPluginSecrets(secretStore),
