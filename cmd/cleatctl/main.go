@@ -123,7 +123,9 @@ func main() {
 	// schema and nothing else. It has no use for the store, and the tenant-scoped warning below
 	// describes the operator's questions, which the publisher asks none of, so it is handed the
 	// bare connection here, before both.
-	if args[0] == "library" {
+	cmd := args[0]
+	switch cmd {
+	case "library":
 		requirePortedFor("library", d)
 		runLibrary(ctx, db, engine.Dialect(d.name), args[1:])
 		return
@@ -143,8 +145,6 @@ func main() {
 		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
 	}
 	defer closer.Close()
-
-	cmd := args[0]
 
 	// Before the subcommand runs: some are not written for this dialect, and
 	// the refusal has to precede the first statement rather than follow a

@@ -9,11 +9,38 @@ import (
 	"fmt"
 )
 
+// One statement per dialect, written out, rather than built by concatenating placeholders into
+// the text: the only thing that differs is the bind syntax, and a constant is what a reader and
+// the SQL-concatenation lint can both see is not assembled from input.
+const (
+	storedBundleListingPostgres = `SELECT name, version FROM library.bundle_members WHERE library = $1 AND bundle_version = $2`
+	storedBundleListingMSSQL    = `SELECT name, version FROM library.bundle_members WHERE library = @p1 AND bundle_version = @p2`
+
+	listLibraryBundlesPostgres = `
+		SELECT b.library, b.bundle_version, b.published_at, COALESCE(b.published_by, ''),
+		       m.name, m.version, m.wasm_sha256, m.wasm_length, m.exposure
+		FROM library.bundles b
+		LEFT JOIN library.bundle_members bm ON bm.library = b.library AND bm.bundle_version = b.bundle_version
+		LEFT JOIN library.members m ON m.library = bm.library AND m.name = bm.name AND m.version = bm.version
+		WHERE ($1 = '' OR b.library = $1)
+		ORDER BY b.library, b.published_at DESC, b.bundle_version DESC, m.name`
+	listLibraryBundlesMSSQL = `
+		SELECT b.library, b.bundle_version, b.published_at, COALESCE(b.published_by, ''),
+		       m.name, m.version, m.wasm_sha256, m.wasm_length, m.exposure
+		FROM library.bundles b
+		LEFT JOIN library.bundle_members bm ON bm.library = b.library AND bm.bundle_version = b.bundle_version
+		LEFT JOIN library.members m ON m.library = bm.library AND m.name = bm.name AND m.version = bm.version
+		WHERE (@p1 = '' OR b.library = @p1)
+		ORDER BY b.library, b.published_at DESC, b.bundle_version DESC, m.name`
+)
+
 // storedBundleListing returns name -> version for one bundle, through the publish transaction.
 func storedBundleListing(ctx context.Context, tx *sql.Tx, d Dialect, library, bundleVersion string) (map[string]int, error) {
-	rows, err := tx.QueryContext(ctx,
-		`SELECT name, version FROM library.bundle_members WHERE library = `+d.placeholder(1)+` AND bundle_version = `+d.placeholder(2),
-		library, bundleVersion)
+	query := storedBundleListingPostgres
+	if d == DialectMSSQL {
+		query = storedBundleListingMSSQL
+	}
+	rows, err := tx.QueryContext(ctx, query, library, bundleVersion)
 	if err != nil {
 		return nil, fmt.Errorf("publish library: read the stored bundle: %w", err)
 	}
@@ -31,15 +58,11 @@ func storedBundleListing(ctx context.Context, tx *sql.Tx, d Dialect, library, bu
 }
 
 func listLibraryBundles(ctx context.Context, db *sql.DB, d Dialect, library string) ([]LibraryBundleSummary, error) {
-	p1 := d.placeholder(1)
-	rows, err := db.QueryContext(ctx, `
-		SELECT b.library, b.bundle_version, b.published_at, COALESCE(b.published_by, ''),
-		       m.name, m.version, m.wasm_sha256, m.wasm_length, m.exposure
-		FROM library.bundles b
-		LEFT JOIN library.bundle_members bm ON bm.library = b.library AND bm.bundle_version = b.bundle_version
-		LEFT JOIN library.members m ON m.library = bm.library AND m.name = bm.name AND m.version = bm.version
-		WHERE (`+p1+` = '' OR b.library = `+p1+`)
-		ORDER BY b.library, b.published_at DESC, b.bundle_version DESC, m.name`, library)
+	query := listLibraryBundlesPostgres
+	if d == DialectMSSQL {
+		query = listLibraryBundlesMSSQL
+	}
+	rows, err := db.QueryContext(ctx, query, library)
 	if err != nil {
 		return nil, fmt.Errorf("list library bundles: %w", err)
 	}

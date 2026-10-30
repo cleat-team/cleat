@@ -11,7 +11,27 @@ import (
 	"fmt"
 )
 
+// publishLibraryMSSQL replays the whole publish when the server rolled it back (a deadlock
+// victim, 1205): the transaction is all-or-nothing and every write in it is idempotent, so a
+// replay is sound. A conflict or a refusal is not such an error and returns at once.
 func publishLibraryMSSQL(ctx context.Context, db *sql.DB, req PublishLibraryRequest) (PublishLibraryResult, error) {
+	pub := mssqlLibraryPublisher{db: db}
+	var res PublishLibraryResult
+	err := withRollbackGuaranteedRetry(ctx, "publish library bundle", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		res, err = pub.publishOnce(ctx, req)
+		return err
+	})
+	return res, err
+}
+
+// mssqlLibraryPublisher is the connection a publish runs on. It is a type, not a bare function,
+// so the transaction below is a method the retry closure calls the way every other SQL Server
+// transaction boundary is reached (mssql_tx_boundaries_retried_test.go reads exactly that shape).
+type mssqlLibraryPublisher struct{ db *sql.DB }
+
+func (m mssqlLibraryPublisher) publishOnce(ctx context.Context, req PublishLibraryRequest) (PublishLibraryResult, error) {
+	db := m.db
 	res := PublishLibraryResult{Library: req.Library, BundleVersion: req.BundleVersion}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
