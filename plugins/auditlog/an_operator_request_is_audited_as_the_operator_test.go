@@ -99,6 +99,12 @@ func TestAnOperatorRequestIsAuditedAsTheOperator(t *testing.T) {
 		// own chain is deleted with it, so a row on that chain would be recorded and then removed.
 		{"a DELETE of a tenant, whose handler names none: the default chain, attributed, path kept",
 			http.MethodDelete, chain, "/api/admin/tenants/" + tenantB.String(), opKey, want{uuid.Nil, op}},
+		// Deleting a tombstone (B3b-2b) is recorded the same way: on the DEFAULT chain, naming the operator, with
+		// the dropped tenant's id in the path. The tenant is gone and so is its chain, so a handler that named it
+		// would file the row where it is deleted or start a chain for a dead id. The row records THAT it happened;
+		// the tombstone's contents are in the reply and the worker's log, because a row has no field for them.
+		{"a DELETE of a tombstone, whose handler names none: the default chain, attributed, path kept",
+			http.MethodDelete, chain, "/api/admin/tenants/" + tenantB.String() + "/tombstone", opKey, want{uuid.Nil, op}},
 		{"a handler that says it acted on tenant B: B's chain",
 			"", chain, "/api/admin/acts-on-b", opKey, want{tenantB, op}},
 		{"the first tenant a handler names wins",

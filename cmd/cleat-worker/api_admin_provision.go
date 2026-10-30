@@ -42,6 +42,10 @@ type tenantProvisioner interface {
 
 	// DropTenant removes a tenant and leaves its tombstone, in one transaction (cleat#3552, B3b-2).
 	DropTenant(ctx context.Context, req auth.DropRequest) (auth.DropResult, error)
+
+	// DeleteTombstone removes a dropped tenant's tombstone and returns what it held, which allows the id to be
+	// provisioned again. Reached only by an admin-scoped key (cleat#3552, B3b-2b).
+	DeleteTombstone(ctx context.Context, tenantID uuid.UUID) (auth.Tombstone, error)
 }
 
 // provisionBodyLimit bounds the request. The largest legitimate body is a few short strings.
