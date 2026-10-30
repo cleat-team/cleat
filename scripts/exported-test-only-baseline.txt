@@ -63,6 +63,7 @@ engine/sharded_store.go	func ShardedStore.LoadEventHistoryBatch
 engine/sharded_store.go	func ShardedStore.StartNewRunWithConcurrencyKey
 engine/store_lifecycle.go	func PostgresStore.StartNewRunWithConcurrencyKey
 engine/store_types.go	func RetiredAt
+engine/testutil/library_publisher.go	func OpenLibraryLoginDB
 engine/testutil/mssql_admin.go	func AdminDB
 engine/testutil/mssql_admin_replay_list.go	func MSSQLDropTenantFilterPolicies
 engine/testutil/mssql_admin_replay_list.go	func MSSQLRestoreLaterFilterPolicies

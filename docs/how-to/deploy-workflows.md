@@ -279,9 +279,36 @@ member of the bundle, naming the member it came from and holding no bytes of its
 
 Every published library is installable by every tenant. A `404` means that library has no such bundle.
 
-> **Nothing can publish a bundle yet.** Publishing is the operator's act, through a command that is not
-> in this release (cleat#3597), so on a deployment today every install answers `404`. A sharded PostgreSQL
-> deployment answers `501` until that issue lands too.
+> A **sharded** PostgreSQL deployment answers `501` to an install, and `cleatctl library publish` is not
+> available against one, until the sharded half of cleat#3597 lands.
+
+## Publishing a workflow library
+
+Publishing is the **operator's** act, and the database makes that true: only a login that holds the
+`cleat_library_publisher` role can write the library schema (and that role can insert and read but never
+update). Connect with such a login; the superuser login works too, and the application role does not.
+PostgreSQL and SQL Server only.
+
+    cleatctl --db "$PUBLISHER_DSN" library publish acme 1.2.0 checkout.wasm pay.wasm
+    cleatctl --db "$PUBLISHER_DSN" library list acme
+
+- **A member is named by its own stamp.** Each binary's `cleat.metadata` carries its `workflow_name` and
+  `workflow_version`; publish reads them from the file and lets nothing on the command line rename or
+  renumber it. A binary with no readable stamp, or a `<file>.schema.json` that is not valid JSON, is refused.
+- **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
+  of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
+  does not contain. A name appears once per bundle.
+- **Members and bundles are immutable.** Publishing a `(library, name, version)` that already exists with the
+  same bytes and the same entry-point schemas (the `.schema.json` beside the binary, which the bytes do not
+  carry) is a no-op; with different bytes it is refused, naming both digests, and with the same bytes and
+  different schemas it is refused saying so (publish the changed build under a new version). Publishing a bundle version that exists with exactly the same members is a no-op, which
+  is how a publish that stopped partway is repaired; with a different member set it is refused and says what
+  differs.
+- **One transaction.** The members, the bundle and its listing are all written, or none are.
+- **`library list [<library>] [--json]`** shows each bundle, who published it and when, and its members with
+  their digest and size. It never prints the bytes.
+- A plugin a member declares in `plugin_deps` is not checked at publish: it is checked, against the registry of
+  plugins workers have registered, when a tenant installs.
 
 ## Production deployment checklist
 

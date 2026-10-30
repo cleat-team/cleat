@@ -119,6 +119,18 @@ func main() {
 
 	ctx := context.Background()
 
+	// cleat#3597: `library` is for the library PUBLISHER's login, which can write the library
+	// schema and nothing else. It has no use for the store, and the tenant-scoped warning below
+	// describes the operator's questions, which the publisher asks none of, so it is handed the
+	// bare connection here, before both.
+	cmd := args[0]
+	switch cmd {
+	case "library":
+		requirePortedFor("library", d)
+		runLibrary(ctx, db, engine.Dialect(d.name), args[1:])
+		return
+	}
+
 	// Say once, up front, that this connection cannot answer the questions
 	// cleatctl asks. Before the store is opened, so it is the first thing on
 	// stderr rather than something to find after a wrong answer. cleat#1184.
@@ -133,8 +145,6 @@ func main() {
 		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
 	}
 	defer closer.Close()
-
-	cmd := args[0]
 
 	// Before the subcommand runs: some are not written for this dialect, and
 	// the refusal has to precede the first statement rather than follow a
@@ -219,6 +229,8 @@ Commands:
   versions gc [--dry-run]         run garbage collection on deprecated versions
       [--min-versions=N] [--max-age=DURATION]
   deploy workflow <name> <wasm>   deploy a new workflow WASM binary
+  library publish <library> <bundle-version> <member.wasm>...  publish a workflow library bundle (cleat#3597)
+  library list [<library>]        list published library bundles
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
   cost [flags]                    estimate monthly operational costs
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
