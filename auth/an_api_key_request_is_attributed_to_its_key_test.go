@@ -79,8 +79,10 @@ func TestAnAPIKeyRequestCarriesItsKeyIDAsTheSubject(t *testing.T) {
 	}
 }
 
-// An identity something else established earlier in the chain is not replaced by the weaker fact that
-// a key was presented.
+// An identity that a layer OUTSIDE this one already established is not replaced by the weaker fact
+// that a key was presented. This is the shape of a host that puts an identity layer in front of the
+// tenant layer; cleat-worker is not one (its plugin middleware, oauthprovider included, runs inside
+// MiddlewareWithMux, so there an OAuth email wins by overwriting and this guard decides nothing).
 func TestAnAPIKeyDoesNotOverwriteAnExistingSubject(t *testing.T) {
 	fake := newFakeDBStore()
 	addTestKey(fake)
@@ -94,7 +96,7 @@ func TestAnAPIKeyDoesNotOverwriteAnExistingSubject(t *testing.T) {
 	}
 	subject, has, _ := servedSubject(t, engine.NewPostgresStore(db), outer)
 	if !has || subject != "someone@example.com" {
-		t.Errorf("subject = %q (present=%v), want the OAuth subject untouched", subject, has)
+		t.Errorf("subject = %q (present=%v), want the outer layer's subject untouched", subject, has)
 	}
 
 	// An empty subject is no subject: it must not block the key's.

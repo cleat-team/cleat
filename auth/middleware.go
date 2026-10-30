@@ -232,11 +232,15 @@ func MiddlewareWithMux(store TenantResolver, requireAuth bool, mux *http.ServeMu
 			// an API-key caller, which is the normal way a request authenticates, carried no subject
 			// and those columns recorded nothing.
 			//
-			// ONLY WHEN NOTHING HAS SET ONE. WithSubject overwrites, and an identity that something
-			// else established earlier in the chain (an OAuth session's email) must not be replaced by
-			// the weaker fact that a key was presented. The two do not overlap on a successful request
-			// today -- a cleat API key carries a cleat_sk_ prefix and a session token does not -- and
-			// that is a property of two token formats, not something this line should lean on.
+			// ONLY WHEN NOTHING HAS SET ONE. WithSubject overwrites, so this layer must not replace an
+			// identity that a layer OUTSIDE it already established with the weaker fact that a key was
+			// presented. cleat-worker has no such layer: plugin middleware, oauthprovider included,
+			// runs INSIDE this one (composeAuthChain wraps the plugin handler), so there an OAuth
+			// email set later wins by overwriting the key's subject, and this guard decides nothing.
+			// It is kept for a host that puts an identity layer outside this one. The two do not
+			// overlap on a successful request in the worker either way -- a cleat API key carries a
+			// cleat_sk_ prefix and a session token does not -- which is a property of two token
+			// formats, not something this line should lean on.
 			if keyID != uuid.Nil {
 				if existing, ok := SubjectFromContext(ctx); !ok || existing == "" {
 					ctx = WithSubject(ctx, KeySubjectPrefix+keyID.String())
