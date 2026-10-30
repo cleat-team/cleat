@@ -13,6 +13,25 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
+// authTestDSN is the database the integration test below connects to, and whether the environment named one
+// at all (cleat#3618).
+//
+// It reads the same variables, in the same order, as testutil.PostgresTestDSN -- CLEAT_TEST_POSTGRES, then
+// CLEAT_TEST_DB -- plus the deprecated DURABLE_TEST_DB. This test used to read only the last two, so with
+// just CLEAT_TEST_POSTGRES set (what a single-server local setup does) it dialled localhost, was refused, and
+// SKIPPED, while every neighbour ran against the database that was configured.
+//
+// It does not call PostgresTestDSN, because that falls back to a localhost DSN and so is never empty: this
+// test has to tell "nothing configured" (a skip) from "configured but broken" (a failure).
+func authTestDSN() (dsn string, configured bool) {
+	for _, name := range []string{"CLEAT_TEST_POSTGRES", "CLEAT_TEST_DB", "DURABLE_TEST_DB"} {
+		if v := os.Getenv(name); v != "" {
+			return v, true
+		}
+	}
+	return "postgres://localhost:5432/cleat?sslmode=disable", false
+}
+
 // TestAuthMiddlewareRejectsInvalidKey verifies that when auth middleware is
 // wired in (the --require-auth=true default), requests with an invalid API key
 // are rejected with 401 Unauthorized.
@@ -32,17 +51,10 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		t.Skip("skipping auth integration test in short mode")
 	}
 
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = os.Getenv("DURABLE_TEST_DB") // deprecated spelling
-	}
 	// Distinguish "no database configured" from "the configured database is
 	// broken". Only the former is a legitimate skip; treating the latter as one
 	// is how a test reports success while testing nothing.
-	configured := dsn != ""
-	if !configured {
-		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
-	}
+	dsn, configured := authTestDSN()
 
 	fatalf := t.Skipf
 	if configured {
