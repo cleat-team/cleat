@@ -34,6 +34,11 @@ type tenantProvisioner interface {
 	// every other operator key gets (cleat#3552, B3a). There is deliberately no resume-by-creator.
 	SetTenantSuspended(ctx context.Context, tenantID uuid.UUID, suspended bool) error
 	SuspendTenantByCreator(ctx context.Context, tenantID uuid.UUID, creator string) error
+
+	// DropPlanHeader is the cheap read that decides whether a caller may see a plan; DropPlanFacts is the
+	// admin-connection half of the counts and is read only after it (cleat#3552, B3b-1b). Both read-only.
+	DropPlanHeader(ctx context.Context, tenantID uuid.UUID) (auth.DropPlanHeader, error)
+	DropPlanFacts(ctx context.Context, tenantID uuid.UUID) (auth.DropPlanFacts, error)
 }
 
 // provisionBodyLimit bounds the request. The largest legitimate body is a few short strings.

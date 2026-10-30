@@ -21,6 +21,7 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 	forceComplete := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/instances/wf-1/force-complete"
 	confirm := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/confirm"
 	suspend := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/suspend"
+	dropPlan := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop-plan"
 	resume := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/resume"
 
 	type row struct {
@@ -43,6 +44,8 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, confirm", ScopeProvision, http.MethodPost, confirm, 200},
 		// ...and the step a drop needs first (B3a): suspend, one tenant, canonical form, POST.
 		{"provision, suspend", ScopeProvision, http.MethodPost, suspend, 200},
+		// ...and the read-only plan of what the drop would remove (B3b-1b): GET, one tenant, canonical form.
+		{"provision, drop-plan", ScopeProvision, http.MethodGet, dropPlan, 200},
 		// ...but NOT resume: a provisioner that could clear the flag could lift a suspension an operator made.
 		{"provision, resume", ScopeProvision, http.MethodPost, resume, 403},
 
@@ -66,6 +69,13 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, confirm with an empty id", ScopeProvision, http.MethodPost, "/api/admin/tenants//confirm", 403},
 		// Suspend and resume have the same neighbours confirm has, and the same refusals.
 		{"provision, suspend with GET", ScopeProvision, http.MethodGet, suspend, 403},
+		// The method belongs to the route, in both directions.
+		{"provision, drop-plan with POST", ScopeProvision, http.MethodPost, dropPlan, 403},
+		{"provision, drop-plan with DELETE", ScopeProvision, http.MethodDelete, dropPlan, 403},
+		{"provision, drop-plan with a tail", ScopeProvision, http.MethodGet, dropPlan + "/x", 403},
+		{"provision, drop-plan of upper-case id", ScopeProvision, http.MethodGet, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7/drop-plan", 403},
+		{"provision, confirm with GET", ScopeProvision, http.MethodGet, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/confirm", 403},
+		{"provision, the tenants collection with GET", ScopeProvision, http.MethodGet, "/api/admin/tenants", 403},
 		{"provision, suspend with DELETE", ScopeProvision, http.MethodDelete, suspend, 403},
 		{"provision, resume with PUT", ScopeProvision, http.MethodPut, resume, 403},
 		{"provision, suspend with a trailing slash", ScopeProvision, http.MethodPost, suspend + "/", 403},
@@ -76,9 +86,9 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, suspend with an empty id", ScopeProvision, http.MethodPost, "/api/admin/tenants//suspend", 403},
 		{"provision, an encoded slash in the suspend path", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7%2Fsuspend", 403},
 		{"provision, suspend spelled in capitals", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/SUSPEND", 403},
-		{"provision, drop-plan (a later PR, not this scope)", ScopeProvision, http.MethodGet, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop-plan", 403},
 		{"provision, drop", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7", 403},
 		{"admin, suspend", ScopeAdmin, http.MethodPost, suspend, 200},
+		{"admin, drop-plan", ScopeAdmin, http.MethodGet, dropPlan, 200},
 		{"admin, resume", ScopeAdmin, http.MethodPost, resume, 200},
 		{"provision, other verbs under a tenant", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/drop", 403},
 		{"provision, an encoded slash in the confirm path", ScopeProvision, http.MethodPost, "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7%2Fconfirm", 403},

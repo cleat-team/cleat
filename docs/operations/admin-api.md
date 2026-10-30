@@ -197,6 +197,36 @@ hyphenated) and only with `POST`; any other spelling is `403` from the scope. Li
 `501` on MySQL and on a sharded worker. The change is audited on the tenant's own chain, with the operator as the
 subject.
 
+
+## Planning a drop
+
+`GET /api/admin/tenants/{tenant}/drop-plan` says what dropping a tenant would remove, and the two facts a drop
+will require, without removing anything (cleat#3552). It is `cleatctl drop-tenant`'s preview as an API, for the
+service that provisioned the tenant. It answers `200` with counts only, never a row:
+
+```json
+{"tenant_id": "...", "name": "acme", "suspended": true, "unsettled_runs": 0,
+ "tables": [{"table": "workflow_instances", "rows": 12}, ...], "total_rows": 140,
+ "plugin_tables": [{"table": "public.my_plugin_rows", "rows": 3}],
+ "uncounted_plugin_tables": [], "skipped_plugin_tables": []}
+```
+
+- `unsettled_runs` is the number of the tenant's runs that have not reached a terminal status (not `done`, `failed`,
+  `dead_lettered`, `terminated` or `cancelled`). A drop will require it to be `0` and `suspended` to be `true`. Note that
+  suspending a tenant does not make runs that were already started finish; it stops new ones.
+- `tables` lists every table counted, zeros included, so an empty table and an absent one do not look alike. On
+  PostgreSQL the tenant's data is counted in the tenant's own scope and the `admin.*` tables on the admin
+  connection; on SQL Server one list, derived from the catalogue, is counted in the tenant's scope.
+- `plugin_tables` are the per-tenant tables plugins have registered in `admin.plugin_tables` (PostgreSQL; on SQL Server
+  they are already in `tables`). A registered table the tenant's scope could not read is named in
+  `uncounted_plugin_tables` instead of being reported as empty, and a registry row that names a table that does not exist
+  in `skipped_plugin_tables`; `admin.drop_tenant` still deletes the former and skips the latter.
+- It is a snapshot taken statement by statement, not a moment and not a lock: each count is read separately, so a run that starts or finishes while the plan is read can make two counts disagree by one, and runs can start or finish between the plan and a drop. A drop checks what it requires for itself.
+
+Who may call it is the same as `suspend`: an admin-scoped operator key for any tenant; a provision-scoped key only for a
+tenant its own principal created; a tenant key never. A tenant that does not exist, one the caller did not create and
+one made offline all answer the same `404`. The default tenant answers `400`. PostgreSQL and SQL Server only.
+
 ## Acting on another tenant
 
 `/api/admin/tenants/{tenant}/instances/{id}/…` is the same four operations addressed at an explicit tenant.

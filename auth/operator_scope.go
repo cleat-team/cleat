@@ -138,11 +138,11 @@ func (o Operator) MayReach(method string, u *url.URL) bool {
 // thing it gates does: a handler added without it would be reachable by every operator key
 // the moment it was registered.
 func provisionMayReach(method string, u *url.URL) bool {
-	if method != http.MethodPost || u.RawPath != "" {
+	if (method != http.MethodPost && method != http.MethodGet) || u.RawPath != "" {
 		return false
 	}
 	if u.Path == OperatorRoutePrefix+"tenants" {
-		return true
+		return method == http.MethodPost
 	}
 	// The last step of the handshake, and a tenant's suspension, which a drop requires first
 	// (cleat#3552, B3a): POST /api/admin/tenants/<id>/{confirm,suspend}. NOT resume: a provisioner
@@ -156,7 +156,10 @@ func provisionMayReach(method string, u *url.URL) bool {
 		return false
 	}
 	id, tail, hasTail := strings.Cut(rest, "/")
-	if !hasTail || (tail != "confirm" && tail != "suspend") {
+	// The method belongs to the route: the plan is read with GET and nothing else is, so a GET to
+	// confirm or suspend, or a POST to the plan, is not a route a provisioner may reach.
+	if !hasTail || !((method == http.MethodPost && (tail == "confirm" || tail == "suspend")) ||
+		(method == http.MethodGet && tail == "drop-plan")) {
 		return false
 	}
 	parsed, err := uuid.Parse(id)

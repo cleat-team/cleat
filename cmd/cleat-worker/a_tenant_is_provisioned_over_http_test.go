@@ -40,6 +40,23 @@ type fakeProvisioner struct {
 	gotSuspended                         bool
 	gotSuspendCreator                    string
 	suspendErr                           error
+
+	planHeader    auth.DropPlanHeader
+	planHeaderErr error
+	planFacts     auth.DropPlanFacts
+	planFactsErr  error
+	headerCalls   int
+	factsCalls    int
+}
+
+func (f *fakeProvisioner) DropPlanHeader(context.Context, uuid.UUID) (auth.DropPlanHeader, error) {
+	f.headerCalls++
+	return f.planHeader, f.planHeaderErr
+}
+
+func (f *fakeProvisioner) DropPlanFacts(context.Context, uuid.UUID) (auth.DropPlanFacts, error) {
+	f.factsCalls++
+	return f.planFacts, f.planFactsErr
 }
 
 func (f *fakeProvisioner) ProvisionTenant(_ context.Context, r auth.ProvisionRequest) (auth.ProvisionResult, error) {

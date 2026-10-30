@@ -52,6 +52,11 @@ func (s *apiServer) handleAdminRoutesForTenant(w http.ResponseWriter, r *http.Re
 		s.handleConfirmProvisionedTenant(w, r, tenant)
 		return
 	}
+	if ok && tenant != "" && tail == "drop-plan" {
+		// cleat#3552, B3b-1b: what a drop would remove, read-only. Not an instance route either.
+		s.handleTenantDropPlan(w, r, tenant)
+		return
+	}
 	if ok && tenant != "" && (tail == "suspend" || tail == "resume") {
 		// cleat#3552, B3a: the step a drop requires first. Dispatched here for the same reason as
 		// confirm: it is not an instance route.
