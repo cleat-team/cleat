@@ -19,6 +19,19 @@
 -- library's, not a tenant's name to rename. The comparison is the database's own (starts_with is exact
 -- on PostgreSQL), never LIKE, where the "_" a library name may hold is a wildcard.
 --
+-- THE ARGUMENT IS VALIDATED because the publisher can call this directly, not only through the engine:
+-- starts_with(name, '') is true of every name, so an unchecked prefix lets that role list every tenant's
+-- names, one prefix at a time or all at once. It answers only for a library prefix: a library name (the
+-- engine's grammar, at most 128 characters) followed by ONE ".". The publisher can still ask about a
+-- library name it guesses, which is what this is for, and can no longer list names it has not guessed.
+--
+-- DELIBERATE RESIDUAL: a validated reader still answers for ANY library-shaped prefix, so the publisher
+-- can list the tenants' names under a prefix it guesses ('payroll.') without publishing anything. That is
+-- accepted: the publisher is an operator credential (owner decision D40) and D59-b shows the operator the
+-- clash list on a refused publish anyway. The grammar check does not make the publisher unable to
+-- enumerate. Tightening it to "the prefix of the library being published in this transaction" would need
+-- a marker the engine sets, and the publisher holds the connection, so it could set the same marker.
+--
 -- Idempotent: CREATE OR REPLACE, and GRANT / REVOKE repeat harmlessly.
 CREATE OR REPLACE FUNCTION library_clashing_names(p_prefix text)
     RETURNS TABLE (tenant_id uuid, name text, versions text)
@@ -30,6 +43,11 @@ DECLARE
     v_prior  text;
     v_tenant uuid;
 BEGIN
+    IF p_prefix IS NULL OR length(p_prefix) > 129 OR p_prefix !~ '^[A-Za-z0-9][A-Za-z0-9_-]*\.$' THEN
+        RAISE EXCEPTION 'library_clashing_names: % is not a library prefix (a library name of letters, digits, "_" and "-", then one ".")', p_prefix
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
     SELECT r.rolsuper OR r.rolbypassrls INTO v_bypass FROM pg_catalog.pg_roles r WHERE r.rolname = current_user;
     IF v_bypass THEN
         RETURN QUERY

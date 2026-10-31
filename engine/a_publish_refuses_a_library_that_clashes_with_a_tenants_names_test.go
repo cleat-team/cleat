@@ -152,6 +152,97 @@ func TestThePublisherCanAskForClashesAndCannotReadATenantsRows(t *testing.T) {
 	})
 }
 
+// The reader is executable by the publisher, so the publisher can call it with ANY argument, not only
+// the "<library>." the engine sends. Unchecked, "" is a prefix of every name and "z" of every name
+// that starts with one, and the role this PR keeps out of tenant rows reads them all through the
+// reader (measured by the reviewer: two rows for "", one for "z", on both dialects and both rigs).
+// So the reader answers only for a library prefix: the library grammar, at most 128 characters, then
+// one ".". The refusal is asserted on its TEXT as well as its status, so a refusal by anything else
+// (a missing grant, a dead connection) cannot stand in for the check.
+func TestThePublisherCannotListTenantNamesByAskingForAPrefixThatIsNotALibrary(t *testing.T) {
+	const marker = "is not a library prefix"
+	eachPrefixRig(t, func(t *testing.T, c *prefixCase) {
+		c.registerTenants(t)
+		c.openPublisher(t)
+		lib := c.library(t, "wide")
+		secret := "z" + lib + ".payroll" // starts with "z", and sits under no library
+		if err := c.deploy(pfxTenantA, secret, 1); err != nil {
+			t.Fatalf("UNMEASURED: seeding a name: %v", err)
+		}
+		// ask calls the reader as the publisher with a RAW argument, which libraryPrefixClashes cannot do.
+		ask := func(prefix string) ([]string, error) {
+			query := `SELECT tenant_id::text, name, versions FROM library_clashing_names($1)`
+			if c.rig.dialect == DialectMSSQL {
+				query = `EXEC dbo.library_clashing_names @p1`
+			}
+			rows, err := c.pub.QueryContext(c.ctx, query, prefix)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			var names []string
+			for rows.Next() {
+				var tenant, name, versions string
+				if err := rows.Scan(&tenant, &name, &versions); err != nil {
+					return nil, err
+				}
+				names = append(names, tenant+"|"+name)
+			}
+			return names, rows.Err()
+		}
+
+		// Known-positive: a real library prefix reaches the seeded name, so a refusal below is the
+		// check's doing and not a reader that returns nothing to everyone.
+		got, err := ask("z" + lib + ".")
+		if err != nil || len(got) != 1 || got[0] != pfxTenantA+"|"+secret {
+			t.Fatalf("UNMEASURED: the reader asked for %q returned %v (%v), want tenant A's %s", "z"+lib+".", got, err, secret)
+		}
+		// Every character a library name may hold must be ACCEPTED, each in a position that reaches the
+		// character-class test: a validator stricter than the grammar refuses real publishes. The first
+		// version of the SQL Server check refused a hyphen, and only other tests' library names
+		// ("pub-...", "shardclash-...") noticed; this test's own names held none.
+		for _, ok := range []string{
+			"a-b.", "a_b.", "a--b.", "a-.", "a_.", "A-Z9.", "9a.", "Z.", "a1-2_3b.",
+			strings.Repeat("a", 128) + ".", // the longest library name still finds nothing, and is not refused
+		} {
+			if got, err := ask(ok); err != nil || len(got) != 0 {
+				t.Errorf("the library prefix %q returned %v (%v), want an answer of no names and no refusal", ok, got, err)
+			}
+		}
+
+		for _, bad := range []struct{ why, prefix string }{
+			{"empty, a prefix of every name", ""},
+			{"a single letter, a prefix of every name that starts with it", "z"},
+			{"a letter and nothing after it", "zz"},
+			{"two dots", "a.b."},
+			{"no library name before the dot", "."},
+			{"a dot in the middle", "a.b"},
+			{"a library name without its dot", "z" + lib},
+			{"starts with a hyphen", "-a."},
+			{"starts with an underscore", "_a."},
+			{"a space inside", "a b."},
+			{"a trailing space after the dot", "a. "},
+			{"a trailing newline after the dot", "a.\n"},
+			{"a non-ASCII letter first", "\u00e9."},
+			// After the first character, so only the character-class test sees them: under a
+			// case- and accent-insensitive collation the range [a-z] would cover an accented letter.
+			{"a non-ASCII letter after the first", "a\u00e9b."},
+			{"a full-width letter after the first", "a\uff21."},
+			{"a wildcard", "a%."},
+			{"129 characters before the dot", strings.Repeat("a", 129) + "."},
+		} {
+			names, err := ask(bad.prefix)
+			if err == nil {
+				t.Errorf("the publisher asked the reader for %q (%s) and was answered with %v, want a refusal", bad.prefix, bad.why, names)
+				continue
+			}
+			if !strings.Contains(err.Error(), marker) {
+				t.Errorf("the reader refused %q (%s) with %q, want the refusal to say %q", bad.prefix, bad.why, err, marker)
+			}
+		}
+	})
+}
+
 // The rows an install wrote sit under the library's prefix, because every member is named
 // "<library>.<name>". The reader must count a tenant's OWN names only, or publishing the next bundle
 // version of a library any tenant has installed refuses itself. Nothing else names members under

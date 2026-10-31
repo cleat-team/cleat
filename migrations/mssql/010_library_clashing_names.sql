@@ -12,12 +12,34 @@
 -- cleat_library_publisher alone. Only the application's OWN names count (library IS NULL). The comparison
 -- is the database's own: LEFT(name, LEN(@prefix)) = @prefix, the prefix as the right-hand side of LEN,
 -- so while workflow names are case-insensitive here (owner decision D60, cleat#3635, makes them binary)
--- the check is exactly as wide as the database's idea of "the same name". No LIKE: "_" is a wildcard.
+-- the check is exactly as wide as the database's idea of "the same name". No LIKE on the NAMES: "_" is a wildcard.
+--
+-- THE ARGUMENT IS VALIDATED because the publisher can call this directly, not only through the engine:
+-- LEFT(name, LEN('')) = '' is true of every name, so an unchecked prefix lets that role list every tenant's
+-- names. It answers only for a library prefix: a library name (the engine's grammar, at most 128
+-- characters) followed by ONE ".". LIKE is safe HERE because it tests the argument against a fixed
+-- pattern, under a binary collation so the ranges are code-point ranges whatever the database collation.
+-- The hyphen a library name may hold is swapped for a letter BEFORE the character-class test, because a
+-- hyphen written inside the class was measured to refuse a legitimate name here.
+--
+-- DELIBERATE RESIDUAL: a validated reader still answers for ANY library-shaped prefix, so the publisher
+-- can list the tenants' names under a prefix it guesses ('payroll.') without publishing anything. That is
+-- accepted: the publisher is an operator credential (owner decision D40) and D59-b shows the operator the
+-- clash list on a refused publish anyway. The grammar check stops the publisher listing names it has NOT
+-- guessed; it does not make the publisher unable to enumerate. Tightening it to "the prefix of the library
+-- being published in this transaction" would need a marker the engine sets, and the publisher holds the
+-- connection, so it could set the same marker.
 CREATE OR ALTER PROCEDURE dbo.library_clashing_names (@prefix NVARCHAR(255))
 WITH EXECUTE AS OWNER
 AS
 BEGIN
     SET NOCOUNT ON;
+    IF @prefix IS NULL
+        OR DATALENGTH(@prefix) > 2 * 129
+        OR @prefix COLLATE Latin1_General_BIN2 NOT LIKE N'[A-Za-z0-9]%.'
+        OR REPLACE(@prefix COLLATE Latin1_General_BIN2, N'-', N'a') LIKE N'%[^A-Za-z0-9_.]%'
+        OR @prefix COLLATE Latin1_General_BIN2 LIKE N'%.%.%'
+        THROW 50010, N'library_clashing_names: the argument is not a library prefix (a library name of letters, digits, "_" and "-", then one ".")', 1;
     DECLARE @prior NVARCHAR(4000) = CAST(SESSION_CONTEXT(N'tenant_id') AS NVARCHAR(4000));
     DECLARE @tid UNIQUEIDENTIFIER, @tid_text NVARCHAR(4000);
     CREATE TABLE #clash (tenant_id UNIQUEIDENTIFIER NOT NULL, name NVARCHAR(255) NOT NULL, versions NVARCHAR(MAX) NOT NULL);
