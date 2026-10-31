@@ -1846,15 +1846,25 @@ jobs:
       - name: Build the cleat CLI
         run: go build -o .bin/cleat ./cmd/cleat
 
-      # scripts/build-documented-examples.sh keeps only the last 8 lines of a failing
-      # build, so which toolchain this job ran on was invisible when it broke. Print
-      # it where it is not (cleat#3499).
+      # scripts/build-documented-examples.sh kept only the last 8 lines of a failing
+      # build until cleat#3592, so which toolchain this job ran on was invisible when
+      # it broke. It prints the log now; this still prints the toolchain where a
+      # build log would not (cleat#3499).
       - name: Show the toolchain this job runs on
         run: |
           grep PRETTY_NAME /etc/os-release
           echo "runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
           echo "JAVA_HOME=${JAVA_HOME:-unset}"
           java -version
+
+      # cleat#3592. Runs the real script against a stub `cleat` that replays a REAL
+      # Gradle failure (a one-line compile error in examples/java-workflow, JDK 17),
+      # and asserts the compiler error and `* What went wrong:` reach the output.
+      # Before the fix they did not: the script printed `tail -8`, which keeps
+      # Gradle's epilogue and drops its cause. Also asserts the cap is stated when a
+      # log exceeds it, rather than the cause silently vanishing.
+      - name: Self-test the failure output of the example builds
+        run: scripts/test-build-documented-examples.sh
 
       - name: Run every documented example build
         run: scripts/build-documented-examples.sh
