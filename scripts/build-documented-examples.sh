@@ -71,6 +71,11 @@ if [[ ! -x "$CLEAT_BIN" ]]; then
   exit 2
 fi
 
+# How much of a failed build's log is printed. A real Gradle failure of the
+# shape cleat#3592 hit is ~30 lines; this is generous enough for a build with a
+# long compiler diagnostic and small enough not to bury the other examples.
+FAIL_LOG_LINES="${BDE_FAIL_LOG_LINES:-400}"
+
 examined=0 built=0 failed=0 skipped=0
 declare -a FAILURES=()
 
@@ -109,7 +114,17 @@ while IFS= read -r readme; do
   else
     echo "FAIL  $dir"
     echo "      \$ $cmd"
-    sed 's/^/      /' /tmp/bde.log | tail -8
+    # The log, not its last eight lines (cleat#3592). Gradle prints the cause
+    # ABOVE its own epilogue -- the compiler error, then `* What went wrong:` and
+    # the exception -- and the epilogue is the part a tail keeps: `> Run with
+    # --info`, `BUILD FAILED`. On the run that prompted this the cause was not
+    # recoverable from CI at all. The cap is a bound, not a window onto the
+    # cause: past it the earliest lines are dropped and the output says how many.
+    total="$(wc -l </tmp/bde.log | tr -d ' ')"
+    if (( total > FAIL_LOG_LINES )); then
+      echo "      ... $((total - FAIL_LOG_LINES)) earlier line(s) of $total omitted; showing the last $FAIL_LOG_LINES"
+    fi
+    tail -n "$FAIL_LOG_LINES" /tmp/bde.log | sed 's/^/      /'
     FAILURES+=("$dir")
     failed=$((failed + 1))
   fi
