@@ -33,19 +33,33 @@
 #
 # THE LIST GROWS ON EVIDENCE. An unseen transport error fails this run exactly as
 # it did before; add its text to --self-test first, then to TRANSIENT_RE. The last
-# three alternatives are not from a recorded instance -- they are the same class
+# two alternatives are not from a recorded instance -- they are the same class
 # (a connection that did not complete) and are here because a pattern limited to
 # the exact strings above would miss the next variant by construction.
 #
+# A BARE `unexpected EOF` WAS HERE AND WAS WRONG. It is the Go compiler's own
+# message for a truncated file ("syntax error: unexpected EOF, expected }"), so a
+# real compile error ran three times: three `docker build`s and 30s of sleep
+# (cleat#3644 review, measured). Do not add a phrase a compiler, a linter or a
+# test can print; anchor it to the fetch it belongs to.
+#
+# ONLY THE TAIL OF THE LOG IS READ (RETRY_TRANSIENT_WINDOW lines, default 40).
+# The scenario scripts print `tail -25`/`tail -30` of this log when a step fails,
+# so the cause of a failure is always in that window -- and it keeps an earlier,
+# recovered fetch error out of the decision. The Dockerfile's own `go mod
+# download` retry leaves the error it recovered from in the build output; matched
+# over the whole log, a later ordinary compile error would be read as transient.
+#
 # Source it, or run `scripts/lib/retry-transient.sh --self-test`.
 
-TRANSIENT_RE='could not fetch content descriptor .* from remote: not found|stream error: stream ID [0-9]+; INTERNAL_ERROR|connection reset by peer|TLS handshake timeout|dial tcp .*i/o timeout|unexpected EOF'
+TRANSIENT_RE='could not fetch content descriptor .* from remote: not found|stream error: stream ID [0-9]+; INTERNAL_ERROR|connection reset by peer|TLS handshake timeout|dial tcp .*i/o timeout'
 
 retry_transient() {
   local log=$1
   shift
   local attempts=${RETRY_TRANSIENT_ATTEMPTS:-3}
   local delay=${RETRY_TRANSIENT_DELAY:-10}
+  local window=${RETRY_TRANSIENT_WINDOW:-40}
   local n=1 rc
   while :; do
     "$@" >"$log" 2>&1
@@ -53,11 +67,11 @@ retry_transient() {
     if (( rc == 0 )); then
       return 0
     fi
-    if (( n >= attempts )) || ! grep -Eq -- "$TRANSIENT_RE" "$log"; then
+    if (( n >= attempts )) || ! tail -n "$window" "$log" | grep -Eq -- "$TRANSIENT_RE"; then
       return "$rc"
     fi
     echo "==> transient upstream fetch failure on attempt $n of $attempts (exit $rc); retrying in $((delay * n))s:" >&2
-    grep -Em1 -- "$TRANSIENT_RE" "$log" | cut -c1-300 >&2
+    tail -n "$window" "$log" | grep -Em1 -- "$TRANSIENT_RE" | cut -c1-300 >&2
     sleep $((delay * n))
     n=$((n + 1))
   done
@@ -124,6 +138,24 @@ EOF
   _case "compile error" 7 1 './cmd/cleat-worker/main.go:12:2: undefined: nope' 99
   _case "bad compose file (a plain 'not found')" 7 1 'service "cleat-worker" refers to undefined volume: not found' 99
   _case "--verify-backend refusing a no-wasmtime binary" 7 1 'wasmtime backend unavailable' 99
+  # The compiler's own message for a truncated file contains "unexpected EOF".
+  # An earlier TRANSIENT_RE matched that bare phrase and ran a real compile error
+  # three times (found in review of cleat#3644); "undefined: nope" above could
+  # not see it because it does not contain the phrase.
+  _case "compile error: go's own 'unexpected EOF' (truncated file)" 7 1 \
+    './main.go:5:1: syntax error: unexpected EOF, expected }' 99
+
+  echo "window: only the tail of the log is read, as the callers' own failure tail is"
+  local noise early_flake
+  noise=$(for i in $(seq 1 60); do echo "#12 [builder 7/9] step output line $i"; done)
+  early_flake='go: golang.org/x/text@v0.43.0: read "https://proxy.golang.org/x.zip": stream error: stream ID 357; INTERNAL_ERROR; received from peer'
+  # The Dockerfile's own `go mod download` retry leaves the fetch error it
+  # recovered from in the build output. A later, ordinary compile error must not
+  # be read as transient because of it (cleat#3644 review).
+  _case "recovered fetch error early in the log, then a compile error" 7 1 \
+    "$early_flake"$'\n'"$noise"$'\n'"./cmd/cleat-worker/main.go:12:2: undefined: nope" 99
+  _case "the transient error is at the end of a long log" 0 2 \
+    "$noise"$'\n'"$early_flake" 1
 
   echo "bounds"
   _case "transient every time: gives up after 3, keeps rc" 7 3 'connection reset by peer' 99
