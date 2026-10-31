@@ -12,6 +12,13 @@ package auditlog
 // Controls, because each claim needs the case beside it that is still what it was: a request that notes
 // nothing stores the "{}" every row stored before this existed, and a request that is not an operator's
 // ignores the slot (only an operator request listens to it, as with the target).
+//
+// THIS FILE'S NAME IS LOAD-BEARING. It builds the shared chain database, whose admin connection stays open
+// until TestMain, and TestAuditRowsAreScopedToTheirTenantOnMSSQL (audit_rows_*) goes through testutil.TestDB,
+// which refuses to start while another client is attached to the test database (cleat#982). Go runs a package's
+// tests in file-name order, so every file that builds a shared chain database must sort AFTER audit_rows_*, as
+// chain_*, queue_test.go and record_event_test.go do. Under its first name (an_operator_*) this file ran first
+// and that test failed on a PostgreSQL-configured run, with the foreign session being this file's own.
 
 import (
 	"encoding/json"
