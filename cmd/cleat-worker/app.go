@@ -84,6 +84,11 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	// (cleat#3540). Callable with the tenant's own key; publishing is not a route.
 	mux.HandleFunc("POST /api/libraries/{library}/install", api.handleInstallLibrary)
 
+	// What the caller's tenant holds, and what is published (cleat#3627). Read-only, callable
+	// with the tenant's own key. Two paths so no library name can collide with a reserved word.
+	mux.HandleFunc("GET /api/library-installs", api.handleListLibraryInstalls)
+	mux.HandleFunc("GET /api/libraries", api.handleListLibraries)
+
 	// The per-tenant OpenAPI document (cleat#2913). A metadata read like
 	// GET /api/definitions above -- assembled from workflow_defs, not a read
 	// through a durable run, so it is not Tier C.
