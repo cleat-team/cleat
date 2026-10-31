@@ -158,6 +158,8 @@ permissions:
 # `failure`). Each cap was sized to at least 2.5x the job's observed maximum
 # over recent develop and pull_request runs, and the figure is in the comment
 # beside it, so a job stopped at its cap has almost always hung.
+# The ten jobs that run only on a tag push, a push to release/** or main (cleat#3493)
+# were sized from those runs instead, at 3.5x or more; the comment beside each says so.
 #
 # BEFORE RE-RUNNING A CANCELLED JOB, compare how long it ran with its cap. About
 # equal means the cap fired: read the log for where the time went (the stalls
@@ -3419,6 +3421,7 @@ jobs:
     name: Benchmarks
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 60  # max 16.9m over 5 successful runs (push-to-main samples), 2026-10-31; cleat#3493
     steps:
       - uses: actions/checkout@v7
         with:

@@ -7,20 +7,11 @@
 # caller, or a job that now has a cap -- so an entry is deleted in the same change
 # that caps its job.
 #
-# All ten below are PENDING cleat#3493, which caps them. cleat#3479 left them
-# uncapped believing none had a successful run to size a cap from; that was true
-# only of the sample it read (develop and pull_request runs), which cannot contain
-# a tag push, a push to release/** or a push to main, and these jobs run only on
-# those (or by manual workflow_dispatch). They are not uncapped for lack of data. The publishing jobs also wait on a decision about
-# capping a job that publishes; cleat#3493 records it.
-
-ci.yml:benchmarks | pending cleat#3493: runs only on a push to main, which cleat#3479's sample did not include
-release.yml:goreleaser | pending cleat#3493: runs only on a tag push or a manual workflow_dispatch, neither in cleat#3479's sample; it publishes
-release.yml:container-image | pending cleat#3493: runs only on a tag push or a manual workflow_dispatch, neither in cleat#3479's sample; it publishes
-release.yml:homebrew-bump | pending cleat#3493: runs only on a tag push or a manual workflow_dispatch, neither in cleat#3479's sample; it publishes
-release.yml:helm-chart-publish | pending cleat#3493: runs only on a tag push or a manual workflow_dispatch, neither in cleat#3479's sample; it publishes
-publish-pypi.yml:build | pending cleat#3493: runs only on a tag push, which cleat#3479's sample did not include
-publish-pypi.yml:publish | pending cleat#3493: runs only on a tag push, which cleat#3479's sample did not include; it publishes
-release-smoke.yml:versions | pending cleat#3493: runs only on a push to release/** or a manual workflow_dispatch, neither in cleat#3479's sample
-release-smoke.yml:wheel | pending cleat#3493: runs only on a push to release/** or a manual workflow_dispatch, neither in cleat#3479's sample
-release-smoke.yml:python-versions | pending cleat#3493: runs only on a push to release/** or a manual workflow_dispatch, neither in cleat#3479's sample
+# The list is empty. It held ten jobs until cleat#3493 capped them: cleat#3479 had
+# left them uncapped believing none had a successful run to size a cap from, which was
+# true only of the sample it read (develop and pull_request runs). Those cannot contain
+# a tag push, a push to release/** or a push to main, and these jobs run only on those
+# (or by manual workflow_dispatch). They were never uncapped for lack of data.
+#
+# An exemption added here needs a reason that survives its own fix: say why the job
+# cannot carry a cap, and what removes the exemption.
