@@ -28,7 +28,25 @@ WORKDIR /app
 # and must be present for go mod download to resolve.
 COPY go.mod go.sum ./
 COPY cleat/go.mod cleat/go.sum cleat/
-RUN go mod download
+# Retried, because this is the one step in the build that depends on a server
+# we do not run, and it has failed on a transport error three times with the
+# code under test never reached (cleat#3586): `stream error ... INTERNAL_ERROR`
+# twice and `connection reset by peer` once, each from proxy.golang.org, each on
+# a different module. Every caller of this Dockerfile gets the retry -- the
+# scenario scripts, `make cluster-up`, the Go tests that build the image -- which a
+# wrapper around `docker build` in one script would not give them.
+#
+# Not retried on a match of the error text, unlike scripts/lib/retry-transient.sh:
+# `go mod download` does one thing, so any failure of it is a fetch failure, and
+# a text filter here could only turn an unfamiliar wording into a failed build.
+# Five attempts, 5s apart growing to 20s, then the last error is the build's.
+RUN attempt=1; \
+    until go mod download; do \
+      if [ "$attempt" -ge 5 ]; then exit 1; fi; \
+      echo "go mod download failed (attempt $attempt of 5); retrying in $((attempt * 5))s" >&2; \
+      sleep $((attempt * 5)); \
+      attempt=$((attempt + 1)); \
+    done
 
 # Copy the full source tree (includes cmd/cleat-worker/web/dist/ for //go:embed)
 COPY . .

@@ -67,6 +67,10 @@ set -uo pipefail
 set +e
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
+# retry_transient: a transient proxy/registry error in `docker build` or `docker compose up`
+# is retried, anything else is not (cleat#3586).
+# shellcheck source=scripts/lib/retry-transient.sh
+source scripts/lib/retry-transient.sh
 
 EXAMPLE_DIR="examples/ai-agent-platform"
 README="$EXAMPLE_DIR/README.md"
@@ -182,14 +186,14 @@ fi
 export CLEAT_WORKER_IMAGE="$WORKER_IMAGE"
 
 echo "==> building the worker image from this checkout"
-if ! docker build -t "$WORKER_IMAGE" . >/tmp/aap-docker-build.log 2>&1; then
+if ! retry_transient /tmp/aap-docker-build.log docker build -t "$WORKER_IMAGE" .; then
   echo "FAIL: docker build of the repository's Dockerfile" >&2
   tail -30 /tmp/aap-docker-build.log >&2
   exit 1
 fi
 
 echo "==> docker compose up"
-if ! "${COMPOSE[@]}" up -d >/tmp/aap-compose-up.log 2>&1; then
+if ! retry_transient /tmp/aap-compose-up.log "${COMPOSE[@]}" up -d; then
   echo "FAIL: docker compose up" >&2
   tail -30 /tmp/aap-compose-up.log >&2
   exit 1
