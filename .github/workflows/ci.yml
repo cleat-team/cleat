@@ -1334,6 +1334,21 @@ jobs:
           scripts/test-stream-trailer-check.sh
           LINT_GUARD_EOF
 
+      # cleat#3586. scripts/lib/retry-transient.sh retries `docker build` and
+      # `docker compose up` in the scenario scripts, but ONLY when the log shows a
+      # transient upstream-fetch error. The self-test holds the five failures
+      # recorded on that issue as known-positives (each retried once, then
+      # passes) and a compile error, a plain "not found" and a failing
+      # --verify-backend as known-negatives (run once, status kept), and asserts
+      # the retry notice as well as the status: with the retry disabled a
+      # transient case still ends in SOME status.
+      - name: Transient-fetch retry self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Transient-fetch retry self-test" >> "$LINT_FAILURES_FILE"
+          scripts/lib/retry-transient.sh --self-test
+          LINT_GUARD_EOF
+
       # A runner job with no `timeout-minutes` inherits GitHub's 360-minute default,
       # which is what cleat#3479 and cleat#3482 spent two PRs removing by hand
       # (cleat#3492). Refuses a new job that lands uncapped unless it is on

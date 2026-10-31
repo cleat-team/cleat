@@ -47,6 +47,10 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE_DIR="$REPO_ROOT/examples/b2b-saas-control-plane"
+# retry_transient: a transient proxy/registry error in `docker build` or `docker compose up`
+# is retried, anything else is not (cleat#3586).
+# shellcheck source=scripts/lib/retry-transient.sh
+source "$REPO_ROOT/scripts/lib/retry-transient.sh"
 
 free_port() {
   python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
@@ -93,7 +97,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> building the worker image from this checkout"
-if ! docker build -t "$WORKER_IMAGE" . >"$OUT_DIR/docker-build.log" 2>&1; then
+if ! retry_transient "$OUT_DIR/docker-build.log" docker build -t "$WORKER_IMAGE" .; then
   echo "FAIL: docker build of the repository's Dockerfile" >&2
   tail -25 "$OUT_DIR/docker-build.log" >&2
   exit 1
@@ -110,7 +114,7 @@ if ! go build -o "$OUT_DIR/cleat" ./cmd/cleat 2>"$OUT_DIR/build.log" ||
 fi
 
 echo "==> docker compose up"
-if ! "${COMPOSE[@]}" up -d >"$OUT_DIR/compose-up.log" 2>&1; then
+if ! retry_transient "$OUT_DIR/compose-up.log" "${COMPOSE[@]}" up -d; then
   echo "FAIL: docker compose up" >&2
   tail -30 "$OUT_DIR/compose-up.log" >&2
   exit 1
