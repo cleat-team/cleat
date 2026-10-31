@@ -13,7 +13,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// LoadWASM returns the compiled WASM bytes for a workflow definition.
+// LoadWASM returns the compiled WASM bytes for a workflow definition. For a definition installed from a
+// library the bytes are the library member's, and they are returned only if they hash to the digest the
+// member records: otherwise the result is an *LibraryMemberDigestMismatchError (ErrLibraryMemberDigestMismatch)
+// and no bytes (cleat#3630).
 func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy
 	// must run under its own tenant's SESSION_CONTEXT, not whatever the
@@ -39,10 +42,17 @@ func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 		// An installed library definition names an immutable member of a published
 		// library instead of holding bytes (cleat#3540). A second read, only for
 		// such a row, so an ordinary definition never depends on the library schema.
+		var recorded string
 		if err := tx.QueryRowContext(ctx,
-			`SELECT wasm_bytes FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
-			library.String, defName, defVersion).Scan(&wasmBytes); err != nil {
+			`SELECT wasm_bytes, wasm_sha256 FROM library.members WHERE library = @p1 AND name = @p2 AND version = @p3`,
+			library.String, defName, defVersion).Scan(&wasmBytes, &recorded); err != nil {
 			return nil, libraryMemberReadError("load wasm", library.String, defName, defVersion, err)
+		}
+		// The bytes are checked against the digest recorded beside them (cleat#3630). ck_members_digest makes
+		// a mismatch impossible while it is enabled and trusted, so this only fires after a table owner
+		// disabled it (NOCHECK) or removed it.
+		if err := verifyLibraryMemberDigest(library.String, defName, defVersion, recorded, wasmBytes); err != nil {
+			return nil, err
 		}
 	}
 	return wasmBytes, nil
