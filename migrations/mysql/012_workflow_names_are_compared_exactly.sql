@@ -44,10 +44,15 @@
 --   * WHERE A FAILURE LANDS, MEASURED with a held shared lock and lock_wait_timeout=3. A lock on a table the foreign keys
 --     tie to workflow_instances (event_history) stops the very first DROP FOREIGN KEY: ERROR 1205, NOTHING changed, all
 --     ten columns still case-insensitive and all three keys present. A lock on a table nothing else references
---     (idempotency_keys) stops that table's ALTER late: ERROR 1205 with 8 of 10 columns converted, 0 of 3 keys present,
---     and an instance row naming a definition that does not exist WAS ACCEPTED in that window. Run again, it converged
---     (10 of 10, 3 of 3), and a third run on the finished database changed nothing. If such an orphan is still there when
---     it is run again, the preflight refuses ("no exact parent", nothing changed); delete or repair the row and re-run.
+--     (idempotency_keys) stops that table's ALTER late: ERROR 1205 with 8 of 10 columns converted and ALL THREE KEYS
+--     BACK, because the keys are restored right after the four tables they join, before the six keyless ones; an
+--     instance naming a definition that does not exist was refused by the key. Run again, it converged (10 of 10, 3
+--     of 3), and a third run on the finished database changed nothing.
+--   * THE WINDOW WITH NO KEYS is the stretch between dropping them and putting them back, and it holds the four
+--     key-bearing copies and nothing else. A lock timeout cannot leave it open; a process that dies inside it (a kill, a
+--     crash, a deadlock victim, a full disk) can, and there an orphan CAN be written. The test builds that state by
+--     hand (it is not reached by a lock) and shows that if the orphan is still there when the migration is run again,
+--     the preflight refuses it ("no exact parent", nothing changed); delete or repair the row and run it again.
 -- Same convention as 004: a throwaway procedure, because MySQL has no IF NOT EXISTS for any of this.
 --
 -- THE REFUSAL TEXT IS CAPPED AT 128 CHARACTERS, because SIGNAL's MESSAGE_TEXT is: a longer one is error 1648
@@ -184,7 +189,7 @@ BEGIN
         ALTER TABLE workflow_tags DROP FOREIGN KEY fk_workflow_tags_def;
     END IF;
 
-    -- 3. The columns, one table at a time, the key-bearing group first and the largest tables last. Type and
+    -- 3. The four key-bearing columns, parent first. Type and
     -- nullability are exactly what information_schema held when this was written (no defaults, no comments);
     -- only the collation changes. Each is skipped if it is already converted.
     IF (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_defs' AND COLUMN_NAME = 'name') <> 'utf8mb4_0900_bin' THEN
@@ -199,6 +204,21 @@ BEGIN
     IF (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_instances' AND COLUMN_NAME = 'def_name') <> 'utf8mb4_0900_bin' THEN
         ALTER TABLE workflow_instances MODIFY def_name VARCHAR(255) COLLATE utf8mb4_0900_bin NOT NULL, ALGORITHM=COPY, LOCK=SHARED;
     END IF;
+    -- 4. Put the keys back, definition for definition, AS SOON AS the four tables they join are converted, and BEFORE the six
+    -- keyless ones. The window with no keys is the one place an orphan can be written, so it should span the smallest
+    -- set of copies, not the largest: idempotency_keys and event_history are the biggest tables and the likeliest to fail.
+    -- Adding a key validates every existing row, which is the backstop for anything the preflight above did not see.
+    IF NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_instances' AND CONSTRAINT_NAME = 'fk_instances_def' AND CONSTRAINT_TYPE = 'FOREIGN KEY') THEN
+        ALTER TABLE workflow_instances ADD CONSTRAINT fk_instances_def FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs (tenant_id, name, version);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_routing' AND CONSTRAINT_NAME = 'fk_workflow_routing_def' AND CONSTRAINT_TYPE = 'FOREIGN KEY') THEN
+        ALTER TABLE workflow_routing ADD CONSTRAINT fk_workflow_routing_def FOREIGN KEY (tenant_id, workflow_name, target_version) REFERENCES workflow_defs (tenant_id, name, version);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_tags' AND CONSTRAINT_NAME = 'fk_workflow_tags_def' AND CONSTRAINT_TYPE = 'FOREIGN KEY') THEN
+        ALTER TABLE workflow_tags ADD CONSTRAINT fk_workflow_tags_def FOREIGN KEY (tenant_id, workflow_name, version) REFERENCES workflow_defs (tenant_id, name, version);
+    END IF;
+
+    -- 5. The six keyless columns, nothing joins them to a definition, the largest tables last.
     IF (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_memory_stats' AND COLUMN_NAME = 'def_name') <> 'utf8mb4_0900_bin' THEN
         ALTER TABLE workflow_memory_stats MODIFY def_name VARCHAR(255) COLLATE utf8mb4_0900_bin NOT NULL, ALGORITHM=COPY, LOCK=SHARED;
     END IF;
@@ -218,19 +238,7 @@ BEGIN
         ALTER TABLE event_history MODIFY child_name VARCHAR(255) COLLATE utf8mb4_0900_bin NULL, ALGORITHM=COPY, LOCK=SHARED;
     END IF;
 
-    -- 4. Put the keys back, definition for definition. Adding a key validates every existing row, which is the
-    -- backstop for anything the preflight above did not see.
-    IF NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_instances' AND CONSTRAINT_NAME = 'fk_instances_def' AND CONSTRAINT_TYPE = 'FOREIGN KEY') THEN
-        ALTER TABLE workflow_instances ADD CONSTRAINT fk_instances_def FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs (tenant_id, name, version);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_routing' AND CONSTRAINT_NAME = 'fk_workflow_routing_def' AND CONSTRAINT_TYPE = 'FOREIGN KEY') THEN
-        ALTER TABLE workflow_routing ADD CONSTRAINT fk_workflow_routing_def FOREIGN KEY (tenant_id, workflow_name, target_version) REFERENCES workflow_defs (tenant_id, name, version);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_tags' AND CONSTRAINT_NAME = 'fk_workflow_tags_def' AND CONSTRAINT_TYPE = 'FOREIGN KEY') THEN
-        ALTER TABLE workflow_tags ADD CONSTRAINT fk_workflow_tags_def FOREIGN KEY (tenant_id, workflow_name, version) REFERENCES workflow_defs (tenant_id, name, version);
-    END IF;
-
-    -- 5. FINISH BY ASSERTING, because the half-converted state is SILENT (measured: no error, a comparison between a
+    -- 6. FINISH BY ASSERTING, because the half-converted state is SILENT (measured: no error, a comparison between a
     -- converted and an unconverted column is quietly exact). Read every target column back from information_schema and
     -- every key, and fail loudly, naming the first one left behind. A run that gets here has converted everything; a
     -- run that does not has said which. The recovery is the same either way: run it again.

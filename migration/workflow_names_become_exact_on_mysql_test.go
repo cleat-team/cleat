@@ -324,8 +324,15 @@ func TestMySQLWorkflowNamesBecomeExact(t *testing.T) {
 	if converted != len(mysqlNamesColumns)-2 {
 		t.Errorf("after the part-way failure %d columns are converted, want %d", converted, len(mysqlNamesColumns)-2)
 	}
-	if n := mysqlFKCount(t, db); n != 0 {
-		t.Errorf("after the part-way failure %d foreign keys remain; the header says all three are dropped until the migration completes", n)
+	// The keys are put back right after the four tables they join are converted, BEFORE the six keyless ones, so a
+	// failure on a keyless table (this one) leaves all three in place. That is the point of the order: a no-key window
+	// spanning idempotency_keys and event_history, the two largest copies, would be the likeliest place to stop in.
+	if n := mysqlFKCount(t, db); n != 3 {
+		t.Errorf("after a failure on a keyless table %d of 3 foreign keys exist; they should already be back, so that no orphan can be written", n)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version) VALUES ('run-key-orphan', 'No.Such.Definition', 1)`); err == nil {
+		mysqlExec(t, db, `DELETE FROM workflow_instances WHERE id = 'run-key-orphan'`)
+		t.Error("an instance naming a definition that does not exist was ACCEPTED after the part-way failure; the key should have refused it")
 	}
 	// The header's claim about the mixed state, measured: comparing a converted name column with an unconverted one
 	// does NOT fail (an earlier draft of the header said error 1267, and was wrong); the binary side wins, so a
@@ -338,9 +345,20 @@ func TestMySQLWorkflowNamesBecomeExact(t *testing.T) {
 		t.Errorf("two UNCONVERTED columns matched %d case-different pairs, want 1: they should still fold case among themselves", n)
 	}
 
-	// 2b. THE WINDOW IS REAL: with the keys gone, a row naming a definition that does not exist in ANY spelling is
-	// accepted. Re-running while it is still there must be refused, with nothing changed (still 8 of 10, still no keys);
-	// removing it and re-running converges. This is the header's claim about what a failed run leaves behind.
+	// 2b. THE NO-KEY WINDOW, built by hand. After the reorder a lock timeout cannot leave it open (every table touched
+	// after the keys are dropped and before they are back is converted under a lock the run already holds), so the
+	// only way to be inside it is a process that dies between step 2 and step 4: a kill, a crash, a deadlock victim, a
+	// full disk. That is simulated here by dropping the three keys directly, NOT reached by a lock, and the state is
+	// labelled so: it is a constructed one. With the keys gone a row naming a definition that does not exist in ANY
+	// spelling is accepted; re-running while it is still there must be refused, with nothing changed; removing it and
+	// re-running converges.
+	for _, drop := range []string{
+		`ALTER TABLE workflow_instances DROP FOREIGN KEY fk_instances_def`,
+		`ALTER TABLE workflow_routing DROP FOREIGN KEY fk_workflow_routing_def`,
+		`ALTER TABLE workflow_tags DROP FOREIGN KEY fk_workflow_tags_def`,
+	} {
+		mysqlExec(t, db, drop)
+	}
 	mysqlExec(t, db, `INSERT INTO workflow_instances (id, def_name, def_version) VALUES ('run-window-orphan', 'No.Such.Definition', 1)`)
 	err = runMigrations(t, ctx, real, migration.DialectMySQL)
 	if err == nil {
