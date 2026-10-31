@@ -380,6 +380,11 @@ func (p *Plugin) deliver(ctx, baseCtx context.Context, d deliveryRow) (string, e
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Webhook-Event", d.EventType)
 	req.Header.Set("X-Webhook-Signature", "sha256="+signature)
+	// The delivery's own id, the webhook_delivery.id the list route returns: the same value on the
+	// first send, on every retry and after a redelivery (cleat#3612), because all of them are this
+	// row. A receiver dedupes on it and an operator matches a receiver's log line to a delivery.
+	// Not covered by the signature, which stays the HMAC of the body alone (cleat#3621).
+	req.Header.Set("X-Webhook-Delivery", d.ID.String())
 
 	// Execute the HTTP request.
 	resp, err := p.httpClient.Do(req)
