@@ -44,6 +44,7 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 | `POST /api/admin/tenants/{tenant}/instances/{id}/steps/{n}/resolve` | one workflow's step, in the named tenant | as above |
 | `POST /api/admin/tenants` | creates a tenant (and its org, by name) and mints its first key | **operator credential only**: a tenant key gets `403` |
 | `POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": …}` | makes that key permanent | **operator credential only**, and only the principal that created the tenant |
+| `POST /api/admin/tenants/{tenant}/recovery-key` with `{"reason": …}` | mints a provisional key for a tenant with **no live key** | **admin-scoped operator key only**: a provision-scoped key and a tenant key get `403` |
 
 The id-only tenant-scoped routes are checked by `callerOwnsTarget` before anything runs, and answer 404 (never
 403) for another tenant's workflow, so they do not confirm it exists. They sit behind the flag because they are
@@ -161,8 +162,55 @@ is no way to name another in the request.
 
 The last-key rule serialises on the tenant's row, so two concurrent revokes of a tenant's last two keys leave
 exactly one standing (measured: without the lock both succeed, on PostgreSQL and on SQL Server). It protects
-against a mistake, not against a determined caller: `?force=true` removes the last key, after which only
-`cleat-worker --generate-api-key` (offline) or a new operator-provisioned key restores access.
+against a mistake, not against a determined caller: `?force=true` removes the last key, after which only an
+operator can restore access: `POST /api/admin/tenants/{tenant}/recovery-key` (below), or `cleat-worker
+--generate-api-key` offline.
+
+## Recovering a tenant that has locked itself out
+
+A tenant can remove its own last key (`DELETE /api/keys/{key_id}?force=true`). After that nothing it holds
+reaches `/api/keys`. `POST /api/admin/tenants/{tenant}/recovery-key` is how an operator gives it a way back
+without a shell on a worker (cleat#3578).
+
+    POST /api/admin/tenants/{tenant}/recovery-key
+    X-Confirm: {tenant}
+    {"reason": "the last key was revoked with force=true on 2026-10-30; the owner asked for access back"}
+
+It is **admin-scoped operator keys only**. A provision-scoped key is refused (`403`), as is a tenant key. Whether
+a service that created a tenant may recover it is an open question for the owner, not a gap.
+
+| Result | When |
+|---|---|
+| `201` with `key_id`, **`secret` (shown once)**, `provisional: true`, `expires_at`, `valid_for_seconds: 900`, `Cache-Control: no-store` | the tenant has **no live key** and is not suspended |
+| `409 tenant_has_live_keys` with `live_keys` | the tenant can still act for itself. Nothing is minted. This includes a recovery key minted a moment ago that has not lapsed, so **at most one is outstanding** |
+| `409 tenant_suspended` | an operator suspended the tenant: resume it first |
+| `404` | no such tenant, a dropped tenant (its row went with it) |
+| `400` | the id is not a UUID or is the default tenant; `X-Confirm` is not the same id, typed back; the body is not exactly `{"reason": …}`; or the reason is unacceptable (below). A body over 4 KiB is `413` |
+| `403` | not an admin-scoped operator key |
+
+**The guard is one fact, decided in the transaction that mints, under the tenant's row lock:** the tenant has no
+live key. It is the same lock `POST /api/keys` takes, so a tenant minting or revoking at the same moment and this
+call are one serial decision. The key is **provisional** (15 minutes), so a reply that is lost lapses and the
+operator can call again; a permanent key whose reply was lost would be live, held by nobody, and would block every
+retry. It adds one key and revokes nothing.
+
+**The reason is required** and is recorded in the audit row on **the tenant's own chain**, covered by the chain
+hash, beside `operator:<key id>`: the tenant can read, in its own log, who recovered it and why. A refused
+attempt (`409`) is recorded the same way, with what refused it. The reason must be non-empty after trimming, at
+most 500 characters, free of control characters, and **must not contain an API key** (`cleat_sk_…` or
+`cleat_op_…`, in any case): the audit chain is append-only, so a credential pasted into a free-text field would
+be in it for good, and the `400` does not repeat the reason. The secret is in the reply and **nowhere else**: not
+in the audit row, not in the log.
+
+**What the tenant does with it:** use the recovery key to `POST /api/keys` for a permanent key, then `DELETE
+/api/keys/{key_id}` the recovery key. Do not wait for it to lapse. This route does not rely on the confirm route.
+
+**What this does not stop, stated plainly.** An admin operator can recover a tenant that revoked its keys
+*deliberately*. That is not new power: `cleat-worker --generate-api-key` gives anyone with a shell the same, and
+`/api/admin/*` already reaches every tenant's runs. What the route changes is that the power is now reachable over
+HTTP by a credential that can be stolen, which is why it is admin-scoped, why the tenant must hold no live key, and
+why every use is attributed to the operator and recorded, with a reason, where the tenant can read it. PostgreSQL
+and SQL Server only, like the rest of tenant provisioning.
 
 ## Suspending and resuming a tenant
 

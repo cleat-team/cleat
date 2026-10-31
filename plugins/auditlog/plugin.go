@@ -46,6 +46,8 @@ type queuedAuditEvent struct {
 	ipAddress  string
 	userAgent  string
 	duration   time.Duration
+	// metadata is the JSON document the handler noted for this row (auth.NoteAuditMetadata); "" stores {}.
+	metadata string
 }
 
 // Plugin implements audit trail recording and querying.

@@ -339,6 +339,7 @@ func TestNoHandlerSerialisesJSONAroundTheResponseWriter(t *testing.T) {
 	known := map[string]site{
 		"app.go: json.NewEncoder(w).Encode(map[string]string{\"error\": \"not found\"})":       {1, "an error body"},
 		"internal_holds.go: _ = json.NewEncoder(rw).Encode(internalHoldsResponse{Held: held})": {1, "concurrency-key holds, no event data"},
+		"api_admin_recovery_key.go: if b, err := json.Marshal(doc); err == nil {":              {1, "noteRecoveryAudit: the audit row's metadata document ({reason, key_id|refused}), stored on the tenant's chain and hash-covered; not an HTTP response, carries no event record, and the reason was refused if it held a key-shaped string"},
 		"main.go: json.NewEncoder(w).Encode(statuses)":                                         {1, "component health statuses"},
 		"server.go: json.NewEncoder(w).Encode(v)":                                              {1, "writeJSON itself, the choke point"},
 		"server.go: json.NewEncoder(w).Encode(map[string]any{":                                 {1, "a fixed-shape response; read it before adding data to it"},
