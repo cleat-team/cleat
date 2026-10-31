@@ -20,6 +20,7 @@ package migration_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -220,12 +221,29 @@ func TestSQLServerWorkflowNamesBecomeExact(t *testing.T) {
 		mustExec(t, c, `INSERT INTO workflow_routing (workflow_name, target_version, tenant_id) VALUES (N'Billing.Pay', 1, @p1)`, namesTenantKnown)
 		defs(c, namesTenantKnown, "Checkout")
 		inst(c, namesTenantKnown, "run-case-orphan", "checkout") // the FK accepts this today: that is the hazard
+		// Schedules have NO foreign key: handleCreateSchedule stores def_name as typed and never looks the
+		// definition up, yet a due schedule starts its workflow by that name. cleat-review-69 measured the gap.
+		sched := func(name, def string) {
+			t.Helper()
+			mustExec(t, c, `INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, next_run_at, tenant_id) VALUES (@p1, @p2, N'main', N'* * * * *', N'{}', SYSDATETIMEOFFSET(), @p3)`, name, def, namesTenantKnown)
+		}
+		sched("nightly", "checkout")     // reaches 'Checkout' ONLY by case: must be refused
+		sched("weekly", "Billing.Pay")   // exact: must not be
+		sched("ghost", "NoSuchWorkflow") // names no definition in any case: already broken, not this migration's to refuse
 	})
 
 	// The lookup 011 changes, measured BEFORE so that "0 afterwards" is a change and not a miss.
 	const folded = `SELECT COUNT(*) FROM workflow_defs WHERE name = N'billing.pay'`
 	if n := countIn(t, db, namesTenantKnown, folded); n != 1 {
 		t.Fatalf("UNMEASURED: before 011 the lowercase probe finds %d of 'Billing.Pay', want 1 (the column should fold case)", n)
+	}
+	// The schedule-to-definition join the reviewer measured: it finds 'nightly' BEFORE 011 (so "0 afterwards" would
+	// be a change and not a miss), finds the exact schedule, and finds nothing for the ghost.
+	const schedJoin = `SELECT COUNT(*) FROM workflow_schedules s JOIN workflow_defs d ON d.tenant_id = s.tenant_id AND d.name = s.def_name WHERE s.name = N'%s'`
+	for name, want := range map[string]int{"nightly": 1, "weekly": 1, "ghost": 0} {
+		if n := countIn(t, db, namesTenantKnown, fmt.Sprintf(schedJoin, name)); n != want {
+			t.Fatalf("UNMEASURED: before 011 the schedule %q joins %d definition(s), want %d", name, n, want)
+		}
 	}
 	// And the row is invisible without the tenant context, which is why the preflight iterates tenants.
 	var plain int
@@ -273,11 +291,33 @@ func TestSQLServerWorkflowNamesBecomeExact(t *testing.T) {
 	}
 	unchanged(t, db, "after the preflight refusal")
 
-	// 2. Repair that row. The same defect in a tenant that is NOT in admin.tenants is invisible to the
-	// preflight loop; the foreign keys, recreated WITH CHECK, are the backstop and must refuse it too.
+	// 1b. The first repair is done; the SCHEDULE that reaches its definition only by case is next. It must be refused
+	// naming the schedule, and the control rows (the exact schedule, and the ghost that names no definition at all)
+	// must not be what it refuses: the run below applies with both still present.
 	inTenant(t, db, namesTenantKnown, func(c *sql.Conn) {
 		mustExec(t, c, `UPDATE workflow_instances SET def_name = N'Checkout' WHERE id = N'run-case-orphan'`)
 	})
+	err = runMigrations(t, ctx, real, migration.DialectMSSQL)
+	if err == nil {
+		t.Fatal("migration 011 applied over a schedule that reaches its definition only by case; it must refuse (the schedule would stop firing)")
+	}
+	for _, want := range []string{"cleat#3635", "workflow_schedules.def_name", namesTenantKnown, "'checkout' (schedule nightly)", "Nothing was changed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the schedule refusal does not say %q:\n%v", want, err)
+		}
+	}
+	for _, notWant := range []string{"weekly", "ghost", "NoSuchWorkflow"} {
+		if strings.Contains(err.Error(), notWant) {
+			t.Errorf("the schedule refusal names %q, which is not a case-only match", notWant)
+		}
+	}
+	unchanged(t, db, "after the schedule refusal")
+	inTenant(t, db, namesTenantKnown, func(c *sql.Conn) {
+		mustExec(t, c, `UPDATE workflow_schedules SET def_name = N'Checkout' WHERE name = N'nightly'`)
+	})
+
+	// 2. The same defect in a tenant that is NOT in admin.tenants is invisible to the preflight loop; the foreign
+	// keys, recreated WITH CHECK, are the backstop and must refuse it too.
 	inTenant(t, db, namesTenantHid, func(c *sql.Conn) {
 		defs(c, namesTenantHid, "Hidden.Flow")
 		inst(c, namesTenantHid, "run-hidden-orphan", "hidden.flow")

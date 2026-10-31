@@ -41,6 +41,17 @@
 -- leaving the four columns out made no difference that the run-to-run spread could resolve; the CHANGELOG entry
 -- carries the figures and their limits.
 --
+-- WHICH STORED-ONLY COLUMNS ARE CHECKED, AND WHY (decided with the reviewer's measurement, cleat#3642):
+--   * workflow_schedules.def_name: CHECKED above. It is looked up (a due schedule starts its workflow by this name).
+--   * idempotency_keys.def_name: not checked. It is only selected and compared in Go with `!=`, which is exact before
+--     and after; no SQL predicate reads it.
+--   * event_history.child_name: not checked. It is written and read back; no SQL predicate reads it, and replay
+--     compares it in Go.
+--   * admin.plugin_dep_overrides.definition_name: not checked. It is an append-only AUDIT record of each use of the
+--     plugin-dependency override (engine/plugin_dep_overrides.go only inserts); nothing looks it up to authorize a
+--     deploy, so a case variant "stops applying" nothing. A person querying the table by name now needs the exact spelling.
+--   Re-derive: git grep -n -E 'plugin_dep_overrides|child_name|idempotency_keys' -- '*.go' ':!*_test.go' and read the predicates.
+--
 -- NOT CONVERTED: the tables plugins create at boot (the scheduler's schedules, event_subscriptions, task_queue).
 -- Core migrations cannot name a table that may not exist yet, so those def-name columns stay case-insensitive until the
 -- plugin migrations convert them on their own (carried as a follow-up, not forgotten).
@@ -163,6 +174,30 @@ BEGIN TRY
                               AND m.library COLLATE Latin1_General_100_BIN2 = c.library COLLATE Latin1_General_100_BIN2
                               AND m.name COLLATE Latin1_General_100_BIN2 = c.name COLLATE Latin1_General_100_BIN2)) e;
     IF @found > 0 SET @report += CHAR(10) + N'  workflow_defs.(library, name) -> library.members.(library, name), tenant ' + CAST(@t AS nvarchar(40)) + N': ' + @ex;
+
+    -- A STORED-ONLY column that is still LOOKED UP: a schedule starts its workflow by the def_name it stores, which
+    -- handleCreateSchedule keeps exactly as the caller typed it and never checks against a definition. A schedule
+    -- for 'checkout' under a definition named 'Checkout' works today and fails at every tick once the lookup is
+    -- exact (cleat-review-69 measured the join: 1 before, 0 after, with this migration reporting success). Refuse a
+    -- row that matches a definition the way the OLD collation compares (the database default, forced so a re-run over
+    -- converted columns still sees it) and matches none exactly. A schedule that names no definition in ANY case was
+    -- already broken and is not this migration's to refuse.
+    -- Through a narrow temp table of this tenant's definition NAMES, indexed both ways: the first version of this
+    -- check compared workflow_schedules to the wide workflow_defs rows directly, the optimiser chose a scan of
+    -- workflow_defs per schedule row, and the file took 105 to 140 s instead of about 6 on 100,000 schedules. A seek per
+    -- schedule row is what makes it cheap.
+    IF OBJECT_ID(N'tempdb..#defnames') IS NOT NULL DROP TABLE #defnames;
+    CREATE TABLE #defnames (exact_name nvarchar(255) COLLATE Latin1_General_100_BIN2 NOT NULL PRIMARY KEY,
+                            loose_name nvarchar(255) COLLATE DATABASE_DEFAULT NOT NULL);
+    INSERT #defnames (exact_name, loose_name) SELECT DISTINCT name, name FROM dbo.workflow_defs WHERE tenant_id = @t;
+    CREATE INDEX ix_defnames_loose ON #defnames (loose_name);
+    SELECT @found = COUNT(*), @ex = STRING_AGG(CAST(e.nm AS nvarchar(max)), N', ')
+    FROM (SELECT TOP (3) N'''' + c.def_name COLLATE DATABASE_DEFAULT + N''' (schedule ' + c.name COLLATE DATABASE_DEFAULT + N')' AS nm FROM dbo.workflow_schedules c
+          WHERE c.tenant_id = @t
+            AND EXISTS (SELECT 1 FROM #defnames d WHERE d.loose_name = c.def_name COLLATE DATABASE_DEFAULT)
+            AND NOT EXISTS (SELECT 1 FROM #defnames d WHERE d.exact_name = c.def_name COLLATE Latin1_General_100_BIN2)) e;
+    DROP TABLE #defnames;
+    IF @found > 0 SET @report += CHAR(10) + N'  workflow_schedules.def_name -> workflow_defs.name, tenant ' + CAST(@t AS nvarchar(40)) + N': ' + @ex;
 
     FETCH NEXT FROM tenants INTO @t;
   END
