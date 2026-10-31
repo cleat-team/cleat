@@ -166,7 +166,7 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	case strings.Contains(query, "INSERT INTO schedules"):
 		return c.execInsertSchedule(args)
 	case strings.Contains(query, "UPDATE schedules"):
-		return c.execUpdateSchedule(args)
+		return c.execUpdateSchedule(query, args)
 	case strings.Contains(query, "DELETE FROM schedules"):
 		return c.execDeleteSchedule(args)
 	default:
@@ -229,7 +229,7 @@ func (c *fakeConn) execInsertSchedule(args []driver.NamedValue) (driver.Result, 
 	return &fakeResult{1}, nil
 }
 
-func (c *fakeConn) execUpdateSchedule(args []driver.NamedValue) (driver.Result, error) {
+func (c *fakeConn) execUpdateSchedule(query string, args []driver.NamedValue) (driver.Result, error) {
 	// Find id and tenant_id from the end of the args.
 	// The query is: UPDATE schedules SET updated_at = now(), ... WHERE id = $N AND tenant_id = $N+1
 	n := len(args)
@@ -246,7 +246,12 @@ func (c *fakeConn) execUpdateSchedule(args []driver.NamedValue) (driver.Result, 
 
 	// For background update (runDueSchedules), we only have 3 args and no tenant_id in WHERE.
 	// For route update, we have at least 2 args [id, tenant_id] at the end.
-	if n == 3 {
+	//
+	// Told apart by the STATEMENT, not by the argument count. It used to be `n == 3`, and a route update that
+	// sets one field (`{"name":"x"}`: name, id, tenant_id) has exactly three arguments too, so it was read as the
+	// background update, found no schedule whose id was the tenant's, and reported 0 rows for an update that
+	// worked. Nothing minded while the handler discarded the count (cleat#3551).
+	if strings.Contains(query, "SET last_run_at") {
 		// Background update: last_run_at = $1, next_run_at = $2, WHERE id = $3
 		id, err := aStr(args, 3)
 		if err != nil {
@@ -351,6 +356,8 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return c.queryDueSchedules(args, scanErr)
 	case strings.Contains(q, "SELECT cron, enabled FROM schedules"):
 		return c.queryScheduleForUpdate(args)
+	case strings.Contains(q, "SELECT 1 FROM schedules"):
+		return c.queryScheduleExists(args)
 	case strings.Contains(q, "SELECT name, cron, workflow_name, input FROM schedules"):
 		return c.queryScheduleForTrigger(args)
 	case strings.Contains(q, "FROM schedules") && strings.Contains(q, "WHERE id ="):
@@ -369,6 +376,24 @@ func (c *fakeConn) queryTenantByKeyHash(args []driver.NamedValue) (driver.Rows, 
 	}
 	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
 	return &fakeRows{columns: cols, data: data}, nil
+}
+
+// queryScheduleExists answers `SELECT 1 FROM schedules WHERE id = $1 AND tenant_id = $2`, which PUT asks when its
+// UPDATE affected 0 rows (cleat#3551): one row if the tenant has that schedule, none if not.
+func (c *fakeConn) queryScheduleExists(args []driver.NamedValue) (driver.Rows, error) {
+	id, err := aStr(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := aStr(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	cols := []string{"?column?"}
+	if _, ok := c.store.schedules[tid+":"+id]; !ok {
+		return &fakeRows{columns: cols}, nil
+	}
+	return &fakeRows{columns: cols, data: [][]driver.Value{{int64(1)}}}, nil
 }
 
 func (c *fakeConn) queryScheduleByID(args []driver.NamedValue) (driver.Rows, error) {
