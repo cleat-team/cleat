@@ -2604,6 +2604,7 @@ func main() {
 		}
 
 		// Wrap with auth middleware if --require-auth is true.
+		var chain *authChain // set under --require-auth; nil means authentication is off
 		if *requireAuth {
 			// S6: these plugin endpoints are meant to be called by
 			// parties who cannot present a cleat API key -- an external
@@ -2666,12 +2667,15 @@ func main() {
 			// authenticated by the outermost layer and then refused by the tenant layer behind it.
 			// Installed under --require-auth: with authentication off nothing is gated, so there is
 			// no decision for the operator layer to make.
-			handler = composeAuthChain(handler, mux, authChain{
+			//
+			// Only DESCRIBED here; composeRequestChain installs it below, together with the
+			// --tenant-resolver wrapper that must go outside it (cleat#3577).
+			chain = &authChain{
 				Tenants:          authResolver,
 				Operators:        operatorResolver,
 				Domains:          authResolver,
 				RequireHostMatch: *requireHostMatch,
-			})
+			}
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//
@@ -2727,20 +2731,9 @@ func main() {
 			logger.WarnContext(context.Background(), "authentication disabled", "worker_id", workerID)
 		}
 
-		// Tenant resolver middleware.
-		if strings.HasPrefix(*tenantResolver, "header:") {
-			headerName := strings.TrimPrefix(*tenantResolver, "header:")
-			prev := handler
-			handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if tidStr := r.Header.Get(headerName); tidStr != "" {
-					if tid, err := uuid.Parse(tidStr); err == nil {
-						ctx := auth.WithTenantID(r.Context(), tid)
-						r = r.WithContext(ctx)
-					}
-				}
-				prev.ServeHTTP(w, r)
-			})
-		}
+		// Authentication, then the tenant resolver OUTSIDE it. One function, so the order a worker
+		// runs is the order the tests measure (cleat#3577); see composeRequestChain.
+		handler = composeRequestChain(handler, mux, chain, *tenantResolver)
 
 		// Create rate limiters and wrap handler.
 		// A rate-limit of 0 disables IP-based rate limiting.
