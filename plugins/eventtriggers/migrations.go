@@ -1397,5 +1397,41 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE event_subscriptions ALTER COLUMN def_name NVARCHAR(MAX) COLLATE DATABASE_DEFAULT NOT NULL;
 			`,
 		},
+		{
+			// cleat#3658 (owner decision D60): this plugin's workflow-definition NAME column compares exactly on
+			// MySQL, as it already does on PostgreSQL and -- since step 11, cleat#3641 -- on SQL Server. Core
+			// migration 012 (cleat#3640) did the same for the core columns.
+			//
+			// A NEW VERSION, NOT AN UpMySQL ADDED TO 11, and this is why: MySQL already has 11 recorded as
+			// applied, because 11's Up is empty and the runner records a version whether or not any SQL ran for
+			// that dialect. An UpMySQL added to 11 would therefore never execute on a database that has already
+			// migrated -- it is cleat#1157's failure (a skipped migration recorded as done) reached from the
+			// other side.
+			//
+			// NOTHING IN SQL COMPARES THIS COLUMN TODAY (it is written and read back in a select list, with no
+			// predicate, join, grouping, ordering or key on it), so this fixes no user-visible behaviour. It makes
+			// the schema uniformly exact, which is what a later comparison (event routing) needs.
+			//
+			// NOT IN-PLACE, MEASURED on MySQL 8.4.11 with a 128 MB buffer pool and the tables' real plugin
+			// definitions: ALGORITHM=INPLACE is REFUSED on all three plugin tables (error 1845), so each step
+			// asks for COPY, LOCK=SHARED outright. The table is copied once; READS CONTINUE and WRITERS WAIT for
+			// the whole copy. event_subscriptions holds one row per subscription -- 100,000 rows took 1.2 s --
+			// and it carries CHECK (json_valid(...)), so the rebuild re-validates every row. The figure scales
+			// with the host and with the table; it was measured at one size.
+			Version:         12,
+			Up:              "",
+			DialectSpecific: "MySQL only: PostgreSQL's comparison of this column is already exact, and SQL Server's was made exact by this plugin's step 11 (cleat#3641).",
+			UpMySQL: `
+				SET @col := (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'event_subscriptions' AND COLUMN_NAME = 'def_name');
+				SET @ddl := IF(@col <> 'utf8mb4_0900_bin', 'ALTER TABLE event_subscriptions MODIFY def_name VARCHAR(255) COLLATE utf8mb4_0900_bin NOT NULL, ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			// Reversal restores the server default, which is what the column had before. It costs the same copy.
+			DownMySQL: `
+				SET @col := (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'event_subscriptions' AND COLUMN_NAME = 'def_name');
+				SET @ddl := IF(@col <> 'utf8mb4_0900_ai_ci', 'ALTER TABLE event_subscriptions MODIFY def_name VARCHAR(255) COLLATE utf8mb4_0900_ai_ci NOT NULL, ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+		},
 	}
 }
