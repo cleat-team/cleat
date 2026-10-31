@@ -1,0 +1,36 @@
+-- cleat#3638: the application role cannot REWRITE a tombstone. See migrations/mssql/014 for the
+-- same change on SQL Server.
+--
+-- admin.tenant_tombstones is the one record of where a dropped tenant's own audit chain ended
+-- (audit_chain_seq, audit_chain_hash). The chain itself is deleted with the tenant, so this row is
+-- what lets an earlier copy of that chain still be checked against the tenant's last known state.
+-- 007 states the rule -- "No UPDATE is granted: a tombstone is written once and deleted by an
+-- operator or not at all" -- and grants SELECT, INSERT and DELETE.
+--
+-- THE STATED PRIVILEGE AND THE HELD ONE DIFFERED. 001_schema.sql runs
+--
+--     ALTER DEFAULT PRIVILEGES IN SCHEMA admin GRANT SELECT, INSERT, DELETE, UPDATE ON TABLES TO cleat_app
+--
+-- and a default privilege is applied when the table is CREATED, so 007's table arrived already
+-- carrying UPDATE and 007's own GRANT did not take it away. Measured 2026-10-30 for cleat#3638 as
+-- cleat_app itself (SET ROLE, then has_table_privilege), on a scratch database migrated through
+-- 010: admin.tenant_tombstones held DELETE, INSERT, SELECT **and UPDATE** against a stated
+-- DELETE, INSERT, SELECT. It was the only one of the fourteen admin/library tables where the two
+-- differed; the library schema has no default-privileges rule, and every other admin table's
+-- stated set already included UPDATE.
+--
+-- The REVOKE is the whole change, and it has to be a new file rather than an edit to 007: an applied
+-- migration is identified by version and is not re-read, so an edit reaches new databases only.
+--
+-- The GRANT re-states what 007 granted. It is not needed to keep those three -- they are already
+-- held -- and it is here so that this file answers "what may the application role do to a tombstone"
+-- on its own, which is the question a reader checking a privilege arrives with.
+--
+-- WHAT THIS DOES NOT CLAIM. No code path updates the row today: the statements against it are the
+-- drop's INSERT, the reads, and the operator's DELETE (checked in cleat#3638), so nothing broken is
+-- being repaired and no behaviour changes. What changes is a capability. cleat_app is the credential
+-- a compromised worker holds, and with UPDATE it could rewrite the anchor that an earlier copy of a
+-- deleted tenant's audit chain is checked against -- after which the check would agree with a chain
+-- somebody had edited.
+GRANT SELECT, INSERT, DELETE ON TABLE admin.tenant_tombstones TO cleat_app;
+REVOKE UPDATE ON TABLE admin.tenant_tombstones FROM cleat_app;

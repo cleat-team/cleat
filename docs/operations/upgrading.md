@@ -409,6 +409,41 @@ reads and writes blocked**, and measure on a copy of your own data. It is linear
   so that the schema compares workflow names exactly everywhere.
 - MySQL's equivalent is cleat#3658 and is not part of this release's plugin steps.
 
+### The application role can no longer rewrite a tombstone (cleat#3638)
+
+`admin.tenant_tombstones` is the one record of where a dropped tenant's own audit chain ended; the
+chain is deleted with the tenant, so this row is what lets an earlier copy of that chain still be
+checked. It is written once, read, and deleted by an operator, and nothing updates it. PostgreSQL
+migration `007` granted `cleat_app` `SELECT, INSERT, DELETE` and said so in a comment. The
+application role held `UPDATE` anyway, on both dialects: on PostgreSQL through `001`'s
+`ALTER DEFAULT PRIVILEGES IN SCHEMA admin`, which applies when a table is *created* and was never
+taken back, and on SQL Server through `001`'s schema-level `GRANT ... ON SCHEMA::[admin]`, which no
+table-level `DENY` overrode.
+
+Migration `011` (PostgreSQL) revokes it and migration `014` (SQL Server) denies it.
+
+**This is not a behaviour change.** The statements against the table in this tree are the drop's
+`INSERT`, the reads and the operator's `DELETE`; nothing updates the row. What changes is a
+capability. `cleat_app` is the credential a compromised worker process holds, and with `UPDATE` it
+could rewrite the anchor an earlier copy of a deleted tenant's audit chain is checked against — after
+which the check would agree with a chain somebody had edited.
+
+- **It runs in the deploy step**, with the other core migrations: `cleat-worker --migrate-only`,
+  from a role with DDL rights. Nothing needs to be drained first.
+- **Cost.** Both are privilege statements, not data ones: no table is rewritten and no row is read.
+  Measured on PostgreSQL 16: the `REVOKE` completed immediately while another session held an
+  `ACCESS SHARE` lock on the table, so an ordinary reader is not blocked. SQL Server's lock
+  behaviour for a `DENY` was not measured separately.
+- **Nothing else is narrowed.** `SELECT`, `INSERT` and `DELETE` are unchanged, and the tests assert
+  them on both dialects; the drop route and the operator's delete route go on working as this login.
+- **To undo it:** `GRANT UPDATE ON admin.tenant_tombstones TO cleat_app;` (PostgreSQL) or
+  `REVOKE UPDATE ON [admin].[tenant_tombstones] FROM cleat_app_role;` (SQL Server). The second removes
+  only the table-level `DENY` and leaves the schema-level `GRANT` beneath it intact.
+- **If your deployment grants the application role's privileges outside these migrations,** that
+  grant will hand `UPDATE` back on the next run. `deploy/postgres/900-app-role.sh` and
+  `deploy/mssql/900-app-role.sh` do not — every `GRANT` and `DENY` this login has comes from
+  `migrations/` — so the shipped deployment path keeps the restriction.
+
 ## Running old and new workers side by side
 
 Because workers are stateless and read workflow definitions from the database,
