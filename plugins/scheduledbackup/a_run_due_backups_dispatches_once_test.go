@@ -82,16 +82,6 @@ func TestRunDueBackupsDispatchesExactlyOnceAndAdvancesNextRunAt(t *testing.T) {
 			p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
 			p.deploymentSecrets = &fakeBackupDeploymentSecrets{dsn: testBackupDSN}
 			p.config.DumpDir = t.TempDir()
-			// A fake pg_dump that succeeds at once. This test is about what the
-			// claim transaction does, and a dispatched backup counts either way
-			// (it writes its backup_history row before pg_dump runs), so the one
-			// thing pg_dump can contribute here is time. Without this the wait
-			// below ran whatever pg_dump the machine had on PATH against the host
-			// "test" in testBackupDSN: on a machine with none it failed at once,
-			// and with a slow one this test failed with "timed out waiting for
-			// dispatched backup to finish" (cleat#3622). Every other test in this
-			// package that runs a backup already does this.
-			installFakePgDump(t, "echo dump > \"$2\"\nexit 0\n")
 
 			// TWO due configs, not one: with a single row, lib/pq can finish
 			// delivering it (and know there are no more) before the loop
