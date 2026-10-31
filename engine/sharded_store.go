@@ -504,6 +504,12 @@ func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion 
 		if err == nil {
 			return wasm, nil
 		}
+		// A library member whose bytes do not match their digest (cleat#3630) is a finding about the data,
+		// not a miss: another shard's "not found" must not replace it, and another shard's intact copy must
+		// not quietly stand in for the one that is damaged. It is returned as the shard found it.
+		if errors.Is(err, ErrLibraryMemberDigestMismatch) {
+			return nil, err
+		}
 		lastErr = err
 	}
 	return nil, lastErr
