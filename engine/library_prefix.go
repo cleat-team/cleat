@@ -197,6 +197,15 @@ func libraryPrefixClashes(ctx context.Context, q libraryPrefixQueryer, d Dialect
 	case DialectPostgres:
 		query = `SELECT tenant_id::text, name, versions FROM library_clashing_names($1)`
 	case DialectMSSQL:
+		// The procedure sets the connection's SESSION_CONTEXT tenant_id for each tenant it visits and puts
+		// the caller's back at the end and in CATCH. A client cancel is a TDS attention, which CATCH does not
+		// run on, so a call cancelled inside it leaves its last tenant in the SESSION (measured, cleat#3647).
+		// What keeps that from the next statement is go-mssqldb v1.11.2 resetting the session when
+		// database/sql reuses the connection, not this procedure, and
+		// TestACancelledCallThatSetsTheSessionContextIsNotSeenByTheNextPoolUse is what notices if a driver
+		// bump loses it. Not covered, cleat#3647 stays open for each: the worker's HTTP handler end to end,
+		// how the tenant-scoped stores set their own context on a pooled connection, any other driver or
+		// pooler, and READ_COMMITTED_SNAPSHOT on.
 		query = `EXEC dbo.library_clashing_names @p1`
 	default:
 		return nil, nil
