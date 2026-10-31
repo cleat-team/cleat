@@ -11,8 +11,8 @@
 -- EXECUTE AS OWNER so the publisher needs no right on workflow_defs; EXECUTE is granted to
 -- cleat_library_publisher alone. Only the application's OWN names count (library IS NULL). The comparison
 -- is the database's own: LEFT(name, LEN(@prefix)) = @prefix, the prefix as the right-hand side of LEN,
--- so while workflow names are case-insensitive here (owner decision D60, cleat#3635, makes them binary)
--- the check is exactly as wide as the database's idea of "the same name". No LIKE on the NAMES: "_" is a wildcard.
+-- so the check is exactly as wide as the database's idea of "the same name": exact, since the name columns
+-- became binary (owner decision D60, cleat#3635). No LIKE on the NAMES: "_" is a wildcard.
 --
 -- THE ARGUMENT IS VALIDATED because the publisher can call this directly, not only through the engine:
 -- LEFT(name, LEN('')) = '' is true of every name, so an unchecked prefix lets that role list every tenant's

@@ -12,9 +12,8 @@ import (
 // replaces the grandfathering part 2 described. Run on real PostgreSQL and SQL Server, and as both
 // logins the deploy side uses (the publisher is the same connection either way).
 //
-// The names are the database's own equality, so the case divergence is pinned here as it is for the
-// deploy: owner decision D60 (cleat#3635) makes SQL Server's names case-sensitive, and the case at the
-// end is the placeholder #3635 flips.
+// The names are the database's own equality, which is exact on both databases since owner decision D60
+// (cleat#3635): the case at the end asserts that a name in another case is not in the way anywhere.
 
 // registerTenants gives the three test tenants an admin.tenants row, which is what the clash reader
 // enumerates tenants from (a PostgreSQL reader whose owner bypasses row-level security needs none, and
@@ -93,22 +92,15 @@ func TestAPublishThatClashesWithATenantsOwnNamesIsRefused(t *testing.T) {
 			}
 		})
 
-		// Pinned divergence, the publish half: SQL Server holds a tenant's UPPER.prefix names to be under
-		// the prefix, PostgreSQL does not. Owner decision D60 (cleat#3635) makes them agree.
-		t.Run("pinned divergence: a tenant's names in another case", func(t *testing.T) {
+		// Names are compared exactly on both databases (owner decision D60, cleat#3635), so a tenant's
+		// UPPER.prefix name is a different name from the library's and is not in the way. Until D60 SQL
+		// Server held it to be the same name and refused here; PostgreSQL never did.
+		t.Run("a tenant's names in another case are different names on both databases", func(t *testing.T) {
 			lib2 := c.library(t, "clashcase")
 			upper := strings.ToUpper(lib2) + ".mine"
 			mustDeploy(pfxTenantC, upper, 1)
-			err := c.publishAsOperator(t, lib2)
-			switch c.rig.dialect {
-			case DialectMSSQL:
-				if !errors.Is(err, ErrLibraryPublishRefused) {
-					t.Errorf("SQL Server: publishing %q beside the tenant's %q got %v; the database treats them as the same name, so it must be refused", lib2, upper, err)
-				}
-			default:
-				if err != nil {
-					t.Errorf("PostgreSQL: publishing %q was refused (%v), but %q is a different name there", lib2, err, upper)
-				}
+			if err := c.publishAsOperator(t, lib2); err != nil {
+				t.Errorf("%s: publishing %q beside the tenant's %q was refused (%v), but %s compares names exactly, so they are different names", c.rig.dialect, lib2, upper, err, c.rig.dialect)
 			}
 		})
 	})
