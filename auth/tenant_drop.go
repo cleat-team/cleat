@@ -220,6 +220,16 @@ func (s *TenantStore) DropTenant(ctx context.Context, req DropRequest) (DropResu
 	case DialectPostgres:
 		_, err = tx.ExecContext(ctx, `SELECT admin.drop_tenant($1::uuid, $2)`, req.TenantID.String(), req.Schema)
 	default:
+		// This procedure sets SESSION_CONTEXT tenant_id to the tenant being dropped and restores the caller's
+		// value only on the normal path and in CATCH. A request that is cancelled inside it (the worker passes
+		// r.Context()) is a TDS attention, CATCH does not run, the transaction rolls back and the dropped
+		// tenant stays in the SESSION (measured, cleat#3647). It runs as the application login, the one the
+		// tenant-scoped stores use. What keeps the stale value from the next statement is go-mssqldb v1.11.2
+		// resetting the session when database/sql reuses the connection, and
+		// engine.TestACancelledCallThatSetsTheSessionContextIsNotSeenByTheNextPoolUse is what notices if a
+		// driver bump loses it. Not covered, cleat#3647 stays open for each: the worker's HTTP handler end to
+		// end, how the tenant-scoped stores set their own context on a pooled connection, any other driver
+		// or pooler, and READ_COMMITTED_SNAPSHOT on.
 		_, err = tx.ExecContext(ctx, `EXEC admin.drop_tenant @tenant_id = @p1`, req.TenantID.String())
 	}
 	if err != nil {
