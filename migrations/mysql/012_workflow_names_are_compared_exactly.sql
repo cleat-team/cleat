@@ -23,9 +23,11 @@
 -- where event_history did not, so nothing here depends on it. Each ALTER asks for ALGORITHM=COPY, LOCK=SHARED outright:
 -- the table is COPIED once with READS allowed and WRITES BLOCKED for the whole copy, and the cost grows with the table.
 -- Measured on MySQL 8.4.11 with a 128 MB buffer pool, 20,000 definitions, 1,000,000 instances, 1,000,000 history events
--- and 390,000 rows in the other four tables (2.5 GB): 127 s and 135 s for the whole file, with no probe call failing; an
--- instance insert waited up to 66 s, an event insert up to 13 s, a definition read at most 0.8 s. Run it with workers
--- stopped, as every migration here is.
+-- and 390,000 rows in the other four tables (2.5 GB), with an instance insert, an event insert and a definition read
+-- looping throughout: four runs, two on each key order, took 127, 135, 187 and 143 s (host load 2.2 to 5.2, which this
+-- cannot separate from the order). No probe call failed in any. The longest instance insert waited 64 to 75 s, the
+-- longest event insert 9 to 28 s, the longest definition read 0.2 to 0.8 s. Run it with workers stopped, as every
+-- migration here is.
 -- (SQL Server's equivalent is metadata-only; do not carry that expectation over.)
 --
 -- A foreign key between columns of different collations is refused (error 3780), so the three keys that carry a
