@@ -251,5 +251,41 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE task_queue ALTER COLUMN def_name NVARCHAR(MAX) COLLATE DATABASE_DEFAULT NULL;
 			`,
 		},
+		{
+			// cleat#3658 (owner decision D60): this plugin's workflow-definition NAME column compares exactly on
+			// MySQL, as it already does on PostgreSQL and -- since step 6, cleat#3641 -- on SQL Server. See
+			// plugins/eventtriggers/migrations.go's step 12 for the full reasoning; this is the same change.
+			//
+			// A NEW VERSION, NOT AN UpMySQL ADDED TO 6: MySQL has 6 recorded as applied already, because 6's Up
+			// is empty and the runner records a version whether or not any SQL ran for that dialect.
+			//
+			// THIS IS THE ONE TO SIZE FOR. task_queue holds one row per QUEUED job, so it scales with load rather
+			// than with configuration, and the copy blocks writers for its whole duration.
+			//
+			// NOT IN-PLACE, MEASURED on MySQL 8.4.11 with a 128 MB buffer pool and the table's real plugin
+			// definition: ALGORITHM=INPLACE is refused (error 1845), so this asks for COPY, LOCK=SHARED. Reads
+			// continue and WRITERS WAIT for the whole copy; no probe call failed. Two sizes, so the growth is
+			// measured rather than extrapolated from one: 1,000,000 rows took 16.6 s and 3,000,614 rows took
+			// 56.2 s -- about 17 to 19 s per million, linear across those two points and not claimed beyond
+			// them. The table carries two secondary indexes and CHECK (json_valid(...)) on its JSON columns, so
+			// the rebuild re-validates and re-indexes every row. The figure scales with the host.
+			//
+			// The column is NULLABLE and has no default; that is restated exactly below.
+			Version:         7,
+			Up:              "",
+			DialectSpecific: "MySQL only: PostgreSQL's comparison of this column is already exact, and SQL Server's was made exact by this plugin's step 6 (cleat#3641).",
+			UpMySQL: `
+				SET @col := (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'task_queue' AND COLUMN_NAME = 'def_name');
+				SET @ddl := IF(@col <> 'utf8mb4_0900_bin', 'ALTER TABLE task_queue MODIFY def_name VARCHAR(255) COLLATE utf8mb4_0900_bin NULL, ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			// Reversal restores the server default, which is what the column had before. It costs the same copy,
+			// so a rollback of this version is as expensive as the upgrade.
+			DownMySQL: `
+				SET @col := (SELECT COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'task_queue' AND COLUMN_NAME = 'def_name');
+				SET @ddl := IF(@col <> 'utf8mb4_0900_ai_ci', 'ALTER TABLE task_queue MODIFY def_name VARCHAR(255) COLLATE utf8mb4_0900_ai_ci NULL, ALGORITHM=COPY, LOCK=SHARED', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+		},
 	}
 }
