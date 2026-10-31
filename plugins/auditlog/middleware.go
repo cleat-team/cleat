@@ -81,13 +81,17 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 
 		tid, _ := auth.TenantIDFromContext(r.Context())
+		var metadata string
 		if operatorTarget != nil {
 			tid, _ = operatorTarget.Tenant() // the nil UUID, the default tenant's, when none was noted
+			metadata = operatorTarget.Metadata()
 		}
 		// ok is deliberately ignored: an unauthenticated request has no
 		// subject to record, and that is a fact worth an empty user_id, not a
 		// reason to refuse the request or fail this write. cleat#1881.
 		userID, _ := auth.SubjectFromContext(r.Context())
-		p.enqueueAudit(tid, userID, r.Method, r.URL.Path, rw.statusCode, r.RemoteAddr, r.UserAgent(), duration)
+		ev := newQueuedEvent(tid, userID, r.Method, r.URL.Path, rw.statusCode, r.RemoteAddr, r.UserAgent(), duration)
+		ev.metadata = metadata
+		p.enqueue(ev)
 	})
 }

@@ -45,9 +45,10 @@ type chainEvent struct {
 	durationMs int
 
 	// metadata is the literal JSON document to store, hashed as the database stores it
-	// rather than as supplied -- see appendOnce. Empty means "{}"; nothing in production
-	// sets this field yet (cleat#2534 will be the first caller), so every row appended
-	// today still stores and hashes "{}", unchanged.
+	// rather than as supplied -- see appendOnce. Empty means "{}". The middleware sets it
+	// when an operator handler noted a document (auth.NoteAuditMetadata, cleat#3578: the
+	// reason an operator gave for minting a recovery key); every other row still stores
+	// and hashes "{}", unchanged.
 	metadata string
 
 	// id and ts are fixed when the request finished, not when the append runs: with a queue

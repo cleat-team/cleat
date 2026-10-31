@@ -63,6 +63,12 @@ func (s *apiServer) handleAdminRoutesForTenant(w http.ResponseWriter, r *http.Re
 		s.handleSetTenantSuspended(w, r, tenant, tail == "suspend")
 		return
 	}
+	if ok && tenant != "" && tail == "recovery-key" {
+		// cleat#3578: an operator mints a key for a tenant that has locked itself out. Admin-only; the
+		// handler and the scope gate both say so. Not an instance route either.
+		s.handleRecoveryKey(w, r, tenant)
+		return
+	}
 	if ok && tenant != "" && tail == "tombstone" {
 		// cleat#3552, B3b-2b: the one act that lets a dropped id be provisioned again. Admin-only; the
 		// handler and the scope gate both say so. Not an instance route either.

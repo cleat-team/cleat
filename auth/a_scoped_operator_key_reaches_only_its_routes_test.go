@@ -25,6 +25,7 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 	resume := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7/resume"
 	bare := "/api/admin/tenants/8d264f39-9c52-4623-aa1d-258c7bcc34d7"
 	tombstone := bare + "/tombstone"
+	recovery := bare + "/recovery-key"
 
 	type row struct {
 		name   string
@@ -104,6 +105,17 @@ func TestAScopedOperatorKeyReachesOnlyTheRoutesItsScopeNames(t *testing.T) {
 		{"provision, tombstone with POST", ScopeProvision, http.MethodPost, tombstone, 403},
 		{"provision, tombstone of upper-case id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7/tombstone", 403},
 		{"provision, tombstone with a tail", ScopeProvision, http.MethodDelete, tombstone + "/x", 403},
+		// Minting a recovery key (cleat#3578) hands the caller a working credential for a tenant's data, so
+		// it is admin-only in v1 and a provision-scoped key is refused. It falls out of provisionMayReach with
+		// no case to name it, which is the kind of refusal a later edit removes without noticing, so each
+		// shape a provisioner might try is a row. Whether a provisioner may recover tenants it created is the
+		// owner's open question on the issue.
+		{"admin, mint a recovery key", ScopeAdmin, http.MethodPost, recovery, 200},
+		{"provision, mint a recovery key", ScopeProvision, http.MethodPost, recovery, 403},
+		{"provision, recovery key with GET", ScopeProvision, http.MethodGet, recovery, 403},
+		{"provision, recovery key with DELETE", ScopeProvision, http.MethodDelete, recovery, 403},
+		{"provision, recovery key of upper-case id", ScopeProvision, http.MethodPost, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7/recovery-key", 403},
+		{"provision, recovery key with a tail", ScopeProvision, http.MethodPost, recovery + "/x", 403},
 		{"provision, drop of upper-case id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8D264F39-9C52-4623-AA1D-258C7BCC34D7", 403},
 		{"provision, drop of bare hex", ScopeProvision, http.MethodDelete, "/api/admin/tenants/8d264f399c524623aa1d258c7bcc34d7", 403},
 		{"provision, drop of a name that is no id", ScopeProvision, http.MethodDelete, "/api/admin/tenants/acme", 403},
