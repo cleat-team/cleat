@@ -144,15 +144,8 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	if err != nil {
 		return nil, err
 	}
-	hashHex := fmt.Sprintf("%x", keyHash)
-	tid, ok := c.store.apiKeys[hashHex]
-	if !ok {
-		return &fakeRows{columns: []string{"tenant_id", "key_id"}}, nil
-	}
-	return &fakeRows{
-		columns: []string{"tenant_id", "key_id"},
-		data:    [][]driver.Value{{tid, "11111111-1111-1111-1111-111111111111"}},
-	}, nil
+	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+	return &fakeRows{columns: cols, data: data}, nil
 }
 
 // ---- Rate limits: INSERT ... ON CONFLICT DO UPDATE -------------------------
@@ -1457,15 +1450,8 @@ func (c *rowsErrConn) QueryContext(_ context.Context, query string, args []drive
 		if err != nil {
 			return nil, err
 		}
-		hashHex := fmt.Sprintf("%x", keyHash)
-		tid, ok := c.store.apiKeys[hashHex]
-		if !ok {
-			return &fakeRows{columns: []string{"tenant_id", "key_id"}}, nil
-		}
-		return &fakeRows{
-			columns: []string{"tenant_id", "key_id"},
-			data:    [][]driver.Value{{tid, "11111111-1111-1111-1111-111111111111"}},
-		}, nil
+		cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+		return &fakeRows{columns: cols, data: data}, nil
 	}
 	return nil, fmt.Errorf("rowsErrConn: unexpected query: %s", query)
 }

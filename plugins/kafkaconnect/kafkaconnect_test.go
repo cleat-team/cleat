@@ -20,6 +20,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -381,15 +382,8 @@ func (c *fakeKafkaConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows
 	if err != nil {
 		return nil, err
 	}
-	hashHex := fmt.Sprintf("%x", keyHash)
-	tid, ok := c.store.apiKeys[hashHex]
-	if !ok {
-		return &fakeKafkaRows{cols: []string{"tenant_id", "key_id"}}, nil
-	}
-	return &fakeKafkaRows{
-		cols: []string{"tenant_id", "key_id"},
-		data: [][]driver.Value{{tid, "11111111-1111-1111-1111-111111111111"}},
-	}, nil
+	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+	return &fakeKafkaRows{cols: cols, data: data}, nil
 }
 
 func (c *fakeKafkaConn) queryList(args []driver.NamedValue) (driver.Rows, error) {
