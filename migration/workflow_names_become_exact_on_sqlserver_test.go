@@ -331,10 +331,18 @@ func TestSQLServerWorkflowNamesBecomeExact(t *testing.T) {
 	}
 	unchanged(t, db, "after the foreign-key refusal")
 
-	// 3. Repair it, and the migration applies.
+	// 3. Repair it, and the migration applies. ONE KNOWN LIMITATION IS PINNED HERE, not hidden: a case-only SCHEDULE in
+	// the tenant the preflight does not list has no foreign key to refuse it and no loop iteration to see it, so the
+	// migration applies over it and the schedule stops reaching its definition. 011's header and the CHANGELOG say so;
+	// if that is ever closed this assertion flips on purpose.
 	inTenant(t, db, namesTenantHid, func(c *sql.Conn) {
 		mustExec(t, c, `UPDATE workflow_instances SET def_name = N'Hidden.Flow' WHERE id = N'run-hidden-orphan'`)
+		mustExec(t, c, `INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, next_run_at, tenant_id) VALUES (N'hidden-sched', N'hidden.flow', N'main', N'* * * * *', N'{}', SYSDATETIMEOFFSET(), @p1)`, namesTenantHid)
 	})
+	const hiddenSchedJoin = `SELECT COUNT(*) FROM workflow_schedules s JOIN workflow_defs d ON d.tenant_id = s.tenant_id AND d.name = s.def_name WHERE s.name = N'hidden-sched'`
+	if n := countIn(t, db, namesTenantHid, hiddenSchedJoin); n != 1 {
+		t.Fatalf("UNMEASURED: before 011 the unlisted tenant's case-only schedule joins %d definition(s), want 1", n)
+	}
 	if err := runMigrations(t, ctx, real, migration.DialectMSSQL); err != nil {
 		t.Fatalf("migration 011 refused a database with no case-only orphans: %v", err)
 	}
@@ -380,6 +388,11 @@ func TestSQLServerWorkflowNamesBecomeExact(t *testing.T) {
 	}
 	if len(removed) != len(namesColumns) || len(added) != len(namesColumns) {
 		t.Errorf("011 changed the collation of %d column(s), want %d (the list at the top of this file)", len(removed), len(namesColumns))
+	}
+
+	// The pinned limitation: the unlisted tenant's case-only schedule was NOT refused, and no longer reaches its definition.
+	if n := countIn(t, db, namesTenantHid, hiddenSchedJoin); n != 0 {
+		t.Errorf("after 011 the unlisted tenant's case-only schedule still joins %d definition(s); the documented limitation has changed, so the header and CHANGELOG must too", n)
 	}
 
 	// The change a user sees: the lowercase probe no longer finds the mixed-case name; the exact one does,

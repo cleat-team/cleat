@@ -52,6 +52,14 @@
 --     deploy, so a case variant "stops applying" nothing. A person querying the table by name now needs the exact spelling.
 --   Re-derive: git grep -n -E 'plugin_dep_overrides|child_name|idempotency_keys' -- '*.go' ':!*_test.go' and read the predicates.
 --
+-- THE SCHEDULE CHECK HAS NO BACKSTOP, AND THE FOUR FOREIGN-KEYED KINDS DO. Those are recreated WITH CHECK, which reads
+-- every row whatever tenant it is in, so a case-only orphan anywhere refuses the migration. A schedule has no foreign
+-- key, and the loop that checks it visits only the tenants listed in admin.tenants plus the default tenant. A
+-- case-only schedule in a tenant with NO admin.tenants row therefore passes this migration SILENTLY and stops firing
+-- afterwards. MEASURED, and pinned as a known limitation by the migration test (a case-only schedule in the unlisted
+-- tenant: the migration applies, and the schedule's join to its definition is 0 afterwards); if this is ever closed,
+-- that assertion flips on purpose.
+--
 -- NOT CONVERTED: the tables plugins create at boot (the scheduler's schedules, event_subscriptions, task_queue).
 -- Core migrations cannot name a table that may not exist yet, so those def-name columns stay case-insensitive until the
 -- plugin migrations convert them on their own (carried as a follow-up, not forgotten).
