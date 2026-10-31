@@ -407,7 +407,55 @@ reads and writes blocked**, and measure on a copy of your own data. It is linear
   edition, so the step does not use it.
 - **Nothing reads these columns in a `WHERE`**, so the change fixes no behaviour you can see today. It exists
   so that the schema compares workflow names exactly everywhere.
-- MySQL's equivalent is cleat#3658 and is not part of this release's plugin steps.
+- MySQL's equivalent is the next section.
+
+### MySQL: the same three plugin-owned columns are rewritten, and writers wait for the whole copy (cleat#3658)
+
+The MySQL half of the section above. `event_subscriptions.def_name`, `schedules.workflow_name` and
+`task_queue.def_name` were still `utf8mb4_0900_ai_ci` after core migration `012` (cleat#3640), which
+converted the core columns. Three new plugin steps convert them — `eventtriggers` 12, `scheduler` 5 and
+`jobqueue` 7 — and they are **new versions rather than an arm added to the old ones**, because MySQL
+already has the previous steps recorded as applied: their `Up` is empty for MySQL and the runner records
+a version whether or not any SQL ran, which the log states plainly — `scheduler v4: no MySQL migration —
+skipping`. A step reusing the old version would never execute on a database that has already migrated.
+
+**A MySQL collation change rebuilds the table.** `ALGORITHM=INPLACE` is refused outright on all three
+tables (error 1845), so each step asks for `COPY, LOCK=SHARED`: the table is copied once, **reads
+continue and writers wait for the whole copy.**
+
+Measured on MySQL 8.4.11 with a 128 MB buffer pool, on the plugins' real table definitions, under load
+(2.8 to 4.7) and with a writer and a reader probing throughout:
+
+| table.column | rows | duration |
+|---|---|---|
+| `event_subscriptions.def_name` | 100,000 | 1.2 s |
+| `schedules.workflow_name` | 100,000 | 1.3 s |
+| `task_queue.def_name` | 1,000,000 | **16.6 s** |
+| `task_queue.def_name` | 3,000,614 | **56.2 s** |
+
+**`task_queue` is the one to size for**: one row per queued job, so it scales with load rather than with
+configuration. Its growth is measured across two points (about 17 to 19 s per million rows) and is not
+claimed beyond them. The table carries two secondary indexes and `CHECK (json_valid(...))` on its JSON
+columns, so the rebuild re-validates and re-indexes every row. No probe call failed.
+
+- **Run it with enqueuers stopped, or in a window.** A write that arrives during the copy waits for it, so
+  a client with a shorter timeout fails.
+- **The figures scale with the host** and with the table. Measure on a copy of your own data.
+- **Not measured:** other buffer-pool sizes, other MySQL versions, other machines, `task_queue` above
+  3,000,614 rows, and a failure part-way through a step.
+- **Nothing reads these columns in a `WHERE`**, so this fixes no behaviour you can see today. It makes the
+  schema compare workflow names exactly everywhere.
+
+`--migrate-only` applies these with the core migrations. A worker started without it, on a database where
+they are pending, refuses and changes nothing — measured on the real binary against a MySQL database
+migrated by the previous release:
+
+```
+refusing to start: the database's plugin schema is behind this worker: plugin migration(s) not applied:
+event-triggers v12, jobqueue v7, scheduler v5.
+```
+
+Exit code 1, and all three columns were still `utf8mb4_0900_ai_ci` afterwards.
 
 ## Running old and new workers side by side
 
