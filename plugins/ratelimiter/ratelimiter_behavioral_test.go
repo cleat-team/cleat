@@ -175,15 +175,8 @@ func (c *behConn) QueryContext(_ context.Context, query string, args []driver.Na
 
 func (c *behConn) queryTenant(args []driver.NamedValue) (driver.Rows, error) {
 	keyHash, _ := behArgBytes(args, 1)
-	hashHex := fmt.Sprintf("%x", keyHash)
-	tid, ok := c.store.apiKeys[hashHex]
-	if !ok {
-		return &behRows{columns: []string{"tenant_id", "key_id"}}, nil
-	}
-	return &behRows{
-		columns: []string{"tenant_id", "key_id"},
-		data:    [][]driver.Value{{tid, "11111111-1111-1111-1111-111111111111"}},
-	}, nil
+	cols, data := plugintest.APIKeyLookupRows(c.store.apiKeys, keyHash)
+	return &behRows{columns: cols, data: data}, nil
 }
 
 func (c *behConn) queryAllLimits() (driver.Rows, error) {
