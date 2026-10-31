@@ -29,6 +29,10 @@ type AuditTarget struct {
 	mu  sync.Mutex
 	id  uuid.UUID
 	set bool
+
+	// metadata is the JSON document a handler asked to be stored on the row (cleat#3578: the reason an
+	// operator gave). Empty means "none", which stores the "{}" every row stored before this existed.
+	metadata string
 }
 
 type auditTargetKey struct{}
@@ -61,4 +65,31 @@ func (a *AuditTarget) Tenant() (uuid.UUID, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.id, a.set
+}
+
+// NoteAuditMetadata records a JSON document for the audit row of this request, stored in the row's
+// metadata column and covered by the chain hash like the rest of the row. It is a no-op when nothing is
+// listening (every request but an operator's under the audit log). The FIRST document noted wins, as the
+// first tenant does, so a handler cannot have a later step overwrite what an earlier one recorded.
+//
+// The caller owns what goes in. The document must be valid JSON, and must never contain a secret: this
+// is the audit log, not a place to put a credential, and nothing here looks. cleat#3578 puts an
+// operator's stated reason here and validates it before it gets this far.
+func NoteAuditMetadata(ctx context.Context, doc string) {
+	slot, ok := ctx.Value(auditTargetKey{}).(*AuditTarget)
+	if !ok || doc == "" {
+		return
+	}
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+	if slot.metadata == "" {
+		slot.metadata = doc
+	}
+}
+
+// Metadata returns the document a handler noted, or "" when it noted none.
+func (a *AuditTarget) Metadata() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.metadata
 }

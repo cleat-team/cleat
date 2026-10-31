@@ -218,7 +218,12 @@ func newQueuedEvent(tenantID uuid.UUID, userID, method, path string, statusCode 
 // room, and then gives the event up as lost: a request never waits on the audit log longer than
 // that, however long the database is down.
 func (p *Plugin) enqueueAudit(tenantID uuid.UUID, userID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
-	ev := newQueuedEvent(tenantID, userID, method, path, statusCode, ipAddress, userAgent, duration)
+	p.enqueue(newQueuedEvent(tenantID, userID, method, path, statusCode, ipAddress, userAgent, duration))
+}
+
+// enqueue is enqueueAudit for an event already built, which is how the middleware attaches the
+// metadata a handler noted.
+func (p *Plugin) enqueue(ev queuedAuditEvent) {
 	p.q.sent.Add(1)
 	if p.buffer == nil {
 		p.recordOnce(ev)
@@ -262,7 +267,7 @@ func (p *Plugin) appendEvent(ev queuedAuditEvent, retry bool) error {
 	return p.appendChained(ctx, chainEvent{
 		tenantID: ev.tenantID, userID: ev.userID, method: ev.method, path: ev.path,
 		statusCode: ev.statusCode, ipAddress: ev.ipAddress, userAgent: ev.userAgent,
-		durationMs: int(ev.duration.Milliseconds()), id: ev.id, ts: ev.ts, retry: retry,
+		durationMs: int(ev.duration.Milliseconds()), id: ev.id, ts: ev.ts, retry: retry, metadata: ev.metadata,
 	})
 }
 
