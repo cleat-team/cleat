@@ -2,8 +2,10 @@ package main
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/cleat-team/cleat/auth"
+	"github.com/google/uuid"
 )
 
 // authChain is what composeAuthChain needs to wrap the API in authentication.
@@ -48,4 +50,46 @@ func composeAuthChain(inner http.Handler, mux *http.ServeMux, c authChain) http.
 	}
 	handler = auth.MiddlewareWithMux(c.Tenants, true, mux, pluginAuthExemptPatterns...)(handler)
 	return auth.OperatorMiddleware(c.Operators, inner)(handler)
+}
+
+// composeRequestChain is the whole of what main.go puts around the API's handler for identity: the
+// authentication layers when there are any, then the --tenant-resolver wrapper OUTSIDE them. main.go
+// calls it, and so do the tests that measure the order (cleat#3577).
+//
+// THE HEADER WRAPPER MUST BE THE OUTERMOST LAYER, and that is the correctness argument, not
+// a tidy-up. Outside, it runs first: it puts the header's tenant in the context, and the tenant-key
+// middleware inside it then sets the tenant from the KEY and shadows the header. Installed inside
+// the chain it would run last and shadow the key instead, so a request carrying a valid key for
+// tenant A and `X-Tenant: <B>` would act on tenant B -- for /api/keys that is minting, listing and
+// revoking another tenant's keys. It held for months only by the order of two blocks in main(), and
+// nothing could see it: the header wrapper was not part of composeAuthChain.
+//
+// chain is nil when authentication is off (--require-auth=false); then the header is the only
+// identity there is, which is why /api/keys answers 403 in that mode.
+func composeRequestChain(inner http.Handler, mux *http.ServeMux, chain *authChain, tenantResolver string) http.Handler {
+	handler := inner
+	if chain != nil {
+		handler = composeAuthChain(handler, mux, *chain)
+	}
+	return tenantResolverMiddleware(tenantResolver)(handler)
+}
+
+// tenantResolverMiddleware is --tenant-resolver=header:<name>: a valid uuid in that header becomes
+// the request's tenant. Any other mode, and a header that is absent or not a uuid, leave the request
+// as it came. It is only ever correct as the outermost layer; see composeRequestChain.
+func tenantResolverMiddleware(mode string) func(http.Handler) http.Handler {
+	headerName, ok := strings.CutPrefix(mode, "header:")
+	if !ok {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if tidStr := r.Header.Get(headerName); tidStr != "" {
+				if tid, err := uuid.Parse(tidStr); err == nil {
+					r = r.WithContext(auth.WithTenantID(r.Context(), tid))
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }

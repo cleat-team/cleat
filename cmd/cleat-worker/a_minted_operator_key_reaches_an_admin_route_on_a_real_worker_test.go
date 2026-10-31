@@ -71,7 +71,8 @@ type chainFixture struct {
 	listed         *bool  // a tenant data route's handler ran, in any store
 	reachedB       *bool  // tenant B's store was opened for a force-complete
 	hostBindingAsk *bool
-	storeB         *mockStore
+	storeA, storeB *mockStore
+	keys           *keyTable // what resolves the keys above, for a test that builds its own chain
 	api            *apiServer
 	// noted is what the audit slot held when the request finished; see
 	// a_handler_names_the_tenant_it_acted_on_test.go.
@@ -93,6 +94,14 @@ func buildChain(t *testing.T, requireHostMatch bool) chainFixture {
 // real worker.
 func buildChainAround(t *testing.T, requireHostMatch bool, wrap func(*notedTarget) func(http.Handler) http.Handler) chainFixture {
 	t.Helper()
+	return buildChainResolving(t, requireHostMatch, wrap, "single-tenant")
+}
+
+// buildChainResolving is buildChainAround with the --tenant-resolver mode named, and the chain built by
+// composeRequestChain, the function main.go calls, so the header wrapper goes where a worker puts it
+// (cleat#3577).
+func buildChainResolving(t *testing.T, requireHostMatch bool, wrap func(*notedTarget) func(http.Handler) http.Handler, tenantResolver string) chainFixture {
+	t.Helper()
 	enableAdminRoutes(t)
 	api, storeA, storeB, _ := twoTenantServer(t, true)
 	defaultStore := api.store.(*mockStore)
@@ -113,7 +122,7 @@ func buildChainAround(t *testing.T, requireHostMatch bool, wrap func(*notedTarge
 		tenantAKey: auth.GenerateAPIKey(), forgedOpKey: auth.GenerateOperatorKey(),
 		unknownTenant: auth.GenerateAPIKey(),
 		listed:        &listed, reachedB: &reachedB, hostBindingAsk: &asked,
-		storeB: storeB, noted: &notedTarget{}, api: api,
+		storeA: storeA, storeB: storeB, noted: &notedTarget{}, api: api,
 	}
 	h := func(k string) [32]byte { return sha256.Sum256([]byte(k)) }
 	keys := &keyTable{
@@ -124,15 +133,16 @@ func buildChainAround(t *testing.T, requireHostMatch bool, wrap func(*notedTarge
 		},
 	}
 
+	f.keys = keys
 	mux := http.NewServeMux()
 	registerRoutes(mux, api)
 	var inner http.Handler = mux
 	if wrap != nil {
 		inner = wrap(f.noted)(mux)
 	}
-	f.handler = composeAuthChain(inner, mux, authChain{
+	f.handler = composeRequestChain(inner, mux, &authChain{
 		Tenants: keys, Operators: keys, Domains: noDomains{asked: &asked}, RequireHostMatch: requireHostMatch,
-	})
+	}, tenantResolver)
 	return f
 }
 
