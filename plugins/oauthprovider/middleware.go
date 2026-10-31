@@ -72,9 +72,27 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		// carries a `cleat_sk_` prefix.
 		//
 		// Falling through is not a loosening. This middleware only ever ADDS
-		// SessionInfo; it grants nothing on its own, and it sits OUTSIDE
-		// auth.MiddlewareWithMux, which still refuses a request carrying no valid
-		// credential.
+		// SessionInfo; it grants nothing on its own.
+		//
+		// And in cmd/cleat-worker it runs INSIDE auth.MiddlewareWithMux, not
+		// outside it. Every plugin's middleware wraps the CORE mux
+		// (wrapPluginMiddleware) and composeAuthChain wraps that, so by the time
+		// this runs a request has already been admitted by core auth, or exempted
+		// from it by name (pluginAuthExemptPatterns). A request carrying no valid
+		// credential does not reach this point: it was answered 401 before. This
+		// comment said the opposite until cleat#3632.
+		//
+		// That also means the session branch below is out of reach on an
+		// authenticated route in the worker. Core auth reads a 64-hex bearer as
+		// an API key, finds none in tenant_api_keys, and answers 401 before this
+		// middleware sees the request; an OAuth login hands back a MINTED API KEY
+		// for that reason (see the end of the callback handler in routes.go).
+		// Measured 2026-10-31 through wrapPluginMiddleware and composeAuthChain:
+		// a valid key reaches plugin middleware with the tenant already in the
+		// context, and no credential or a 64-hex bearer on /api/workflows and
+		// /api/keys never does. cmd/cleat-worker's
+		// a_plugin_middleware_runs_inside_core_auth_test.go pins it, so this does
+		// not drift a second time.
 		if !looksLikeSessionToken(token) {
 			next.ServeHTTP(w, r)
 			return
