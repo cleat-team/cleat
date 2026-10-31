@@ -23,10 +23,11 @@ import (
 // installed X@1 (and a library X@3 shadows a tenant's own X@1), because a versionless start runs
 // the highest version whatever its origin. The tests run on real databases through the real stores.
 //
-// Names are compared IN SQL with each database's own equality, so the dialects differ on purpose and
-// the difference is pinned here: SQL Server compares names case-insensitively (CI_AS), PostgreSQL
-// does not. `ACME.checkout` is the same workflow as `acme.checkout` on SQL Server and a different one
-// on PostgreSQL, so it is refused on the first and accepted on the second.
+// Names are compared IN SQL with each database's own equality. PostgreSQL and SQL Server now agree:
+// both compare workflow names exactly (SQL Server since migration 011, cleat#3635, owner D60; until then
+// its CI_AS collation made `ACME.checkout` the same workflow as `acme.checkout`). So `ACME.checkout` is a
+// DIFFERENT workflow from `acme.checkout` on both, and is accepted on both. MySQL is not a tier-1 backend
+// for this check and still folds case (cleat#3640).
 
 const (
 	pfxTenantA = "f3000000-0000-4000-8000-0000000036a0"
@@ -231,20 +232,12 @@ func TestADeployUnderAPublishedLibraryPrefixIsRefused(t *testing.T) {
 			}
 		})
 
-		// The dialects differ on purpose, and this is where the difference is a decision: the check
-		// asks the database whether two names are the same, and SQL Server says yes.
-		t.Run("pinned divergence: the prefix in another case", func(t *testing.T) {
+		// The check asks the database whether two names are the same. Both tier-1 databases now say no for
+		// a name that differs only in case (SQL Server did say yes until migration 011, cleat#3635).
+		t.Run("the prefix in another case is a different name on both databases", func(t *testing.T) {
 			upper := strings.ToUpper(lib) + ".review"
-			err := c.deploy(pfxTenantB, upper, 2)
-			switch rig.dialect {
-			case DialectMSSQL:
-				if !errors.Is(err, ErrWorkflowNameUnderLibraryPrefix) {
-					t.Errorf("SQL Server: deploy %q beside %q got %v; the database treats them as the same name, so it must be refused", upper, lib+".review", err)
-				}
-			default:
-				if err != nil {
-					t.Errorf("PostgreSQL: deploy %q was refused (%v), but PostgreSQL treats it as a different workflow from %q and it cannot shadow it", upper, err, lib+".review")
-				}
+			if err := c.deploy(pfxTenantB, upper, 2); err != nil {
+				t.Errorf("%s: deploy %q was refused (%v), but %s compares names exactly, so it is a different workflow from %q and it cannot shadow it", rig.dialect, upper, err, rig.dialect, lib+".review")
 			}
 		})
 	})
@@ -299,23 +292,15 @@ func TestAnInstallIsRefusedWhenTheTenantHoldsItsOwnNamesUnderThePrefix(t *testin
 			}
 		})
 
-		// Pinned divergence, the install half: SQL Server holds `LIB.mine` to be the same name.
-		t.Run("pinned divergence: the tenant's own name in another case", func(t *testing.T) {
+		// The install half: `LIB.mine` is not the same name as `lib.mine`, on either database.
+		t.Run("the tenant's own name in another case is a different name on both databases", func(t *testing.T) {
 			lib2 := c.library(t, "inst2")
 			if err := c.deploy(pfxTenantC, strings.ToUpper(lib2)+".mine", 1); err != nil {
 				t.Fatalf("UNMEASURED: seeding the upper-case own name: %v", err)
 			}
 			c.publish(t, lib2, libMember{name: lib2 + ".review", version: 1, exposure: "auth"})
-			err := c.install(pfxTenantC, lib2)
-			switch rig.dialect {
-			case DialectMSSQL:
-				if !errors.Is(err, ErrLibraryDefinitionCollision) {
-					t.Errorf("SQL Server: install beside the tenant's %s.mine got %v; the database treats it as the same name, so it must be refused", strings.ToUpper(lib2), err)
-				}
-			default:
-				if err != nil {
-					t.Errorf("PostgreSQL: install was refused (%v), but %s.mine is a different workflow there", err, strings.ToUpper(lib2))
-				}
+			if err := c.install(pfxTenantC, lib2); err != nil {
+				t.Errorf("%s: install was refused (%v), but %s.mine is a different workflow from %s.mine there", rig.dialect, err, strings.ToUpper(lib2), lib2)
 			}
 		})
 	})

@@ -8,11 +8,12 @@ package engine
 //	a tenant's DEPLOY refuses any name that starts with a published library's prefix, at any version
 //	an INSTALL refuses when the tenant already holds its OWN name under the library's prefix
 //
-// Both compare IN SQL, with each database's own equality for names. SQL Server compares names
-// case-insensitively (the column is SQL_Latin1_General_CP1_CI_AS) and PostgreSQL does not, so on SQL
-// Server `ACME.checkout` IS `acme.checkout` and must be refused, while on PostgreSQL it is a different
-// workflow and cannot shadow anything. A Go strings.HasPrefix would let the first through, and LIKE
-// would treat the `_` that a library name may contain as a wildcard.
+// Both compare IN SQL, with each database's own equality for names. PostgreSQL and SQL Server both
+// compare them exactly (SQL Server since migration 011, cleat#3635: the name columns are
+// Latin1_General_100_BIN2), so `ACME.checkout` is a different workflow from `acme.checkout` and cannot
+// shadow anything on either. Before 011 SQL Server's columns were SQL_Latin1_General_CP1_CI_AS and
+// `ACME.checkout` WAS `acme.checkout` there. A Go strings.HasPrefix would not use the database's idea of
+// "the same name", and LIKE would treat the `_` that a library name may contain as a wildcard.
 
 import (
 	"context"

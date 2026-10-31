@@ -310,9 +310,9 @@ PostgreSQL and SQL Server only.
   `acme.checkout` version 1, because a start without a version runs the highest one whatever its origin. A row
   a tenant already holds under a prefix (possible only for a library published before this rule) is not
   touched: it keeps running, and only a later deploy or install is refused until it is renamed or removed. The
-  comparison is the database's own, so while SQL Server's names are case-insensitive `ACME.checkout` is under
-  the `acme.` prefix there and is a different name on PostgreSQL; making SQL Server's names case-sensitive
-  (owner decision D60, cleat#3635) removes that difference.
+  comparison is the database's own, and on PostgreSQL and SQL Server it is exact: `ACME.checkout` is a different
+  name from `acme.checkout` and is not under the `acme.` prefix. (SQL Server compared names
+  case-insensitively until migration `011`, cleat#3635, owner decision D60.)
 - **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
   of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
   does not contain. A name appears once per bundle.
