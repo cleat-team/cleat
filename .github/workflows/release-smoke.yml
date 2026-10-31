@@ -44,6 +44,7 @@ jobs:
   versions:
     name: Version agreement and the Python stamper
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.3m over 10 successful runs (release/** push and workflow_dispatch samples), 2026-10-31; cleat#3493
     steps:
       - uses: actions/checkout@v7
 
@@ -99,6 +100,7 @@ jobs:
   wheel:
     name: The built wheel reports its version
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.3m over 10 successful runs (release/** push and workflow_dispatch samples), 2026-10-31; cleat#3493
     steps:
       - uses: actions/checkout@v7
 
@@ -178,6 +180,7 @@ jobs:
     name: Built wheel on Python ${{ matrix.python-version }}
     needs: wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # max 0.2m per matrix leg over 10 successful runs each (release/** push and workflow_dispatch samples), 2026-10-31; cleat#3493
     strategy:
       fail-fast: false
       # 3.13 first, because it is the one no other job exercises. ci.yml's

@@ -52,6 +52,7 @@ jobs:
     # baseline every cleat-worker binary is linked against; a fixed label
     # means that only moves when this line does.
     runs-on: ubuntu-26.04
+    timeout-minutes: 60  # max 16.6m over 4 successful runs (tag-push samples), 2026-10-31; cleat#3493
     steps:
       # First, before anything is checked out or built. Until this step existed
       # the `goreleaser` job validated the tag NOWHERE -- it relied entirely on
@@ -195,6 +196,7 @@ jobs:
     name: Publish the cleat-worker image
     needs: goreleaser
     runs-on: ubuntu-26.04
+    timeout-minutes: 60  # max 16.4m over 3 successful runs (tag-push samples), 2026-10-31; cleat#3493
     steps:
       # No tag check here, deliberately: `needs: goreleaser` has already run
       # one, and "Compute cleat-worker image tags" below refuses a non-vX.Y.Z
@@ -310,6 +312,7 @@ jobs:
     name: Bump the Homebrew tap
     needs: goreleaser
     runs-on: ubuntu-26.04
+    timeout-minutes: 10  # max 0.2m over 3 successful runs (tag-push samples), 2026-10-31; cleat#3493
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -382,6 +385,7 @@ jobs:
     name: Publish the Helm chart
     needs: [goreleaser, container-image]
     runs-on: ubuntu-26.04
+    timeout-minutes: 10  # max 0.2m over 3 successful runs (tag-push samples), 2026-10-31; cleat#3493
     steps:
       - name: Checkout
         uses: actions/checkout@v7

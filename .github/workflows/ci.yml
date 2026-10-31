@@ -3419,6 +3419,7 @@ jobs:
     name: Benchmarks
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 60  # max 16.9m over 5 successful runs (push-to-main samples), 2026-10-31; cleat#3493
     steps:
       - uses: actions/checkout@v7
         with:
