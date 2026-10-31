@@ -62,6 +62,12 @@ func TestTheLibraryReadsRunAsTheAppLogin(t *testing.T) {
 				// (measured: this test's first version took cleat_app_role's SELECT on [library] away for the rest of
 				// the database's life). The installs table below is different: its DENY sits on top of the dbo
 				// schema-level grant, a separate row, so REVOKE there removes only the DENY.
+				//
+				// THAT RELIES ON AN ASSUMPTION about the migrations: SQL Server grants the application role
+				// SELECT at SCHEMA level only (001 for [dbo], 005 for [library]). If a migration ever grants
+				// SELECT on tenant_library_installs at OBJECT level, the REVOKE of this test's DENY (here and
+				// in the cleanup) would delete that grant for good, as the first version did to [library].
+				// Read sys.database_permissions after a run if that is ever in doubt.
 				restoreCatalogue = `GRANT SELECT ON SCHEMA::[library] TO cleat_app_role`
 				denyInstalls = `DENY SELECT ON dbo.tenant_library_installs TO cleat_app_role`
 				restoreInstalls = `REVOKE SELECT ON dbo.tenant_library_installs FROM cleat_app_role`
