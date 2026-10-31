@@ -363,6 +363,52 @@ the same phantom migration, so all three were instructions about a file that
 was never there -- and, since cleat#1981, a different file sits at that same
 number; none of this history ever applied to it.
 
+### SQL Server: three plugin-owned columns are rewritten (cleat#3641)
+
+Plugin migrations run in the same step as the core ones, so everything below happens during
+`cleat-worker --migrate-only` (or a `--migrate-on-start` worker), **not at worker boot**. A worker started
+without either, on a database where these steps are pending, refuses and changes nothing:
+
+```
+refusing to start: the database's plugin schema is behind this worker: plugin migration(s) not applied:
+event-triggers v11, jobqueue v6, scheduler v4.
+```
+
+Measured on the real binary, exit code 1. The three steps each run `ALTER TABLE ... ALTER COLUMN ... COLLATE
+Latin1_General_100_BIN2` on an `NVARCHAR(MAX)` column so that it compares exactly (owner decision D60):
+
+| plugin (step) | table.column | size to expect |
+|---|---|---|
+| `eventtriggers` (11) | `event_subscriptions.def_name` | one row per subscription; small |
+| `scheduler` (4) | `schedules.workflow_name` | one row per schedule; small |
+| `jobqueue` (6) | `task_queue.def_name` | **one row per queued job; check this one** |
+
+**It is not a metadata-only change.** Migration `011` was, because the core columns are `NVARCHAR(255)`; these
+are `NVARCHAR(MAX)`, and SQL Server rewrites them. Measured on SQL Server 2022 (16.0.4265.3, **Developer
+Edition only**), on a table with `task_queue`'s column definitions and 1,000,000 rows (719.6 MB):
+
+| | plain `ALTER COLUMN` (what the step runs) |
+|---|---|
+| duration | 17.1 s the first time, 8.8 s on a repeat |
+| transaction-log records | about 2.7 million |
+| table used space | 719.6 MB before, **1,439.3 MB** after |
+| while it runs | a point read and an insert both waited for the whole statement (longest 8.6 s and 8.7 s of a 9.3 s statement), none failed |
+
+Treat that as a scaling figure of **roughly 9 to 17 s and a doubled table per million rows of this column, with
+reads and writes blocked**, and measure on a copy of your own data. It is linear across one measured size only.
+
+- **Count first:** `SELECT COUNT_BIG(*) FROM task_queue;` If the queue holds completed jobs you do not need,
+  removing them before the migration shortens it in proportion.
+- **Run it with enqueuers stopped, or in a window.** An enqueue that arrives during the statement waits for it,
+  so a client with a shorter timeout fails.
+- **Not measured:** Standard Edition, rows with long values, more than 1,000,000 rows, whether rebuilding the
+  table afterwards returns the extra space, and a failure part-way through. `ALTER COLUMN ... WITH (ONLINE = ON)`
+  took 56 s with a longest read of 0.3 s and a longest insert of 2.4 s on Developer Edition, but it depends on the
+  edition, so the step does not use it.
+- **Nothing reads these columns in a `WHERE`**, so the change fixes no behaviour you can see today. It exists
+  so that the schema compares workflow names exactly everywhere.
+- MySQL's equivalent is cleat#3658 and is not part of this release's plugin steps.
+
 ## Running old and new workers side by side
 
 Because workers are stateless and read workflow definitions from the database,

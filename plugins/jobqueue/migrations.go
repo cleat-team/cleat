@@ -226,5 +226,30 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE task_queue MODIFY payload LONGTEXT NULL;
 			`,
 		},
+		{
+			// cleat#3641 (owner decision D60): this plugin's workflow-definition NAME column compares exactly
+			// on SQL Server, as it already does on PostgreSQL and as migration 011 made the core columns.
+			// Until now task_queue.def_name inherited the database collation, which is
+			// case-insensitive on a default install.
+			//
+			// NOTHING IN SQL COMPARES THIS COLUMN TODAY (it is written and read back in a select list, with no
+			// predicate, join, grouping, ordering or key on it), so this fixes no user-visible behaviour. It makes the
+			// schema uniformly exact, which is what a later comparison (event routing) needs.
+			//
+			// NOT METADATA-ONLY, MEASURED: the column is NVARCHAR(MAX), and on 1,000,000 rows (720 MB) a plain ALTER
+			// COLUMN ... COLLATE took 9 to 17 s, wrote about 2.7 million log records and doubled the table's used space,
+			// blocking reads and writes for its duration. #3635's metadata-only result was for NVARCHAR(255). This runs
+			// under --migrate-only, with the core migrations. The type and nullability are restated exactly.
+			Version:         6,
+			Up:              "",
+			DialectSpecific: "SQL Server only: PostgreSQL's comparison of this column is already exact, and MySQL's is a separate step (cleat#3658) because its cost and its decision differ (a write-blocking table copy).",
+			UpMSSQL: `
+				ALTER TABLE task_queue ALTER COLUMN def_name NVARCHAR(MAX) COLLATE Latin1_General_100_BIN2 NULL;
+			`,
+			// Reversal restores the database default, which is what the column had before.
+			DownMSSQL: `
+				ALTER TABLE task_queue ALTER COLUMN def_name NVARCHAR(MAX) COLLATE DATABASE_DEFAULT NULL;
+			`,
+		},
 	}
 }
