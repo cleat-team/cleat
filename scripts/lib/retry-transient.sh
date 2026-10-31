@@ -43,16 +43,41 @@
 # (cleat#3644 review, measured). Do not add a phrase a compiler, a linter or a
 # test can print; anchor it to the fetch it belongs to.
 #
-# ONLY THE TAIL OF THE LOG IS READ (RETRY_TRANSIENT_WINDOW lines, default 40).
-# The scenario scripts print `tail -25`/`tail -30` of this log when a step fails,
-# so the cause of a failure is always in that window -- and it keeps an earlier,
-# recovered fetch error out of the decision. The Dockerfile's own `go mod
-# download` retry leaves the error it recovered from in the build output; matched
-# over the whole log, a later ordinary compile error would be read as transient.
+# WHAT PART OF THE LOG DECIDES. Only what comes after the LAST
+# `go mod download: ok after N attempt(s)` line the Dockerfile prints (that RUN
+# retries internally), and then only its last RETRY_TRANSIENT_WINDOW (40) lines.
+#
+# The marker is what does the work. A fetch error the Dockerfile recovered from
+# stays in the build log after the build went on, and a later ordinary failure --
+# a compile error -- would be read as transient because of it. A window alone does
+# not stop that: in a real BuildKit log the recovered error is 22 lines from the
+# end, because between it and the end sit the next COPY, the failing RUN and
+# BuildKit's error summary with its Dockerfile excerpt (cleat#3644 review, built
+# and measured; an earlier version of this comment and of the self-test claimed
+# the window covered it, on a fixture padded with 60 lines no real build has).
+# The window stays for the other direction: the callers print `tail -25`/`-30`
+# of this log on failure, so the cause is in that tail.
+#
+# Without the marker -- compose, or any command that is not this Dockerfile --
+# the window is all there is, and a recovered error inside it counts.
 #
 # Source it, or run `scripts/lib/retry-transient.sh --self-test`.
 
 TRANSIENT_RE='could not fetch content descriptor .* from remote: not found|stream error: stream ID [0-9]+; INTERNAL_ERROR|connection reset by peer|TLS handshake timeout|dial tcp .*i/o timeout'
+
+TRANSIENT_MARKER_RE='go mod download: ok after [0-9]+ attempt'
+
+# The part of LOG that decides: after its last marker, if it has one, then the
+# last WINDOW lines of that.
+_retry_transient_deciding_text() {
+  local log=$1 window=$2 last
+  last=$(grep -nE -- "$TRANSIENT_MARKER_RE" "$log" | tail -n 1 | cut -d: -f1)
+  if [[ -n "$last" ]]; then
+    tail -n +"$((last + 1))" "$log" | tail -n "$window"
+  else
+    tail -n "$window" "$log"
+  fi
+}
 
 retry_transient() {
   local log=$1
@@ -67,11 +92,11 @@ retry_transient() {
     if (( rc == 0 )); then
       return 0
     fi
-    if (( n >= attempts )) || ! tail -n "$window" "$log" | grep -Eq -- "$TRANSIENT_RE"; then
+    if (( n >= attempts )) || ! _retry_transient_deciding_text "$log" "$window" | grep -Eq -- "$TRANSIENT_RE"; then
       return "$rc"
     fi
     echo "==> transient upstream fetch failure on attempt $n of $attempts (exit $rc); retrying in $((delay * n))s:" >&2
-    tail -n "$window" "$log" | grep -Em1 -- "$TRANSIENT_RE" | cut -c1-300 >&2
+    _retry_transient_deciding_text "$log" "$window" | grep -Em1 -- "$TRANSIENT_RE" | cut -c1-300 >&2
     sleep $((delay * n))
     n=$((n + 1))
   done
@@ -80,7 +105,8 @@ retry_transient() {
 # ---- self-test --------------------------------------------------------------
 
 _retry_transient_self_test() {
-  local work failures=0
+  local work failures=0 ROOT
+  ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
   work=$(mktemp -d) || { echo "UNMEASURED: no scratch directory" >&2; return 2; }
   # shellcheck disable=SC2064  # $work is expanded now on purpose
   trap "rm -rf '$work'" RETURN
@@ -145,15 +171,97 @@ EOF
   _case "compile error: go's own 'unexpected EOF' (truncated file)" 7 1 \
     './main.go:5:1: syntax error: unexpected EOF, expected }' 99
 
-  echo "window: only the tail of the log is read, as the callers' own failure tail is"
+  echo "a recovered go mod download flake, in a REAL BuildKit log, is not a reason to retry what fails after it"
+  # The log below is real: a probe image whose RUN is the Dockerfile's `go mod
+  # download` retry, verbatim, over a stub `go` that fails that step once with
+  # cleat#3582's exact text and then succeeds, followed by a build that fails to
+  # compile; `docker build --progress=plain`, 2026-10-31. The recovered flake is
+  # 22 lines from the end -- inside the window -- because between it and the end
+  # sit the COPY step, the failing RUN, and BuildKit's error summary with its
+  # Dockerfile excerpt. An earlier version of this case padded the gap with 60
+  # filler lines, which is a gap no real build has (found in review of #3644).
+  local real_log
+  real_log=$(cat <<'REAL_BUILDKIT_LOG'
+#0 building with "orbstack" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.probe
+#1 transferring dockerfile: 588B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for mirror.gcr.io/library/busybox:latest
+#2 DONE 0.5s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM mirror.gcr.io/library/busybox:latest@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+#4 resolve mirror.gcr.io/library/busybox:latest@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4 0.0s done
+#4 CACHED
+
+#5 [internal] load build context
+#5 transferring context: 870B done
+#5 DONE 0.0s
+
+#6 [2/8] COPY stub/go /usr/local/bin/go
+#6 DONE 0.1s
+
+#7 [3/8] WORKDIR /app
+#7 DONE 0.0s
+
+#8 [4/8] COPY go.mod go.sum ./
+#8 DONE 0.0s
+
+#9 [5/8] COPY cleat/go.mod cleat/go.sum cleat/
+#9 DONE 0.1s
+
+#10 [6/8] RUN attempt=1;     until go mod download; do       if [ "$attempt" -ge 5 ]; then exit 1; fi;       echo "go mod download failed (attempt $attempt of 5); retrying in $((attempt * 5))s" >&2;       sleep $((attempt * 5));       attempt=$((attempt + 1));     done;     echo "go mod download: ok after $attempt attempt(s)"
+#10 0.226 go: golang.org/x/text@v0.43.0: read "https://proxy.golang.org/golang.org/x/text/@v/v0.43.0.zip": stream error: stream ID 357; INTERNAL_ERROR; received from peer
+#10 0.226 go mod download failed (attempt 1 of 5); retrying in 5s
+#10 5.231 go mod download: ok after 2 attempt(s)
+#10 DONE 5.3s
+
+#11 [7/8] COPY . .
+#11 DONE 0.1s
+
+#12 [8/8] RUN CGO_ENABLED=1 go build -o /cleat-worker ./cmd/cleat-worker
+#12 0.138 ./cmd/cleat-worker/main.go:12:2: undefined: nope
+#12 ERROR: process "/bin/sh -c CGO_ENABLED=1 go build -o /cleat-worker ./cmd/cleat-worker" did not complete successfully: exit code: 1
+------
+ > [8/8] RUN CGO_ENABLED=1 go build -o /cleat-worker ./cmd/cleat-worker:
+0.138 ./cmd/cleat-worker/main.go:12:2: undefined: nope
+------
+Dockerfile.probe:15
+--------------------
+  13 |         echo "go mod download: ok after $attempt attempt(s)"
+  14 |     COPY . .
+  15 | >>> RUN CGO_ENABLED=1 go build -o /cleat-worker ./cmd/cleat-worker
+  16 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c CGO_ENABLED=1 go build -o /cleat-worker ./cmd/cleat-worker" did not complete successfully: exit code: 1
+REAL_BUILDKIT_LOG
+)
+  _case "real log: recovered flake, marker, then a compile error" 7 1 "$real_log" 99
+  # The same log with a transient error AFTER the marker is still retried: the
+  # marker narrows the decision, it does not switch the helper off.
+  local after_marker
+  after_marker=$(printf '%s\n' "$real_log" | sed -n '1,/go mod download: ok after/p'; echo '#12 0.4 go: github.com/x/y@v1.0.0: read "https://proxy.golang.org/x.zip": connection reset by peer')
+  _case "a transient error after the marker is still retried" 0 2 "$after_marker" 1
+  # The marker is the Dockerfile's, and the helper reads it: if the two drift the
+  # case above goes back to retrying, so check they are the same string.
+  # shellcheck disable=SC2016  # the Dockerfile's text has a literal $attempt
+  if grep -qF 'echo "go mod download: ok after $attempt attempt(s)"' "$ROOT/Dockerfile" \
+     && printf '%s\n' 'go mod download: ok after 2 attempt(s)' | grep -Eq -- "$TRANSIENT_MARKER_RE"; then
+    printf '  ok    %-52s\n' "the Dockerfile's marker and TRANSIENT_MARKER_RE agree"
+  else
+    printf '  FAIL  %-52s\n' "the Dockerfile's marker and TRANSIENT_MARKER_RE agree" >&2
+    failures=$((failures + 1))
+  fi
+
+  echo "window: only the tail of the log is read"
   local noise early_flake
   noise=$(for i in $(seq 1 60); do echo "#12 [builder 7/9] step output line $i"; done)
   early_flake='go: golang.org/x/text@v0.43.0: read "https://proxy.golang.org/x.zip": stream error: stream ID 357; INTERNAL_ERROR; received from peer'
-  # The Dockerfile's own `go mod download` retry leaves the fetch error it
-  # recovered from in the build output. A later, ordinary compile error must not
-  # be read as transient because of it (cleat#3644 review).
-  _case "recovered fetch error early in the log, then a compile error" 7 1 \
-    "$early_flake"$'\n'"$noise"$'\n'"./cmd/cleat-worker/main.go:12:2: undefined: nope" 99
   _case "the transient error is at the end of a long log" 0 2 \
     "$noise"$'\n'"$early_flake" 1
 

@@ -40,13 +40,21 @@ COPY cleat/go.mod cleat/go.sum cleat/
 # `go mod download` does one thing, so any failure of it is a fetch failure, and
 # a text filter here could only turn an unfamiliar wording into a failed build.
 # Five attempts, 5s apart growing to 20s, then the last error is the build's.
+#
+# The last line prints a marker, and scripts/lib/retry-transient.sh reads it. The
+# output of an attempt that failed and was then retried stays in the build log
+# even though the build went on to succeed here, and a LATER, ordinary failure
+# (a compile error) would otherwise be read as a transient fetch error because of
+# it. The helper decides only on what comes after the last marker. Keep the two
+# strings identical; scripts/lib/retry-transient.sh --self-test checks that.
 RUN attempt=1; \
     until go mod download; do \
       if [ "$attempt" -ge 5 ]; then exit 1; fi; \
       echo "go mod download failed (attempt $attempt of 5); retrying in $((attempt * 5))s" >&2; \
       sleep $((attempt * 5)); \
       attempt=$((attempt + 1)); \
-    done
+    done; \
+    echo "go mod download: ok after $attempt attempt(s)"
 
 # Copy the full source tree (includes cmd/cleat-worker/web/dist/ for //go:embed)
 COPY . .
