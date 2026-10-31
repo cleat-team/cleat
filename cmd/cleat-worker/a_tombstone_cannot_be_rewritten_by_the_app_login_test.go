@@ -179,9 +179,13 @@ func TestTheAppLoginCannotRewriteATombstone(t *testing.T) {
 				t.Fatalf("the control write did not land: hash is %q", got)
 			}
 
-			// 3. THE RESTORE, verified rather than assumed. On SQL Server this also proves the REVOKE
-			// above took only the object-level DENY: a schema grant that had been consumed by it would
-			// show up here as an UPDATE that is still allowed.
+			// 3. THE RESTORE, verified rather than assumed: put the restriction back and require the
+			// refusal again, so a restore that did not restore cannot be mistaken for a fix that works.
+			//
+			// The evidence that the SQL Server lift took ONLY the object-level DENY and left the
+			// schema-level GRANT underneath it is step 2, not this step: the UPDATE there SUCCEEDED
+			// against that grant. This step could not distinguish a restored DENY from a DENY plus a
+			// destroyed grant -- both refuse -- which is the reading cleat#3627 lost an afternoon to.
 			if _, err := owner.ExecContext(ctx, restore); err != nil {
 				t.Fatalf("could not put the restriction back on admin.tenant_tombstones: %v", err)
 			}
