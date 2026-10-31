@@ -2,10 +2,10 @@ package backendkit
 
 // cleat#3540, PR 4: installing a workflow library from a backend.
 //
-// The worker has one tenant-facing library route, POST /api/libraries/{library}/install,
-// and this wraps it. Publishing and listing are not routes: `cleatctl library publish|list`
-// talk to the database with an operator's publisher login, so a service that holds only a
-// tenant key has no way to ask either (cleat#3627 tracks tenant-facing GET routes).
+// The worker's tenant-facing library route for writing is POST /api/libraries/{library}/install,
+// and this wraps it. Publishing is not a route: `cleatctl library publish` talks to the database
+// with an operator's publisher login (D40). The two reads that go with the install, what a tenant
+// holds and what is published, were not routes until cleat#3627 and are in library_reads.go.
 //
 // The result and error types are this package's own and do not import engine: engine
 // needs cgo and every backend that links backendkit would inherit it.

@@ -283,6 +283,27 @@ Every published library is installable by every tenant. A `404` means that libra
 > supported yet. A library can still be **published to every shard**, ready for when it is; see
 > [Publishing to a sharded deployment](#publishing-to-a-sharded-deployment).
 
+### Seeing what you hold, and what you could install
+
+Two read-only routes answer from the tenant's own API key, so a service that has no database handle can ask
+(cleat#3627). Both answer `501` on a sharded deployment and on MySQL, like the install.
+
+    GET /api/library-installs
+    {"installs":[{"library":"acme-flows","bundle_version":"1.2.0","installed_at":"2026-10-31T12:00:00Z","installed_by":"key-of-tenant-a"}]}
+
+    GET /api/libraries            (optionally ?library=acme-flows)
+    {"bundles":[{"library":"acme-flows","bundle_version":"1.2.0","published_at":"2026-10-31T12:00:00Z","members":[{"name":"acme-flows.order","version":3,"wasm_sha256":"ab12","wasm_length":7,"exposure":"auth"}]}]}
+
+- **`/api/library-installs` is your own and no other tenant's.** It lists the bundle of each library your
+  tenant holds, ordered by library, and `[]` when it holds none.
+- **`/api/libraries` is the same for every tenant.** Any tenant may install any published library, so this is
+  the catalogue of what is published, newest first within a library, each member with its digest and size and
+  never its bytes. It does not say who published a bundle. If the operator has configured an entitlement check
+  that refuses your tenant a library, that library is left out of this list too, so the list never offers what
+  the install would refuse. `exposure: "public"` on a member tells you the install will be refused (`400`)
+  unless the operator has opted your tenant in.
+- `backendkit` has one method for each: `Client.InstalledLibraries` and `Client.PublishedLibraries`.
+
 ## Publishing a workflow library
 
 Publishing is the **operator's** act, and the database makes that true: only a login that holds the
