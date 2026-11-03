@@ -18,9 +18,11 @@ package plugins_test
 //	postgres  exact   a deterministic collation
 //	mssql     exact   Latin1_General_100_BIN2 after the plugins' SQL Server step (cleat#3641); until then
 //	                  the database default, SQL_Latin1_General_CP1_CI_AS, which folds case
-//	mysql     FOLDS   utf8mb4_0900_ai_ci. PINNED, not endorsed: cleat#3658 converts them, and this entry
-//	                  flips to exact in that change. A pin that nobody has to update is how a divergence
-//	                  looks like a decision, so this test goes red when MySQL moves.
+//	mysql     exact   utf8mb4_0900_bin after the plugins' MySQL step (cleat#3658); until then the server
+//	                  default, utf8mb4_0900_ai_ci, which ignores case AND accent. That difference was PINNED
+//	                  here as `FOLDS` until cleat#3658 on purpose -- a pin that nobody has to update is how a
+//	                  divergence comes to look like a decision -- and this entry flipping is what that pin
+//	                  was for. It went red first, before the step existed.
 
 import (
 	"context"
@@ -89,8 +91,8 @@ func nameColumnExpectations() map[testutil.Dialect]nameColumnExpectation {
 		testutil.DialectPostgres: {folds: false, why: "a deterministic collation, so = is byte equality"},
 		testutil.DialectMSSQL: {collation: "Latin1_General_100_BIN2", folds: false,
 			why: "the plugins' SQL Server step (cleat#3641) made the column Latin1_General_100_BIN2; until then it inherited the database default, SQL_Latin1_General_CP1_CI_AS, which folds case"},
-		testutil.DialectMySQL: {collation: "utf8mb4_0900_ai_ci", folds: true,
-			why: "PINNED until cleat#3658: the column is still the server default, utf8mb4_0900_ai_ci, which ignores case and accent. This entry flips to utf8mb4_0900_bin / false in that change"},
+		testutil.DialectMySQL: {collation: "utf8mb4_0900_bin", folds: false,
+			why: "the plugins' MySQL step (cleat#3658) converted the column to utf8mb4_0900_bin, the collation cleat#3640 measured against PostgreSQL as the only MySQL one that agrees with it on all six probes; before that it inherited the server default, utf8mb4_0900_ai_ci, which ignores case AND accent"},
 	}
 }
 
