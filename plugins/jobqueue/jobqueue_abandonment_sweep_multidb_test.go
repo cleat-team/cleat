@@ -121,7 +121,7 @@ func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 			// anything about the statement's SYNTAX -- the actual subject of
 			// this file. It also has to run before CrossTenantConn: on MSSQL
 			// that now routes through MSSQLAdminDB, which Fatals if core RLS
-			// is enforced but migration 012's cleat_admin role does not exist
+			// is enforced but the cleat_admin role does not exist
 			// yet. cleat#2226.
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 
@@ -215,7 +215,7 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 			// anything about the statement's SYNTAX -- the actual subject of
 			// this file. It also has to run before CrossTenantConn: on MSSQL
 			// that now routes through MSSQLAdminDB, which Fatals if core RLS
-			// is enforced but migration 012's cleat_admin role does not exist
+			// is enforced but the cleat_admin role does not exist
 			// yet. cleat#2226.
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 

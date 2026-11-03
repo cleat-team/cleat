@@ -155,13 +155,13 @@ func mssqlReleaseApplock(t *testing.T, ctx context.Context, conn *sql.Conn) {
 // ANY sys.security_policies row, as this used to, made a database with only
 // plugin policies applied -- which migrations/mssql/*.sql never reaches, since
 // core migrations are what add those -- read as "needs cleat_admin", and
-// migration 012 (which creates that role) never runs unless something
-// applied the core schema. Measured in cleat#2226's CI (Plugin Migrations
-// job): that job's MSSQL database only ever runs plugin.RunMigrations with
-// coreMigrations=nil, so it accumulates plugin policies and never
-// dbo.fn_tenant_filter or the cleat_admin role -- a fixture that only ever
-// touches plugin tables through CrossTenantConn does not need either, and
-// must not be made to Fatal over their absence.
+// the role (created by migrations/mssql/001_schema.sql) never exists unless
+// something applied the core schema. Measured in cleat#2226's CI (Plugin
+// Migrations job): that job's MSSQL database only ever runs
+// plugin.RunMigrations with coreMigrations=nil, so it accumulates plugin
+// policies and never dbo.fn_tenant_filter or the cleat_admin role -- a
+// fixture that only ever touches plugin tables through CrossTenantConn does
+// not need either, and must not be made to Fatal over their absence.
 func mssqlHasCoreSecurityPolicies(t *testing.T, db *sql.DB) bool {
 	t.Helper()
 	var n int
@@ -536,8 +536,9 @@ func AdminDB(t *testing.T, db *sql.DB, dialect Dialect) *sql.DB {
 }
 
 // requireMSSQLAdminRole fails loudly when the database enforces RLS but has not
-// had migration 012 applied. Falling back to the plain pool here is what would
-// make teardown silently no-op again.
+// had migrations/mssql/001_schema.sql applied, the file that creates the role.
+// Falling back to the plain pool here is what would make teardown silently
+// no-op again.
 func requireMSSQLAdminRole(t *testing.T, db *sql.DB) {
 	t.Helper()
 	var n int

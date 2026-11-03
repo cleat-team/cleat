@@ -69,7 +69,7 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 			// SetupMinimalSchema (core: workflow_defs, workflow_instances) must
 			// run before CrossTenantConn: on MSSQL that call now routes through
 			// MSSQLAdminDB, which Fatals if RLS is enforced on the core tables
-			// but the cleat_admin role migration 012 creates does not exist yet
+			// but the cleat_admin role does not exist yet
 			// -- true of this database until the schema below has applied.
 			// cleat#2226.
 			testutil.SetupMinimalSchema(t, be.DB, be.Dialect)
