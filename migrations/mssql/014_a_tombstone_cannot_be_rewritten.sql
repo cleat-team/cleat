@@ -1,0 +1,36 @@
+-- cleat#3638: the application role cannot REWRITE a tombstone. See migrations/postgres/011 for the
+-- full reasoning; this is the same change on SQL Server.
+--
+-- 007 grants nothing of its own here: the application role reaches every [admin] table through
+-- 001_schema.sql's schema-level GRANT, which includes UPDATE, and 007 adds no DENY. A table-level
+-- DENY wins over a schema-level GRANT whatever order the two were issued in, which is the shape 008
+-- already uses for [admin].[plugin_dep_overrides]:
+--
+--     -- Append-only: the application role keeps the admin schema's SELECT and INSERT and may not
+--     -- update or delete a row.
+--     DENY UPDATE ON [admin].[plugin_dep_overrides] TO [cleat_app_role];
+--
+-- Nothing in the tree updates a tombstone -- the statements against it are the drop's INSERT, the
+-- reads, and the operator's DELETE -- so this file changes a capability and not a behaviour.
+--
+-- Re-running is a no-op: a DENY for one principal on one object is idempotent, so this file needs no
+-- IF guard, exactly as 008's two DENYs need none.
+--
+-- THE NUMBER IS 014, WHICH IS NOT THE NEXT FREE ONE, and this paragraph is here so that a reader
+-- checking the numbering gets the reason rather than having to infer it. The high-water mark for
+-- this dialect was 011, so 012 was free -- but when this file was written (2026-10-31) the numbers
+-- 012 and 013 were both named by comments in the tree, as the numbers of migrations that once
+-- existed, and scripts/migration-citation-baseline.txt carried those citations as known-dangling:
+-- cleat#2438 compacted the per-file chain into a three-file baseline in which the number a comment
+-- remembers no longer identifies anything. Taking either would have made those citations resolve to
+-- THIS file, and a citation resolving to the wrong migration is the failure the citation guard
+-- exists to catch; a gap in the sequence is not a failure at all (mysql is 001-004, 008 and 012, and
+-- scripts/check-migration-versions.sh rejects duplicates, not holes). 014 was the first number above
+-- the mark that no comment in the tree named.
+--
+-- THE TWO NUMBERS IT STEPPED OVER HAVE SINCE BECOME SOMEONE ELSE'S BUSINESS, and neither change is
+-- this one. cleat#3657 added MySQL's 012, so several comments now cite a 012 that really exists; and
+-- cleat#3660 rewrites the six comments that cited an 012 meaning the [cleat_admin] role, which
+-- migrations/mssql/001_schema.sql creates. This file neither depends on nor contradicts either.
+DENY UPDATE ON [admin].[tenant_tombstones] TO [cleat_app_role];
+GO

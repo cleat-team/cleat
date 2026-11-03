@@ -60,6 +60,29 @@ var namesForeignKeys = []string{
 // shipped runner can build the database exactly as it stood before this change.
 func chainBefore(t *testing.T, version int) string {
 	t.Helper()
+	return chainUpTo(t, version, false)
+}
+
+// chainThrough copies every SQL Server migration UP TO AND INCLUDING the version, and this test runs the
+// "after" half of its before/after comparison through it rather than through the whole chain.
+//
+// WHY, MEASURED. This test's subject is migration 011 and the catalog diff below asserts that 011 changed
+// only column collations. Running the WHOLE chain for the "after" makes every later migration part of that
+// difference, and the first one to land above 011 broke this test: cleat#3638's 014 (a table-level DENY on
+// admin.tenant_tombstones) failed it with
+//
+//	011 changed something other than a column's collation: + GRANT DENY UPDATE ON OBJECT admin.tenant_tombstones TO cleat_app_role
+//
+// which has nothing to do with collations and nothing to do with 011. Bounding the runner is the fix.
+// Whitelisting 014's catalog entries would hide the same failure for the next migration above 011 instead,
+// and there is no reason for this test to know any of their names.
+func chainThrough(t *testing.T, version int) string {
+	t.Helper()
+	return chainUpTo(t, version, true)
+}
+
+func chainUpTo(t *testing.T, version int, inclusive bool) string {
+	t.Helper()
 	src := filepath.Join(migrationsRoot(t), "mssql")
 	dst := filepath.Join(t.TempDir(), "mssql")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -75,7 +98,7 @@ func chainBefore(t *testing.T, version int) string {
 			continue
 		}
 		n, err := strconv.Atoi(strings.SplitN(e.Name(), "_", 2)[0])
-		if err != nil || n >= version {
+		if err != nil || n > version || (n == version && !inclusive) {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(src, e.Name()))
@@ -88,7 +111,11 @@ func chainBefore(t *testing.T, version int) string {
 		copied++
 	}
 	if copied == 0 {
-		t.Fatalf("UNMEASURED: no migration older than %03d was found in %s, so there is no 'before' to build", version, src)
+		bound := "older than"
+		if inclusive {
+			bound = "up to and including"
+		}
+		t.Fatalf("UNMEASURED: no migration %s %03d was found in %s, so this chain is not the one the test means to build", bound, version, src)
 	}
 	return filepath.Dir(dst) // the runner appends the dialect directory itself
 }
@@ -251,7 +278,8 @@ func TestSQLServerWorkflowNamesBecomeExact(t *testing.T) {
 		t.Fatalf("UNMEASURED: a plain session sees %d workflow_defs rows (err=%v); the premise that row-level security hides them from the migrating login does not hold here", plain, err)
 	}
 
-	real := migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t))
+	// Bounded at 011, so the catalog diff below is 011's and only 011's. See chainThrough.
+	real := migration.NewRunner(db, migration.DialectMSSQL, chainThrough(t, namesVersion))
 
 	// 0. FAILS CLOSED on an object it does not know. The preflight's catalog check had only ever PASSED until
 	// these two cases: an operator-added index on a name column, and a schema-bound view over one. Each must be

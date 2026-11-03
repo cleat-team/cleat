@@ -36,9 +36,12 @@ func TestATombstoneIsDeletedAsTheAppLogin(t *testing.T) {
 			case auth.DialectPostgres:
 				appDSN = pgAppRoleDSN(t, owner, testutil.PostgresTestDSN())
 				driver, whoami = "postgres", `SELECT current_user`
-				// Migration 007 grants cleat_app SELECT, INSERT and DELETE on the tombstone table. It also holds UPDATE
-				// there, through 001's ALTER DEFAULT PRIVILEGES IN SCHEMA admin, so UPDATE is not a usable probe of
-				// "least privilege"; the DDL below is.
+				// Migration 007 grants cleat_app SELECT, INSERT and DELETE on the tombstone table. Until cleat#3638
+				// it also held UPDATE there, through 001's ALTER DEFAULT PRIVILEGES IN SCHEMA admin; migration 011
+				// revoked that, so UPDATE is a usable probe now and
+				// a_tombstone_cannot_be_rewritten_by_the_app_login_test.go is where it is made. The DDL below stays
+				// the right premise for THIS test, because it asks about the connection as a whole rather than
+				// about one table.
 				revoke = `REVOKE DELETE ON admin.tenant_tombstones FROM cleat_app`
 				restore = `GRANT DELETE ON admin.tenant_tombstones TO cleat_app`
 				unprivileged = `CREATE TABLE admin.zz_3552_probe (x int)`
