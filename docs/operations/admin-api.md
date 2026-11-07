@@ -198,8 +198,10 @@ retry. It adds one key and revokes nothing.
 hash, beside `operator:<key id>`: the tenant can read, in its own log, who recovered it and why. A refused
 attempt (`409`) is recorded the same way, with what refused it. The reason must be non-empty after trimming, at
 most 500 characters, free of control characters, and **must not contain an API key** (`cleat_sk_…` or
-`cleat_op_…`, in any case): the audit chain is append-only, so a credential pasted into a free-text field would
-be in it for good, and the `400` does not repeat the reason. The secret is in the reply and **nowhere else**: not
+`cleat_op_…`, in any case) **or a standalone run of 64 hex digits** (the shape of a session token): the audit
+chain is append-only, so a credential pasted into a free-text field would be in it for good, and the `400` does not
+repeat the reason. The second rule also refuses a sha-256 digest, which is the same bytes; that is the price, and
+the remedy is to cite the digest by its first 12 digits. The secret is in the reply and **nowhere else**: not
 in the audit row, not in the log.
 
 **What the tenant does with it:** use the recovery key to `POST /api/keys` for a permanent key, then `DELETE

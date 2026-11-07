@@ -14,7 +14,8 @@ package main
 //     additive later.
 //  2. THE TENANT ID IS TYPED BACK in X-Confirm, checked before anything is read.
 //  3. A REASON IS REQUIRED: non-empty after trimming, at most maxRecoveryReason characters, no control
-//     characters, and nothing shaped like an API key. It is recorded in the audit row on the TARGET
+//     characters, and nothing shaped like a credential (an API key, or a standalone run of 64 hex digits,
+//     the shape of a session token and, at the price noted on bareHex64, of a sha-256 digest). It is recorded in the audit row on the TARGET
 //     tenant's chain (hash-covered), so the tenant can read, in its own log, who recovered it and why.
 //     A reason that looks like a key is refused with a 400 that does not echo it: a credential pasted
 //     into a free-text field must not end up in the audit chain for good, or in a log.
@@ -40,6 +41,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -61,6 +63,13 @@ const (
 type recoveryKeyMinter interface {
 	MintRecoveryKey(ctx context.Context, tenantID uuid.UUID, description string) (auth.RecoveryKey, error)
 }
+
+// bareHex64 matches 64 hex digits that are not part of a longer hex run: the shape of an OAuth session token
+// pasted into the wrong field. THE COST, decided on cleat#3669: a sha-256 digest in a reason is refused as
+// well, because the two are the same bytes and no pattern can tell them apart. Refusing is the cheaper error:
+// a refused digest costs the operator a shorter reference (a prefix, or "sha256:" and the first 12 digits)
+// and a retry, while a token that is accepted is in an append-only, hash-covered chain for good.
+var bareHex64 = regexp.MustCompile(`(?i)(?:^|[^0-9a-f])[0-9a-f]{64}(?:$|[^0-9a-f])`)
 
 type recoveryKeyRequest struct {
 	Reason string `json:"reason"`
@@ -86,6 +95,9 @@ func validateRecoveryReason(raw string) (string, string) {
 	lower := strings.ToLower(reason)
 	if strings.Contains(lower, strings.ToLower(auth.OperatorKeyPrefix)) || strings.Contains(lower, "cleat_sk_") {
 		return "", "reason must not contain an API key"
+	}
+	if bareHex64.MatchString(reason) {
+		return "", "reason must not contain a 64-digit hex string (it may be a token); refer to a digest by its first 12 digits"
 	}
 	return reason, ""
 }
