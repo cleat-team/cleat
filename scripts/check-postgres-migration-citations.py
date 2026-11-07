@@ -597,6 +597,23 @@ def self_test_resolved_under_baseline():
             body = [l for l in lines[start + 1:end] if "\t" in l]
             return sorted(tuple(l.split("\t")[:2]) for l in body)
 
+        def block_tags(out):
+            """{(file, fact): the third field}. Pinned separately because the
+            first two fields alone are what a reviewer matches against the
+            diff, and a block whose TAGS are wrong still matches on them."""
+            lines = out.splitlines()
+            try:
+                start = next(i for i, l in enumerate(lines) if l.startswith("--- paste"))
+                end = next(i for i, l in enumerate(lines) if l.startswith("--- end"))
+            except StopIteration:
+                return {}
+            tags = {}
+            for l in lines[start + 1:end]:
+                f = l.split("\t")
+                if len(f) >= 3:
+                    tags[(f[0], f[1])] = f[2]
+            return tags
+
         git("init", "-q")
         for d in DIALECTS:
             write(f"migrations/{d}/001_schema.sql", "-- schema\n")
@@ -651,6 +668,9 @@ def self_test_resolved_under_baseline():
                             f"entries: got {block_entries(out)!r}, want {[entry_a]!r}")
         if "mysql/012_x.sql" not in out:
             failures.append(f"the block did not name the file it resolves to: {out!r}")
+        tag = block_tags(out).get(entry_a, "")
+        if not (tag.startswith("resolves-to:") and "mysql/012_x.sql" in tag):
+            failures.append(f"an accepted entry's tag should say what it resolves to: {tag!r}")
         rc, out = run()
         if rc != 0:
             failures.append(f"main mode after acceptance: rc={rc}, want 0: {out!r}")
@@ -681,6 +701,14 @@ def self_test_resolved_under_baseline():
         if rc != 0 or block_entries(out) != sorted([entry_a, entry_b]):
             failures.append("mixed block does not match the dropped lines: "
                             f"rc={rc} got {block_entries(out)!r}")
+        tags = block_tags(out)
+        tag_a, tag_b = tags.get(entry_a, ""), tags.get(entry_b, "")
+        if not (tag_a.startswith("resolves-to:") and "mysql/012_x.sql" in tag_a):
+            failures.append(f"mixed block: the accepted entry's tag is {tag_a!r}, "
+                            "want resolves-to: naming mysql/012_x.sql")
+        if tag_b != "citation-removed":
+            failures.append(f"mixed block: the plain fix's tag is {tag_b!r}, "
+                            "want exactly citation-removed")
     return failures
 
 
