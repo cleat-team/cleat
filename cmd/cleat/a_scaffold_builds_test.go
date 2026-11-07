@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -86,12 +85,14 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 			}
 
 			// A successful init says nothing about dependencies: the closing warning
-			// (cleat#3533) is only for a tidy that failed.
-			if strings.Contains(initOut, "WARNING: ") {
-				t.Errorf("init resolved its dependencies, so it must not end with the warning:\n%s", initOut)
-			}
-
+			// (cleat#3533) is only for a tidy that failed. When it did fail, and the cause is a
+			// transient network error, the tidy is re-run here (up to scaffoldTidyRetries times) and the build below proceeds
+			// (cleat#3659, D61 option 3): the product does not retry, but a template's build is
+			// not what a flaky checksum database is meant to fail. Any other warning is an error.
 			proj := filepath.Join(root, name)
+			if err := resolveAfterATransientInitWarning(t, initOut, proj, goModTidy, scaffoldTidyPause); err != nil {
+				t.Errorf("%v", err)
+			}
 			out, err := runCleatIn(t, proj, "build", "-o", "./out", ".")
 			if err != nil {
 				// init's own output is printed here too (cleat#3533). init exits 0 even when
