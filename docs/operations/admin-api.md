@@ -205,6 +205,13 @@ in the audit row, not in the log.
 **What the tenant does with it:** use the recovery key to `POST /api/keys` for a permanent key, then `DELETE
 /api/keys/{key_id}` the recovery key. Do not wait for it to lapse. This route does not rely on the confirm route.
 
+**The confirm route can make a recovery key permanent, and an operator should not be surprised by it.** A recovery
+key is a provisional key like any other, so `POST /api/admin/tenants/{tenant}/confirm` with its `key_id` makes it
+permanent, and it then outlives its 15 minutes. Only the principal that **created** the tenant (the provision-scoped
+key that called `POST /api/admin/tenants`) can do that; the admin operator who minted the recovery key is not that
+principal and gets `404`. It needs the creator's own credential and the recovery key's `key_id`, and its reply
+carries no secret, so it does not hand the creator the key.
+
 **What this does not stop, stated plainly.** An admin operator can recover a tenant that revoked its keys
 *deliberately*. That is not new power: `cleat-worker --generate-api-key` gives anyone with a shell the same, and
 `/api/admin/*` already reaches every tenant's runs. What the route changes is that the power is now reachable over
