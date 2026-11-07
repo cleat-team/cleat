@@ -23,8 +23,12 @@ import (
 // green over a regression that dropped that sentence. A permanent failure is not retried, and neither is
 // a run whose init did not warn.
 //
-// The logic is here, behind a function, because the real scaffold test cannot be made to meet a transient
-// failure on demand; this can, with a tidy that is a function.
+// The logic is here, behind a function, so that every branch of it can be exercised without a network: a
+// tidy that is a function can fail transiently, permanently or not at all on demand. The real scaffold test
+// can also meet a transient failure end to end, with a GOPROXY that answers 503 for its first seconds and
+// then forwards (cleat-review measured exactly that on cleat#3674: init's tidy got 503s, its closing line
+// carried the option 2 sentence, the re-run resolved the scaffold and the build passed), but that needs a
+// proxy and the clock, so it is not a test that runs here.
 
 // scaffoldTidyRetries is how many times the scaffold's `go mod tidy` is re-run after a transient warning.
 // A transient failure usually clears on the next try, and a run that fails this many times in a row is a
