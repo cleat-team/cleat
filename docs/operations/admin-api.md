@@ -207,9 +207,11 @@ in the audit row, not in the log.
 
 **The confirm route can make a recovery key permanent, and an operator should not be surprised by it.** A recovery
 key is a provisional key like any other, so `POST /api/admin/tenants/{tenant}/confirm` with its `key_id` makes it
-permanent, and it then outlives its 15 minutes. Only the principal that **created** the tenant (the provision-scoped
-key that called `POST /api/admin/tenants`) can do that; the admin operator who minted the recovery key is not that
-principal and gets `404`. It needs the creator's own credential and the recovery key's `key_id`, and its reply
+permanent, and it then outlives its 15 minutes. Only the creator recorded on the tenant can do that: the principal
+of the operator key that called `POST /api/admin/tenants`, or that key itself if it has no principal. That is an
+identity, not a scope. An operator who did not create the tenant, such as an admin recovering a tenant that a
+provisioning service created, gets `404`; an admin that created the tenant itself is its creator and can confirm
+its own recovery key. The call needs that identity's credential and the recovery key's `key_id`, and its reply
 carries no secret, so it does not hand the creator the key.
 
 **What this does not stop, stated plainly.** An admin operator can recover a tenant that revoked its keys
