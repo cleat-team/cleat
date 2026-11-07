@@ -514,6 +514,12 @@ type tidyFailure struct {
 // Docker scenarios' log matcher (cleat#3644), and a phrase from one line combined with a URL from another is
 // that mistake again.
 //
+// EVERY PHRASE CONTAINS A SPACE, and that is a rule and not a style. The marker is a URL, and a URL is
+// arbitrary text with no spaces in it: a phrase without one ("goaway", "internal_error", "client.timeout")
+// matched a module named for it, on a 404 that no re-run clears (cleat-review on cleat#3673). A phrase with a
+// space cannot match inside a URL, so the module path cannot supply the phrase.
+// TestEveryTransientPhraseHasASpace holds the rule for the next phrase added.
+//
 // The direction of a miss matters, and it is the safe one: a cause this does not recognise prints the
 // closing line it always printed. It is not exhaustive and is not meant to be. The shape that is measured is
 // the HTTP/2 stream reset from the checksum database (cleat#3659, run 40907847227); the rest are the
@@ -522,9 +528,9 @@ type tidyFailure struct {
 var (
 	transientFetchMarkers = []string{"http://", "https://", "dial tcp"}
 	transientTidyPhrases  = []string{
-		"stream error:", "internal_error", "goaway", "connection reset by peer", "unexpected eof",
+		"stream error:", "sent goaway", "connection reset by peer", "unexpected eof",
 		"i/o timeout", "tls handshake timeout", "timeout awaiting response headers", "context deadline exceeded",
-		"client.timeout", "429 too many requests", "500 internal server error", "502 bad gateway",
+		"client.timeout exceeded", "429 too many requests", "500 internal server error", "502 bad gateway",
 		"503 service unavailable", "504 gateway timeout",
 	}
 )

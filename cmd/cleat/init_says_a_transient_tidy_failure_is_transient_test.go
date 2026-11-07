@@ -40,6 +40,14 @@ func TestTransientTidyCauseRecognisesTheRealLogAndNothingBroader(t *testing.T) {
 		{"a module that does not exist", `reading https://proxy.golang.org/nope/@v/list: 404 Not Found`, false},
 		{"a go.mod that does not parse: an EOF with no fetch on the line", "go.mod:3: unexpected EOF", false},
 
+		// cleat-review on cleat#3673: a phrase word inside the URL's own module path. The phrases without a
+		// space (goaway, internal_error, client.timeout) matched a module that happens to be named for one, on
+		// a 404/410 that a re-run does not clear -- the false-hit direction, which option 3 would retry on.
+		{"goaway in a module path", `reading https://proxy.golang.org/github.com/acme/goaway/@v/list: 404 Not Found`, false},
+		{"internal_error in a module path", `reading https://proxy.golang.org/github.com/acme/internal_error/@v/list: 410 Gone`, false},
+		{"client.timeout in a module path", `reading https://proxy.golang.org/github.com/acme/client.timeout/@v/list: 404 Not Found`, false},
+		{"the real log with the same word in its URL is still transient", `reading https://sum.golang.org/tile/8/0/goaway/042: stream error: stream ID 129; INTERNAL_ERROR; received from peer`, true},
+
 		// The same-line rule, which is the reason the match is per line: a URL on one line and a transient
 		// phrase on another is two unrelated lines, and cleat#3644's matcher was fooled by exactly that
 		// shape (a compile error's "unexpected EOF"). This case is synthetic by necessity -- it states the
@@ -51,6 +59,20 @@ func TestTransientTidyCauseRecognisesTheRealLogAndNothingBroader(t *testing.T) {
 				t.Errorf("transientTidyCause = %v, want %v for:\n%s", got, tc.want, tc.out)
 			}
 		})
+	}
+}
+
+// The rule that keeps a module path from supplying a phrase (see transientTidyPhrases): a URL has no spaces
+// in it, so a phrase with one cannot match inside it. This is what makes the three cases above hold for
+// phrases that are added later, which a list of module-path cases cannot do.
+func TestEveryTransientPhraseHasASpace(t *testing.T) {
+	for _, phrase := range transientTidyPhrases {
+		if !strings.Contains(phrase, " ") {
+			t.Errorf("phrase %q has no space, so a module path in a URL on the same line can match it", phrase)
+		}
+	}
+	if len(transientTidyPhrases) == 0 {
+		t.Error("no phrases, so the rule above measured nothing")
 	}
 }
 
