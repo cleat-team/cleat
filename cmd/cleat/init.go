@@ -495,13 +495,59 @@ func tidyScaffold(dir string) *tidyFailure {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "\nWarning: could not resolve dependencies (%v).\n"+
 			"Run 'go mod tidy' in %s before building.\n%s\n", err, dir, out)
-		return &tidyFailure{dir: dir}
+		return &tidyFailure{dir: dir, transient: transientTidyCause(string(out))}
 	}
 	return nil
 }
 
-// tidyFailure records that a scaffold's `go mod tidy` failed.
-type tidyFailure struct{ dir string }
+// tidyFailure records that a scaffold's `go mod tidy` failed. transient is set when the output names a
+// network or stream error that a re-run usually clears (transientTidyCause); it changes the closing line's
+// wording and nothing else. tidyScaffold does not retry (cleat#3659, owner decision D61).
+type tidyFailure struct {
+	dir       string
+	transient bool
+}
+
+// transientFetchMarkers say a line of `go mod tidy` output is about fetching something over the network;
+// transientTidyPhrases say how that fetch failed in a way a re-run usually clears. A line must carry one of
+// each. Anchoring on the same line is deliberate: a bare "unexpected EOF" matched a compile error in the
+// Docker scenarios' log matcher (cleat#3644), and a phrase from one line combined with a URL from another is
+// that mistake again.
+//
+// The direction of a miss matters, and it is the safe one: a cause this does not recognise prints the
+// closing line it always printed. It is not exhaustive and is not meant to be. The shape that is measured is
+// the HTTP/2 stream reset from the checksum database (cleat#3659, run 40907847227); the rest are the
+// ordinary ways a fetch fails once and succeeds on the next try. A refused connection and a disabled proxy
+// are NOT in the list: they are a proxy that is down and a setting, and re-running does not clear either.
+var (
+	transientFetchMarkers = []string{"http://", "https://", "dial tcp"}
+	transientTidyPhrases  = []string{
+		"stream error:", "internal_error", "goaway", "connection reset by peer", "unexpected eof",
+		"i/o timeout", "tls handshake timeout", "timeout awaiting response headers", "context deadline exceeded",
+		"client.timeout", "429 too many requests", "500 internal server error", "502 bad gateway",
+		"503 service unavailable", "504 gateway timeout",
+	}
+)
+
+// transientTidyCause reports whether `go mod tidy`'s output names a network or stream error that a re-run
+// usually clears.
+func transientTidyCause(out string) bool {
+	for _, line := range strings.Split(strings.ToLower(out), "\n") {
+		if containsAny(line, transientFetchMarkers) && containsAny(line, transientTidyPhrases) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
 
 // report prints the one line init ends with when the scaffold's dependencies
 // were not resolved: what is wrong, and the command that fixes it. A nil
@@ -510,8 +556,14 @@ func (f *tidyFailure) report(w io.Writer) {
 	if f == nil {
 		return
 	}
-	fmt.Fprintf(w, "WARNING: %s was created but will not build yet: its dependencies were not resolved (the cause is above). Fix it with: cd %s && go mod tidy\n",
-		f.dir, shellWord(f.dir))
+	cause := "the cause is above"
+	if f.transient {
+		// cleat#3659, D61. The remedy is the same command; what changes is that the reader is told a re-run
+		// is likely to be enough, so a transient fetch error does not read as a broken project.
+		cause = "the cause is above, and looks like a transient network error, so re-running the command usually fixes it"
+	}
+	fmt.Fprintf(w, "WARNING: %s was created but will not build yet: its dependencies were not resolved (%s). Fix it with: cd %s && go mod tidy\n",
+		f.dir, cause, shellWord(f.dir))
 }
 
 // shellWord quotes s for a POSIX shell only when it needs it, so the common
