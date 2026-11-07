@@ -249,6 +249,11 @@ func TestARecoveryReasonIsRequiredBoundedAndNeverKeyShaped(t *testing.T) {
 		{"a tenant key prefix", "cleat_sk_anything"},
 		{"a tenant key prefix in upper case", "CLEAT_SK_ANYTHING"},
 		{"an operator key prefix", "pasted cleat_op_0123456789abcdef"},
+		// cleat#3669 (a): the shape of an OAuth session token, with no prefix to recognise it by.
+		{"a bare 64-digit hex string", strings.Repeat("0123456789abcdef", 4)},
+		{"a bare 64-digit hex string in upper case", strings.ToUpper(strings.Repeat("0123456789abcdef", 4))},
+		{"a 64-digit hex string inside a sentence", "token was " + strings.Repeat("a1", 32) + " when it leaked"},
+		{"a sha-256 digest: the price of the rule, pinned on purpose", "rolled back to sha256:" + strings.Repeat("ab", 32)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := buildRecoveryHTTP(t)
@@ -268,6 +273,22 @@ func TestARecoveryReasonIsRequiredBoundedAndNeverKeyShaped(t *testing.T) {
 			}
 			if *h.meta != "" {
 				t.Errorf("a refused reason reached the audit document: %q", *h.meta)
+			}
+		})
+	}
+	// The edges of the rule: what it must NOT refuse, so it cannot grow into "any hex".
+	for _, tc := range []struct {
+		name, reason string
+	}{
+		{"63 hex digits", strings.Repeat("0123456789abcdef", 4)[:63]},
+		{"a 64-digit run inside a longer hex run", strings.Repeat("0123456789abcdef", 4) + "0"},
+		{"a 12-digit digest prefix", "rolled back to sha256:" + strings.Repeat("ab", 6)},
+		{"64 characters that are not all hex", strings.Repeat("0123456789abcdef", 3) + "0123456789abcdeg"},
+	} {
+		t.Run("accepted: "+tc.name, func(t *testing.T) {
+			h := buildRecoveryHTTP(t)
+			if w := h.recoverTenant(http.MethodPost, recoveryTenant, h.adminKey, recoveryTenant, okBody(tc.reason)); w.Code != http.StatusCreated {
+				t.Fatalf("status %d, want 201: %s", w.Code, w.Body.String())
 			}
 		})
 	}
