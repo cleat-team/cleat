@@ -55,6 +55,27 @@ const mysqlOrphanQuery = "SELECT CAST('workflow_instances' AS CHAR) COLLATE utf8
 // mysqlChainBefore copies every MySQL migration older than version into a temporary directory.
 func mysqlChainBefore(t *testing.T, version int) string {
 	t.Helper()
+	return mysqlChainUpTo(t, version, false)
+}
+
+// mysqlChainThrough copies every MySQL migration UP TO AND INCLUDING the version, and the "after" half of the
+// before/after comparison in TestMySQLWorkflowNamesBecomeExact runs through it rather than through the whole chain.
+//
+// WHY. That test's subject is migration 012 and its catalog diff asserts that 012 changed only column collations.
+// Running the WHOLE chain makes every later migration part of the difference, so the first core MySQL migration above
+// 012 would fail it with a line about something that has nothing to do with collations or with 012. That is exactly
+// what happened to the SQL Server twin, where cleat#3638's 014 (a table-level DENY) failed it with
+// "011 changed something other than a column's collation: + GRANT DENY UPDATE ON OBJECT ..." (cleat#3664); this one
+// had not met it yet because 012 was the highest MySQL migration (cleat#3667). Bounding the runner is the repair.
+// Whitelisting the next migration's catalog entries would hide the same failure for the one after it, and there is
+// no reason for this test to know any of their names.
+func mysqlChainThrough(t *testing.T, version int) string {
+	t.Helper()
+	return mysqlChainUpTo(t, version, true)
+}
+
+func mysqlChainUpTo(t *testing.T, version int, inclusive bool) string {
+	t.Helper()
 	src := filepath.Join(migrationsRoot(t), "mysql")
 	dst := filepath.Join(t.TempDir(), "mysql")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -70,7 +91,7 @@ func mysqlChainBefore(t *testing.T, version int) string {
 			continue
 		}
 		n, err := strconv.Atoi(strings.SplitN(e.Name(), "_", 2)[0])
-		if err != nil || n >= version {
+		if err != nil || n > version || (n == version && !inclusive) {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(src, e.Name()))
@@ -83,7 +104,11 @@ func mysqlChainBefore(t *testing.T, version int) string {
 		copied++
 	}
 	if copied == 0 {
-		t.Fatalf("UNMEASURED: no MySQL migration older than %03d in %s, so there is no 'before' to build", version, src)
+		bound := "older than"
+		if inclusive {
+			bound = "up to and including"
+		}
+		t.Fatalf("UNMEASURED: no MySQL migration %s %03d was found in %s, so this chain is not the one the test means to build", bound, version, src)
 	}
 	return filepath.Dir(dst)
 }
@@ -231,7 +256,8 @@ func TestMySQLWorkflowNamesBecomeExact(t *testing.T) {
 		t.Error("CHANGELOG.md does not contain the orphan query this test runs, byte for byte; the release note and the test have drifted")
 	}
 
-	real := migration.NewRunner(db, migration.DialectMySQL, migrationsRoot(t))
+	// Bounded at 012, so the catalog diff below is 012's and only 012's. See mysqlChainThrough.
+	real := migration.NewRunner(db, migration.DialectMySQL, mysqlChainThrough(t, mysqlNamesVersion))
 
 	// 1. REFUSED, one orphan at a time, each naming its own table, within 128 characters.
 	for _, step := range []struct {
@@ -300,7 +326,7 @@ func TestMySQLWorkflowNamesBecomeExact(t *testing.T) {
 	if _, err := holder.ExecContext(ctx, `LOCK TABLES idempotency_keys WRITE`); err != nil {
 		t.Fatalf("UNMEASURED: could not hold a write lock on idempotency_keys: %v", err)
 	}
-	err = runMigrations(t, ctx, migration.NewRunner(short, migration.DialectMySQL, migrationsRoot(t)), migration.DialectMySQL)
+	err = runMigrations(t, ctx, migration.NewRunner(short, migration.DialectMySQL, mysqlChainThrough(t, mysqlNamesVersion)), migration.DialectMySQL)
 	if err == nil {
 		holder.ExecContext(ctx, `UNLOCK TABLES`)
 		holder.Close()
