@@ -108,14 +108,51 @@ INJECTS a match or DISCOVERS one from the real tree -- a suite that is all
 injection has this exact blind spot, on whatever pipeline stage nothing
 injects past.
 
+cleat#3666 -- WHAT A STALE ENTRY MEANS. The union rule above is deliberate
+(`--self-test` case 12), and it has one consequence that is not: a number
+another dialect retired and a later migration REUSES makes every citation of
+that number resolve to the new, unrelated file. The baseline entry for each
+then goes stale, and the guard said "the citation was fixed" about citations
+nobody had touched. `--update` believed it and dropped them. That is how six
+SQL Server comments citing `migration 012` for the `cleat_admin` role came to
+cite MySQL's `012_workflow_names_are_compared_exactly.sql` (cleat#3657,
+cleat#3660), and the 004 collisions before it did the same to dialect-scoped
+`migrations/postgres/004` (cleat#1986, cleat#3360, f6310d9f).
+
+What discriminates is whether the citation TEXT is still in the tree. A stale
+entry whose (file, fact) is gone was fixed. One whose (file, fact) is still
+extracted, unchanged, was RESOLVED UNDER: nothing was fixed, a migration was
+added beneath it. Over the baseline's whole history on develop
+(`git log -- scripts/migration-citation-baseline.txt`, 9 removal events,
+measured 2026-11-07) that predicate fires on 6 of the 6 entries #3657's
+`--update` dropped, on 0 of the 22 removed because someone fixed the citation,
+and on one benign event (the 004 prose in engine/routine_definition_drift_test.go,
+which describes the old bare form). Neither of the two rules this replaced
+did better: "a number real in exactly one dialect is suspicious" flags
+legitimate readers (9 on 2026-11-07, 38 on 7cfc78f8 -- a census, moving), and
+"infer the dialect from the calling file's path" reaches 2 of the 6.
+
+The guard reports that class separately, names what it now resolves to, and
+`--update` refuses to drop it unless `--accept-resolved` is passed, in which
+case it prints a block, every dropped baseline line, for the PR body. The
+reviewer's check is mechanical: the block and the baseline lines the diff
+removes are the same set. `is_real()` is unchanged. What this cannot reach: a
+citation that resolved falsely from the start never entered the baseline, so
+nothing flips.
+
 Usage:
   scripts/check-postgres-migration-citations.py --self-test
   scripts/check-postgres-migration-citations.py
   scripts/check-postgres-migration-citations.py --update
+  scripts/check-postgres-migration-citations.py --update --accept-resolved
 """
+import contextlib
+import io
+import os
 import re
 import subprocess
 import sys
+import tempfile
 
 SELF_PATH = "scripts/check-postgres-migration-citations.py"
 BASELINE_PATH = "scripts/migration-citation-baseline.txt"
@@ -388,6 +425,291 @@ def check(matches, real_files, real_numbers, baseline, exempt_prefixes=EXEMPT_FI
     unallowed = sorted(dangling - set(baseline.keys()))
     stale = sorted(set(baseline.keys()) - dangling)
     return unallowed, stale
+
+
+def present_citations(matches, exempt_prefixes=EXEMPT_FILE_PREFIXES):
+    """{(path, cited fact): [(lineno, dialect, num, fname), ...]} for every
+    citation the scan extracts from a non-exempt file, resolved or not.
+
+    This is the other half of what `check` compares: `dangling` says which
+    citations do not resolve, this says which citation TEXT is still there.
+    Their difference is what separates a stale baseline entry whose citation
+    was edited from one whose citation was left alone and has since started
+    to resolve (cleat#3666).
+    """
+    out = {}
+    for path, lineno, dialect, num, fname in matches:
+        if path.startswith(exempt_prefixes):
+            continue
+        out.setdefault((path, cited_fact(dialect, num, fname)), []).append(
+            (lineno, dialect, num, fname))
+    return out
+
+
+def resolves_to(dialect, num, fname, real_files):
+    """The migration files, as 'dialect/NNN_name.sql', that this citation
+    resolves to right now -- the same predicate as is_real(), but naming what
+    satisfied it instead of saying that something did."""
+    out = []
+    for d in ((dialect,) if dialect else DIALECTS):
+        for f in sorted(real_files[d]):
+            if (f == fname) if fname else (f[:3] == num):
+                out.append(f"{d}/{f}")
+    return out
+
+
+def classify_stale(stale, matches, real_files, exempt_prefixes=EXEMPT_FILE_PREFIXES):
+    """Split stale baseline entries (cleat#3666) into
+      fixed    -- the citation text is gone: someone edited it.
+      resolved -- the citation text is STILL in the tree and now resolves.
+                  {(file, fact): [files it resolves to]}; nothing was fixed,
+                  a migration was added under an unchanged citation.
+
+    The second class is the event the union rule in is_real() can cause: a
+    number another dialect retires and a later migration reuses makes every
+    bare citation of it resolve to an unrelated file. Reporting it as "the
+    citation was fixed" told the author the opposite of what happened.
+    """
+    present = present_citations(matches, exempt_prefixes)
+    fixed, resolved = [], {}
+    for entry in stale:
+        cites = present.get(entry)
+        if not cites:
+            fixed.append(entry)
+            continue
+        targets = sorted({x for _l, d, n, f in cites
+                          for x in resolves_to(d, n, f, real_files)})
+        if not targets:
+            # A stale entry is one that is NOT dangling, so a citation still
+            # in the tree must resolve to something. If it does not, this
+            # function was handed an entry that is not stale, or is_real()
+            # and resolves_to() have drifted apart. Say that rather than
+            # report an acceptance that names nothing.
+            print(f"UNMEASURED: {entry[0]}: {entry[1]} is neither dangling nor "
+                  "resolvable, so it cannot be classified.", file=sys.stderr)
+            print("this is a failure of the check, not a finding about the tree",
+                  file=sys.stderr)
+            sys.exit(2)
+        resolved[entry] = targets
+    return fixed, resolved
+
+
+def line_text(path, lineno):
+    """The source line a citation sits on, for the acceptance block; empty if
+    the file cannot be read (the block is evidence for a reviewer, not input)."""
+    try:
+        with open(path) as f:
+            return f.read().splitlines()[lineno - 1].strip()[:140]
+    except (OSError, IndexError, UnicodeDecodeError):
+        return ""
+
+
+def format_acceptance_block(dropped, resolved, matches, exempt_prefixes=EXEMPT_FILE_PREFIXES):
+    """The block `--update --accept-resolved` prints for the PR body.
+
+    Every dropped baseline line appears, in baseline format in its first two
+    tab-separated fields, so a reviewer can compare the block with the lines
+    the diff removes one for one. Entries that were plain fixes are tagged
+    `citation-removed`; accepted ones carry what they now resolve to and the
+    line that still cites them -- the part a reviewer has to judge.
+    """
+    present = present_citations(matches, exempt_prefixes)
+    lines = ["--- paste this block into the PR body "
+             "(review: the baseline lines this diff removes must match it) ---",
+             f"dropped from {BASELINE_PATH}:"]
+    for path, fact in sorted(dropped):
+        if (path, fact) in resolved:
+            lineno = present[(path, fact)][0][0]
+            lines.append("\t".join([
+                path, fact, "resolves-to: " + ", ".join(resolved[(path, fact)]),
+                f"{path}:{lineno}: {line_text(path, lineno)}"]))
+        else:
+            lines.append("\t".join([path, fact, "citation-removed"]))
+    lines.append("--- end ---")
+    return "\n".join(lines)
+
+
+def print_resolved(resolved, matches, exempt_prefixes=EXEMPT_FILE_PREFIXES):
+    present = present_citations(matches, exempt_prefixes)
+    for (path, fact), targets in sorted(resolved.items()):
+        lineno = present[(path, fact)][0][0]
+        print(f"  {path}\t{fact}\tresolves now to {', '.join(targets)}")
+        print(f"      still cited at {path}:{lineno}: {line_text(path, lineno)}")
+
+
+RESOLVED_ADVICE = (
+    "Nothing was fixed here: the citation text is unchanged, and a migration was "
+    "added under it.\n"
+    "Either that migration is NOT what the comment meant (a number another dialect "
+    "retired was reused) -- then reword the citation to name the file it means, or "
+    "what carries the behaviour, and rerun --update.\n"
+    "Or it IS what was meant -- then run `{cmd} --update --accept-resolved`, which "
+    "drops the entries and prints a block; paste that block into the PR body."
+)
+
+
+def self_test_resolved_under_baseline():
+    """cleat#3666, end to end on a throwaway git repo: a baseline entry whose
+    citation text does not change, but which a NEW migration makes resolve.
+
+    Runs this script as a subprocess against a tree it discovers itself, and
+    asserts on the printed TEXT as well as the exit status: a status-only
+    case certifies a guard that has lost exactly the message it is named for
+    (the old stale path also exits 1, and also leaves the baseline alone in
+    main mode).  Returns a list of failure strings; empty means every case
+    held.
+    """
+    failures = []
+    script = os.path.abspath(__file__)
+    with tempfile.TemporaryDirectory() as tmp:
+        def git(*args):
+            r = subprocess.run(["git", *args], cwd=tmp, capture_output=True, text=True)
+            if r.returncode != 0:
+                print("UNMEASURED: self-test fixture setup failed: git "
+                      + " ".join(args) + ": " + r.stderr, file=sys.stderr)
+                print("this is a failure of the check, not a finding about the tree",
+                      file=sys.stderr)
+                sys.exit(2)
+
+        def write(rel, text):
+            full = os.path.join(tmp, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write(text)
+
+        def run(*flags):
+            r = subprocess.run([sys.executable, script, *flags], cwd=tmp,
+                               capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+
+        def baseline():
+            with open(os.path.join(tmp, BASELINE_PATH)) as f:
+                return f.read()
+
+        def block_entries(out):
+            """The (file, fact) pairs of the paste-into-the-PR-body block."""
+            lines = out.splitlines()
+            try:
+                start = next(i for i, l in enumerate(lines) if l.startswith("--- paste"))
+                end = next(i for i, l in enumerate(lines) if l.startswith("--- end"))
+            except StopIteration:
+                return None
+            body = [l for l in lines[start + 1:end] if "\t" in l]
+            return sorted(tuple(l.split("\t")[:2]) for l in body)
+
+        def block_tags(out):
+            """{(file, fact): the third field}. Pinned separately because the
+            first two fields alone are what a reviewer matches against the
+            diff, and a block whose TAGS are wrong still matches on them."""
+            lines = out.splitlines()
+            try:
+                start = next(i for i, l in enumerate(lines) if l.startswith("--- paste"))
+                end = next(i for i, l in enumerate(lines) if l.startswith("--- end"))
+            except StopIteration:
+                return {}
+            tags = {}
+            for l in lines[start + 1:end]:
+                f = l.split("\t")
+                if len(f) >= 3:
+                    tags[(f[0], f[1])] = f[2]
+            return tags
+
+        git("init", "-q")
+        for d in DIALECTS:
+            write(f"migrations/{d}/001_schema.sql", "-- schema\n")
+        write("src/a.go", "// the role is made by migration 012\n")
+        write("src/b.go", "// nothing is cited here any more\n")
+        entry_a = ("src/a.go", "migration 012")
+        entry_b = ("src/b.go", "migration 013")
+        base_a = "src/a.go\tmigration 012\n"
+        base_b = "src/b.go\tmigration 013\n"
+        write(BASELINE_PATH, base_a)
+        git("add", "-A")
+
+        # Precondition: with 012 real nowhere the entry is dangling and baselined.
+        rc, out = run()
+        if rc != 0:
+            failures.append(f"precondition: the fixture tree should be clean, rc={rc}: {out!r}")
+            return failures
+
+        # 1. A migration at that number appears in ANOTHER dialect. Nothing in
+        #    src/a.go changed.
+        write("migrations/mysql/012_x.sql", "-- unrelated\n")
+        git("add", "-A")
+        rc, out = run()
+        if rc != 1:
+            failures.append(f"main mode: rc={rc}, want 1: {out!r}")
+        if "resolves now to" not in out or "mysql/012_x.sql" not in out:
+            failures.append("main mode did not say the citation resolves now, "
+                            f"or did not name the file it resolves to: {out!r}")
+        if "the citation was fixed" in out:
+            failures.append("main mode told the author the citation was fixed, "
+                            f"about a citation nobody changed: {out!r}")
+
+        # 2. --update must refuse, write nothing, and show what it would drop.
+        before = baseline()
+        rc, out = run("--update")
+        if rc != 1:
+            failures.append(f"--update without the flag: rc={rc}, want 1: {out!r}")
+        if baseline() != before:
+            failures.append("--update without the flag rewrote the baseline")
+        if "--accept-resolved" not in out or "src/a.go\tmigration 012" not in out:
+            failures.append("--update's refusal did not name the flag or the entry it "
+                            f"would drop: {out!r}")
+
+        # 3. With the flag it drops, and the block names EXACTLY the dropped entries.
+        rc, out = run("--update", "--accept-resolved")
+        if rc != 0:
+            failures.append(f"--update --accept-resolved: rc={rc}, want 0: {out!r}")
+        if baseline() != "":
+            failures.append(f"the accepted entry was not dropped: {baseline()!r}")
+        if block_entries(out) != [entry_a]:
+            failures.append("the pasted block does not name exactly the dropped "
+                            f"entries: got {block_entries(out)!r}, want {[entry_a]!r}")
+        if "mysql/012_x.sql" not in out:
+            failures.append(f"the block did not name the file it resolves to: {out!r}")
+        tag = block_tags(out).get(entry_a, "")
+        if not (tag.startswith("resolves-to:") and "mysql/012_x.sql" in tag):
+            failures.append(f"an accepted entry's tag should say what it resolves to: {tag!r}")
+        rc, out = run()
+        if rc != 0:
+            failures.append(f"main mode after acceptance: rc={rc}, want 0: {out!r}")
+
+        # 4. Control: the citation really is fixed. No new class, no flag, no block.
+        write(BASELINE_PATH, base_b)
+        git("add", "-A")
+        rc, out = run()
+        if rc != 1 or "resolves now to" in out:
+            failures.append(f"a fixed citation read as resolved-under-it: rc={rc} {out!r}")
+        rc, out = run("--update")
+        if rc != 0 or baseline() != "":
+            failures.append(f"--update on a fixed citation: rc={rc} baseline={baseline()!r}")
+        if "--- paste" in out:
+            failures.append(f"a plain fix printed an acceptance block: {out!r}")
+
+        # 5. Mixed: one resolved, one fixed. The resolved one blocks --update
+        #    for both (nothing is half-written); with the flag the block lists
+        #    BOTH dropped lines, so it matches the diff line for line.
+        write(BASELINE_PATH, base_a + base_b)
+        git("add", "-A")
+        before = baseline()
+        rc, out = run("--update")
+        if rc != 1 or baseline() != before:
+            failures.append(f"mixed --update without the flag: rc={rc}, baseline changed="
+                            f"{baseline() != before}")
+        rc, out = run("--update", "--accept-resolved")
+        if rc != 0 or block_entries(out) != sorted([entry_a, entry_b]):
+            failures.append("mixed block does not match the dropped lines: "
+                            f"rc={rc} got {block_entries(out)!r}")
+        tags = block_tags(out)
+        tag_a, tag_b = tags.get(entry_a, ""), tags.get(entry_b, "")
+        if not (tag_a.startswith("resolves-to:") and "mysql/012_x.sql" in tag_a):
+            failures.append(f"mixed block: the accepted entry's tag is {tag_a!r}, "
+                            "want resolves-to: naming mysql/012_x.sql")
+        if tag_b != "citation-removed":
+            failures.append(f"mixed block: the plain fix's tag is {tag_b!r}, "
+                            "want exactly citation-removed")
+    return failures
 
 
 def self_test():
@@ -698,13 +1020,55 @@ def self_test():
             print(f"    {path}: {fact}", file=sys.stderr)
         ok = False
 
+    # 25. cleat#3666, the dialect-SCOPED form. The 004 collisions (cleat#1986,
+    #     cleat#3360, f6310d9f) flipped `migrations/postgres/004` itself, not a
+    #     bare `migration 004`: the dialect named in the citation reused the
+    #     number. Classification must not depend on the form, and the target
+    #     is named per dialect.
+    unit_matches = [("a.go", 1, "postgres", "004", None)]
+    unit_files = dict(real_files)
+    unit_files["postgres"] = real_files["postgres"] | {"004_operator_key_scopes.sql"}
+    fixed, resolved = classify_stale(
+        [("a.go", "migrations/postgres/004"), ("c.go", "migration 099")],
+        unit_matches, unit_files)
+    want = ["postgres/004_operator_key_scopes.sql",
+            "postgres/004_scope_plugin_grants_to_the_install.sql"]
+    if resolved != {("a.go", "migrations/postgres/004"): want}:
+        print(f"self-test FAIL: a dialect-scoped citation was not classified as "
+              f"resolved-under-baseline: {resolved}", file=sys.stderr)
+        ok = False
+    #    ...and a citation that is gone from the tree is "fixed".
+    if fixed != [("c.go", "migration 099")]:
+        print(f"self-test FAIL: a citation no longer in the tree was not left in "
+              f"the fixed class: {fixed}", file=sys.stderr)
+        ok = False
+    #    An entry that is present but resolves to nothing is not a state a
+    #    stale entry can be in; it must be UNMEASURED (2), not a verdict.
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            classify_stale([("b.go", "004_fix_x.sql")],
+                           [("b.go", 1, None, "004", "004_fix_x.sql")], real_files)
+        print("self-test FAIL: an unclassifiable entry was classified", file=sys.stderr)
+        ok = False
+    except SystemExit as e:
+        if e.code != 2:
+            print(f"self-test FAIL: an unclassifiable entry exited {e.code}, want 2",
+                  file=sys.stderr)
+            ok = False
+
+    # 26-30. cleat#3666: a baseline entry that goes stale while its citation
+    #        is still in the tree (see self_test_resolved_under_baseline).
+    for failure in self_test_resolved_under_baseline():
+        print(f"self-test FAIL: {failure}", file=sys.stderr)
+        ok = False
+
     if ok:
-        print("self-test: OK (24/24)")
+        print("self-test: OK")
         return 0
     return 1
 
 
-def do_update():
+def do_update(accept_resolved=False):
     """Regenerate the baseline from the real tree's CURRENT dangling set.
 
     Mechanical: every dangling (file, fact) pair the scan finds today,
@@ -714,15 +1078,35 @@ def do_update():
     IS true of the tree, not what the guard would prefer were true. If you
     are regenerating specifically to grandfather a citation you just wrote,
     read the module docstring's warning about what that pair means first.
+
+    One thing it does refuse (cleat#3666): dropping an entry whose citation is
+    still in the tree. That is not a fixed citation, it is a migration added
+    under an unchanged one, and dropping it silently is how six SQL Server
+    comments came to cite an unrelated MySQL file. Pass --accept-resolved to
+    mean it; the block it prints goes in the PR body. Returns the exit status.
     """
     real_files = real_files_by_dialect()
     real_numbers = real_numbers_by_dialect(real_files)
     matches = git_tracked_matches()
     dangling = compute_dangling(matches, real_files, real_numbers)
+    dropped = sorted(set(load_baseline()) - dangling)
+    _fixed, resolved = classify_stale(dropped, matches, real_files)
+    if resolved and not accept_resolved:
+        print(f"REFUSED: --update would drop {len(resolved)} baseline "
+              f"entr{'y' if len(resolved) == 1 else 'ies'} whose citation is still "
+              "in the tree and now resolves to a migration. Nothing was written.")
+        print_resolved(resolved, matches)
+        print()
+        print(RESOLVED_ADVICE.format(cmd=sys.argv[0]))
+        return 1
     with open(BASELINE_PATH, "w") as f:
         for path, fact in sorted(dangling):
             f.write(f"{path}\t{fact}\n")
     print(f"Wrote {len(dangling)} entries to {BASELINE_PATH}")
+    if accept_resolved and dropped:
+        print()
+        print(format_acceptance_block(dropped, resolved, matches))
+    return 0
 
 
 def main():
@@ -730,8 +1114,7 @@ def main():
         sys.exit(self_test())
 
     if "--update" in sys.argv:
-        do_update()
-        sys.exit(0)
+        sys.exit(do_update(accept_resolved="--accept-resolved" in sys.argv))
 
     real_files = real_files_by_dialect()
     if not any(real_files.values()):
@@ -762,12 +1145,20 @@ def main():
         print(f"baseline with `{sys.argv[0]} --update` and review the diff before")
         print("committing it.")
 
-    if stale:
+    fixed, resolved = classify_stale(stale, matches, real_files)
+    if fixed:
         print("ERROR: baseline entries whose (file, cited fact) no longer appears as "
               "a dangling citation (the citation was fixed, or the line changed -- "
               f"regenerate with `{sys.argv[0]} --update`):")
-        for path, fact in stale:
+        for path, fact in fixed:
             print(f"  {path}: {fact}")
+
+    if resolved:
+        print("ERROR: baseline entries whose citation is STILL in the tree, "
+              "unchanged, but now resolves to a migration:")
+        print_resolved(resolved, matches)
+        print()
+        print(RESOLVED_ADVICE.format(cmd=sys.argv[0]))
 
     sys.exit(1)
 
