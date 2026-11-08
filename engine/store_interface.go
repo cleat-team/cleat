@@ -238,6 +238,17 @@ type WorkflowStore interface {
 	// without creating a duplicate.
 	// tenantID must be a valid UUID; the all-zeros default is accepted
 	// for single-tenant installations without RLS.
+	//
+	// runID is empty in every caller this repository ships, and the store then
+	// generates a canonical lowercase UUID. A caller that chooses one should
+	// keep it lowercase, because whether two ids that differ only by case are
+	// the same run depends on the dialect: on SQL Server and MySQL
+	// workflow_instances.id compares case-insensitively, so a lookup by the
+	// other spelling finds the run and a second insert is refused (a primary
+	// key violation); on PostgreSQL it compares exactly, so the two are
+	// distinct runs. Measured in cleat#3639, against each dialect's catalog
+	// collation. The test pinning the generated side is
+	// TestEveryRunIdAStoreGeneratesIsACanonicalLowercaseUUID.
 	StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error)
 
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
