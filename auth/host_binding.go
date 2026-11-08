@@ -316,6 +316,16 @@ type querier interface {
 // transaction and cannot follow the connection back into the pool. SQL Server: sp_set_session_context
 // inside a transaction, exactly as the engine does (engine.setTenantOnTx). MySQL scopes by database, so the
 // read is direct.
+//
+// SQL SERVER DOES NOT REVERT WITH THE TRANSACTION, and this relies on the driver on purpose. Session context
+// belongs to the CONNECTION, so the connection goes back to this pool still holding the tenant. What
+// clears it is go-mssqldb answering database/sql's ResetSession with sp_reset_connection, the same
+// mechanism engine/plugindb_tenant.go documents and pins. It is safe because nothing on this pool reads
+// a policy table without setting its own tenant first (every such read here goes through scopedRead or
+// beginDropTx, and no admin.* table has a policy), so a stale value is never consumed.
+// TestAScopedReadsTenantDoesNotSurviveTheSQLServerConnectionPool fails if the shipped driver stops
+// resetting. It is a single layer: a cancel before the read does not clear it either, and the options for
+// making it driver-independent, with their measured cost, are on cleat#3678.
 func (s *TenantStore) scopedRead(ctx context.Context, tenant uuid.UUID, fn func(q querier) error) error {
 	if s.dialect == DialectMySQL {
 		return fn(s.db)
