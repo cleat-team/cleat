@@ -67,6 +67,10 @@ import (
 // does that; every value it passes today is go or python (tier 1), which is
 // why it is not a finding, but it is a gap and not a proof.
 //
+// A second one: a helper in ANOTHER package. The call graph is per directory, so
+// a test that reaches a builder through an imported package's exported helper is
+// not followed. Package-level var tables ARE followed (cleat-review's M2).
+//
 // WHERE A TEST IS ALLOWED TO RUN INSTEAD. Excluding a test from the gate is
 // half; `go test -skip` leaves no --- SKIP line, so a test excluded from Tier 1
 // and run nowhere retires silently while every job stays green. The second
@@ -138,8 +142,10 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 	// An entry that is no longer a finding, or is now excluded, is stale: the list
 	// is a statement about the tree and has to be re-read when the tree moves.
 	reached := map[string]bool{}
+	reachedAt := map[string]bool{} // "dir:name", for the allowance, which is per package
 	for _, f := range found {
 		reached[f.name] = true
+		reachedAt[strings.TrimPrefix(f.dir, "../")+":"+f.name] = true
 	}
 	for name, why := range toolchainFreeBuilderCallers {
 		switch {
@@ -154,14 +160,15 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 		}
 	}
 
-	for name, why := range knownOpenToolchainTests {
+	for key, why := range knownOpenToolchainTests {
+		name := key[strings.Index(key, ":")+1:]
 		switch {
-		case !reached[name]:
+		case !reachedAt[key]:
 			t.Errorf("knownOpenToolchainTests lists %s but the scan no longer finds it reaching a "+
-				"builder. If the issue it names has landed, that is the point: delete the entry.\n%s", name, why)
+				"builder. If the issue it names has landed, that is the point: delete the entry.\n%s", key, why)
 		case matchesAny(name, excl):
 			t.Errorf("%s is excluded from tier 1 and still listed in knownOpenToolchainTests. "+
-				"Delete the entry.\n%s", name, why)
+				"Delete the entry.\n%s", key, why)
 		}
 	}
 
@@ -170,7 +177,7 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 		if _, free := toolchainFreeBuilderCallers[f.name]; free {
 			continue
 		}
-		if _, open := knownOpenToolchainTests[f.name]; open && !matchesAny(f.name, excl) {
+		if _, open := knownOpenToolchainTests[strings.TrimPrefix(f.dir, "../")+":"+f.name]; open && !matchesAny(f.name, excl) {
 			continue
 		}
 		if !matchesAny(f.name, excl) {
@@ -216,10 +223,11 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 // test was split, renamed or deleted) or becomes excluded, so the entry has to be
 // deleted the day the issue lands.
 var knownOpenToolchainTests = map[string]string{
-	"TestCrashMidAgentLoopResumesWithoutReaskingTheModel": "cleat#3692: its /rust, /java and /assemblyscript " +
+	"tests/crash:TestCrashMidAgentLoopResumesWithoutReaskingTheModel": "cleat#3692: its /rust, /java and /assemblyscript " +
 		"subtests build guests with tier-2 toolchains in tier 1. tier1-gate.yml's rest shards provision a JDK and " +
 		"Rust for it (cleat#3499, cleat#2978). Excluding the whole test would drop its go and python subtests, " +
-		"which belong in tier 1, so it needs a split first",
+		"which belong in tier 1, so it needs a split first. The allowance covers anything added INSIDE this " +
+		"test, including a further client in agentClients(); a different test is refused by name",
 }
 
 // toolchainFreeBuilderCallers are tests that reach a tier-2 builder and do not
@@ -327,37 +335,65 @@ func callGraphAndRootsOfTestDir(dir string) (calls map[string][]string, roots ma
 			return nil, nil, err
 		}
 		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
+			// A package-level `var table = []func(*testing.T) []byte{buildJavaClientWASM}`
+			// is a node of its own: tests that range over it reach the builder through
+			// it. Only FuncDecls were scanned until cleat-review's M2 on cleat#3691.
+			var nodes []struct {
+				name string
+				root ast.Node
 			}
-			name := fn.Name.Name
-			if _, seen := calls[name]; !seen {
-				calls[name] = nil
-			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				switch x := n.(type) {
-				case *ast.Ident:
-					// Every reference, not only a call: tests/crash hands its builders
-					// to a table as VALUES (`build: buildJavaClientWASM`), so a scan of
-					// call expressions never saw them (cleat-review on cleat#3691).
-					// Over-approximate on purpose; only names that are declared
-					// functions matter, and a wrongly-named test is a loud finding.
-					calls[name] = append(calls[name], x.Name)
-					if lang, ok := builderIdents[x.Name]; ok {
-						roots[name] = lang
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				nodes = append(nodes, struct {
+					name string
+					root ast.Node
+				}{d.Name.Name, d})
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
 					}
-				case *ast.CallExpr:
-					if lang := targetLanguageIn(x.Args); lang != "" {
-						roots[name] = lang
-					}
-				case *ast.CompositeLit:
-					if lang := targetLanguageIn(x.Elts); lang != "" {
-						roots[name] = lang
+					for _, id := range vs.Names {
+						nodes = append(nodes, struct {
+							name string
+							root ast.Node
+						}{id.Name, vs})
 					}
 				}
-				return true
-			})
+			}
+			for _, node := range nodes {
+				name, root := node.name, node.root
+				if _, seen := calls[name]; !seen {
+					calls[name] = nil
+				}
+				ast.Inspect(root, func(n ast.Node) bool {
+					switch x := n.(type) {
+					case *ast.Ident:
+						// Every reference, not only a call: tests/crash hands its builders
+						// to a table as VALUES (`build: buildJavaClientWASM`), so a scan of
+						// call expressions never saw them (cleat-review on cleat#3691).
+						// Over-approximate on purpose; only names that are declared
+						// functions matter, and a wrongly-named test is a loud finding.
+						calls[name] = append(calls[name], x.Name)
+						if lang, ok := builderIdents[x.Name]; ok {
+							roots[name] = lang
+						}
+					case *ast.CallExpr:
+						if lang := targetLanguageIn(x.Args); lang != "" {
+							roots[name] = lang
+						}
+					case *ast.CompositeLit:
+						if lang := targetLanguageIn(x.Elts); lang != "" {
+							roots[name] = lang
+						}
+					}
+					return true
+				})
+			}
 		}
 	}
 	return calls, roots, nil

@@ -109,7 +109,7 @@
 # tests/crash's TestCrashMidAgentLoopResumesWithoutReaskingTheModel builds its
 # /java, /rust and /assemblyscript clients in tier 1 (cleat#3499, cleat#2978).
 # cleat#3692 removes that, and these two steps go with it. Until then a Gradle,
-# Maven Central or crates.io outage can fail this gate through that test alone.
+# Maven Central, crates.io or npm outage can fail this gate through that test alone.
 # Every OTHER tier-2 toolchain test is excluded in tiers.yaml and run by ci.yml's
 # test-go "commands" leg; engine/tier2_toolchain_tests_in_every_tier1_package_test.go
 # fails if one is not, and lists the exception by name (cleat#3690).
