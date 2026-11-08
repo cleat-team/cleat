@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -142,8 +142,7 @@ func (s *ShardedStore) fanOutDefWrite(op, name string, version int, designatedFi
 	}
 	repair := "Run the same command again: every shard's write is idempotent, so it repairs this"
 	if !designatedFirst {
-		repair = "The shards written no longer hold this definition: deploy the version again to restore them, " +
-			"or clear what the failing shard holds and purge again"
+		repair = purgeRepair
 	}
 	res := &ShardedDefWriteError{Op: op, Name: name, Version: version, Repair: repair}
 	for i, sh := range all {
@@ -263,18 +262,23 @@ func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, v
 // there makes that shard's DELETE fail, which rolls every shard back with nothing removed anywhere.
 // A store that cannot hold a DELETE open is purged at commit time, as it was before.
 //
-// THE OPEN TRANSACTIONS ARE BOUNDED. The whole phase, from the first DELETE to the last commit, runs
-// under one deadline, the cross-shard lock's wait (see lockDefFanOut), after which every shard still
-// open is rolled back and the purge fails having removed nothing from any shard that had not
-// committed. That is the same figure on purpose: a deploy queued behind this purge gives up at it, so
-// holding the shards longer than that would only be holding them for a purge nobody is waiting on. A
-// slow shard therefore cannot keep the others' rows locked beyond it. A purge costs one connection
+// THE OPEN TRANSACTIONS ARE BOUNDED. Holding them open runs under one deadline, the cross-shard
+// lock's wait (see lockDefFanOut), measured from the first DELETE to the moment every DELETE is held
+// and the purge decides to commit. If it runs out first, every shard still open is rolled back and
+// the purge fails having removed nothing. That is the same figure on purpose: a deploy queued behind
+// this purge gives up at it, so holding the shards longer than that would only be holding them for a
+// purge nobody is waiting on. A slow shard therefore cannot keep the others' rows locked beyond it.
+// The deadline does NOT reach the commits: once the decision is made the timer does nothing, because
+// a clock that expired between two commits split the purge by itself. A purge costs one connection
 // per shard for as long as it runs, and the lock's own connection on the name's own shard.
 //
 // WHAT IS LEFT, stated so nobody reads it as more: the COMMITS are still one after another across
-// databases. A commit that fails on a shard after another has committed, or a process that dies
-// between two commits, splits the purge exactly as before: the shards committed no longer hold the
-// definition, the error names them, and deploying the version again restores them.
+// databases. A commit that fails on a shard stops the ones after it (they are rolled back and reported
+// as not attempted), so the split is exactly the shards that committed BEFORE the failing one: they no
+// longer hold the definition, the error names them, and deploying the version again restores them. A
+// process that dies between two commits, or a caller that cancels between them (database/sql ends the
+// transactions of a cancelled context, as it does for a deploy cancelled mid fan-out), leaves the same
+// shape.
 func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
 	all, designated := s.defShards(name)
 	if designated == nil {
@@ -296,11 +300,43 @@ func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, versio
 	if bound <= 0 {
 		bound = defaultDefFanOutLockWait
 	}
+	// The deadline bounds HOLDING the deletes open, up to the moment every one is held and the purge
+	// decides to commit. It must not reach the commits: a deadline that expired between two of them
+	// split the purge by the clock. The decision is made under a mutex so the timer and the purge cannot
+	// both win: either the timer aborts before the decision, or the decision is made and the timer does
+	// nothing.
 	phase, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var timedOut atomic.Bool
-	timer := time.AfterFunc(bound, func() { timedOut.Store(true); cancel() })
+	var (
+		mu       sync.Mutex
+		decided  bool // every DELETE is held and the purge is committing: nothing may cancel it now
+		timedOut bool
+	)
+	timer := time.AfterFunc(bound, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if decided {
+			return
+		}
+		timedOut = true
+		cancel()
+	})
 	defer timer.Stop()
+	gaveUp := func() error {
+		return fmt.Errorf("purge_workflow_def %q version %d: gave up after %s with the deletes held open on the shards "+
+			"(a shard was too slow); nothing that had not already committed was removed: %w", name, version, bound, context.DeadlineExceeded)
+	}
+	abortReason := func() (error, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if timedOut {
+			return gaveUp(), true
+		}
+		if ctx.Err() != nil {
+			return ctx.Err(), true
+		}
+		return nil, false
+	}
 
 	holds := make(map[*Shard]defPurgeHold, len(order))
 	defer func() {
@@ -308,10 +344,6 @@ func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, versio
 			h.rollback()
 		}
 	}()
-	gaveUp := func() error {
-		return fmt.Errorf("purge_workflow_def %q version %d: gave up after %s with the deletes held open on the shards "+
-			"(a shard was too slow); nothing that had not already committed was removed: %w", name, version, bound, context.DeadlineExceeded)
-	}
 
 	var refused []error
 	for _, sh := range order {
@@ -321,11 +353,8 @@ func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, versio
 		}
 		h, err := p.beginWorkflowDefPurge(phase, name, version)
 		if err != nil {
-			if timedOut.Load() {
-				return gaveUp()
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if aborted, ok := abortReason(); ok {
+				return aborted
 			}
 			refused = append(refused, fmt.Errorf("shard %q: %w", sh.Config.Name, err))
 			continue
@@ -335,18 +364,69 @@ func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, versio
 	if len(refused) > 0 {
 		return fmt.Errorf("purge_workflow_def %q version %d refused, no shard was written: %w", name, version, errors.Join(refused...))
 	}
-
-	err = s.fanOutDefWrite("purge_workflow_def", name, version, false, func(sh *Shard) error {
-		if h, ok := holds[sh]; ok {
-			return h.commit()
-		}
-		return sh.Store.PurgeWorkflowDef(ctx, name, version)
-	})
-	if err != nil && timedOut.Load() {
-		// The deadline can land between two commits. What was committed is in the error; say why the rest was not.
-		return fmt.Errorf("%w (the %s bound on holding the deletes open ran out part way: %w)", err, bound, context.DeadlineExceeded)
+	// The decision. If the timer or the caller got there first, nothing has been committed and the
+	// deferred rollback releases every row.
+	mu.Lock()
+	if timedOut || ctx.Err() != nil {
+		mu.Unlock()
+		aborted, _ := abortReason()
+		return aborted
 	}
-	return err
+	decided = true
+	mu.Unlock()
+
+	if len(holds) == 0 {
+		// Nothing could hold a DELETE open: purge each shard by its own PurgeWorkflowDef, as a store
+		// that cannot ask has always been.
+		return s.fanOutDefWrite("purge_workflow_def", name, version, false, func(sh *Shard) error {
+			return sh.Store.PurgeWorkflowDef(ctx, name, version)
+		})
+	}
+	return commitPurgeHolds(ctx, order, holds, name, version)
+}
+
+// purgeRepair is what the error of a purge that reached only some of the shards says to do.
+const purgeRepair = "The shards written no longer hold this definition: deploy the version again to restore them, " +
+	"or clear what the failing shard holds and purge again"
+
+// commitPurgeHolds commits the shards' held DELETEs in order (the name's own shard last), and stops at
+// the first commit that fails: every hold after it is rolled back and reported as not attempted, so a
+// failure on one shard cannot remove the definition from a shard whose neighbour kept it. What was
+// committed before the failure is reported as written, which is the split this leaves.
+func commitPurgeHolds(ctx context.Context, order []*Shard, holds map[*Shard]defPurgeHold, name string, version int) error {
+	res := &ShardedDefWriteError{Op: "purge_workflow_def", Name: name, Version: version, Repair: purgeRepair}
+	failed := false
+	for _, sh := range order {
+		h, held := holds[sh]
+		if failed {
+			if held {
+				h.rollback()
+			}
+			res.NotAttempted = append(res.NotAttempted, sh.Config.Name)
+			continue
+		}
+		var err error
+		if held {
+			err = h.commit()
+		} else {
+			err = sh.Store.PurgeWorkflowDef(ctx, name, version)
+		}
+		if err != nil {
+			failed = true
+			res.Failed = append(res.Failed, sh.Config.Name)
+			res.Errs = append(res.Errs, fmt.Errorf("shard %q: %w", sh.Config.Name, err))
+			continue
+		}
+		res.Succeeded = append(res.Succeeded, sh.Config.Name)
+	}
+	if !failed {
+		return nil
+	}
+	// Nothing was written anywhere: the caller's own error, undecorated by a "written to []" report.
+	if len(res.Succeeded) == 0 && len(res.Errs) == 1 {
+		return res.Errs[0]
+	}
+	return res
 }
 
 // ListWorkflowDefs aggregates every shard and returns each (name, version) once. Every shard holds a

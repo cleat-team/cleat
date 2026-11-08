@@ -86,20 +86,22 @@ for the purge and then fails because the version is gone (measured as a non-supe
 login with row-level security on: the same version waited, a different version of
 the name and a different name did not); a run already there makes its shard's
 DELETE fail, which rolls every shard back. The deletes are held open for at most
-the same 60 seconds as the lock, across the whole phase from the first DELETE to the
-last commit, after which every shard not yet committed is rolled back and the
-purge fails having removed nothing from them; a purge holds one connection per
-shard for as long as it runs.
+the same 60 seconds as the lock, counted from the first DELETE until every one is
+held and the purge starts committing; if that runs out first, every shard is rolled
+back and the purge fails having removed nothing. The 60 seconds does not run during
+the commits. A purge holds one connection per shard for as long as it runs.
 
 **What a purge still can split (cleat#3687, remaining).** The commits are one
 after another across databases, with no transaction over all of them. A commit
-that fails on a shard after another shard has committed, or a process that dies
-between two commits, leaves the shards that committed without the definition. The
-error names the shards written and the shard that failed, and deploying the
-version again restores them; until then a new run that hashes to a shard without
-the definition fails `workflow_payloads_def_fkey`. The window is the time between
-the first and last commit, not the whole purge, and it needs a failed commit or a
-crash, not just a run starting. A deploy that would replace a version's bytes under open runs
+that fails stops the ones after it: the shards not yet committed are rolled back
+and keep the definition, so what a failure leaves is exactly the shards that
+committed before the failing one, without the definition. The same is true of a
+process that dies between two commits, and of a caller that cancels between them.
+The error names the shards written, the shard that failed and the shards not
+attempted, and deploying the version again restores them; until then a new run
+that hashes to a shard without the definition fails `workflow_payloads_def_fkey`.
+The window is the time between the first and last commit, not the whole purge, and
+it needs a failed commit, a crash or a cancel, not just a run starting. A deploy that would replace a version's bytes under open runs
 (cleat#3497) is refused if **any** shard has such runs, and is checked on every
 shard before any is written. That pre-check exists for PostgreSQL; on MySQL and
 SQL Server each shard applies the rule to its own runs as it is written.

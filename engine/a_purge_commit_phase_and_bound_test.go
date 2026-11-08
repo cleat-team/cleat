@@ -159,3 +159,107 @@ func TestASlowShardCannotKeepAnotherShardsDeleteOpenBeyondTheBound(t *testing.T)
 		t.Errorf("%d lock(s) still held after the purge returned", got)
 	}
 }
+
+// With three or more shards, a commit that fails must stop the commits after it. fanOutDefWrite's
+// order for a purge is the other shards in turn and the name's own shard last, and it carries on past
+// a failure on one of the others; for holds that are still open that would remove the definition from
+// a shard whose neighbour kept it, for no reason. Every shard not yet committed is rolled back.
+func TestAPurgeWhoseFirstCommitFailsOnThreeShardsRemovesNothingFromAnyShard(t *testing.T) {
+	rs := newRealShards(t, "cleat_3687_three", "a", "b", "c")
+	d := rs.shardOf(raceDefName)
+	ctx := context.Background()
+	if err := rs.deploy(ctx, raceDefName, 1, defBytesA, false); err != nil {
+		t.Fatalf("UNMEASURED: deploy the version to purge: %v", err)
+	}
+	st, gated := rs.gatedSharded(t, raceDefName)
+	// The commit order is the other shards in list order, then the name's own shard.
+	first := -1
+	for i := range rs.names {
+		if i != d {
+			first = i
+			break
+		}
+	}
+	gated[first].failCommit = func() error { return errors.New("injected commit failure") }
+
+	err := st.PurgeWorkflowDef(ctx, raceDefName, 1)
+	if err == nil || !strings.Contains(err.Error(), "injected commit failure") {
+		t.Fatalf("a purge whose first commit failed returned %v, want that failure", err)
+	}
+	for i := range rs.names {
+		if n := rs.defCount(t, i, raceDefName); n != 1 {
+			t.Errorf("shard %q holds %d copies, want 1: a failed commit must stop the ones after it (error: %v)", rs.names[i], n, err)
+		}
+	}
+	if got := rs.advisoryLocksOn(t, d); got != 0 {
+		t.Errorf("%d lock(s) still held after the purge returned", got)
+	}
+}
+
+// A failure on the SECOND commit on three shards: the first shard committed, the failing one and the
+// ones after it did not, and the error says which is which, including the shard not attempted.
+func TestAPurgeWhoseSecondCommitFailsOnThreeShardsNamesWhatWasWrittenFailedAndNotAttempted(t *testing.T) {
+	rs := newRealShards(t, "cleat_3687_three2", "a", "b", "c")
+	d := rs.shardOf(raceDefName)
+	ctx := context.Background()
+	if err := rs.deploy(ctx, raceDefName, 1, defBytesA, false); err != nil {
+		t.Fatalf("UNMEASURED: deploy the version to purge: %v", err)
+	}
+	st, gated := rs.gatedSharded(t, raceDefName)
+	var others []int
+	for i := range rs.names {
+		if i != d {
+			others = append(others, i)
+		}
+	}
+	gated[others[1]].failCommit = func() error { return errors.New("injected commit failure") }
+
+	err := st.PurgeWorkflowDef(ctx, raceDefName, 1)
+	var split *ShardedDefWriteError
+	if !errors.As(err, &split) {
+		t.Fatalf("returned %T %v, want a *ShardedDefWriteError", err, err)
+	}
+	if len(split.Succeeded) != 1 || split.Succeeded[0] != rs.names[others[0]] ||
+		len(split.Failed) != 1 || split.Failed[0] != rs.names[others[1]] ||
+		len(split.NotAttempted) != 1 || split.NotAttempted[0] != rs.names[d] {
+		t.Errorf("error says written=%v failed=%v not attempted=%v, want written=[%s] failed=[%s] not attempted=[%s]",
+			split.Succeeded, split.Failed, split.NotAttempted, rs.names[others[0]], rs.names[others[1]], rs.names[d])
+	}
+	for i, want := range map[int]int{others[0]: 0, others[1]: 1, d: 1} {
+		if n := rs.defCount(t, i, raceDefName); n != want {
+			t.Errorf("shard %q holds %d copies, want %d", rs.names[i], n, want)
+		}
+	}
+}
+
+// The bound covers holding the deletes open, not the commits. Once every DELETE is held and the purge
+// has decided to commit, the deadline running out must not split it. The hook stalls just before the
+// name's own shard commits, past the bound, with the other shard already committed.
+func TestTheBoundExpiringBetweenTwoCommitsDoesNotSplitThePurge(t *testing.T) {
+	rs := newRealShards(t, "cleat_3687_bounded", "a", "b")
+	d := rs.shardOf(raceDefName)
+	o := otherThan(d, 2)
+	ctx := context.Background()
+	if err := rs.deploy(ctx, raceDefName, 1, defBytesA, false); err != nil {
+		t.Fatalf("UNMEASURED: deploy the version to purge: %v", err)
+	}
+	st, gated := rs.gatedSharded(t, raceDefName)
+	const bound = 500 * time.Millisecond
+	st.defLockWait = bound
+	stalled := false
+	gated[d].afterPurge = func() { // just before the name's own shard commits
+		stalled = true
+		time.Sleep(3 * bound)
+	}
+
+	err := st.PurgeWorkflowDef(ctx, raceDefName, 1)
+	if !stalled {
+		t.Fatalf("UNMEASURED: the hook never ran")
+	}
+	if err != nil {
+		t.Errorf("a purge whose bound ran out between two commits returned %v, want it to finish", err)
+	}
+	if atD, atO := rs.defCount(t, d, raceDefName), rs.defCount(t, o, raceDefName); atD != 0 || atO != 0 {
+		t.Errorf("the shards hold designated=%d other=%d copies, want 0 and 0: the purge must not be split by the clock", atD, atO)
+	}
+}
