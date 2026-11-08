@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strings"
@@ -224,12 +225,14 @@ func (s *TenantStore) DropTenant(ctx context.Context, req DropRequest) (DropResu
 		// value only on the normal path and in CATCH. A request that is cancelled inside it (the worker passes
 		// r.Context()) is a TDS attention, CATCH does not run, the transaction rolls back and the dropped
 		// tenant stays in the SESSION (measured, cleat#3647). It runs as the application login, the one the
-		// tenant-scoped stores use. What keeps the stale value from the next statement is go-mssqldb v1.11.2
-		// resetting the session when database/sql reuses the connection, and
+		// tenant-scoped stores use. What keeps the stale value from the next statement is beginDropTx's
+		// release(), which discards a connection it cannot clear, and behind it go-mssqldb v1.11.2 resetting
+		// the session when database/sql reuses the connection. release() was not always a layer: it swallowed
+		// the clear's failure on exactly this path (cleat#3647).
 		// engine.TestACancelledCallThatSetsTheSessionContextIsNotSeenByTheNextPoolUse is what notices if a
-		// driver bump loses it. Not covered, cleat#3647 stays open for each: the worker's HTTP handler end to
-		// end, how the tenant-scoped stores set their own context on a pooled connection, any other driver
-		// or pooler, and READ_COMMITTED_SNAPSHOT on.
+		// driver bump loses the reset, and TestAClientAbortDuringADropLeavesNoTenantOnThePool pins release().
+		// Not covered, cleat#3647 stays open for each: any other driver or pooler, and
+		// READ_COMMITTED_SNAPSHOT on.
 		_, err = tx.ExecContext(ctx, `EXEC admin.drop_tenant @tenant_id = @p1`, req.TenantID.String())
 	}
 	if err != nil {
@@ -258,7 +261,7 @@ func mayActOn(onlyCreator, createdBy string) bool {
 // PostgreSQL scopes with set_config(..., true), which is transaction-local and cannot outlive it.
 // SQL Server's session context belongs to the CONNECTION, so the transaction is pinned to one and the
 // context is cleared before the connection returns to the pool; a pooled connection that kept it would
-// serve the next caller as this tenant.
+// serve the next caller as this tenant. A connection that cannot be cleared is discarded, not pooled.
 func (s *TenantStore) beginDropTx(ctx context.Context, tenantID uuid.UUID) (*sql.Tx, func(), error) {
 	switch s.dialect {
 	case DialectPostgres:
@@ -278,7 +281,17 @@ func (s *TenantStore) beginDropTx(ctx context.Context, tenantID uuid.UUID) (*sql
 		}
 		release := func() {
 			// Not ctx: this must run even when the request was cancelled.
-			_, _ = conn.ExecContext(context.Background(), `EXEC sp_set_session_context @key = N'tenant_id', @value = NULL`)
+			if _, err := conn.ExecContext(context.Background(), `EXEC sp_set_session_context @key = N'tenant_id', @value = NULL`); err != nil {
+				// FAIL CLOSED (cleat#3647). A connection whose clear did not succeed may still carry this
+				// tenant, and must never go back to the pool. This used to discard the error and return the
+				// connection anyway, and the clear does fail: a request cancelled inside admin.drop_tenant is a
+				// TDS attention, database/sql rolls the transaction back itself, and the driver's connection is
+				// left holding the aborted transaction, so the next batch is refused with "server does not have
+				// an active transaction ... XACT_ABORT" and the context stayed set. Only the driver's session
+				// reset on reuse kept the next statement from running as the dropped tenant. Returning
+				// ErrBadConn from Raw makes database/sql close the connection instead of pooling it.
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			}
 			_ = conn.Close()
 		}
 		if _, err := conn.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenantID.String()); err != nil {
