@@ -169,6 +169,28 @@ func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) 
 		return fmt.Errorf("deploy_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 
+	// cleat#3547: one deploy of this (name, version) at a time across the shards, held until the last is
+	// written. It is taken BEFORE the pre-pass, which is a check and not a lock, so the question it asks
+	// is still true when the writes it permits begin. With one shard there is no cross-shard order to
+	// keep and the shard's own row lock is enough.
+	if len(all) > 1 {
+		locker, ok := designated.Store.(defFanOutLocker)
+		if !ok {
+			return fmt.Errorf("deploy_workflow_def: shard %q cannot take the cross-shard deploy lock, so a deploy to %d shards "+
+				"could not be ordered against a concurrent one and would not be attempted; sharding is supported on PostgreSQL only",
+				designated.Config.Name, len(all))
+		}
+		wait := s.defLockWait
+		if wait <= 0 {
+			wait = defaultDefFanOutLockWait
+		}
+		release, err := locker.lockWorkflowDefFanOut(ctx, def.Name, def.Version, wait)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+
 	// cleat#3497 across every shard, before any is written. See the comment at the top of the file.
 	openRuns := 0
 	for _, sh := range all {

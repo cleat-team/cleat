@@ -61,6 +61,10 @@ type ShardedStore struct {
 	// order and stop once the budget is spent, so a fixed starting point would
 	// drain shard 0 first and starve the tail under sustained load.
 	claimCursor atomic.Uint64
+
+	// defLockWait bounds how long a def deploy queues for the cross-shard deploy lock
+	// (workflow_def_fanout_lock.go). Zero means defaultDefFanOutLockWait; a test sets a short one.
+	defLockWait time.Duration
 }
 
 // SetMetrics hands the metrics instance to every PostgreSQL shard store that

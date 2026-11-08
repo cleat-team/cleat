@@ -40,7 +40,8 @@ definition to one shard only, and a run on any other shard failed with
 
 | Operation | Behaviour |
 |-----------|-----------|
-| deploy, deprecate | Written to every shard, the shard the name hashes to first. |
+| deploy | Written to every shard, the shard the name hashes to first, **under a lock on that shard** held until the last shard is written, so two deploys of one version queue instead of interleaving (cleat#3547; see below). |
+| deprecate | Written to every shard, the shard the name hashes to first. Not under that lock yet. |
 | purge | Asked of every shard first (the DELETE is run and rolled back); if any refuses, nothing is removed anywhere. Otherwise the other shards first and the name's own shard last. |
 | list | Each (name, version) once; where copies differ, the name's own shard wins. |
 | count of open runs | Summed over every shard. |
@@ -51,6 +52,23 @@ There is no transaction across databases, so a write can reach some shards and
 not others. The error names the shards written, the shards that failed and the
 shards not tried, and says what repairs it: for a deploy or deprecate, run the
 same command again.
+
+Two deploys of one version with different bytes used to be able to interleave across
+shards, so that one shard ended holding one deploy's bytes and another shard held
+the other's, and both deploys returned success (cleat#3547). Replacing a
+version's bytes is allowed on a single store, where the later deploy wins, so a
+sharded store does not forbid it: it makes "later" one decision by taking a
+PostgreSQL advisory lock on the shard the name hashes to, keyed on the tenant,
+name and version, before the pre-check and releasing it after the last shard is
+written. A deploy waits for the one in front of it for at most 60 seconds and then
+fails with `another deploy of workflow "X" version N holds the cross-shard deploy
+lock` and writes nothing (HTTP 409 on `POST /api/definitions`); run it again. The
+lock is transaction-scoped, so a cancelled or crashed deploy cannot leave it held.
+Each deploy in flight on one name uses two connections on that shard's pool. It
+does not cover `cleat deploy --db`, which reaches one shard only (below), or two
+processes started with different `--shards-file` lists, which would choose
+different shards to lock; changing the list is a resharding, which routing does not
+support either.
 
 A purge is refused by any shard that still holds a run of that version,
 **finished runs included**, until retention removes the row (the foreign key from
