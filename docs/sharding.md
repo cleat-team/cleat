@@ -42,7 +42,7 @@ definition to one shard only, and a run on any other shard failed with
 |-----------|-----------|
 | deploy | Written to every shard, the shard the name hashes to first, **under a lock on that shard** held until the last shard is written, so two deploys of one version queue instead of interleaving (cleat#3547; see below). |
 | deprecate | Written to every shard, the shard the name hashes to first, **under the same lock** as a deploy of that version (cleat#3547). |
-| purge | **Under the same lock**, taken before the question is asked. Asked of every shard first (the DELETE is run and rolled back); if any refuses, nothing is removed anywhere. Otherwise the other shards first and the name's own shard last. |
+| purge | **Under the same lock**, taken before anything is asked. The DELETE is run on every shard and held open; if any shard refuses, they are all rolled back and nothing is removed anywhere. Otherwise they are committed, the other shards first and the name's own shard last (cleat#3687; see below for what that leaves). |
 | list | Each (name, version) once; where copies differ, the name's own shard wins. |
 | count of open runs | Summed over every shard. |
 | load by name (WASM, config, DAG, version lookup) | Tries the name's own shard first, then the rest. |
@@ -79,10 +79,27 @@ A purge is refused by any shard that still holds a run of that version,
 **finished runs included**, until retention removes the row (the foreign key from
 a run to its definition does not cascade). Version GC and `cleatctl versions
 purge` check only runs that are not settled, so this is the usual reason a purge
-fails, not a race. Because the question is asked of every shard before any is
-written, such a refusal changes nothing. Only a run that starts between the
-question and the write can split a purge; then the shards already purged no longer
-hold the definition, and deploying the version again restores them. A deploy that would replace a version's bytes under open runs
+fails, not a race. Because every shard's DELETE has run, and none is committed,
+before the first commit, such a refusal changes nothing. The open DELETE keeps its
+row locked, so a run that starts for that version while a purge is in flight waits
+for the purge and then fails because the version is gone (measured as a non-superuser
+login with row-level security on: the same version waited, a different version of
+the name and a different name did not); a run already there makes its shard's
+DELETE fail, which rolls every shard back. The deletes are held open for at most
+the same 60 seconds as the lock, across the whole phase from the first DELETE to the
+last commit, after which every shard not yet committed is rolled back and the
+purge fails having removed nothing from them; a purge holds one connection per
+shard for as long as it runs.
+
+**What a purge still can split (cleat#3687, remaining).** The commits are one
+after another across databases, with no transaction over all of them. A commit
+that fails on a shard after another shard has committed, or a process that dies
+between two commits, leaves the shards that committed without the definition. The
+error names the shards written and the shard that failed, and deploying the
+version again restores them; until then a new run that hashes to a shard without
+the definition fails `workflow_payloads_def_fkey`. The window is the time between
+the first and last commit, not the whole purge, and it needs a failed commit or a
+crash, not just a run starting. A deploy that would replace a version's bytes under open runs
 (cleat#3497) is refused if **any** shard has such runs, and is checked on every
 shard before any is written. That pre-check exists for PostgreSQL; on MySQL and
 SQL Server each shard applies the rule to its own runs as it is written.

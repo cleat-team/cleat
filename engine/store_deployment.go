@@ -335,23 +335,44 @@ func (s *PostgresStore) preflightWorkflowDefReplacement(ctx context.Context, def
 	return CheckWorkflowDefReplacementPostgres(ctx, tx, s.tenantID, def.Name, def.Version, def.WASMBytes, def.ReplaceUnderOpenRuns)
 }
 
-// preflightWorkflowDefPurge asks whether PurgeWorkflowDef would be refused on THIS database, by
-// running its DELETE and rolling it back. workflow_payloads_def_fkey is NO ACTION, so any run row of
-// the version, finished or not, refuses it until retention removes the row. ShardedStore asks every
-// shard before it removes the definition from any (sharded_store_defs.go).
-func (s *PostgresStore) preflightWorkflowDefPurge(ctx context.Context, name string, version int) error {
+// beginWorkflowDefPurge runs a purge's DELETE on THIS database and keeps the transaction OPEN, so
+// ShardedStore can commit it only once every shard's DELETE has succeeded (cleat#3687). It is the
+// statement PurgeWorkflowDef runs, so the question "would this be refused" is the statement itself
+// and cannot drift from it: workflow_payloads_def_fkey is NO ACTION, so any run row of the version,
+// finished or not, refuses it until retention removes the row.
+//
+// WHY THE DELETE IS HELD OPEN RATHER THAN ROLLED BACK. The roll-back version answered the question and
+// then let go, so a run starting between the answer and the real delete made the real delete fail on
+// that shard after the others had already committed. An uncommitted DELETE keeps its row lock, and a
+// run insert for the same version has to take a share lock on that row for the foreign key, so the
+// insert WAITS for the purge to finish and then fails cleanly because the version is gone. Measured as
+// a non-superuser login with row-level security on (the test suite's RLS role) on 2026-11-08: the same-version insert
+// waited the full 3 s the DELETE was held, a different version of the same name and a different name
+// did not wait at all, and with a run committed first the DELETE refused with the same constraint.
+//
+// The caller bounds how long this stays open: the transaction is bound to ctx, and database/sql rolls
+// it back when ctx ends.
+func (s *PostgresStore) beginWorkflowDefPurge(ctx context.Context, name string, version int) (defPurgeHold, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
-		return fmt.Errorf("preflight workflow def purge: begin: %w", err)
+		return nil, fmt.Errorf("purge workflow def: begin: %w", err)
 	}
-	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM workflow_defs WHERE name = $1 AND version = $2
 	`, name, version); err != nil {
-		return fmt.Errorf("purge workflow def: %w", err)
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("purge workflow def: %w", err)
 	}
-	return nil
+	return &pgDefPurgeHold{tx: tx}, nil
 }
+
+// pgDefPurgeHold is a DELETE that has run and not been committed.
+type pgDefPurgeHold struct{ tx *sql.Tx }
+
+func (h *pgDefPurgeHold) commit() error { return h.tx.Commit() }
+
+// rollback is safe after commit: ErrTxDone is the normal answer and is ignored.
+func (h *pgDefPurgeHold) rollback() { _ = h.tx.Rollback() }
 
 // ListWorkflowDefs returns all versions of a workflow, ordered by version DESC.
 // If name is empty, returns all workflow definitions across all workflows.

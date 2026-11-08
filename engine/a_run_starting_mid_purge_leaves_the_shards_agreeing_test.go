@@ -17,9 +17,10 @@ import (
 // The interleaving is forced with a hook that runs when one shard's purge write has been made, as in
 // the deploy and deprecate race tests, so no timing decides what is asserted.
 
-// TestARunStartingOnTheNameOwnShardMidPurgeLeavesTheShardsAgreeing: the purge has removed the version
-// from the other shard when a run starts on the name's own shard. Either the purge is refused with
-// nothing removed anywhere, or both shards lose the version; not one of each.
+// TestARunStartingOnTheNameOwnShardMidPurgeLeavesTheShardsAgreeing: every shard has been asked about the
+// purge and none has finished it when a run starts for the version on the name's own shard. Either the
+// start is held behind the purge and fails because the version is gone, or the purge is refused with
+// nothing removed anywhere; never one shard without the version and the other with it.
 func TestARunStartingOnTheNameOwnShardMidPurgeLeavesTheShardsAgreeing(t *testing.T) {
 	rs := newRealShards(t, "cleat_3687_start", "a", "b")
 	d := rs.shardOf(raceDefName)
@@ -31,31 +32,85 @@ func TestARunStartingOnTheNameOwnShardMidPurgeLeavesTheShardsAgreeing(t *testing
 	st, gated := rs.gatedSharded(t, raceDefName)
 	st.defLockWait = 30 * time.Second
 
-	var runID string
-	gated[o].afterPurge = func() { runID = rs.startRunOn(ctx, t, d, raceDefName) }
+	id := rs.idOnShard(t, d, "mid-purge")
+	startErr := make(chan error, 1)
+	var blocked, startedDone, hookRan bool
+	var earlyErr error
+	// The other shard is committed first. At that point the name's own shard has been asked and not
+	// finished, which is the window.
+	gated[o].afterPurge = func() {
+		hookRan = true
+		go func() {
+			_, _, err := rs.store.StartNewRun(ctx, id, raceDefName, 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
+			startErr <- err
+		}()
+		blocked, startedDone, earlyErr = rs.waitUntilBlockedOrDone(t, d, startErr, 5*time.Second)
+	}
 
-	err := st.PurgeWorkflowDef(ctx, raceDefName, 1)
-	if runID == "" {
-		t.Fatalf("UNMEASURED: no run was started mid-purge, so this run did not exercise the window (purge returned %v)", err)
+	purgeErr := st.PurgeWorkflowDef(ctx, raceDefName, 1)
+	if !hookRan {
+		t.Fatalf("UNMEASURED: the hook never ran (purge returned %v)", purgeErr)
+	}
+	if !blocked && !startedDone {
+		t.Fatalf("UNMEASURED: the start neither returned nor waited on a lock within 5 s")
 	}
 	atD, atO := rs.defCount(t, d, raceDefName), rs.defCount(t, o, raceDefName)
 	if atD != atO {
-		t.Fatalf("the shards disagree about whether the version exists: designated holds %d copies, the other %d (purge returned: %v)", atD, atO, err)
+		t.Fatalf("the shards disagree about whether the version exists: designated holds %d copies, the other %d "+
+			"(the run start returned early=%v with %v; purge returned: %v)", atD, atO, startedDone, earlyErr, purgeErr)
 	}
-	// The run is on the designated shard, so the purge cannot have removed the version there: it must
-	// have been refused as a whole.
-	if err == nil || !strings.Contains(err.Error(), "no shard was written") {
-		t.Errorf("a purge that a run started under returned %v, want a refusal saying no shard was written", err)
+	// The start was held behind the name's own shard's open delete, so the purge went through and the
+	// start then found no version.
+	if !blocked {
+		t.Errorf("the run start was not held behind the purge (it returned %v at once)", earlyErr)
 	}
-	if atD != 1 {
-		t.Errorf("both shards should still hold the version the run needs, got %d", atD)
+	if purgeErr != nil {
+		t.Errorf("the purge failed: %v", purgeErr)
+	}
+	startRes := earlyErr // already collected when the start returned before the purge finished
+	if !startedDone {
+		startRes = <-startErr
+	}
+	if startRes == nil || !strings.Contains(startRes.Error(), "workflow_payloads_def_fkey") {
+		t.Errorf("the run that waited returned %v, want the definition foreign key refusing it", startRes)
+	}
+	if atD != 0 {
+		t.Errorf("both shards should have lost the version, got %d copies", atD)
 	}
 }
 
-// TestARunStartingBehindAPurgesOpenDeleteWaitsAndThenFails: the purge has run its DELETE on the name's
-// own shard and not finished. A run for that version must not slip in ahead of the delete's outcome:
-// it waits for the purge and then fails cleanly because the version is gone, and the shards agree.
-// A run for ANOTHER version of the name is not held back.
+// TestARunAlreadyStartedMakesThePurgeRefuseEverywhere: the other order. A run exists on the name's own
+// shard before the purge reaches it, so that shard's DELETE refuses, and every shard that had already
+// run its DELETE is rolled back. Nothing is removed anywhere.
+func TestARunAlreadyStartedMakesThePurgeRefuseEverywhere(t *testing.T) {
+	rs := newRealShards(t, "cleat_3687_refuse", "a", "b")
+	d := rs.shardOf(raceDefName)
+	o := otherThan(d, 2)
+	ctx := context.Background()
+	if err := rs.deploy(ctx, raceDefName, 1, defBytesA, false); err != nil {
+		t.Fatalf("UNMEASURED: deploy the version to purge: %v", err)
+	}
+	st, _ := rs.gatedSharded(t, raceDefName)
+	rs.startRunOn(ctx, t, d, raceDefName)
+
+	err := st.PurgeWorkflowDef(ctx, raceDefName, 1)
+	if err == nil || !strings.Contains(err.Error(), "refused, no shard was written") {
+		t.Fatalf("a purge over a shard holding a run returned %v, want a refusal saying no shard was written", err)
+	}
+	for _, i := range []int{d, o} {
+		if n := rs.defCount(t, i, raceDefName); n != 1 {
+			t.Errorf("shard %q holds %d copies after a refused purge, want 1", rs.names[i], n)
+		}
+	}
+	if got := rs.advisoryLocksOn(t, d); got != 0 {
+		t.Errorf("%d lock(s) still held after the purge returned", got)
+	}
+}
+
+// TestARunStartingBehindAPurgesOpenDeleteWaitsAndThenFails: the purge holds its DELETE on the name's
+// own shard and has not finished. A run for that version waits for the purge and then fails cleanly
+// because the version is gone, and the shards agree. A run for ANOTHER version of the name is not
+// held back.
 func TestARunStartingBehindAPurgesOpenDeleteWaitsAndThenFails(t *testing.T) {
 	rs := newRealShards(t, "cleat_3687_wait", "a", "b")
 	d := rs.shardOf(raceDefName)
@@ -68,9 +123,6 @@ func TestARunStartingBehindAPurgesOpenDeleteWaitsAndThenFails(t *testing.T) {
 	}
 	st, gated := rs.gatedSharded(t, raceDefName)
 	st.defLockWait = 30 * time.Second
-	// Time is only how long the purge lingers to see whether a start gets through; it is never what is
-	// asserted, only whether the start had returned by then.
-	const gate = 2 * time.Second
 
 	startOn := func(version int, label string) <-chan error {
 		id := rs.idOnShard(t, d, label)
@@ -82,46 +134,39 @@ func TestARunStartingBehindAPurgesOpenDeleteWaitsAndThenFails(t *testing.T) {
 		return ch
 	}
 	var sameCh, otherCh <-chan error
-	var sameErr, otherErr error
-	var sameBeforeEnd, otherBeforeEnd bool
-	// The designated shard is purged last, so by the time this runs the other shard's delete is done too.
+	var sameBlocked, sameDone, otherDone, hookRan bool
+	var otherErr, sameEarly error
+	// The name's own shard is committed last; by then every shard's DELETE is open.
 	gated[d].afterPurge = func() {
-		sameCh, otherCh = startOn(1, "wait-same"), startOn(2, "wait-other")
-		select {
-		case sameErr = <-sameCh:
-			sameBeforeEnd = true
-		case <-time.After(gate):
-		}
-		select {
-		case otherErr = <-otherCh:
-			otherBeforeEnd = true
-		case <-time.After(gate):
-		}
+		hookRan = true
+		// The other version first: it does not take the purged row's lock, so it returns at once.
+		otherCh = startOn(2, "wait-other")
+		_, otherDone, otherErr = rs.waitUntilBlockedOrDone(t, d, otherCh, 5*time.Second)
+		sameCh = startOn(1, "wait-same")
+		sameBlocked, sameDone, sameEarly = rs.waitUntilBlockedOrDone(t, d, sameCh, 5*time.Second)
 	}
 
 	if err := st.PurgeWorkflowDef(ctx, raceDefName, 1); err != nil {
 		t.Fatalf("UNMEASURED: purge returned %v", err)
 	}
-	if sameCh == nil {
+	if !hookRan {
 		t.Fatalf("UNMEASURED: the hook never ran")
 	}
-	if !sameBeforeEnd {
-		sameErr = <-sameCh // the purge is over now, so the start has its answer
-	}
-	if !otherBeforeEnd {
-		otherErr = <-otherCh
-	}
-	if sameBeforeEnd {
-		t.Errorf("a run for the version being purged returned before the purge finished; it should wait behind the purge's open delete")
-	}
-	if !otherBeforeEnd {
+	if !otherDone {
 		t.Errorf("a run for another version of the same name was held back; it should not wait")
-	}
-	if sameErr == nil || !strings.Contains(sameErr.Error(), "workflow_payloads_def_fkey") {
-		t.Errorf("the run for the purged version returned %v, want the definition foreign key refusing it", sameErr)
 	}
 	if otherErr != nil {
 		t.Errorf("the run for another version failed: %v", otherErr)
+	}
+	if !sameBlocked || sameDone {
+		t.Errorf("the run for the version being purged was not held behind the purge's open delete (blocked=%v returned early=%v with %v)", sameBlocked, sameDone, sameEarly)
+	}
+	sameRes := sameEarly // already collected when the start returned before the purge finished
+	if !sameDone {
+		sameRes = <-sameCh
+	}
+	if sameRes == nil || !strings.Contains(sameRes.Error(), "workflow_payloads_def_fkey") {
+		t.Errorf("the run for the purged version returned %v, want the definition foreign key refusing it", sameRes)
 	}
 	if atD, atO := rs.defCount(t, d, raceDefName), rs.defCount(t, o, raceDefName); atD != atO || atD != 1 {
 		t.Errorf("after purging v1 each shard should hold only v2: designated=%d other=%d copies of the name, want 1 and 1", atD, atO)

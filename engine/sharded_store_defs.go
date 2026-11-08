@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // Workflow definitions are REPLICATED to every shard (cleat#3545, owner decision D42).
@@ -31,13 +33,17 @@ import (
 //
 //	deploy and deprecate write the designated shard first and stop if it fails, so a failure there
 //	  leaves nothing changed
-//	purge asks every shard first (a DELETE that is rolled back) and writes nothing if any refuses.
+//	purge runs its DELETE on every shard and holds each open, and commits them only once every one has
+//	  succeeded (cleat#3687), so a shard that refuses rolls them all back and nothing is removed anywhere.
 //	  That refusal is ROUTINE, not a race: workflow_payloads_def_fkey is NO ACTION and a FINISHED
 //	  run keeps its row until retention, while version GC and `cleatctl versions purge` gate only on
 //	  runs that are not settled. A shard holding history of the version refuses, and a purge that had
 //	  already removed it from the shards before it would leave them without a definition their runs
-//	  need (cleat#3546 review). Only a run that starts between the question and the write can still
-//	  split a purge, and then the designated shard is written last and only if the rest succeeded
+//	  need (cleat#3546 review). The open DELETE keeps its row locked, so a run starting for the
+//	  version meanwhile waits for the purge instead of landing between its writes. What is left is the
+//	  COMMIT phase: the commits are one after another across databases, the designated shard is
+//	  committed last and only if the rest succeeded, and a commit that fails after another shard has
+//	  committed splits the purge. See PurgeWorkflowDef.
 //	every write is idempotent
 //	the error names the shards that were written, the shards that failed and the shards not tried,
 //	  and says what repairs that operation
@@ -87,11 +93,18 @@ type defReplacementPreflight interface {
 	preflightWorkflowDefReplacement(ctx context.Context, def *WorkflowDef) error
 }
 
-// defPurgePreflight is implemented by a store that can ask whether a purge would be refused without
-// removing anything. PostgresStore does, by running the DELETE and rolling it back, so the question
-// is the statement itself and cannot drift from it.
-type defPurgePreflight interface {
-	preflightWorkflowDefPurge(ctx context.Context, name string, version int) error
+// defPurger is implemented by a store that can run a purge's DELETE and keep it uncommitted.
+// PostgresStore does. A store that does not is purged by its own PurgeWorkflowDef at commit time,
+// with nothing asked of it beforehand.
+type defPurger interface {
+	beginWorkflowDefPurge(ctx context.Context, name string, version int) (defPurgeHold, error)
+}
+
+// defPurgeHold is one shard's DELETE that has run and not been committed. rollback is safe after
+// commit.
+type defPurgeHold interface {
+	commit() error
+	rollback()
 }
 
 // defShards returns every shard with the designated one for name first, and the designated one
@@ -241,35 +254,99 @@ func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, v
 	})
 }
 
-// PurgeWorkflowDef removes the definition from every shard, or from none if any shard that can say
-// so beforehand would refuse.
+// PurgeWorkflowDef removes the definition from every shard, or from none if any shard refuses.
+//
+// It runs the DELETE on every shard that can hold one open, in the order it will commit (the other
+// shards first, the name's own shard last), and commits them only once every DELETE has succeeded
+// (cleat#3687). Until then each shard's row stays locked, so a run starting for this version on a
+// shard waits for the purge and fails cleanly if the purge goes through; and a run that is already
+// there makes that shard's DELETE fail, which rolls every shard back with nothing removed anywhere.
+// A store that cannot hold a DELETE open is purged at commit time, as it was before.
+//
+// THE OPEN TRANSACTIONS ARE BOUNDED. The whole phase, from the first DELETE to the last commit, runs
+// under one deadline, the cross-shard lock's wait (see lockDefFanOut), after which every shard still
+// open is rolled back and the purge fails having removed nothing from any shard that had not
+// committed. That is the same figure on purpose: a deploy queued behind this purge gives up at it, so
+// holding the shards longer than that would only be holding them for a purge nobody is waiting on. A
+// slow shard therefore cannot keep the others' rows locked beyond it. A purge costs one connection
+// per shard for as long as it runs, and the lock's own connection on the name's own shard.
+//
+// WHAT IS LEFT, stated so nobody reads it as more: the COMMITS are still one after another across
+// databases. A commit that fails on a shard after another has committed, or a process that dies
+// between two commits, splits the purge exactly as before: the shards committed no longer hold the
+// definition, the error names them, and deploying the version again restores them.
 func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
 	all, designated := s.defShards(name)
 	if designated == nil {
 		return fmt.Errorf("purge_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	// Before the question is asked of the shards, so a deploy cannot land between it and the writes.
+	// Before any DELETE, so a deploy cannot land between the shards' writes.
 	release, err := s.lockDefFanOut(ctx, "purge", name, version)
 	if err != nil {
 		return err
 	}
 	defer release()
+
+	// defShards puts the designated shard first; purge commits it last.
+	order := make([]*Shard, 0, len(all))
+	order = append(order, all[1:]...)
+	order = append(order, all[0])
+
+	bound := s.defLockWait
+	if bound <= 0 {
+		bound = defaultDefFanOutLockWait
+	}
+	phase, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(bound, func() { timedOut.Store(true); cancel() })
+	defer timer.Stop()
+
+	holds := make(map[*Shard]defPurgeHold, len(order))
+	defer func() {
+		for _, h := range holds {
+			h.rollback()
+		}
+	}()
+	gaveUp := func() error {
+		return fmt.Errorf("purge_workflow_def %q version %d: gave up after %s with the deletes held open on the shards "+
+			"(a shard was too slow); nothing that had not already committed was removed: %w", name, version, bound, context.DeadlineExceeded)
+	}
+
 	var refused []error
-	for _, sh := range all {
-		pf, ok := sh.Store.(defPurgePreflight)
+	for _, sh := range order {
+		p, ok := sh.Store.(defPurger)
 		if !ok {
 			continue
 		}
-		if err := pf.preflightWorkflowDefPurge(ctx, name, version); err != nil {
+		h, err := p.beginWorkflowDefPurge(phase, name, version)
+		if err != nil {
+			if timedOut.Load() {
+				return gaveUp()
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			refused = append(refused, fmt.Errorf("shard %q: %w", sh.Config.Name, err))
+			continue
 		}
+		holds[sh] = h
 	}
 	if len(refused) > 0 {
 		return fmt.Errorf("purge_workflow_def %q version %d refused, no shard was written: %w", name, version, errors.Join(refused...))
 	}
-	return s.fanOutDefWrite("purge_workflow_def", name, version, false, func(sh *Shard) error {
+
+	err = s.fanOutDefWrite("purge_workflow_def", name, version, false, func(sh *Shard) error {
+		if h, ok := holds[sh]; ok {
+			return h.commit()
+		}
 		return sh.Store.PurgeWorkflowDef(ctx, name, version)
 	})
+	if err != nil && timedOut.Load() {
+		// The deadline can land between two commits. What was committed is in the error; say why the rest was not.
+		return fmt.Errorf("%w (the %s bound on holding the deletes open ran out part way: %w)", err, bound, context.DeadlineExceeded)
+	}
+	return err
 }
 
 // ListWorkflowDefs aggregates every shard and returns each (name, version) once. Every shard holds a
