@@ -78,6 +78,12 @@ import (
 // exact shape tiers.yaml's own `exclude_tests` comment warns about, since
 // `go test -skip` removes a test with no `--- SKIP` line to notice.
 //
+// This test walks engine/ ONLY. cmd/cleat is a tier-1 package too, and six of its
+// tests built a Java or AssemblyScript guest in the tier-1 gate for want of
+// anyone looking there (cleat#3689); the same rule for every other tier-1 package
+// is TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatProvidesIt
+// in tier2_toolchain_tests_in_every_tier1_package_test.go, cleat#3690.
+//
 // So this asserts both directions, and derives the test set from the source
 // rather than from a list someone maintains. A sixth toolchain test added
 // tomorrow fails here, in a job that needs no toolchain to run.
