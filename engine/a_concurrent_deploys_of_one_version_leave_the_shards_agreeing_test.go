@@ -29,7 +29,47 @@ type gatedShard struct {
 	after  func(def *WorkflowDef)
 	// The same for the other two writes that take the lock (cleat#3547, second half).
 	beforeDeprecate, afterDeprecate func(deprecated bool)
-	afterPurge                      func()
+	// afterPurge runs once this shard's purge write has been made and before the purge is finished
+	// elsewhere: after the committed DELETE of PurgeWorkflowDef, or, for a purge that holds its DELETEs
+	// open (cleat#3687), just before this shard's commit, when every shard has been asked and none has
+	// committed. Both are "between the question and the write".
+	afterPurge func()
+	// failCommit, if set, is asked at this shard's commit of a held purge and its error replaces the
+	// commit (the held transaction is rolled back, as a failed commit leaves it).
+	failCommit func() error
+	// duringPurgeBegin runs before this shard's held DELETE, with the purge's context.
+	duringPurgeBegin func(ctx context.Context)
+}
+
+func (g *gatedShard) beginWorkflowDefPurge(ctx context.Context, name string, version int) (defPurgeHold, error) {
+	if g.duringPurgeBegin != nil {
+		g.duringPurgeBegin(ctx)
+	}
+	h, err := g.PostgresStore.beginWorkflowDefPurge(ctx, name, version)
+	if err != nil {
+		return nil, err
+	}
+	return &gatedHold{defPurgeHold: h, before: g.afterPurge, fail: g.failCommit}, nil
+}
+
+// gatedHold lets a test fail one shard's commit.
+type gatedHold struct {
+	defPurgeHold
+	before func()
+	fail   func() error
+}
+
+func (h *gatedHold) commit() error {
+	if h.before != nil {
+		h.before()
+	}
+	if h.fail != nil {
+		if err := h.fail(); err != nil {
+			h.defPurgeHold.rollback()
+			return err
+		}
+	}
+	return h.defPurgeHold.commit()
 }
 
 func (g *gatedShard) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
@@ -92,6 +132,31 @@ func (rs *realShards) gatedSharded(t *testing.T, name string) (*ShardedStore, []
 		t.Fatalf("UNMEASURED: the gated store designates %q, the plain one %q", got, rs.names[rs.shardOf(name)])
 	}
 	return st, gated
+}
+
+// waitUntilBlockedOrDone returns once the start behind ch has returned or a backend on shard i is
+// waiting for a lock, whichever comes first, and says which. It is how a test learns that a start has
+// reached the database and is being held, rather than guessing it has with a timer; the timeout only
+// ends the wait, and is reported as neither.
+func (rs *realShards) waitUntilBlockedOrDone(t *testing.T, i int, ch <-chan error, timeout time.Duration) (blocked, done bool, err error) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case err = <-ch:
+			return false, true, err
+		default:
+		}
+		var n int
+		if qerr := rs.dbs[i].QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`).Scan(&n); qerr != nil {
+			t.Fatalf("UNMEASURED: read pg_stat_activity on shard %q: %v", rs.names[i], qerr)
+		}
+		if n > 0 {
+			return true, false, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false, false, nil
 }
 
 // advisoryLocksOn counts the deploy locks held in shard i's database right now.
