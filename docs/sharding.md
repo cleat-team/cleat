@@ -41,8 +41,8 @@ definition to one shard only, and a run on any other shard failed with
 | Operation | Behaviour |
 |-----------|-----------|
 | deploy | Written to every shard, the shard the name hashes to first, **under a lock on that shard** held until the last shard is written, so two deploys of one version queue instead of interleaving (cleat#3547; see below). |
-| deprecate | Written to every shard, the shard the name hashes to first. Not under that lock yet. |
-| purge | Asked of every shard first (the DELETE is run and rolled back); if any refuses, nothing is removed anywhere. Otherwise the other shards first and the name's own shard last. |
+| deprecate | Written to every shard, the shard the name hashes to first, **under the same lock** as a deploy of that version (cleat#3547). |
+| purge | **Under the same lock**, taken before the question is asked. Asked of every shard first (the DELETE is run and rolled back); if any refuses, nothing is removed anywhere. Otherwise the other shards first and the name's own shard last. |
 | list | Each (name, version) once; where copies differ, the name's own shard wins. |
 | count of open runs | Summed over every shard. |
 | load by name (WASM, config, DAG, version lookup) | Tries the name's own shard first, then the rest. |
@@ -62,7 +62,12 @@ PostgreSQL advisory lock on the shard the name hashes to, keyed on the tenant,
 name and version, before the pre-check and releasing it after the last shard is
 written. A deploy waits for the one in front of it for at most 60 seconds and then
 fails with `another deploy of workflow "X" version N holds the cross-shard deploy
-lock` and writes nothing (HTTP 409 on `POST /api/definitions`); run it again. The
+lock` and writes nothing (HTTP 409 on `POST /api/definitions`); run it again. A
+deprecate or purge of the same version takes the same lock, so it queues behind a
+deploy of that version, and a deploy behind it, and gives up the same way (HTTP 409
+on the version endpoints). Without the lock, a deploy landing between a purge's
+writes to the shards left one shard holding a definition the name's own shard no
+longer had, and two deprecations could leave the shards disagreeing about the flag. The
 lock is transaction-scoped, so a cancelled or crashed deploy cannot leave it held.
 Each deploy in flight on one name uses two connections on that shard's pool. It
 does not cover `cleat deploy --db`, which reaches one shard only (below), or two
@@ -83,8 +88,12 @@ shard before any is written. That pre-check exists for PostgreSQL; on MySQL and
 SQL Server each shard applies the rule to its own runs as it is written.
 
 `cleat deploy --db` writes by raw SQL to the one database it is given, so
-against a sharded deployment it reaches that shard only; deploy through the
-worker or `cleatctl` instead.
+against a sharded deployment it reaches that shard only. `cleatctl deploy` does
+the same: it opens one store from one `--dsn`, which is a single database, so it
+reaches one shard and does not take the cross-shard lock. Only the worker's
+`POST /api/definitions` goes through the sharded store and writes every shard
+(cleat#3684 asks whether the CLIs should refuse a database that is one shard of
+several; they do not today).
 
 ### Fan-Out Operations
 
