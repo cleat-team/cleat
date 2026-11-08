@@ -3141,6 +3141,14 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error() + `; build the new bytes with a higher --version and upload them with that same "version", so the open runs keep the code they started on`})
 			return
 		}
+		// cleat#3547: another deploy of this name and version holds the cross-shard deploy lock and
+		// did not finish within the bound. A conflict with a deploy in flight, not a server fault;
+		// the error says nothing was written and to run it again.
+		if errors.Is(err, engine.ErrWorkflowDefDeployInProgress) {
+			slog.Warn("deploy workflow def refused: another deploy of that version is in progress", "name", def.Name, "version", def.Version, "error", err)
+			s.writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		// cleat#3540: the tenant's row for this name and version was installed from
 		// a library, so it holds no bytes and cannot be given any. A conflict with
 		// the state of the definition, like the open-runs refusal above, and the

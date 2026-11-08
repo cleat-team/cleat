@@ -22,6 +22,9 @@ type mockShardStore struct {
 	// Default error for all methods (if fn override is nil)
 	err error
 
+	// lockErr is what lockWorkflowDefFanOut returns instead of a lock (cleat#3547).
+	lockErr error
+
 	// Default return values
 	wf  *WorkflowInstance
 	wfs []*WorkflowInstance
@@ -622,6 +625,18 @@ func (m *mockShardStore) ClearStickyWorker(ctx context.Context, workflowID strin
 func (m *mockShardStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
 	m.recordCall("DeployWorkflowDef")
 	return m.err
+}
+
+// lockWorkflowDefFanOut makes the mock a defFanOutLocker (cleat#3547), without the ordering a real
+// one provides: these tests are about where a deploy is routed and written, and the lock itself is
+// exercised against PostgreSQL in a_concurrent_deploys_of_one_version_leave_the_shards_agreeing_test.go.
+// Calls are recorded so a test can say which shard was asked for it and that it was let go.
+func (m *mockShardStore) lockWorkflowDefFanOut(ctx context.Context, name string, version int, wait time.Duration) (func(), error) {
+	m.recordCall("lockWorkflowDefFanOut")
+	if m.lockErr != nil {
+		return nil, m.lockErr
+	}
+	return func() { m.recordCall("releaseWorkflowDefFanOut") }, nil
 }
 
 func (m *mockShardStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
@@ -2059,10 +2074,44 @@ func TestCompleteUpdateRequest_Success(t *testing.T) {
 }
 
 func TestDeployWorkflowDef_Success(t *testing.T) {
-	ss, _ := makeShardedStore(t, 2)
+	ss, mocks := makeShardedStore(t, 2)
 	err := ss.DeployWorkflowDef(context.Background(), &WorkflowDef{Name: "my-def", Version: 1})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+	// cleat#3547: the lock is asked of the shard the name hashes to, and only of that one, and is let go.
+	designated := ss.getShard("my-def").Config.Name
+	for _, m := range mocks {
+		want := 0
+		if m.name == designated {
+			want = 1
+		}
+		if got := m.CallCount("lockWorkflowDefFanOut"); got != want {
+			t.Errorf("shard %s was asked for the deploy lock %d times, want %d (designated: %s)", m.name, got, want, designated)
+		}
+		if got := m.CallCount("releaseWorkflowDefFanOut"); got != want {
+			t.Errorf("shard %s released the deploy lock %d times, want %d", m.name, got, want)
+		}
+		if got := m.CallCount("DeployWorkflowDef"); got != 1 {
+			t.Errorf("shard %s was deployed to %d times, want 1", m.name, got)
+		}
+	}
+}
+
+func TestDeployWorkflowDef_WritesNothingWhenTheLockCannotBeTaken(t *testing.T) {
+	ss, mocks := makeShardedStore(t, 2)
+	held := &WorkflowDefDeployInProgressError{Name: "my-def", Version: 1, Waited: time.Second}
+	for _, m := range mocks {
+		m.lockErr = held
+	}
+	err := ss.DeployWorkflowDef(context.Background(), &WorkflowDef{Name: "my-def", Version: 1})
+	if !errors.Is(err, ErrWorkflowDefDeployInProgress) {
+		t.Fatalf("a deploy that could not take the lock returned %v, want ErrWorkflowDefDeployInProgress", err)
+	}
+	for _, m := range mocks {
+		if got := m.CallCount("DeployWorkflowDef"); got != 0 {
+			t.Errorf("shard %s was written to %d times by a deploy that never got the lock", m.name, got)
+		}
 	}
 }
 
