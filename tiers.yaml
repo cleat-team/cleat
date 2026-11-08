@@ -248,7 +248,9 @@ tier1:
     #
     # Re-derive the whole list, rather than trusting this one:
     # engine/tier2_toolchain_tests_placement_test.go walks the engine test
-    # sources for anything that REACHES buildJavaWasm, buildAssemblyScriptWasm
+    # sources (and engine/tier2_toolchain_tests_in_every_tier1_package_test.go
+    # every other tier-1 package, which this sentence did not say until
+    # cleat#3690) for anything that REACHES buildJavaWasm, buildAssemblyScriptWasm
     # or buildRustWasm -- transitively, because a test can reach a builder
     # through a helper -- and fails unless each is both excluded here and
     # selected by e2e-cross-language.yml. Two of the eleven were found only by
@@ -269,6 +271,43 @@ tier1:
     - "^TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow$"
     - "^TestJavaExportsTheDeferRunner$"
     - "^TestTheHostRunsDefersOfAKilledJavaWorkflow$"
+    # tier 2 -- java and assemblyscript, in cmd/cleat (cleat#3690, from cleat#3689).
+    #
+    # The block above came from a guard that walked engine/ only, and cmd/cleat is a
+    # tier-1 package too. Six tests there build a guest through the cleat binary and
+    # were running in this gate: the three Java ones fetched the Gradle wrapper's
+    # distribution from services.gradle.org (which redirects to a GitHub release
+    # asset), and on 2026-11-08 that answered 504 on three attempts and turned
+    # develop's Tier 1 Gate red on a commit that touched nothing under cmd/cleat. That
+    # was the dependency D5 excluded on purpose, arriving through the one directory
+    # nothing was watching. cleat#3039 recorded the same host failing the same way
+    # (a 502) in this same job.
+    #
+    # Selected, once excluded, by ci.yml's test-go "commands" leg -- NOT by
+    # e2e-cross-language.yml, whose -run covers ./engine/... only. That leg
+    # provisions Rust, Node, Java and Gradle and runs ./cmd/... with no -run and no
+    # -skip; the guard checks all four of those facts rather than the leg's name.
+    #
+    # Six of the thirteen cmd/cleat tests that reach a builder, not all thirteen,
+    # and the rest are deliberate. Measured 2026-11-08 with no java, node, npx,
+    # cargo or gradle on PATH: these six SKIPPED; the other seven PASSED
+    # (TestRunBuild_{Java,Rust,AS}Target_*, TestJavaBuildRefusesNondeterminism,
+    # TestRustBuildRefusesNondeterminism, TestRustBuildAcceptsProseNamingAForbiddenPattern)
+    # because they refuse before any toolchain starts. Tiering follows what a test
+    # NEEDS. The seven are named, with their reason, in
+    # engine/tier2_toolchain_tests_in_every_tier1_package_test.go.
+    #
+    # One tier-2 toolchain test is NOT excluded here, deliberately and with an end date:
+    # tests/crash's TestCrashMidAgentLoopResumesWithoutReaskingTheModel (/rust, /java,
+    # /assemblyscript). Excluding the whole test would also drop its go and python
+    # subtests, so it is listed as an allowance in the same guard and removed by
+    # cleat#3692.
+    - "^TestJavaBuildRefusesAStaleManifest$"
+    - "^TestJavaBuildRefusesMultipleManifests$"
+    - "^TestJavaExampleEntryPointResolutionLive$"
+    - "^TestAssemblyScriptBuildRefusesAStaleManifest$"
+    - "^TestAssemblyScriptExampleEntryPointResolutionLive$"
+    - "^TestASBuildRefusesNondeterminism$"
     # tier 2 -- docker. cmd/cleat-worker/a_real_postgres_docker_pause_idle_worker_gap_test.go
     # (cleat#2005's third review round, GAP2): a real-database reproduction of the
     # reaper's idle-worker recovery-grace-period fix, using `docker pause` on the
