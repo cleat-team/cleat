@@ -2140,18 +2140,67 @@ func TestGetWorkflowDef_Success(t *testing.T) {
 }
 
 func TestMarkVersionDeprecated_Success(t *testing.T) {
-	ss, _ := makeShardedStore(t, 2)
+	ss, mocks := makeShardedStore(t, 2)
 	err := ss.MarkVersionDeprecated(context.Background(), "def", 1, true)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
+	assertLockedOnceOnTheDesignatedShard(t, ss, mocks, "def", "MarkVersionDeprecated")
 }
 
 func TestPurgeWorkflowDef_Success(t *testing.T) {
-	ss, _ := makeShardedStore(t, 2)
+	ss, mocks := makeShardedStore(t, 2)
 	err := ss.PurgeWorkflowDef(context.Background(), "def", 1)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+	assertLockedOnceOnTheDesignatedShard(t, ss, mocks, "def", "PurgeWorkflowDef")
+}
+
+// assertLockedOnceOnTheDesignatedShard checks the cleat#3547 lock was asked of the shard the name hashes
+// to, only of that one, once, and was let go, and that every shard was then written by op.
+func assertLockedOnceOnTheDesignatedShard(t *testing.T, ss *ShardedStore, mocks []*mockShardStore, name, op string) {
+	t.Helper()
+	designated := ss.getShard(name).Config.Name
+	for _, m := range mocks {
+		want := 0
+		if m.name == designated {
+			want = 1
+		}
+		if got := m.CallCount("lockWorkflowDefFanOut"); got != want {
+			t.Errorf("%s: shard %s was asked for the lock %d times, want %d (designated: %s)", op, m.name, got, want, designated)
+		}
+		if got := m.CallCount("releaseWorkflowDefFanOut"); got != want {
+			t.Errorf("%s: shard %s released the lock %d times, want %d", op, m.name, got, want)
+		}
+		if got := m.CallCount(op); got != 1 {
+			t.Errorf("%s: shard %s was written %d times, want 1", op, m.name, got)
+		}
+	}
+}
+
+func TestDeprecateAndPurgeWriteNothingWhenTheLockCannotBeTaken(t *testing.T) {
+	ops := map[string]func(*ShardedStore) error{
+		"MarkVersionDeprecated": func(ss *ShardedStore) error { return ss.MarkVersionDeprecated(context.Background(), "my-def", 1, true) },
+		"PurgeWorkflowDef":      func(ss *ShardedStore) error { return ss.PurgeWorkflowDef(context.Background(), "my-def", 1) },
+	}
+	for op, run := range ops {
+		t.Run(op, func(t *testing.T) {
+			ss, mocks := makeShardedStore(t, 2)
+			held := &WorkflowDefDeployInProgressError{Name: "my-def", Version: 1, Waited: time.Second}
+			for _, m := range mocks {
+				m.lockErr = held
+			}
+			err := run(ss)
+			if !errors.Is(err, ErrWorkflowDefDeployInProgress) {
+				t.Fatalf("%s without the lock returned %v, want ErrWorkflowDefDeployInProgress", op, err)
+			}
+			for _, m := range mocks {
+				if got := m.CallCount(op); got != 0 {
+					t.Errorf("shard %s was written %d times by %s that never got the lock", m.name, got, op)
+				}
+			}
+		})
 	}
 }
 

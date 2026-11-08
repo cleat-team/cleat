@@ -27,6 +27,28 @@ type gatedShard struct {
 	*PostgresStore
 	before func(def *WorkflowDef)
 	after  func(def *WorkflowDef)
+	// The same for the other two writes that take the lock (cleat#3547, second half).
+	beforeDeprecate, afterDeprecate func(deprecated bool)
+	afterPurge                      func()
+}
+
+func (g *gatedShard) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
+	if g.beforeDeprecate != nil {
+		g.beforeDeprecate(deprecated)
+	}
+	err := g.PostgresStore.MarkVersionDeprecated(ctx, name, version, deprecated)
+	if g.afterDeprecate != nil {
+		g.afterDeprecate(deprecated)
+	}
+	return err
+}
+
+func (g *gatedShard) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
+	err := g.PostgresStore.PurgeWorkflowDef(ctx, name, version)
+	if g.afterPurge != nil {
+		g.afterPurge()
+	}
+	return err
 }
 
 func (g *gatedShard) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {

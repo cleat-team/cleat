@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -251,7 +252,7 @@ func (h *versionHandler) markDeprecated(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err := store.MarkVersionDeprecated(r.Context(), name, version, deprecated); err != nil {
-		writeVersionError(w, 500, err.Error())
+		writeVersionError(w, versionWriteStatus(err), err.Error())
 		return
 	}
 	status := "deprecated"
@@ -271,10 +272,20 @@ func (h *versionHandler) purgeVersion(w http.ResponseWriter, r *http.Request, na
 		return
 	}
 	if err := store.PurgeWorkflowDef(r.Context(), name, version); err != nil {
-		writeVersionError(w, 500, err.Error())
+		writeVersionError(w, versionWriteStatus(err), err.Error())
 		return
 	}
 	writeVersionJSON(w, 200, map[string]string{"status": "purged"})
+}
+
+// versionWriteStatus is the HTTP status for a failed deprecate or purge. Only the cross-shard lock
+// timeout (cleat#3547) is a conflict: another write to this version holds the lock, nothing was
+// written, and the same request will work once it finishes. Every other store error stays a 500.
+func versionWriteStatus(err error) int {
+	if errors.Is(err, ErrWorkflowDefDeployInProgress) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
 }
 
 // writeVersionJSON is a standalone JSON response writer for this package.

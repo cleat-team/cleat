@@ -13,6 +13,10 @@ import (
 
 // One deploy of a (name, version) at a time across a sharded store (cleat#3547).
 //
+// The same lock orders deprecate and purge (sharded_store_defs.go, lockDefFanOut): each writes every shard
+// in turn too, and a purge that a deploy interleaves with leaves one shard holding a definition the
+// designated shard no longer has. Wherever this header says "deploy" it means a write to the version.
+//
 // WHY. ShardedStore.DeployWorkflowDef writes the definition to every shard in turn. Each shard's own
 // write takes a row lock, which orders two deploys of one version WITHIN that shard and nothing across
 // shards. Two deploys A and B of different bytes can interleave as A on the first shard, B on the first
@@ -79,8 +83,8 @@ type WorkflowDefDeployInProgressError struct {
 }
 
 func (e *WorkflowDefDeployInProgressError) Error() string {
-	return fmt.Sprintf("another deploy of workflow %q version %d holds the cross-shard deploy lock; waited %s for it. "+
-		"Nothing was written. Run the deploy again once the other one has finished", e.Name, e.Version, e.Waited)
+	return fmt.Sprintf("another deploy, deprecate or purge of workflow %q version %d holds the cross-shard deploy lock; waited %s for it. "+
+		"Nothing was written. Run the command again once the other one has finished", e.Name, e.Version, e.Waited)
 }
 
 // Is reports a match against ErrWorkflowDefDeployInProgress.

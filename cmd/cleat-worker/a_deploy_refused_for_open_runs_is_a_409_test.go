@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -95,6 +97,26 @@ func TestAnUploadRefusedForOpenRunsIsAConflictNotAServerError(t *testing.T) {
 		}
 		if strings.Contains(msg, "--version") {
 			t.Errorf("the 409 body %q gives the open-runs advice, which does not apply to a name under a prefix", msg)
+		}
+	})
+
+	// cleat#3547: a deploy that gave up waiting for another deploy of the same version on a sharded
+	// store. A conflict with a write in flight, not a fault; the message says nothing was written and
+	// to run it again, and it must not borrow the open-runs advice either. The error arrives wrapped,
+	// as it does through the sharded store's callers.
+	t.Run("a deploy that gave up waiting for the cross-shard lock is a 409 that says nothing was written", func(t *testing.T) {
+		held := fmt.Errorf("deploy: %w", &engine.WorkflowDefDeployInProgressError{Name: "uploaded", Version: 1, Waited: 60 * time.Second})
+		code, msg := upload(t, held)
+		if code != http.StatusConflict {
+			t.Fatalf("HTTP %d (%q), want 409", code, msg)
+		}
+		for _, want := range []string{`"uploaded"`, "version 1", "cross-shard deploy lock", "1m0s", "Nothing was written", "again"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the 409 body %q does not mention %q", msg, want)
+			}
+		}
+		if strings.Contains(msg, "--version") {
+			t.Errorf("the 409 body %q gives the open-runs advice, which does not apply to a deploy that was never attempted", msg)
 		}
 	})
 

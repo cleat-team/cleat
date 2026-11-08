@@ -162,6 +162,31 @@ func (s *ShardedStore) fanOutDefWrite(op, name string, version int, designatedFi
 	return res
 }
 
+// lockDefFanOut takes the cross-shard lock for (name, version) (cleat#3547) and returns the function
+// that releases it. Deploy, deprecate and purge all take the SAME lock, so a purge cannot remove a
+// version from the shards between a deploy's writes to them, and two deprecations cannot leave the
+// shards disagreeing about the flag. With one shard there is no cross-shard order to keep and the
+// shard's own row lock is enough, so there is nothing to take; with none, the caller reports that.
+// A multi-shard store whose designated shard cannot lock refuses, because running unordered would
+// read as protected. verb is only for the message: "deploy", "deprecate" or "purge".
+func (s *ShardedStore) lockDefFanOut(ctx context.Context, verb, name string, version int) (release func(), err error) {
+	all, designated := s.defShards(name)
+	if designated == nil || len(all) < 2 {
+		return func() {}, nil
+	}
+	locker, ok := designated.Store.(defFanOutLocker)
+	if !ok {
+		return nil, fmt.Errorf("%s_workflow_def: shard %q cannot take the cross-shard deploy lock, so a %s to %d shards "+
+			"could not be ordered against a concurrent one and would not be attempted; sharding is supported on PostgreSQL only",
+			verb, designated.Config.Name, verb, len(all))
+	}
+	wait := s.defLockWait
+	if wait <= 0 {
+		wait = defaultDefFanOutLockWait
+	}
+	return locker.lockWorkflowDefFanOut(ctx, name, version, wait)
+}
+
 // DeployWorkflowDef writes the definition to every shard.
 func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
 	all, designated := s.defShards(def.Name)
@@ -169,27 +194,14 @@ func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) 
 		return fmt.Errorf("deploy_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 
-	// cleat#3547: one deploy of this (name, version) at a time across the shards, held until the last is
+	// cleat#3547: one write to this (name, version) at a time across the shards, held until the last is
 	// written. It is taken BEFORE the pre-pass, which is a check and not a lock, so the question it asks
-	// is still true when the writes it permits begin. With one shard there is no cross-shard order to
-	// keep and the shard's own row lock is enough.
-	if len(all) > 1 {
-		locker, ok := designated.Store.(defFanOutLocker)
-		if !ok {
-			return fmt.Errorf("deploy_workflow_def: shard %q cannot take the cross-shard deploy lock, so a deploy to %d shards "+
-				"could not be ordered against a concurrent one and would not be attempted; sharding is supported on PostgreSQL only",
-				designated.Config.Name, len(all))
-		}
-		wait := s.defLockWait
-		if wait <= 0 {
-			wait = defaultDefFanOutLockWait
-		}
-		release, err := locker.lockWorkflowDefFanOut(ctx, def.Name, def.Version, wait)
-		if err != nil {
-			return err
-		}
-		defer release()
+	// is still true when the writes it permits begin.
+	release, err := s.lockDefFanOut(ctx, "deploy", def.Name, def.Version)
+	if err != nil {
+		return err
 	}
+	defer release()
 
 	// cleat#3497 across every shard, before any is written. See the comment at the top of the file.
 	openRuns := 0
@@ -217,8 +229,13 @@ func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) 
 	})
 }
 
-// MarkVersionDeprecated writes to every shard.
+// MarkVersionDeprecated writes to every shard, under the same cross-shard lock as a deploy.
 func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
+	release, err := s.lockDefFanOut(ctx, "deprecate", name, version)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return s.fanOutDefWrite("mark_version_deprecated", name, version, true, func(sh *Shard) error {
 		return sh.Store.MarkVersionDeprecated(ctx, name, version, deprecated)
 	})
@@ -231,6 +248,12 @@ func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, versio
 	if designated == nil {
 		return fmt.Errorf("purge_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
+	// Before the question is asked of the shards, so a deploy cannot land between it and the writes.
+	release, err := s.lockDefFanOut(ctx, "purge", name, version)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var refused []error
 	for _, sh := range all {
 		pf, ok := sh.Store.(defPurgePreflight)
