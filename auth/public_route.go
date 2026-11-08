@@ -1,6 +1,29 @@
 package auth
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+)
+
+// matchedExemptRouteKey is unexported, and its only writer is unexported too, so nothing outside this package
+// can set the flag below and no header, query parameter or path feeds it: it is true only when
+// MiddlewareWithMux asked the real serving mux and the answer was one of the exempt patterns.
+type matchedExemptRouteKey struct{}
+
+func withMatchedExemptRoute(ctx context.Context) context.Context {
+	return context.WithValue(ctx, matchedExemptRouteKey{}, true)
+}
+
+// MatchedExemptRoute reports whether MiddlewareWithMux let this request through because the mux resolved
+// it to one of the exempt PATTERNS. It is false for an infrastructure path (answered without
+// authentication, but not exempted by pattern), for an authenticated request, and for a context nothing set.
+//
+// It means one thing, and has exactly one reader: oauthprovider.Middleware does not look up a session for
+// such a request. It is not a "skip authentication" switch, and nothing else may read it as one. cleat#3654.
+func MatchedExemptRoute(ctx context.Context) bool {
+	v, _ := ctx.Value(matchedExemptRouteKey{}).(bool)
+	return v
+}
 
 // publicPatternSet turns a hand-maintained pattern list into a lookup set.
 // Returns nil for an empty list so callers can skip the check entirely.
