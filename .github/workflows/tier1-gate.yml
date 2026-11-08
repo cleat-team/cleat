@@ -93,7 +93,7 @@
 #                    Python-using tests live in wasm/, cmd/cleat-worker/ and
 #                    cmd/cleat/ as well as engine/.
 #
-# What these jobs deliberately do NOT provide: Rust, Node, a JDK or Gradle.
+# What these jobs are meant NOT to depend on: Rust, Node, a JDK or Gradle.
 # Those are tier-2 languages, and D5 decided the gate filters their tests out
 # rather than provisioning their toolchains -- see the note above
 # tier1.exclude_tests in tiers.yaml. The short version is that tier 1's
@@ -103,6 +103,16 @@
 # unmergeable. PyPI and the wasm-tools release are accepted here because
 # python IS tier 1; crates.io, npm and Maven Central are not, because their
 # languages are not.
+#
+# THE EXCEPTION, and it is a debt rather than a decision. The rest shards DO set
+# up a JDK 17 and Rust with wasm32-unknown-unknown (steps below), because
+# tests/crash's TestCrashMidAgentLoopResumesWithoutReaskingTheModel builds its
+# /java, /rust and /assemblyscript clients in tier 1 (cleat#3499, cleat#2978).
+# cleat#3692 removes that, and these two steps go with it. Until then a Gradle,
+# Maven Central or crates.io outage can fail this gate through that test alone.
+# Every OTHER tier-2 toolchain test is excluded in tiers.yaml and run by ci.yml's
+# test-go "commands" leg; engine/tier2_toolchain_tests_in_every_tier1_package_test.go
+# fails if one is not, and lists the exception by name (cleat#3690).
 #
 # MERGE_GROUP SKIPS tier1-coverage, tier1-engine AND tier1-rest ENTIRELY
 # (owner-ordered, this change). The merge queue re-tests every required
@@ -821,16 +831,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The rest shards run ./cmd/... and ./tests/crash/..., whose Java tests
-      # (TestJavaBuildRefusesAStaleManifest, TestJavaBuildRefusesMultipleManifests,
-      # TestJavaExampleEntryPointResolutionLive, TestCrashMidAgentLoopResumes.../java)
-      # build with Gradle 7.6.4 behind `cleat build --target java`. This job named no
+      # The rest shards run ./cmd/... and ./tests/crash/..., and tests/crash's
+      # TestCrashMidAgentLoopResumes.../java builds with Gradle 7.6.4 behind
+      # `cleat build --target java`. (Until cleat#3690 this list also named
+      # TestJavaBuildRefusesAStaleManifest, TestJavaBuildRefusesMultipleManifests and
+      # TestJavaExampleEntryPointResolutionLive; tiers.yaml now excludes those from
+      # tier 1, and ci.yml's "commands" leg runs them.) This job named no
       # JDK, so it followed the runner image's default: `ubuntu-latest` moved from
       # ubuntu-24.04 (JDK 17) to ubuntu-26.04 (JDK 25, per the actions/runner-images
       # readmes), and these shards, a required check, failed on every develop push
       # from 2026-10-27T23:47Z. The engine shards are untouched: Tier 1 excludes
       # TestJavaWorkflowExecute as a lower-tier test and they passed on 26.04.
       # cleat#3499, cleat#3498.
+      # This step stays only for tests/crash and is removed with cleat#3692.
       - name: Setup Java
         uses: actions/setup-java@v6
         if: github.event_name != 'merge_group'

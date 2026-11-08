@@ -296,6 +296,12 @@ tier1:
     # because they refuse before any toolchain starts. Tiering follows what a test
     # NEEDS. The seven are named, with their reason, in
     # engine/tier2_toolchain_tests_in_every_tier1_package_test.go.
+    #
+    # One tier-2 toolchain test is NOT excluded here, deliberately and with an end date:
+    # tests/crash's TestCrashMidAgentLoopResumesWithoutReaskingTheModel (/rust, /java,
+    # /assemblyscript). Excluding the whole test would also drop its go and python
+    # subtests, so it is listed as an allowance in the same guard and removed by
+    # cleat#3692.
     - "^TestJavaBuildRefusesAStaleManifest$"
     - "^TestJavaBuildRefusesMultipleManifests$"
     - "^TestJavaExampleEntryPointResolutionLive$"

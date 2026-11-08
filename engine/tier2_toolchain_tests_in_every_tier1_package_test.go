@@ -41,7 +41,9 @@ import (
 // "--target", "java", ...). So a test is a root here if its body, or a helper
 // it reaches, either
 //
-//   - calls one of the in-process builders (builderIdents), or
+//   - calls, or merely REFERENCES, one of the in-process builders (builderIdents)
+//     -- tests/crash passes them to a table as values, which a scan of call
+//     expressions never saw -- or
 //   - carries the two adjacent string literals "--target", "<tier-2 language>"
 //     in a call's arguments or a composite literal.
 //
@@ -152,16 +154,30 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 		}
 	}
 
+	for name, why := range knownOpenToolchainTests {
+		switch {
+		case !reached[name]:
+			t.Errorf("knownOpenToolchainTests lists %s but the scan no longer finds it reaching a "+
+				"builder. If the issue it names has landed, that is the point: delete the entry.\n%s", name, why)
+		case matchesAny(name, excl):
+			t.Errorf("%s is excluded from tier 1 and still listed in knownOpenToolchainTests. "+
+				"Delete the entry.\n%s", name, why)
+		}
+	}
+
 	var commandsLeg *commandsLegFacts
 	for _, f := range found {
 		if _, free := toolchainFreeBuilderCallers[f.name]; free {
 			continue
 		}
+		if _, open := knownOpenToolchainTests[f.name]; open && !matchesAny(f.name, excl) {
+			continue
+		}
 		if !matchesAny(f.name, excl) {
 			t.Errorf("%s (%s) builds the %s toolchain but is not excluded from the tier-1 gate.\n\n"+
-				"tier1-gate.yml provisions no JDK, Gradle, Node or Rust (D5: those languages are "+
-				"tier 2), but the GitHub runner image preinstalls them, so this test RUNS in the "+
-				"gate and depends on a download host (services.gradle.org, registry.npmjs.org, "+
+				"tiers.yaml puts those languages in tier 2 (D5) and the gate does not set out to "+
+				"depend on their toolchains, but the runner image preinstalls them and some "+
+				"tier-1 jobs provision them, so this test RUNS in the gate and depends on a download host (services.gradle.org, registry.npmjs.org, "+
 				"static.crates.io) being up. cleat#3689 was exactly that, for Gradle. Add an "+
 				"anchored pattern to tiers.yaml tier1.exclude_tests -- or, if it needs no "+
 				"toolchain (it refuses before one starts), prove that with the toolchain off "+
@@ -191,6 +207,19 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 				f.name, strings.TrimPrefix(f.dir, "../"), f.lang, f.lang)
 		}
 	}
+}
+
+// knownOpenToolchainTests are tier-1 tests that DO need a tier-2 toolchain and are
+// deliberately left in the gate for now, each with the issue that removes it.
+// This is an allowance with an end date in the form of a failing check, not a
+// place to hide a test: the guard fails if an entry stops being a finding (the
+// test was split, renamed or deleted) or becomes excluded, so the entry has to be
+// deleted the day the issue lands.
+var knownOpenToolchainTests = map[string]string{
+	"TestCrashMidAgentLoopResumesWithoutReaskingTheModel": "cleat#3692: its /rust, /java and /assemblyscript " +
+		"subtests build guests with tier-2 toolchains in tier 1. tier1-gate.yml's rest shards provision a JDK and " +
+		"Rust for it (cleat#3499, cleat#2978). Excluding the whole test would drop its go and python subtests, " +
+		"which belong in tier 1, so it needs a split first",
 }
 
 // toolchainFreeBuilderCallers are tests that reach a tier-2 builder and do not
@@ -308,13 +337,17 @@ func callGraphAndRootsOfTestDir(dir string) (calls map[string][]string, roots ma
 			}
 			ast.Inspect(fn, func(n ast.Node) bool {
 				switch x := n.(type) {
-				case *ast.CallExpr:
-					if id, ok := x.Fun.(*ast.Ident); ok {
-						calls[name] = append(calls[name], id.Name)
-						if lang, ok := builderIdents[id.Name]; ok {
-							roots[name] = lang
-						}
+				case *ast.Ident:
+					// Every reference, not only a call: tests/crash hands its builders
+					// to a table as VALUES (`build: buildJavaClientWASM`), so a scan of
+					// call expressions never saw them (cleat-review on cleat#3691).
+					// Over-approximate on purpose; only names that are declared
+					// functions matter, and a wrongly-named test is a loud finding.
+					calls[name] = append(calls[name], x.Name)
+					if lang, ok := builderIdents[x.Name]; ok {
+						roots[name] = lang
 					}
+				case *ast.CallExpr:
 					if lang := targetLanguageIn(x.Args); lang != "" {
 						roots[name] = lang
 					}
@@ -368,6 +401,9 @@ func reachesATierTwoToolchain(fn string, calls map[string][]string, roots map[st
 	return ""
 }
 
+// flagsFilter matches a -run or -skip, in a go test line or in a matrix entry's flags.
+var flagsFilter = regexp.MustCompile(`\s-(run|skip)[\s=]`)
+
 // commandsLegFacts is what ci.yml's test-go "commands" matrix entry provides.
 type commandsLegFacts struct {
 	legFound        bool     // a test-go matrix entry named commands exists
@@ -408,6 +444,10 @@ func readCommandsLeg() (*commandsLegFacts, error) {
 				isLeg = true
 				facts.legFound = true
 				facts.pathIsCmd = p["path"] == "./cmd/..."
+				// The leg's flags go onto the same go test line as ${{ matrix.package.flags }}.
+				if fl, ok := p["flags"].(string); ok && flagsFilter.MatchString(" "+fl+" ") {
+					facts.filteredRunStep = "matrix flags: " + fl
+				}
 			}
 		}
 		if !isLeg {
@@ -421,7 +461,7 @@ func readCommandsLeg() (*commandsLegFacts, error) {
 				facts.runStepFound = true
 				for _, line := range strings.Split(s.Run, "\n") {
 					if strings.HasPrefix(strings.TrimSpace(line), "go test") &&
-						regexp.MustCompile(`\s-(run|skip)[\s=]`).MatchString(line) {
+						flagsFilter.MatchString(line) {
 						facts.filteredRunStep = strings.TrimSpace(line)
 					}
 				}
