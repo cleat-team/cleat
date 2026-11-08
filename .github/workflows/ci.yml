@@ -271,6 +271,21 @@ jobs:
           scripts/check-onboarding-go-version.sh
           LINT_GUARD_EOF
 
+      # scripts/fetch-wasm-tools.sh is what tier1-gate.yml's two "Install
+      # wasm-tools" steps run, and it is the only code between a required check
+      # and a GitHub release-asset outage (cleat#3693). Its --self-test serves
+      # it a scripted local release (cold cache, warm cache, a bad cache entry,
+      # wrong bytes, three 504s then success, a permanent outage) and asserts
+      # the sha256 is checked on every path and the retry window is bounded. It
+      # needs no network beyond loopback and takes about fifteen seconds. Exit 2
+      # is "could not run", and fails this step like exit 1.
+      - name: wasm-tools fetch self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "wasm-tools fetch self-test" >> "$LINT_FAILURES_FILE"
+          scripts/fetch-wasm-tools.sh --self-test
+          LINT_GUARD_EOF
+
       # Four SDK stampers (AssemblyScript, Java, Python, Rust) each carry the
       # version in their own manifest and their own injection script, with no
       # single source of truth -- so a release bump that touches one site and

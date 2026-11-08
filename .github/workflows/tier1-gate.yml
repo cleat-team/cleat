@@ -247,6 +247,37 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The wasm-tools pin, in ONE place for the two "Install wasm-tools" steps
+  # below (they were byte-identical copies). Pinned to the same version
+  # scripts/docker/python-toolchain.Dockerfile installs, so the container a
+  # developer runs this gate in and the runner agree; if those drift, a
+  # developer's green is not evidence about CI's.
+  #
+  # The digest has real provenance, unlike ci.yml's shellcheck pin. wasm-tools
+  # publishes SLSA build attestations, and this exact value was verified against
+  # one before being written here (2026-08-30):
+  #
+  #   gh attestation verify wasm-tools-1.255.0-x86_64-linux.tar.gz \
+  #     --repo bytecodealliance/wasm-tools --format json
+  #
+  #   builder : .../bytecodealliance/wasm-tools/.github/workflows/publish.yml@refs/heads/main
+  #   subject : wasm-tools-1.255.0-x86_64-linux.tar.gz  (1 of 10 attested)
+  #
+  # The check in CI is an offline sha256 rather than a repeat of that
+  # verification on purpose: `gh attestation verify` calls GitHub's API, and
+  # these jobs are required checks that have already been failed once by a
+  # transient fetch (503, 2026-08-12). Provenance is established once, at pin
+  # time, by a human reading the attestation; CI then enforces it with no new
+  # way to flake.
+  #
+  # When bumping WASM_TOOLS_VERSION, re-run the command above on the new
+  # artifact and paste its digest -- do not just compute a hash of whatever
+  # downloaded. The cache key below contains both values, so a bump starts a
+  # fresh cache entry by itself.
+  WASM_TOOLS_VERSION: "1.255.0"
+  WASM_TOOLS_SHA256: "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072"
+
 jobs:
   # No DB, no Python, no wasm-tools: `go test -list` compiles the package and
   # enumerates Test funcs, it never runs one. Gates the three expensive jobs
@@ -497,52 +528,42 @@ jobs:
       # speed -- see this file's header on why tier 1 does not take
       # dependencies on tier-2 languages' registries.
       #
-      # Pinned to the same version scripts/docker/python-toolchain.Dockerfile
-      # installs, so the container a developer runs this gate in and the runner
-      # agree. If those drift, a developer's green is not evidence about CI's.
+      # wasm-tools comes from the release tarball, cached, and fetched by
+      # scripts/fetch-wasm-tools.sh (cleat#3693). On 2026-11-08 the release
+      # asset answered 504 for long enough that this step's old window (five
+      # retries 2 s apart, ~10 s) ran out and `Tier 1 Gate -- rest shard 3/4`
+      # failed four attempts on `develop`; the cache plus a bounded window of
+      # about five minutes is what that needs. The script's header has the
+      # bound and the rest of the reasoning.
+      #
+      # The cache holds only the TARBALL, never the unpacked binary, and the
+      # script checks its sha256 on a hit exactly as on a download, so a bad
+      # entry is refused (and replaced from the release), not trusted.
+      #
+      # `continue-on-error` is on THIS step only, and on purpose: a cache
+      # service error must read as a miss and fall back to the download, never
+      # as a red required check. (actions/cache already warns rather than fails
+      # on most service errors; this makes that not depend on which ones.) The
+      # job-level form is what check-workflow-guards.py forbids on a required
+      # context, and is not used.
+      - name: Restore wasm-tools tarball
+        if: github.event_name != 'merge_group'
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/wasm-tools-cache
+          key: wasm-tools-${{ env.WASM_TOOLS_VERSION }}-${{ env.WASM_TOOLS_SHA256 }}
+
       - name: Install wasm-tools
         if: github.event_name != 'merge_group'
-        env:
-          WASM_TOOLS_VERSION: "1.255.0"
         run: |
           set -euo pipefail
-          # This exact fetch failed a required check with `curl: (22) ... error:
-          # 503` on 2026-08-12, which read like a defect in the PR that hit it
-          # (#472, an actions/github-script bump) and was not.
-          #
-          # --retry-all-errors rather than plain --retry, and to a file rather
-          # than piped into tar. Both are load-bearing; see the same fetch in
-          # ci.yml's "Install lint tools" for the measurements. Short version:
-          # plain --retry does not retry a mid-transfer abort at all, and once
-          # retrying does work, piping hands tar the first attempt's bytes
-          # followed by a complete second copy.
-          curl -sSLf --retry 5 --retry-delay 2 --retry-all-errors \
-            -o /tmp/wasm-tools.tar.gz \
-            "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux.tar.gz"
-          # This digest has real provenance, unlike ci.yml's shellcheck pin.
-          # wasm-tools publishes SLSA build attestations, and this exact value
-          # was verified against one before being written here (2026-08-30):
-          #
-          #   gh attestation verify wasm-tools-1.255.0-x86_64-linux.tar.gz \
-          #     --repo bytecodealliance/wasm-tools --format json
-          #
-          #   builder : .../bytecodealliance/wasm-tools/.github/workflows/publish.yml@refs/heads/main
-          #   subject : wasm-tools-1.255.0-x86_64-linux.tar.gz  (1 of 10 attested)
-          #
-          # The check here is an offline sha256 rather than a repeat of that
-          # verification on purpose: `gh attestation verify` calls GitHub's API,
-          # and this job is a required check that has already been failed once
-          # by a transient fetch (503, 2026-08-12). Provenance is established
-          # once, at pin time, by a human reading the attestation; CI then
-          # enforces it with no network and no new way to flake.
-          #
-          # When bumping WASM_TOOLS_VERSION, re-run the command above on the new
-          # artifact and paste its digest -- do not just compute a hash of
-          # whatever downloaded.
-          echo "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072  /tmp/wasm-tools.tar.gz" \
-            | sha256sum -c -
-          tar xzf /tmp/wasm-tools.tar.gz -C /tmp
-          sudo mv /tmp/wasm-tools-*/wasm-tools /usr/local/bin/wasm-tools
+          tarball="${RUNNER_TEMP}/wasm-tools-cache/wasm-tools.tar.gz"
+          bash scripts/fetch-wasm-tools.sh "${tarball}"
+          unpacked="${RUNNER_TEMP}/wasm-tools-unpacked"
+          mkdir -p "${unpacked}"
+          tar xzf "${tarball}" -C "${unpacked}" --strip-components=1
+          sudo mv "${unpacked}/wasm-tools" /usr/local/bin/wasm-tools
           wasm-tools --version
 
       # SQL Server starts with no application database, and the DSN above names
@@ -809,19 +830,26 @@ jobs:
           # machine and not another.
           pip install pyyaml
 
+      # See the first "Restore wasm-tools tarball" step for why this is a cache
+      # plus scripts/fetch-wasm-tools.sh rather than a bare curl.
+      - name: Restore wasm-tools tarball
+        if: github.event_name != 'merge_group'
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/wasm-tools-cache
+          key: wasm-tools-${{ env.WASM_TOOLS_VERSION }}-${{ env.WASM_TOOLS_SHA256 }}
+
       - name: Install wasm-tools
         if: github.event_name != 'merge_group'
-        env:
-          WASM_TOOLS_VERSION: "1.255.0"
         run: |
           set -euo pipefail
-          curl -sSLf --retry 5 --retry-delay 2 --retry-all-errors \
-            -o /tmp/wasm-tools.tar.gz \
-            "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux.tar.gz"
-          echo "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072  /tmp/wasm-tools.tar.gz" \
-            | sha256sum -c -
-          tar xzf /tmp/wasm-tools.tar.gz -C /tmp
-          sudo mv /tmp/wasm-tools-*/wasm-tools /usr/local/bin/wasm-tools
+          tarball="${RUNNER_TEMP}/wasm-tools-cache/wasm-tools.tar.gz"
+          bash scripts/fetch-wasm-tools.sh "${tarball}"
+          unpacked="${RUNNER_TEMP}/wasm-tools-unpacked"
+          mkdir -p "${unpacked}"
+          tar xzf "${tarball}" -C "${unpacked}" --strip-components=1
+          sudo mv "${unpacked}/wasm-tools" /usr/local/bin/wasm-tools
           wasm-tools --version
 
       # cleat#2978: tests/crash's Rust agent client (TestCrashMidAgentLoopResumesWithoutReaskingTheModel/rust)
