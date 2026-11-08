@@ -340,8 +340,9 @@ PostgreSQL and SQL Server only.
   reserved prefix above: a tenant cannot deploy under a published prefix, and a library cannot be published over
   names a tenant already has. On a sharded deployment every shard is asked before any is written. The check
   reads tenants through a function the publisher may call and nothing else (migration `010`), and it sees
-  the tenants listed in `admin.tenants` plus the default tenant; on SQL Server a tenant with workflow rows and
-  no `admin.tenants` row would not be seen.
+  the tenants listed in `admin.tenants` plus the default tenant. A tenant with workflow rows and no
+  `admin.tenants` row is not seen on SQL Server, and is not seen on PostgreSQL either when the reader function's
+  owner does not bypass row-level security (a superuser or `BYPASSRLS` owner reads every tenant directly).
 - **A bundle is a consistent set.** Every `child_versions` pin in a member's stamp must name another member
   of the *same* bundle at that exact version, so a tenant that installs the bundle can never resolve a child it
   does not contain. A name appears once per bundle.
