@@ -110,9 +110,12 @@ func (s *PostgresStore) lockWorkflowDefFanOut(ctx context.Context, name string, 
 	if ms < 1 {
 		ms = 1
 	}
-	// lock_timeout applies to an advisory lock wait. LOCAL ends with the transaction, so nothing is
-	// left on the connection.
-	if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = "+strconv.FormatInt(ms, 10)); err != nil {
+	// lock_timeout applies to an advisory lock wait. is_local (the third argument) is SET LOCAL: it ends
+	// with the transaction, so nothing is left on the connection. A constant statement with the value
+	// as a parameter, and not "SET LOCAL ... = " + a formatted number, because the tree-scanning guard
+	// TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet cannot read a statement built by
+	// concatenation and fails on one it cannot resolve.
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('lock_timeout', $1, true)`, strconv.FormatInt(ms, 10)); err != nil {
 		_ = tx.Rollback()
 		return nil, fmt.Errorf("cross-shard deploy lock: set lock_timeout: %w", err)
 	}
