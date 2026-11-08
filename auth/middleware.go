@@ -206,7 +206,9 @@ func MiddlewareWithMux(store TenantResolver, requireAuth bool, mux *http.ServeMu
 				return
 			}
 			if isPublicRoute(mux, publicMatcher, patternSet, r) {
-				next.ServeHTTP(w, r)
+				// Say so to whatever runs inside this layer: a plugin's middleware must not
+				// authenticate, or refuse, a request that core auth waived (cleat#3654).
+				next.ServeHTTP(w, r.WithContext(withMatchedExemptRoute(r.Context())))
 				return
 			}
 

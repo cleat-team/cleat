@@ -39,6 +39,16 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A route core auth exempted by pattern (auth.MatchedExemptRoute) is reachable with no cleat
+		// credential at all, and a header on it is not ours to judge. Without this a session-shaped
+		// Bearer on POST /ingest/{id} or POST /slack/interactive was answered 401 "invalid session"
+		// here, while the same request with no header, or with any other shape, reached the
+		// handler. cleat#3654. The exemption list stays in cmd/cleat-worker; this only asks.
+		if auth.MatchedExemptRoute(r.Context()) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Named authHeader rather than auth: this package imports
 		// github.com/cleat-team/cleat/auth below, and a local var named auth
 		// would shadow it for the rest of this closure.
