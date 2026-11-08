@@ -532,24 +532,48 @@ jobs:
       # scripts/fetch-wasm-tools.sh (cleat#3693). On 2026-11-08 the release
       # asset answered 504 for long enough that this step's old window (five
       # retries 2 s apart, ~10 s) ran out and `Tier 1 Gate -- rest shard 3/4`
-      # failed four attempts on `develop`; the cache plus a bounded window of
-      # about five minutes is what that needs. The script's header has the
-      # bound and the rest of the reasoning.
+      # failed four attempts on `develop`. The script's header has the retry
+      # bound (no new attempt after 240 s) and the rest of the reasoning.
+      #
+      # RESTORE, FETCH, SAVE-ON-MISS, INSTALL, as four steps and not one
+      # `actions/cache` step, on purpose. A plain `actions/cache` saves in its
+      # POST step and only when the whole job succeeded, so a download that
+      # verified followed by a failing test would never warm the cache, and the
+      # next run would face the outage again. `cache/save` straight after the
+      # fetch warms it as soon as a verified tarball exists. It runs on a miss
+      # only: an exact hit means the key is already stored, and keys are
+      # immutable, so a save would only fail to reserve it.
       #
       # The cache holds only the TARBALL, never the unpacked binary, and the
-      # script checks its sha256 on a hit exactly as on a download, so a bad
-      # entry is refused (and replaced from the release), not trusted.
+      # fetch script checks its sha256 on a hit exactly as on a download, so a
+      # bad entry is refused (and replaced from the release), not trusted.
       #
-      # `continue-on-error` is on THIS step only, and on purpose: a cache
-      # service error must read as a miss and fall back to the download, never
-      # as a red required check. (actions/cache already warns rather than fails
-      # on most service errors; this makes that not depend on which ones.) The
-      # job-level form is what check-workflow-guards.py forbids on a required
-      # context, and is not used.
+      # `continue-on-error` is on the two cache steps only, and on purpose: a
+      # cache-service error must read as a miss (restore) or as a cache that
+      # stays cold (save), never as a red required check. The fetch step has
+      # none. The job-level form is what check-workflow-guards.py forbids on a
+      # required context, and is not used.
+      #
+      # Caches are scoped to the ref: a PR's cache does not serve `develop` or
+      # another PR, and a `develop` cache serves every PR. So the entry that
+      # protects other runs is the one `develop`'s own push run saves.
       - name: Restore wasm-tools tarball
+        id: wasm-tools-cache
         if: github.event_name != 'merge_group'
         continue-on-error: true
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/wasm-tools-cache
+          key: wasm-tools-${{ env.WASM_TOOLS_VERSION }}-${{ env.WASM_TOOLS_SHA256 }}
+
+      - name: Fetch wasm-tools
+        if: github.event_name != 'merge_group'
+        run: bash scripts/fetch-wasm-tools.sh "${RUNNER_TEMP}/wasm-tools-cache/wasm-tools.tar.gz"
+
+      - name: Save wasm-tools tarball
+        if: github.event_name != 'merge_group' && steps.wasm-tools-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/wasm-tools-cache
           key: wasm-tools-${{ env.WASM_TOOLS_VERSION }}-${{ env.WASM_TOOLS_SHA256 }}
@@ -559,7 +583,6 @@ jobs:
         run: |
           set -euo pipefail
           tarball="${RUNNER_TEMP}/wasm-tools-cache/wasm-tools.tar.gz"
-          bash scripts/fetch-wasm-tools.sh "${tarball}"
           unpacked="${RUNNER_TEMP}/wasm-tools-unpacked"
           mkdir -p "${unpacked}"
           tar xzf "${tarball}" -C "${unpacked}" --strip-components=1
@@ -830,12 +853,25 @@ jobs:
           # machine and not another.
           pip install pyyaml
 
-      # See the first "Restore wasm-tools tarball" step for why this is a cache
-      # plus scripts/fetch-wasm-tools.sh rather than a bare curl.
+      # See the first "Restore wasm-tools tarball" step for why these are four
+      # steps (restore, fetch, save on a miss, install) rather than a bare curl.
       - name: Restore wasm-tools tarball
+        id: wasm-tools-cache
         if: github.event_name != 'merge_group'
         continue-on-error: true
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/wasm-tools-cache
+          key: wasm-tools-${{ env.WASM_TOOLS_VERSION }}-${{ env.WASM_TOOLS_SHA256 }}
+
+      - name: Fetch wasm-tools
+        if: github.event_name != 'merge_group'
+        run: bash scripts/fetch-wasm-tools.sh "${RUNNER_TEMP}/wasm-tools-cache/wasm-tools.tar.gz"
+
+      - name: Save wasm-tools tarball
+        if: github.event_name != 'merge_group' && steps.wasm-tools-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
         with:
           path: ${{ runner.temp }}/wasm-tools-cache
           key: wasm-tools-${{ env.WASM_TOOLS_VERSION }}-${{ env.WASM_TOOLS_SHA256 }}
@@ -845,7 +881,6 @@ jobs:
         run: |
           set -euo pipefail
           tarball="${RUNNER_TEMP}/wasm-tools-cache/wasm-tools.tar.gz"
-          bash scripts/fetch-wasm-tools.sh "${tarball}"
           unpacked="${RUNNER_TEMP}/wasm-tools-unpacked"
           mkdir -p "${unpacked}"
           tar xzf "${tarball}" -C "${unpacked}" --strip-components=1

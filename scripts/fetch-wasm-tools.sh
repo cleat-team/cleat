@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Put a sha256-verified wasm-tools release tarball at <dest>, from the cache
 # if <dest> is already there and still verifies, from the GitHub release
-# otherwise. Used by tier1-gate.yml's two "Install wasm-tools" steps (cleat#3693).
+# otherwise. Used by tier1-gate.yml's two "Fetch wasm-tools" steps (cleat#3693),
+# which sit between actions/cache/restore and actions/cache/save.
 #
 # WHY THIS EXISTS. The install used to be one `curl --retry 5 --retry-delay 2`
 # and nothing else. On 2026-11-08 `develop` c67b11f3's `Tier 1 Gate -- rest
