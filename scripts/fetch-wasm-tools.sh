@@ -47,10 +47,11 @@
 #   WASM_TOOLS_SHA256   required, the pinned digest of the x86_64-linux tarball
 #   WASM_TOOLS_URL      optional; overrides the release URL. A test seam: the
 #                       workflow never sets it.
-#   WASM_TOOLS_FETCH_BUDGET_S, WASM_TOOLS_FETCH_FIRST_DELAY_S
-#                       optional; the 240 and 5 above, so the self-test can
-#                       exercise the give-up path in seconds. The workflow
-#                       never sets them.
+#   WASM_TOOLS_FETCH_BUDGET_S, WASM_TOOLS_FETCH_FIRST_DELAY_S,
+#   WASM_TOOLS_FETCH_MAX_TIME_S
+#                       optional; the 240, 5 and 60 above, so the self-test can
+#                       exercise the give-up path and a stalled server in
+#                       seconds. The workflow never sets them.
 #
 # Usage:
 #   scripts/fetch-wasm-tools.sh <dest.tar.gz>
@@ -70,6 +71,7 @@ fetch() {
   local url="${WASM_TOOLS_URL:-https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux.tar.gz}"
   local budget="${WASM_TOOLS_FETCH_BUDGET_S:-240}"
   local delay="${WASM_TOOLS_FETCH_FIRST_DELAY_S:-5}"
+  local max_time="${WASM_TOOLS_FETCH_MAX_TIME_S:-60}"
   local part="${dest}.partial"
 
   mkdir -p "$(dirname "$dest")"
@@ -91,7 +93,7 @@ fetch() {
   while :; do
     attempt=$((attempt + 1))
     rm -f "$part"
-    if curl -sSLf --connect-timeout 15 --max-time 60 -o "$part" "$url"; then
+    if curl -sSLf --connect-timeout 15 --max-time "$max_time" -o "$part" "$url"; then
       break
     fi
     if [ $((SECONDS + delay)) -ge "$budget" ]; then
@@ -143,10 +145,12 @@ self_test() {
   trap cleanup EXIT
 
   # A scripted release server: the first $2 requests get a 504, the rest get
-  # $1's bytes. It counts requests in $4 so a case can say how many times the
+  # $1's bytes; a negative $2 means it accepts the connection and then says
+# nothing (the "Read timed out" shape of a half-dead release endpoint). It
+# counts requests in $4 so a case can say how many times the
   # network was touched, which is the quantity the cache exists to reduce.
   cat >"$work/server.py" <<'PY'
-import http.server, sys
+import http.server, sys, time
 
 payload = open(sys.argv[1], "rb").read()
 fail_first = int(sys.argv[2])
@@ -160,6 +164,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         hits += 1
         with open(hitsfile, "w") as f:
             f.write(str(hits))
+        if fail_first < 0:
+            time.sleep(120)
+            return
         if hits <= fail_first:
             self.send_response(504)
             self.end_headers()
@@ -173,7 +180,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+class Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+
+server = Server(("127.0.0.1", 0), Handler)
 with open(portfile, "w") as f:
     f.write(str(server.server_port))
 server.serve_forever()
@@ -204,7 +215,8 @@ PY
   }
   server_hits() { if [ -f "$hits_file" ]; then cat "$hits_file"; else echo 0; fi; }
 
-  # run_case <name> <want-exit> <budget> <first-delay>; sets $rc $out $elapsed.
+  # run_case <name> <want-exit> <budget> <first-delay> [max-time]; sets $rc $out
+  # $elapsed.
   # The server answers in milliseconds, so a run that outlives its budget by 15 s
   # has lost its bound; it is killed and reported as rc=124 rather than left to
   # hang the self-test (and the Lint job) until something else times out.
@@ -213,6 +225,7 @@ PY
     set +e
     env WASM_TOOLS_VERSION=0.0.0 WASM_TOOLS_SHA256="$good_sha" WASM_TOOLS_URL="$url" \
       WASM_TOOLS_FETCH_BUDGET_S="$3" WASM_TOOLS_FETCH_FIRST_DELAY_S="$4" \
+      WASM_TOOLS_FETCH_MAX_TIME_S="${5:-60}" \
       bash "$self" "$work/cache/wasm-tools.tar.gz" >"$work/case.out" 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
@@ -288,6 +301,16 @@ PY
   expect "a permanent outage gives up inside the budget and leaves no file" \
     "$([ $rc -eq 1 ] && [ "$(server_hits)" -ge 2 ] && [ "$elapsed" -le 12 ] && [ "$(dest_sha)" = none ] && has "could not download" && echo 0 || echo 1)" \
     "exit=$rc hits=$(server_hits) elapsed=${elapsed}s budget=6s"
+
+  # 7. a server that accepts and never answers: each attempt is cut off by
+  # --max-time, the loop still honours the budget, and nothing is left at <dest>.
+  # Without --max-time curl would wait on the stalled connection for as long as
+  # the server likes, past the budget and past the watchdog (rc=124).
+  reset_cache; start_server "$work/good.tgz" -1
+  run_case stall 1 5 1 2
+  expect "a stalled server is cut off per attempt and the step still ends inside its bound" \
+    "$([ $rc -eq 1 ] && [ "$(server_hits)" -ge 2 ] && [ "$elapsed" -le 12 ] && [ "$(dest_sha)" = none ] && has "could not download" && echo 0 || echo 1)" \
+    "exit=$rc hits=$(server_hits) elapsed=${elapsed}s budget=5s max_time=2s"
 
   echo "${cases} cases, ${failures} failed"
   [ "$failures" -eq 0 ]
