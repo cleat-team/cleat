@@ -1483,15 +1483,25 @@ tier2:
 #     Homebrew formula). See IMPROVEMENT-PLAN.md §3.402.
 #
 #   * `Test Go (crash)` is the ONE matrix entry that is not required, and it runs a
-#     tier-1 package. That is not a hole: tier1.packages includes ./tests/crash/... and
-#     the required `Tier 1 Gate` runs the whole list.
+#     tier-1 package. That is not a hole for the tier-1 tests in it: tier1.packages
+#     includes ./tests/crash/... and the required `Tier 1 Gate` runs them.
 #
-#     DECIDED 2026-09-05: leave it unrequired. What is genuinely not blocking is the
+#     DECIDED 2026-09-05: leave it unrequired. What was not blocking then was the
 #     `-race` variant -- the matrix job runs `go test -race`, the Tier 1 Gate does not,
 #     so a data race in the crash tests would not stop a merge. That was judged not
 #     worth a required context of its own; correctness there is gated, only the race
 #     detector is advisory. Recorded because "the only one of twelve that is not
 #     required" reads as an oversight, and twice now someone has started chasing it.
+#
+#     WHAT CHANGED with cleat#3692, and it is wider than the race detector. The Tier 1
+#     Gate no longer runs ALL of ./tests/crash/...: the tier-2 agent clients (rust,
+#     java, assemblyscript) are
+#     TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel, which
+#     tier1.exclude_tests removes, so this unrequired job is the only one that runs
+#     them. A failure there is red and visible and does not stop a merge. That is what
+#     tier 2 means, and it differs from the cmd/ tests moved out by cleat#3690, whose
+#     `commands` leg IS required. Making `Test Go (crash)` required would close that
+#     difference, and it is a branch-protection change, so it is the owner's call.
 #
 # Re-derive all three:
 #
