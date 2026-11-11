@@ -297,17 +297,31 @@ tier1:
     # NEEDS. The seven are named, with their reason, in
     # engine/tier2_toolchain_tests_in_every_tier1_package_test.go.
     #
-    # One tier-2 toolchain test is NOT excluded here, deliberately and with an end date:
-    # tests/crash's TestCrashMidAgentLoopResumesWithoutReaskingTheModel (/rust, /java,
-    # /assemblyscript). Excluding the whole test would also drop its go and python
-    # subtests, so it is listed as an allowance in the same guard and removed by
-    # cleat#3692.
     - "^TestJavaBuildRefusesAStaleManifest$"
     - "^TestJavaBuildRefusesMultipleManifests$"
     - "^TestJavaExampleEntryPointResolutionLive$"
     - "^TestAssemblyScriptBuildRefusesAStaleManifest$"
     - "^TestAssemblyScriptExampleEntryPointResolutionLive$"
     - "^TestASBuildRefusesNondeterminism$"
+    # tier 2 -- rust, java and assemblyscript, in tests/crash (cleat#3692, the last of
+    # the three guard findings cleat#3690 left open).
+    #
+    # tests/crash's agent-loop acceptance ran one subtest per client language, and the
+    # rust, java and assemblyscript subtests built their guests with Cargo, Gradle and
+    # npm inside this gate. An exclusion cannot name a subtest -- this list is matched
+    # against `go test -list`, which lists top-level tests only -- so the tier-2 clients
+    # became a top-level test of their own and the tier-1 one kept go and python.
+    # tier1-gate.yml's rest shards used to provision a JDK 17 and Rust for it
+    # (cleat#3499, cleat#2978); both steps went with this change. Node, which the
+    # runner image ships, is not provisioned by either gate.
+    #
+    # Selected, once excluded, by ci.yml's test-go "crash" leg, which provisions Rust,
+    # Node, Java and Gradle and runs ./tests/crash/... with no -run and no -skip; the
+    # guard checks those facts and that the leg still carries that path. That leg is
+    # not a required context (see the required_contexts note on `Test Go (crash)`), so
+    # a failure in these clients is visible and does not block a merge, which is what
+    # tier 2 means.
+    - "^TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel$"
     # tier 2 -- docker. cmd/cleat-worker/a_real_postgres_docker_pause_idle_worker_gap_test.go
     # (cleat#2005's third review round, GAP2): a real-database reproduction of the
     # reaper's idle-worker recovery-grace-period fix, using `docker pause` on the
