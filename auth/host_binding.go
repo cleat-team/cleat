@@ -317,31 +317,52 @@ type querier interface {
 // inside a transaction, exactly as the engine does (engine.setTenantOnTx). MySQL scopes by database, so the
 // read is direct.
 //
-// SQL SERVER DOES NOT REVERT WITH THE TRANSACTION, and this relies on the driver on purpose. Session context
-// belongs to the CONNECTION, so the connection goes back to this pool still holding the tenant. What
-// clears it is go-mssqldb answering database/sql's ResetSession with sp_reset_connection, the same
-// mechanism engine/plugindb_tenant.go documents and pins. It is safe because nothing on this pool reads
-// a policy table without setting its own tenant first (every such read here goes through scopedRead or
-// beginDropTx, and no admin.* table has a policy), so a stale value is never consumed.
-// TestAScopedReadsTenantDoesNotSurviveTheSQLServerConnectionPool fails if the shipped driver stops
-// resetting. It is a single layer: a cancel before the read does not clear it either, and the options for
-// making it driver-independent, with their measured cost, are on cleat#3678.
+// SQL SERVER DOES NOT REVERT WITH THE TRANSACTION. Session context belongs to the CONNECTION, so a plain
+// transaction on the pool would hand the connection back still holding the tenant. This pins one connection
+// for the read, and releaseTenantConn clears the tenant before the connection goes back and DISCARDS the
+// connection when the clear does not succeed (a cancel before or during the read, a connection the driver
+// has already broken). So what the next statement on this pool reads as its tenant does not depend on
+// go-mssqldb answering database/sql's ResetSession with sp_reset_connection, which is what this relied on
+// until cleat#3678 (owner decision D65). The driver's reset is still there as a second layer.
+// TestAScopedReadsTenantDoesNotSurviveTheSQLServerConnectionPool pins the result on the shipped driver and
+// on one that does not reset, and TestAScopedReadWhoseClearIsRefusedDiscardsItsConnection pins the discard. The
+// cost is one more round trip on SQL Server, measured on cleat#3678.
 func (s *TenantStore) scopedRead(ctx context.Context, tenant uuid.UUID, fn func(q querier) error) error {
 	if s.dialect == DialectMySQL {
 		return fn(s.db)
+	}
+	if s.dialect == DialectMSSQL {
+		return s.scopedReadMSSQL(ctx, tenant, fn)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if s.dialect == DialectMSSQL {
-		_, err = tx.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant.String())
-	} else {
-		_, err = tx.ExecContext(ctx, `SELECT set_config('cleat.tenant_id', $1, true)`, tenant.String())
-	}
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, `SELECT set_config('cleat.tenant_id', $1, true)`, tenant.String()); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("scope the read to tenant %s: %w", tenant, err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// scopedReadMSSQL is scopedRead's SQL Server arm: one pinned connection, the tenant set on it, the read in
+// a transaction on it, and releaseTenantConn clearing the tenant (or discarding the connection) afterwards.
+func (s *TenantStore) scopedReadMSSQL(ctx context.Context, tenant uuid.UUID, fn func(q querier) error) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseTenantConn(conn)
+	if _, err := conn.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant.String()); err != nil {
+		return fmt.Errorf("scope the read to tenant %s: %w", tenant, err)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
 	if err := fn(tx); err != nil {
 		_ = tx.Rollback()

@@ -255,6 +255,27 @@ func mayActOn(onlyCreator, createdBy string) bool {
 	return onlyCreator == "" || (createdBy != "" && createdBy == onlyCreator)
 }
 
+// releaseTenantConn puts a pinned SQL Server connection back as it found it: it clears the tenant the
+// caller set and closes the connection, and when the clear does not succeed it discards the connection
+// instead of pooling it.
+//
+// FAIL CLOSED (cleat#3647). A connection whose clear did not succeed may still carry the tenant, and must
+// never go back to the pool. This used to discard the error and return the connection anyway, and the
+// clear does fail: a request cancelled inside admin.drop_tenant is a TDS attention, database/sql rolls the
+// transaction back itself, the driver's connection is left holding the aborted transaction, so the next
+// batch is refused with "server does not have an active transaction ... XACT_ABORT" and the context stayed
+// set. Only the driver's session reset on reuse kept the next statement from running as the dropped tenant.
+// Returning ErrBadConn from Raw makes database/sql close the connection instead of pooling it.
+//
+// The clear runs on context.Background(), not the caller's context: it must run even when the request was
+// cancelled. scopedRead (cleat#3678) uses it too, so neither path depends on the driver's reset.
+func releaseTenantConn(conn *sql.Conn) {
+	if _, err := conn.ExecContext(context.Background(), `EXEC sp_set_session_context @key = N'tenant_id', @value = NULL`); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	_ = conn.Close()
+}
+
 // beginDropTx opens the transaction and gives it the tenant's scope. The returned func must be called
 // when the transaction is over, and puts the connection back as it found it.
 //
@@ -279,21 +300,7 @@ func (s *TenantStore) beginDropTx(ctx context.Context, tenantID uuid.UUID) (*sql
 		if err != nil {
 			return nil, nil, err
 		}
-		release := func() {
-			// Not ctx: this must run even when the request was cancelled.
-			if _, err := conn.ExecContext(context.Background(), `EXEC sp_set_session_context @key = N'tenant_id', @value = NULL`); err != nil {
-				// FAIL CLOSED (cleat#3647). A connection whose clear did not succeed may still carry this
-				// tenant, and must never go back to the pool. This used to discard the error and return the
-				// connection anyway, and the clear does fail: a request cancelled inside admin.drop_tenant is a
-				// TDS attention, database/sql rolls the transaction back itself, and the driver's connection is
-				// left holding the aborted transaction, so the next batch is refused with "server does not have
-				// an active transaction ... XACT_ABORT" and the context stayed set. Only the driver's session
-				// reset on reuse kept the next statement from running as the dropped tenant. Returning
-				// ErrBadConn from Raw makes database/sql close the connection instead of pooling it.
-				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-			}
-			_ = conn.Close()
-		}
+		release := func() { releaseTenantConn(conn) }
 		if _, err := conn.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenantID.String()); err != nil {
 			release()
 			return nil, nil, fmt.Errorf("auth: scope the drop to the tenant: %w", err)
