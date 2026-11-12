@@ -109,6 +109,62 @@ func TestATenantsBeatDoesNotQueueBehindTheExecutionPoolUnderRLSOnSQLServer(t *te
 	})
 }
 
+// TestTheStoreMainBuildsForTheHeartbeatPoolCanBeRescoped is the half of the switch
+// in heartbeatStoreForTenant that the beat tests above cannot see: they build the
+// isolated store with rig.scoped, so a future wrapper type returned by
+// OpenIsolatedStore would leave the switch matching nothing, fall through to
+// storeForTenant, and every test would still pass on the stores they build
+// themselves. This asks the factory main.go asks, for the type it hands back.
+// One function per dialect, so an unset CLEAT_TEST_MSSQL skips only its own.
+type isolatedStoreOpener3571 interface {
+	OpenIsolatedStore(ctx context.Context, tenantID string, maxConns int, taskQueues ...string) (engine.WorkflowStore, io.Closer, error)
+}
+
+func checkTheIsolatedStoreCanBeRescoped(t *testing.T, f isolatedStoreOpener3571) {
+	t.Helper()
+	st, closer, err := f.OpenIsolatedStore(context.Background(), engine.DefaultTenantUUID, 1, "default")
+	if err != nil {
+		t.Fatalf("OpenIsolatedStore: %v", err)
+	}
+	defer closer.Close()
+	switch st.(type) {
+	case *engine.PostgresStore, *engine.MSSQLStore:
+	default:
+		t.Fatalf("OpenIsolatedStore returned %T, which heartbeatStoreForTenant cannot re-scope", st)
+	}
+	// A factory that records whether it was asked: a beat that falls back to
+	// storeForTenant opens a store there, and one that was re-scoped does not.
+	factory := &recordingFactory{store: &mockStore{}}
+	w := &Worker{heartbeatStore: st, storeFactory: factory, storeTenantID: engine.DefaultTenantUUID}
+	got, release, err := w.heartbeatStoreForTenant(poolTenant3571)
+	if err != nil {
+		t.Fatalf("heartbeatStoreForTenant: %v", err)
+	}
+	release()
+	if opened := factory.openedTenants(); len(opened) != 0 {
+		t.Errorf("heartbeatStoreForTenant asked the execution pool's factory for %v: %T from OpenIsolatedStore is not "+
+			"recognised, so another tenant's beat falls back to the execution pool (cleat#3571)", opened, st)
+	}
+	// A re-scoped store is a copy of the same type, not the pool's own store.
+	if got == nil || got == st || fmt.Sprintf("%T", got) != fmt.Sprintf("%T", st) {
+		t.Errorf("heartbeatStoreForTenant returned %T (the pool's own store: %v), want a re-scoped copy of %T", got, got == st, st)
+	}
+}
+
+func TestTheStoreMainBuildsForTheHeartbeatPoolCanBeRescoped(t *testing.T) {
+	owner := testutil.SuiteTestDB(t, "cleat_worker_hbpool3571")
+	checkTheIsolatedStoreCanBeRescoped(t, engine.NewPostgresStoreFactory(owner, "public").WithDSN(testutil.PostgresTestDSN()))
+}
+
+func TestTheStoreMainBuildsForTheHeartbeatPoolCanBeRescopedOnSQLServer(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping the SQL Server cleat#3571 isolated-store type test")
+	}
+	f := engine.NewMSSQLStoreFactory(os.Getenv("CLEAT_TEST_MSSQL"))
+	t.Cleanup(func() { _ = f.Close() })
+	checkTheIsolatedStoreCanBeRescoped(t, f)
+}
+
 func runABeatAgainstASaturatedExecutionPool(t *testing.T, rig *hbRig, runTenant string) {
 	t.Helper()
 	ctx := context.Background()
