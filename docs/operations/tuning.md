@@ -376,6 +376,10 @@ against PgBouncer's `default_pool_size` and remove that failure mode; set
 `--heartbeat-max-connections 0` to opt back out and share the core pool as
 before.
 
+The pool serves every tenant's runs, not only the worker's own: another tenant's
+beat uses it re-scoped to that tenant, so serving more tenants does not add
+connections to this term (cleat#3571).
+
 **The tenant pool is unbounded in tenant count, and reaped.** A worker opens a
 pool per tenant it touches, from either of two sources — `--tenant-isolation=role`
 on PostgreSQL, and the store factory itself on MySQL and SQL Server — so there

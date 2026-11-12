@@ -2103,6 +2103,11 @@ type Worker struct {
 	// pool; it does not address a GC pause or a network path to the
 	// database degraded for this worker only, which #2009 covers instead.
 	//
+	// It carries every tenant's beat, not only the worker's own: another
+	// tenant's runs use it re-scoped with WithTenant (heartbeatStoreForTenant),
+	// on PostgreSQL and SQL Server. MySQL and a sharded store cannot be
+	// re-scoped and use `store`'s pool for other tenants' beats (cleat#3571).
+	//
 	// Nil falls back to `store`, so a Worker built without one (tests, or
 	// --heartbeat-max-connections=0) behaves exactly as before.
 	heartbeatStore engine.WorkflowStore
@@ -4392,6 +4397,40 @@ func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
 	return w.store
 }
 
+// heartbeatStoreForTenant is the store a run of another tenant is beaten
+// through (cleat#3571). With an isolated heartbeat pool it is that pool,
+// re-scoped to the tenant with WithTenant: a copy that shares the pool and
+// carries a different tenant id, so it costs no connection and
+// --heartbeat-max-connections still bounds everything the heartbeat holds. Before
+// this the other tenant's beat went through storeForTenant, which is the
+// EXECUTION pool, so the isolation covered the worker's own tenant's runs and
+// not the others'.
+//
+// Only the two stores that supply the tenant on every transaction are re-scoped.
+// PostgreSQL sets cleat.tenant_id per transaction (beginTxWithRLS) and SQL Server
+// asserts SESSION_CONTEXT per transaction (beginTxWithContext), so one pooled
+// connection can carry a different tenant's beat each call. MySQL's tenant is the
+// database the pool was opened on and a sharded store routes by tenant, so
+// neither can be re-scoped here, and neither is helped: they fall through to
+// storeForTenant, as does a worker with no isolated pool.
+//
+// What a re-scoped beat leaves behind on SQL Server was measured on the shipped
+// driver (2026-11-12): the session context it set is gone when the pooled
+// connection is next used, and is visible on that connection until then. Nothing
+// here depends on that, because HeartbeatBatchFenced asserts its tenant at the
+// start of every transaction, but a plain statement run on this pool would depend
+// on it, so heartbeatBatchStore is held to being the only reader of heartbeatStore
+// (TestTheHeartbeatPoolIsUsedOnlyThroughHeartbeatBatchStore).
+func (w *Worker) heartbeatStoreForTenant(tenantID string) (engine.WorkflowStore, func(), error) {
+	switch s := w.heartbeatStore.(type) {
+	case *engine.PostgresStore:
+		return s.WithTenant(tenantID), func() {}, nil
+	case *engine.MSSQLStore:
+		return s.WithTenant(tenantID), func() {}, nil
+	}
+	return w.storeForTenant(tenantID)
+}
+
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
 // are currently executing, fenced individually per (run, generation) rather
 // than in the single unfenced statement BatchHeartbeat used to issue.
@@ -4475,9 +4514,12 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 	// run of the worker's own tenant was unaffected, which is why a suite that
 	// runs the default tenant, or a role that bypasses the policy, never saw it.
 	//
-	// The worker's own tenant keeps heartbeatBatchStore(), so cleat#2009's
-	// isolated heartbeat pool still serves the runs it was built for. Every other
-	// tenant goes through storeForTenant, as executeWorkflow does for the same run.
+	// The worker's own tenant uses heartbeatBatchStore(), cleat#2009's isolated
+	// heartbeat pool. Every other tenant uses the same pool re-scoped to that
+	// tenant (heartbeatStoreForTenant), so a burst of execution traffic cannot
+	// queue ANY tenant's beat; where there is no such pool, or the dialect cannot
+	// re-scope one, it falls back to storeForTenant, as executeWorkflow does for
+	// the same run (cleat#3571).
 	//
 	// A group that cannot be asked says nothing about its own runs, exactly as a
 	// failed call said nothing before: it is logged, recorded as trouble, and its
@@ -4503,7 +4545,7 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 		hbStore, release := w.heartbeatBatchStore(), func() {}
 		if group != "" {
 			var openErr error
-			hbStore, release, openErr = w.storeForTenant(group)
+			hbStore, release, openErr = w.heartbeatStoreForTenant(group)
 			if openErr != nil {
 				// Not recordDBTrouble: this is one tenant's pool, and what
 				// lastDBTrouble guards is whether THIS worker can trust a
@@ -4655,7 +4697,7 @@ func (w *Worker) heartbeatAndFenceInFlight() bool {
 
 // heartbeatGroupFor names the group a run's heartbeat belongs to: "" for the
 // worker's own tenant, which heartbeatBatchStore serves, and the tenant id for
-// every other, which storeForTenant serves. It tracks storeForTenant's own first
+// every other, which heartbeatStoreForTenant serves. It tracks storeForTenant's own first
 // condition (a second copy of that rule is how the two come apart), because the
 // group is only right if the store it selects is the store that run's lease row
 // is visible through. cleat#3566.
