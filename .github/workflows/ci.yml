@@ -2562,11 +2562,21 @@ jobs:
       #
       # The loop fails if it finds no modules at all, because a scan that
       # silently covers nothing is what this whole job exists to not be.
+      # cleat#3701 (owner decision D69): ONE advisory, GO-2026-6859, is waived
+      # through 2026-12-11 by scripts/govulncheck-gate.sh, because go1.27.4 --
+      # the release that fixes it -- cannot build cleat (wasmtime-go issue 299).
+      # Every other finding fails, and so does the waiver once it expires.
+      # --self-test first, same reason as the guards above: a gate that has
+      # lost its refusal reads green on the tree it was written to catch.
+      - name: govulncheck gate self-test
+        run: scripts/govulncheck-gate.sh --self-test
+
       - name: govulncheck (all first-party modules)
         env:
           CGO_ENABLED: "1"
         run: |
           set -uo pipefail
+          ROOT="$PWD"
           mods="$(find . -name go.mod \
                     -not -path './node_modules/*' -not -path '*/node_modules/*' \
                     -not -path './.claude/*' |
@@ -2576,10 +2586,15 @@ jobs:
             exit 1
           fi
           echo "scanning modules:"; echo "$mods" | sed 's/^/  /'
+          # Installed once and run as a binary, not `go run`: `go run` turns
+          # govulncheck's exit 3 (reachable findings) into its own exit 1, the
+          # same status as a build failure, and the gate below needs them apart.
+          go install golang.org/x/vuln/cmd/govulncheck@latest || exit 1
+          export GOVULNCHECK="$(go env GOPATH)/bin/govulncheck"
           rc=0
           for m in $mods; do
             echo "::group::govulncheck $m"
-            ( cd "$m" && go run golang.org/x/vuln/cmd/govulncheck@latest ./... ) || rc=1
+            "$ROOT/scripts/govulncheck-gate.sh" "$m" || rc=1
             echo "::endgroup::"
           done
           exit $rc
