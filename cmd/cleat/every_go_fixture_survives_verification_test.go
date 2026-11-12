@@ -141,6 +141,12 @@ var goFixtureExpectations = map[string]string{
 	// the declaration path. The declaration itself is asserted by
 	// TestABuiltFixtureDeclaresItsExposureFromSource in wasm/.
 	"exposure": "",
+	// cleat#3524. Two fixtures `cleat build` and `cleat vet` both REFUSE, on a
+	// bad //cleat:exposure declaration. Both verify cleanly here on purpose:
+	// the refusal is not a threading error, it is read from the usage scan, and
+	// is asserted by TestVetAndBuildGiveOneAnswerOnTheRefusalsOnlyBuildUsedToTake.
+	"exposureconflict": "",
+	"exposureinvalid":  "",
 }
 
 // TestEveryGoFixtureMatchesItsExpectedVerification is cleat#1313.

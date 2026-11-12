@@ -178,6 +178,7 @@ Validate a workflow package without compiling.
 | `--lang <name>` | auto-detected | Language target: `go`, `rust`, `java`, `as`, `python` |
 | `--json` | `false` | Output results as JSON |
 | `--ci` | `false` | Output in GitHub Actions annotation format (takes precedence over `--json`) |
+| `--channel <name>` | none | Go only. Child version resolution channel, as for `cleat build`. Only `frozen` changes the verdict: it refuses a child whose name is not a compile-time constant |
 
 Auto-detection checks for `go.mod`, `Cargo.toml`, `build.gradle.kts`,
 `build.gradle`, `.py` files, or `package.json` (in that order).
@@ -193,16 +194,22 @@ floating-point warning) are not run by `go build`, `go vet` or `go test`, so a
 workflow can pass all three and still be rejected by `cleat build`. `cleat vet
 <package-path>` runs that analysis without compiling. For a Go package it gives the
 same verdict on the analysis as `cleat build`: `cleat vet`, `cleat build` and
-`cleat build --json` agree on the closure errors and the threading check (cleat#3524).
-It exits 1 on an error or a threading problem and 0 otherwise; warnings such as W002
+`cleat build --json` agree on the closure errors, the threading check and the
+refusals that read the source's declarations: a `//cleat:exposure` that names two
+classes or one that is not `auth`, `public` or `internal`, and, with
+`--channel frozen`, a child it cannot pin (see
+[Which child names the build can pin](../explanation/workflow-versioning.md);
+cleat#3524). It exits 1 on any of them and 0 otherwise; warnings such as W002
 are printed and do not change the exit status. In CI, `--ci` writes GitHub
-annotations.
+annotations. Pass the same `--channel` you build with: without `--channel frozen`
+`cleat vet` cannot know the build will pin children.
+
+`cleat build` refuses all of these before it compiles anything, so a refused build
+leaves no `.wasm` (and no generated files) in its `-o` directory.
 
 A clean `cleat vet` does not promise that `cleat build` will succeed. `cleat build`
-goes on to checks and steps that `cleat vet` does not run: with `--channel frozen`
-it refuses a child it cannot pin (see
-[Which child names the build can pin](../explanation/workflow-versioning.md)), and it
-then generates code and compiles the WASM, either of which can fail.
+then generates code and compiles the WASM, either of which can fail, and resolves
+child versions against the lock file or the database.
 
 ---
 

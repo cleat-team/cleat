@@ -63,7 +63,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init|version> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] [--channel <channel>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
@@ -174,6 +174,7 @@ func main() {
 		vetLang := fs.String("lang", "", "language target: go, rust, java, as, python (auto-detected if empty)")
 		vetJSON := fs.Bool("json", false, "output results as JSON")
 		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
+		vetChannel := fs.String("channel", "", "child version resolution channel, as for build: only frozen changes the verdict (Go)")
 		fs.Parse(args[1:])
 		remainder := fs.Args()
 		refuseTrailingFlags("vet", remainder)
@@ -194,7 +195,7 @@ func main() {
 		var code int
 		switch lang {
 		case "go":
-			code = runVet(pattern, useJSON, *vetCI)
+			code = runVet(pattern, useJSON, *vetCI, *vetChannel)
 		case "rust":
 			code = runVetRust(pattern)
 		case "java":
@@ -284,22 +285,23 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 
-	// cleat#3500: refused before anything is compiled, so a build that cannot
-	// keep the policy it was asked for does not leave an artifact behind.
-	if msg := frozenChildBindingError(usage, channel); msg != "" {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-		os.Exit(1)
-	}
+	// cleat#3500, cleat#1986 slice 2c, cleat#3524: the refusals that read the
+	// usage scan, taken from the one place `cleat vet` takes them from. All of
+	// them are decided before anything is compiled, so a build that cannot keep
+	// what it was asked for does not leave an artifact behind. The exposure one
+	// used to sit after the compile and left a .wasm without its metadata.
+	refusals := analysisRefusals(usage, channel)
 
 	if jsonOut {
 		vo := vetJSONOutput(result, cr, threadingErrs)
+		addRefusals(&vo, refusals)
 		jsonBytes, jErr := json.Marshal(vo)
 		if jErr != nil {
 			fmt.Fprintf(os.Stderr, "Error building JSON diagnostics: %v\n", jErr)
 			os.Exit(1)
 		}
 		fmt.Println(string(jsonBytes))
-		if len(threadingErrs) > 0 || cr.NumErrors() > 0 {
+		if len(threadingErrs) > 0 || cr.NumErrors() > 0 || len(refusals) > 0 {
 			os.Exit(1)
 		}
 	} else {
@@ -342,13 +344,16 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		}
 
 		errCount := cr.NumErrors()
-		if errCount > 0 {
+		if errCount > 0 || len(refusals) > 0 {
 			fmt.Fprintln(os.Stderr)
 			for _, e := range cr.SortedErrors() {
 				fmt.Fprintf(os.Stderr, "  %s: %s: %s\n", e.Code, funcLoc(e.FuncName, e.Line, e.Column), e.Message)
 				if e.Suggestion != "" {
 					fmt.Fprintf(os.Stderr, "    → %s\n", e.Suggestion)
 				}
+			}
+			for _, msg := range refusals {
+				fmt.Fprintf(os.Stderr, "  Error: %s\n", msg)
 			}
 			os.Exit(1)
 		}
@@ -541,13 +546,8 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// `cleat init` project printed `Would deploy workflow "my-workflow.wasm"`.
 	workflowName := workflowLogicalName(result)
 
-	// cleat#1986 slice 2c: the source's exposure declaration, validated here.
-	// The refusal itself is exposureDeclarationError, which is a function rather
-	// than straight-line code so that it can be tested; see its doc comment.
-	if msg := exposureDeclarationError(usage); msg != "" {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-		os.Exit(1)
-	}
+	// The source's exposure declaration is validated with the other refusals,
+	// before the compile (analysisRefusals above), not here.
 
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
@@ -742,10 +742,10 @@ func pctOf(part, whole int64) float64 {
 	return float64(part) * 100 / float64(whole)
 }
 
-func runVet(pattern string, jsonOut bool, ciOut bool) int {
-	result, _, cr, threadingErrs, usage, tr := analyze(pattern)
-	_ = usage
-	_ = tr
+func runVet(pattern string, jsonOut bool, ciOut bool, channel string) int {
+	result, _, cr, threadingErrs, usage, _ := analyze(pattern)
+	// The same refusals `cleat build` takes, from the same call (cleat#3524).
+	refusals := analysisRefusals(usage, channel)
 
 	if ciOut {
 		// GitHub Actions annotation format.
@@ -770,6 +770,11 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 			}
 			exitCode = 1
 		}
+		for _, msg := range refusals {
+			// A workflow command's data is one line: newlines travel as %0A.
+			fmt.Printf("::error title=Refusal::%s\n", strings.ReplaceAll(msg, "\n", "%0A"))
+			exitCode = 1
+		}
 		for _, w := range cr.SortedWarnings() {
 			f := lookupFile(result, w.FuncName)
 			if f == "" {
@@ -782,13 +787,14 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 
 	if jsonOut {
 		vo := vetJSONOutput(result, cr, threadingErrs)
+		addRefusals(&vo, refusals)
 		jsonBytes, jErr := json.Marshal(vo)
 		if jErr != nil {
 			fmt.Fprintf(os.Stderr, "Error building JSON output: %v\n", jErr)
 			return 1
 		}
 		fmt.Println(string(jsonBytes))
-		if len(threadingErrs) > 0 || cr.NumErrors() > 0 {
+		if len(threadingErrs) > 0 || cr.NumErrors() > 0 || len(refusals) > 0 {
 			return 1
 		}
 		return 0
@@ -815,6 +821,10 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 		if e.Suggestion != "" {
 			fmt.Printf("    → %s\n", e.Suggestion)
 		}
+		exitCode = 1
+	}
+	for _, msg := range refusals {
+		fmt.Printf("  Error: %s\n", msg)
 		exitCode = 1
 	}
 	for _, w := range cr.SortedWarnings() {
@@ -1726,6 +1736,39 @@ func frozenChildBindingError(usage *wasm.UsageInfo, channel string) string {
 	b.WriteString("An unpinned child would resolve to the highest deployed version at runtime. " +
 		"Name each child with a string literal or a const, or build with a channel that resolves at the point of use (stable, latest).")
 	return b.String()
+}
+
+// analysisRefusals is every refusal that follows from the analysis but is not
+// one of its own diagnostics (closure errors, threading errors): the checks
+// that read wasm.UsageInfo. `cleat build` and `cleat vet` both call it, so a
+// package one refuses the other refuses.
+//
+// They did not, until cleat#3524. exposureDeclarationError and
+// frozenChildBindingError were called from runBuild alone, so `cleat vet` printed
+// OK on a package whose build then exited 1 -- the exposure one only after the
+// WASM had been compiled and written. A function that two commands must agree on
+// belongs behind one call, because a third check added beside the first two in
+// runBuild would reopen the gap without any test noticing.
+//
+// channel is the --channel value; only "frozen" refuses (see
+// frozenChildBindingError), so an empty channel, vet's default, is the same
+// verdict as any of build's defaults.
+func analysisRefusals(usage *wasm.UsageInfo, channel string) []string {
+	var out []string
+	if msg := exposureDeclarationError(usage); msg != "" {
+		out = append(out, msg)
+	}
+	if msg := frozenChildBindingError(usage, channel); msg != "" {
+		out = append(out, msg)
+	}
+	return out
+}
+
+// addRefusals puts analysisRefusals into the JSON diagnostics as errors.
+func addRefusals(vo *VetOutput, refusals []string) {
+	for _, msg := range refusals {
+		vo.Errors = append(vo.Errors, VetResult{Message: msg})
+	}
 }
 
 // workflowLogicalName returns the workflow's declared or derived name, with
