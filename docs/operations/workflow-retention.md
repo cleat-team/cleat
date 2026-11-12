@@ -31,6 +31,8 @@ cleat#3707).
 * An arm whose flag is `0` stays off for every tenant.
 * `POST /api/admin/retention/sweep` is **not** the loop: it still runs through the worker's own store, so with
   the application login it reaches that worker's own tenant's data only (see `admin-api.md`).
+* **A sweep leaves no audit event and no per-tenant record.** Only the worker's log and metrics say it ran
+  (see "What is not recorded" in `docs/reference/audit-log.md`). Whether it should is open on cleat#3707.
 * **The first sweep after upgrading removes what was never removed.** A deployment with other tenants on
   `--retention-days` 30 deletes their event history older than 30 days at the first sweep after the upgrade
   (the sweep runs once at startup, then every 24 hours). Nothing here is reversible.

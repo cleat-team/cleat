@@ -20,6 +20,35 @@ empty), `ip_address`, `user_agent`, `duration_ms` and `timestamp`, plus the chai
 `seq`, `prev_hash` and `row_hash`. `metadata` was always `{}` before cleat#2534; see
 *Recording from a workflow* below for the first thing that writes anything else there.
 
+## What is not recorded: the worker's own maintenance
+
+The log records two things: an API request, and a workflow's own `record_event` call. **The loops a worker runs
+on its own schedule are neither, and write no audit event**, for any tenant: the stale-run reaper, the heartbeat,
+the concurrency-key reaper, defer-phase expiry, compaction, memory-sample cleanup, the metrics sweep, the rotating
+claim and cron, and **retention**. Their record is the worker's log and its metrics.
+
+This is deliberate. These loops visit every tenant on every tick, so a row each would be most of the chain, and
+every row costs an append under the tenant's head lock that the request path shares. It is the same reason the
+infrastructure probes are exempt.
+
+**Retention is the one to read twice.** It permanently deletes data a tenant can see (event history, and with the
+opt-in flags completed and dead-lettered runs) under flags the operator sets for the whole deployment, with no
+per-tenant setting, and **the tenant gets no record that a sweep ran or what it removed.** Whether a retention
+sweep should leave a per-tenant record is not decided; it is open on cleat#3707. See
+[`workflow-retention.md`](../operations/workflow-retention.md) for what each flag deletes.
+
+The audit log's *own* retention is different and is recorded: it moves the floor in the chain head, described under
+*Retention* below.
+
+How this was established, so it can be checked again. On 2026-11-12, at `05367f68`, the real-database tests for
+each of those loops were run on PostgreSQL 17 and SQL Server 2022 with every statement logged, and no statement
+touched `audit_events` or `audit_chain_heads`; the same instruments did see the audit plugin's own writes (13
+statements on PostgreSQL, 83 trace events on SQL Server). Not run: a whole worker process with its timers, and the
+trial-expiry loop. The structural reason, which does not depend on that run, is that one package writes these
+tables:
+
+    git grep -n 'INSERT INTO audit_events' -- '*.go' ':!*_test.go'    # plugins/auditlog/chain_store.go only
+
 ## Recording from a workflow
 
 A workflow can append to its own tenant's chain directly, with the `record_event` host
