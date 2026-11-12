@@ -12,6 +12,29 @@ turning one on says nothing about the other.
 
 See `docs/reference/worker-config.md` for the flag reference entries.
 
+## The sweep covers every tenant the worker serves (cleat#3572)
+
+Retention is the operator's, not the tenant's: the flags above are applied to **every tenant a worker
+serves**, each through that tenant's own store and under that tenant's row-level security, exactly as a
+dedicated worker for that tenant would apply them. Until cleat#3572 the loop ran through the worker's own
+tenant's store only, so any other tenant on the same deployment kept its history for ever -- including under
+`--retention-days`, which is on by default. A tenant's retention is not configurable (a per-tenant setting is
+cleat#3707).
+
+* **If your workers run different retention flags, the shortest window wins for every tenant.** Any worker
+  that serves a tenant deletes on its own schedule, so one worker started with `--retention-days 7` removes
+  the event history of every tenant it serves after 7 days, whatever the others are set to. Keep the flags
+  the same across a deployment, or accept the shortest.
+* The sweep needs `--claim-across-tenants` (the default) and a store that can list tenants. A worker that
+  cannot serve other tenants (no store factory, `--claim-across-tenants=false`, MySQL, which is single-tenant)
+  sweeps its own tenant only, as before.
+* An arm whose flag is `0` stays off for every tenant.
+* `POST /api/admin/retention/sweep` is **not** the loop: it still runs through the worker's own store, so with
+  the application login it reaches that worker's own tenant's data only (see `admin-api.md`).
+* **The first sweep after upgrading removes what was never removed.** A deployment with other tenants on
+  `--retention-days` 30 deletes their event history older than 30 days at the first sweep after the upgrade
+  (the sweep runs once at startup, then every 24 hours). Nothing here is reversible.
+
 ## `--retention-days` -- what it finds depends on how the workflow stopped
 
 **This section used to say the flag finds nothing to delete, because
