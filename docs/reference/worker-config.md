@@ -331,6 +331,15 @@ own `heartbeat=N` term.
 **Not yet supported on a sharded deployment (`--shards-file`).** A sharded
 worker's heartbeat stays on the execution pool regardless of this flag.
 
+**Which runs it covers.** Every tenant's, on PostgreSQL and SQL Server. A worker
+that serves other tenants (`--claim-across-tenants`) beats their runs through this
+same pool, re-scoped to each tenant per call, so it costs no connection beyond
+this flag's ceiling. Before cleat#3571 only the worker's own tenant's runs used
+it, and another tenant's beat went through the execution pool. MySQL, whose tenant
+is the database a pool was opened on, is single-tenant and has nothing to cover.
+It protects against a saturated execution pool; it does nothing for a paused
+process or a degraded network path.
+
 A heartbeat that succeeds through this pool still records the worker's database
 contact as OK (`recordDBContactOK`), the same signal an idle worker's DB ping
 records -- so the DB-health gate cleat#2166 added does not distinguish which

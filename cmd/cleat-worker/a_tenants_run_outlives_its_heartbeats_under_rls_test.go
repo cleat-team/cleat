@@ -84,6 +84,13 @@ type hbRig struct {
 	// process and the server do not share a clock.
 	expireDeferDeadline func(t *testing.T, tenant, wfID string)
 	tenant              string
+	// newPool opens one more connection pool on the same database, as the same
+	// principal the rig's own pool uses (cleat#3571: the execution pool and the
+	// heartbeat pool are two pools on one database).
+	newPool func(t *testing.T) *sql.DB
+	// scoped is a store on pool, scoped to tenant the way the factory's own
+	// stores are.
+	scoped func(pool *sql.DB, tenant string) engine.WorkflowStore
 }
 
 func TestATenantsRunOutlivesItsHeartbeatsUnderRLS(t *testing.T) {
@@ -122,6 +129,16 @@ func postgresHBRig(t *testing.T, owner, db *sql.DB, policyApplies bool, tenant s
 		name: "postgres", policyApplies: policyApplies, db: db, tenant: tenant,
 		factory:  engine.NewPostgresStoreFactory(db, "public"),
 		ownStore: engine.NewPostgresStore(db),
+		newPool: func(t *testing.T) *sql.DB {
+			t.Helper()
+			if !policyApplies {
+				return testutil.SuiteTestDB(t, "cleat_worker_hbtenant")
+			}
+			return testutil.OpenPostgresRLSTestDB(t, owner)
+		},
+		scoped: func(pool *sql.DB, tenant string) engine.WorkflowStore {
+			return engine.NewPostgresStore(pool).WithTenant(tenant)
+		},
 		register: func(t *testing.T, tenant string) {
 			t.Helper()
 			if _, err := owner.Exec(
@@ -259,6 +276,18 @@ func mssqlHBRig(t *testing.T, tenant string) *hbRig {
 	}
 	return &hbRig{
 		name: "mssql", policyApplies: true, db: db, tenant: tenant, factory: factory, ownStore: own,
+		newPool: func(t *testing.T) *sql.DB {
+			t.Helper()
+			pool, err := sql.Open("sqlserver", connStr)
+			if err != nil {
+				t.Fatalf("opening another pool on the test database: %v", err)
+			}
+			t.Cleanup(func() { _ = pool.Close() })
+			return pool
+		},
+		scoped: func(pool *sql.DB, tenant string) engine.WorkflowStore {
+			return engine.NewMSSQLStore(pool).WithTenant(tenant)
+		},
 		register: func(t *testing.T, tenant string) {
 			t.Helper()
 			if _, err := db.ExecContext(ctx,
