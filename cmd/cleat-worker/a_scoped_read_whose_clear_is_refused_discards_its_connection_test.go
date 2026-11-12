@@ -1,14 +1,14 @@
 package main
 
-// cleat#3678 (owner decision D65, option iii). auth.TenantStore.scopedRead on SQL Server pins a connection,
-// sets the tenant on it and, when the read is over, clears the tenant before the connection goes back to the
+// cleat#3678 (owner decisions D65 and D70). auth.TenantStore.scopedRead on SQL Server pins a connection,
+// sets the tenant on it and, when the read is over, has cleared the tenant before the connection goes back to the
 // pool. When the clear cannot be shown to have worked the connection must be DISCARDED, not pooled: a
 // connection that may still carry the tenant must never serve the next caller. That is what makes the result
 // independent of the driver's session reset.
 //
-// THE CLEAR IS REFUSED here by a connector wrapper that fails the one statement that clears the tenant. The
-// driver does not reset the session either (noResetConnector), so nothing but the discard stands between the
-// tenant and the next statement. Asserted: the next statement runs on a DIFFERENT connection (identity is
+// THE CLEAR IS REFUSED here by a connector wrapper that fails the statements that clear the tenant, in the
+// read's own batch and on its own round trip. The driver does not reset the session either
+// (noResetConnector), so nothing but the discard stands between the tenant and the next statement. Asserted: the next statement runs on a DIFFERENT connection (identity is
 // session id plus connection_id, because SQL Server hands a replaced connection the same session id) and
 // reads no tenant. Red against a scopedRead that does not clear or discard: it leaves the tenant on the
 // same connection.
@@ -55,8 +55,22 @@ type refuseClearConn struct {
 	refused *int
 }
 
+func refusesClear(q string) bool {
+	return strings.Contains(q, "sp_set_session_context") && strings.Contains(q, "@value = NULL")
+}
+
+// PrepareContext refuses the clear when it travels in the read's own batch (D70), which database/sql sends down
+// the prepare path on a driver whose connection has no QueryerContext, as the wrapper does not.
+func (c *refuseClearConn) PrepareContext(ctx context.Context, q string) (sqldriver.Stmt, error) {
+	if refusesClear(q) {
+		*c.refused++
+		return nil, errors.New("clear refused (test)")
+	}
+	return c.noResetConn.PrepareContext(ctx, q)
+}
+
 func (c *refuseClearConn) ExecContext(ctx context.Context, q string, args []sqldriver.NamedValue) (sqldriver.Result, error) {
-	if strings.Contains(q, "sp_set_session_context") && strings.Contains(q, "@value = NULL") {
+	if refusesClear(q) {
 		*c.refused++
 		return nil, errors.New("clear refused (test)")
 	}
@@ -90,8 +104,11 @@ func TestAScopedReadWhoseClearIsRefusedDiscardsItsConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UNMEASURED: %v", err)
 	}
-	if _, err := ts.TenantForHost(ctx, "refused-clear.invalid", uuid.New()); err != nil {
-		t.Fatalf("UNMEASURED: the scoped read itself failed: %v", err)
+	// The read fails, because its batch carries the clear and the clear is refused. What matters is what
+	// becomes of the connection, so the error is not the assertion.
+	_, readErr := ts.TenantForHost(ctx, "refused-clear.invalid", uuid.New())
+	if readErr == nil {
+		t.Fatal("UNMEASURED: the read succeeded although its clear was refused, so a refused clear that surfaces was never exercised")
 	}
 	if refused == 0 {
 		t.Fatal("UNMEASURED: the scoped read never tried to clear the tenant, so a clear that is refused was never exercised")

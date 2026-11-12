@@ -307,7 +307,24 @@ func (s *TenantStore) allTenantIDs(ctx context.Context) ([]uuid.UUID, error) {
 
 // querier is the subset of *sql.DB and *sql.Tx a scoped read needs.
 type querier interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryRowContext(ctx context.Context, query string, args ...any) rowScanner
+}
+
+// rowScanner is what a scoped read does with the row it asked for. *sql.Row satisfies it, and so does the
+// refusal a clearingQuerier hands back for a second statement.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// sqlQuerier adapts *sql.DB and *sql.Tx, whose QueryRowContext returns a concrete *sql.Row, to querier.
+type sqlQuerier struct {
+	inner interface {
+		QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	}
+}
+
+func (q sqlQuerier) QueryRowContext(ctx context.Context, query string, args ...any) rowScanner {
+	return q.inner.QueryRowContext(ctx, query, args...)
 }
 
 // scopedRead runs fn on a connection that carries tenant, where the dialect scopes by the connection.
@@ -319,17 +336,18 @@ type querier interface {
 //
 // SQL SERVER DOES NOT REVERT WITH THE TRANSACTION. Session context belongs to the CONNECTION, so a plain
 // transaction on the pool would hand the connection back still holding the tenant. This pins one connection
-// for the read, and releaseTenantConn clears the tenant before the connection goes back and DISCARDS the
-// connection when the clear does not succeed (a cancel before or during the read, a connection the driver
-// has already broken). So what the next statement on this pool reads as its tenant does not depend on
-// go-mssqldb answering database/sql's ResetSession with sp_reset_connection, which is what this relied on
-// until cleat#3678 (owner decision D65). The driver's reset is still there as a second layer.
+// for the read and the read's own batch carries the clear of the tenant (scopedReadMSSQL). A read that did
+// not come back clean, or whose clear is not shown to have run, goes through releaseTenantConn, which clears
+// on its own round trip and DISCARDS the connection when that does not succeed. So what the next statement on
+// this pool reads as its tenant does not depend on go-mssqldb answering database/sql's ResetSession with
+// sp_reset_connection, which is what this relied on until cleat#3678 (owner decisions D65 and D70). The
+// driver's reset is still there as a second layer.
 // TestAScopedReadsTenantDoesNotSurviveTheSQLServerConnectionPool pins the result on the shipped driver and
-// on one that does not reset, and TestAScopedReadWhoseClearIsRefusedDiscardsItsConnection pins the discard. The
-// cost is one more round trip on SQL Server, measured on cleat#3678.
+// on one that does not reset, TestAScopedReadWhoseClearIsRefusedDiscardsItsConnection pins the discard, and
+// TestATrailingStatementsErrorSurfacesThroughScan pins what folding the clear into the batch relies on.
 func (s *TenantStore) scopedRead(ctx context.Context, tenant uuid.UUID, fn func(q querier) error) error {
 	if s.dialect == DialectMySQL {
-		return fn(s.db)
+		return fn(sqlQuerier{s.db})
 	}
 	if s.dialect == DialectMSSQL {
 		return s.scopedReadMSSQL(ctx, tenant, fn)
@@ -342,7 +360,7 @@ func (s *TenantStore) scopedRead(ctx context.Context, tenant uuid.UUID, fn func(
 		_ = tx.Rollback()
 		return fmt.Errorf("scope the read to tenant %s: %w", tenant, err)
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(sqlQuerier{tx}); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -350,13 +368,29 @@ func (s *TenantStore) scopedRead(ctx context.Context, tenant uuid.UUID, fn func(
 }
 
 // scopedReadMSSQL is scopedRead's SQL Server arm: one pinned connection, the tenant set on it, the read in
-// a transaction on it, and releaseTenantConn clearing the tenant (or discarding the connection) afterwards.
+// a transaction on it, and the clear of the tenant carried in the read's own batch (clearingQuerier), so the
+// common case costs no round trip of its own.
+//
+// What is not shown to have cleared goes through releaseTenantConn instead, which clears on its own round
+// trip or discards the connection: a read that failed or was cancelled (the batch may not have reached its
+// clear), a commit that failed, and a read that ran no statement. Only a read whose one statement came back
+// without an error, or with sql.ErrNoRows, counts as cleared. The driver reports an error from the trailing
+// clear through Scan on both the row and the no-row path, which
+// TestATrailingStatementsErrorSurfacesThroughScan pins; a driver that did not would turn a refused clear
+// into a pooled connection, so that test is what this depends on.
 func (s *TenantStore) scopedReadMSSQL(ctx context.Context, tenant uuid.UUID, fn func(q querier) error) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer releaseTenantConn(conn)
+	cleared := false
+	defer func() {
+		if cleared {
+			_ = conn.Close()
+			return
+		}
+		releaseTenantConn(conn)
+	}()
 	if _, err := conn.ExecContext(ctx, `EXEC sp_set_session_context @key = N'tenant_id', @value = @p1`, tenant.String()); err != nil {
 		return fmt.Errorf("scope the read to tenant %s: %w", tenant, err)
 	}
@@ -364,9 +398,36 @@ func (s *TenantStore) scopedReadMSSQL(ctx context.Context, tenant uuid.UUID, fn 
 	if err != nil {
 		return err
 	}
-	if err := fn(tx); err != nil {
+	cq := &clearingQuerier{tx: tx}
+	err = fn(cq)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		_ = tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if cerr := tx.Commit(); cerr != nil {
+		return cerr
+	}
+	cleared = cq.used
+	return err
 }
+
+// clearingQuerier is the querier a SQL Server scoped read gets. Its one statement carries the clear of the
+// session tenant after it in the same batch, so the clear costs no round trip of its own, and a second
+// statement is refused: it would run on a connection whose tenant the first one already cleared.
+type clearingQuerier struct {
+	tx   *sql.Tx
+	used bool
+}
+
+func (c *clearingQuerier) QueryRowContext(ctx context.Context, query string, args ...any) rowScanner {
+	if c.used {
+		return failedRow{errors.New("auth: a scoped read on SQL Server runs one statement, which carries the clear of the tenant")}
+	}
+	c.used = true
+	return c.tx.QueryRowContext(ctx, strings.TrimSuffix(strings.TrimSpace(query), ";")+";\n"+clearTenantStmt, args...)
+}
+
+// failedRow is a rowScanner that only reports an error.
+type failedRow struct{ err error }
+
+func (r failedRow) Scan(...any) error { return r.err }

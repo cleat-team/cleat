@@ -255,6 +255,13 @@ func mayActOn(onlyCreator, createdBy string) bool {
 	return onlyCreator == "" || (createdBy != "" && createdBy == onlyCreator)
 }
 
+// clearTenantStmt clears the session tenant on a SQL Server connection.
+const clearTenantStmt = `EXEC sp_set_session_context @key = N'tenant_id', @value = NULL`
+
+// releaseClearTimeout bounds the clear releaseTenantConn runs; one that has not answered by then fails and
+// the connection is discarded.
+const releaseClearTimeout = 5 * time.Second
+
 // releaseTenantConn puts a pinned SQL Server connection back as it found it: it clears the tenant the
 // caller set and closes the connection, and when the clear does not succeed it discards the connection
 // instead of pooling it.
@@ -267,10 +274,14 @@ func mayActOn(onlyCreator, createdBy string) bool {
 // set. Only the driver's session reset on reuse kept the next statement from running as the dropped tenant.
 // Returning ErrBadConn from Raw makes database/sql close the connection instead of pooling it.
 //
-// The clear runs on context.Background(), not the caller's context: it must run even when the request was
-// cancelled. scopedRead (cleat#3678) uses it too, so neither path depends on the driver's reset.
+// The clear runs on a context of its own, not the caller's: it must run even when the request was
+// cancelled, and it is bounded (releaseClearTimeout) because it is on the request path and a clear that
+// does not answer is a connection to discard, not one to wait on. scopedRead (cleat#3678) uses it too, so
+// neither path depends on the driver's reset.
 func releaseTenantConn(conn *sql.Conn) {
-	if _, err := conn.ExecContext(context.Background(), `EXEC sp_set_session_context @key = N'tenant_id', @value = NULL`); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), releaseClearTimeout)
+	defer cancel()
+	if _, err := conn.ExecContext(ctx, clearTenantStmt); err != nil {
 		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 	}
 	_ = conn.Close()
