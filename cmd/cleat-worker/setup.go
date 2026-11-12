@@ -6901,24 +6901,57 @@ func (w *Worker) compactionLoop() {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("compaction")
-			compStart := time.Now()
-			candidates, err := w.store.GetCompactionCandidates(w.ctx, w.compactionThreshold, 10)
-			if err != nil {
-				w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
-				w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "error")
-				w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
-				continue
-			}
-			for _, wfID := range candidates {
-				if err := engine.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold, w.Metrics); err != nil {
-					w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
-				}
-			}
-			w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "ok")
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
-			w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction", int64(len(candidates)))
+			w.compactOnce()
 		}
 	}
+}
+
+// compactionCandidatesPerTick bounds how many workflows one store compacts in one
+// tick. It is per STORE, so a pass over N tenants compacts up to N times this.
+const compactionCandidatesPerTick = 10
+
+// compactOnce is one tick of compactionLoop, extracted so a test can drive it
+// without a ticker.
+//
+// GetCompactionCandidates and CompactWorkflowHistory scope themselves to their
+// store's tenant, and the loop ran them through the worker's own store only, so a
+// workflow of any other tenant never compacted however long its history grew
+// (cleat#3572). The other tenants are compacted through their own stores, after
+// the worker's own answered; the candidates found through a tenant's store are
+// compacted through the SAME store, because compacting one through another
+// tenant's would find nothing.
+func (w *Worker) compactOnce() {
+	compStart := time.Now()
+	candidates, err := w.compactStoreOnce(w.store)
+	if err != nil {
+		w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
+		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "error")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
+		return
+	}
+	others := w.sweepOtherTenants("compaction", func(_ context.Context, st engine.WorkflowStore) (int64, error) {
+		n, err := w.compactStoreOnce(st)
+		return int64(n), err
+	})
+	w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "ok")
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
+	w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction", int64(candidates)+others)
+}
+
+// compactStoreOnce finds one store's candidates and compacts each, returning how
+// many it found. A failure to compact one workflow is logged and does not stop the
+// rest; only failing to FIND candidates is returned.
+func (w *Worker) compactStoreOnce(st engine.WorkflowStore) (int, error) {
+	candidates, err := st.GetCompactionCandidates(w.ctx, w.compactionThreshold, compactionCandidatesPerTick)
+	if err != nil {
+		return 0, err
+	}
+	for _, wfID := range candidates {
+		if err := engine.CompactWorkflowHistory(w.ctx, st, wfID, w.compactionThreshold, w.Metrics); err != nil {
+			w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
+		}
+	}
+	return len(candidates), nil
 }
 
 func (w *Worker) memoryReloadLoop() {
