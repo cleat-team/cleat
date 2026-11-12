@@ -2589,7 +2589,27 @@ jobs:
           # Installed once and run as a binary, not `go run`: `go run` turns
           # govulncheck's exit 3 (reachable findings) into its own exit 1, the
           # same status as a build failure, and the gate below needs them apart.
-          go install golang.org/x/vuln/cmd/govulncheck@latest || exit 1
+          #
+          # PINNED, not @latest (cleat#3706). scripts/govulncheck-gate.sh parses
+          # govulncheck's TEXT output, so a format change in a new release would
+          # turn this required check red on every PR at once. The vulnerability
+          # database is fetched separately at run time, so a pinned tool still
+          # sees every new advisory. Bump it on purpose, after reading the
+          # release notes for output-format changes and running the gate's
+          # --self-test and a real scan against the new version.
+          GOVULNCHECK_VERSION=v1.9.0
+          go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" || exit 1
+          # Nothing tracks a version named inside a script (Dependabot does not
+          # read it), so say when a newer one exists. A warning annotation, never
+          # a failure: an upstream release must not turn a required check red. A
+          # lookup that fails says so rather than staying silent.
+          if newest="$(cd "$RUNNER_TEMP" && GOWORK=off go list -m -f '{{.Version}}' golang.org/x/vuln@latest 2>/dev/null)" && [ -n "$newest" ]; then
+            if [ "$newest" != "$GOVULNCHECK_VERSION" ]; then
+              echo "::warning title=govulncheck::a newer govulncheck exists ($newest; pinned $GOVULNCHECK_VERSION). Bump the pin in this step after reading its release notes for output-format changes (cleat#3706)"
+            fi
+          else
+            echo "::notice title=govulncheck::could not look up the newest govulncheck, so whether the pin is stale is unknown this run"
+          fi
           export GOVULNCHECK="$(go env GOPATH)/bin/govulncheck"
           rc=0
           for m in $mods; do

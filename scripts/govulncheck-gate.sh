@@ -29,6 +29,12 @@
 # the waiver is valid THROUGH WAIVER_EXPIRES inclusive, and the first day it
 # fails again is the day after. Extending it is a new owner decision, not an
 # edit to this date.
+# THE TOOL IS PINNED in the Vulnerability Check step of .github/workflows/ci.yml
+# (GOVULNCHECK_VERSION, cleat#3706), because this script parses its text output:
+# a format change in a new release must not turn the required check red on every
+# PR at once. The step prints a warning annotation when a newer version exists.
+# Bumping it is deliberate: read the release notes, run --self-test, and run a
+# real scan under the new version and compare the ids it lists.
 WAIVED_ID="GO-2026-6859"
 WAIVER_EXPIRES="2026-12-11"
 WAIVER_ISSUE="https://github.com/cleat-team/cleat/issues/3701"
