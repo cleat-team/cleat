@@ -7421,16 +7421,26 @@ func (w *Worker) previewRetentionSweepWindow(retentionDays, completedWorkflowRet
 // of retentionLoop so it is callable directly from a test without waiting on
 // the loop's 24-hour ticker.
 func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
-	// ONE clock reading for the whole sweep. Each arm used to call time.Now()
-	// itself, so the three cutoffs differed by microseconds -- harmless in
-	// effect, but they describe one retention window and a test asserting they
-	// agree should not have to tolerate a gap. Reading the clock once removes
-	// the question rather than widening an assertion around it.
-	sweptAt := time.Now()
+	w.runRetentionSweepAt(time.Now(), retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
+}
+
+// runRetentionSweepAt is runRetentionSweep with the clock supplied, so a test can
+// age every row without writing a timestamp into a table.
+func (w *Worker) runRetentionSweepAt(sweptAt time.Time, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
+	// ownFailed is set when any arm failed against the worker's own store, which is
+	// what keeps the sweep off the other tenants: see retentionOfOtherTenants.
+	ownFailed := false
+	// ONE clock reading for the whole sweep, taken by the caller as sweptAt. Each
+	// arm used to call time.Now() itself, so the three cutoffs differed by
+	// microseconds -- harmless in effect, but they describe one retention window
+	// and a test asserting they agree should not have to tolerate a gap. Reading
+	// the clock once removes the question rather than widening an assertion
+	// around it.
 	if retentionDays > 0 {
 		cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: error deleting expired events", "worker_id", w.id, "error", err)
 		} else if deleted > 0 {
 			w.Metrics.RecordEventsDeleted(w.ctx, deleted)
@@ -7455,6 +7465,7 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 		cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
 		cleared, err := w.store.ClearExpiredCompactionState(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: clear expired compaction state", "worker_id", w.id, "error", err)
 		} else if cleared > 0 {
 			w.Metrics.RecordCompactionStateCleared(w.ctx, cleared)
@@ -7466,6 +7477,7 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 		cutoff := sweptAt.Add(-time.Duration(completedWorkflowRetentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteCompletedWorkflows(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: error deleting completed workflows", "worker_id", w.id, "error", err)
 		} else if deleted > 0 {
 			w.Metrics.RecordWorkflowsPurged(w.ctx, deleted)
@@ -7490,13 +7502,91 @@ func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays
 		cutoff := sweptAt.Add(-time.Duration(deadLetterRetentionDays) * 24 * time.Hour)
 		deleted, err := w.store.DeleteDeadLetteredWorkflows(w.ctx, cutoff)
 		if err != nil {
+			ownFailed = true
 			w.logger.ErrorContext(w.ctx, "retention: delete dead-lettered workflows", "worker_id", w.id, "error", err)
 		} else if deleted > 0 {
 			w.logger.InfoContext(w.ctx, "retention: deleted dead-lettered workflows",
 				"worker_id", w.id, "count", deleted, "older_than", cutoff)
 		}
 	}
+	// The other tenants, each through its own store (cleat#3572), after the
+	// worker's own arms and only if none of them failed: a failure of THIS
+	// worker's database stops the sweep here, and everything below is about other
+	// tenants.
+	if !ownFailed {
+		w.retentionOfOtherTenants(sweptAt, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays)
+	}
 	w.Metrics.SetRetentionLastRunTimestamp(w.ctx, time.Now().Unix())
+}
+
+// retentionOfOtherTenants applies the same retention arms, with the same flags and
+// the same cutoffs, to every tenant other than the worker's own, each through that
+// tenant's own store.
+//
+// The arms scope themselves to their store's tenant (an explicit tenant_id
+// predicate, and row-level security besides), and the loop ran them through the
+// worker's own store only. Every tenant but that one therefore kept its event
+// history, its compaction state and, with the opt-in flags, its completed and
+// dead-lettered runs without limit: --retention-days is ON BY DEFAULT, so on a
+// worker serving other tenants the default was not being applied to them.
+// Measured as cleat_app, cleat#3572.
+//
+// THE FLAGS ARE THE OPERATOR'S, NOT THE TENANT'S, and no per-tenant retention
+// setting exists (cleat#3707). Applying them to every tenant is what a dedicated
+// worker for that tenant would do. It also means that when workers of one
+// deployment run DIFFERENT retention flags, the SHORTEST window wins for every
+// tenant they all serve: any worker that serves a tenant deletes on its own
+// schedule.
+//
+// The arms are independent, as in the sweep for the worker's own store: one
+// failing for a tenant does not stop that tenant's other arms or any other tenant.
+// What was removed is counted across tenants into the same counters, with no
+// per-tenant label.
+func (w *Worker) retentionOfOtherTenants(sweptAt time.Time, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
+	var events, cleared, completed, deadLettered int64
+	w.sweepOtherTenants("retention", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+		var first error
+		note := func(err error) {
+			if err != nil && first == nil {
+				first = err
+			}
+		}
+		if retentionDays > 0 {
+			cutoff := sweptAt.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+			n, err := st.DeleteExpiredEvents(ctx, cutoff)
+			events += n
+			note(err)
+			n, err = st.ClearExpiredCompactionState(ctx, cutoff)
+			cleared += n
+			note(err)
+		}
+		if completedWorkflowRetentionDays > 0 {
+			n, err := st.DeleteCompletedWorkflows(ctx, sweptAt.Add(-time.Duration(completedWorkflowRetentionDays)*24*time.Hour))
+			completed += n
+			note(err)
+		}
+		if deadLetterRetentionDays > 0 {
+			n, err := st.DeleteDeadLetteredWorkflows(ctx, sweptAt.Add(-time.Duration(deadLetterRetentionDays)*24*time.Hour))
+			deadLettered += n
+			note(err)
+		}
+		return 0, first
+	})
+	if events > 0 {
+		w.Metrics.RecordEventsDeleted(w.ctx, events)
+		w.logger.InfoContext(w.ctx, "retention: deleted expired event rows of other tenants", "worker_id", w.id, "count", events)
+	}
+	if cleared > 0 {
+		w.Metrics.RecordCompactionStateCleared(w.ctx, cleared)
+		w.logger.InfoContext(w.ctx, "retention: cleared compaction state of other tenants", "worker_id", w.id, "count", cleared)
+	}
+	if completed > 0 {
+		w.Metrics.RecordWorkflowsPurged(w.ctx, completed)
+		w.logger.InfoContext(w.ctx, "retention: deleted completed workflow rows of other tenants", "worker_id", w.id, "count", completed)
+	}
+	if deadLettered > 0 {
+		w.logger.InfoContext(w.ctx, "retention: deleted dead-lettered workflows of other tenants", "worker_id", w.id, "count", deadLettered)
+	}
 }
 
 func (w *Worker) memoryCleanupLoop(maxSamples int) {

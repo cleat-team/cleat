@@ -17,9 +17,13 @@ authenticated key reaches them just as it always did. So while the flag is on:
 - **any authenticated key can read this worker's detailed health** (`GET /api/admin/health`): stale loops,
   the last database error, and other plugins' health messages;
 - **any authenticated key can trigger a retention sweep** (`POST /api/admin/retention/sweep`), which runs the
-  worker's own retention over every tenant's data, with a cutoff the caller chooses (`older_than`). It does
-  not enable a retention arm that is switched off, but for an arm that is on, a short `older_than` deletes
-  every tenant's completed history older than that.
+  worker's own retention with a cutoff the caller chooses (`older_than`). It does not enable a retention arm
+  that is switched off, but for an arm that is on, a short `older_than` deletes completed history older than
+  that. **Whose history depends on the worker's database login.** Through the application login, where
+  row-level security applies, it reaches the worker's own tenant only: measured on PostgreSQL as that role
+  (cleat#3572, `TestTheAdminRetentionSweepReachesTheWorkersOwnTenantOnly`), not measured on SQL Server. The
+  retention predicates carry no tenant filter of their own, so through a login that bypasses row-level security
+  it would reach every tenant's; that is read from the code, not measured.
 
 With `--require-auth=false` the same routes are open to everyone who can reach the port. The worker logs a
 warning at startup that says so. Enable the flag on a deployment whose keys you trust to this degree, keep
@@ -33,7 +37,7 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 |---|---|---|
 | `POST`, `GET /api/admin/drain` | this worker's claim loop and lifetime | **worker-level**: any key, any tenant |
 | `GET /api/admin/health` | this worker's loops, database error text and every plugin's health message | **worker-level**: any key, any tenant; unreadable during a database outage (its key lookup needs the database) |
-| `POST /api/admin/retention/sweep` | retention over every tenant's data on this worker's store | **worker-level**: any key, any tenant |
+| `POST /api/admin/retention/sweep` | retention through this worker's own store (its own tenant's data under the application login; see above) | **worker-level**: any key, any tenant |
 | `POST /api/admin/instances/{id}/force-complete` | one workflow | tenant-scoped: 404 unless the caller's tenant owns `{id}` |
 | `POST /api/admin/instances/{id}/force-fail` | one workflow | tenant-scoped |
 | `POST /api/admin/instances/{id}/re-replay` | one workflow | tenant-scoped |
@@ -448,7 +452,7 @@ pod's `terminationGracePeriodSeconds` (chart: `worker.terminationGracePeriodSeco
 [zero-downtime-deploy.md](zero-downtime-deploy.md#what-sigterm-does) for what happens to a run that outlasts the grace.
 
 Set `adminApi.enabled` only where every API key you have issued is trusted to drain workers and to run the
-all-tenant retention sweep.
+retention sweep.
 
 ## `GET /api/admin/drain` is read-only, and `POST` is a cordon
 
