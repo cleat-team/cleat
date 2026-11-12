@@ -110,13 +110,38 @@ func TestMigrateOnlyMigratesEveryShard(t *testing.T) {
 		}
 		return n
 	}
+	// foreignChain leaves db with the ledger another release's runner leaves: a
+	// schema_migrations with no identity columns, recording a version. Every name is
+	// qualified with public, because that is the schema the runner reads (the default
+	// --schema) and an unqualified name goes wherever the connection's search_path puts
+	// it: for a role named "cleat", the "cleat" schema the migrations create, so the
+	// damage landed where the runner never looked and the test measured the RLS check
+	// instead of the chain check. The assertions after the writes are what make that
+	// visible.
+	foreignChain := func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		if _, err := db.Exec(`CREATE TABLE public.schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO public.schema_migrations (version) VALUES ('1')`); err != nil {
+			t.Fatal(err)
+		}
+		var versions int
+		if err := db.QueryRow(`SELECT count(*) FROM public.schema_migrations WHERE version = '1'`).Scan(&versions); err != nil || versions != 1 {
+			t.Fatalf("the foreign chain is not in public.schema_migrations (count %d, err %v): the case would measure nothing", versions, err)
+		}
+		var identity int
+		if err := db.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'schema_migrations' AND column_name IN ('name', 'checksum')`).Scan(&identity); err != nil || identity != 0 {
+			t.Fatalf("public.schema_migrations has identity columns (%d, err %v), so it is not another release's chain", identity, err)
+		}
+	}
 	ledger := func(t *testing.T, db *sql.DB) int {
 		t.Helper()
-		if tableCount(t, db, "postgres", "schema_migrations") == 0 {
+		if inSchema(t, db, "public", "schema_migrations") == 0 {
 			return 0
 		}
 		var n int
-		if err := db.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
+		if err := db.QueryRow(`SELECT count(*) FROM public.schema_migrations`).Scan(&n); err != nil {
 			t.Fatalf("reading schema_migrations: %v", err)
 		}
 		return n
@@ -172,12 +197,7 @@ func TestMigrateOnlyMigratesEveryShard(t *testing.T) {
 		dsn1, db1 := deployScratchNamed(t, c, "cleat_3718_f1_")
 		// A schema_migrations table with no identity columns is what another release's
 		// runner leaves; the chain check refuses it (cleat#3405).
-		if _, err := db1.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db1.Exec(`INSERT INTO schema_migrations (version) VALUES ('1')`); err != nil {
-			t.Fatal(err)
-		}
+		foreignChain(t, db1)
 		code, out := runWorker(t, bin, nil, "--driver=postgres", "--shards-file="+shardsFile(t, dsn0, dsn1), "--migrate-only")
 		if code == 0 {
 			t.Fatalf("--migrate-only exited 0 with a shard on another release's migration chain:\n%s", out)
@@ -197,8 +217,11 @@ func TestMigrateOnlyMigratesEveryShard(t *testing.T) {
 		// No ledger, so the chain check passes; a table the first migration creates, so the
 		// migration itself fails. This is the path the chain check cannot reach: the one
 		// where a shard is accepted and then cannot be migrated.
-		if _, err := db1.Exec(`CREATE TABLE workflow_instances (id int)`); err != nil {
+		if _, err := db1.Exec(`CREATE TABLE public.workflow_instances (id int)`); err != nil {
 			t.Fatal(err)
+		}
+		if inSchema(t, db1, "public", "workflow_instances") != 1 {
+			t.Fatal("the conflicting table is not in public, where the first migration creates it: the case would measure nothing")
 		}
 		code, out := runWorker(t, bin, nil, "--driver=postgres", "--shards-file="+shardsFile(t, dsn0, dsn1), "--migrate-only")
 		if code == 0 {
@@ -244,15 +267,10 @@ func TestMigrateOnlyMigratesEveryShard(t *testing.T) {
 		if ok, out := startsHealthy(t, bin, "--driver=postgres", "--shards-file="+file); !ok {
 			t.Fatalf("a sharded worker did not start on a fully migrated deployment:\n%s", out)
 		}
-		if _, err := db1.Exec(`DROP TABLE schema_migrations`); err != nil {
+		if _, err := db1.Exec(`DROP TABLE public.schema_migrations`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db1.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db1.Exec(`INSERT INTO schema_migrations (version) VALUES ('1')`); err != nil {
-			t.Fatal(err)
-		}
+		foreignChain(t, db1)
 		code, out := runWorker(t, bin, nil, "--driver=postgres", "--shards-file="+file)
 		if code == 0 {
 			t.Fatalf("a normal start exited 0 with shard-1 on another release's chain:\n%s", out)
