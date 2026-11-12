@@ -462,5 +462,6 @@ head after the drop, while the default tenant's rows were untouched). What the d
 (`admin.tenant_tombstones`): the dropping principal, the time, and the chain's last `seq` and `hash`, which the
 drop response also returns. That lets an export taken **before** the drop be checked against where the chain
 ended, and it is all that is left: after the drop there is nothing to export. If a tenant's audit history has to
-be kept past its removal, export it with `cleatctl audit export` first. Whether audit history should outlive a
-tenant is not decided; see cleat#3716.
+be kept past its removal, export it with `cleatctl audit export` first. By owner decision D77 (2026-11-12) a
+tenant's audit history does not outlive the tenant; that is reopened only if a stated compliance requirement needs
+it kept after offboarding (cleat#3716).

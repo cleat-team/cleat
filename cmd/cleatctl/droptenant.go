@@ -324,6 +324,10 @@ workflow_schedules, workflow_tags, workflow_routing, idempotency_keys,
 tenant_settings, workflow_defs, admin.tenant_api_keys, admin.tenant_roles,
 admin.tenants, plus the tenant's plugin schema and Postgres role.
 
+This deletes the tenant's audit trail too (audit_events and audit_chain_heads).
+If you need it, run "cleatctl audit export" first: afterwards there is nothing
+left to export.
+
 --schema names the schema holding this deployment's cleat tables; it defaults
 to "public" and must match cleat-worker's --schema. It is passed to
 admin.drop_tenant explicitly rather than inferred, so the deletion cannot be
