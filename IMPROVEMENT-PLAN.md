@@ -4876,7 +4876,8 @@ and has now sent two readers chasing it.
 
 Since cleat#3692 that no longer covers the whole package: the tier-2 agent clients moved to a
 top-level test the Tier 1 Gate excludes, so this unrequired job is the only one that runs them
-(see the note under `required_contexts` in `tiers.yaml`).
+(see the note under `required_contexts` in `tiers.yaml`). The owner decided on
+2026-11-12 (D71) that those clients stay non-blocking and `Test Go (crash)` is not made required.
 
 #### The guard shipped with a hole, and assigning the tiers is what exposed it
 

@@ -1500,8 +1500,14 @@ tier2:
 #     tier1.exclude_tests removes, so this unrequired job is the only one that runs
 #     them. A failure there is red and visible and does not stop a merge. That is what
 #     tier 2 means, and it differs from the cmd/ tests moved out by cleat#3690, whose
-#     `commands` leg IS required. Making `Test Go (crash)` required would close that
-#     difference, and it is a branch-protection change, so it is the owner's call.
+#     `commands` leg IS required.
+#
+#     DECIDED 2026-11-12 (owner D71): the tier-2 clients stay non-blocking, and
+#     `Test Go (crash)` is NOT made required. The earlier premise, that the Tier 1 Gate
+#     runs the whole of ./tests/crash/..., is false for this one test, and stays false
+#     on purpose. Making the job required would have closed the difference with the
+#     cmd/ tests, and it was declined; it would be a branch-protection change, so
+#     reopening it is the owner's call too.
 #
 # Re-derive all three:
 #
