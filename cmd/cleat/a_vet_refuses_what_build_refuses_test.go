@@ -18,7 +18,7 @@ import (
 // --channel flag at all. The exposure one also fired only after the compile, so
 // the refused build left a .wasm behind.
 //
-// The table is the claim "one answer": every row runs the four forms and asserts
+// The table is the claim "one answer": every row runs the five forms and asserts
 // one verdict and one message across them. The accepted rows are the floor: a
 // gate that refused everything would pass the refused rows.
 func TestVetAndBuildGiveOneAnswerOnTheRefusalsOnlyBuildUsedToTake(t *testing.T) {
@@ -53,6 +53,7 @@ func TestVetAndBuildGiveOneAnswerOnTheRefusalsOnlyBuildUsedToTake(t *testing.T) 
 
 			vetOut, vetCode := runCleat(t, args("vet")...)
 			vetJSON, vetJSONCode := runCleat(t, args("vet", "--json")...)
+			vetCI, vetCICode := runCleat(t, args("vet", "--ci")...)
 			buildOut, buildCode := runCleat(t, args("build", "-o", outPlain)...)
 			buildJSON, buildJSONCode := runCleat(t, args("build", "--json", "-o", outJSON)...)
 
@@ -61,18 +62,27 @@ func TestVetAndBuildGiveOneAnswerOnTheRefusalsOnlyBuildUsedToTake(t *testing.T) 
 				want = 1
 			}
 			for form, code := range map[string]int{
-				"vet": vetCode, "vet --json": vetJSONCode,
+				"vet": vetCode, "vet --json": vetJSONCode, "vet --ci": vetCICode,
 				"build": buildCode, "build --json": buildJSONCode,
 			} {
 				if code != want {
-					t.Errorf("`cleat %s` exited %d, want %d (the four forms must agree)", form, code, want)
+					t.Errorf("`cleat %s` exited %d, want %d (the five forms must agree)", form, code, want)
 				}
 			}
 			if c.refuse == "" {
+				if strings.Contains(vetCI, "::error") {
+					t.Errorf("`cleat vet --ci` annotated an error on a package every other form accepts:\n%s", vetCI)
+				}
 				return
 			}
 
-			for form, out := range map[string]string{"vet": vetOut, "build": buildOut} {
+			// --ci has its own loop and its own exit status, so it is a form of
+			// its own. Its annotation is one line (newlines travel as %0A), and
+			// every refusal text asserted here is on the first line.
+			if !strings.Contains(vetCI, "::error") {
+				t.Errorf("`cleat vet --ci` printed no error annotation for a refusal:\n%s", vetCI)
+			}
+			for form, out := range map[string]string{"vet": vetOut, "build": buildOut, "vet --ci": vetCI} {
 				if !strings.Contains(out, c.refuse) {
 					t.Errorf("`cleat %s` refused without saying %q:\n%s", form, c.refuse, out)
 				}
