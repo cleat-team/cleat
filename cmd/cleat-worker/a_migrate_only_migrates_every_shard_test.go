@@ -21,6 +21,11 @@ package main
 //     shard, exits non-zero, and leaves EVERY shard as it was: the first shard is not
 //     migrated and the failure reported afterwards.
 //   - a shard whose migration fails (past the chain check) exits non-zero and names the shard.
+//   - a shard with its own `schema` is migrated into that schema, the one its stores read
+//     (cleat#1287 one shard over).
+//   - a NORMAL start refuses a shard on another release's chain, naming it (cleat#3405's rule,
+//     "at --migrate-only and at boot alike", now applied to every shard), and starts when the
+//     chain is the shipped one.
 //   - the migrated deployment starts: a sharded worker boots on shards a --migrate-only
 //     run prepared, which is the thing the deploy step is for.
 
@@ -74,6 +79,36 @@ func TestMigrateOnlyMigratesEveryShard(t *testing.T) {
 			t.Fatal(err)
 		}
 		return p
+	}
+	// shardsFileSchemas is shardsFile with a schema per shard ("" leaves it unset).
+	shardsFileSchemas := func(t *testing.T, dsns, schemas []string) string {
+		t.Helper()
+		type shard struct {
+			Name    string `json:"name"`
+			ConnStr string `json:"conn_str"`
+			Schema  string `json:"schema,omitempty"`
+		}
+		var shards []shard
+		for i, d := range dsns {
+			shards = append(shards, shard{Name: "shard-" + string(rune('0'+i)), ConnStr: d, Schema: schemas[i]})
+		}
+		b, err := json.Marshal(shards)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(t.TempDir(), "shards.json")
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	inSchema := func(t *testing.T, db *sql.DB, schema, table string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`, schema, table).Scan(&n); err != nil {
+			t.Fatalf("looking for %s.%s: %v", schema, table, err)
+		}
+		return n
 	}
 	ledger := func(t *testing.T, db *sql.DB) int {
 		t.Helper()
@@ -171,6 +206,59 @@ func TestMigrateOnlyMigratesEveryShard(t *testing.T) {
 		}
 		if !strings.Contains(out, "shard-1") {
 			t.Errorf("the failure must name the shard; got:\n%s", out)
+		}
+	})
+
+	t.Run("a shard with its own schema is migrated into that schema", func(t *testing.T) {
+		dsn0, db0 := deployScratchNamed(t, c, "cleat_3718_c0_")
+		dsn1, db1 := deployScratchNamed(t, c, "cleat_3718_c1_")
+		const schema = "shard_one_3718"
+		file := shardsFileSchemas(t, []string{dsn0, dsn1}, []string{"", schema})
+		code, out := runWorker(t, bin, nil, "--driver=postgres", "--shards-file="+file, "--migrate-only")
+		if code != 0 {
+			t.Fatalf("--migrate-only with a per-shard schema exited %d:\n%s", code, out)
+		}
+		// The control: the first shard, with no schema of its own, is in public, so the
+		// query can see a ledger where one is.
+		if inSchema(t, db0, "public", "schema_migrations") != 1 {
+			t.Fatalf("the first shard has no schema_migrations in public: the run measured nothing.\n%s", out)
+		}
+		if inSchema(t, db1, schema, "schema_migrations") != 1 || inSchema(t, db1, schema, "workflow_instances") != 1 {
+			t.Errorf("shard-1 was not migrated into its own schema %q, which is the schema its stores read "+
+				"(NewPostgresStoreFactory(sdb, cfg.Schema)).\n%s", schema, out)
+		}
+		if inSchema(t, db1, "public", "schema_migrations") != 0 || inSchema(t, db1, "public", "workflow_instances") != 0 {
+			t.Errorf("shard-1 got tables in public although the shards file gives it schema %q (cleat#1287 one shard over)", schema)
+		}
+	})
+
+	t.Run("a normal start refuses a shard on another release's chain, and starts when it is the shipped one", func(t *testing.T) {
+		dsn0, _ := deployScratchNamed(t, c, "cleat_3718_n0_")
+		dsn1, db1 := deployScratchNamed(t, c, "cleat_3718_n1_")
+		file := shardsFile(t, dsn0, dsn1)
+		if code, out := runWorker(t, bin, nil, "--driver=postgres", "--shards-file="+file, "--migrate-only"); code != 0 {
+			t.Fatalf("--migrate-only exited %d:\n%s", code, out)
+		}
+		// The known-positive: before the shard is damaged, a normal start on this very
+		// deployment starts, so the refusal below is the chain and nothing else.
+		if ok, out := startsHealthy(t, bin, "--driver=postgres", "--shards-file="+file); !ok {
+			t.Fatalf("a sharded worker did not start on a fully migrated deployment:\n%s", out)
+		}
+		if _, err := db1.Exec(`DROP TABLE schema_migrations`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db1.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db1.Exec(`INSERT INTO schema_migrations (version) VALUES ('1')`); err != nil {
+			t.Fatal(err)
+		}
+		code, out := runWorker(t, bin, nil, "--driver=postgres", "--shards-file="+file)
+		if code == 0 {
+			t.Fatalf("a normal start exited 0 with shard-1 on another release's chain:\n%s", out)
+		}
+		if !strings.Contains(out, "refusing to start (shard shard-1)") {
+			t.Errorf("the refusal must be the chain check and must name the shard; got:\n%s", out)
 		}
 	})
 }
