@@ -45,9 +45,11 @@ import (
 // MEASURED: wall time of w.reapOnce() and w.claimGeneral() against a real
 // database as the RLS role, with N tenants registered and no work, cold (the
 // first tick, which on SQL Server opens a pool per tenant) and warm; statements
-// per reaper tick (PostgreSQL: transactions, which is what pg_stat_database
-// counts; SQL Server: batch requests); and the number of claim ticks until a run
-// started in a random tenant is claimed.
+// per reaper tick (PostgreSQL: calls counted by pg_stat_statements, which include
+// BEGIN and COMMIT, for the suite database only; SQL Server: the instance-wide
+// Batch Requests counter, so a concurrent run on the same server inflates it and
+// the harness should have the server to itself); and the number of claim ticks
+// until a run started in a random tenant is claimed.
 //
 // PROJECTED, from those, and labelled so in the output: first-notice latency in
 // seconds. It combines the measured tick count and tick cost with the dispatch
@@ -115,7 +117,7 @@ func sortedDur(d []time.Duration) []time.Duration {
 
 func TestTenantScalePostgres(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
-		t.Skip("no PostgreSQL DSN set")
+		t.Fatal("-tags tenantscale is the request to measure, and neither CLEAT_TEST_POSTGRES nor CLEAT_TEST_DB is set; run one dialect with -run TestTenantScaleSQLServer")
 	}
 	owner := testutil.SuiteTestDB(t, "cleat_worker_tenantscale")
 	rlsDB := testutil.OpenPostgresRLSTestDB(t, owner)
@@ -156,7 +158,7 @@ func TestTenantScalePostgres(t *testing.T) {
 
 func TestTenantScaleSQLServer(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
-		t.Skip("CLEAT_TEST_MSSQL not set")
+		t.Fatal("-tags tenantscale is the request to measure, and CLEAT_TEST_MSSQL is not set; run one dialect with -run TestTenantScalePostgres")
 	}
 	rig := mssqlHBRig(t, scaleTenant(1))
 	counter := func() int64 {
