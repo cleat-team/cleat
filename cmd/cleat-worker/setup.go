@@ -7478,23 +7478,37 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("memory_cleanup")
-			mcStart := time.Now()
-			deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
-			if err != nil {
-				w.logger.ErrorContext(w.ctx, "memory cleanup error", "worker_id", w.id, "error", err)
-				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "error")
-			} else if deleted > 0 {
-				w.logger.InfoContext(w.ctx, "memory cleanup: removed old samples", "worker_id", w.id, "count", deleted)
-			}
-			if err == nil {
-				w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "ok")
-				if deleted > 0 {
-					w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "memory_cleanup", deleted)
-				}
-			}
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
+			w.cleanupMemorySamplesOnce(maxSamples)
 		}
 	}
+}
+
+// cleanupMemorySamplesOnce is one tick of memoryCleanupLoop, extracted so a test
+// can drive it without a ticker.
+//
+// RecordWorkflowMemory persists each sample to the store of the tenant the
+// workflow belongs to (see memory_sample_is_persisted_to_the_workflows_tenant_test.go),
+// and this loop trimmed only the worker's own tenant's, so every other tenant's
+// workflow_memory_samples grew without bound (cleat#3572). The other tenants are
+// trimmed through their own stores, after the worker's own answered.
+func (w *Worker) cleanupMemorySamplesOnce(maxSamples int) {
+	mcStart := time.Now()
+	deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
+	if err != nil {
+		w.logger.ErrorContext(w.ctx, "memory cleanup error", "worker_id", w.id, "error", err)
+		w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "error")
+		w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
+		return
+	}
+	deleted += w.sweepOtherTenants("memory cleanup", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+		return st.CleanupMemorySamples(ctx, maxSamples)
+	})
+	if deleted > 0 {
+		w.logger.InfoContext(w.ctx, "memory cleanup: removed old samples", "worker_id", w.id, "count", deleted)
+		w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "memory_cleanup", deleted)
+	}
+	w.Metrics.RecordBackgroundLoop(w.ctx, "memory_cleanup", "ok")
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
 }
 
 // updateDispatchLoop and dispatchPendingUpdates lived here until updates were

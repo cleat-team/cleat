@@ -68,7 +68,7 @@ func TestAStaleConcurrencyKeyOfAnotherTenantIsReapedUnderRLSOnSQLServer(t *testi
 	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
 		t.Skip("CLEAT_TEST_MSSQL not set, skipping the SQL Server cleat#3572 test")
 	}
-	const other = "88888888-0000-4000-8000-000000003572"
+	const other = "88888888-0000-4000-8000-000035720000"
 	env := mssqlKeyEnv(mssqlHBRig(t, other))
 	t.Run("a non-default tenant's stale key, reaped by a worker whose own tenant is the default", func(t *testing.T) {
 		runAStaleKeyIsReaped(t, env, other)
