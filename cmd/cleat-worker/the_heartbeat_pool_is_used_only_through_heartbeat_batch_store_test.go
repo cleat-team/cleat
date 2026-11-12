@@ -5,7 +5,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"sort"
 	"strings"
 	"testing"
@@ -38,49 +37,58 @@ func TestTheHeartbeatPoolIsUsedOnlyThroughHeartbeatBatchStore(t *testing.T) {
 		"heartbeatBatchStore":     true,
 		"heartbeatStoreForTenant": true,
 	}
+	// git ls-files rather than ParseDir (deprecated, SA1019) or a walk: a walk
+	// descends into .claude/worktrees/, whole copies of the repository, and would
+	// attribute a scratch checkout's code to this package.
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
-	if err != nil {
-		t.Fatalf("parsing the package: %v", err)
+	var files []*ast.File
+	for _, path := range trackedGoFiles(t) {
+		if strings.Contains(path, "/") || strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		files = append(files, f)
+	}
+	if len(files) == 0 {
+		t.Fatal("no tracked non-test files in this package: the scan would pass vacuously")
 	}
 	var problems []string
 	fieldReaders := map[string]bool{}
 	callSites := map[string][]string{}
 	var resultVars map[string]bool // identifiers the accessors' results are assigned to, in `user`
 	var userDecl *ast.FuncDecl
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok {
-					continue
-				}
-				if fn.Name.Name == user {
-					userDecl = fn
-				}
-				ast.Inspect(fn, func(n ast.Node) bool {
-					switch x := n.(type) {
-					case *ast.SelectorExpr:
-						if x.Sel.Name == "heartbeatStore" {
-							if accessors[fn.Name.Name] {
-								fieldReaders[fn.Name.Name] = true
-							} else {
-								problems = append(problems, fset.Position(x.Pos()).String()+" reads Worker.heartbeatStore in "+fn.Name.Name)
-							}
-						}
-					case *ast.CallExpr:
-						if sel, ok := x.Fun.(*ast.SelectorExpr); ok && accessors[sel.Sel.Name] {
-							callSites[sel.Sel.Name] = append(callSites[sel.Sel.Name], fset.Position(x.Pos()).String()+" in "+fn.Name.Name)
-							if fn.Name.Name != user {
-								problems = append(problems, fset.Position(x.Pos()).String()+" calls "+sel.Sel.Name+" in "+fn.Name.Name+", not in "+user)
-							}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if fn.Name.Name == user {
+				userDecl = fn
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					if x.Sel.Name == "heartbeatStore" {
+						if accessors[fn.Name.Name] {
+							fieldReaders[fn.Name.Name] = true
+						} else {
+							problems = append(problems, fset.Position(x.Pos()).String()+" reads Worker.heartbeatStore in "+fn.Name.Name)
 						}
 					}
-					return true
-				})
-			}
+				case *ast.CallExpr:
+					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && accessors[sel.Sel.Name] {
+						callSites[sel.Sel.Name] = append(callSites[sel.Sel.Name], fset.Position(x.Pos()).String()+" in "+fn.Name.Name)
+						if fn.Name.Name != user {
+							problems = append(problems, fset.Position(x.Pos()).String()+" calls "+sel.Sel.Name+" in "+fn.Name.Name+", not in "+user)
+						}
+					}
+				}
+				return true
+			})
 		}
 	}
 	for name := range accessors {
