@@ -6832,61 +6832,183 @@ func (w *Worker) metricsSweepLoop() {
 			return
 		case <-ticker.C:
 			w.healthTracker.recordRun("metrics_sweep")
-			sweepStart := time.Now()
-			failed := 0
-
-			if n, err := ms.CountStalledWorkflows(w.ctx, w.stallThreshold); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count stalled workflows", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetWorkflowsStuck(w.ctx, int64(n))
-			}
-
-			if n, err := ms.CountEventHistoryTotal(w.ctx); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count event history", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetEventHistoryRowCount(w.ctx, int64(n))
-			}
-
-			if b, err := ms.EstimateEventHistorySize(w.ctx); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: estimate event history size", "worker_id", w.id, "error", err)
-			} else {
-				// Empty workflow name: the gauge is labelled per workflow but
-				// pg_total_relation_size is whole-table, so there is no name to
-				// give it. "" is the established unlabelled value here --
-				// RecordDispatchLatency passes it for the same reason. Making
-				// this per-workflow would mean a size query per definition,
-				// which is the cost this estimator exists to avoid.
-				w.Metrics.SetEventHistorySize(w.ctx, b, "")
-			}
-
-			if n, err := ms.CountActiveConcurrencyKeys(w.ctx); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count active concurrency keys", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetConcurrencyKeysTotal(w.ctx, int64(n))
-			}
-
-			// The leading indicator, on the same sweep as the total it sits
-			// beside. Both come from the same table, so asking twice here costs
-			// one extra query rather than a second loop.
-			if n, err := ms.CountConcurrencyKeysExpiringSoon(w.ctx, w.keyExpiryWindow); err != nil {
-				failed++
-				w.logger.ErrorContext(w.ctx, "metrics sweep: count concurrency keys expiring soon", "worker_id", w.id, "error", err)
-			} else {
-				w.Metrics.SetConcurrencyKeysExpiringSoon(w.ctx, int64(n))
-			}
-
-			status := "ok"
-			if failed > 0 {
-				status = "error"
-			}
-			w.Metrics.RecordBackgroundLoop(w.ctx, "metrics_sweep", status)
-			w.Metrics.SetBackgroundLoopDuration(w.ctx, "metrics_sweep", time.Since(sweepStart).Seconds())
+			w.metricsSweepOnce(ms)
 		}
 	}
+}
+
+// The gauges metricsSweepOnce publishes, in the order it computes them.
+const (
+	gaugeStuck = iota
+	gaugeEventRows
+	gaugeEventSize
+	gaugeKeysTotal
+	gaugeKeysExpiring
+	gaugeCount
+)
+
+var gaugeNames = [gaugeCount]string{
+	"count stalled workflows", "count event history", "estimate event history size",
+	"count active concurrency keys", "count concurrency keys expiring soon",
+}
+
+// metricsSweepOnce is one tick of metricsSweepLoop, extracted so a test can drive
+// it without a ticker.
+//
+// FOUR OF THE FIVE GAUGES ARE TENANT-SCOPED COUNTS (an explicit tenant_id
+// predicate each), and the sweep ran them through the worker's own store only, so
+// on a worker that serves other tenants every one of them described one tenant
+// (cleat#3572). They are now the SUM over every tenant the worker serves, each
+// counted through that tenant's own store under its own row-level security. The
+// fifth, the event history SIZE, is pg_total_relation_size of the whole table on
+// the plain pool: it is the same figure whichever store asks, already covers every
+// tenant, and is taken from the worker's own store ONLY -- summing it across
+// tenants would multiply it by the tenant count.
+//
+// A PARTIAL SUM MUST NOT BE PUBLISHED AS THE TOTAL. A count gauge is published only
+// when every query that feeds it answered, for the worker's own tenant and for
+// every other tenant, and the tenant list was read and every tenant's store opened.
+// (The size depends on none of that and is published whenever the worker's own
+// query answered.) A gap in the tenants, a tenant's failed query or a store that
+// cannot answer leaves the PREVIOUS value standing (as a failed own query always did: not publishing is
+// not the same as publishing zero), logs it, and counts the pass as "incomplete"
+// in the background-loop counter, so a stale total is visible. There is no
+// per-tenant label: the series count stays what it was.
+//
+// Every query still runs for every tenant it can: one failing gauge does not stop
+// the others, and one tenant failing does not stop the rest being counted, because
+// the gauges it did not touch are still complete.
+func (w *Worker) metricsSweepOnce(ms MetricsStore) {
+	sweepStart := time.Now()
+	var vals [gaugeCount]int64
+	var ownOK, crossOK [gaugeCount]bool
+	for g := range ownOK {
+		ownOK[g], crossOK[g] = true, true
+	}
+	ownFailed := 0
+
+	// query runs one gauge's query against one store; the caller adds the answer
+	// to the gauge's running total.
+	query := func(st MetricsStore, g int) (int64, error) {
+		switch g {
+		case gaugeStuck:
+			n, err := st.CountStalledWorkflows(w.ctx, w.stallThreshold)
+			return int64(n), err
+		case gaugeEventRows:
+			n, err := st.CountEventHistoryTotal(w.ctx)
+			return int64(n), err
+		case gaugeEventSize:
+			return st.EstimateEventHistorySize(w.ctx)
+		case gaugeKeysTotal:
+			n, err := st.CountActiveConcurrencyKeys(w.ctx)
+			return int64(n), err
+		default:
+			n, err := st.CountConcurrencyKeysExpiringSoon(w.ctx, w.keyExpiryWindow)
+			return int64(n), err
+		}
+	}
+
+	for g := 0; g < gaugeCount; g++ {
+		n, err := query(ms, g)
+		if err != nil {
+			ownOK[g] = false
+			ownFailed++
+			w.logger.ErrorContext(w.ctx, "metrics sweep: "+gaugeNames[g], "worker_id", w.id, "error", err)
+			continue
+		}
+		vals[g] = n
+	}
+
+	// The other tenants, only if the worker serves them. A gap in WHICH tenants were
+	// counted taints every gauge; a tenant's own failure taints only the gauge that
+	// failed.
+	gap := false
+	var firstErr error
+	if w.claimAcrossTenants {
+		sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
+			tms, isMetrics := st.(MetricsStore)
+			for g := 0; g < gaugeCount; g++ {
+				if g == gaugeEventSize {
+					continue // whole-table, taken from the worker's own store only
+				}
+				if !isMetrics {
+					crossOK[g] = false
+					if firstErr == nil {
+						firstErr = fmt.Errorf("tenant %s: its store does not implement MetricsStore", tenantID)
+					}
+					continue
+				}
+				n, qerr := query(tms, g)
+				if qerr != nil {
+					crossOK[g] = false
+					if firstErr == nil {
+						firstErr = fmt.Errorf("tenant %s: %s: %w", tenantID, gaugeNames[g], qerr)
+					}
+					continue
+				}
+				vals[g] += n
+			}
+		})
+		switch {
+		case err != nil && errors.Is(err, errRotatingClaimUnavailable):
+			// This worker serves its own tenant only: the sum IS the own value.
+		case err != nil:
+			gap = true
+			firstErr = err
+		case sweep.OpenFailed > 0:
+			gap = true
+			if firstErr == nil {
+				firstErr = sweep.FirstErr
+			}
+		}
+	}
+
+	// The whole-table size does not depend on which tenants were counted, so a gap
+	// in them neither holds it back nor makes a pass incomplete: it is published
+	// whenever the worker's own query answered.
+	crossIncomplete := gap
+	published := 0
+	for g := 0; g < gaugeCount; g++ {
+		if g != gaugeEventSize && !crossOK[g] {
+			crossIncomplete = true
+		}
+		if !ownOK[g] || (g != gaugeEventSize && (!crossOK[g] || gap)) {
+			continue
+		}
+		published++
+		switch g {
+		case gaugeStuck:
+			w.Metrics.SetWorkflowsStuck(w.ctx, vals[g])
+		case gaugeEventRows:
+			w.Metrics.SetEventHistoryRowCount(w.ctx, vals[g])
+		case gaugeEventSize:
+			// Empty workflow name: the gauge is labelled per workflow but
+			// pg_total_relation_size is whole-table, so there is no name to
+			// give it. "" is the established unlabelled value here --
+			// RecordDispatchLatency passes it for the same reason. Making
+			// this per-workflow would mean a size query per definition,
+			// which is the cost this estimator exists to avoid.
+			w.Metrics.SetEventHistorySize(w.ctx, vals[g], "")
+		case gaugeKeysTotal:
+			w.Metrics.SetConcurrencyKeysTotal(w.ctx, vals[g])
+		case gaugeKeysExpiring:
+			w.Metrics.SetConcurrencyKeysExpiringSoon(w.ctx, vals[g])
+		}
+	}
+	if crossIncomplete {
+		w.logger.WarnContext(w.ctx, "metrics sweep: other tenants could not all be counted, so the totals that depend on them keep their previous value this pass",
+			"worker_id", w.id, "published", published, "of", gaugeCount, "first_error", firstErr)
+	}
+
+	status := "ok"
+	switch {
+	case ownFailed > 0:
+		status = "error"
+	case crossIncomplete:
+		status = "incomplete"
+	}
+	w.Metrics.RecordBackgroundLoop(w.ctx, "metrics_sweep", status)
+	w.Metrics.SetBackgroundLoopDuration(w.ctx, "metrics_sweep", time.Since(sweepStart).Seconds())
 }
 
 func (w *Worker) compactionLoop() {
