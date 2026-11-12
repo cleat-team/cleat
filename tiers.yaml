@@ -297,17 +297,31 @@ tier1:
     # NEEDS. The seven are named, with their reason, in
     # engine/tier2_toolchain_tests_in_every_tier1_package_test.go.
     #
-    # One tier-2 toolchain test is NOT excluded here, deliberately and with an end date:
-    # tests/crash's TestCrashMidAgentLoopResumesWithoutReaskingTheModel (/rust, /java,
-    # /assemblyscript). Excluding the whole test would also drop its go and python
-    # subtests, so it is listed as an allowance in the same guard and removed by
-    # cleat#3692.
     - "^TestJavaBuildRefusesAStaleManifest$"
     - "^TestJavaBuildRefusesMultipleManifests$"
     - "^TestJavaExampleEntryPointResolutionLive$"
     - "^TestAssemblyScriptBuildRefusesAStaleManifest$"
     - "^TestAssemblyScriptExampleEntryPointResolutionLive$"
     - "^TestASBuildRefusesNondeterminism$"
+    # tier 2 -- rust, java and assemblyscript, in tests/crash (cleat#3692, the last of
+    # the three guard findings cleat#3690 left open).
+    #
+    # tests/crash's agent-loop acceptance ran one subtest per client language, and the
+    # rust, java and assemblyscript subtests built their guests with Cargo, Gradle and
+    # npm inside this gate. An exclusion cannot name a subtest -- this list is matched
+    # against `go test -list`, which lists top-level tests only -- so the tier-2 clients
+    # became a top-level test of their own and the tier-1 one kept go and python.
+    # tier1-gate.yml's rest shards used to provision a JDK 17 and Rust for it
+    # (cleat#3499, cleat#2978); both steps went with this change. Node, which the
+    # runner image ships, is not provisioned by either gate.
+    #
+    # Selected, once excluded, by ci.yml's test-go "crash" leg, which provisions Rust,
+    # Node, Java and Gradle and runs ./tests/crash/... with no -run and no -skip; the
+    # guard checks those facts and that the leg still carries that path. That leg is
+    # not a required context (see the required_contexts note on `Test Go (crash)`), so
+    # a failure in these clients is visible and does not block a merge, which is what
+    # tier 2 means.
+    - "^TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel$"
     # tier 2 -- docker. cmd/cleat-worker/a_real_postgres_docker_pause_idle_worker_gap_test.go
     # (cleat#2005's third review round, GAP2): a real-database reproduction of the
     # reaper's idle-worker recovery-grace-period fix, using `docker pause` on the
@@ -1469,15 +1483,31 @@ tier2:
 #     Homebrew formula). See IMPROVEMENT-PLAN.md §3.402.
 #
 #   * `Test Go (crash)` is the ONE matrix entry that is not required, and it runs a
-#     tier-1 package. That is not a hole: tier1.packages includes ./tests/crash/... and
-#     the required `Tier 1 Gate` runs the whole list.
+#     tier-1 package. That is not a hole for the tier-1 tests in it: tier1.packages
+#     includes ./tests/crash/... and the required `Tier 1 Gate` runs them.
 #
-#     DECIDED 2026-09-05: leave it unrequired. What is genuinely not blocking is the
+#     DECIDED 2026-09-05: leave it unrequired. What was not blocking then was the
 #     `-race` variant -- the matrix job runs `go test -race`, the Tier 1 Gate does not,
 #     so a data race in the crash tests would not stop a merge. That was judged not
 #     worth a required context of its own; correctness there is gated, only the race
 #     detector is advisory. Recorded because "the only one of twelve that is not
 #     required" reads as an oversight, and twice now someone has started chasing it.
+#
+#     WHAT CHANGED with cleat#3692, and it is wider than the race detector. The Tier 1
+#     Gate no longer runs ALL of ./tests/crash/...: the tier-2 agent clients (rust,
+#     java, assemblyscript) are
+#     TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel, which
+#     tier1.exclude_tests removes, so this unrequired job is the only one that runs
+#     them. A failure there is red and visible and does not stop a merge. That is what
+#     tier 2 means, and it differs from the cmd/ tests moved out by cleat#3690, whose
+#     `commands` leg IS required.
+#
+#     DECIDED 2026-11-12 (owner D71): the tier-2 clients stay non-blocking, and
+#     `Test Go (crash)` is NOT made required. The earlier premise, that the Tier 1 Gate
+#     runs the whole of ./tests/crash/..., is false for this one test, and stays false
+#     on purpose. Making the job required would have closed the difference with the
+#     cmd/ tests, and it was declined; it would be a branch-protection change, so
+#     reopening it is the owner's call too.
 #
 # Re-derive all three:
 #

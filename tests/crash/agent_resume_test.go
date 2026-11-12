@@ -134,6 +134,17 @@ type agentClient struct {
 	build func(*testing.T) []byte
 }
 
+// agentClients are the TIER-1 clients: Go and Python, the two languages tiers.yaml's
+// tier1.languages names. Tier 1 runs these and nothing that needs another toolchain.
+//
+// The tier-2 clients are tierTwoAgentClients, in a table and a top-level test of
+// their own, and that separation is the point (cleat#3692): `go test -skip` takes
+// a top-level test name and scripts/tier-gate.sh enumerates exclusions against
+// `go test -list`, which lists top-level tests only, so a subtest of this one
+// could not be excluded from Tier 1 without dropping go and python with it. Do
+// not add a rust, java or assemblyscript entry here. The guard in
+// engine/tier2_toolchain_tests_in_every_tier1_package_test.go fails if one
+// appears, naming this test.
 func agentClients() []agentClient {
 	return []agentClient{
 		{
@@ -183,6 +194,20 @@ func agentClients() []agentClient {
 			input: `{"config": ` + agentConfigJSON + `, "__entry_point": "run"}`,
 			build: buildPythonClientWASM,
 		},
+	}
+}
+
+// tierTwoAgentClients are the clients whose language is tier 2 (D5): Rust, Java and
+// AssemblyScript. Building each needs a toolchain that tier 1 does not provision and
+// whose download host (crates.io, Maven Central and the Gradle distribution, the npm
+// registry) is not one tier 1 is meant to depend on. cleat#3689 was that, for Gradle.
+//
+// They run in TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel,
+// which tiers.yaml's tier1.exclude_tests names and ci.yml's test-go "crash" leg
+// runs. That leg provisions all three toolchains and runs ./tests/crash/... with no
+// -run and no -skip; the guard checks both halves.
+func tierTwoAgentClients() []agentClient {
+	return []agentClient{
 		{
 			// Rust's #[cleat_entry] requires exactly one user parameter -- a
 			// WASM export receives one JSON payload -- so, like Go, the
@@ -223,25 +248,47 @@ func agentClients() []agentClient {
 	}
 }
 
-// TestCrashMidAgentLoopResumesWithoutReaskingTheModel is the acceptance.
+// TestCrashMidAgentLoopResumesWithoutReaskingTheModel is the acceptance, for the
+// two tier-1 languages. The tier-2 clients run the same scenario in
+// TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel.
 func TestCrashMidAgentLoopResumesWithoutReaskingTheModel(t *testing.T) {
+	runAgentCrashAcceptance(t, agentClients())
+}
+
+// TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel is the same
+// acceptance for Rust, Java and AssemblyScript clients (cleat#3692).
+//
+// It exists as a top-level test of its own so that tiers.yaml can exclude it from
+// Tier 1 by name, which a subtest cannot be (see agentClients). Excluded tests
+// leave no `--- SKIP` line, so this is only safe because ci.yml's test-go "crash"
+// leg runs ./tests/crash/... unfiltered with Rust, Node, Java and Gradle set up,
+// and the guard fails if that stops being true. The name deliberately does not begin
+// with the tier-1 test's, so an unanchored `-run` for one does not select the other.
+func TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel(t *testing.T) {
+	runAgentCrashAcceptance(t, tierTwoAgentClients())
+}
+
+// runAgentCrashAcceptance deploys the shipped agent once and runs the crash
+// scenario for each client.
+func runAgentCrashAcceptance(t *testing.T, clients []agentClient) {
+	t.Helper()
 	db := ownerDB(t)
 	defer db.Close()
 
 	taskQueue := "queue-agent-" + uniqueSuffix()
 	bin := buildWorker(t)
 
-	// Built and deployed ONCE for both clients, because they are the same
+	// Built and deployed ONCE for every client, because they are the same
 	// artifact: one deployment of the agent serves every caller, and the
 	// clients differ only in which SDK starts it. Building them per subtest
-	// would be four identical compilations and would also hide a divergence --
-	// if the two clients reached different agents, the counts below would
+	// would be identical compilations and would also hide a divergence --
+	// if the clients reached different agents, the counts below would
 	// still agree.
 	deployOneDef(t, db, "agent", buildWorkflowWASM(t, "examples/agent"), taskQueue)
 	deployOneDef(t, db, "summarise", buildWorkflowWASM(t, "testdata/summarise"), taskQueue)
 	grantLoopbackEgress(t, db)
 
-	for _, client := range agentClients() {
+	for _, client := range clients {
 		t.Run(client.name, func(t *testing.T) {
 			deployOneDef(t, db, client.defName, client.build(t), taskQueue)
 			runAgentCrashScenario(t, db, bin, taskQueue, client)

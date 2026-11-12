@@ -260,7 +260,7 @@ tests/plugin-harness/testdata/hostcallsas/dist/
 
 # Same for cleat#2978's AssemblyScript agent client: `cleat build --target
 # assemblyscript` writes into the fixture's own dist/ regardless of -o, and
-# TestCrashMidAgentLoopResumesWithoutReaskingTheModel/assemblyscript rebuilds
+# TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel/assemblyscript rebuilds
 # it on every run.
 testdata/agentclientas/dist/
 

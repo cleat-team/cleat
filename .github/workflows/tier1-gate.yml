@@ -104,15 +104,14 @@
 # python IS tier 1; crates.io, npm and Maven Central are not, because their
 # languages are not.
 #
-# THE EXCEPTION, and it is a debt rather than a decision. The rest shards DO set
-# up a JDK 17 and Rust with wasm32-unknown-unknown (steps below), because
-# tests/crash's TestCrashMidAgentLoopResumesWithoutReaskingTheModel builds its
+# That used to have one exception. The rest shards set up a JDK 17 and Rust with
+# wasm32-unknown-unknown because tests/crash's agent-loop acceptance built its
 # /java, /rust and /assemblyscript clients in tier 1 (cleat#3499, cleat#2978).
-# cleat#3692 removes that, and these two steps go with it. Until then a Gradle,
-# Maven Central, crates.io or npm outage can fail this gate through that test alone.
-# Every OTHER tier-2 toolchain test is excluded in tiers.yaml and run by ci.yml's
-# test-go "commands" leg; engine/tier2_toolchain_tests_in_every_tier1_package_test.go
-# fails if one is not, and lists the exception by name (cleat#3690).
+# Those clients are now a top-level test of their own, excluded in tiers.yaml and
+# run by ci.yml's test-go "crash" leg, and both steps are gone (cleat#3692). Every
+# tier-2 toolchain test in a tier-1 package is excluded the same way, and
+# engine/tier2_toolchain_tests_in_every_tier1_package_test.go fails if one is not
+# and has no exceptions to name (cleat#3690).
 #
 # MERGE_GROUP SKIPS tier1-coverage, tier1-engine AND tier1-rest ENTIRELY
 # (owner-ordered, this change). The merge queue re-tests every required
@@ -831,26 +830,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The rest shards run ./cmd/... and ./tests/crash/..., and tests/crash's
-      # TestCrashMidAgentLoopResumes.../java builds with Gradle 7.6.4 behind
-      # `cleat build --target java`. (Until cleat#3690 this list also named
-      # TestJavaBuildRefusesAStaleManifest, TestJavaBuildRefusesMultipleManifests and
-      # TestJavaExampleEntryPointResolutionLive; tiers.yaml now excludes those from
-      # tier 1, and ci.yml's "commands" leg runs them.) This job named no
-      # JDK, so it followed the runner image's default: `ubuntu-latest` moved from
-      # ubuntu-24.04 (JDK 17) to ubuntu-26.04 (JDK 25, per the actions/runner-images
-      # readmes), and these shards, a required check, failed on every develop push
-      # from 2026-10-27T23:47Z. The engine shards are untouched: Tier 1 excludes
-      # TestJavaWorkflowExecute as a lower-tier test and they passed on 26.04.
-      # cleat#3499, cleat#3498.
-      # This step stays only for tests/crash and is removed with cleat#3692.
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        if: github.event_name != 'merge_group'
-        with:
-          distribution: temurin
-          java-version: "17"
-
       - name: Install componentize-py, PyYAML and the Python SDK
         if: github.event_name != 'merge_group'
         run: |
@@ -899,24 +878,6 @@ jobs:
           tar xzf "${tarball}" -C "${unpacked}" --strip-components=1
           sudo mv "${unpacked}/wasm-tools" /usr/local/bin/wasm-tools
           wasm-tools --version
-
-      # cleat#2978: tests/crash's Rust agent client (TestCrashMidAgentLoopResumesWithoutReaskingTheModel/rust)
-      # runs in this shard and needs wasm32-unknown-unknown, which the
-      # ubuntu-latest image's preinstalled rustup does NOT carry by default
-      # -- unlike Node and a JDK, which the image does ship, so the Java and
-      # AssemblyScript subtests needed no equivalent step here. Without
-      # this, `cargo build` fails with "can't find crate for `core`" /
-      # "the wasm32-unknown-unknown target may not be installed", which
-      # tier-gate.sh reports as a genuine test failure -- there is no skip
-      # to fall back to, and there should not be one: this is ci.yml's
-      # "Setup Rust + wasm32-unknown-unknown for the crash agent client"
-      # step's exact counterpart for this gate, which runs tests/crash
-      # through a completely separate job from ci.yml's own matrix.
-      - name: Setup Rust + wasm32-unknown-unknown for the crash agent client
-        if: github.event_name != 'merge_group'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
 
       - name: Create the cleat database on SQL Server
         if: github.event_name != 'merge_group'

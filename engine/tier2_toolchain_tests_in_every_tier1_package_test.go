@@ -80,9 +80,21 @@ import (
 //   - cmd/...            -> ci.yml's test-go "commands" leg, which provisions
 //     Rust, Node, Java and Gradle for exactly this and runs ./cmd/... with no
 //     -run and no -skip. The guard checks all of that, not just the leg's name.
+//   - tests/crash        -> ci.yml's test-go "crash" leg, which provisions the same
+//     four and runs ./tests/crash/... with no -run and no -skip. Checked the same
+//     way, for EVERY language the excluded test reaches (it reaches all three).
 //   - any other tier-1 package -> a failure naming the test, so a toolchain
 //     test added there forces a decision about where it runs instead of
 //     passing because nobody wrote the mapping.
+//
+// THERE ARE NO ALLOWANCES. Until cleat#3692 this guard carried one,
+// knownOpenToolchainTests, for tests/crash's agent-loop acceptance, which ran a
+// subtest per client language and so could not be excluded without dropping its go
+// and python clients. The tier-2 clients are now a top-level test of their own, the
+// allowance and the machinery for it are deleted, and a toolchain test that is not
+// excluded is a failure with nothing to list it under. If a future one genuinely
+// cannot be excluded yet, that is a decision to make in the PR that adds the
+// exception, not a map this file keeps ready for it.
 func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatProvidesIt(t *testing.T) {
 	pkgs, err := tier1PackageDirs()
 	if err != nil {
@@ -93,7 +105,10 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 		t.Fatalf("reading tiers.yaml: %v", err)
 	}
 
-	type finding struct{ dir, name, lang string }
+	type finding struct {
+		dir, name string
+		langs     []string // every tier-2 language the test reaches, sorted
+	}
 	var found []finding
 	perDirLang := map[string]map[string]int{}
 	for _, dir := range pkgs {
@@ -110,11 +125,21 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 			if !strings.HasPrefix(fn, "Test") {
 				continue
 			}
-			if lang := reachesATierTwoToolchain(fn, calls, roots, map[string]bool{}); lang != "" {
-				found = append(found, finding{dir, fn, lang})
-				if perDirLang[dir] == nil {
-					perDirLang[dir] = map[string]int{}
-				}
+			reachedLangs := map[string]bool{}
+			tierTwoLanguagesReached(fn, calls, roots, map[string]bool{}, reachedLangs)
+			if len(reachedLangs) == 0 {
+				continue
+			}
+			var langs []string
+			for lang := range reachedLangs {
+				langs = append(langs, lang)
+			}
+			sort.Strings(langs)
+			found = append(found, finding{dir, fn, langs})
+			if perDirLang[dir] == nil {
+				perDirLang[dir] = map[string]int{}
+			}
+			for _, lang := range langs {
 				perDirLang[dir][lang]++
 			}
 		}
@@ -126,26 +151,28 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 		return found[i].name < found[j].name
 	})
 
-	// The scan is checked before its result is used. cmd/cleat has tests for all
-	// three languages today; zero of one means the literal scan stopped seeing
-	// that language and every check below passes vacuously for it.
-	for _, lang := range []string{"java", "assemblyscript", "rust"} {
-		if perDirLang["../cmd/cleat"][lang] == 0 {
-			t.Fatalf("the scan found no %s toolchain test in cmd/cleat (found %v).\n\n"+
-				"There are several of each. Zero means the way tests reach a builder "+
-				"changed -- a renamed helper, or `\"--target\", \"%s\"` no longer written "+
-				"as adjacent literals -- and both checks below pass vacuously for it.",
-				lang, perDirLang["../cmd/cleat"], lang)
+	// The scan is checked before its result is used. Each package below has tests
+	// for all three languages today; zero of one means the way tests reach a builder
+	// changed -- a renamed helper, `"--target", "<lang>"` no longer written as
+	// adjacent literals, or tests/crash's table no longer holding the builders by
+	// name -- and both checks below pass vacuously for that language.
+	for _, dir := range []string{"../cmd/cleat", "../tests/crash"} {
+		for _, lang := range []string{"java", "assemblyscript", "rust"} {
+			if perDirLang[dir][lang] == 0 {
+				t.Fatalf("the scan found no %s toolchain test in %s (found %v).\n\n"+
+					"There are several of each in cmd/cleat and one test in tests/crash that "+
+					"reaches all three. Zero means the way tests reach a builder changed, and "+
+					"both checks below pass vacuously for it.",
+					lang, strings.TrimPrefix(dir, "../"), perDirLang[dir])
+			}
 		}
 	}
 
 	// An entry that is no longer a finding, or is now excluded, is stale: the list
 	// is a statement about the tree and has to be re-read when the tree moves.
 	reached := map[string]bool{}
-	reachedAt := map[string]bool{} // "dir:name", for the allowance, which is per package
 	for _, f := range found {
 		reached[f.name] = true
-		reachedAt[strings.TrimPrefix(f.dir, "../")+":"+f.name] = true
 	}
 	for name, why := range toolchainFreeBuilderCallers {
 		switch {
@@ -160,26 +187,12 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 		}
 	}
 
-	for key, why := range knownOpenToolchainTests {
-		name := key[strings.Index(key, ":")+1:]
-		switch {
-		case !reachedAt[key]:
-			t.Errorf("knownOpenToolchainTests lists %s but the scan no longer finds it reaching a "+
-				"builder. If the issue it names has landed, that is the point: delete the entry.\n%s", key, why)
-		case matchesAny(name, excl):
-			t.Errorf("%s is excluded from tier 1 and still listed in knownOpenToolchainTests. "+
-				"Delete the entry.\n%s", key, why)
-		}
-	}
-
-	var commandsLeg *commandsLegFacts
+	legs := map[string]*testGoLegFacts{}
 	for _, f := range found {
 		if _, free := toolchainFreeBuilderCallers[f.name]; free {
 			continue
 		}
-		if _, open := knownOpenToolchainTests[strings.TrimPrefix(f.dir, "../")+":"+f.name]; open && !matchesAny(f.name, excl) {
-			continue
-		}
+		langs := strings.Join(f.langs, ", ")
 		if !matchesAny(f.name, excl) {
 			t.Errorf("%s (%s) builds the %s toolchain but is not excluded from the tier-1 gate.\n\n"+
 				"tiers.yaml puts those languages in tier 2 (D5) and the gate does not set out to "+
@@ -188,46 +201,58 @@ func TestEveryToolchainBuildingTestInAnyTier1PackageIsExcludedAndRunByAJobThatPr
 				"static.crates.io) being up. cleat#3689 was exactly that, for Gradle. Add an "+
 				"anchored pattern to tiers.yaml tier1.exclude_tests -- or, if it needs no "+
 				"toolchain (it refuses before one starts), prove that with the toolchain off "+
-				"PATH and list it in toolchainFreeBuilderCallers.",
-				f.name, strings.TrimPrefix(f.dir, "../"), f.lang)
+				"PATH and list it in toolchainFreeBuilderCallers.\n\n"+
+				"If the test is a SUBTEST-per-language table (tests/crash was), split the tier-2 "+
+				"languages into a top-level test of their own: exclusions are matched against "+
+				"`go test -list`, which lists top-level tests only.",
+				f.name, strings.TrimPrefix(f.dir, "../"), langs)
 		}
 
-		switch {
-		case f.dir == "../cmd/cleat" || strings.HasPrefix(f.dir, "../cmd/"):
-			if commandsLeg == nil {
-				commandsLeg, err = readCommandsLeg()
-				if err != nil {
-					t.Fatalf("reading ci.yml's commands leg: %v", err)
-				}
-			}
-			for _, problem := range commandsLeg.problemsFor(f.lang) {
-				t.Errorf("%s (%s) is excluded from the tier-1 gate on the strength of ci.yml's "+
-					"test-go \"commands\" leg running it, but %s.\n\nWithout that this test runs "+
-					"NOWHERE, and `go test -skip` leaves no --- SKIP line to say so.",
-					f.name, f.lang, problem)
-			}
-		default:
+		leg, ok := legForTier1Package(f.dir)
+		if !ok {
 			t.Errorf("%s in %s builds the %s toolchain, and this guard does not know which job "+
 				"runs tests from that package once they are excluded from tier 1.\n\n"+
-				"Add the package to the switch in this test with the job that provisions %s, "+
+				"Add the package to legForTier1Package with the job that provisions it, "+
 				"or an excluded test there will run nowhere.",
-				f.name, strings.TrimPrefix(f.dir, "../"), f.lang, f.lang)
+				f.name, strings.TrimPrefix(f.dir, "../"), langs)
+			continue
+		}
+		facts := legs[leg.name]
+		if facts == nil {
+			facts, err = readTestGoLeg(leg)
+			if err != nil {
+				t.Fatalf("reading ci.yml's %s leg: %v", leg.name, err)
+			}
+			legs[leg.name] = facts
+		}
+		// EVERY language the test reaches, not the first: tests/crash's one test
+		// reaches all three, and a leg with Rust and Node but no JDK must fail.
+		for _, lang := range f.langs {
+			for _, problem := range facts.problemsFor(lang) {
+				t.Errorf("%s (%s) is excluded from the tier-1 gate on the strength of ci.yml's "+
+					"test-go %q leg running it, but %s.\n\nWithout that this test runs "+
+					"NOWHERE, and `go test -skip` leaves no --- SKIP line to say so.",
+					f.name, lang, leg.name, problem)
+			}
 		}
 	}
 }
 
-// knownOpenToolchainTests are tier-1 tests that DO need a tier-2 toolchain and are
-// deliberately left in the gate for now, each with the issue that removes it.
-// This is an allowance with an end date in the form of a failing check, not a
-// place to hide a test: the guard fails if an entry stops being a finding (the
-// test was split, renamed or deleted) or becomes excluded, so the entry has to be
-// deleted the day the issue lands.
-var knownOpenToolchainTests = map[string]string{
-	"tests/crash:TestCrashMidAgentLoopResumesWithoutReaskingTheModel": "cleat#3692: its /rust, /java and /assemblyscript " +
-		"subtests build guests with tier-2 toolchains in tier 1. tier1-gate.yml's rest shards provision a JDK and " +
-		"Rust for it (cleat#3499, cleat#2978). Excluding the whole test would drop its go and python subtests, " +
-		"which belong in tier 1, so it needs a split first. The allowance covers anything added INSIDE this " +
-		"test, including a further client in agentClients(); a different test is refused by name",
+// testGoLeg names the ci.yml test-go matrix entry that runs a tier-1 package's
+// excluded toolchain tests, and the package path that entry must carry.
+type testGoLeg struct{ name, path string }
+
+// legForTier1Package says which ci.yml leg runs the tier-2 tests of a tier-1
+// package once tiers.yaml excludes them from Tier 1. A package not listed here
+// has no such leg, and a toolchain test in it fails the guard by name.
+func legForTier1Package(dir string) (testGoLeg, bool) {
+	switch {
+	case dir == "../cmd" || strings.HasPrefix(dir, "../cmd/"):
+		return testGoLeg{"commands", "./cmd/..."}, true
+	case dir == "../tests/crash":
+		return testGoLeg{"crash", "./tests/crash/..."}, true
+	}
+	return testGoLeg{}, false
 }
 
 // toolchainFreeBuilderCallers are tests that reach a tier-2 builder and do not
@@ -320,15 +345,24 @@ func tier1PackageDirs() ([]string, error) {
 
 // callGraphAndRootsOfTestDir parses one directory's _test.go files. calls maps
 // each declared function to the identifiers it calls; roots maps each function
-// that itself builds a tier-2 toolchain to its language.
-func callGraphAndRootsOfTestDir(dir string) (calls map[string][]string, roots map[string]string, err error) {
+// that itself builds a tier-2 toolchain to every language it builds. A SET, not
+// one language: tests/crash's tierTwoAgentClients names all three builders, and a
+// map that kept the last one written would tell the second half of this guard that
+// the job running it needs only AssemblyScript's toolchain.
+func callGraphAndRootsOfTestDir(dir string) (calls map[string][]string, roots map[string]map[string]bool, err error) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
 	if err != nil {
 		return nil, nil, err
 	}
 	calls = map[string][]string{}
-	roots = map[string]string{}
+	roots = map[string]map[string]bool{}
+	addRoot := func(fn, lang string) {
+		if roots[fn] == nil {
+			roots[fn] = map[string]bool{}
+		}
+		roots[fn][lang] = true
+	}
 	for _, path := range files {
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
@@ -380,15 +414,15 @@ func callGraphAndRootsOfTestDir(dir string) (calls map[string][]string, roots ma
 						// functions matter, and a wrongly-named test is a loud finding.
 						calls[name] = append(calls[name], x.Name)
 						if lang, ok := builderIdents[x.Name]; ok {
-							roots[name] = lang
+							addRoot(name, lang)
 						}
 					case *ast.CallExpr:
 						if lang := targetLanguageIn(x.Args); lang != "" {
-							roots[name] = lang
+							addRoot(name, lang)
 						}
 					case *ast.CompositeLit:
 						if lang := targetLanguageIn(x.Elts); lang != "" {
-							roots[name] = lang
+							addRoot(name, lang)
 						}
 					}
 					return true
@@ -421,35 +455,36 @@ func targetLanguageIn(exprs []ast.Expr) string {
 	return ""
 }
 
-func reachesATierTwoToolchain(fn string, calls map[string][]string, roots map[string]string, seen map[string]bool) string {
+// tierTwoLanguagesReached adds to langs every tier-2 language fn reaches. It
+// follows every callee rather than stopping at the first root, so a test that
+// reaches two languages is reported for both.
+func tierTwoLanguagesReached(fn string, calls map[string][]string, roots map[string]map[string]bool, seen map[string]bool, langs map[string]bool) {
 	if seen[fn] {
-		return ""
+		return
 	}
 	seen[fn] = true
-	if lang, ok := roots[fn]; ok {
-		return lang
+	for lang := range roots[fn] {
+		langs[lang] = true
 	}
 	for _, callee := range calls[fn] {
-		if lang := reachesATierTwoToolchain(callee, calls, roots, seen); lang != "" {
-			return lang
-		}
+		tierTwoLanguagesReached(callee, calls, roots, seen, langs)
 	}
-	return ""
 }
 
 // flagsFilter matches a -run or -skip, in a go test line or in a matrix entry's flags.
 var flagsFilter = regexp.MustCompile(`\s-(run|skip)[\s=]`)
 
-// commandsLegFacts is what ci.yml's test-go "commands" matrix entry provides.
-type commandsLegFacts struct {
-	legFound        bool     // a test-go matrix entry named commands exists
-	pathIsCmd       bool     // ... and its path is ./cmd/...
-	setup           []string // `uses:` of steps conditioned on the commands leg
+// testGoLegFacts is what one ci.yml test-go matrix entry provides.
+type testGoLegFacts struct {
+	leg             testGoLeg
+	legFound        bool     // a test-go matrix entry with the leg's name exists
+	pathIsRight     bool     // ... and its path is the leg's package path
+	setup           []string // `uses:` of steps conditioned on the leg
 	filteredRunStep string   // the Run tests step's go test line, if it filters
 	runStepFound    bool
 }
 
-func readCommandsLeg() (*commandsLegFacts, error) {
+func readTestGoLeg(leg testGoLeg) (*testGoLegFacts, error) {
 	b, err := os.ReadFile("../.github/workflows/ci.yml")
 	if err != nil {
 		return nil, err
@@ -472,14 +507,14 @@ func readCommandsLeg() (*commandsLegFacts, error) {
 	if err := yaml.Unmarshal(b, &wf); err != nil {
 		return nil, err
 	}
-	facts := &commandsLegFacts{}
+	facts := &testGoLegFacts{leg: leg}
 	for _, job := range wf.Jobs {
 		isLeg := false
 		for _, p := range job.Strategy.Matrix.Package {
-			if p["name"] == "commands" {
+			if p["name"] == leg.name {
 				isLeg = true
 				facts.legFound = true
-				facts.pathIsCmd = p["path"] == "./cmd/..."
+				facts.pathIsRight = p["path"] == leg.path
 				// The leg's flags go onto the same go test line as ${{ matrix.package.flags }}.
 				if fl, ok := p["flags"].(string); ok && flagsFilter.MatchString(" "+fl+" ") {
 					facts.filteredRunStep = "matrix flags: " + fl
@@ -490,7 +525,7 @@ func readCommandsLeg() (*commandsLegFacts, error) {
 			continue
 		}
 		for _, s := range job.Steps {
-			if strings.Contains(s.If, "matrix.package.name == 'commands'") && s.Uses != "" {
+			if strings.Contains(s.If, "matrix.package.name == '"+leg.name+"'") && s.Uses != "" {
 				facts.setup = append(facts.setup, s.Uses)
 			}
 			if s.Name == "Run tests" {
@@ -505,17 +540,17 @@ func readCommandsLeg() (*commandsLegFacts, error) {
 		}
 	}
 	if !facts.legFound {
-		return nil, constErr("found no test-go matrix entry named \"commands\" in ci.yml -- " +
+		return nil, constErr("found no test-go matrix entry named \"" + leg.name + "\" in ci.yml -- " +
 			"the leg was renamed or removed, and the second half of this guard has nothing to check")
 	}
 	return facts, nil
 }
 
-// problemsFor lists what is missing for lang to be built by the commands leg.
-func (f *commandsLegFacts) problemsFor(lang string) []string {
+// problemsFor lists what is missing for lang to be built by the leg.
+func (f *testGoLegFacts) problemsFor(lang string) []string {
 	var out []string
-	if !f.pathIsCmd {
-		out = append(out, "the leg's matrix path is no longer ./cmd/...")
+	if !f.pathIsRight {
+		out = append(out, "the leg's matrix path is no longer "+f.leg.path)
 	}
 	if !f.runStepFound {
 		out = append(out, "the leg has no step named \"Run tests\"")
@@ -537,7 +572,7 @@ func (f *commandsLegFacts) problemsFor(lang string) []string {
 		}
 	}
 	if !has {
-		out = append(out, "the leg has no step using "+want+" conditioned on the commands leg")
+		out = append(out, "the leg has no step using "+want+" conditioned on the "+f.leg.name+" leg")
 	}
 	if lang == "java" {
 		gradle := false

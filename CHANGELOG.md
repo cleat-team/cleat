@@ -57,9 +57,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tier 1, and it checks that `ci.yml`'s `commands` leg still provisions the toolchain and runs
   `./cmd/...` unfiltered, since `go test -skip` leaves no skip line to say a test runs nowhere.
   Seven other tests that reach a builder stay in Tier 1 because they refuse before any toolchain
-  starts (measured with none on `PATH`). `tests/crash`'s agent-loop test, which builds Rust, Java and
-  AssemblyScript clients in Tier 1, is named in the guard as a known exception until cleat#3692
-  splits it.
+  starts (measured with none on `PATH`). `tests/crash`'s agent-loop test was the one exception
+  until cleat#3692.
+- Tier 1 no longer builds Rust, Java or AssemblyScript clients in `tests/crash` (cleat#3692). The
+  agent-loop acceptance ran one subtest per client language, so its `rust`, `java` and
+  `assemblyscript` subtests fetched Cargo, Gradle and npm dependencies inside the gate, which
+  `tiers.yaml` puts in tier 2 (D5), and `tier1.exclude_tests` cannot name a subtest. The tier-2
+  clients are now a top-level test of their own, excluded from Tier 1 and run by `ci.yml`'s `crash`
+  leg, which provisions the toolchains. The tier-1 test keeps `go` and `python`. `tier1-gate.yml`'s
+  rest shards no longer set up a JDK 17 or Rust for it, and the placement guard has no exceptions
+  left to name: it checks that the `crash` leg still provisions every language the excluded test
+  reaches and runs `./tests/crash/...` unfiltered.
 - Dropping a tenant on SQL Server no longer returns a connection to the pool when clearing its session context failed (cleat#3647). `beginDropTx` clears the dropped tenant's session context before releasing the connection it pinned, and ignored the clear's failure; after a request was cancelled inside `admin.drop_tenant` the clear was refused, so the connection went back to the pool still holding that tenant. With the driver's session reset on reuse (go-mssqldb v1.11.2, as shipped) the next statement on the pool ran as no tenant, so nothing was observed to leak: this removes a dependence on the driver on the application login's pool. A connection whose clear fails is now discarded. Pinned by `TestAClientAbortDuringADropLeavesNoTenantOnThePool` (SQL Server).
 - A request to a route that skips authentication is no longer answered `401 {"error":"invalid session"}` because of its `Authorization` header (cleat#3654). `POST /ingest/{source_id}` and `POST /slack/interactive` are reachable without a cleat credential, but when `oauthprovider` was loaded a Bearer token of 64 lowercase hex characters on either was looked up as an OAuth session and refused when none matched, while the same request with no header, or with a differently shaped one, reached its handler. `auth.MiddlewareWithMux` now records that the mux resolved a request to one of the exempt patterns, and the plugin leaves such a request alone; nothing else reads it. Observed through the real worker; not observed: whether any deployed sender sends such a header on these routes.
 - Two concurrent deploys of one workflow version with different bytes can no longer leave a sharded store's shards holding different code (cleat#3547). The deploy wrote each shard in turn and nothing ordered two deploys across shards, so one shard could end with one deploy's bytes and another with the other's while both returned success. A deploy now takes a PostgreSQL advisory lock on the shard the name hashes to, keyed on the tenant, name and version, and holds it until the last shard is written; a second deploy of the same version waits for it for up to 60 seconds, then fails with `ErrWorkflowDefDeployInProgress` (HTTP 409 from `POST /api/definitions`) and writes nothing. A multi-shard store whose first shard cannot take the lock refuses to deploy rather than running unordered. Replacing a version's bytes is still allowed, as on a single store. Deprecate and purge are not yet under the lock. `cleat deploy --db` writes one shard only and does not take it.
