@@ -158,6 +158,10 @@ schema and the role. It touches **no plugin table**. A dropped tenant's `kv_stor
 `audit_events`, `oauth_sessions`, `webhook_events` and `blob_index` rows all survive, in `public`,
 indefinitely. For a deletion path that exists to honour a tenant leaving, that is the wrong default.
 
+*Superseded since this page's baseline: cleat#1289 / #1382 (2026-09-12) made `admin.drop_tenant` delete a
+tenant's rows from every plugin table, `audit_events` and `audit_chain_heads` included. See "Retention" in
+`docs/reference/audit-log.md` for what a drop leaves behind (cleat#3716).*
+
 **(e) `Down` is declared and never executed.** `plugin.Migration.Down` is populated by plugins and
 `grep -rn '\.Down\b' plugin/ migration/` finds no caller. It is a field promising rollback that does
 not exist.

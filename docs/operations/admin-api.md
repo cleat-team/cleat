@@ -318,6 +318,10 @@ of the provisioning API, so it is refused unless every one of these holds, check
 Steps 4 and 5 are checked in the same transaction as the drop, under a lock on the tenant's row, so a resume cannot slip
 in between the check and the delete.
 
+**A drop deletes the tenant's audit trail** (`audit_events` and `audit_chain_heads`), with the rest of its data. If you
+need that history, run `cleatctl audit export` for the tenant **before** the drop; afterwards there is nothing to export
+(`docs/reference/audit-log.md`).
+
 ```json
 {"tenant_id": "...", "dropped": true, "already_dropped": false, "dropped_at": "2026-10-30T04:00:00.000000Z",
  "dropped_by": "clew-service", "audit_chain": {"seq": 41, "hash": "…"}}

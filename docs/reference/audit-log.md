@@ -484,5 +484,13 @@ recording the gap as a floor would turn a finding into a fact.
 The sweep visits every tenant that has an expired row, whether or not the tenant is still
 registered. It no longer uses one cross-tenant `DELETE`.
 
-A dropped tenant's audit rows and head row survive `drop-tenant`, as `audit_events` always has
-(`docs/plugin-table-handling.md`), and are removed by retention when they expire.
+**A dropped tenant's audit rows and chain head do not survive `drop-tenant`.** `admin.drop_tenant` deletes the
+tenant's `audit_events` and `audit_chain_heads` rows with the rest of its data (cleat#1289; measured on
+PostgreSQL 17 and SQL Server 2022 on 2026-11-12, cleat#3716: a tenant with 3 recorded requests had 0 rows and no
+head after the drop, while the default tenant's rows were untouched). What the drop leaves is the tombstone
+(`admin.tenant_tombstones`): the dropping principal, the time, and the chain's last `seq` and `hash`, which the
+drop response also returns. That lets an export taken **before** the drop be checked against where the chain
+ended, and it is all that is left: after the drop there is nothing to export. If a tenant's audit history has to
+be kept past its removal, export it with `cleatctl audit export` first. By owner decision D77 (2026-11-12) a
+tenant's audit history does not outlive the tenant; that is reopened only if a stated compliance requirement needs
+it kept after offboarding (cleat#3716).
