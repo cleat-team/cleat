@@ -145,12 +145,24 @@ parent workflow ID).
 
 ### 1. Create the Schema on Each Shard
 
-Every shard must have the full cleat schema.  Use the same migration scripts
-you use for a single-node deployment:
+Every shard must have the full cleat schema.  Run the same deploy step you use
+for a single-node deployment, with the shards file (step 2) on the command line:
 
 ```bash
-for f in migrations/postgres/*.sql; do psql "$SHARD_CONN_STR" -f "$f"; done
+cleat-worker --driver postgres --shards-file shards.json --migrate-only
 ```
+
+It migrates the core schema of every shard, and the plugin tables on the first
+shard (the admin shard, see `docs/reference/worker-config.md`).  A shard whose
+migration chain belongs to another release is refused before any shard is
+changed, and a shard that cannot be migrated fails the run and is named in the
+log.  `--migrate-db` names the first shard's migration connection only: the other
+shards are migrated through their own `conn_str`, so that login needs DDL rights.
+
+A shard built another way -- for example with the `psql` loop this page used to
+give, which records no migration ledger -- is not adopted by this: `--migrate-only`
+tries to apply the whole chain to it and fails at the first object that already
+exists.  Migrating such a shard in place is not covered here.
 
 ### 2. Write a Shard Configuration File
 

@@ -888,6 +888,10 @@ func main() {
 	shardPoolCount := 0
 
 	var factory engine.StoreFactory
+	// shardMigrationTargets is every shard's database, in shards-file order, captured
+	// where the sharded branch opens them because shardDBs is scoped to that branch and
+	// the migration step below is not. Empty for an unsharded worker. cleat#3718.
+	var shardMigrationTargets []shardMigrationTarget
 	var payloadEncryption *engine.PayloadEncryption
 	// payloadRing is the SAME *engine.ReloadableKeyRing payloadEncryption is
 	// built around, in whichever of the three branches below actually runs
@@ -978,6 +982,7 @@ func main() {
 			sdb.SetConnMaxLifetime(5 * time.Minute)
 
 			shardDBs[i] = sdb
+			shardMigrationTargets = append(shardMigrationTargets, shardMigrationTarget{name: cfg.Name, db: sdb, schema: cfg.Schema})
 			f := engine.NewPostgresStoreFactory(sdb, cfg.Schema)
 			// WithDSN is required by OpenIsolatedStore below (cleat#2195): it
 			// opens its own pool on this DSN rather than reusing sdb, and
@@ -1768,6 +1773,34 @@ func main() {
 	}
 	refuseForeignChain("database", migrator)
 
+	// EVERY SHARD (cleat#3718). The runner above is the admin shard's, or --migrate-db's.
+	// A sharded worker has one database per shard and used to migrate only that one, so
+	// `--migrate-only` exited 0 with the other shards empty. Each of the others gets its
+	// own runner on its own connection and its own schema, and its chain is checked here,
+	// with the rest, before anything is changed: a refusal on shard 3 must not leave shard
+	// 1 migrated. Plugin migrations stay on the admin shard, where the plugin tables live
+	// (docs/reference/worker-config.md, --shards-file).
+	type shardRunner struct {
+		name string
+		r    *migration.Runner
+	}
+	var otherShards []shardRunner
+	for i, t := range shardMigrationTargets {
+		if i == 0 {
+			continue // the admin shard: migrator, above
+		}
+		r := migration.NewRunner(t.db, migration.Dialect(factory.Dialect()), *migrationsDir).
+			WithFS(migrationsOverrideFS()).
+			WithLockTimeout(*migrationLockTimeout).
+			WithSchema(t.schema)
+		refuseForeignChain("shard "+t.name, r)
+		otherShards = append(otherShards, shardRunner{name: t.name, r: r})
+	}
+	if *migrateDBURL != "" && len(otherShards) > 0 && (*migrateOnly || *migrateOnStart) {
+		logger.WarnContext(context.Background(), "--migrate-db names the first shard's migration connection only; the other shards are migrated through their own conn_str in the shards file, so that login needs DDL rights too",
+			"worker_id", workerID, "other_shards", len(otherShards))
+	}
+
 	// For MySQL, the factory creates a per-tenant database that needs its own
 	// copy of the schema, migrated or verified exactly as the shared one is.
 	// Its chain is checked here too, before the shared database is migrated, so
@@ -1809,6 +1842,13 @@ func main() {
 			plugin.WithSchema(*schemaName)); err != nil {
 			logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
 			os.Exit(1)
+		}
+		for _, sh := range otherShards {
+			if err := sh.r.Run(ctx); err != nil {
+				logger.ErrorContext(context.Background(), "core database migrations failed on shard "+sh.name+" — the shards before it are migrated and this one and any after it are not; check that its login has CREATE/ALTER privileges", "worker_id", workerID, "shard", sh.name, "error", err)
+				os.Exit(1)
+			}
+			logger.InfoContext(context.Background(), "shard migrated", "worker_id", workerID, "shard", sh.name)
 		}
 	} else if err := verifySchema(ctx, migrator, migrateDB, plugin.Dialect(factory.Dialect()), plugList,
 		*schemaName, func(msg string, args ...any) {
