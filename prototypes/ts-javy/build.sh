@@ -9,12 +9,19 @@ cd "$(dirname "$0")"
 name=$1; entries=$2
 out=${OUT_NAME:-$name}
 J=.tools/javy; W=.work
+PLUGIN=${PLUGIN:-$W/cleat-plugin.wasm}   # a determinism control build passes its own plugin variant
 mkdir -p "$W"
+
+# Static determinism check (tools/tscheck). Refuses a workflow that names a global this runtime does not define. The binary is
+# built and run directly, not through `go run`, because `go run` reports every non-zero exit as 1 and this check has three
+# outcomes: 0 clean, 1 finding, 2 UNMEASURED (the check could not look). Both 1 and 2 stop the build.
+GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go build -o "$W/tscheck" ./tools/tscheck
+"$W/tscheck" "workflows/$name/$name.ts" || { rc=$?; echo "build refused by tscheck (exit $rc: 1 = finding, 2 = UNMEASURED)"; exit "$rc"; }
 
 # The plugin: rebuilt when its sources are newer than the initialised module, or on request.
 if [ -n "${REBUILD_PLUGIN:-}" ] || [ ! -f "$W/cleat-plugin.wasm" ] || [ -n "$(find plugin/src plugin/Cargo.toml ../../crates/cleat-sdk/src -newer "$W/cleat-plugin.wasm" -type f | head -1)" ]; then
-  (cd plugin && cargo build --target wasm32-wasip1 --release 2>&1 | grep -E '^(error|warning: unused)|Finished' || true)
-  $J init-plugin plugin/target/wasm32-wasip1/release/cleat_js_plugin.wasm -o "$W/cleat-plugin.wasm"
+  (cd plugin && CLEAT_SHIMS_OFF="" cargo build --target wasm32-wasip1 --release 2>&1 | grep -E '^(error|warning: unused)|Finished' || true)
+  $J init-plugin --deterministic plugin/target/wasm32-wasip1/release/cleat_js_plugin.wasm -o "$W/cleat-plugin.wasm"
 fi
 
 define=()
@@ -43,7 +50,21 @@ IFS=',' read -ra E <<< "$entries"
 for e in "${E[@]}"; do k=${e//_/-}; echo "  export $k: func();" >> "$wit"; pairs+=("$e=$k"); done
 echo "}" >> "$wit"
 
-$J build "$W/$out.js" -C plugin="$W/cleat-plugin.wasm" -C wit="$wit" -C wit-world=w -o "$W/$out.javy.wasm"
+# -C deterministic: fixed clocks and a zero RNG during Wizer pre-initialisation, so identical source gives identical bytes
+# (without it two builds of one bundle differ in 3 bytes of a pre-initialised data segment; evidence/phase2/repro.txt).
+$J build "$W/$out.js" -C plugin="$PLUGIN" -C deterministic=${JAVY_DETERMINISTIC:-y} -C wit="$wit" -C wit-world=w -o "$W/$out.javy.wasm"
 link/target/release/cleat-js-link "$W/$out.javy.wasm" "$W/$out.linked.wasm" "${pairs[@]}"
-GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go run ./tools/tsmeta -in "$W/$out.linked.wasm" -out "$W/$out.wasm" -name "$out" -entries "$entries" -language javascript
+# The engine pin: what this module carries, computed from the real artefacts (nothing typed). QuickJS comes from the plugin's
+# lockfile, the plugin and SDK by content hash. A rebuild with any of them changed is a different pin.
+python3 - "$J" "$PLUGIN" "$W/$out.pin.json" "${JAVY_DETERMINISTIC:-y}" <<'PY'
+import hashlib, json, re, subprocess, sys
+javy, plugin, out, det = sys.argv[1:5]
+sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+lock = open("plugin/Cargo.lock").read()
+qjs = re.search(r'name = "rquickjs-core"\nversion = "([^"]+)"', lock).group(1)
+json.dump({"pin_version": 1, "javy": subprocess.check_output([javy, "--version"], text=True).strip(), "rquickjs_core": qjs,
+           "plugin_sha256": sha(plugin), "sdk_sha256": sha("packages/cleat-ts/index.ts"), "deterministic_build": det == "y"},
+          open(out, "w"), sort_keys=True, indent=1)
+PY
+GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go run ./tools/tsmeta -in "$W/$out.linked.wasm" -out "$W/$out.wasm" -name "$out" -entries "$entries" -language javascript -pin "$W/$out.pin.json"
 ls -l "$W/$out.wasm" | awk '{print "built", $9, $5, "bytes"}'

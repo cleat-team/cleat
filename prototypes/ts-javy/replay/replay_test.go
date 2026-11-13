@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -96,7 +97,7 @@ func TestReplayOfAnInFlightJSRunIsIdenticalThreeTimes(t *testing.T) {
 		t.Fatalf("UNMEASURED: only %d events loaded; a replay of that proves nothing about suspension points", len(loaded))
 	}
 
-	env := wasmtest.NewWasmTestEnv(t)
+	env := wasmtest.NewWasmTestEnv(t, wasmtest.WithWorkflowID(id))
 	defer env.Close()
 
 	var outs [3]outcome
@@ -189,4 +190,69 @@ func types(h []engine.EventRecord) string {
 		s = append(s, string(e.EventType))
 	}
 	return strings.Join(s, ",")
+}
+
+// Plan §4.5, "Engine version": deploy, bump the engine, replay. The result must be an identical replay or a refusal, never a
+// silent difference. The SAME in-flight history is replayed on three modules that differ only in their embedded engine:
+//
+//	a  the engine the run recorded on
+//	b  a benign bump: different bytes (a different shim set, no behavioural difference for this workflow)
+//	c  a behaviour-changing bump: the Math.random shim removed
+//
+// a and b must replay identically; c must be REFUSED (a replay divergence), because its Math.random differs from the value the
+// history recorded. If c replayed quietly the same as a, "never drift silently" would be a claim with nothing behind it.
+func TestReplayUnderABumpedEngine(t *testing.T) {
+	dsn, id := need(t, "REPLAY_DSN"), need(t, "REPLAY_WORKFLOW_ID")
+	pa, pb, pc := need(t, "REPLAY_WASM_A"), need(t, "REPLAY_WASM_B"), need(t, "REPLAY_WASM_C")
+	entry, input := need(t, "REPLAY_ENTRY"), need(t, "REPLAY_INPUT")
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	loaded, err := engine.NewPostgresStore(db).LoadEventHistory(context.Background(), id)
+	if err != nil {
+		t.Fatalf("loading the persisted history: %v", err)
+	}
+	t.Logf("loaded %d persisted events for %s: %s", len(loaded), id, types(loaded))
+	if len(loaded) < 1 {
+		t.Fatalf("UNMEASURED: no persisted events; the random value this test depends on was never recorded")
+	}
+	// The engine's random stream is derived per workflow, so a replay under a DIFFERENT workflow id legitimately diverges for any
+	// workflow that draws a random value. The first version of this test used a fresh id and reported a divergence even for the
+	// engine the run was recorded on. Replay under the run's own identity.
+	env := wasmtest.NewWasmTestEnv(t, wasmtest.WithWorkflowID(id), wasmtest.WithDefName(os.Getenv("REPLAY_DEF_NAME")), wasmtest.WithDefVersion(atoiOr(os.Getenv("REPLAY_DEF_VERSION"), 1)))
+	defer env.Close()
+	read := func(p string) []byte {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	oa := replayOnce(t, env, read(pa), entry, input, loaded)
+	oa2 := replayOnce(t, env, read(pa), entry, input, loaded)
+	ob := replayOnce(t, env, read(pb), entry, input, loaded)
+	oc := replayOnce(t, env, read(pc), entry, input, loaded)
+	t.Logf("a (recorded engine):   err=%q suspended=%q", oa.Err, oa.Suspended)
+	t.Logf("a again:               err=%q suspended=%q", oa2.Err, oa2.Suspended)
+	t.Logf("b (benign bump):       err=%q suspended=%q", ob.Err, ob.Suspended)
+	t.Logf("c (behaviour change):  err=%.200q", oc.Err)
+	if oa.Err != "" || !reflect.DeepEqual(oa, oa2) {
+		t.Fatalf("the recorded engine does not even replay its own history identically twice; nothing below means anything")
+	}
+	if !reflect.DeepEqual(oa, ob) {
+		t.Errorf("benign bump b did not replay identically to a:\n a=%+v\n b=%+v", oa, ob)
+	}
+	if oc.Err == "" || !strings.Contains(oc.Err, "divergence") {
+		t.Errorf("behaviour-changing bump c was NOT refused with a replay divergence (err=%q): drift would be silent", oc.Err)
+	}
+}
+
+func atoiOr(s string, d int) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return d
+	}
+	return n
 }

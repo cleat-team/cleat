@@ -1,0 +1,30 @@
+  WASM unchanged: go_journey v1 already has the same binary (skipped)
+  WASM unchanged: go_sleeper v1 already has the same binary (skipped)
+
+-- pass 1
+js no kill                        status=done  event_count=6 warnings=1
+go no kill                        status=done  event_count=6 warnings=1
+js kill at the signal wait only   status=done  event_count=6 warnings=1
+go kill at the signal wait only   status=done  event_count=6 warnings=1
+js kill at the child wait only    status=done  event_count=6 warnings=1
+go kill at the child wait only    status=done  event_count=6 warnings=1
+js kill at both                   status=done  event_count=6 warnings=1
+go kill at both                   status=done  event_count=6 warnings=1
+js no kill (again)                status=done  event_count=6 warnings=1
+go no kill (again)                status=done  event_count=6 warnings=1
+
+-- pass 2
+js no kill                        status=done  event_count=6 warnings=1
+go no kill                        status=done  event_count=6 warnings=1
+js kill at the signal wait only   status=done  event_count=6 warnings=1
+go kill at the signal wait only   status=done  event_count=6 warnings=1
+js kill at the child wait only    status=done  event_count=6 warnings=1
+go kill at the child wait only    status=done  event_count=6 warnings=1
+js kill at both                   status=done  event_count=6 warnings=1
+go kill at both                   status=done  event_count=6 warnings=1
+js no kill (again)                status=done  event_count=6 warnings=1
+go no kill (again)                status=done  event_count=6 warnings=1
+
+summary (runs, runs that logged the warning, runs that did not end done):
+  js: 10 runs, 10 with the warning, 0 not done
+  go: 10 runs, 10 with the warning, 0 not done

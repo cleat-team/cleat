@@ -20,12 +20,37 @@ def psql(sql):
     return p.stdout.rstrip("\n")
 
 
+# Matches only workers started by THIS harness (its binary name and its API port in one command line). A second worker on the same
+# database is the failure this guards against: it claims runs the first one's log never shows, so every count read from a log is
+# silently short. Measured 2026-11-13: two survivors of Phase 1 scripts turned a 10-of-10 into 5-of-10 and 0-of-10.
+import atexit
+STALE = f"cleat-worker -db .*-api-addr :{PORT}"
+
+
+def stop_stale():
+    subprocess.run(["pkill", "-f", STALE], capture_output=True)
+    for _ in range(20):
+        if not subprocess.run(["pgrep", "-f", STALE], capture_output=True, text=True).stdout.split():
+            return
+        time.sleep(0.25)
+    raise SystemExit("UNMEASURED: a harness worker is still alive after pkill; counts read from logs would be short")
+
+
 class Worker:
     def __init__(self, log):
         self.log = Path(log)
         self.proc = None
+        stop_stale()
+        atexit.register(self.stop)
 
     def start(self):
+        try:
+            urllib.request.urlopen(f"{API}/healthz", timeout=1).read()
+            raise SystemExit(f"UNMEASURED: something is already serving {API}; starting a worker now would share its database")
+        except SystemExit:
+            raise
+        except Exception:
+            pass
         f = open(self.log, "ab")
         f.write(f"\n=== worker start {time.strftime('%H:%M:%S')} ===\n".encode())
         f.flush()
@@ -33,6 +58,8 @@ class Worker:
             [str(W / "cleat-worker"), "-db", APP, "-migrate-db", OWNER, "-api-addr", f":{PORT}", "-concurrency", "4",
              "-poll", "200ms"], stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
         for _ in range(60):
+            if self.proc.poll() is not None:
+                raise SystemExit(f"UNMEASURED: the worker exited at start (rc={self.proc.returncode}); see {self.log}")
             try:
                 urllib.request.urlopen(f"{API}/healthz", timeout=2).read()
                 return
@@ -41,8 +68,16 @@ class Worker:
         raise SystemExit("worker never became healthy")
 
     def kill9(self):
-        os.killpg(self.proc.pid, signal.SIGKILL)
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         self.proc.wait(timeout=20)
+
+    def stop(self):
+        """Idempotent cleanup, registered with atexit so a driver that fails still leaves no worker behind."""
+        if self.proc is not None and self.proc.poll() is None:
+            self.kill9()
 
 
 def http(method, path, key, body=None, timeout=15):

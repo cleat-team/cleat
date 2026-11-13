@@ -1,0 +1,35 @@
+    Finished `release` profile [optimized] target(s) in 0.16s
+plugin-full: off-list='' bytes=1070714 shim-source-present=True
+    Finished `release` profile [optimized] target(s) in 2.03s
+plugin-off-date: off-list='date' bytes=1070677 shim-source-present=True
+    Finished `release` profile [optimized] target(s) in 1.49s
+plugin-off-random: off-list='random' bytes=1070691 shim-source-present=True
+    Finished `release` profile [optimized] target(s) in 1.75s
+plugin-off-lockdown: off-list='lockdown' bytes=1070665 shim-source-present=True
+    Finished `release` profile [optimized] target(s) in 2.17s
+plugin-off-all: off-list='date,random,lockdown' bytes=1070714 shim-source-present=True
+built .work/sleeper.wasm 1116530 bytes
+WASM unchanged: sleeper v2 already has the same binary (skipped)
+built .work/signaler.wasm 1116515 bytes
+WASM unchanged: signaler v2 already has the same binary (skipped)
+built .work/parent.wasm 1116504 bytes
+WASM unchanged: parent v2 already has the same binary (skipped)
+built .work/racer.wasm 1116735 bytes
+WASM unchanged: racer v2 already has the same binary (skipped)
+built .work/finalizer.wasm 1116596 bytes
+WASM unchanged: finalizer v2 already has the same binary (skipped)
+built .work/journey.wasm 1116811 bytes
+WASM unchanged: journey v4 already has the same binary (skipped)
+built .work/busy.wasm 1116857 bytes
+WASM unchanged: busy v1 already has the same binary (skipped)
+built .work/finalizer_throw.wasm 1116534 bytes
+WASM unchanged: finalizer_throw v2 already has the same binary (skipped)
+built .work/errors.wasm 1117877 bytes
+WASM unchanged: thrower v2 already has the same binary (skipped)
+WASM unchanged: rejecter v2 already has the same binary (skipped)
+WASM unchanged: late_thrower v2 already has the same binary (skipped)
+WASM unchanged: raw_throw v2 already has the same binary (skipped)
+WASM unchanged: oom v2 already has the same binary (skipped)
+built .work/nondet.wasm 1119857 bytes
+built and deployed everything from the current toolchain
+[build] exit=0

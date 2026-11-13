@@ -28,6 +28,13 @@ import_namespace!("cleat-js-plugin-v0");
 const SUSPEND_SENTINEL: i64 = 1 << 62;
 const SUSPENDED: &str = r#"{"suspended":true}"#;
 
+/// Comma-separated shim names to leave OUT of this build (see shims.js). Empty in every shipped build; set only by the
+/// determinism control builds (`CLEAT_SHIMS_OFF=random cargo build ...`), so each control removes exactly one shim.
+const SHIMS_OFF: &str = match option_env!("CLEAT_SHIMS_OFF") {
+    Some(v) => v,
+    None => "",
+};
+
 #[derive(Default)]
 struct Io {
     args_ptr: u32,
@@ -219,6 +226,8 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             }),
         )
         .unwrap();
+        g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
+        ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });
     runtime
 }

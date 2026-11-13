@@ -1,0 +1,5 @@
+caught   never refuses (rules emptied)   (--- FAIL: TestKnownPositivesAreRefusedForTheDeterminismReason)
+caught   refuses a method call on another object   (--- FAIL: TestKnownNegativesAreNotOverReported)
+caught   an unterminated comment ends the scan quietly   (--- FAIL: TestACheckThatCouldNotLookIsNotAPass)
+restored (content identical)
+ok  	cleatproto/tools/tscheck	0.546s

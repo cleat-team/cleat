@@ -18,7 +18,7 @@ print("run", wid, "in flight, history:", [e[1] for e in events(wid)], flush=True
 env = {**os.environ, "GOWORK": "off", "GOFLAGS": "-mod=mod", "GOPROXY": "off",
        "REPLAY_DSN": OWNER, "REPLAY_WORKFLOW_ID": wid, "REPLAY_WASM": str(W / "journey.wasm"),
        "REPLAY_ENTRY": "journey", "REPLAY_INPUT": json.dumps(inp)}
-p = subprocess.run(["go", "test", "-count=1", "-v", "./..."], cwd=HERE / "replay", env=env, capture_output=True, text=True, timeout=600)
+p = subprocess.run(["go", "test", "-count=1", "-v", "-run", "TestReplayOfAnInFlightJSRunIsIdenticalThreeTimes", "./replay"], cwd=HERE, env=env, capture_output=True, text=True, timeout=600)
 out = p.stdout + p.stderr
 print(out)
 (HERE / "evidence" / "phase1" / "q2-replay-3x.txt").write_text(out)

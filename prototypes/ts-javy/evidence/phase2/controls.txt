@@ -1,0 +1,127 @@
+  WASM unchanged: nondet_full v3 already has the same binary (skipped)
+  WASM unchanged: nondet_off-date v3 already has the same binary (skipped)
+  WASM unchanged: nondet_off-random v3 already has the same binary (skipped)
+  WASM unchanged: nondet_off-lockdown v3 already has the same binary (skipped)
+  WASM unchanged: nondet_off-all v3 already has the same binary (skipped)
+
+variant       source               outcome
+full          dateNow              same=True  recorded=1794594541665            later=1794594543067
+full          newDate              same=True  recorded=1794594543312            later=1794594544534
+full          dateElapsed          same=True  recorded=false                    later=false
+full          newDateElapsed       same=True  recorded=false                    later=false
+full          dateEqualsHostNow    same=True  recorded=true                     later=true
+full          dateCall             same=True  recorded="string:true"            later="string:true"
+full          random               same=True  recorded=0.5927432775344919       later=0.7695431602288212
+full          randomRange          same=True  recorded={"min":0.001781422245102 later={"min":0.004481222367196
+full          intl                 same=True  recorded="undefined"              later="undefined"
+full          toLocaleDate         same=True  recorded="01/01/1970, 12:00:00 AM later="01/01/1970, 12:00:00 AM
+full          toLocaleNumber       same=True  recorded="1234567.891"            later="1234567.891"
+full          perfNow              same=True  recorded="absent"                 later="absent"
+full          cryptoRandom         same=True  recorded="absent"                 later="absent"
+full          weakRef              same=True  recorded="undefined"              later="undefined"
+full          finalizationRegistry same=True  recorded="undefined"              later="undefined"
+full          setTimeout           same=True  recorded="absent"                 later="absent"
+full          setInterval          same=True  recorded="absent"                 later="absent"
+full          setTimeoutCall       same=True  recorded="absent"                 later="absent"
+full          setTimeoutComputed   same=True  recorded=threw:TypeError          later=threw:TypeError
+off-date      dateNow              same=True  recorded=1794594570051            later=1794594571461
+off-date      newDate              same=True  recorded=1794594571674            later=1794594572911
+off-date      dateElapsed          same=True  recorded=false                    later=false
+off-date      newDateElapsed       same=True  recorded=false                    later=false
+off-date      dateEqualsHostNow    same=True  recorded=true                     later=true
+off-date      dateCall             same=True  recorded="string:true"            later="string:true"
+off-date      random               same=True  recorded=0.2570639944314498       later=0.5031011939387701
+off-date      randomRange          same=True  recorded={"min":0.005003029588560 later={"min":0.002446099255998
+off-date      intl                 same=True  recorded="undefined"              later="undefined"
+off-date      toLocaleDate         same=True  recorded="01/01/1970, 12:00:00 AM later="01/01/1970, 12:00:00 AM
+off-date      toLocaleNumber       same=True  recorded="1234567.891"            later="1234567.891"
+off-date      perfNow              same=True  recorded="absent"                 later="absent"
+off-date      cryptoRandom         same=True  recorded="absent"                 later="absent"
+off-date      weakRef              same=True  recorded="undefined"              later="undefined"
+off-date      finalizationRegistry same=True  recorded="undefined"              later="undefined"
+off-date      setTimeout           same=True  recorded="absent"                 later="absent"
+off-date      setInterval          same=True  recorded="absent"                 later="absent"
+off-date      setTimeoutCall       same=True  recorded="absent"                 later="absent"
+off-date      setTimeoutComputed   same=True  recorded=threw:TypeError          later=threw:TypeError
+off-random    dateNow              same=True  recorded=1794594598205            later=1794594599705
+off-random    newDate              same=True  recorded=1794594599807            later=1794594601023
+off-random    dateElapsed          same=True  recorded=false                    later=false
+off-random    newDateElapsed       same=True  recorded=false                    later=false
+off-random    dateEqualsHostNow    same=True  recorded=true                     later=true
+off-random    dateCall             same=True  recorded="string:true"            later="string:true"
+off-random    random               FAILED divergence=True  host: workflow 0d2e228f-9e9a-4cd5-abf4-d874460b2ca3: execution failed: wasm trap: host: ex
+off-random    randomRange          FAILED divergence=True  host: workflow fa6fdc20-56b1-45cc-bcb6-660ca204a063: execution failed: wasm trap: host: ex
+off-random    intl                 same=True  recorded="undefined"              later="undefined"
+off-random    toLocaleDate         same=True  recorded="01/01/1970, 12:00:00 AM later="01/01/1970, 12:00:00 AM
+off-random    toLocaleNumber       same=True  recorded="1234567.891"            later="1234567.891"
+off-random    perfNow              same=True  recorded="absent"                 later="absent"
+off-random    cryptoRandom         same=True  recorded="absent"                 later="absent"
+off-random    weakRef              same=True  recorded="undefined"              later="undefined"
+off-random    finalizationRegistry same=True  recorded="undefined"              later="undefined"
+off-random    setTimeout           same=True  recorded="absent"                 later="absent"
+off-random    setInterval          same=True  recorded="absent"                 later="absent"
+off-random    setTimeoutCall       same=True  recorded="absent"                 later="absent"
+off-random    setTimeoutComputed   same=True  recorded=threw:TypeError          later=threw:TypeError
+off-lockdown  dateNow              same=True  recorded=1794594625975            later=1794594627372
+off-lockdown  newDate              same=True  recorded=1794594627613            later=1794594628834
+off-lockdown  dateElapsed          same=True  recorded=false                    later=false
+off-lockdown  newDateElapsed       same=True  recorded=false                    later=false
+off-lockdown  dateEqualsHostNow    same=True  recorded=true                     later=true
+off-lockdown  dateCall             same=True  recorded="string:true"            later="string:true"
+off-lockdown  random               same=True  recorded=0.1258123997286661       later=0.19988680394787106
+off-lockdown  randomRange          same=True  recorded={"min":0.001162037847070 later={"min":0.000249437751927
+off-lockdown  intl                 same=True  recorded="undefined"              later="undefined"
+off-lockdown  toLocaleDate         same=True  recorded="01/01/1970, 12:00:00 AM later="01/01/1970, 12:00:00 AM
+off-lockdown  toLocaleNumber       same=True  recorded="1234567.891"            later="1234567.891"
+off-lockdown  perfNow              same=True  recorded="absent"                 later="absent"
+off-lockdown  cryptoRandom         same=True  recorded="absent"                 later="absent"
+off-lockdown  weakRef              same=True  recorded="undefined"              later="undefined"
+off-lockdown  finalizationRegistry same=True  recorded="undefined"              later="undefined"
+off-lockdown  setTimeout           same=True  recorded="absent"                 later="absent"
+off-lockdown  setInterval          same=True  recorded="absent"                 later="absent"
+off-lockdown  setTimeoutCall       same=True  recorded="absent"                 later="absent"
+off-lockdown  setTimeoutComputed   same=True  recorded=threw:TypeError          later=threw:TypeError
+off-all       dateNow              same=True  recorded=1794594653663            later=1794594655053
+off-all       newDate              same=True  recorded=1794594655305            later=1794594656525
+off-all       dateElapsed          same=True  recorded=false                    later=false
+off-all       newDateElapsed       same=True  recorded=false                    later=false
+off-all       dateEqualsHostNow    same=True  recorded=true                     later=true
+off-all       dateCall             same=True  recorded="string:true"            later="string:true"
+off-all       random               FAILED divergence=True  host: workflow dbd847f2-805e-4251-ba50-ae206030578f: execution failed: wasm trap: host: ex
+off-all       randomRange          FAILED divergence=True  host: workflow f7a0d5a2-86b9-4703-8edb-5ff1c2a5c605: execution failed: wasm trap: host: ex
+off-all       intl                 same=True  recorded="undefined"              later="undefined"
+off-all       toLocaleDate         same=True  recorded="01/01/1970, 12:00:00 AM later="01/01/1970, 12:00:00 AM
+off-all       toLocaleNumber       same=True  recorded="1234567.891"            later="1234567.891"
+off-all       perfNow              same=True  recorded="absent"                 later="absent"
+off-all       cryptoRandom         same=True  recorded="absent"                 later="absent"
+off-all       weakRef              same=True  recorded="undefined"              later="undefined"
+off-all       finalizationRegistry same=True  recorded="undefined"              later="undefined"
+off-all       setTimeout           same=True  recorded="absent"                 later="absent"
+off-all       setInterval          same=True  recorded="absent"                 later="absent"
+off-all       setTimeoutCall       same=True  recorded="absent"                 later="absent"
+off-all       setTimeoutComputed   same=True  recorded=threw:TypeError          later=threw:TypeError
+
+known-positive for the absence checks (a global is injected by user code; the check must SEE it):
+  inject WeakRef                -> "function"
+  inject FinalizationRegistry   -> "function"
+  inject setTimeout             -> "present"
+  inject performance            -> 0
+
+verdicts
+  INFO  locale probes under the full plugin: intl="undefined", toLocaleDate="01/01/1970, 12:00:00 AM", toLocaleNumber="1234567.891"
+  PASS  full: every source is replay-stable (all 19 runs completed, recorded == replayed)
+  PASS  full: the live sources are live (value after the sleep differs from the recorded one), so 'stable' is not 'constant'
+  PASS  CONTROL random: with only the random shim removed, random is NOT replay-stable  failed (replay divergence)
+  PASS  random shim removal affects no other source
+  PASS  CONTROL random: randomRange also breaks without the shim
+  INFO  CONTROL date: with only the date shim removed, sources that stop being replay-stable: none; stable: ['dateNow', 'newDate', 'dateElapsed', 'newDateElapsed', 'dateEqualsHostNow']
+  INFO  CONTROL lockdown: with only lockdown removed, deterministic sources whose value changes: none (the globals are already absent in this Javy build, so this control cannot fail today)
+  PASS  full: Math.random is in [0,1), centred and not constant (400 draws)  {'min': 0.0017814222451024708, 'max': 0.994852296906417, 'mean': 0.49936576806611493, 'distinct': 400}
+  PASS  off-date: Math.random is in [0,1), centred and not constant (400 draws)  {'min': 0.005003029588560581, 'max': 0.9999128617785791, 'mean': 0.4955920439881276, 'distinct': 400}
+  PASS  off-lockdown: Math.random is in [0,1), centred and not constant (400 draws)  {'min': 0.001162037847070585, 'max': 0.998374316058423, 'mean': 0.4999461245555716, 'distinct': 400}
+  PASS  static-check limit: a computed-property timer passes the checker and then throws at run time, replay-stable  threw:TypeError
+  PASS  absent globals really are absent under the full plugin
+  PASS  known-positive: the absence check notices an injected global (all four)
+  PASS  off-all differs from full exactly where the individual controls say (no interaction hidden)
+
+12 of 12 verdicts passed

@@ -1,0 +1,28 @@
+=== RUN   TestKnownPositivesAreRefusedForTheDeterminismReason
+=== RUN   TestKnownPositivesAreRefusedForTheDeterminismReason/positive_timer.ts
+=== RUN   TestKnownPositivesAreRefusedForTheDeterminismReason/positive_weakref.ts
+=== RUN   TestKnownPositivesAreRefusedForTheDeterminismReason/positive_global_qualified.ts
+=== RUN   TestKnownPositivesAreRefusedForTheDeterminismReason/positive_template_expr.ts
+--- PASS: TestKnownPositivesAreRefusedForTheDeterminismReason (0.29s)
+    --- PASS: TestKnownPositivesAreRefusedForTheDeterminismReason/positive_timer.ts (0.27s)
+    --- PASS: TestKnownPositivesAreRefusedForTheDeterminismReason/positive_weakref.ts (0.01s)
+    --- PASS: TestKnownPositivesAreRefusedForTheDeterminismReason/positive_global_qualified.ts (0.00s)
+    --- PASS: TestKnownPositivesAreRefusedForTheDeterminismReason/positive_template_expr.ts (0.00s)
+=== RUN   TestKnownNegativesAreNotOverReported
+--- PASS: TestKnownNegativesAreNotOverReported (0.00s)
+=== RUN   TestKnownLimitsAreStillLimits
+--- PASS: TestKnownLimitsAreStillLimits (0.00s)
+=== RUN   TestKnownOverReportsAreStillOverReports
+--- PASS: TestKnownOverReportsAreStillOverReports (0.00s)
+=== RUN   TestACheckThatCouldNotLookIsNotAPass
+=== RUN   TestACheckThatCouldNotLookIsNotAPass/unmeasured_comment.ts
+=== RUN   TestACheckThatCouldNotLookIsNotAPass/unmeasured_empty.ts
+=== RUN   TestACheckThatCouldNotLookIsNotAPass/unmeasured_template.ts
+--- PASS: TestACheckThatCouldNotLookIsNotAPass (0.01s)
+    --- PASS: TestACheckThatCouldNotLookIsNotAPass/unmeasured_comment.ts (0.00s)
+    --- PASS: TestACheckThatCouldNotLookIsNotAPass/unmeasured_empty.ts (0.00s)
+    --- PASS: TestACheckThatCouldNotLookIsNotAPass/unmeasured_template.ts (0.00s)
+=== RUN   TestAnAllowMarkerNeedsAReasonAndIsReported
+--- PASS: TestAnAllowMarkerNeedsAReasonAndIsReported (0.01s)
+PASS
+ok  	cleatproto/tools/tscheck	2.369s

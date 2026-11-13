@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ func main() {
 	name := flag.String("name", "", "workflow name")
 	entries := flag.String("entries", "", "comma-separated entry point names")
 	language := flag.String("language", "javascript", "language label; the engine routes on it and accepts only the labels in engine.WasmtimeLanguages")
+	pin := flag.String("pin", "", "JSON file describing the exact engine this module carries; stored as the custom section "+pinSection)
 	flag.Parse()
 	if *in == "" || *out == "" || *name == "" || *entries == "" {
 		fmt.Fprintln(os.Stderr, "usage: tsmeta -in a.wasm -out b.wasm -name N -entries e1,e2 [-language L]")
@@ -52,9 +54,47 @@ func main() {
 	if got, err := wasm.ReadMetadata(b); err != nil || got.WorkflowName != *name {
 		fatal(fmt.Errorf("metadata round trip failed: %v", err))
 	}
+	if *pin != "" {
+		p, err := os.ReadFile(*pin)
+		if err != nil {
+			fatal(err)
+		}
+		if !json.Valid(p) {
+			fatal(fmt.Errorf("%s is not valid JSON", *pin))
+		}
+		b = appendCustomSection(b, pinSection, p)
+	}
 	if err := os.WriteFile(*out, b, 0o644); err != nil {
 		fatal(err)
 	}
+}
+
+// pinSection names the custom section that records the exact engine (Javy, QuickJS, plugin and SDK hashes) a module carries.
+// The stock engine ignores sections it does not know, so this adds no engine mechanism; see PHASE2.md for what that means for
+// "refuse or replay identically".
+const pinSection = "cleat.js-engine"
+
+func uleb(n int) []byte {
+	var out []byte
+	for {
+		b := byte(n & 0x7f)
+		n >>= 7
+		if n != 0 {
+			out = append(out, b|0x80)
+			continue
+		}
+		return append(out, b)
+	}
+}
+
+// appendCustomSection appends a WebAssembly custom section (id 0, size, name, payload) to a module.
+func appendCustomSection(mod []byte, name string, payload []byte) []byte {
+	body := append(uleb(len(name)), name...)
+	body = append(body, payload...)
+	out := append([]byte{}, mod...)
+	out = append(out, 0)
+	out = append(out, uleb(len(body))...)
+	return append(out, body...)
 }
 
 func fatal(err error) {

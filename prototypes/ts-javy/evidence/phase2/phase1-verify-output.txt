@@ -1,0 +1,13 @@
+WASM unchanged: journey v4 already has the same binary (skipped)
+### summary
+  9 of 9 checks passed
+rc=0 ran-and-passed=True skipped=False
+hung: none
+UNMEASURED (failed before reaching the code under test): none
+no kill                            status=done  event_count=6 warnings=1
+kill at the signal wait only       status=done  event_count=6 warnings=1
+kill at the child wait only        status=done  event_count=6 warnings=1
+kill at both                       status=done  event_count=6 warnings=1
+no kill (again)                    status=done  event_count=6 warnings=1
+exit codes: restart=0 replay=0 errors=0 warn-bisect=0
+[phase1] exit=0

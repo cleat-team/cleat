@@ -1,0 +1,568 @@
+{
+ "full/cryptoRandom": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/dateCall": {
+  "later": "\"string:true\"",
+  "recorded": "\"string:true\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/dateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "full/dateEqualsHostNow": {
+  "later": "true",
+  "recorded": "true",
+  "same": true,
+  "status": "done"
+ },
+ "full/dateNow": {
+  "later": "1794594543067",
+  "recorded": "1794594541665",
+  "same": true,
+  "status": "done"
+ },
+ "full/finalizationRegistry": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/intl": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/newDate": {
+  "later": "1794594544534",
+  "recorded": "1794594543312",
+  "same": true,
+  "status": "done"
+ },
+ "full/newDateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "full/perfNow": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/random": {
+  "later": "0.7695431602288212",
+  "recorded": "0.5927432775344919",
+  "same": true,
+  "status": "done"
+ },
+ "full/randomRange": {
+  "later": "{\"min\":0.00448122236719628,\"max\":0.9900681207797707,\"mean\":0.5099444191274366,\"distinct\":400}",
+  "recorded": "{\"min\":0.0017814222451024708,\"max\":0.994852296906417,\"mean\":0.49936576806611493,\"distinct\":400}",
+  "same": true,
+  "status": "done"
+ },
+ "full/setInterval": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/setTimeout": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/setTimeoutCall": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/setTimeoutComputed": {
+  "later": "threw:TypeError",
+  "recorded": "threw:TypeError",
+  "same": true,
+  "status": "done"
+ },
+ "full/toLocaleDate": {
+  "later": "\"01/01/1970, 12:00:00 AM\"",
+  "recorded": "\"01/01/1970, 12:00:00 AM\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/toLocaleNumber": {
+  "later": "\"1234567.891\"",
+  "recorded": "\"1234567.891\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/weakRef": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/cryptoRandom": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/dateCall": {
+  "later": "\"string:true\"",
+  "recorded": "\"string:true\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/dateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/dateEqualsHostNow": {
+  "later": "true",
+  "recorded": "true",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/dateNow": {
+  "later": "1794594655053",
+  "recorded": "1794594653663",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/finalizationRegistry": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/intl": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/newDate": {
+  "later": "1794594656525",
+  "recorded": "1794594655305",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/newDateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/perfNow": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/random": {
+  "diverged": true,
+  "error": "host: workflow dbd847f2-805e-4251-ba50-ae206030578f: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "status": "failed"
+ },
+ "off-all/randomRange": {
+  "diverged": true,
+  "error": "host: workflow f7a0d5a2-86b9-4703-8edb-5ff1c2a5c605: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "status": "failed"
+ },
+ "off-all/setInterval": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/setTimeout": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/setTimeoutCall": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/setTimeoutComputed": {
+  "later": "threw:TypeError",
+  "recorded": "threw:TypeError",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/toLocaleDate": {
+  "later": "\"01/01/1970, 12:00:00 AM\"",
+  "recorded": "\"01/01/1970, 12:00:00 AM\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/toLocaleNumber": {
+  "later": "\"1234567.891\"",
+  "recorded": "\"1234567.891\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/weakRef": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/cryptoRandom": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/dateCall": {
+  "later": "\"string:true\"",
+  "recorded": "\"string:true\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/dateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/dateEqualsHostNow": {
+  "later": "true",
+  "recorded": "true",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/dateNow": {
+  "later": "1794594571461",
+  "recorded": "1794594570051",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/finalizationRegistry": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/intl": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/newDate": {
+  "later": "1794594572911",
+  "recorded": "1794594571674",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/newDateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/perfNow": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/random": {
+  "later": "0.5031011939387701",
+  "recorded": "0.2570639944314498",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/randomRange": {
+  "later": "{\"min\":0.0024460992559987016,\"max\":0.9995754990358439,\"mean\":0.514329351841145,\"distinct\":400}",
+  "recorded": "{\"min\":0.005003029588560581,\"max\":0.9999128617785791,\"mean\":0.4955920439881276,\"distinct\":400}",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/setInterval": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/setTimeout": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/setTimeoutCall": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/setTimeoutComputed": {
+  "later": "threw:TypeError",
+  "recorded": "threw:TypeError",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/toLocaleDate": {
+  "later": "\"01/01/1970, 12:00:00 AM\"",
+  "recorded": "\"01/01/1970, 12:00:00 AM\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/toLocaleNumber": {
+  "later": "\"1234567.891\"",
+  "recorded": "\"1234567.891\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/weakRef": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/cryptoRandom": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/dateCall": {
+  "later": "\"string:true\"",
+  "recorded": "\"string:true\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/dateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/dateEqualsHostNow": {
+  "later": "true",
+  "recorded": "true",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/dateNow": {
+  "later": "1794594627372",
+  "recorded": "1794594625975",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/finalizationRegistry": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/intl": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/newDate": {
+  "later": "1794594628834",
+  "recorded": "1794594627613",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/newDateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/perfNow": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/random": {
+  "later": "0.19988680394787106",
+  "recorded": "0.1258123997286661",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/randomRange": {
+  "later": "{\"min\":0.00024943775192798334,\"max\":0.9959828381403084,\"mean\":0.5076004262149972,\"distinct\":400}",
+  "recorded": "{\"min\":0.001162037847070585,\"max\":0.998374316058423,\"mean\":0.4999461245555716,\"distinct\":400}",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/setInterval": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/setTimeout": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/setTimeoutCall": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/setTimeoutComputed": {
+  "later": "threw:TypeError",
+  "recorded": "threw:TypeError",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/toLocaleDate": {
+  "later": "\"01/01/1970, 12:00:00 AM\"",
+  "recorded": "\"01/01/1970, 12:00:00 AM\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/toLocaleNumber": {
+  "later": "\"1234567.891\"",
+  "recorded": "\"1234567.891\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/weakRef": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/cryptoRandom": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/dateCall": {
+  "later": "\"string:true\"",
+  "recorded": "\"string:true\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/dateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/dateEqualsHostNow": {
+  "later": "true",
+  "recorded": "true",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/dateNow": {
+  "later": "1794594599705",
+  "recorded": "1794594598205",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/finalizationRegistry": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/intl": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/newDate": {
+  "later": "1794594601023",
+  "recorded": "1794594599807",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/newDateElapsed": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/perfNow": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/random": {
+  "diverged": true,
+  "error": "host: workflow 0d2e228f-9e9a-4cd5-abf4-d874460b2ca3: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "status": "failed"
+ },
+ "off-random/randomRange": {
+  "diverged": true,
+  "error": "host: workflow fa6fdc20-56b1-45cc-bcb6-660ca204a063: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "status": "failed"
+ },
+ "off-random/setInterval": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/setTimeout": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/setTimeoutCall": {
+  "later": "\"absent\"",
+  "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/setTimeoutComputed": {
+  "later": "threw:TypeError",
+  "recorded": "threw:TypeError",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/toLocaleDate": {
+  "later": "\"01/01/1970, 12:00:00 AM\"",
+  "recorded": "\"01/01/1970, 12:00:00 AM\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/toLocaleNumber": {
+  "later": "\"1234567.891\"",
+  "recorded": "\"1234567.891\"",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/weakRef": {
+  "later": "\"undefined\"",
+  "recorded": "\"undefined\"",
+  "same": true,
+  "status": "done"
+ }
+}

@@ -86,16 +86,15 @@ observed the runs `failed` at the poll and did not observe them beyond that with
 ## Observations that are not findings yet
 
 1. **`WARN replay history is shorter than the instance's recorded event count` on `journey`.** `recorded_event_count=5
-   loaded_events=4`, final `event_count=6` against 4 persisted rows. Every such run still completed with the correct
-   result. **I could not reduce it to a trigger**: the first bisect (older build of the same source) warned in 5 of 5
-   variants including the two with no kill; the final bisect (`evidence/phase1/warn-bisect.txt`) warned in 3 of 5
-   (1,0,1,0,1), and the two zero-warning variants are both ones with a kill at the signal wait. The earlier sentence
-   "deterministic for this sequence" was wrong. It is **not** a restart artifact (it appears with no kill). `sleeper`,
-   `signaler` and `parent→sleeper` did not log it. Related, closed: cleat#3391, where the same warning was a symptom of
-   the `AwaitAnyChild` re-check path. My reading — **not measured** — is that re-suspending at a child wait counts an
-   event that is not persisted. **The control that would settle whether this is guest-specific is the same
-   sleep→signal→child sequence from a Go guest, and I have not run it.**
-2. **The build is not byte-reproducible.** Two consecutive builds of identical source and an identical esbuild bundle
+   loaded_events=4`, final `event_count=6` against 4 persisted rows. Every such run completed with the correct result.
+   **Corrected 2026-11-13 (Phase 2):** this section first said the rate varied (5 of 5, then 3 of 5) and called that
+   unexplained. It was my harness: worker processes from earlier scripts survived and claimed runs whose log lines went to
+   files the counting script did not read. With exactly one worker alive for the whole run, the same bisect gives **5 of 5**
+   (`evidence/phase1/warn-bisect.txt`), including the two variants with no kill, so it is not a restart artifact. The Go control
+   that this section said had not been run **was** run in Phase 2: a Go guest logs it 10 of 10, the JS guest 10 of 10, so it is
+   an engine behaviour, filed as cleat#3779. My reading that re-suspending at a child wait counts an event that is never
+   persisted is still **not measured**. Related, closed: cleat#3391.
+2. **The build was not byte-reproducible (fixed in Phase 2: see PHASE2.md).** Two consecutive builds of identical source and an identical esbuild bundle
    (same `js` hash) differ at the Javy stage in 3 bytes of one 7-byte data segment (`cmp -l` → 3). The cause is not
    established; a Wizer-snapshotted heap value is the obvious place to look. A deployed module's bytes are fixed, so
    replay is unaffected; it matters for content-addressed dedupe and for the plan's engine-pin item.
@@ -123,7 +122,7 @@ engine:
 
 - `kill -9` was applied **while the run was suspended**, not in the middle of a guest executing.
 - The 3 replays are three calls in one process against one history, not three fresh processes.
-- No Go control for observation 1. No byte-reproducibility cause.
+- (Both listed here originally are resolved in Phase 2: the Go control was run, and the reproducibility cause was found.)
 - Failed runs were not observed beyond the first terminal poll with a live worker.
 - Timing and size thresholds (§5) are Phase 4. Phase 1 recorded none.
 
@@ -139,6 +138,12 @@ engine:
 - The error driver reported `hung: none`, exit 0, over five runs that never reached the code under test; it now exits 2.
 - `tools/tsmeta` lived in the root Go module and was in its build; both Go programs are now in the nested module
   `prototypes/ts-javy/go.mod` (always run with `GOWORK=off`): `go list ./... | grep -c prototypes` → 0 from the root.
+
+- **Worker processes outlived the scripts that started them.** `phase1_verify.py` and `phase1_warn_bisect.py` never stopped their
+  workers, so a later script's `/healthz` answered from the old worker, two workers shared the database, and every count taken
+  from a log file was short. It produced the wrong "3 of 5" above and, in Phase 2, a Go control that read 0 of 10. Found because
+  an end-to-end run left two `cleat-worker` processes alive. Every driver now stops stale workers first, refuses to run if one
+  survives, and stops its own at exit; `phase2-verify.sh` flags a leak between steps.
 
 ## Layout
 
