@@ -621,13 +621,14 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
-	// Increment event_count on workflow_instances so GetEventCount and quota
-	// enforcement work correctly on MSSQL.
+	// Set event_count on workflow_instances so GetEventCount and quota enforcement
+	// work correctly on MSSQL: the highest step plus one, not "+ len(recs)" (see
+	// eventCountAfter, cleat#3779).
 	if incrementCount {
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_instances SET event_count = event_count + @p1 WHERE id = @p2
-		`, len(recs), workflowID); err != nil {
-			return fmt.Errorf("append events in tx: increment event_count: %w", err)
+			UPDATE workflow_instances SET event_count = @p1 WHERE id = @p2
+		`, eventCountAfter(recs), workflowID); err != nil {
+			return fmt.Errorf("append events in tx: set event_count: %w", err)
 		}
 	}
 	return nil

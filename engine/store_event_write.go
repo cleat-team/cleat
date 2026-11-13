@@ -78,15 +78,45 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 		}
 	}
 
-	// Increment event_count on workflow_instances so quota enforcement
-	// has an up-to-date count.
+	// Set event_count on workflow_instances so quota enforcement has an up-to-date
+	// count. SET to the highest step plus one, not "+ len(recs)": see eventCountAfter.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE workflow_instances SET event_count = event_count + $1 WHERE id = $2`,
-		len(recs), workflowID); err != nil {
-		return fmt.Errorf("append events in tx: increment event_count: %w", err)
+		`UPDATE workflow_instances SET event_count = $1 WHERE id = $2`,
+		eventCountAfter(recs), workflowID); err != nil {
+		return fmt.Errorf("append events in tx: set event_count: %w", err)
 	}
 
 	return nil
+}
+
+// eventCountAfter is the value workflow_instances.event_count takes once recs have
+// been appended: the highest step in them, plus one (cleat#3779).
+//
+// event_count is "how many events this run has recorded", which equals the
+// highest step recorded plus one because a run's steps are dense from 0 (replay
+// refuses a history that is not: validateReplayStepDensity). It used to be
+// event_count + len(recs), which counts append RECORDS, and the two differ whenever
+// a record lands on a row that already exists. That is what an await does: on every
+// wake at a still-pending await_child, await_promise or await_all_children the
+// engine records the same step again (an upsert, on purpose), so each wake added one
+// to the count and nothing to the rows. A parent waiting on a child counted up by
+// about one every 30 s on a fixed set of rows, and replay's short-history check
+// (cleat#1507) read that as a truncated tail on every healthy run.
+//
+// A count derived from the steps cannot be inflated by a re-record or a repeated
+// finalize, whatever the number of times either happens. It is also self-healing:
+// a run whose count was inflated by an older worker is set back to the true value by
+// its next non-empty append, so no migration is needed. It is the same number after
+// compaction, which deletes the rows below the compaction step but leaves the steps
+// above it numbered as they were.
+func eventCountAfter(recs []EventRecord) int {
+	highest := -1
+	for _, r := range recs {
+		if r.Step > highest {
+			highest = r.Step
+		}
+	}
+	return highest + 1
 }
 
 // appendOneEvent inserts a single event without a prepared statement.

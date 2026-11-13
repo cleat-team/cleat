@@ -173,8 +173,8 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set trace_id = @p2 where id = @p1",
 		Reason: scopedByCaller,
 	},
-	"mssql_events.go:appendEventsInTxOpts#d455f79e06bf": {
-		SQL:    "update workflow_instances set event_count = event_count + @p1 where id = @p2",
+	"mssql_events.go:appendEventsInTxOpts#3d46f6cddc4e": {
+		SQL:    "update workflow_instances set event_count = @p1 where id = @p2",
 		Reason: scopedByCaller,
 	},
 	// cleat#2059 realigned event_history's primary key to (tenant_id,
