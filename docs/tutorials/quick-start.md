@@ -23,9 +23,15 @@ install the latest release, and step 1 gives both.
 ## 1. Prerequisites
 
 - **Go 1.27+** -- [Download](https://go.dev/dl/). Needed in step 5, which
-  compiles your workflow to WebAssembly.
+  compiles your workflow to WebAssembly. Any Go 1.27 release does that. (Only
+  *building cleat itself* is limited to Go 1.27.3 for now -- see the next item.)
 - **Docker** -- for running Postgres locally
-- **The `cleat` CLI and `cleat-worker`** -- install both with Homebrew:
+- **The `cleat` CLI and `cleat-worker`** -- on Linux, take the prebuilt release
+  assets: no Go and no compiler needed, and it took ten seconds on a machine with
+  nothing else installed. The commands are in
+  [Installation](../../README.md#prebuilt-release-assets-linux-amd64-and-arm64);
+  check the worker with `cleat-worker --verify-backend`. On macOS, or to build
+  from source, install both with Homebrew:
 
 ```bash
 brew install cleat-team/tap/cleat
@@ -36,8 +42,19 @@ bumped on every release (cleat#2068), so there is no version to track by hand.
 macOS needs a from-source `cleat-worker` because no CGO worker is published for
 it; see [Installation](../../README.md#installation).
 
+> **Building cleat from source has two requirements the install does not check.**
+> It needs a **C compiler** (Debian/Ubuntu: `build-essential`, not just `gcc`;
+> macOS: `xcode-select --install`): without one Go turns cgo off silently, the
+> install exits 0, and you get a worker that refuses to start, with a message saying
+> what to install (it stops at step 3, `--migrate-only`, before touching the
+> database). And it needs **Go 1.27.3, not 1.27.4 or newer**, whose cgo rejects the
+> wasmtime library (`disallowed LTO section`): `export GOTOOLCHAIN=go1.27.3` first.
+> Details and the reason are in the README's
+> [From source](../../README.md#from-source-go-1273-and-a-c-toolchain) section
+> (cleat#3787).
+
 > **Alternatively, install from a checkout of this repository.** The tree
-> tracks ahead of the last release (v0.3.2 at this writing), so this is the
+> tracks ahead of the last release, so this is the
 > right choice if you are working on cleat itself, or building against the SDK
 > in the tree:
 >

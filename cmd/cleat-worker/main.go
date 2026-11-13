@@ -464,6 +464,16 @@ func main() {
 		os.Exit(runListPlugins(os.Stdout))
 	}
 
+	// Every mode below -- including --migrate-only and --generate-api-key,
+	// which need no backend of their own -- belongs to a worker that is about to
+	// be used to run workflows, and a binary with no wasmtime backend cannot. It
+	// used to find that out much later (the backend is constructed after the
+	// migration and the key mint), so the quick-start got three steps in before
+	// it failed. Refuse now, with what to do about it. cleat#3787.
+	if refuseWithoutWasmtimeBackend(os.Stderr) {
+		os.Exit(1)
+	}
+
 	// Apply CLEAT_CHILD_BINDING_OVERRIDE env var as fallback when the flag is not set.
 	applyChildBindingOverrideEnv()
 
