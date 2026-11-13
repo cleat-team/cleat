@@ -25,8 +25,8 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 	var wasmBytes []byte
 	var library sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT wasm_bytes, library FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&wasmBytes, &library)
+		SELECT wasm_bytes, library FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, defName, defVersion, s.tenantID).Scan(&wasmBytes, &library)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
@@ -80,8 +80,8 @@ func (s *PostgresStore) GetWASMLength(ctx context.Context, defName string, defVe
 	var length sql.NullInt64
 	var library sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		`SELECT length(wasm_bytes), library FROM workflow_defs WHERE name = $1 AND version = $2`,
-		defName, defVersion).Scan(&length, &library); err != nil {
+		`SELECT length(wasm_bytes), library FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3`,
+		defName, defVersion, s.tenantID).Scan(&length, &library); err != nil {
 		return 0, err
 	}
 	if library.Valid {
@@ -152,8 +152,8 @@ func (s *PostgresStore) LoadWorkflowConfig(ctx context.Context, defName string, 
 
 	var maxHistoryLength int
 	err = tx.QueryRowContext(ctx, `
-		SELECT max_history_length FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&maxHistoryLength)
+		SELECT max_history_length FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
@@ -187,8 +187,8 @@ func (s *PostgresStore) LoadDAGSpec(ctx context.Context, defName string, defVers
 	// which is the dialect nearly everyone runs.
 	var raw *[]byte
 	err = tx.QueryRowContext(ctx, `
-		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&raw)
+		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
@@ -211,8 +211,8 @@ func (s *PostgresStore) ListVersions(ctx context.Context, defName string) ([]int
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT version FROM workflow_defs WHERE name = $1 ORDER BY version DESC
-	`, defName)
+		SELECT version FROM workflow_defs WHERE name = $1 AND tenant_id = $2 ORDER BY version DESC
+	`, defName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list versions: %w", err)
 	}
@@ -619,7 +619,7 @@ func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string
 // exists and is not deprecated. Returns true if the version can be used.
 //
 //	SQL: SELECT EXISTS(SELECT 1 FROM workflow_defs
-//	     WHERE name = $1 AND version = $2 AND disabled_at IS NULL)
+//	     WHERE name = $1 AND version = $2 AND disabled_at IS NULL AND tenant_id = $3)
 
 func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -632,9 +632,9 @@ func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, def
 	err = tx.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM workflow_defs
-			WHERE name = $1 AND version = $2 AND disabled_at IS NULL
+			WHERE name = $1 AND version = $2 AND disabled_at IS NULL AND tenant_id = $3
 		)
-	`, defName, defVersion).Scan(&exists)
+	`, defName, defVersion, s.tenantID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("validate version: %w", err)
 	}

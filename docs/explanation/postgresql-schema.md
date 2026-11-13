@@ -894,3 +894,11 @@ which would otherwise pass every other check while isolating nothing.
 | `auto` (default) | Refuse to start when `--require-auth` is set; warn otherwise |
 | `require` | Always refuse to start |
 | `off` | Skip the check |
+
+`auto` refuses because `--require-auth` defaults to true; it only warns on a worker started with
+`--require-auth=false`, and `off` never looks. On a connection that bypasses the policies, the
+statements that read a workflow definition are scoped to the store's tenant in the SQL itself
+(cleat#3740), as they are on SQL Server and MySQL, so two tenants that hold the same workflow
+name and version do not read each other's. Before that, those reads relied on the policies
+alone and, on such a connection, answered from whichever tenant's row came first: a run could
+execute another tenant's module.
