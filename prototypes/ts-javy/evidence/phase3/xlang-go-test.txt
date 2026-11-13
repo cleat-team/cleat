@@ -1,25 +1,25 @@
 === RUN   TestSuspensionEventsCrossReplay
     suspension_test.go:122: go  segment one: suspended="await_signals([\"go\"], 600000ms)" events=[await_signals]
-2026/11/13 14:51:16 INFO child version: latest policy name=xsleeper
-2026/11/13 14:51:16 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
-2026/11/13 14:51:16 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
+2026/11/13 15:53:11 INFO child version: latest policy name=xsleeper
+2026/11/13 15:53:11 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
+2026/11/13 15:53:11 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
     suspension_test.go:127: go  complete: result={"signal":"hello","slept":1500} events=[await_signals,signal_received,child_workflow,await_child]
     suspension_test.go:122: ts  segment one: suspended="await_signals([\"go\"], 600000ms)" events=[await_signals]
-2026/11/13 14:51:16 INFO child version: latest policy name=xsleeper
-2026/11/13 14:51:16 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
-2026/11/13 14:51:16 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
+2026/11/13 15:53:12 INFO child version: latest policy name=xsleeper
+2026/11/13 15:53:12 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
+2026/11/13 15:53:12 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
     suspension_test.go:127: ts  complete: result={"signal":"hello","slept":1500} events=[await_signals,signal_received,child_workflow,await_child]
     suspension_test.go:148: go  history -> ts  replay: err=<nil> suspended="" result={"signal":"hello","slept":1500}
     suspension_test.go:148: ts  history -> go  replay: err=<nil> suspended="" result={"signal":"hello","slept":1500}
     suspension_test.go:174: signal wait reasons: map[go->go:await_signals(["go"], 600000ms) [replayed] go->ts:await_signals(["go"], 600000ms) [replayed] ts->go:await_signals(["go"], 600000ms) [replayed] ts->ts:await_signals(["go"], 600000ms) [replayed]]
     suspension_test.go:174: child wait  reasons: map[go->go:await_child(child-xsleeper-<id>) go->ts:await_child(child-xsleeper-<id>) ts->go:await_child(child-xsleeper-<id>) ts->ts:await_child(child-xsleeper-<id>)]
-2026/11/13 14:51:18 INFO child version: latest policy name=xsleeper
-2026/11/13 14:51:18 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
-2026/11/13 14:51:18 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
+2026/11/13 15:53:19 INFO child version: latest policy name=xsleeper
+2026/11/13 15:53:19 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
+2026/11/13 15:53:19 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
     suspension_test.go:189: suspended in go  at the signal wait, signal delivered, resumed in ts : err=<nil> suspended="" result={"signal":"hello","slept":1500}
-2026/11/13 14:51:19 INFO child version: latest policy name=xsleeper
-2026/11/13 14:51:19 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
-2026/11/13 14:51:19 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
+2026/11/13 15:53:20 INFO child version: latest policy name=xsleeper
+2026/11/13 15:53:20 INFO childWorkflowWithVersion name=xsleeper version=0 child_version=0 parent_id=00000000-0000-0000-0000-00000000c0de is_replay=false step_count=2 child_wf_store_nil=false
+2026/11/13 15:53:20 INFO calling StartChildWorkflowAtomic name=xsleeper parent_id=00000000-0000-0000-0000-00000000c0de child_version=0
     suspension_test.go:189: suspended in ts  at the signal wait, signal delivered, resumed in go : err=<nil> suspended="" result={"signal":"hello","slept":1500}
     suspension_test.go:199: go  with a 300 ms sleep: suspended="cleat_sleep(300ms)" events=0
     suspension_test.go:199: ts  with a 300 ms sleep: suspended="cleat_sleep(300ms)" events=0
@@ -31,22 +31,22 @@
     suspension_test.go:247: OBSERVATION go  history with signal_received -> child_workflow on ts : err=true suspended="" result=""
     suspension_test.go:247: OBSERVATION ts  history with signal_received -> child_workflow on go : err=false suspended="workflow suspended" result=""
     suspension_test.go:247: OBSERVATION ts  history with signal_received -> child_workflow on ts : err=true suspended="" result=""
---- PASS: TestSuspensionEventsCrossReplay (5.92s)
+--- PASS: TestSuspensionEventsCrossReplay (20.20s)
 === RUN   TestEveryDirectionReplaysWithABitIdenticalResult
-2026/11/13 14:51:21 INFO Starting order for user cross-test workflow_id=0a3fc52f-0dda-4143-aafb-ec86195f6064 tenant_id="" step=0 source=workflow
-2026/11/13 14:51:21 INFO Reserved inventory: resv_abc123 workflow_id=0a3fc52f-0dda-4143-aafb-ec86195f6064 tenant_id="" step=1 source=workflow
-2026/11/13 14:51:21 INFO Payment processed: chg_xyz789 workflow_id=0a3fc52f-0dda-4143-aafb-ec86195f6064 tenant_id="" step=2 source=workflow
-2026/11/13 14:51:21 INFO Order complete: TRACK-123456 workflow_id=0a3fc52f-0dda-4143-aafb-ec86195f6064 tenant_id="" step=3 source=workflow
+2026/11/13 15:53:30 INFO Starting order for user cross-test workflow_id=a97a952f-4e13-4ded-9d8d-5764fbfa1ee1 tenant_id="" step=0 source=workflow
+2026/11/13 15:53:30 INFO Reserved inventory: resv_abc123 workflow_id=a97a952f-4e13-4ded-9d8d-5764fbfa1ee1 tenant_id="" step=1 source=workflow
+2026/11/13 15:53:30 INFO Payment processed: chg_xyz789 workflow_id=a97a952f-4e13-4ded-9d8d-5764fbfa1ee1 tenant_id="" step=2 source=workflow
+2026/11/13 15:53:30 INFO Order complete: TRACK-123456 workflow_id=a97a952f-4e13-4ded-9d8d-5764fbfa1ee1 tenant_id="" step=3 source=workflow
     xlang_test.go:79: go   executed: result="{\"tracking_id\":\"TRACK-123456\"}" events=4  shape=[call|inventory|Reserve call|payments|Charge call|shipping|CreateShipment call|notifications|SendEmail]
-2026/11/13 14:51:21 INFO Starting order for user cross-test workflow_id=7b715195-ce16-4f5d-8f4c-378dd5c7ae6f tenant_id="" step=0 source=workflow
-2026/11/13 14:51:21 INFO Reserved inventory: resv_abc123 workflow_id=7b715195-ce16-4f5d-8f4c-378dd5c7ae6f tenant_id="" step=1 source=workflow
-2026/11/13 14:51:21 INFO Payment processed: chg_xyz789 workflow_id=7b715195-ce16-4f5d-8f4c-378dd5c7ae6f tenant_id="" step=2 source=workflow
-2026/11/13 14:51:21 INFO Order complete: TRACK-123456 workflow_id=7b715195-ce16-4f5d-8f4c-378dd5c7ae6f tenant_id="" step=3 source=workflow
+2026/11/13 15:53:31 INFO Starting order for user cross-test workflow_id=b824e8d3-c1d4-427b-9592-8a68f795cf6c tenant_id="" step=0 source=workflow
+2026/11/13 15:53:31 INFO Reserved inventory: resv_abc123 workflow_id=b824e8d3-c1d4-427b-9592-8a68f795cf6c tenant_id="" step=1 source=workflow
+2026/11/13 15:53:31 INFO Payment processed: chg_xyz789 workflow_id=b824e8d3-c1d4-427b-9592-8a68f795cf6c tenant_id="" step=2 source=workflow
+2026/11/13 15:53:31 INFO Order complete: TRACK-123456 workflow_id=b824e8d3-c1d4-427b-9592-8a68f795cf6c tenant_id="" step=3 source=workflow
     xlang_test.go:79: ts   executed: result="{\"tracking_id\":\"TRACK-123456\"}" events=4  shape=[call|inventory|Reserve call|payments|Charge call|shipping|CreateShipment call|notifications|SendEmail]
-2026/11/13 14:51:21 INFO Starting order for user cross-test workflow_id=831f0964-4f63-42be-978b-e3957e36f745 tenant_id="" step=0 source=workflow
-2026/11/13 14:51:21 INFO Reserved inventory: resv_abc123 workflow_id=831f0964-4f63-42be-978b-e3957e36f745 tenant_id="" step=1 source=workflow
-2026/11/13 14:51:21 INFO Payment processed: chg_xyz789 workflow_id=831f0964-4f63-42be-978b-e3957e36f745 tenant_id="" step=2 source=workflow
-2026/11/13 14:51:21 INFO Order complete: TRACK-123456 workflow_id=831f0964-4f63-42be-978b-e3957e36f745 tenant_id="" step=4 source=workflow
+2026/11/13 15:53:31 INFO Starting order for user cross-test workflow_id=abf05e06-a28a-42fb-a94a-dfddf85c9d5f tenant_id="" step=0 source=workflow
+2026/11/13 15:53:31 INFO Reserved inventory: resv_abc123 workflow_id=abf05e06-a28a-42fb-a94a-dfddf85c9d5f tenant_id="" step=1 source=workflow
+2026/11/13 15:53:31 INFO Payment processed: chg_xyz789 workflow_id=abf05e06-a28a-42fb-a94a-dfddf85c9d5f tenant_id="" step=2 source=workflow
+2026/11/13 15:53:31 INFO Order complete: TRACK-123456 workflow_id=abf05e06-a28a-42fb-a94a-dfddf85c9d5f tenant_id="" step=4 source=workflow
     xlang_test.go:79: rust executed: result="{\"tracking_id\":\"TRACK-123456\"}" events=4  shape=[call|inventory|Reserve call|payments|Charge call|shipping|CreateShipment call|notifications|SendEmail]
     xlang_test.go:93: go   exec -> go   replay  same-language (control)  result="{\"tracking_id\":\"TRACK-123456\"}"  bit-identical=true
     xlang_test.go:93: go   exec -> ts   replay  cross-language           result="{\"tracking_id\":\"TRACK-123456\"}"  bit-identical=true
@@ -57,20 +57,20 @@
     xlang_test.go:93: rust exec -> go   replay  cross-language           result="{\"tracking_id\":\"TRACK-123456\"}"  bit-identical=true
     xlang_test.go:93: rust exec -> ts   replay  cross-language           result="{\"tracking_id\":\"TRACK-123456\"}"  bit-identical=true
     xlang_test.go:93: rust exec -> rust replay  same-language (control)  result="{\"tracking_id\":\"TRACK-123456\"}"  bit-identical=true
---- PASS: TestEveryDirectionReplaysWithABitIdenticalResult (1.89s)
+--- PASS: TestEveryDirectionReplaysWithABitIdenticalResult (4.80s)
 === RUN   TestHistoriesAreComparableEventByEvent
-2026/11/13 14:51:23 INFO Starting order for user cross-test workflow_id=a63f6da0-9166-4e32-bfcf-705e4755bc8d tenant_id="" step=0 source=workflow
-2026/11/13 14:51:23 INFO Reserved inventory: resv_abc123 workflow_id=a63f6da0-9166-4e32-bfcf-705e4755bc8d tenant_id="" step=1 source=workflow
-2026/11/13 14:51:23 INFO Payment processed: chg_xyz789 workflow_id=a63f6da0-9166-4e32-bfcf-705e4755bc8d tenant_id="" step=2 source=workflow
-2026/11/13 14:51:23 INFO Order complete: TRACK-123456 workflow_id=a63f6da0-9166-4e32-bfcf-705e4755bc8d tenant_id="" step=3 source=workflow
-2026/11/13 14:51:23 INFO Starting order for user cross-test workflow_id=4c7994c5-c01d-4abf-9f09-77a369116aaa tenant_id="" step=0 source=workflow
-2026/11/13 14:51:23 INFO Reserved inventory: resv_abc123 workflow_id=4c7994c5-c01d-4abf-9f09-77a369116aaa tenant_id="" step=1 source=workflow
-2026/11/13 14:51:23 INFO Payment processed: chg_xyz789 workflow_id=4c7994c5-c01d-4abf-9f09-77a369116aaa tenant_id="" step=2 source=workflow
-2026/11/13 14:51:23 INFO Order complete: TRACK-123456 workflow_id=4c7994c5-c01d-4abf-9f09-77a369116aaa tenant_id="" step=3 source=workflow
-2026/11/13 14:51:23 INFO Starting order for user cross-test workflow_id=bf605aa0-b8a1-4de8-850a-66bee667745e tenant_id="" step=0 source=workflow
-2026/11/13 14:51:23 INFO Reserved inventory: resv_abc123 workflow_id=bf605aa0-b8a1-4de8-850a-66bee667745e tenant_id="" step=1 source=workflow
-2026/11/13 14:51:23 INFO Payment processed: chg_xyz789 workflow_id=bf605aa0-b8a1-4de8-850a-66bee667745e tenant_id="" step=2 source=workflow
-2026/11/13 14:51:23 INFO Order complete: TRACK-123456 workflow_id=bf605aa0-b8a1-4de8-850a-66bee667745e tenant_id="" step=4 source=workflow
+2026/11/13 15:53:35 INFO Starting order for user cross-test workflow_id=fc99346b-b405-4eda-b05a-94e58202fbf9 tenant_id="" step=0 source=workflow
+2026/11/13 15:53:35 INFO Reserved inventory: resv_abc123 workflow_id=fc99346b-b405-4eda-b05a-94e58202fbf9 tenant_id="" step=1 source=workflow
+2026/11/13 15:53:35 INFO Payment processed: chg_xyz789 workflow_id=fc99346b-b405-4eda-b05a-94e58202fbf9 tenant_id="" step=2 source=workflow
+2026/11/13 15:53:35 INFO Order complete: TRACK-123456 workflow_id=fc99346b-b405-4eda-b05a-94e58202fbf9 tenant_id="" step=3 source=workflow
+2026/11/13 15:53:35 INFO Starting order for user cross-test workflow_id=e3d836d0-0828-45e9-813d-c7d10bf6a2b8 tenant_id="" step=0 source=workflow
+2026/11/13 15:53:35 INFO Reserved inventory: resv_abc123 workflow_id=e3d836d0-0828-45e9-813d-c7d10bf6a2b8 tenant_id="" step=1 source=workflow
+2026/11/13 15:53:35 INFO Payment processed: chg_xyz789 workflow_id=e3d836d0-0828-45e9-813d-c7d10bf6a2b8 tenant_id="" step=2 source=workflow
+2026/11/13 15:53:35 INFO Order complete: TRACK-123456 workflow_id=e3d836d0-0828-45e9-813d-c7d10bf6a2b8 tenant_id="" step=3 source=workflow
+2026/11/13 15:53:35 INFO Starting order for user cross-test workflow_id=5ffb877e-764a-434a-96d6-9ad4a83e6240 tenant_id="" step=0 source=workflow
+2026/11/13 15:53:35 INFO Reserved inventory: resv_abc123 workflow_id=5ffb877e-764a-434a-96d6-9ad4a83e6240 tenant_id="" step=1 source=workflow
+2026/11/13 15:53:35 INFO Payment processed: chg_xyz789 workflow_id=5ffb877e-764a-434a-96d6-9ad4a83e6240 tenant_id="" step=2 source=workflow
+2026/11/13 15:53:35 INFO Order complete: TRACK-123456 workflow_id=5ffb877e-764a-434a-96d6-9ad4a83e6240 tenant_id="" step=4 source=workflow
     xlang_test.go:120: REQUEST BYTES differ at event 0 (inventory.Reserve) between go and ts:
             go:   {"cart":[{"sku":"SKU-001","quantity":2}],"user_id":"cross-test"}
             ts  : {"cart":[{"quantity":2,"sku":"SKU-001"}],"user_id":"cross-test"}
@@ -78,23 +78,23 @@
             go:   {"cart":[{"sku":"SKU-001","quantity":2}],"user_id":"cross-test"}
             rust: {"cart":[{"quantity":2,"sku":"SKU-001"}],"user_id":"cross-test"}
     xlang_test.go:124: recorded request bytes that differ from the Go twin's: 2 (not a replay failure: replay does not compare them)
---- PASS: TestHistoriesAreComparableEventByEvent (0.47s)
+--- PASS: TestHistoriesAreComparableEventByEvent (0.97s)
 === RUN   TestATamperedHistoryIsRefusedInEveryDirection
-2026/11/13 14:51:24 INFO Starting order for user cross-test workflow_id=73a5e262-0337-4324-ad8a-0ee7ece9fee1 tenant_id="" step=0 source=workflow
-2026/11/13 14:51:24 INFO Reserved inventory: resv_abc123 workflow_id=73a5e262-0337-4324-ad8a-0ee7ece9fee1 tenant_id="" step=1 source=workflow
-2026/11/13 14:51:24 INFO Payment processed: chg_xyz789 workflow_id=73a5e262-0337-4324-ad8a-0ee7ece9fee1 tenant_id="" step=2 source=workflow
-2026/11/13 14:51:24 INFO Order complete: TRACK-123456 workflow_id=73a5e262-0337-4324-ad8a-0ee7ece9fee1 tenant_id="" step=3 source=workflow
+2026/11/13 15:53:36 INFO Starting order for user cross-test workflow_id=790161cc-7a5f-49a8-b653-b0712bd2da18 tenant_id="" step=0 source=workflow
+2026/11/13 15:53:36 INFO Reserved inventory: resv_abc123 workflow_id=790161cc-7a5f-49a8-b653-b0712bd2da18 tenant_id="" step=1 source=workflow
+2026/11/13 15:53:36 INFO Payment processed: chg_xyz789 workflow_id=790161cc-7a5f-49a8-b653-b0712bd2da18 tenant_id="" step=2 source=workflow
+2026/11/13 15:53:36 INFO Order complete: TRACK-123456 workflow_id=790161cc-7a5f-49a8-b653-b0712bd2da18 tenant_id="" step=3 source=workflow
     xlang_test.go:147: go  history with payments.Charge -> payments.Refund, replayed on go  : refused=true
     xlang_test.go:147: go  history with payments.Charge -> payments.Refund, replayed on ts  : refused=true
     xlang_test.go:147: go  history with payments.Charge -> payments.Refund, replayed on rust: refused=true
-2026/11/13 14:51:24 INFO Starting order for user cross-test workflow_id=597a7f3b-0bb6-4d35-9626-a6b0b07a294c tenant_id="" step=0 source=workflow
-2026/11/13 14:51:24 INFO Reserved inventory: resv_abc123 workflow_id=597a7f3b-0bb6-4d35-9626-a6b0b07a294c tenant_id="" step=1 source=workflow
-2026/11/13 14:51:24 INFO Payment processed: chg_xyz789 workflow_id=597a7f3b-0bb6-4d35-9626-a6b0b07a294c tenant_id="" step=2 source=workflow
-2026/11/13 14:51:24 INFO Order complete: TRACK-123456 workflow_id=597a7f3b-0bb6-4d35-9626-a6b0b07a294c tenant_id="" step=3 source=workflow
+2026/11/13 15:53:37 INFO Starting order for user cross-test workflow_id=575677c1-88f1-4633-90f6-cb65fbd157da tenant_id="" step=0 source=workflow
+2026/11/13 15:53:37 INFO Reserved inventory: resv_abc123 workflow_id=575677c1-88f1-4633-90f6-cb65fbd157da tenant_id="" step=1 source=workflow
+2026/11/13 15:53:37 INFO Payment processed: chg_xyz789 workflow_id=575677c1-88f1-4633-90f6-cb65fbd157da tenant_id="" step=2 source=workflow
+2026/11/13 15:53:37 INFO Order complete: TRACK-123456 workflow_id=575677c1-88f1-4633-90f6-cb65fbd157da tenant_id="" step=3 source=workflow
     xlang_test.go:147: ts  history with payments.Charge -> payments.Refund, replayed on go  : refused=true
     xlang_test.go:147: ts  history with payments.Charge -> payments.Refund, replayed on ts  : refused=true
     xlang_test.go:147: ts  history with payments.Charge -> payments.Refund, replayed on rust: refused=true
---- PASS: TestATamperedHistoryIsRefusedInEveryDirection (1.40s)
+--- PASS: TestATamperedHistoryIsRefusedInEveryDirection (3.18s)
 === RUN   TestHostCanonicalJSONIsGoAndRawJSDiffers
     xlang_test.go:193: keysUnsorted         hostMatchesGo=true  rawJSMatchesCanonical=false
             raw:   {"b":1,"a":2,"c":{"z":1,"y":2}}
@@ -142,25 +142,25 @@
             raw:   {"a":1,"a":2}
             canon: {"a":2}
     xlang_test.go:201: cases where raw JavaScript JSON.stringify differs from the canonical form: [keysUnsorted htmlChars lineSeparators loneSurrogate bigIntegerLiteral exponentLiteral duplicateKeys]
---- PASS: TestHostCanonicalJSONIsGoAndRawJSDiffers (0.16s)
+--- PASS: TestHostCanonicalJSONIsGoAndRawJSDiffers (0.41s)
 === RUN   TestMultiKeyResultIsByteIdenticalToGoOnlyWithCanonicalResults
     xlang_test.go:227: go (encoding/json):                 {"a":2,"b":1,"html":"\u003cx\u003e\u0026","n":100,"nested":{"y":[true,null],"z":1.5}}
     xlang_test.go:228: ts, SDK canonical result (default): {"a":2,"b":1,"html":"\u003cx\u003e\u0026","n":100,"nested":{"y":[true,null],"z":1.5}}
     xlang_test.go:229: ts, RAW JSON.stringify (control):   {"b":1,"a":2,"html":"<x>&","nested":{"z":1.5,"y":[true,null]},"n":100}
---- PASS: TestMultiKeyResultIsByteIdenticalToGoOnlyWithCanonicalResults (0.62s)
+--- PASS: TestMultiKeyResultIsByteIdenticalToGoOnlyWithCanonicalResults (1.48s)
 === RUN   TestTSAndRustRecordTheSameRequestBytes
-2026/11/13 14:51:26 INFO Starting order for user cross-test workflow_id=987e58a1-4099-4e4e-9ee6-c3e6e2d85eda tenant_id="" step=0 source=workflow
-2026/11/13 14:51:26 INFO Reserved inventory: resv_abc123 workflow_id=987e58a1-4099-4e4e-9ee6-c3e6e2d85eda tenant_id="" step=1 source=workflow
-2026/11/13 14:51:26 INFO Payment processed: chg_xyz789 workflow_id=987e58a1-4099-4e4e-9ee6-c3e6e2d85eda tenant_id="" step=2 source=workflow
-2026/11/13 14:51:26 INFO Order complete: TRACK-123456 workflow_id=987e58a1-4099-4e4e-9ee6-c3e6e2d85eda tenant_id="" step=3 source=workflow
-2026/11/13 14:51:26 INFO Starting order for user cross-test workflow_id=96cc9930-b27d-451e-a774-107c1110108a tenant_id="" step=0 source=workflow
-2026/11/13 14:51:26 INFO Reserved inventory: resv_abc123 workflow_id=96cc9930-b27d-451e-a774-107c1110108a tenant_id="" step=1 source=workflow
-2026/11/13 14:51:26 INFO Payment processed: chg_xyz789 workflow_id=96cc9930-b27d-451e-a774-107c1110108a tenant_id="" step=2 source=workflow
-2026/11/13 14:51:26 INFO Order complete: TRACK-123456 workflow_id=96cc9930-b27d-451e-a774-107c1110108a tenant_id="" step=4 source=workflow
---- PASS: TestTSAndRustRecordTheSameRequestBytes (0.18s)
+2026/11/13 15:53:40 INFO Starting order for user cross-test workflow_id=892d4e48-1707-45f6-8786-71a8d2f48057 tenant_id="" step=0 source=workflow
+2026/11/13 15:53:40 INFO Reserved inventory: resv_abc123 workflow_id=892d4e48-1707-45f6-8786-71a8d2f48057 tenant_id="" step=1 source=workflow
+2026/11/13 15:53:40 INFO Payment processed: chg_xyz789 workflow_id=892d4e48-1707-45f6-8786-71a8d2f48057 tenant_id="" step=2 source=workflow
+2026/11/13 15:53:40 INFO Order complete: TRACK-123456 workflow_id=892d4e48-1707-45f6-8786-71a8d2f48057 tenant_id="" step=3 source=workflow
+2026/11/13 15:53:40 INFO Starting order for user cross-test workflow_id=00f6c936-d233-4671-b759-a6cbb51ad6df tenant_id="" step=0 source=workflow
+2026/11/13 15:53:40 INFO Reserved inventory: resv_abc123 workflow_id=00f6c936-d233-4671-b759-a6cbb51ad6df tenant_id="" step=1 source=workflow
+2026/11/13 15:53:40 INFO Payment processed: chg_xyz789 workflow_id=00f6c936-d233-4671-b759-a6cbb51ad6df tenant_id="" step=2 source=workflow
+2026/11/13 15:53:40 INFO Order complete: TRACK-123456 workflow_id=00f6c936-d233-4671-b759-a6cbb51ad6df tenant_id="" step=4 source=workflow
+--- PASS: TestTSAndRustRecordTheSameRequestBytes (0.36s)
 === RUN   TestNonFiniteNumbersFailInGoAndInTypeScriptAlike
     xlang_test.go:290: NaN       go: unsupported value: NaN | ts: unsupported value: NaN | ts lenient (red control): result="{\"v\":null}" err=<nil>
     xlang_test.go:290: +Infinity go: unsupported value: +Inf | ts: unsupported value: +Inf | ts lenient (red control): result="{\"v\":null}" err=<nil>
---- PASS: TestNonFiniteNumbersFailInGoAndInTypeScriptAlike (1.25s)
+--- PASS: TestNonFiniteNumbersFailInGoAndInTypeScriptAlike (2.56s)
 PASS
-ok  	cleatproto/xlang	12.823s
+ok  	cleatproto/xlang	34.632s

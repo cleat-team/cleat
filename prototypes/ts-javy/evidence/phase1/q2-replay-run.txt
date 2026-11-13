@@ -1,20 +1,20 @@
-run 2b5dd541-10c3-429b-b97a-2434909a6553 in flight, history: ['await_signals', 'signal_received', 'child_workflow', 'await_child']
+run c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1 in flight, history: ['await_signals', 'signal_received', 'child_workflow', 'await_child']
 === RUN   TestReplayOfAnInFlightJSRunIsIdenticalThreeTimes
-    replay_test.go:95: loaded 4 persisted events for 2b5dd541-10c3-429b-b97a-2434909a6553: await_signals,signal_received,child_workflow,await_child
-2026/11/13 14:40:29 INFO await_child: no cached result, exitReplay to fresh workflow_id=2b5dd541-10c3-429b-b97a-2434909a6553 runID=e3dd397b-9adf-469b-8264-08f40837b03e step=3
-    replay_test.go:106: replay 1: err="" suspended="await_child(e3dd397b-9adf-469b-8264-08f40837b03e)" resultLen=0 historyEvents=5
-2026/11/13 14:40:29 INFO await_child: no cached result, exitReplay to fresh workflow_id=2b5dd541-10c3-429b-b97a-2434909a6553 runID=e3dd397b-9adf-469b-8264-08f40837b03e step=3
-    replay_test.go:106: replay 2: err="" suspended="await_child(e3dd397b-9adf-469b-8264-08f40837b03e)" resultLen=0 historyEvents=5
-2026/11/13 14:40:29 INFO await_child: no cached result, exitReplay to fresh workflow_id=2b5dd541-10c3-429b-b97a-2434909a6553 runID=e3dd397b-9adf-469b-8264-08f40837b03e step=3
-    replay_test.go:106: replay 3: err="" suspended="await_child(e3dd397b-9adf-469b-8264-08f40837b03e)" resultLen=0 historyEvents=5
+    replay_test.go:95: loaded 4 persisted events for c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1: await_signals,signal_received,child_workflow,await_child
+2026/11/13 15:40:02 INFO await_child: no cached result, exitReplay to fresh workflow_id=c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1 runID=76888a43-537f-40f9-ab47-ca3d66dc2d06 step=3
+    replay_test.go:106: replay 1: err="" suspended="await_child(76888a43-537f-40f9-ab47-ca3d66dc2d06)" resultLen=0 historyEvents=5
+2026/11/13 15:40:02 INFO await_child: no cached result, exitReplay to fresh workflow_id=c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1 runID=76888a43-537f-40f9-ab47-ca3d66dc2d06 step=3
+    replay_test.go:106: replay 2: err="" suspended="await_child(76888a43-537f-40f9-ab47-ca3d66dc2d06)" resultLen=0 historyEvents=5
+2026/11/13 15:40:02 INFO await_child: no cached result, exitReplay to fresh workflow_id=c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1 runID=76888a43-537f-40f9-ab47-ca3d66dc2d06 step=3
+    replay_test.go:106: replay 3: err="" suspended="await_child(76888a43-537f-40f9-ab47-ca3d66dc2d06)" resultLen=0 historyEvents=5
     replay_test.go:120: IDENTICAL x3: true
-    replay_test.go:130: RED CONTROL A (step 1 signal_received -> child_workflow): detected=true err="host: workflow 2b5dd541-10c3-429b-b97a-2434909a6553: execution failed: wasm trap: host: export \"journey\": {\"error\":\"Error: Failed(\\\"await_child(run_id=\\\\\\\"\\\\\\\") failed: host error code 1. Check that the run ID is valid.\\\")\\n    at CleatError (function.mjs:3:1)\\n    at settle (function.mjs:13:51)\\n    at <anonymous> (function.mjs:33:130)\\n\"}" suspended=""
-2026/11/13 14:40:29 ERROR replay history is not dense workflow_id=2b5dd541-10c3-429b-b97a-2434909a6553 tenant_id="" events=3 error="event 1 of 3 carries step 2: the history is missing at least one record, so replay would consume step 2's result where step 1's is expected and then re-execute the remainder as though the workflow had reached the end of its history"
-    replay_test.go:140: RED CONTROL B (one event removed from the middle): detected=true err="host: workflow 2b5dd541-10c3-429b-b97a-2434909a6553: replay history is incomplete: event 1 of 3 carries step 2: the history is missing at least one record, so replay would consume step 2's result where step 1's is expected and then re-execute the remainder as though the workflow had reached the end of its history"
-2026/11/13 14:40:29 INFO await_child: no cached result, exitReplay to fresh workflow_id=2b5dd541-10c3-429b-b97a-2434909a6553 runID=e3dd397b-9adf-469b-8264-08f40837b03e step=3
+    replay_test.go:130: RED CONTROL A (step 1 signal_received -> child_workflow): detected=true err="host: workflow c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1: execution failed: wasm trap: host: export \"journey\": {\"error\":\"Error: Failed(\\\"await_child(run_id=\\\\\\\"\\\\\\\") failed: host error code 1. Check that the run ID is valid.\\\")\\n    at CleatError (packages/cleat-ts/index.ts:38:40)\\n    at settle (packages/cleat-ts/index.ts:49:54)\\n    at <anonymous> (packages/cleat-ts/index.ts:99:124)\\n\"}" suspended=""
+2026/11/13 15:40:02 ERROR replay history is not dense workflow_id=c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1 tenant_id="" events=3 error="event 1 of 3 carries step 2: the history is missing at least one record, so replay would consume step 2's result where step 1's is expected and then re-execute the remainder as though the workflow had reached the end of its history"
+    replay_test.go:140: RED CONTROL B (one event removed from the middle): detected=true err="host: workflow c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1: replay history is incomplete: event 1 of 3 carries step 2: the history is missing at least one record, so replay would consume step 2's result where step 1's is expected and then re-execute the remainder as though the workflow had reached the end of its history"
+2026/11/13 15:40:02 INFO await_child: no cached result, exitReplay to fresh workflow_id=c17c5dbe-f7d9-4ea9-8a27-b7a4a16bb5e1 runID=76888a43-537f-40f9-ab47-ca3d66dc2d06 step=3
     replay_test.go:155: OBSERVATION (renamed child, not asserted): detected=true err=""
---- PASS: TestReplayOfAnInFlightJSRunIsIdenticalThreeTimes (0.21s)
+--- PASS: TestReplayOfAnInFlightJSRunIsIdenticalThreeTimes (1.84s)
 PASS
-ok  	cleatproto/replay	0.663s
+ok  	cleatproto/replay	3.757s
 
 rc=0 ran-and-passed=True skipped=False

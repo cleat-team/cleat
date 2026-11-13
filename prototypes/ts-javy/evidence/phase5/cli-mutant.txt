@@ -1,0 +1,6 @@
+--- FAIL: TestParseTSEntry (0.00s)
+    build_ts_test.go:27: parseTSEntry("wf.ts:") accepted a spec that must be refused
+    build_ts_test.go:27: parseTSEntry("wf.ts:PlaceOrder") accepted a spec that must be refused
+    build_ts_test.go:27: parseTSEntry("wf.ts:place-order") accepted a spec that must be refused
+restored (content identical)
+green again after the restore

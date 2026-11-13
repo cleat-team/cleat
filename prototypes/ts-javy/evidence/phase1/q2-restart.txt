@@ -11,8 +11,8 @@
   history at suspension: []
   worker SIGKILLed
   worker restarted
-  PASS  S1 sleeper completes after a restart  {"slept":6000,"workflow":"ca886dbf-1ee3-4195-ae30-1e08406a0918"}
-  info  reclaim_count=0 (not asserted: whether the kill landed during a claimed segment is timing, and either value completed correctly)
+  PASS  S1 sleeper completes after a restart  {"slept":6000,"workflow":"866785fe-7517-4473-bd7e-8d8ea4f8b112"}
+  info  reclaim_count=1 (not asserted: whether the kill landed during a claimed segment is timing, and either value completed correctly)
 
 ### S2 signaler: SIGKILL while waiting for the signal, restart, deliver the signal
   status at suspension: ready
@@ -22,22 +22,22 @@
 
 ### S3 parent -> child sleeper: SIGKILL while both are suspended, restart
   parent history: [('0', 'child_workflow', '', '', '', 'sleeper'), ('1', 'await_child', '', '', '', '')]
-  newest other run: b42479ee-f75e-469b-a025-bd100aeb2d49	ready
-  PASS  S3 parent completes with the child's result  {"child":{"slept":6000,"workflow":"b42479ee-f75e-469b-a025-bd100aeb2d49"}}
+  newest other run: 813e146a-aaa5-4e36-a0ff-499d24f0ad81	ready
+  PASS  S3 parent completes with the child's result  {"child":{"slept":6000,"workflow":"813e146a-aaa5-4e36-a0ff-499d24f0ad81"}}
 
 ### S4 journey: sleep, signal, child in ONE run; kill -9 at each suspension; history rows never change underneath
   [A: suspended at the signal wait] status=ready 1 history rows: ['await_signals']
   [B: after SIGKILL #1, restarted] status=ready 1 history rows: ['await_signals']
   [C: suspended at the child wait] status=ready 4 history rows: ['await_signals', 'signal_received', 'child_workflow', 'await_child']
   [D: after SIGKILL #2, restarted, child still running] status=ready 4 history rows: ['await_signals', 'signal_received', 'child_workflow', 'await_child']
-  PASS  S4 journey completes  {"id":"3b6b3bc3-9889-40a1-a754-89221d835e2f","now":true,"uuid":"210deb2e-b58c-5cf6-9305-f0f8feead949","child":{"slept":15000,"workflow":"cabb04e6-c14c-4dd3-9861-ae6bfa1b6dc4"},"random":"7377613134942747486","signal":"hello"}
+  PASS  S4 journey completes  {"id":"b6487749-66c3-4715-8f31-30ff7de3dd8e","now":true,"uuid":"c29f8376-c05f-5628-9c8c-0ab4cf66b116","child":{"slept":15000,"workflow":"48f43b9b-cf8b-4d90-9f01-8d4af4cdf8f6"},"random":"-9145646430152019786","signal":"hello"}
   rows of [A] are an unchanged prefix of [B]: True (1 -> 1 rows)
   rows of [B] are an unchanged prefix of [C]: True (1 -> 4 rows)
   rows of [C] are an unchanged prefix of [D]: True (4 -> 4 rows)
   PASS  S4 each earlier snapshot's history rows (all columns) are an unchanged prefix of every later one, across 2 SIGKILLs
   'replay history is shorter' warnings for this run: 1
-    2026/11/13 14:40:11 WARN replay history is shorter than the instance's recorded event count workflow_id=3b6b3bc3-9889-40a1-a754-89221d835e2f tenant_id=00000000-0000-0000-0000-000000000000 recorded_event_count=5 loaded_events=4 truncated_compacted_events=0 miss
-  journey run id 3b6b3bc3-9889-40a1-a754-89221d835e2f
+    2026/11/13 15:39:38 WARN replay history is shorter than the instance's recorded event count workflow_id=b6487749-66c3-4715-8f31-30ff7de3dd8e tenant_id=00000000-0000-0000-0000-000000000000 recorded_event_count=5 loaded_events=4 truncated_compacted_events=0 miss
+  journey run id b6487749-66c3-4715-8f31-30ff7de3dd8e
 
 ### S5 finalizer: `finally` must not run at suspension, and must run once at completion
   PASS  S5 no `finally` ran during the suspended segment  trace lines so far: 0

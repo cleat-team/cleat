@@ -1,7 +1,7 @@
 settings: L.PORT=18791 L.BIN='/Users/Shared/localssd/rcownie/cleat-wt-ts-fresh/prototypes/ts-javy/.work/cleat-worker'
   PASS  the old pattern WOULD have matched the foreign worker (so this test can disagree with it)
   PASS  a worker recorded in this checkout's pidfile, running this checkout's binary, IS stopped
-  PASS  the foreign worker on the same port was NOT touched  pid 29130
+  PASS  the foreign worker on the same port was NOT touched  pid 7021
   PASS  the pidfile was removed
   PASS  a process running this checkout's binary with NO pidfile entry makes it refuse as UNMEASURED
   PASS  and it was not killed

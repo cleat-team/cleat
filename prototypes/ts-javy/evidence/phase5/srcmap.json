@@ -1,0 +1,51 @@
+{
+ "expected_lines": {
+  "inner-throw": 8,
+  "call-from-workflow": 12,
+  "call-after-resume": 17,
+  "zod-parse": 21,
+  "lib-throw": 27
+ },
+ "throw_col": 3,
+ "module_bytes": {
+  "map": 2224146,
+  "nomap": 1721114
+ },
+ "map_payload_bytes": 451785,
+ "map_cost_by_workflow": {
+  "crosslang": {
+   "map": 1132295,
+   "nomap": 1125468,
+   "delta": 6827,
+   "pct": 0.6
+  },
+  "bench": {
+   "map": 1129710,
+   "nomap": 1124110,
+   "delta": 5600,
+   "pct": 0.5
+  },
+  "npm_lodash": {
+   "map": 1306217,
+   "nomap": 1211361,
+   "delta": 94856,
+   "pct": 7.8
+  },
+  "npm_zod": {
+   "map": 2216687,
+   "nomap": 1717530,
+   "delta": 499157,
+   "pct": 29.1
+  }
+ },
+ "errors": {
+  "map/srcmap_throw": "host: workflow 111093f9-1dba-4566-b479-8aeccfccf378: execution failed: wasm trap: host: export \"srcmap_throw\": {\"error\":\"Error: boom 1\\n    at inner (workflows/srcmap/srcmap.ts:8:29)\\n    at <anonymous> (workflows/srcmap/srcmap.ts:12:3)\\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\\n\"}",
+  "map/srcmap_late": "host: workflow af7fdb63-55a5-4ebf-b283-259fa823433e: execution failed: wasm trap: host: export \"srcmap_late\": {\"error\":\"Error: boom 2\\n    at inner (workflows/srcmap/srcmap.ts:8:29)\\n    at <anonymous> (workflows/srcmap/srcmap.ts:17:3)\\n\"}",
+  "map/srcmap_zod": "host: workflow 6c9bdaf0-22b6-4b8c-a09a-ea6258ff3450: execution failed: wasm trap: host: export \"srcmap_zod\": {\"error\":\"ZodError: [\\n  {\\n    \\\"expected\\\": \\\"number\\\",\\n    \\\"code\\\": \\\"invalid_type\\\",\\n    \\\"path\\\": [\\n      \\\"a\\\"\\n    ],\\n    \\\"message\\\": \\\"Invalid input: expected number, received string\\\"\\n  }\\n]\\n    at <anonymous> (workflows/srcmap/srcmap.ts:21:31)\\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\\n\"}",
+  "map/srcmap_lib": "host: workflow 4380c6e2-365e-464c-8776-7d3865c401ea: execution failed: wasm trap: host: export \"srcmap_lib\": {\"error\":\"TypeError: Invalid UUID\\n    at parse3 (node_modules/uuid/dist/parse.js:4:15)\\n    at v35 (node_modules/uuid/dist/v35.js:15:66)\\n    at v5 (node_modules/uuid/dist/v5.js:5:12)\\n    at <anonymous> (workflows/srcmap/srcmap.ts:27:3)\\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\\n\"}",
+  "nomap/srcmap_throw": "host: workflow a569a45a-d327-4723-9eec-10f3331b3255: execution failed: wasm trap: host: export \"srcmap_throw\": {\"error\":\"Error: boom 1\\n    at inner (function.mjs:20007:29)\\n    at <anonymous> (function.mjs:20010:3)\\n    at <anonymous> (function.mjs:135:37)\\n\"}",
+  "nomap/srcmap_late": "host: workflow 2ad9761f-090e-4e57-bab8-197f5becd11a: execution failed: wasm trap: host: export \"srcmap_late\": {\"error\":\"Error: boom 2\\n    at inner (function.mjs:20007:29)\\n    at <anonymous> (function.mjs:20014:3)\\n\"}",
+  "nomap/srcmap_zod": "host: workflow e2270e60-8a8d-40a0-8b68-1b4339c21ef9: execution failed: wasm trap: host: export \"srcmap_zod\": {\"error\":\"ZodError: [\\n  {\\n    \\\"expected\\\": \\\"number\\\",\\n    \\\"code\\\": \\\"invalid_type\\\",\\n    \\\"path\\\": [\\n      \\\"a\\\"\\n    ],\\n    \\\"message\\\": \\\"Invalid input: expected number, received string\\\"\\n  }\\n]\\n    at <anonymous> (function.mjs:20017:61)\\n    at <anonymous> (function.mjs:135:37)\\n\"}",
+  "nomap/srcmap_lib": "host: workflow 168b214a-95cd-4371-99a0-78eab94faa60: execution failed: wasm trap: host: export \"srcmap_lib\": {\"error\":\"TypeError: Invalid UUID\\n    at parse3 (function.mjs:19874:11)\\n    at v35 (function.mjs:19903:72)\\n    at v5 (function.mjs:19999:10)\\n    at <anonymous> (function.mjs:20020:3)\\n    at <anonymous> (function.mjs:135:37)\\n\"}"
+ }
+}

@@ -1,0 +1,15 @@
+user workflow: /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/cleat-userwf-248jtpvk/src/orders.ts (outside /Users/Shared/localssd/rcownie/cleat-wt-ts-fresh)
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/cleat-userwf-248jtpvk/out/orders.wasm
+  PASS  cleat build --target ts builds a workflow outside the repository (exit 0, module written to -o)  rc=0
+  PASS  the module carries the javascript language label and the engine pin
+  Deployed orders v1 (ABI v1, minVersion=1, 2211110 bytes, SHA256=c65ea99133ff50bc)
+  PASS  a valid order completes with the right result  {"ok":true,"qty":3}
+  PASS  an invalid order fails (zod refuses it)  host: workflow eb678bfc-762f-4288-8024-082b8cc71b11: execution failed: wasm trap
+  PASS  the error names the user's own file and a line in it, relative to the source root  at <anonymous> (src/orders.ts:8:25)
+  PASS  a throw in the user's code names src/orders.ts:7, as the whole path (nothing before it)  ort "check_order": {"error":"Error: order must be an object\n    at <anonymous> (src/orders.ts:7:44)\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\n"}
+  PASS  no bundle position (function.mjs) leaks into either error
+  PASS  a malformed entry name is refused (exit 1) before any build  Error: entry name "Check-Order" is not snake_case ([a-z][a-z0-9_]*)
+  PASS  a source the static check refuses exits 1 and emits NO artifact  rc=1
+  PASS  an unbuilt toolchain is UNMEASURED (exit 2) and says what is missing  rc=2
+
+10 of 10 verdicts passed

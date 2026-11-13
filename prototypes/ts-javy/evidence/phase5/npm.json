@@ -1,0 +1,373 @@
+{
+ "rows": [
+  {
+   "case": "parse_ok",
+   "guest": "{\"id\":7,\"name\":\"Ada\",\"email\":\"ada@example.com\",\"role\":\"user\"}",
+   "later_same": true,
+   "node": "{\"id\":7,\"name\":\"Ada\",\"email\":\"ada@example.com\",\"role\":\"user\"}",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "safeparse_errors",
+   "guest": "[{\"path\":\"id\",\"code\":\"too_small\",\"message\":\"Too small: expected number to be >0\"},{\"path\":\"name\",\"code\":\"too_small\",\"message\":\"Too small: expected string to have >=1 characters\"},{\"path\":\"email\",\"code\":\"invalid_format\",\"message\":\"Invalid email address\"},{\"path\":\"role\",\"code\":\"invalid_value\",\"message",
+   "later_same": true,
+   "node": "[{\"path\":\"id\",\"code\":\"too_small\",\"message\":\"Too small: expected number to be >0\"},{\"path\":\"name\",\"code\":\"too_small\",\"message\":\"Too small: expected string to have >=1 characters\"},{\"path\":\"email\",\"code\":\"invalid_format\",\"message\":\"Invalid email address\"},{\"path\":\"role\",\"code\":\"invalid_value\",\"message",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "transform_coerce",
+   "guest": "{\"n\":42,\"s\":[\"hello\",\"world\"],\"d\":\"2024-02-29\"}",
+   "later_same": true,
+   "node": "{\"n\":42,\"s\":[\"hello\",\"world\"],\"d\":\"2024-02-29\"}",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "discriminated_union",
+   "guest": "[{\"kind\":\"a\",\"x\":1},{\"kind\":\"b\",\"y\":\"z\"},\"invalid_union\"]",
+   "later_same": true,
+   "node": "[{\"kind\":\"a\",\"x\":1},{\"kind\":\"b\",\"y\":\"z\"},\"invalid_union\"]",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "json_schema",
+   "guest": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"exclusiveMinimum\":0,\"maximum\":9007199254740991},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":40},\"email\":{\"type\":\"string\",\"format\":\"email\",\"pattern\":\"^(?:[A-Za-z0-9_'+\\\\-]+\\\\.)*[A-Za-",
+   "later_same": true,
+   "node": "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\",\"exclusiveMinimum\":0,\"maximum\":9007199254740991},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":40},\"email\":{\"type\":\"string\",\"format\":\"email\",\"pattern\":\"^(?:[A-Za-z0-9_'+\\\\-]+\\\\.)*[A-Za-",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "string_formats",
+   "guest": "{\"uuid\":true,\"url\":false,\"ipv4\":false,\"iso\":true}",
+   "later_same": true,
+   "node": "{\"uuid\":true,\"url\":true,\"ipv4\":false,\"iso\":true}",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  },
+  {
+   "case": "url_global",
+   "guest": "[\"undefined\",\"undefined\"]",
+   "later_same": true,
+   "node": "[\"function\",\"function\"]",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  },
+  {
+   "case": "control_differs",
+   "guest": "\"undefined\"",
+   "later_same": true,
+   "node": "\"object\"",
+   "pkg": "zod",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  },
+  {
+   "case": "format",
+   "guest": "\"2024-02-29T13:05:09 Thursday, February 29th, Q1\"",
+   "later_same": true,
+   "node": "\"2024-02-29T13:05:09 Thursday, February 29th, Q1\"",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "arithmetic",
+   "guest": "[\"2025-03-01T13:05:09.000Z\",\"2025-02-28T13:05:09.000Z\",\"2024-02-25T00:00:00.000Z\",\"2024-02-29T23:59:59.999Z\",\"40\"]",
+   "later_same": true,
+   "node": "[\"2025-03-01T13:05:09.000Z\",\"2025-02-28T13:05:09.000Z\",\"2024-02-25T00:00:00.000Z\",\"2024-02-29T23:59:59.999Z\",\"40\"]",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "interval",
+   "guest": "\"ddwwddd\"",
+   "later_same": true,
+   "node": "\"ddwwddd\"",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "parse",
+   "guest": "[1709211909000,true,\"2024-02-29T00:00:00.000Z\"]",
+   "later_same": true,
+   "node": "[1709211909000,false,\"2024-02-29T00:00:00.000Z\"]",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  },
+  {
+   "case": "distance",
+   "guest": "[\"in about 1 month\",\"about 1 year\"]",
+   "later_same": true,
+   "node": "[\"in about 1 month\",\"about 1 year\"]",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "distance_to_now",
+   "guest": "\"3 days\"",
+   "later_same": true,
+   "node": "\"3 days\"",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "locale_de",
+   "guest": "\"Donnerstag, 29. Februar 2024\"",
+   "later_same": true,
+   "node": "\"Donnerstag, 29. Februar 2024\"",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "native_date_setter_nan",
+   "guest": "\"Thu Jan 01 1970 00:00:00 GMT+0000\"",
+   "later_same": true,
+   "node": "\"Invalid Date\"",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  },
+  {
+   "case": "control_differs",
+   "guest": "\"undefined\"",
+   "later_same": true,
+   "node": "\"object\"",
+   "pkg": "datefns",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  },
+  {
+   "case": "collections",
+   "guest": "{\"chunk\":[[1,2],[3,4],[5]],\"groupBy\":{\"x\":[\"ada\",\"cy\"],\"y\":[\"bob\",\"di\"]},\"orderBy\":[\"bob\",\"ada\",\"cy\",\"di\"],\"uniq\":[\"ada\",\"bob\",\"di\"],\"sum\":142}",
+   "later_same": true,
+   "node": "{\"chunk\":[[1,2],[3,4],[5]],\"groupBy\":{\"x\":[\"ada\",\"cy\"],\"y\":[\"bob\",\"di\"]},\"orderBy\":[\"bob\",\"ada\",\"cy\",\"di\"],\"uniq\":[\"ada\",\"bob\",\"di\"],\"sum\":142}",
+   "pkg": "lodash",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "objects",
+   "guest": "{\"merged\":{\"a\":{\"b\":[9,{\"c\":2}]},\"k\":1,\"z\":3},\"baseUntouched\":2,\"copy\":99,\"pick\":{\"k\":1},\"eq\":true}",
+   "later_same": true,
+   "node": "{\"merged\":{\"a\":{\"b\":[9,{\"c\":2}]},\"k\":1,\"z\":3},\"baseUntouched\":2,\"copy\":99,\"pick\":{\"k\":1},\"eq\":true}",
+   "pkg": "lodash",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "strings",
+   "guest": "[\"fooBarBazQux\",\"foo-bar-baz\"]",
+   "later_same": true,
+   "node": "[\"fooBarBazQux\",\"foo-bar-baz\"]",
+   "pkg": "lodash",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "template",
+   "guest": "\"hello world! [a&lt;b][c]\"",
+   "later_same": true,
+   "node": "\"hello world! [a&lt;b][c]\"",
+   "pkg": "lodash",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "debounce",
+   "guest": "threw:ReferenceError:setTimeout is not defined",
+   "later_same": true,
+   "node": "\"called\"",
+   "pkg": "lodash",
+   "replay_same": true,
+   "verdict": "GUEST_THREW"
+  },
+  {
+   "case": "random",
+   "guest": "true",
+   "later_same": true,
+   "node": "true",
+   "pkg": "lodash",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "control_differs",
+   "guest": "\"undefined\"",
+   "later_same": true,
+   "node": "\"object\"",
+   "pkg": "lodash",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  },
+  {
+   "case": "v5_v3",
+   "guest": "[\"cfbff0d1-9375-5685-968c-48ce8b15ae17\",\"9073926b-929f-31c2-abc9-fad77ae3e8eb\"]",
+   "later_same": true,
+   "node": "[\"cfbff0d1-9375-5685-968c-48ce8b15ae17\",\"9073926b-929f-31c2-abc9-fad77ae3e8eb\"]",
+   "pkg": "uuid",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "parse_stringify",
+   "guest": "[\"4f3f2898-69e3-5a0d-820a-c4e87987dbce\",true,false,5,0]",
+   "later_same": true,
+   "node": "[\"4f3f2898-69e3-5a0d-820a-c4e87987dbce\",true,false,5,0]",
+   "pkg": "uuid",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "v4",
+   "guest": "threw:ReferenceError:crypto is not defined",
+   "later_same": true,
+   "node": "true",
+   "pkg": "uuid",
+   "replay_same": true,
+   "verdict": "GUEST_THREW"
+  },
+  {
+   "case": "v4_with_random_option",
+   "guest": "\"0b30557a-9fc4-490e-b358-7da2c7ec1136\"",
+   "later_same": true,
+   "node": "\"0b30557a-9fc4-490e-b358-7da2c7ec1136\"",
+   "pkg": "uuid",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "v7_with_options",
+   "guest": "\"018bcfe5-6800-7000-8000-15a2c7ec1136\"",
+   "later_same": true,
+   "node": "\"018bcfe5-6800-7000-8000-15a2c7ec1136\"",
+   "pkg": "uuid",
+   "replay_same": true,
+   "verdict": "EQUAL"
+  },
+  {
+   "case": "v7",
+   "guest": "threw:ReferenceError:crypto is not defined",
+   "later_same": true,
+   "node": "true",
+   "pkg": "uuid",
+   "replay_same": true,
+   "verdict": "GUEST_THREW"
+  },
+  {
+   "case": "control_differs",
+   "guest": "\"undefined\"",
+   "later_same": true,
+   "node": "\"object\"",
+   "pkg": "uuid",
+   "replay_same": true,
+   "verdict": "DIFFERENT"
+  }
+ ],
+ "summary": {
+  "datefns": {
+   "equal": [
+    "format",
+    "arithmetic",
+    "interval",
+    "distance",
+    "distance_to_now",
+    "locale_de"
+   ],
+   "module_bytes": 1330217,
+   "module_bytes_without_source_map": 1226974,
+   "not_equal": [
+    [
+     "parse",
+     "DIFFERENT"
+    ],
+    [
+     "native_date_setter_nan",
+     "DIFFERENT"
+    ]
+   ],
+   "replay_unstable": [],
+   "version": "4.4.0"
+  },
+  "lodash": {
+   "equal": [
+    "collections",
+    "objects",
+    "strings",
+    "template",
+    "random"
+   ],
+   "module_bytes": 1306148,
+   "module_bytes_without_source_map": 1211306,
+   "not_equal": [
+    [
+     "debounce",
+     "GUEST_THREW"
+    ]
+   ],
+   "replay_unstable": [],
+   "version": "4.18.1"
+  },
+  "uuid": {
+   "equal": [
+    "v5_v3",
+    "parse_stringify",
+    "v4_with_random_option",
+    "v7_with_options"
+   ],
+   "module_bytes": 1164092,
+   "module_bytes_without_source_map": 1140735,
+   "not_equal": [
+    [
+     "v4",
+     "GUEST_THREW"
+    ],
+    [
+     "v7",
+     "GUEST_THREW"
+    ]
+   ],
+   "replay_unstable": [],
+   "version": "14.0.3"
+  },
+  "zod": {
+   "equal": [
+    "parse_ok",
+    "safeparse_errors",
+    "transform_coerce",
+    "discriminated_union",
+    "json_schema"
+   ],
+   "module_bytes": 2216775,
+   "module_bytes_without_source_map": 1717498,
+   "not_equal": [
+    [
+     "string_formats",
+     "DIFFERENT"
+    ],
+    [
+     "url_global",
+     "DIFFERENT"
+    ]
+   ],
+   "replay_unstable": [],
+   "version": "4.6.7"
+  }
+ }
+}

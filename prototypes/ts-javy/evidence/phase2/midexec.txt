@@ -1,23 +1,23 @@
 iterations per run: 60,000,000 (about 6 s of CPU unloaded, no host call inside the loop; the kill is sent 3 s in)
 
 ### burn AFTER a recorded side effect
-  baseline (uninterrupted): 4.5s  sum=309838663823
+  baseline (uninterrupted): 6.6s  sum=309838663823
   3 s in: status='running', persisted history rows=1
   PASS  the run was still executing when the kill was sent (not suspended, not finished)  status=running
-  after the kill: status=done in 56.1s, reclaim_count=1, claims in the worker logs=2, completions=1
+  after the kill: status=done in 64.7s, reclaim_count=1, claims in the worker logs=2, completions=1
   PASS  the run completed
   PASS  its computed sum equals the uninterrupted run's  309838663823 vs 309838663823
   PASS  it was claimed again after the restart (>= 2 claims) and completed exactly once  claims=2 completions=1
-  PASS  the recorded side-effect value is a valid Math.random result  0.40867381254954493
+  PASS  the recorded side-effect value is a valid Math.random result  0.8323996856650309
 
 ### burn BEFORE any host call
-  baseline (uninterrupted): 9.1s  sum=309838663823
+  baseline (uninterrupted): 18.1s  sum=309838663823
   3 s in: status='running', persisted history rows=0
   PASS  the run was still executing when the kill was sent (not suspended, not finished)  status=running
-  after the kill: status=done in 60.5s, reclaim_count=1, claims in the worker logs=3, completions=1
+  after the kill: status=done in 63.1s, reclaim_count=1, claims in the worker logs=3, completions=1
   PASS  the run completed
   PASS  its computed sum equals the uninterrupted run's  309838663823 vs 309838663823
   PASS  it was claimed again after the restart (>= 2 claims) and completed exactly once  claims=3 completions=1
-  PASS  the recorded side-effect value is a valid Math.random result  0.5236781099823179
+  PASS  the recorded side-effect value is a valid Math.random result  0.5164554551159757
 
 10 of 10 checks passed

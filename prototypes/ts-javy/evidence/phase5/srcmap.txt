@@ -1,0 +1,48 @@
+module with maps 2,224,146 B (map payload 451,785 B), without 1,721,114 B, delta 503,032 B
+  map cost crosslang   1,125,468 -> 1,132,295 B  (+6,827 B, +0.6%)
+  map cost bench       1,124,110 -> 1,129,710 B  (+5,600 B, +0.5%)
+  map cost npm_lodash  1,211,361 -> 1,306,217 B  (+94,856 B, +7.8%)
+  map cost npm_zod     1,717,530 -> 2,216,687 B  (+499,157 B, +29.1%)
+  Deployed map_srcmap_throw v1 (ABI v1, minVersion=1, 2224146 bytes, SHA256=56591faf877aa248)
+  Deployed map_srcmap_late v1 (ABI v1, minVersion=1, 2224146 bytes, SHA256=56591faf877aa248)
+  Deployed map_srcmap_zod v1 (ABI v1, minVersion=1, 2224146 bytes, SHA256=56591faf877aa248)
+  Deployed map_srcmap_lib v1 (ABI v1, minVersion=1, 2224146 bytes, SHA256=56591faf877aa248)
+  Deployed nomap_srcmap_throw v1 (ABI v1, minVersion=1, 1721114 bytes, SHA256=ea5fc80b626b34da)
+  Deployed nomap_srcmap_late v1 (ABI v1, minVersion=1, 1721114 bytes, SHA256=ea5fc80b626b34da)
+  Deployed nomap_srcmap_zod v1 (ABI v1, minVersion=1, 1721114 bytes, SHA256=ea5fc80b626b34da)
+  Deployed nomap_srcmap_lib v1 (ABI v1, minVersion=1, 1721114 bytes, SHA256=ea5fc80b626b34da)
+## map   srcmap_throw  status=failed
+   'host: workflow 111093f9-1dba-4566-b479-8aeccfccf378: execution failed: wasm trap: host: export "srcmap_throw": {"error":"Error: boom 1\\n    at inner (workflows/srcmap/srcmap.ts:8:29)\\n    at <anonymous> (workflows/srcmap/srcmap.ts:12:3)\\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\\n"}'
+## map   srcmap_late   status=failed
+   'host: workflow af7fdb63-55a5-4ebf-b283-259fa823433e: execution failed: wasm trap: host: export "srcmap_late": {"error":"Error: boom 2\\n    at inner (workflows/srcmap/srcmap.ts:8:29)\\n    at <anonymous> (workflows/srcmap/srcmap.ts:17:3)\\n"}'
+## map   srcmap_zod    status=failed
+   'host: workflow 6c9bdaf0-22b6-4b8c-a09a-ea6258ff3450: execution failed: wasm trap: host: export "srcmap_zod": {"error":"ZodError: [\\n  {\\n    \\"expected\\": \\"number\\",\\n    \\"code\\": \\"invalid_type\\",\\n    \\"path\\": [\\n      \\"a\\"\\n    ],\\n    \\"message\\": \\"Invalid input: expected number, received string\\"\\n  }\\n]\\n    at <anonymous> (workflows/srcmap/srcmap.ts:21:31)\\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\\n"}'
+## map   srcmap_lib    status=failed
+   'host: workflow 4380c6e2-365e-464c-8776-7d3865c401ea: execution failed: wasm trap: host: export "srcmap_lib": {"error":"TypeError: Invalid UUID\\n    at parse3 (node_modules/uuid/dist/parse.js:4:15)\\n    at v35 (node_modules/uuid/dist/v35.js:15:66)\\n    at v5 (node_modules/uuid/dist/v5.js:5:12)\\n    at <anonymous> (workflows/srcmap/srcmap.ts:27:3)\\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\\n"}'
+## nomap srcmap_throw  status=failed
+   'host: workflow a569a45a-d327-4723-9eec-10f3331b3255: execution failed: wasm trap: host: export "srcmap_throw": {"error":"Error: boom 1\\n    at inner (function.mjs:20007:29)\\n    at <anonymous> (function.mjs:20010:3)\\n    at <anonymous> (function.mjs:135:37)\\n"}'
+## nomap srcmap_late   status=failed
+   'host: workflow 2ad9761f-090e-4e57-bab8-197f5becd11a: execution failed: wasm trap: host: export "srcmap_late": {"error":"Error: boom 2\\n    at inner (function.mjs:20007:29)\\n    at <anonymous> (function.mjs:20014:3)\\n"}'
+## nomap srcmap_zod    status=failed
+   'host: workflow e2270e60-8a8d-40a0-8b68-1b4339c21ef9: execution failed: wasm trap: host: export "srcmap_zod": {"error":"ZodError: [\\n  {\\n    \\"expected\\": \\"number\\",\\n    \\"code\\": \\"invalid_type\\",\\n    \\"path\\": [\\n      \\"a\\"\\n    ],\\n    \\"message\\": \\"Invalid input: expected number, received string\\"\\n  }\\n]\\n    at <anonymous> (function.mjs:20017:61)\\n    at <anonymous> (function.mjs:135:37)\\n"}'
+## nomap srcmap_lib    status=failed
+   'host: workflow 168b214a-95cd-4371-99a0-78eab94faa60: execution failed: wasm trap: host: export "srcmap_lib": {"error":"TypeError: Invalid UUID\\n    at parse3 (function.mjs:19874:11)\\n    at v35 (function.mjs:19903:72)\\n    at v5 (function.mjs:19999:10)\\n    at <anonymous> (function.mjs:20020:3)\\n    at <anonymous> (function.mjs:135:37)\\n"}'
+
+verdicts
+  PASS  srcmap_throw: names workflows/srcmap/srcmap.ts at the throw line 8  col=29 (the `throw` keyword is at col 3)
+  PASS  srcmap_throw: and at the call site, line 12
+  PASS  srcmap_throw: no bundle position is left in the message
+  PASS  srcmap_throw: known-negative, the no-map build names only the bundle
+  PASS  srcmap_late: names workflows/srcmap/srcmap.ts at the throw line 8  col=29 (the `throw` keyword is at col 3)
+  PASS  srcmap_late: and at the call site, line 17
+  PASS  srcmap_late: no bundle position is left in the message
+  PASS  srcmap_late: known-negative, the no-map build names only the bundle
+  PASS  srcmap_zod: names workflows/srcmap/srcmap.ts at the user's .parse line 21
+  PASS  srcmap_lib: names workflows/srcmap/srcmap.ts at the call line 27
+  PASS  srcmap_lib: names a node_modules/uuid frame by path, mapped from the bundle (a library frame is mapped too)  node_modules/uuid/dist/parse.js:4:15
+  PASS  srcmap_lib: no bundle position is left in the message
+  PASS  srcmap_lib: known-negative, the no-map build names only the bundle
+  PASS  srcmap_zod: known-negative, the no-map build names only the bundle
+  PASS  the message itself is unchanged by maps (the text before the first stack frame is identical, mapped vs unmapped)
+
+15 of 15 verdicts passed

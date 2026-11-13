@@ -1,0 +1,45 @@
+  Deployed npm_zod v1 (ABI v1, minVersion=1, 2216775 bytes, SHA256=4f61c1531348b6d4)
+  Deployed npm_datefns v1 (ABI v1, minVersion=1, 1330217 bytes, SHA256=0308d9f19bacfaf9)
+  Deployed npm_lodash v1 (ABI v1, minVersion=1, 1306148 bytes, SHA256=4ce80604d2930484)
+  Deployed npm_uuid v1 (ABI v1, minVersion=1, 1164092 bytes, SHA256=c58315a279a12850)
+
+package  case                   verdict      replay-stable later-same   (guest answer when not EQUAL)
+zod      parse_ok               EQUAL        True         True      
+zod      safeparse_errors       EQUAL        True         True      
+zod      transform_coerce       EQUAL        True         True      
+zod      discriminated_union    EQUAL        True         True      
+zod      json_schema            EQUAL        True         True      
+zod      string_formats         DIFFERENT    True         True        guest='{"uuid":true,"url":false,"ipv4":false,"iso":true}'  node='{"uuid":true,"url":true,"ipv4":false,"iso":true}'
+zod      url_global             DIFFERENT    True         True        guest='["undefined","undefined"]'  node='["function","function"]'
+zod      control_differs        DIFFERENT    True         True        guest='"undefined"'  node='"object"'
+datefns  format                 EQUAL        True         True      
+datefns  arithmetic             EQUAL        True         True      
+datefns  interval               EQUAL        True         True      
+datefns  parse                  DIFFERENT    True         True        guest='[1709211909000,true,"2024-02-29T00:00:00.000Z"]'  node='[1709211909000,false,"2024-02-29T00:00:00.000Z"]'
+datefns  distance               EQUAL        True         True      
+datefns  distance_to_now        EQUAL        True         True      
+datefns  locale_de              EQUAL        True         True      
+datefns  native_date_setter_nan DIFFERENT    True         True        guest='"Thu Jan 01 1970 00:00:00 GMT+0000"'  node='"Invalid Date"'
+datefns  control_differs        DIFFERENT    True         True        guest='"undefined"'  node='"object"'
+lodash   collections            EQUAL        True         True      
+lodash   objects                EQUAL        True         True      
+lodash   strings                EQUAL        True         True      
+lodash   template               EQUAL        True         True      
+lodash   debounce               GUEST_THREW  True         True        guest='threw:ReferenceError:setTimeout is not defined'  node='"called"'
+lodash   random                 EQUAL        True         True      
+lodash   control_differs        DIFFERENT    True         True        guest='"undefined"'  node='"object"'
+uuid     v5_v3                  EQUAL        True         True      
+uuid     parse_stringify        EQUAL        True         True      
+uuid     v4                     GUEST_THREW  True         True        guest='threw:ReferenceError:crypto is not defined'  node='true'
+uuid     v4_with_random_option  EQUAL        True         True      
+uuid     v7_with_options        EQUAL        True         True      
+uuid     v7                     GUEST_THREW  True         True        guest='threw:ReferenceError:crypto is not defined'  node='true'
+uuid     control_differs        DIFFERENT    True         True        guest='"undefined"'  node='"object"'
+
+known-positive: control_differs reported DIFFERENT for 4 of 4 packages (want all 4)
+
+per package (control_differs excluded):
+  zod      4.6.7    module 2,216,775 B (1,717,498 without source map)  EQUAL 5 of 7  not equal: [('string_formats', 'DIFFERENT'), ('url_global', 'DIFFERENT')]  replay-unstable: none
+  datefns  4.4.0    module 1,330,217 B (1,226,974 without source map)  EQUAL 6 of 8  not equal: [('parse', 'DIFFERENT'), ('native_date_setter_nan', 'DIFFERENT')]  replay-unstable: none
+  lodash   4.18.1   module 1,306,148 B (1,211,306 without source map)  EQUAL 5 of 6  not equal: [('debounce', 'GUEST_THREW')]  replay-unstable: none
+  uuid     14.0.3   module 1,164,092 B (1,140,735 without source map)  EQUAL 4 of 6  not equal: [('v4', 'GUEST_THREW'), ('v7', 'GUEST_THREW')]  replay-unstable: none

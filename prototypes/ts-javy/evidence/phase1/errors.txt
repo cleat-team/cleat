@@ -1,39 +1,39 @@
-## thrower: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
-   error: host: workflow 71ad9362-3215-47f2-ac44-90831a931ae9: execution failed: wasm trap: host: export "thrower": {"error":"Error: thrower: deliberate failure\n    at <anonymous> (function.mjs:81:13)\n    at <anonymous> (function.mjs:69:37)\n"}
+## thrower: status=failed after 0.6s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow c8539c8d-18c0-45f0-9243-afa0e3dd298c: execution failed: wasm trap: host: export "thrower": {"error":"Error: thrower: deliberate failure\n    at <anonymous> (workflows/errors/errors.ts:8:13)\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\n"}
    result: 
    worker-log lines mentioning wasi/policy/fd_seek: 0
    worker WARN/ERROR lines for this run: 1
-      {"time":"2026-11-13T14:40:30.780682-05:00","level":"ERROR","msg":"execution error","worker_id":"e1cac07f0c07b1f706b5123ab59c3ae6","workflow_id":"71ad9362-3215-47f2-ac44-90831a931ae9","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 71
-## rejecter: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
-   error: host: workflow 42538beb-6ce5-49a8-a908-62e6fec154ff: execution failed: wasm trap: host: export "rejecter": {"error":"rejecter: a string, not an Error"}
+      {"time":"2026-11-13T15:40:04.241209-05:00","level":"ERROR","msg":"execution error","worker_id":"a0e355126561316990786061e5ca271f","workflow_id":"c8539c8d-18c0-45f0-9243-afa0e3dd298c","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow c8
+## rejecter: status=failed after 0.4s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow a1bab74e-859f-4c24-8a26-c3d0f2a47108: execution failed: wasm trap: host: export "rejecter": {"error":"rejecter: a string, not an Error"}
    result: 
    worker-log lines mentioning wasi/policy/fd_seek: 0
    worker WARN/ERROR lines for this run: 1
-      {"time":"2026-11-13T14:40:30.874131-05:00","level":"ERROR","msg":"execution error","worker_id":"e1cac07f0c07b1f706b5123ab59c3ae6","workflow_id":"42538beb-6ce5-49a8-a908-62e6fec154ff","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 42
-## late_thrower: status=failed after 2.2s  error_code='unknown' reclaim_count=0 attempts=None
-   error: host: workflow 82adee23-b209-4668-b603-07c9fa1e6d15: execution failed: wasm trap: host: export "late_thrower": {"error":"Error: lateThrower: failed after a resume\n    at <anonymous> (function.mjs:89:13)\n"}
+      {"time":"2026-11-13T15:40:04.572054-05:00","level":"ERROR","msg":"execution error","worker_id":"a0e355126561316990786061e5ca271f","workflow_id":"a1bab74e-859f-4c24-8a26-c3d0f2a47108","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow a1
+## late_thrower: status=failed after 2.6s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow 0afe7156-a125-4374-8ec2-6096ec0732b9: execution failed: wasm trap: host: export "late_thrower": {"error":"Error: lateThrower: failed after a resume\n    at <anonymous> (workflows/errors/errors.ts:20:13)\n"}
    result: 
    worker-log lines mentioning wasi/policy/fd_seek: 0
    worker WARN/ERROR lines for this run: 1
-      {"time":"2026-11-13T14:40:33.300327-05:00","level":"ERROR","msg":"execution error","worker_id":"e1cac07f0c07b1f706b5123ab59c3ae6","workflow_id":"82adee23-b209-4668-b603-07c9fa1e6d15","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 82
-## raw_throw: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
-   error: host: workflow 6913d635-603d-4250-85df-73c96557c9dc: execution failed: wasm trap: host: export "raw_throw": error while executing at wasm backtrace: |     0:  0x3e61f - <unknown>!<wasm function 69> |     1:  0xbb3f3 - <unknown>!<wasm function 1403> |     2:  0xbd93b - <unknown>!<wasm function 1639> |  | Caused by: |     wasm trap: wasm `unreachable` instruction executed | 
+      {"time":"2026-11-13T15:40:07.093324-05:00","level":"ERROR","msg":"execution error","worker_id":"a0e355126561316990786061e5ca271f","workflow_id":"0afe7156-a125-4374-8ec2-6096ec0732b9","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 0a
+## raw_throw: status=failed after 0.4s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow 9944d1e7-6503-43dd-96b4-8733ca94d2e6: execution failed: wasm trap: host: export "raw_throw": error while executing at wasm backtrace: |     0:  0x3e620 - <unknown>!<wasm function 69> |     1:  0xbb3fc - <unknown>!<wasm function 1403> |     2:  0xbd94a - <unknown>!<wasm function 1639> |  | Caused by: |     wasm trap: wasm `unreachable` instruction executed | 
    result: 
    worker-log lines mentioning wasi/policy/fd_seek: 0
    worker WARN/ERROR lines for this run: 1
-      {"time":"2026-11-13T14:40:33.3909-05:00","level":"ERROR","msg":"execution error","worker_id":"e1cac07f0c07b1f706b5123ab59c3ae6","workflow_id":"6913d635-603d-4250-85df-73c96557c9dc","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 6913
-## oom: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
-   error: host: workflow 0030c579-7036-4783-a0d0-ab8717f34c21: execution failed: wasm trap: host: export "oom": {"error":"InternalError: out of memory\n    at <anonymous> (function.mjs:96:58)\n    at <anonymous> (function.mjs:69:37)\n"}
+      {"time":"2026-11-13T15:40:07.69765-05:00","level":"ERROR","msg":"execution error","worker_id":"a0e355126561316990786061e5ca271f","workflow_id":"9944d1e7-6503-43dd-96b4-8733ca94d2e6","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 994
+## oom: status=failed after 0.7s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow 998a8348-ced1-40eb-8292-934d2948ab0f: execution failed: wasm trap: host: export "oom": {"error":"InternalError: out of memory\n    at <anonymous> (workflows/errors/errors.ts:32:58)\n    at <anonymous> (packages/cleat-ts/index.ts:201:22)\n"}
    result: 
    worker-log lines mentioning wasi/policy/fd_seek: 0
    worker WARN/ERROR lines for this run: 1
-      {"time":"2026-11-13T14:40:33.760008-05:00","level":"ERROR","msg":"execution error","worker_id":"e1cac07f0c07b1f706b5123ab59c3ae6","workflow_id":"0030c579-7036-4783-a0d0-ab8717f34c21","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 00
+      {"time":"2026-11-13T15:40:08.53879-05:00","level":"ERROR","msg":"execution error","worker_id":"a0e355126561316990786061e5ca271f","workflow_id":"998a8348-ced1-40eb-8292-934d2948ab0f","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 998
 ## circular: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
-   error: host: workflow 342f1f18-b629-4797-8f92-fd35048a8c18: execution failed: wasm trap: host: export "circular": {"error":"could not return the result: circular reference"}
+   error: host: workflow 6f2d7ac0-0e7b-4d0a-8ff7-42b70b6b46c0: execution failed: wasm trap: host: export "circular": {"error":"could not return the result: circular reference"}
    result: 
    worker-log lines mentioning wasi/policy/fd_seek: 0
    worker WARN/ERROR lines for this run: 1
-      {"time":"2026-11-13T14:40:33.982506-05:00","level":"ERROR","msg":"execution error","worker_id":"e1cac07f0c07b1f706b5123ab59c3ae6","workflow_id":"342f1f18-b629-4797-8f92-fd35048a8c18","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 34
+      {"time":"2026-11-13T15:40:09.096474-05:00","level":"ERROR","msg":"execution error","worker_id":"a0e355126561316990786061e5ca271f","workflow_id":"6f2d7ac0-0e7b-4d0a-8ff7-42b70b6b46c0","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 6f
 
 hung: none
 UNMEASURED (failed before reaching the code under test): none

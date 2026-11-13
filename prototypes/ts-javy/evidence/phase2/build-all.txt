@@ -1,40 +1,40 @@
-    Finished `release` profile [optimized] target(s) in 33.96s
+    Finished `release` profile [optimized] target(s) in 59.29s
 plugin-full: off-list='' fault='' bytes=1074724 shim-source-present=True
-    Finished `release` profile [optimized] target(s) in 1.64s
+    Finished `release` profile [optimized] target(s) in 3.29s
 plugin-off-date: off-list='date' fault='' bytes=1074798 shim-source-present=True
-    Finished `release` profile [optimized] target(s) in 1.60s
+    Finished `release` profile [optimized] target(s) in 4.05s
 plugin-off-random: off-list='random' fault='' bytes=1074797 shim-source-present=True
-    Finished `release` profile [optimized] target(s) in 1.54s
+    Finished `release` profile [optimized] target(s) in 3.06s
 plugin-off-lockdown: off-list='lockdown' fault='' bytes=1074834 shim-source-present=True
-    Finished `release` profile [optimized] target(s) in 1.56s
+    Finished `release` profile [optimized] target(s) in 4.41s
 plugin-off-all: off-list='date,random,lockdown' fault='' bytes=1074699 shim-source-present=True
-    Finished `release` profile [optimized] target(s) in 1.55s
+    Finished `release` profile [optimized] target(s) in 2.86s
 plugin-fault: off-list='' fault='random-nonnumeric' bytes=1074305 shim-source-present=True
-    Finished `release` profile [optimized] target(s) in 1.56s
+    Finished `release` profile [optimized] target(s) in 4.29s
 plugin-fault-lenient: off-list='randomstrict' fault='random-nonnumeric' bytes=1074426 shim-source-present=True
-built .work/sleeper.wasm 1122059 bytes
-Deployed sleeper v1 (ABI v1, minVersion=1, 1122059 bytes, SHA256=c1ea9cc520d6615b)
-built .work/signaler.wasm 1122050 bytes
-Deployed signaler v1 (ABI v1, minVersion=1, 1122050 bytes, SHA256=48d4de9b6e133221)
-built .work/parent.wasm 1122041 bytes
-Deployed parent v1 (ABI v1, minVersion=1, 1122041 bytes, SHA256=0ac74391c0592bd8)
-built .work/racer.wasm 1122264 bytes
-Deployed racer v1 (ABI v1, minVersion=1, 1122264 bytes, SHA256=1d98eb226f35a478)
-built .work/finalizer.wasm 1122132 bytes
-Deployed finalizer v1 (ABI v1, minVersion=1, 1122132 bytes, SHA256=c6c54207185dab02)
-built .work/journey.wasm 1122335 bytes
-Deployed journey v1 (ABI v1, minVersion=1, 1122335 bytes, SHA256=53c32aa9eadd4f19)
-built .work/busy.wasm 1122377 bytes
-Deployed busy v1 (ABI v1, minVersion=1, 1122377 bytes, SHA256=cd089745b36207db)
-built .work/finalizer_throw.wasm 1122072 bytes
-Deployed finalizer_throw v1 (ABI v1, minVersion=1, 1122072 bytes, SHA256=980ee711557d1f00)
-built .work/errors.wasm 1123711 bytes
-Deployed thrower v1 (ABI v1, minVersion=1, 1123711 bytes, SHA256=8ae290e401f2792d)
-Deployed rejecter v1 (ABI v1, minVersion=1, 1123711 bytes, SHA256=8ae290e401f2792d)
-Deployed late_thrower v1 (ABI v1, minVersion=1, 1123711 bytes, SHA256=8ae290e401f2792d)
-Deployed raw_throw v1 (ABI v1, minVersion=1, 1123711 bytes, SHA256=8ae290e401f2792d)
-Deployed oom v1 (ABI v1, minVersion=1, 1123711 bytes, SHA256=8ae290e401f2792d)
-Deployed circular v1 (ABI v1, minVersion=1, 1123711 bytes, SHA256=8ae290e401f2792d)
-built .work/nondet.wasm 1126210 bytes
+built .work/sleeper.wasm 1129548 bytes
+Deployed sleeper v1 (ABI v1, minVersion=1, 1129548 bytes, SHA256=0492871c637bbb5f)
+built .work/signaler.wasm 1129519 bytes
+Deployed signaler v1 (ABI v1, minVersion=1, 1129519 bytes, SHA256=9b6ee514db45d349)
+built .work/parent.wasm 1129505 bytes
+Deployed parent v1 (ABI v1, minVersion=1, 1129505 bytes, SHA256=a535140ab526a51f)
+built .work/racer.wasm 1129911 bytes
+Deployed racer v1 (ABI v1, minVersion=1, 1129911 bytes, SHA256=910ef26b53a64bf5)
+built .work/finalizer.wasm 1129653 bytes
+Deployed finalizer v1 (ABI v1, minVersion=1, 1129653 bytes, SHA256=2f4b500b2d43be94)
+built .work/journey.wasm 1130061 bytes
+Deployed journey v1 (ABI v1, minVersion=1, 1130061 bytes, SHA256=3b01b990f6c6c751)
+built .work/busy.wasm 1130153 bytes
+Deployed busy v1 (ABI v1, minVersion=1, 1130153 bytes, SHA256=223efe9617855e8e)
+built .work/finalizer_throw.wasm 1129581 bytes
+Deployed finalizer_throw v1 (ABI v1, minVersion=1, 1129581 bytes, SHA256=0623ab2bf825a174)
+built .work/errors.wasm 1131881 bytes
+Deployed thrower v1 (ABI v1, minVersion=1, 1131881 bytes, SHA256=f4f4e50e2dd21675)
+Deployed rejecter v1 (ABI v1, minVersion=1, 1131881 bytes, SHA256=f4f4e50e2dd21675)
+Deployed late_thrower v1 (ABI v1, minVersion=1, 1131881 bytes, SHA256=f4f4e50e2dd21675)
+Deployed raw_throw v1 (ABI v1, minVersion=1, 1131881 bytes, SHA256=f4f4e50e2dd21675)
+Deployed oom v1 (ABI v1, minVersion=1, 1131881 bytes, SHA256=f4f4e50e2dd21675)
+Deployed circular v1 (ABI v1, minVersion=1, 1131881 bytes, SHA256=f4f4e50e2dd21675)
+built .work/nondet.wasm 1136553 bytes
 built and deployed everything from the current toolchain
 [build] exit=0

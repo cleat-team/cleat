@@ -1,21 +1,21 @@
-built .work/crosslang.wasm 1123506 bytes
-built .work/jsoncanon.wasm 1124198 bytes
-    Finished `release` profile [optimized] target(s) in 5.33s
-built .work/nan.wasm 1122175 bytes
-built .work/nan_lenient.wasm 1122111 bytes
-built .work/xjourney.wasm 1122235 bytes
-built .work/multikey.wasm 1122072 bytes
-built .work/multikey_raw.wasm 1121997 bytes
+built .work/crosslang.wasm 1132273 bytes
+built .work/jsoncanon.wasm 1132937 bytes
+    Finished `release` profile [optimized] target(s) in 13.25s
+built .work/nan.wasm 1129627 bytes
+built .work/nan_lenient.wasm 1129555 bytes
+built .work/xjourney.wasm 1129865 bytes
+built .work/multikey.wasm 1129538 bytes
+built .work/multikey_raw.wasm 1129439 bytes
 4892416 .work/xlang/go.wasm
 5004297 .work/xlang/gocontrol.wasm
-1124198 .work/xlang/jsoncanon.wasm
-1121997 .work/xlang/multikey_ts_raw.wasm
-1122072 .work/xlang/multikey_ts.wasm
-1122111 .work/xlang/nan_ts_lenient.wasm
-1122175 .work/xlang/nan_ts.wasm
+1132937 .work/xlang/jsoncanon.wasm
+1129439 .work/xlang/multikey_ts_raw.wasm
+1129538 .work/xlang/multikey_ts.wasm
+1129555 .work/xlang/nan_ts_lenient.wasm
+1129627 .work/xlang/nan_ts.wasm
 127661 .work/xlang/rust.wasm
-1123506 .work/xlang/ts.wasm
-1122235 .work/xlang/xjourney_ts.wasm
+1132273 .work/xlang/ts.wasm
+1129865 .work/xlang/xjourney_ts.wasm
   Analyzing package github.com/cleat-team/cleat/testdata/crosslang...
   Found 1 functions, 1 entry point(s), 1 in cleat closure.
   Durable leaves: PlaceOrder
@@ -25,11 +25,11 @@ built .work/multikey_raw.wasm 1121997 bytes
   Generating host adapter... OK
   Generating WASM exports (1 entry point(s))... OK
   Auto-threading: no changes needed
-  Build directory: /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.pLazVruMud
+  Build directory: /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.9tcWuaxHPm
   Compiling WASM module (go/wasip1)...
-  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.pLazVruMud/crosslang.wasm (4.7 MB)
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.9tcWuaxHPm/crosslang.wasm (4.7 MB)
   Embedded metadata: crosslang v1 (ABI v1)
-  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.pLazVruMud/crosslang.wasm.schema.json
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.9tcWuaxHPm/crosslang.wasm.schema.json
   Analyzing package cleatproto/gocontrol...
   Found 6 functions, 6 entry point(s), 3 in cleat closure.
   Durable leaves: GoJourney, GoSleeper, XJourney
@@ -39,9 +39,9 @@ built .work/multikey_raw.wasm 1121997 bytes
   Generating host adapter... OK
   Generating WASM exports (6 entry point(s))... OK
   Auto-threading: no changes needed
-  Build directory: /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.zUIUCVUXGU
+  Build directory: /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.SRNmdQhd4W
   Compiling WASM module (go/wasip1)...
-  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.zUIUCVUXGU/journey.wasm (4.8 MB)
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.SRNmdQhd4W/journey.wasm (4.8 MB)
   Warning: no cleat.lock and no --db flag. Child workflow versions will be resolved dynamically at runtime.
   Embedded metadata: journey v1 (ABI v1)
-  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.zUIUCVUXGU/journey.wasm.schema.json
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.SRNmdQhd4W/journey.wasm.schema.json

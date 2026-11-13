@@ -1,0 +1,12 @@
+=== RUN   TestParseTSEntry
+--- PASS: TestParseTSEntry (0.00s)
+=== RUN   TestIsValidTargetKnowsTS
+--- PASS: TestIsValidTargetKnowsTS (0.00s)
+=== RUN   TestTSToolchainMissingNamesWhatIsAbsent
+--- PASS: TestTSToolchainMissingNamesWhatIsAbsent (0.00s)
+=== RUN   TestIsValidTarget_EdgeCases
+--- PASS: TestIsValidTarget_EdgeCases (0.00s)
+=== RUN   TestIsValidTarget
+--- PASS: TestIsValidTarget (0.00s)
+PASS
+ok  	github.com/cleat-team/cleat/cmd/cleat	8.564s
