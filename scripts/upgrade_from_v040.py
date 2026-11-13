@@ -6,6 +6,11 @@ release candidate and run it.  cleat#3386, gate G4 of the 0.5.0 runbook.
     scripts/upgrade_from_v040.py verify --owner-db DSN --state-dir DIR --rc-worker PATH
     scripts/upgrade_from_v040.py --self-test
 
+    --from-version vX.Y.Z (default v0.4.0) names the published release that seeds the database.
+    The file keeps its v0.4.0 name because the 0.5.0 gate's job calls it by that path;
+    D79 (0.6.0 supports an in-place upgrade from 0.5.0) is `--from-version v0.5.0
+    --expect upgrade`, cleat#3735.
+
 WHY THIS EXISTS.  tests/upgrade/ runs against a schema built fresh from
 migrations/, never against a database a released worker wrote.  Whether a
 database written by v0.4.0 can be migrated by the next release and then served
@@ -60,6 +65,54 @@ VERSION = "v0.4.0"
 RELEASE_URL = f"https://github.com/cleat-team/cleat/releases/download/{VERSION}"
 # The tag is vX.Y.Z, not X.Y.Z -- release.yml publishes vX.Y.Z, X.Y and latest.
 IMAGE = f"ghcr.io/cleat-team/cleat-worker:{VERSION}"
+
+# WHAT EACH PUBLISHED RELEASE IS, PINNED, so a re-pointed tag or a replaced asset cannot
+# change what seeds the database without this table changing in a reviewed commit.  The
+# artifacts are still checked against the release's own checksums.txt; these pins are a
+# second, independent reading of the same fact, taken once (2026-11-13) from that file and
+# from `docker buildx imagetools inspect`.  A release with no entry is not pinned.
+#
+# v0.5.0: the tag was re-pointed under D31 (fe052198 -> 8f9a59b4, a rebuilt dashboard bundle
+# only).  The assets below are the ones the release run at 8f9a59b4 published; the run at
+# fe052198 failed.  Both the tarball's binary and the image's binary embed the RE-POINTED
+# bundle (index-DVc1oRS5.js, not the first commit's index-vw5X-b8v.js), measured with
+# `strings` on 2026-11-13.  The image carries no revision label (the label steps run only on a
+# real tag), so the digest is the identity.
+PINS: dict[str, dict] = {
+    "v0.5.0": {
+        "sha256": {
+            "cleat-worker_0.5.0_linux_amd64.tar.gz": "ebecedb556eae61a21b92261a241591da960ca12c98df63296da92650705c101",
+            "cleat-worker_0.5.0_linux_arm64.tar.gz": "6ae189cee266d1e65662fd9a910ab3abec205b81705782fd24ef4b87855a1a13",
+            "cleat_0.5.0_darwin_amd64.zip": "fc11282b564248ed56c81d8c4ad3ca6fa74a1e9edc38dd479f5f8408d0db6927",
+            "cleat_0.5.0_darwin_arm64.zip": "353df0f03c2a0daa33dd9d050aed39da3b813f15503800546476326883565e6c",
+            "cleat_0.5.0_linux_amd64.tar.gz": "b2c4ee30ab53c507fb2228a4af2e003790cc706453aef38b4c13c9315d1320da",
+            "cleat_0.5.0_linux_arm64.tar.gz": "85d954232f27ec874affca8fde4c2b391b727b87e42b0daffd1df728a57a0c1f",
+        },
+        "image_digest": "sha256:bdc9968a8645a0796ad863a94e97144e9c99f729e241f73a44e33d037163aa7e",
+        # Plugins whose migrations.go gained steps after v0.5.0 (`git diff v0.5.0 origin/develop --stat --
+        # 'plugins/*/migrations*.go'`, 2026-11-13): after an in-place upgrade each must have recorded a HIGHER
+        # step than the seeded database had.  The PostgreSQL arm of some of these steps is a no-op (they are
+        # SQL Server and MySQL collation changes), but the step is still recorded in plugin_migrations, which
+        # is what proves the plugin runner ran.
+        "plugins_with_new_migrations": ["event-triggers", "jobqueue", "notifications", "scheduler"],
+    },
+}
+
+
+def use_version(version: str) -> None:
+    """Point every artifact name and URL at one published release."""
+    global VERSION, RELEASE_URL, IMAGE
+    need(re.fullmatch(r"v\d+\.\d+\.\d+", version) is not None, f"--from-version wants vX.Y.Z, got {version!r}")
+    VERSION = version
+    RELEASE_URL = f"https://github.com/cleat-team/cleat/releases/download/{VERSION}"
+    digest = PINS.get(VERSION, {}).get("image_digest")
+    IMAGE = (f"ghcr.io/cleat-team/cleat-worker@{digest}" if digest
+             else f"ghcr.io/cleat-team/cleat-worker:{VERSION}")
+
+
+def bare() -> str:
+    """0.5.0 for v0.5.0: the form the release asset names use."""
+    return VERSION[1:]
 REPO = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO / "scripts" / "upgrade-from-v040" / "testdata"
 APP_ROLE_PASSWORD = "cleat-upgrade-test"
@@ -134,6 +187,13 @@ def psql(dsn: str, sql: str, *, tuples: bool = True) -> str:
     return p.stdout.strip()
 
 
+def psql_or_empty(dsn: str, sql: str) -> str:
+    try:
+        return psql(dsn, sql)
+    except Unmeasured:
+        return ""
+
+
 def http(method: str, url: str, key: str | None = None, body: dict | None = None,
          timeout: float = 20.0) -> tuple[int, object]:
     data = None
@@ -183,7 +243,7 @@ def fetch(url: str, dest: Path) -> None:
 def machine() -> tuple[str, str]:
     os_ = {"Linux": "linux", "Darwin": "darwin"}.get(platform.system())
     arch = {"x86_64": "amd64", "AMD64": "amd64", "arm64": "arm64", "aarch64": "arm64"}.get(platform.machine())
-    need(os_ is not None and arch is not None, f"no v0.4.0 artifact for {platform.system()}/{platform.machine()}")
+    need(os_ is not None and arch is not None, f"no {VERSION} artifact for {platform.system()}/{platform.machine()}")
     return os_, arch
 
 
@@ -205,6 +265,13 @@ def release_artifact(cache: Path, name: str) -> Path:
     if got != want:
         dest.unlink()
         raise Unmeasured(f"{name}: sha256 {got} does not match checksums.txt {want}")
+    pinned = PINS.get(VERSION, {}).get("sha256", {}).get(name)
+    if PINS.get(VERSION) is not None and pinned is None:
+        raise Unmeasured(f"{name} is not in this harness's pin table for {VERSION}; add its sha256 from a reviewed read of checksums.txt")
+    if pinned is not None and got != pinned:
+        dest.unlink()
+        raise Unmeasured(f"{name}: sha256 {got} matches checksums.txt but not the pin {pinned} in this harness. "
+                         f"The published {VERSION} asset changed since the pin was taken; that is a finding about the release, not about the upgrade")
     return dest
 
 
@@ -221,8 +288,8 @@ def unpack(archive: Path, member: str, out: Path) -> Path:
     return path
 
 
-class V040:
-    """The published v0.4.0 cleat-worker, as a binary on Linux or its image elsewhere."""
+class Published:
+    """The published cleat-worker (VERSION), as a binary on Linux or its image elsewhere."""
 
     def __init__(self, cache: Path, mode: str, local_bin: Path | None = None):
         self.mode = mode
@@ -237,8 +304,8 @@ class V040:
             self.mode = "binary"
             self.bin = local_bin
         elif mode == "binary":
-            need(os_ == "linux", "cleat-worker v0.4.0 binaries are Linux only; use --worker-mode docker")
-            tarball = release_artifact(cache, f"cleat-worker_0.4.0_linux_{arch}.tar.gz")
+            need(os_ == "linux", f"cleat-worker {VERSION} binaries are Linux only; use --worker-mode docker")
+            tarball = release_artifact(cache, f"cleat-worker_{bare()}_linux_{arch}.tar.gz")
             self.bin = unpack(tarball, "cleat-worker", cache / "worker")
         else:
             need(shutil.which("docker") is not None, "docker is not installed")
@@ -260,8 +327,8 @@ class V040:
 def cleat_cli(cache: Path) -> Path:
     os_, arch = machine()
     if os_ == "darwin":
-        return unpack(release_artifact(cache, f"cleat_0.4.0_darwin_{arch}.zip"), "cleat", cache / "cli")
-    return unpack(release_artifact(cache, f"cleat_0.4.0_linux_{arch}.tar.gz"), "cleat", cache / "cli")
+        return unpack(release_artifact(cache, f"cleat_{bare()}_darwin_{arch}.zip"), "cleat", cache / "cli")
+    return unpack(release_artifact(cache, f"cleat_{bare()}_linux_{arch}.tar.gz"), "cleat", cache / "cli")
 
 
 def build_workflows(cli: Path, work: Path) -> dict[str, Path]:
@@ -417,7 +484,13 @@ def upload(api: str, key: str, name: str, wasm: Path) -> None:
 
 
 def start_run(api: str, key: str, name: str, inp: dict) -> str:
-    code, resp = http("POST", f"{api}/api/workflows/{name}/start", key, {"input": inp})
+    # 429 is the tenant's rate limit, which a burst of starts from the seed can hit (observed on MySQL, 2026-11-13); it
+    # says how long to wait.
+    for _ in range(8):
+        code, resp = http("POST", f"{api}/api/workflows/{name}/start", key, {"input": inp})
+        if code != 429:
+            break
+        time.sleep(min(5.0, (resp.get("retry_after_ms", 1000) if isinstance(resp, dict) else 1000) / 1000))
     if code not in (200, 201) or not isinstance(resp, dict) or not resp.get("id"):
         raise Unmeasured(f"start {name} {inp} answered {code}: {str(resp)[:200]}")
     return resp["id"]
@@ -468,18 +541,18 @@ def cmd_seed(a) -> int:
         log(f"CONTROL RUN: seeding with {local_bin}, NOT the published {VERSION} worker; "
             "this says nothing about the upgrade")
     else:
-        log(f"v0.4.0 artifacts ({mode} mode)")
-    v040 = V040(cache, mode, local_bin)
+        log(f"{VERSION} artifacts ({mode} mode)")
+    v040 = Published(cache, mode, local_bin)
     cli = cleat_cli(cache)
     wasm = build_workflows(cli, state / "build")
 
     def one_shot(args: list[str]) -> str:
         p = v040.run(args)
         if p.returncode != 0:
-            raise Unmeasured(f"v0.4.0 worker {args[:3]} exited {p.returncode}: {(p.stdout + p.stderr).strip()[-400:]}")
+            raise Unmeasured(f"{VERSION} worker {args[:3]} exited {p.returncode}: {(p.stdout + p.stderr).strip()[-400:]}")
         return p.stdout + p.stderr
 
-    log("migrating the database with v0.4.0 and provisioning the cleat_app role")
+    log(f"migrating the database with {VERSION} and provisioning the cleat_app role")
     one_shot(["-db", owner, "-migrate-only"])
     psql(owner, f"ALTER ROLE cleat_app LOGIN PASSWORD '{APP_ROLE_PASSWORD}'")
     tenant, key = provision(one_shot, owner)
@@ -495,7 +568,7 @@ def cmd_seed(a) -> int:
         argv = ["docker", "run", "--network", "host", "--name", container, IMAGE] + common
     else:
         argv = v040.command(common)
-    log(f"starting the v0.4.0 worker on {api}")
+    log(f"starting the {VERSION} worker on {api}")
     worker = Worker(argv, state / "seed-worker.log", api, container)
     try:
         worker.wait_healthy()
@@ -558,10 +631,15 @@ def cmd_seed(a) -> int:
         worker.stop()
         flaky.shutdown()
 
-    snapshot = psql(owner, "SELECT status, count(*) FROM workflow_instances GROUP BY 1 ORDER BY 1")
-    log("statuses in the database when the v0.4.0 worker stopped:")
+    # Where a run's status lives depends on the release that wrote the database: workflow_instances
+    # up to v0.4.0, workflow_leases from v0.5.0 (the storage split, which left workflow_instances
+    # without a status column).  Asked of the database, not assumed from the version string.
+    status_table = "workflow_leases" if psql(owner, "SELECT to_regclass('public.workflow_leases')").strip() else "workflow_instances"
+    snapshot = psql(owner, f"SELECT status, count(*) FROM {status_table} GROUP BY 1 ORDER BY 1")
+    log(f"statuses in the database when the {VERSION} worker stopped:")
     print(snapshot, flush=True)
     seen = {line.split("|")[0] for line in snapshot.splitlines()}
+    snapshot_counts = {l.split("|")[0]: int(l.split("|")[1]) for l in snapshot.splitlines()}
     inflight = seen - TERMINAL
     need(bool(inflight), "no run was left in flight, so the RC has nothing to resume; the seed measured nothing")
     # A run parked or queued resumes by an ordinary claim.  One killed mid-execution
@@ -571,13 +649,32 @@ def cmd_seed(a) -> int:
          f"{sorted(seen)}), so the reclaim path is not covered; raise --count spin")
     need("dead_lettered" in seen, "no run was dead-lettered (statuses: "
          f"{sorted(seen)}), so that state is not covered")
+    # The three in-flight classes D79 asks for, each shown present rather than assumed: a step
+    # RUNNING when the worker died (above), a run SLEEPING on a timer or waiting on a signal (settled()
+    # above waited for their stage), and a run QUEUED and never claimed.  The burst is submitted
+    # 0.5 s before the kill, at --concurrency 4, so most of it has not been claimed; "most" is asked of the
+    # database.
+    burst_ids = ",".join(f"'{r['id']}'" for r in runs["burst"])
+    queued = int(psql(owner, f"SELECT count(*) FROM {status_table} WHERE status = 'ready' AND assigned_to IS NULL "
+                             f"AND id IN ({burst_ids})") or 0) if runs["burst"] else 0
+    need(queued > 0, "no burst run was left queued and unclaimed when the worker was killed, so a "
+                     "run that has never been claimed is not covered; raise --count burst")
+    log(f"in flight at the kill: running {snapshot_counts.get('running', 0)}, "
+        f"waiting on a timer {len(runs['timer'])}, waiting on a signal {len(runs['signal'])}, "
+        f"parents awaiting a child {len(runs['parent'])}, queued and unclaimed {queued}")
 
+    history_columns = psql_or_empty(owner, HISTORY_COLUMNS_SQL)
     manifest = {
         "version": VERSION, "seeded_by": str(local_bin) if local_bin else f"published {VERSION}",
         "tenant": tenant, "api_key": key, "timer_seconds": a.timer_seconds,
         "stopped_at": time.time(), "counts": counts, "runs": runs,
         "status_at_stop": {l.split("|")[0]: int(l.split("|")[1]) for l in snapshot.splitlines()},
         "migrations_by_v040": psql(owner, "SELECT string_agg(version, ' ' ORDER BY version) FROM schema_migrations"),
+        # Recorded for --expect upgrade; "" where the seeding release has no such table or column, which
+        # the refuse-mode seed (v0.4.0) must not fail on.
+        "plugin_steps_by_seed": psql_or_empty(owner, PLUGIN_STEPS_SQL),
+        "history_columns_by_seed": history_columns,
+        "history_digest_by_seed": psql_or_empty(owner, history_digest_sql(history_columns)) if history_columns else "",
     }
     (state / "manifest.json").write_text(json.dumps(manifest, indent=1))
     log(f"seeded; manifest at {state / 'manifest.json'}")
@@ -615,8 +712,71 @@ def schema_fingerprint(dsn: str) -> dict[str, list[str]]:
     return {k: sorted(psql(dsn, q).splitlines()) for k, q in facets.items()}
 
 
+PLUGIN_STEPS_SQL = "SELECT plugin_name||' '||max(version) FROM plugin_migrations GROUP BY plugin_name ORDER BY 1"
+
+# One line per run: its event rows, in step order, reduced to what a migration must not touch.  event_history
+# is the history a resumed run replays and verifies, so a migration that rewrote, dropped or re-ordered a row
+# would break a run that is merely PARKED, which a "did the runs finish" check finds only if it finishes.
+# The digest covers EVERY column the seeding release's event_history had, whole row by row, not a chosen few: the
+# docs say the history is left as that release wrote it, and a payload column rewritten on a finished run passes a
+# digest of step, event_type and checksum alone.  The column list is read from the seeded database and recorded in the
+# manifest, so a column a later migration ADDS is not part of the comparison and one it rewrites is.
+HISTORY_COLUMNS_SQL = ("SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns "
+                       "WHERE table_schema = 'public' AND table_name = 'event_history'")
+
+
+def history_digest_sql(columns: str) -> str:
+    cols = [c for c in columns.split(",") if c]
+    need(bool(cols), "the seeded database's event_history column list is empty, so its history cannot be digested")
+    row = ", ".join(f'"{c}"' for c in cols)
+    return (f"SELECT workflow_id||' '||count(*)||' '||md5(string_agg(row({row})::text, ',' ORDER BY step, event_type, checksum)) "
+            "FROM event_history GROUP BY workflow_id ORDER BY workflow_id")
+
+
+def parse_steps(text: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for line in text.splitlines():
+        name, _, ver = line.rpartition(" ")
+        if name and ver.isdigit():
+            out[name] = int(ver)
+    return out
+
+
+def judge_plugin_steps(before: str, after: str, plugins: list[str]) -> list[str]:
+    """One message per plugin that did not record a higher migration step than the seeded database had."""
+    b, a = parse_steps(before), parse_steps(after)
+    msgs = []
+    if not b:
+        return ["the seeded database has no plugin_migrations rows, so nothing can be compared (UNMEASURED-PLUGINS)"]
+    for name in plugins:
+        if name not in a:
+            msgs.append(f"plugin {name}: no plugin_migrations row after the upgrade")
+        elif name not in b:
+            continue  # first recorded by the upgrade: higher by construction
+        elif a[name] <= b[name]:
+            msgs.append(f"plugin {name}: step {b[name]} before the upgrade and {a[name]} after; its new migration did not run")
+    return msgs
+
+
+def judge_history(before: str, after: str) -> list[str]:
+    """One message per run whose event rows differ, or are gone, after the migration."""
+    b = dict(l.split(" ", 1) for l in before.splitlines() if " " in l)
+    a = dict(l.split(" ", 1) for l in after.splitlines() if " " in l)
+    msgs = []
+    if not b:
+        return ["the seeded database has no event_history rows to compare (UNMEASURED-HISTORY)"]
+    for rid, digest in b.items():
+        if rid not in a:
+            msgs.append(f"run {rid}: its event history is gone after --migrate-only")
+        elif a[rid] != digest:
+            msgs.append(f"run {rid}: its event history changed under --migrate-only ({digest} -> {a[rid]})")
+    for rid in a.keys() - b.keys():
+        msgs.append(f"run {rid}: event history appeared during --migrate-only")
+    return msgs
+
+
 def verify_upgrade(a, state: Path, m: dict) -> int:
-    """--expect upgrade: the RC migrates the v0.4.0 database in place and serves its runs."""
+    """--expect upgrade: the RC migrates the database a published release wrote, in place, and serves its runs."""
     key = m["api_key"]
     if not str(m.get("seeded_by", "")).startswith("published"):
         log(f"CONTROL RUN: this database was seeded by {m.get('seeded_by')}, not by the published {VERSION}")
@@ -631,7 +791,7 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
         print(f"FINDING: {msg}", flush=True)
 
     # -- 1. migrate ---------------------------------------------------------
-    log("the RC's --migrate-only against the v0.4.0 database")
+    log(f"the RC's --migrate-only against the {VERSION} database")
     before = psql(owner, "SELECT string_agg(version, ' ' ORDER BY version) FROM schema_migrations")
     p = subprocess.run([str(rc), "-db", owner, "-migrate-only"], capture_output=True, text=True, cwd=REPO)
     out = p.stdout + p.stderr
@@ -639,6 +799,24 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
     print(f"    exit={p.returncode} applying-lines={applying} versions before: {before}", flush=True)
     if p.returncode != 0:
         finding(f"the RC's --migrate-only exited {p.returncode}:\n{out[-800:]}")
+
+    # -- 1b. what the migration must not have touched, and what it must have run ----------------
+    # History first: a parked run replays its event rows when it resumes, so a migration that changed one
+    # breaks a run that only fails later, at replay, and only if it is resumed.  Then the plugin runner:
+    # --migrate-only runs the plugins' migrations after the core ones, and a plugin whose new step
+    # did not run leaves a schema that "migrated" and is still short.
+    def judged(msgs: list[str]) -> None:
+        for msg in msgs:
+            if "UNMEASURED-" in msg:
+                raise Unmeasured(msg)
+            finding(msg)
+
+    judged(judge_history(m.get("history_digest_by_seed", ""),
+                         psql(owner, history_digest_sql(m.get("history_columns_by_seed", "")))))
+    plugins = PINS.get(VERSION, {}).get("plugins_with_new_migrations")
+    if plugins:
+        judged(judge_plugin_steps(m.get("plugin_steps_by_seed", ""), psql(owner, PLUGIN_STEPS_SQL), plugins))
+        print(f"    plugin migrations recorded for {', '.join(plugins)}", flush=True)
 
     # -- 2. does the upgraded schema equal a fresh RC schema? ----------------
     fresh_name = f"cleat_upgrade_fresh_{os.getpid()}"
@@ -687,7 +865,7 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
         worker.wait_healthy()
         all_runs = [r for kind in m["runs"].values() for r in kind]
 
-        # -- 4. history and APIs for the runs that finished under v0.4.0 -----
+        # -- 4. history and APIs for the runs that finished under the seeding release -----
         log("finished runs are readable under the RC")
         stopped_terminal = {rid for rid in
                             (r["id"] for kind in ("ok", "fail", "deadletter") for r in m["runs"][kind])}
@@ -977,6 +1155,7 @@ def cmd_verify(a) -> int:
     state = Path(a.state_dir).resolve()
     need((state / "manifest.json").exists(), f"no manifest at {state}/manifest.json; run `seed` first")
     m = json.loads((state / "manifest.json").read_text())
+    use_version(m.get("version", VERSION))
     if a.expect == "upgrade":
         return verify_upgrade(a, state, m)
     return verify_refusal_and_fresh(a, state, m)
@@ -1020,6 +1199,29 @@ def self_test() -> int:
     check("a refusal that changed schema_migrations is a finding", judge_untouched("x", 0, "1 2", "1 2 3", fp, dict(fp)) is not None)
     check("a refusal that changed the schema is a finding",
           judge_untouched("x", 0, "1 2", "1 2", fp, {**fp, "columns": ["a", "b"]}) is not None)
+    steps0 = "audit-log 4\njobqueue 5\nscheduler 3"
+    check("a plugin that advanced passes", judge_plugin_steps(steps0, "audit-log 4\njobqueue 7\nscheduler 3", ["jobqueue"]) == [])
+    check("a plugin that did not advance is a finding",
+          len(judge_plugin_steps(steps0, "audit-log 4\njobqueue 5\nscheduler 3", ["jobqueue"])) == 1)
+    check("a plugin that lost its row is a finding", len(judge_plugin_steps(steps0, "audit-log 4", ["jobqueue"])) == 1)
+    check("an unseeded plugin step list is UNMEASURED, not a pass",
+          "UNMEASURED" in (judge_plugin_steps("", "jobqueue 7", ["jobqueue"]) or [""])[0])
+    h0 = "run-a 3 abc\nrun-b 2 def"
+    check("an unchanged history passes", judge_history(h0, h0) == [])
+    check("a changed history is a finding", len(judge_history(h0, "run-a 3 abc\nrun-b 2 zzz")) == 1)
+    check("a dropped run history is a finding", len(judge_history(h0, "run-a 3 abc")) == 1)
+    check("an appeared run history is a finding", len(judge_history(h0, h0 + "\nrun-c 1 q")) == 1)
+    check("an empty seeded history is UNMEASURED, not a pass", "UNMEASURED" in (judge_history("", h0) or [""])[0])
+    check("use_version points the artifact names at the release",
+          (use_version("v0.5.0"), bare(), VERSION)[1:] == ("0.5.0", "v0.5.0"))
+    check("a pinned release names its image by digest", "@sha256:" in IMAGE)
+    use_version("v0.4.0")
+    check("an unpinned release names its image by tag", IMAGE.endswith(":v0.4.0"))
+    try:
+        use_version("0.5.0")
+        check("use_version refuses a version without the v", False)
+    except Unmeasured:
+        check("use_version refuses a version without the v", True)
     try:
         need(False, "x")
         check("need() raises Unmeasured", False)
@@ -1037,7 +1239,10 @@ def main(argv: list[str]) -> int:
         p.add_argument("--owner-db", required=True, help="superuser DSN of an existing database (empty for seed)")
         p.add_argument("--state-dir", default=".upgrade-seed", help="where the manifest and logs go")
         if name == "seed":
-            p.add_argument("--cache-dir", default=str(Path(tempfile.gettempdir()) / "cleat-v040-artifacts"))
+            p.add_argument("--from-version", default="v0.4.0", metavar="vX.Y.Z",
+                           help="the published release that seeds the database (default v0.4.0); verify reads it from the manifest")
+            p.add_argument("--cache-dir", default=None,
+                           help="where release assets are cached (default: a per-version directory under the temp dir)")
             p.add_argument("--worker-mode", choices=("binary", "docker"))
             p.add_argument("--worker-bin", help="POSITIVE CONTROL ONLY: seed with this cleat-worker, not the release")
             p.add_argument("--timer-seconds", type=int, default=90,
@@ -1055,6 +1260,10 @@ def main(argv: list[str]) -> int:
         ap.print_usage(sys.stderr)
         return 2
     try:
+        if a.cmd == "seed":
+            use_version(a.from_version)
+            if a.cache_dir is None:
+                a.cache_dir = str(Path(tempfile.gettempdir()) / f"cleat-{VERSION.replace('.', '')}-artifacts")
         return cmd_seed(a) if a.cmd == "seed" else cmd_verify(a)
     except Unmeasured as e:
         print(f"UNMEASURED: {e}\n(this is a failure of the check, not a finding about cleat)", file=sys.stderr)
