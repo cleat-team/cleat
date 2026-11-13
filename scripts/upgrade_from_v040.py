@@ -530,11 +530,16 @@ class MySQL:
         }
         return {k: sorted(self.sql(dsn, q).splitlines()) for k, q in facets.items()}
 
-    def extra_comparisons(self, owner: str, tenant: str, fresh_fp: dict[str, list[str]]) -> list[tuple[str, dict[str, list[str]]]]:
-        """The tenant's own schema, which the worker made when it first served the tenant, must match a fresh
-        release candidate's core schema too: it is where the runs live, and `--migrate-only` is the only thing that
-        migrates it.  (Whether it is migrated at all is what this asks.)"""
-        return [("the tenant's schema against a fresh release candidate's core schema", self.fingerprint(owner, tenant))]
+    def extra_fingerprints(self, owner: str, tenant: str) -> list[tuple[str, dict[str, list[str]], str]]:
+        """The tenant's own database, which the worker made when it first served the tenant and which
+        `--migrate-only` migrates alongside the core one.  (label, its schema fingerprint, its migration ledger.)
+
+        READ RIGHT AFTER THE UPGRADE'S --migrate-only, BEFORE the fresh database is migrated: the tenant's database
+        is named from the tenant id alone (`cleat_<id>`, not from the DSN), so a `--migrate-only` against ANY database
+        on this server migrates it too.  Read after the fresh one, it had been repaired by the comparison's own setup,
+        and a tenant database the upgrade left behind would have read as fine (cleat-review measured it on #3743)."""
+        return [("the tenant's database", self.fingerprint(owner, tenant),
+                 self.sql(owner, self.schema_versions_sql, tenant))]
 
 
 def dialect_of(dsn: str):
@@ -1192,6 +1197,13 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
         print(f"    plugin migrations recorded for {', '.join(plugins)}", flush=True)
 
     # -- 2. does the upgraded schema equal a fresh RC schema? ----------------
+    # Anything a dialect keeps OUTSIDE the database the DSN names is read NOW, before the fresh database's
+    # --migrate-only, which can migrate it too (MySQL: the tenant's own database).
+    extras = d.extra_fingerprints(owner, tenant) if hasattr(d, "extra_fingerprints") else []
+    core_versions = d.sql(owner, d.schema_versions_sql)
+    for what, _, versions in extras:
+        if versions != core_versions:
+            finding(f"{what} has migrations {versions!r} recorded after the upgrade; the core database has {core_versions!r}")
     fresh_name = f"cleat_upgrade_fresh_{os.getpid()}"
     fresh_owner = d.swap_database(owner, fresh_name)
     d.create_database(owner, fresh_name)
@@ -1203,9 +1215,7 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
         up_fp, fr_fp = d.fingerprint(owner), d.fingerprint(fresh_owner)
     finally:
         d.drop_database(owner, fresh_name)
-    compared = [("the upgraded schema", up_fp)]
-    if hasattr(d, "extra_comparisons"):
-        compared += d.extra_comparisons(owner, tenant, fr_fp)
+    compared = [("the upgraded schema", up_fp)] + [(f"{what}'s schema, against a fresh core schema,", fp) for what, fp, _ in extras]
     for what, got in compared:
         for facet in got:
             only_up = sorted(set(got[facet]) - set(fr_fp[facet]))
