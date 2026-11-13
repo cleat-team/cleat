@@ -95,7 +95,27 @@ dependencies = [
 name = "cleat-js-plugin"
 version = "0.0.0"
 dependencies = [
+ "cleat-sdk",
  "javy-plugin-api",
+ "serde_json",
+]
+
+[[package]]
+name = "cleat-macro"
+version = "0.5.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "cleat-sdk"
+version = "0.5.0"
+dependencies = [
+ "cleat-macro",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

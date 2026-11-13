@@ -16,7 +16,7 @@ func main() {
 	out := flag.String("out", "", "stamped module")
 	name := flag.String("name", "", "workflow name")
 	entries := flag.String("entries", "", "comma-separated entry point names")
-	language := flag.String("language", "rust", "language label; the engine routes on it and accepts only the labels in engine.WasmtimeLanguages")
+	language := flag.String("language", "javascript", "language label; the engine routes on it and accepts only the labels in engine.WasmtimeLanguages")
 	flag.Parse()
 	if *in == "" || *out == "" || *name == "" || *entries == "" {
 		fmt.Fprintln(os.Stderr, "usage: tsmeta -in a.wasm -out b.wasm -name N -entries e1,e2 [-language L]")

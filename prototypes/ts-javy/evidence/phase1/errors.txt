@@ -1,0 +1,31 @@
+## thrower: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow f1d658c4-697c-4532-bf27-9696068f9669: execution failed: wasm trap: host: export "thrower": {"error":"Error: thrower: deliberate failure\n    at <anonymous> (function.mjs:61:13)\n    at <anonymous> (function.mjs:49:37)\n"}
+   result: 
+   worker-log lines mentioning wasi/policy/fd_seek: 0
+   worker WARN/ERROR lines for this run: 2
+      {"time":"2026-11-13T12:18:18.246102-05:00","level":"WARN","msg":"this worker's pools may open 74 of the 97 connections the server allows (max_connections=100 superuser_reserved=3 reserved=0), so a SECOND worker will not fit. Raise the server's limit, or put a 
+      {"time":"2026-11-13T12:18:18.248004-05:00","level":"ERROR","msg":"HTTP server listen error","worker_id":"56bd05356838b9876f6e8cbb2f92a0e0","addr":":18771","error":"listen tcp :18771: bind: address already in use"}
+## rejecter: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow 055a2837-3043-427b-a930-54ff6483258b: execution failed: wasm trap: host: export "rejecter": {"error":"rejecter: a string, not an Error"}
+   result: 
+   worker-log lines mentioning wasi/policy/fd_seek: 0
+   worker WARN/ERROR lines for this run: 0
+## late_thrower: status=failed after 2.1s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow 1bd294ea-470a-4093-8878-b4197d70ff49: execution failed: wasm trap: host: export "late_thrower": {"error":"Error: lateThrower: failed after a resume\n    at <anonymous> (function.mjs:69:13)\n"}
+   result: 
+   worker-log lines mentioning wasi/policy/fd_seek: 0
+   worker WARN/ERROR lines for this run: 0
+## raw_throw: status=failed after 0.3s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow 77526d24-6edb-49d7-ab3a-3ef0541287bd: execution failed: wasm trap: host: export "raw_throw": error while executing at wasm backtrace: |     0:  0x3e5ae - <unknown>!<wasm function 67> |     1:  0xbb09c - <unknown>!<wasm function 1399> |     2:  0xbd59f - <unknown>!<wasm function 1634> |  | Caused by: |     wasm trap: wasm `unreachable` instruction executed | 
+   result: 
+   worker-log lines mentioning wasi/policy/fd_seek: 0
+   worker WARN/ERROR lines for this run: 0
+## oom: status=failed after 0.5s  error_code='unknown' reclaim_count=0 attempts=None
+   error: host: workflow 9a955b6a-1b14-43ef-a4dc-7230be6dbb27: execution failed: wasm trap: host: export "oom": {"error":"InternalError: out of memory\n    at <anonymous> (function.mjs:76:58)\n    at <anonymous> (function.mjs:49:37)\n"}
+   result: 
+   worker-log lines mentioning wasi/policy/fd_seek: 0
+   worker WARN/ERROR lines for this run: 1
+      {"time":"2026-11-13T12:18:21.394186-05:00","level":"ERROR","msg":"execution error","worker_id":"56bd05356838b9876f6e8cbb2f92a0e0","workflow_id":"9a955b6a-1b14-43ef-a4dc-7230be6dbb27","tenant_id":"00000000-0000-0000-0000-000000000000","error":"host: workflow 9a
+
+hung: none
+UNMEASURED (failed before reaching the code under test): none

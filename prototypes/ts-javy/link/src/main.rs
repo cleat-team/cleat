@@ -2,8 +2,8 @@
 //!
 //! Javy exports each JavaScript function as `name: () -> ()`. cleat calls an entry point as
 //! `name(args_ptr, args_len, out_ptr, max_out_len) -> i64` (ABI.md section 1). For each entry point named on the
-//! command line this tool renames nothing: it takes Javy's `() -> ()` export, removes the export, and exports a new
-//! function of the ABI's type under the same name that calls
+//! command line this tool takes Javy's `() -> ()` export (named `javy-export`, kebab-case, what a WIT world allows),
+//! removes the export, and exports a new function of the ABI's type under the cleat name that calls
 //!
 //!     cleat_set_io(a, b, c, d);  javy_export();  return cleat_take_result();
 //!
@@ -16,7 +16,7 @@ use walrus::{ExportItem, FunctionBuilder, Module, ValType};
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let (Some(input), Some(output)) = (args.next(), args.next()) else {
-        bail!("usage: cleat-js-link <in.wasm> <out.wasm> <entry> [<entry>...]");
+        bail!("usage: cleat-js-link <in.wasm> <out.wasm> <abi_name>[=<javy-export>] [...]");
     };
     let entries: Vec<String> = args.collect();
     if entries.is_empty() {
@@ -27,12 +27,20 @@ fn main() -> Result<()> {
     let set_io = module.exports.get_func("cleat_set_io").context("the module has no cleat_set_io export: was it built with the cleat-js plugin?")?;
     let take = module.exports.get_func("cleat_take_result").context("the module has no cleat_take_result export")?;
 
-    for name in &entries {
+    // "place_order=place-order": cleat's entry names are snake_case, a WIT export name must be kebab-case.
+    let pairs: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| match e.split_once('=') {
+            Some((abi, javy)) => (abi.to_string(), javy.to_string()),
+            None => (e.clone(), e.clone()),
+        })
+        .collect();
+    for (name, javy_name) in &pairs {
         let js_fn = module
             .exports
-            .get_func(name)
-            .with_context(|| format!("the module exports no function named {name:?}; Javy exports the JS functions the WIT world names"))?;
-        module.exports.remove(name)?;
+            .get_func(javy_name)
+            .with_context(|| format!("the module exports no function named {javy_name:?}; Javy exports the JS functions the WIT world names"))?;
+        module.exports.remove(javy_name)?;
 
         let mut b = FunctionBuilder::new(
             &mut module.types,
@@ -53,7 +61,7 @@ fn main() -> Result<()> {
     }
 
     // Everything but memory and the entry points goes: the ABI's exports are entry points.
-    let keep: std::collections::HashSet<&str> = entries.iter().map(String::as_str).chain(["memory"]).collect();
+    let keep: std::collections::HashSet<&str> = pairs.iter().map(|(a, _)| a.as_str()).chain(["memory"]).collect();
     let drop: Vec<_> = module
         .exports
         .iter()
