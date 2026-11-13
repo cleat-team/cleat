@@ -2,16 +2,19 @@
 
 ## Supported Versions
 
-The cleat project provides security updates for the following versions:
+cleat is pre-1.0: every release is a `0.x` release. The cleat project provides
+security updates for the following versions:
 
-| Version | Supported          |
-|---------|--------------------|
-| 1.x     | :white_check_mark: |
-| < 1.0   | :x:                |
+| Version                        | Supported          |
+|--------------------------------|--------------------|
+| The latest `0.x` minor release | :white_check_mark: |
+| Any earlier minor release      | :x:                |
 
-Only the latest minor release of the current major version receives security patches.
-Users are strongly encouraged to upgrade to the latest version to ensure they receive
-security fixes.
+Only the latest minor release receives security patches. Before 1.0 a minor release can
+change behaviour, so read the upgrade notes at the top of `CHANGELOG.md` and
+`docs/operations/upgrading.md` before you upgrade. Users are strongly encouraged to
+upgrade to the latest version to ensure they receive security fixes. This table will be
+restated when cleat reaches 1.0.
 
 ## Scope Boundaries
 
