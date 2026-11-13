@@ -484,7 +484,13 @@ def upload(api: str, key: str, name: str, wasm: Path) -> None:
 
 
 def start_run(api: str, key: str, name: str, inp: dict) -> str:
-    code, resp = http("POST", f"{api}/api/workflows/{name}/start", key, {"input": inp})
+    # 429 is the tenant's rate limit, which a burst of starts from the seed can hit (observed on MySQL, 2026-11-13); it
+    # says how long to wait.
+    for _ in range(8):
+        code, resp = http("POST", f"{api}/api/workflows/{name}/start", key, {"input": inp})
+        if code != 429:
+            break
+        time.sleep(min(5.0, (resp.get("retry_after_ms", 1000) if isinstance(resp, dict) else 1000) / 1000))
     if code not in (200, 201) or not isinstance(resp, dict) or not resp.get("id"):
         raise Unmeasured(f"start {name} {inp} answered {code}: {str(resp)[:200]}")
     return resp["id"]
@@ -657,6 +663,7 @@ def cmd_seed(a) -> int:
         f"waiting on a timer {len(runs['timer'])}, waiting on a signal {len(runs['signal'])}, "
         f"parents awaiting a child {len(runs['parent'])}, queued and unclaimed {queued}")
 
+    history_columns = psql_or_empty(owner, HISTORY_COLUMNS_SQL)
     manifest = {
         "version": VERSION, "seeded_by": str(local_bin) if local_bin else f"published {VERSION}",
         "tenant": tenant, "api_key": key, "timer_seconds": a.timer_seconds,
@@ -666,7 +673,8 @@ def cmd_seed(a) -> int:
         # Recorded for --expect upgrade; "" where the seeding release has no such table or column, which
         # the refuse-mode seed (v0.4.0) must not fail on.
         "plugin_steps_by_seed": psql_or_empty(owner, PLUGIN_STEPS_SQL),
-        "history_digest_by_seed": psql_or_empty(owner, HISTORY_DIGEST_SQL),
+        "history_columns_by_seed": history_columns,
+        "history_digest_by_seed": psql_or_empty(owner, history_digest_sql(history_columns)) if history_columns else "",
     }
     (state / "manifest.json").write_text(json.dumps(manifest, indent=1))
     log(f"seeded; manifest at {state / 'manifest.json'}")
@@ -709,9 +717,20 @@ PLUGIN_STEPS_SQL = "SELECT plugin_name||' '||max(version) FROM plugin_migrations
 # One line per run: its event rows, in step order, reduced to what a migration must not touch.  event_history
 # is the history a resumed run replays and verifies, so a migration that rewrote, dropped or re-ordered a row
 # would break a run that is merely PARKED, which a "did the runs finish" check finds only if it finishes.
-HISTORY_DIGEST_SQL = ("SELECT workflow_id||' '||count(*)||' '||md5(string_agg(step::text||'/'||coalesce(event_type,'')||'/'||"
-                      "coalesce(checksum,''), ',' ORDER BY step, event_type, checksum)) FROM event_history "
-                      "GROUP BY workflow_id ORDER BY workflow_id")
+# The digest covers EVERY column the seeding release's event_history had, whole row by row, not a chosen few: the
+# docs say the history is left as that release wrote it, and a payload column rewritten on a finished run passes a
+# digest of step, event_type and checksum alone.  The column list is read from the seeded database and recorded in the
+# manifest, so a column a later migration ADDS is not part of the comparison and one it rewrites is.
+HISTORY_COLUMNS_SQL = ("SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns "
+                       "WHERE table_schema = 'public' AND table_name = 'event_history'")
+
+
+def history_digest_sql(columns: str) -> str:
+    cols = [c for c in columns.split(",") if c]
+    need(bool(cols), "the seeded database's event_history column list is empty, so its history cannot be digested")
+    row = ", ".join(f'"{c}"' for c in cols)
+    return (f"SELECT workflow_id||' '||count(*)||' '||md5(string_agg(row({row})::text, ',' ORDER BY step, event_type, checksum)) "
+            "FROM event_history GROUP BY workflow_id ORDER BY workflow_id")
 
 
 def parse_steps(text: str) -> dict[str, int]:
@@ -792,7 +811,8 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
                 raise Unmeasured(msg)
             finding(msg)
 
-    judged(judge_history(m.get("history_digest_by_seed", ""), psql(owner, HISTORY_DIGEST_SQL)))
+    judged(judge_history(m.get("history_digest_by_seed", ""),
+                         psql(owner, history_digest_sql(m.get("history_columns_by_seed", "")))))
     plugins = PINS.get(VERSION, {}).get("plugins_with_new_migrations")
     if plugins:
         judged(judge_plugin_steps(m.get("plugin_steps_by_seed", ""), psql(owner, PLUGIN_STEPS_SQL), plugins))
