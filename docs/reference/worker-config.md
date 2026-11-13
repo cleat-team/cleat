@@ -1188,11 +1188,19 @@ version with a running instance is kept whichever tenant it belongs to. The
 other tenants' passes log one extra line, `version gc swept other tenants`, when
 they removed something. Three limits worth knowing:
 
-- The statements behind a pass carry no tenant predicate; the policy is what
-  scopes them. A worker connected as a role that **bypasses** the policy already
-  sees every tenant's definitions in its own pass (that was true before), and the
-  per-tenant passes then find nothing left, at the cost of one more scan per
-  tenant per interval.
+- **Run this only as a role the row-level-security policy applies to.** The statements
+  behind a pass carry no tenant predicate; the policy is what scopes them, and the
+  collection groups definitions **by workflow name alone**. A worker connected as a role
+  that **bypasses** the policy sees every tenant's definitions in every pass, so two
+  tenants' same-named workflows are treated as one: measured on PostgreSQL as a
+  superuser, with one tenant holding versions 1 and 2 and the default tenant 3 and 4 of
+  one name and a minimum of 2 kept, one pass **deleted the other tenant's versions 1 and
+  2 and kept the default tenant's 3 and 4** (cleat-review reproduced the same on PG 17).
+  That is how the own pass has behaved since this loop shipped, not something this change
+  introduced, and the per-tenant passes add nothing to it, but it is reachable:
+  `--rls-check` defaults to `auto` and only warns when `--require-auth` is off. **Do not set
+  `--version-gc-interval` on a worker whose connection bypasses the policy.** SQL Server has
+  no such principal. A fix is tracked in #3729.
 - MySQL is single-tenant and a sharded store cannot list tenants, so for both this
   is unchanged: the worker's own tenant only.
 - `POST /api/versions/gc` and `cleatctl versions gc` stay scoped to the tenant that
