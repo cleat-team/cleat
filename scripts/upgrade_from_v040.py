@@ -204,35 +204,41 @@ def psql_or_empty(dsn: str, sql: str) -> str:
 # above them is written once.  The PostgreSQL methods are the statements this file always ran.
 # --------------------------------------------------------------------------
 
-MSSQLQ_SRC = "./scripts/upgrade-from-v040/mssqlq"
-_mssqlq: Path | None = None
+MSSQLQ_SRC = "./scripts/upgrade-from-v040/sqlq"
+_sqlq: Path | None = None
 
 
-def mssqlq_binary() -> Path:
-    """The SQL Server query helper (scripts/upgrade-from-v040/mssqlq), built once per process.
+def sqlq_binary() -> Path:
+    """The SQL Server and MySQL query helper (scripts/upgrade-from-v040/sqlq), built once per process.
 
     A Go program rather than sqlcmd for two reasons: the owner login is NOT exempt from row-level
     security on SQL Server, so a read of a tenant table needs the session's tenant_id set on the SAME
     connection as the query, and a CI runner is not promised a sqlcmd.
     """
-    global _mssqlq
-    if _mssqlq is None:
+    global _sqlq
+    if _sqlq is None:
         need(shutil.which("go") is not None, "go is not installed; the SQL Server helper is a Go program")
-        out = Path(tempfile.gettempdir()) / f"cleat-mssqlq-{os.getpid()}"
+        out = Path(tempfile.gettempdir()) / f"cleat-sqlq-{os.getpid()}"
         p = subprocess.run(["go", "build", "-o", str(out), MSSQLQ_SRC], capture_output=True, text=True, cwd=REPO)
         need(p.returncode == 0, f"could not build the SQL Server helper:\n{p.stderr.strip()[-400:]}")
-        _mssqlq = out
-    return _mssqlq
+        _sqlq = out
+    return _sqlq
+
+
+def sql_run(driver: str, dsn: str, sql: str, tenant: str | None = None, pre: str | None = None) -> str:
+    args = [str(sqlq_binary()), "-driver", driver, "-dsn", dsn, "-sql", sql]
+    if tenant:
+        args += ["-tenant", tenant]
+    if pre:
+        args += ["-pre", pre]
+    p = subprocess.run(args, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise Unmeasured(f"{driver} query failed ({sql[:60]!r}): {p.stderr.strip()[:300]}")
+    return p.stdout.strip()
 
 
 def mssql_run(dsn: str, sql: str, tenant: str | None = None) -> str:
-    args = [str(mssqlq_binary()), "-dsn", dsn, "-sql", sql]
-    if tenant:
-        args += ["-tenant", tenant]
-    p = subprocess.run(args, capture_output=True, text=True)
-    if p.returncode != 0:
-        raise Unmeasured(f"sql server query failed ({sql[:60]!r}): {p.stderr.strip()[:300]}")
-    return p.stdout.strip()
+    return sql_run("sqlserver", dsn, sql, tenant)
 
 
 class Postgres:
@@ -297,7 +303,7 @@ class Postgres:
                            f"WHERE workflow_id = '{rid}' RETURNING 1")
         return len(rows.splitlines())
 
-    def fingerprint(self, dsn: str, tenant: str | None) -> dict[str, list[str]]:
+    def fingerprint(self, dsn: str, tenant: str | None = None) -> dict[str, list[str]]:
         return schema_fingerprint(dsn)
 
 
@@ -377,10 +383,10 @@ class SQLServer:
                               f"WHERE workflow_id = '{rid}'; SELECT @@ROWCOUNT", tenant)
         return int(out or 0)
 
-    def fingerprint(self, dsn: str, tenant: str | None) -> dict[str, list[str]]:
+    def fingerprint(self, dsn: str, tenant: str | None = None) -> dict[str, list[str]]:
         """What the schema IS, as sorted lines per facet.  Collations are part of it on purpose: D60 changed several."""
         # Columns are returned as columns, not concatenated in SQL: the catalog views carry a different
-        # collation from this database's literals, and a `+` between them is error 451.  mssqlq joins with "|".
+        # collation from this database's literals, and a `+` between them is error 451.  sqlq joins with "|".
         facets = {
             "columns": "SELECT table_schema, table_name, column_name, data_type, is_nullable, character_maximum_length, "
                        "collation_name FROM INFORMATION_SCHEMA.COLUMNS",
@@ -415,12 +421,135 @@ class SQLServer:
         return {k: sorted(self.sql(dsn, q, tenant).splitlines()) for k, q in facets.items()}
 
 
+class MySQL:
+    """MySQL is single-tenant by owner decision, so there is no row-level security, no tenant to set and no
+    separate application login: the owner login is the application's too.  Its tenant is the default one
+    the migrations create, and -generate-api-key mints the key for it.
+
+    ITS DATA IS NOT IN THE DATABASE YOU NAME.  MySQL keeps a tenant's tables (workflow_instances,
+    event_history, ...) in a database of their own, `cleat_<tenant id with underscores>`, so `-db .../cleat`
+    holds the ledgers and the admin tables and the runs are in `cleat_00000000_0000_...` (measured 2026-11-13:
+    348 rows in workflow_instances there, 0 in `cleat`).  A tenant argument therefore selects that database.
+
+    THE PREFIX IS `cleat`, NOT THE NAME OF THE DATABASE IN THE DSN, and it is per SERVER: a seed against a database
+    called mut_hist created `cleat_0000...` (log: "creating tenant database"), and found the one a previous seed had
+    left there.  So this harness wants a database named `cleat` on a server nothing else has used."""
+    name = "mysql"
+    driver_args = ["-driver", "mysql"]
+    bad_log = ("panic:", "doesn't exist")
+    default_tenant = "00000000-0000-0000-0000-000000000000"
+    # GROUP_CONCAT truncates at 1024 bytes unless the session raises this, and a truncated digest is a digest
+    # of less than the history: it would read as equal for rows it never saw.
+    PRE = "SET SESSION group_concat_max_len = 16777216"
+
+    def tenant_dsn(self, dsn: str, tenant: str | None) -> str:
+        if not tenant:
+            return dsn
+        return self.swap_database(dsn, f"cleat_{tenant.replace('-', '_')}")
+
+    def sql(self, dsn: str, q: str, tenant: str | None = None) -> str:
+        return sql_run("mysql", self.tenant_dsn(dsn, tenant), q, pre=self.PRE)
+
+    def sql_or_empty(self, dsn: str, q: str, tenant: str | None = None) -> str:
+        try:
+            return self.sql(dsn, q, tenant)
+        except Unmeasured:
+            return ""
+
+    def app_dsn(self, owner: str) -> str:
+        need(re.match(r"^[^@]+@tcp\([^)]+\)/cleat(\?|$)", owner) is not None,
+             "--owner-db must look like user:pass@tcp(host:port)/cleat?parseTime=true (the database must be named cleat: "
+             "the worker names the tenant's database cleat_<tenant id> whatever the DSN says)")
+        return owner
+
+    def swap_database(self, dsn: str, name: str) -> str:
+        return re.sub(r"(\)/)[^?]*", lambda mm: mm.group(1) + name, dsn, count=1)
+
+    def provision_app_role(self, owner: str) -> None:
+        pass
+
+    def create_database(self, owner: str, name: str) -> None:
+        self.sql(owner, f"CREATE DATABASE `{name}`")
+
+    def drop_database(self, owner: str, name: str) -> None:
+        self.sql_or_empty(owner, f"DROP DATABASE IF EXISTS `{name}`")
+
+    def status_table(self, owner: str, tenant: str | None) -> str:
+        return ("workflow_leases" if self.sql(owner, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() "
+                                                     "AND table_name = 'workflow_leases'") != "0" else "workflow_instances")
+
+    schema_versions_sql = "SELECT GROUP_CONCAT(version ORDER BY version SEPARATOR ' ') FROM schema_migrations"
+    plugin_steps_sql = ("SELECT CONCAT(plugin_name, ' ', MAX(version)) FROM plugin_migrations "
+                        "GROUP BY plugin_name ORDER BY plugin_name")
+    # Every column the seeded release's table had goes into the digest (see Postgres.history_columns_sql).  Read through
+    # the tenant schema, where the table is.
+    history_columns_sql = ("SELECT GROUP_CONCAT(column_name ORDER BY column_name SEPARATOR ',') FROM information_schema.columns "
+                           "WHERE table_schema = DATABASE() AND table_name = 'event_history'")
+
+    def history_digest_sql(self, columns: str) -> str:
+        cols = [c for c in columns.split(",") if c]
+        need(bool(cols), "the seeded database's event_history column list is empty, so its history cannot be digested")
+        row = ", '|', ".join(f"IFNULL(CAST(`{c}` AS CHAR), '~')" for c in cols)
+        return ("SELECT CONCAT(workflow_id, ' ', COUNT(*), ' ', MD5(GROUP_CONCAT(CONCAT(" + row + ") "
+                "ORDER BY step, event_type, checksum SEPARATOR ','))) FROM event_history GROUP BY workflow_id ORDER BY workflow_id")
+
+    def status_snapshot_sql(self, table: str) -> str:
+        return f"SELECT status, COUNT(*) FROM {table} GROUP BY status ORDER BY status"
+
+    def queued_sql(self, table: str, ids: str) -> str:
+        return (f"SELECT COUNT(*) FROM {table} WHERE status = 'ready' AND assigned_to IS NULL AND id IN ({ids})")
+
+    def tamper_checksums(self, owner: str, tenant: str | None, rid: str) -> int:
+        # An UPDATE through the query helper returns no rows, so the effect is read back.
+        self.sql(owner, f"UPDATE event_history SET checksum = CONCAT('tampered-', checksum) WHERE workflow_id = '{rid}'", tenant)
+        return int(self.sql(owner, f"SELECT COUNT(*) FROM event_history WHERE workflow_id = '{rid}' "
+                                   f"AND checksum LIKE 'tampered-%'", tenant) or 0)
+
+    def fingerprint(self, dsn: str, tenant: str | None = None) -> dict[str, list[str]]:
+        """What the schema IS, as sorted lines per facet; collations are part of it (D60 changed several).
+
+        Of the schema the DSN names, or of the tenant's schema when `tenant` is given: every query is about
+        DATABASE(), and the DSN decides which that is."""
+        dsn = self.tenant_dsn(dsn, tenant)
+        facets = {
+            "columns": "SELECT table_name, column_name, column_type, is_nullable, collation_name, IFNULL(column_default, ''), extra "
+                       "FROM information_schema.columns WHERE table_schema = DATABASE()",
+            "indexes": "SELECT table_name, index_name, non_unique, index_type, GROUP_CONCAT(column_name ORDER BY seq_in_index) "
+                       "FROM information_schema.statistics WHERE table_schema = DATABASE() "
+                       "GROUP BY table_name, index_name, non_unique, index_type",
+            "functions": "SELECT routine_name, MD5(IFNULL(routine_definition, '')) FROM information_schema.routines "
+                         "WHERE routine_schema = DATABASE()",
+            "constraints": "SELECT table_name, constraint_name, constraint_type FROM information_schema.table_constraints "
+                           "WHERE constraint_schema = DATABASE() "
+                           "UNION ALL SELECT constraint_name, update_rule, delete_rule FROM information_schema.referential_constraints "
+                           "WHERE constraint_schema = DATABASE() "
+                           "UNION ALL SELECT constraint_name, MD5(check_clause), '' FROM information_schema.check_constraints "
+                           "WHERE constraint_schema = DATABASE()",
+            "triggers": "SELECT trigger_name, event_object_table, MD5(action_statement) FROM information_schema.triggers "
+                        "WHERE trigger_schema = DATABASE()",
+        }
+        return {k: sorted(self.sql(dsn, q).splitlines()) for k, q in facets.items()}
+
+    def extra_fingerprints(self, owner: str, tenant: str) -> list[tuple[str, dict[str, list[str]], str]]:
+        """The tenant's own database, which the worker made when it first served the tenant and which
+        `--migrate-only` migrates alongside the core one.  (label, its schema fingerprint, its migration ledger.)
+
+        READ RIGHT AFTER THE UPGRADE'S --migrate-only, BEFORE the fresh database is migrated: the tenant's database
+        is named from the tenant id alone (`cleat_<id>`, not from the DSN), so a `--migrate-only` against ANY database
+        on this server migrates it too.  Read after the fresh one, it had been repaired by the comparison's own setup,
+        and a tenant database the upgrade left behind would have read as fine (cleat-review measured it on #3743)."""
+        return [("the tenant's database", self.fingerprint(owner, tenant),
+                 self.sql(owner, self.schema_versions_sql, tenant))]
+
+
 def dialect_of(dsn: str):
     if dsn.startswith(("postgres://", "postgresql://")):
         return Postgres()
     if dsn.startswith("sqlserver://"):
         return SQLServer()
-    raise Unmeasured("--owner-db must be a postgres:// or sqlserver:// URL")
+    if re.match(r"^[^@/]+@tcp\(", dsn):
+        return MySQL()
+    raise Unmeasured("--owner-db must be a postgres:// or sqlserver:// URL, or a MySQL user:pass@tcp(host:port)/db DSN")
 
 
 def http(method: str, url: str, key: str | None = None, body: dict | None = None,
@@ -704,6 +833,9 @@ def provision(worker_run, owner: str, d) -> tuple[str, str]:
         d.sql(owner, f"INSERT INTO admin.orgs (org_id, name) VALUES ('{org}', N'upgrade-seed-org'); "
                      f"INSERT INTO admin.tenants (tenant_id, name, display_name, org_id) "
                      f"VALUES ('{tenant}', N'upgrade-seed-tenant', N'upgrade-seed-tenant', '{org}')")
+    elif d.name == "mysql":
+        # MySQL is single-tenant: v0.5.0 refuses --create-tenant there, and the default tenant is the tenant.
+        tenant = d.default_tenant
     else:
         org = field(worker_run(["-db", owner, "-create-org", "upgrade-seed-org"]), "Org ID")
         need(bool(org), "-create-org produced no org id")
@@ -865,7 +997,19 @@ def cmd_seed(a) -> int:
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
             for kind, inp, rid in ex.map(lambda j: submit(*j), burst_jobs):
                 runs[kind].append({"id": rid, "input": inp})
-        time.sleep(0.5)
+        # Kill the moment a step is RUNNING, not after a fixed half second: how long the spin runs take to be claimed
+        # varies with the machine (a seed on MySQL under emulation found none running at 0.5 s, and was UNMEASURED).
+        # The burst is still mostly unclaimed at that point; the need() below asks the database for both.
+        # A SPIN run, specifically: it takes seconds, so it is still running when the kill lands.  Any running step
+        # would do for the first moment and then finish (a seed waited on one, killed, and found none).
+        spin_ids = ",".join(f"'{r['id']}'" for r in runs["spin"]) or "''"
+        running_sql = (f"SELECT COUNT(*) FROM {d.status_table(owner, tenant)} WHERE status = 'running' "
+                       f"AND id IN ({spin_ids})")
+        stop_at = time.monotonic() + 30
+        while time.monotonic() < stop_at and int(d.sql_or_empty(owner, running_sql, tenant) or 0) == 0:
+            time.sleep(0.1)
+        log(f"killing the worker {30 - (stop_at - time.monotonic()):.1f}s after the burst; running steps seen: "
+            f"{d.sql_or_empty(owner, running_sql, tenant) or 'none'}")
         worker.kill9()
     finally:
         worker.stop()
@@ -1053,6 +1197,13 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
         print(f"    plugin migrations recorded for {', '.join(plugins)}", flush=True)
 
     # -- 2. does the upgraded schema equal a fresh RC schema? ----------------
+    # Anything a dialect keeps OUTSIDE the database the DSN names is read NOW, before the fresh database's
+    # --migrate-only, which can migrate it too (MySQL: the tenant's own database).
+    extras = d.extra_fingerprints(owner, tenant) if hasattr(d, "extra_fingerprints") else []
+    core_versions = d.sql(owner, d.schema_versions_sql)
+    for what, _, versions in extras:
+        if versions != core_versions:
+            finding(f"{what} has migrations {versions!r} recorded after the upgrade; the core database has {core_versions!r}")
     fresh_name = f"cleat_upgrade_fresh_{os.getpid()}"
     fresh_owner = d.swap_database(owner, fresh_name)
     d.create_database(owner, fresh_name)
@@ -1061,16 +1212,18 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
         need(q.returncode == 0, f"the RC could not migrate a fresh database, so there is nothing to compare to:\n{(q.stdout+q.stderr)[-400:]}")
         fresh_applying = len(re.findall(r"\[migration\] applying", q.stdout + q.stderr))
         need(fresh_applying > 0, "the RC applied nothing to a FRESH database, so 'applying' lines are not countable here")
-        up_fp, fr_fp = d.fingerprint(owner, tenant), d.fingerprint(fresh_owner, tenant)
+        up_fp, fr_fp = d.fingerprint(owner), d.fingerprint(fresh_owner)
     finally:
         d.drop_database(owner, fresh_name)
-    for facet in up_fp:
-        only_up = sorted(set(up_fp[facet]) - set(fr_fp[facet]))
-        only_fr = sorted(set(fr_fp[facet]) - set(up_fp[facet]))
-        if only_up or only_fr:
-            finding(f"the upgraded schema differs from a fresh RC schema in {facet}: "
-                    f"{len(only_up)} only in the upgraded database, {len(only_fr)} only in the fresh one\n"
-                    f"      only upgraded: {only_up[:6]}\n      only fresh:    {only_fr[:6]}")
+    compared = [("the upgraded schema", up_fp)] + [(f"{what}'s schema, against a fresh core schema,", fp) for what, fp, _ in extras]
+    for what, got in compared:
+        for facet in got:
+            only_up = sorted(set(got[facet]) - set(fr_fp[facet]))
+            only_fr = sorted(set(fr_fp[facet]) - set(got[facet]))
+            if only_up or only_fr:
+                finding(f"{what} differs from a fresh RC schema in {facet}: "
+                        f"{len(only_up)} only in the upgraded database, {len(only_fr)} only in the fresh one\n"
+                        f"      only upgraded: {only_up[:6]}\n      only fresh:    {only_fr[:6]}")
     print(f"    fresh database: {fresh_applying} migrations applied; the upgraded one: {applying}", flush=True)
 
     # -- 2b. the checksum control --------------------------------------------

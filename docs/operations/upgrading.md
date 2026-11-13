@@ -186,17 +186,16 @@ later, that is a new decision.
 
 What is checked end to end, by `scripts/upgrade_from_v040.py --from-version v0.5.0
 --expect upgrade` (the **Upgrade From v0.5.0** workflow, on every push to a `release/**`
-branch and on demand; cleat#3735): a database seeded by the *published* 0.5.0 worker is
+branch, every pull request into one, and on demand; cleat#3735): a database seeded by the *published* 0.5.0 worker is
 migrated in place by the release candidate to the schema a fresh release candidate
 produces, with each plugin that gained a migration since 0.5.0 recording it and every
 run's event history unchanged by the migration; then every run that was in flight
 completes on the release candidate (a step running at the kill, runs asleep on a timer or
 waiting on a signal, parents awaiting a child, and runs queued and never claimed), and a
-run whose recorded checksums were corrupted is refused. **PostgreSQL and SQL Server so
-far** (one job each, `Upgrade From v0.5.0 (PostgreSQL)` and `Upgrade From v0.5.0 (SQL
-Server)`): the MySQL leg is tracked on cleat#3735 and is not yet in place. On SQL Server
-the schema comparison includes column collations, because the 0.6.0 migrations changed
-several. The workflow is not yet a *required* check on release branches.
+run whose recorded checksums were corrupted is refused. **On all three dialects**, one job each: `Upgrade From v0.5.0 (PostgreSQL)`, `(SQL Server)`
+and `(MySQL)`. On SQL Server and MySQL the schema comparison includes column collations,
+because the 0.6.0 migrations changed several; on MySQL it also compares the tenant's own
+schema (where the runs live) to a fresh core schema. The workflow is not yet a *required* check on release branches.
 
 **Moving from 0.4.0.** There is no export/import tool. The route is to run the two
 side by side until 0.4.0 has nothing left to do:
