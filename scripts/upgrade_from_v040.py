@@ -359,7 +359,9 @@ class SQLServer:
     def history_digest_sql(self, columns: str) -> str:
         cols = [c for c in columns.split(",") if c]
         need(bool(cols), "the seeded database's event_history column list is empty, so its history cannot be digested")
-        row = " + '|' + ".join(f"ISNULL(CAST([{c}] AS nvarchar(max)), N'~')" for c in cols)
+        # An explicit collation on each: after the 0.6.0 migrations (D60) the columns do not all share one, and
+        # concatenating across collations is error 4191.  It changes no byte the digest reads.
+        row = " + '|' + ".join(f"ISNULL(CAST([{c}] AS nvarchar(max)) COLLATE Latin1_General_100_BIN2, N'~')" for c in cols)
         return ("SELECT workflow_id + ' ' + CAST(COUNT(*) AS varchar(20)) + ' ' + CONVERT(varchar(32), "
                 f"HASHBYTES('MD5', STRING_AGG({row}, ',') WITHIN GROUP (ORDER BY step, event_type, checksum)), 2) "
                 "FROM event_history GROUP BY workflow_id ORDER BY workflow_id")
