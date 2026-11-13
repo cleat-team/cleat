@@ -884,14 +884,16 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 //	print(collections.Counter((m.group(4) or 'NONE').strip().split('<')[0]
 //	  for m in re.finditer(r'([a-z0-9-]+): func\((.*?)\)\s*(->\s*([^;]+?))?\s*;',flat)))"
 //
-// The other 45 return plain scalars or strings, and one of them is a stop site:
-// durable-await-signals returns u64, dispatchAwaitSignals passes the word
+// The other 45 returned plain scalars or strings, and one of them was a stop site:
+// durable-await-signals returned u64, dispatchAwaitSignals passed the word
 // through with a raw setResultU64, and DurableAwaitSignals returns
 // callSuspendSentinel from stopBeforeNewWork. So the failure mode the rest of
 // this comment describes WAS available to Python, on the one layout where bit
 // 31 lands inside the timed-out field -- a stop decoded as
-// SignalResult(timed_out=True) and the segment ran on. Fixed in 3.202; the
-// guest half is _raise_if_stopped in python-sdk/cleat_sdk/host_calls.py.
+// SignalResult(timed_out=True) and the segment ran on. Fixed in 3.202 for the
+// u64 and then at the root in cleat#3786: durable-await-signals is now
+// result<signal-outcome, call-failure>, so the stop is a case of the return
+// type and there is no bit to test.
 //
 // The general form is worth keeping: "this guest cannot misread a stop" is a
 // claim about a call's RETURN SHAPE, not about a language. Ask it per call.

@@ -13,6 +13,16 @@ import weakref
 from componentize_py_types import Result, Ok, Err, Some
 
 
+@dataclass
+class Scope:
+    """
+    The virtual object scope a workflow is running under.
+    
+    Both fields are empty when no scope has been set.
+    """
+    object_type: str
+    instance_key: str
+
 
 def set_scope(obj_type: str, inst_key: str) -> str:
     """
@@ -20,10 +30,20 @@ def set_scope(obj_type: str, inst_key: str) -> str:
     Returns the previous scope as a JSON string.
     """
     raise NotImplementedError
-def get_scope(obj_type_ptr: int, obj_type_max_len: int, inst_key_ptr: int, inst_key_max_len: int) -> int:
+def get_scope() -> Scope:
     """
     Get the current virtual object scope.
-    Output buffers kept for multi-return (obj-type + inst-key).
+    
+    This took four output pointers and returned a packed ``u64`` of lengths,
+    which a component host cannot honour for the reason given on
+    ``signal-outcome`` (cleat#3786). Measured on a real worker, after
+    ``set_scope("order", "o-1")``: ``get_scope()`` raised
+    ``CallErrorNotFound (code 3)`` -- the length of ``"o-1"``, read by the
+    SDK as an error code -- so no Python workflow could read its own scope.
+    
+    Not a ``result``: it reads session state, cannot be stopped and cannot
+    fail, and a ``call-failure`` in the signature would promise a refusal the
+    host never produces (engine/stop_correspondence_guard_test.go).
     """
     raise NotImplementedError
 def uuid(seed: str) -> str:

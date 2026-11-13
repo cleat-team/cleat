@@ -158,16 +158,40 @@ interface durable-lifecycle {
 interface durable-signals {
     use outcomes.{call-failure};
 
+    /// A signal a wait received: the name it was sent under, and its payload.
+    record signal {
+        name: string,
+        payload: string,
+    }
+
+    /// How a wait for signals ended.
+    ///
+    /// This import used to take four pointers into the guest's linear memory
+    /// and return a packed ``u64`` of lengths (cleat#3786). A component host
+    /// cannot dereference a guest pointer, so the dispatcher wrote the name and
+    /// payload into a buffer of its own and returned only the lengths: the
+    /// guest read the right number of bytes from the wrong place and was handed
+    /// NULs -- a signal that arrived, with its name and payload erased, in a
+    /// tier-1 language. Measured on a real worker: signal ``go`` with payload
+    /// ``{"approved":true}`` reached the guest as 2 + 17 bytes of ``0x00``.
+    variant signal-outcome {
+        /// A signal arrived. The payload may be empty.
+        received(signal),
+        /// The timeout elapsed first. Nothing was received.
+        timed-out,
+    }
+
     /// Wait for one or more external signals, with a timeout.
-    /// Output buffers kept for multi-return (name + payload).
+    ///
+    /// ``err(call-failure.suspended)`` is the engine stopping the workflow: no
+    /// signal has arrived, the wait has been recorded, and the guest must
+    /// unwind. ``err(call-failure.failed)`` is a host error -- for example a
+    /// delivered signal whose name or payload is larger than the 65,535 bytes
+    /// the host can hand over -- not an outcome of the wait.
     durable-await-signals: func(
         names: string,
         timeout-ms: u64,
-        sig-name-ptr: u32,
-        sig-name-max-len: u32,
-        payload-ptr: u32,
-        payload-max-len: u32,
-    ) -> u64;
+    ) -> result<signal-outcome, call-failure>;
 
     /// Poll for a specific pending signal (non-blocking).
     /// Returns the signal payload, or empty string if none.
@@ -378,14 +402,27 @@ interface durable-scope {
         inst-key: string,
     ) -> string;
 
+    /// The virtual object scope a workflow is running under.
+    ///
+    /// Both fields are empty when no scope has been set.
+    record scope {
+        object-type: string,
+        instance-key: string,
+    }
+
     /// Get the current virtual object scope.
-    /// Output buffers kept for multi-return (obj-type + inst-key).
-    get-scope: func(
-        obj-type-ptr: u32,
-        obj-type-max-len: u32,
-        inst-key-ptr: u32,
-        inst-key-max-len: u32,
-    ) -> u64;
+    ///
+    /// This took four output pointers and returned a packed ``u64`` of lengths,
+    /// which a component host cannot honour for the reason given on
+    /// ``signal-outcome`` (cleat#3786). Measured on a real worker, after
+    /// ``set_scope("order", "o-1")``: ``get_scope()`` raised
+    /// ``CallErrorNotFound (code 3)`` -- the length of ``"o-1"``, read by the
+    /// SDK as an error code -- so no Python workflow could read its own scope.
+    ///
+    /// Not a ``result``: it reads session state, cannot be stopped and cannot
+    /// fail, and a ``call-failure`` in the signature would promise a refusal the
+    /// host never produces (engine/stop_correspondence_guard_test.go).
+    get-scope: func() -> scope;
 
     /// Generate a deterministic UUID from a seed.
     /// Returns the generated UUID string.
