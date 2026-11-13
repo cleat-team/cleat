@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -246,29 +247,52 @@ func TestTSAndRustRecordTheSameRequestBytes(t *testing.T) {
 	}
 }
 
-// ABI 6.6 "NaN canonicalization", measured instead of inferred. The same NaN: Go's encoding/json refuses to encode it, so the Go
-// workflow FAILS; JavaScript's JSON.stringify turns it into null before the host ever sees it, so the TS workflow SUCCEEDS with a
-// null. Two languages, one value, two outcomes: that is a difference in what the SDKs do, not something replay can reconcile.
-func TestNaNIsAnErrorInGoAndNullInTypeScript(t *testing.T) {
-	env := wasmtest.NewWasmTestEnv(t, wasmtest.WithDefName("xlang-nan"))
-	defer env.Close()
+// ABI 6.6 "NaN canonicalization", measured. Go's encoding/json refuses NaN and +-Inf, so a Go workflow that produces one FAILS. A
+// TypeScript SDK that left it to JSON.stringify would turn it into null: a silent change to the data. The SDK therefore refuses with
+// Go's own text, so the twins fail alike. The lenient build (NAN_POLICY=lenient) is the red control: it returns null, which shows
+// the refusal is what the policy does and the test could have disagreed.
+func TestNonFiniteNumbersFailInGoAndInTypeScriptAlike(t *testing.T) {
 	dir := os.Getenv("XLANG_DIR")
 	if dir == "" {
 		t.Skip("UNMEASURED: XLANG_DIR is not set")
 	}
-	goB, err1 := os.ReadFile(filepath.Join(dir, "gocontrol.wasm"))
-	tsB, err2 := os.ReadFile(filepath.Join(dir, "nan_ts.wasm"))
-	if err1 != nil || err2 != nil {
-		t.Fatalf("UNMEASURED: %v %v", err1, err2)
+	read := func(n string) []byte {
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			t.Fatalf("UNMEASURED: %v", err)
+		}
+		return b
 	}
-	_, _, goErr := env.Execute(t, goB, "go_not_a_number", `{"in":{"ms":0}}`)
-	tsRes, _, tsErr := env.Execute(t, tsB, "nan", `{}`)
-	t.Logf("go: err=%v", goErr)
-	t.Logf("ts: result=%q err=%v", tsRes, tsErr)
-	if goErr == nil || !strings.Contains(goErr.Error(), "NaN") {
-		t.Errorf("expected the Go workflow to fail on NaN, got err=%v", goErr)
+	goB, tsB, lenB := read("gocontrol.wasm"), read("nan_ts.wasm"), read("nan_ts_lenient.wasm")
+	exec := func(wasm []byte, entry, input string) (string, error) {
+		env := wasmtest.NewWasmTestEnv(t, wasmtest.WithDefName("xlang-nan"))
+		defer env.Close()
+		res, _, err := env.Execute(t, wasm, entry, input)
+		return res, err
 	}
-	if tsErr != nil || tsRes != `{"v":null}` {
-		t.Errorf("expected the TS workflow to return {\"v\":null}, got result=%q err=%v", tsRes, tsErr)
+	re := regexp.MustCompile(`unsupported value: (NaN|\+Inf|-Inf)`)
+	tail := func(err error) string { // the message both languages share; the TS error also carries a JSON envelope around it
+		if err == nil {
+			return "<no error>"
+		}
+		if m := re.FindString(err.Error()); m != "" {
+			return m
+		}
+		return "<not an unsupported-value error: " + err.Error() + ">"
+	}
+	for _, c := range []struct{ name, goEntry, tsEntry, want string }{
+		{"NaN", "go_not_a_number", "nan", "unsupported value: NaN"},
+		{"+Infinity", "go_infinity", "infinity", "unsupported value: +Inf"},
+	} {
+		_, goErr := exec(goB, c.goEntry, `{"in":{"ms":0}}`)
+		_, tsErr := exec(tsB, c.tsEntry, `{}`)
+		lenRes, lenErr := exec(lenB, c.tsEntry, `{}`)
+		t.Logf("%-9s go: %s | ts: %s | ts lenient (red control): result=%q err=%v", c.name, tail(goErr), tail(tsErr), lenRes, lenErr)
+		if tail(goErr) != c.want || tail(tsErr) != c.want {
+			t.Errorf("%s: expected both languages to fail with %q, got go=%q ts=%q", c.name, c.want, tail(goErr), tail(tsErr))
+		}
+		if lenErr != nil || lenRes != `{"v":null}` {
+			t.Errorf("%s: red control failed: the lenient build should return {\"v\":null}, got %q err=%v", c.name, lenRes, lenErr)
+		}
 	}
 }

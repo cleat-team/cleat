@@ -93,3 +93,12 @@ func GoNotANumber(h cleat.HostCalls, in SleeperInput) (string, error) {
 	}
 	return string(out), nil
 }
+
+// GoInfinity is GoNotANumber for +Inf.
+func GoInfinity(h cleat.HostCalls, in SleeperInput) (string, error) {
+	out, err := json.Marshal(map[string]interface{}{"v": math.Inf(1)})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}

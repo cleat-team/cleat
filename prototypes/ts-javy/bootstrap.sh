@@ -56,6 +56,9 @@ npm ci --no-audit --no-fund >/dev/null 2>&1 || unmeasured "npm ci failed"
 [ "$(npx esbuild --version)" = "0.28.2" ] || unmeasured "esbuild is $(npx esbuild --version), package.json pins 0.28.2"
 echo "  esbuild $(npx esbuild --version)"
 
+# What Go will see when it stamps vcs.modified: ANY dirty path, including the verification's own output files, which are not build
+# inputs. Recorded so the provenance can tell "modified by a stray edit" from "modified only by evidence/ output".
+BUILD_STATUS=$(git -C "$ROOT" status --porcelain)
 echo "### the worker and cleatctl, from this tree's own engine (CGO on: wasmtime is the only backend)"
 ( cd "$ROOT" && env -u GOWORK -u GOFLAGS -u GOPROXY go build -o "$HERE/$W/cleat-worker" ./cmd/cleat-worker \
   && env -u GOWORK -u GOFLAGS -u GOPROXY go build -o "$HERE/$W/cleatctl" ./cmd/cleatctl ) || unmeasured "building the worker or cleatctl failed"
@@ -78,8 +81,8 @@ docker exec "$CONT" psql -U postgres -At -c "select 1 from pg_roles where rolnam
 ./provision-db.sh
 
 echo "### provenance"
-python3 - "$HEAD_SHA" "$DIRTY" <<'PY'
-import hashlib, re, subprocess, sys, datetime
+BUILD_STATUS="$BUILD_STATUS" python3 - "$HEAD_SHA" "$DIRTY" <<'PY' || unmeasured "the binaries are not all reproducible from this commit (see the provenance above); set CLEAT_PROTO_ALLOW_DIRTY=1 only for development"
+import hashlib, os, re, subprocess, sys, datetime
 head, dirty = sys.argv[1], int(sys.argv[2])
 sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
 def vcs(p):
@@ -89,16 +92,25 @@ def vcs(p):
 lines = [f"cleat-ts-proto provenance, written {datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}",
          f"source tree: HEAD {head}; {'DIRTY (' + str(dirty) + ' paths): NOT reproducible from a commit' if dirty else 'clean'}"]
 ok = dirty == 0
+# Paths that were dirty when the binaries were built. Go stamps vcs.modified=true for ANY of them; that is acceptable only if every one
+# is verification OUTPUT under prototypes/ts-javy/evidence/ (not a Go source, not an input to the build).
+paths = [l[3:].strip().strip('"') for l in os.environ.get("BUILD_STATUS", "").splitlines() if l.strip()]
+outside = [x for x in paths if not x.startswith("prototypes/ts-javy/evidence/")]
 for p in (".work/cleat-worker", ".work/cleatctl"):
     rev, mod, t = vcs(p)
-    same = rev == head and mod == "false"
+    only_output = mod == "true" and not outside
+    same = rev == head and (mod == "false" or only_output)
     ok &= same
-    lines.append(f"{p}: sha256 {sha(p)[:16]}  built from {rev[:12]} modified={mod} at {t}  -> {'matches HEAD, clean' if same else 'DOES NOT MATCH a clean HEAD'}")
+    why = "matches HEAD, clean" if mod == "false" else (f"matches HEAD; vcs.modified=true ONLY because {len(paths)} verification output path(s) under evidence/ existed at build time" if only_output else f"DOES NOT MATCH a clean HEAD (dirty at build time: {outside[:3]})")
+    if rev != head: why = f"DOES NOT MATCH HEAD ({rev[:12]} != {head[:12]})"
+    lines.append(f"{p}: sha256 {sha(p)[:16]}  built from {rev[:12]} modified={mod} at {t}  -> {why}")
 lines.append(f"link/target/release/cleat-js-link: sha256 {sha('link/target/release/cleat-js-link')[:16]} (cargo, link/Cargo.lock)")
 lines.append(f".tools/javy: sha256 {sha('.tools/javy')[:16]}  {subprocess.check_output(['.tools/javy','--version'],text=True).strip()}")
 lines.append("toolchain: " + "; ".join(subprocess.check_output(c, text=True).strip().split("\n")[0] for c in (["go", "version"], ["rustc", "--version"], ["node", "--version"], ["npx", "esbuild", "--version"])))
 lines.append("RESULT: " + ("every binary was built from the committed HEAD of a clean tree" if ok else "NOT FULLY REPRODUCIBLE FROM A COMMIT (see above)"))
 open(".work/provenance.txt", "w").write("\n".join(lines) + "\n")
 print("\n".join("  " + l for l in lines))
+if not ok and not os.environ.get("CLEAT_PROTO_ALLOW_DIRTY"):
+    sys.exit(1)
 PY
 echo "bootstrap complete"

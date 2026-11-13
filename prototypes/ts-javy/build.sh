@@ -27,6 +27,7 @@ fi
 define=()
 if [ -n "${SUSPEND_MODE:-}" ]; then define=(--define:SUSPEND_MODE="\"$SUSPEND_MODE\""); fi
 if [ -n "${RESULT_CANONICAL:-}" ]; then define+=(--define:RESULT_CANONICAL="$RESULT_CANONICAL"); fi
+if [ -n "${NAN_POLICY:-}" ]; then define+=(--define:NAN_POLICY="\"$NAN_POLICY\""); fi
 # Javy finds a module's exports SYNTACTICALLY (crates/codegen/src/js.rs): `export function f()` and `export { f }` where f is
 # a function DECLARATION with no parameters. `export const f = workflow(...)` is not seen. So the bundle's entry is a
 # generated file that wraps each workflow in a parameterless function declaration and exports that.

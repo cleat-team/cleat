@@ -32,7 +32,7 @@ want = [
     ("suspension events: both languages' runs suspended at the signal wait and RESUMED in the other", len(re.findall(r"resumed in \S+\s*: err=<nil> suspended=\"\" result=\{\"signal\":\"hello\",\"slept\":1500\}", out)), 2),
     ("suspension events: four tampered child_workflow histories refused as divergences", len(re.findall(r"child_workflow -> signal_received, replayed on \S+\s*: refused=true", out)), 4),
     ("sleep records no event in either language", len(re.findall(r"with a 300 ms sleep: suspended=\"cleat_sleep\(300ms\)\" events=0", out)), 2),
-    ("the Go NaN workflow failed and the TS one returned null", int("json: unsupported value: NaN" in out and 'result="{\\"v\\":null}"' in out), 1),
+    ("NaN and +Infinity: Go and TS fail with the SAME message, and the lenient build (red control) returns null", len(re.findall(r'go: (unsupported value: (?:NaN|\+Inf)) \| ts: \1 \| ts lenient \(red control\): result="\{\\"v\\":null\}" err=<nil>', out)), 2),
 ]
 bad = 0
 for name, got, exp in want:

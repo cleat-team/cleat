@@ -13,6 +13,9 @@ declare const SUSPEND_MODE: string | undefined;
 // Build-time switch for the Q4 red control: RESULT_CANONICAL=false sends the result as raw JSON.stringify, so a test can show a
 // multi-key result is NOT byte-identical to its Go twin without the host's canonical form (ABI 6.3, "SHOULD").
 declare const RESULT_CANONICAL: boolean | undefined;
+// Build-time switch for the NaN red control: NAN_POLICY="lenient" restores plain JSON.stringify, which turns NaN and +-Infinity into
+// null. The default REFUSES them with the text Go's encoding/json uses, so a TS workflow and its Go twin fail the same way.
+declare const NAN_POLICY: string | undefined;
 
 declare function __cleat_args(): string;
 declare function __cleat_result(json: string): void;
@@ -84,7 +87,7 @@ export interface Ctx {
 
 const ctx: Ctx = {
   workflowId: () => __cleat_workflow_id(),
-  call: (service, operation, request) => settle(__cleat_call(service, operation, JSON.stringify(request ?? null))).then(parseJSON) as Promise<never>,
+  call: (service, operation, request) => settle(__cleat_call(service, operation, encode(request ?? null))).then(parseJSON) as Promise<never>,
   sleep: (ms) => settle<null>(__cleat_sleep(ms)).then(() => undefined),
   waitForSignal: (name, timeoutMs = 24 * 60 * 60 * 1000) =>
     settle<{ name: string; payload: string; timedOut: boolean }>(__cleat_await_signals(JSON.stringify(Array.isArray(name) ? name : [name]), timeoutMs)).then((s) => ({
@@ -93,7 +96,7 @@ const ctx: Ctx = {
       timedOut: s.timedOut,
     })),
   child: <T>(name: string, input?: unknown) =>
-    settle<string>(__cleat_child_workflow(name, JSON.stringify(input ?? null))).then((runId) => settle<string>(__cleat_await_child(runId)).then((r) => parseJSON(r) as T)),
+    settle<string>(__cleat_child_workflow(name, encode(input ?? null))).then((runId) => settle<string>(__cleat_await_child(runId)).then((r) => parseJSON(r) as T)),
   now: () => __cleat_now(),
   random: () => __cleat_random(),
   uuid: (seed = "") => __cleat_uuid(seed),
@@ -104,7 +107,7 @@ const ctx: Ctx = {
     if (out === "") throw new Error("the host refused to canonicalise: " + jsonText.slice(0, 80));
     return out;
   },
-  sideEffect: <T>(compute: () => T) => settle<string>(__cleat_side_effect(JSON.stringify(compute()))).then((v) => parseJSON(v) as T),
+  sideEffect: <T>(compute: () => T) => settle<string>(__cleat_side_effect(encode(compute()))).then((v) => parseJSON(v) as T),
   setQueryState: (key, value) => __cleat_set_query_state(key, value),
 };
 
@@ -113,11 +116,21 @@ const ctx: Ctx = {
  * reports the outcome through the plugin: a value becomes the JSON result, a rejection or a throw becomes an error
  * result, and a promise that never settles (a suspension) reports nothing, which the plugin turns into the sentinel.
  */
+// Every value that leaves the guest (a call's request, a child's input, a side effect, the result) is encoded here. A silent null is a
+// data change; a failure is visible, and it is what the Go SDK does (json: unsupported value: NaN / +Inf / -Inf). Measured in xlang/.
+function encode(v: unknown): string {
+  if (typeof NAN_POLICY !== "undefined" && NAN_POLICY === "lenient") return JSON.stringify(v);
+  return JSON.stringify(v, (_k, x) => {
+    if (typeof x === "number" && !Number.isFinite(x)) throw new Error(`json: unsupported value: ${Number.isNaN(x) ? "NaN" : x > 0 ? "+Inf" : "-Inf"}`);
+    return x;
+  });
+}
+
 // The workflow's result as text. Canonical by default: parsed and re-encoded by the host (Go encoding/json), so a TS result is
 // byte-identical to what a Go or Rust workflow returning the same value would produce. If the host refuses (it cannot, for text
 // JSON.stringify produced) the raw text is sent rather than losing the result.
 function resultText(v: unknown): string {
-  const raw = JSON.stringify(v);
+  const raw = encode(v);
   if (typeof RESULT_CANONICAL !== "undefined" && RESULT_CANONICAL === false) return raw;
   const canon = __cleat_json_stringify(raw);
   return canon === "" ? raw : canon;

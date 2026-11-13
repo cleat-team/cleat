@@ -15,7 +15,8 @@ TMPGO=$(mktemp -d)
 cp "$TMPGO"/crosslang.wasm "$X/go.wasm"; rm -rf "$TMPGO"
 ( cd "$ROOT/examples/rust-workflow" && cargo build --target wasm32-unknown-unknown --release 2>&1 | tail -1 )
 cp "$ROOT/examples/rust-workflow/target/wasm32-unknown-unknown/release/rust_workflow.wasm" "$X/rust.wasm"
-./build.sh nan nan | tail -1; cp .work/nan.wasm "$X/nan_ts.wasm"
+./build.sh nan nan,infinity | tail -1; cp .work/nan.wasm "$X/nan_ts.wasm"
+NAN_POLICY=lenient OUT_NAME=nan_lenient ./build.sh nan nan,infinity | tail -1; cp .work/nan_lenient.wasm "$X/nan_ts_lenient.wasm"
 ./build.sh xjourney x_journey | tail -1; cp .work/xjourney.wasm "$X/xjourney_ts.wasm"
 # The multi-key result pair: TS with the SDK's canonical result (default), TS with raw JSON.stringify (the red control), and the Go twin.
 ./build.sh multikey multikey | tail -1; cp .work/multikey.wasm "$X/multikey_ts.wasm"
