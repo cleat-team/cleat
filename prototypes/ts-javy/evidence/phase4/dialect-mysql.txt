@@ -1,0 +1,17 @@
+## mysql: database up on 127.0.0.1:32774; free disk 9.2 GiB
+## migrate-only rc=0 {"time":"2026-11-13T17:41:38.193649-05:00","level":"INFO","msg":"migrations complete","worker_id":"1eb3166d8d80c6a43bdf9e944d588dc0"}
+## deploy sleeper -> 201 {"created": true, "name": "sleeper", "plugin_deps": null, "version": 1}
+## deploy journey -> 201 {"created": true, "name": "journey", "plugin_deps": null, "version": 1}
+  PASS  control: with no signal sent, the run is still suspended (not done, not failed)  status=ready
+## kill -9 the worker while the run is suspended at the signal wait, then restart it
+  PASS  the worker is gone  
+  PASS  after the restart the run is still suspended  status=ready
+  PASS  the signal is accepted  200 {'idempotent_replay': False, 'status': 'delivered'}
+  PASS  the run completes  status=done error=
+  PASS  it received the signal payload we sent  signal='hello-from-mysql'
+  PASS  the child workflow ran and returned  child={'slept': 1500, 'workflow': 'c562accd-032d-4e7f-a96b-2630daaca831'}
+  PASS  uuid, random and now were produced  
+## result {"child": {"slept": 1500, "workflow": "c562accd-032d-4e7f-a96b-2630daaca831"}, "id": "db29e794-7823-4202-b409-eef231c4f084", "now": true, "random": "-5745007021182710849", "signal": "hello-from-mysql", "uuid": "729877e1-1288-507e-8e58-fd224e468f9f"}
+
+8 of 8 checks passed on mysql
+## removed container cleat-ts-my; free disk 8.6 GiB

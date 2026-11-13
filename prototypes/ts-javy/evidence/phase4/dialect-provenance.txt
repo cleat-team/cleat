@@ -1,0 +1,10 @@
+Dialect smoke tests (phase4_dialects.py), run 2026-11-13 ~17:41 EST on macOS arm64.
+Tree: d8dd74f2694fb4e57b7a8dd6632f17319fbca8da (branch proto/ts-javy; the binaries below were built from fe162b49, which differs from this commit only in PHASE5.md and evidence/)
+cade730404156a9a136228e4c9fb2c5fc94f5940b29837d12f2e0b997d36d462  cleat-worker
+af4929a846c018489fe7f590ef77c81751a33b99f7d6f475db6fd1dbec9d8188  cleatctl
+6a1dee1866f87a4477b4d0fef10f81a32469d0d29cfd15b08397462c1ed2cbdc  mods/journey.wasm
+21abc56962cae8b888ddcff9511e1eb0f0e8103a488afdd9aa41597233a1f37f  mods/sleeper.wasm
+Images: mirror.gcr.io/library/mysql:8.4.11 (linux/amd64, run under emulation on arm64; innodb-buffer-pool 128M); mcr.microsoft.com/mssql/server:2022-latest (linux/amd64, emulated).
+Worker flags: -driver <dialect> -require-auth=false -poll 200ms; migrations via -migrate-only; the login is the database superuser (root / sa), so row-level security is not exercised.
+Definitions were deployed through POST /api/definitions: cleatctl deploy workflow is refused on MySQL and SQL Server ("has not been ported", cleat#1316).
+Both containers are created and removed by the script. Free disk was low on this host and killed earlier attempts (No space left on device).

@@ -1,0 +1,64 @@
+{"time":"2026-11-13T17:41:38.235294-05:00","level":"INFO","msg":"starting worker","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","concurrency":4}
+{"time":"2026-11-13T17:41:38.235448-05:00","level":"INFO","msg":"checksum verification enabled","worker_id":"69ae59b94a72f0b38ef7d05e43d85785"}
+{"time":"2026-11-13T17:41:38.238812-05:00","level":"INFO","msg":"plugin DB pool configured","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","max_connections":10}
+{"time":"2026-11-13T17:41:38.240685-05:00","level":"INFO","msg":"heartbeat DB pool configured","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","max_connections":3}
+{"time":"2026-11-13T17:41:38.240701-05:00","level":"INFO","msg":"sensitive-payload encryption is off: no --encryption-key-file, workflow data is stored in plaintext","worker_id":"69ae59b94a72f0b38ef7d05e43d85785"}
+{"time":"2026-11-13T17:41:38.24071-05:00","level":"INFO","msg":"creating tenant database","tenant_id":"00000000-0000-0000-0000-000000000000","database":"cleat_00000000_0000_0000_0000_000000000000"}
+{"time":"2026-11-13T17:41:38.241912-05:00","level":"INFO","msg":"tenant database ready","tenant_id":"00000000-0000-0000-0000-000000000000","database":"cleat_00000000_0000_0000_0000_000000000000","duration_ms":1}
+{"time":"2026-11-13T17:41:38.356858-05:00","level":"INFO","msg":"registered in the worker registry","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","secret_key_versions":null}
+2026/11/13 17:41:38 INFO audit-log: initialized retention_days=90
+2026/11/13 17:41:38 INFO blobstore: initialized backend=memory
+2026/11/13 17:41:38 INFO dag plugin initialized
+2026/11/13 17:41:38 INFO datadog-export: initialized
+{"time":"2026-11-13T17:41:38.369785-05:00","level":"INFO","msg":"plugin not configured, disabled","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","plugin":"email-notify"}
+2026/11/13 17:41:38 INFO event-triggers: initialized
+2026/11/13 17:41:38 INFO eventstore: initialized max_event_size=1048576
+2026/11/13 17:41:38 INFO feature-flags: initialized default_rollout=0
+2026/11/13 17:41:38 INFO jobqueue: initialized
+2026/11/13 17:41:38 INFO kvstore: initialized max_value_size=1048576
+2026/11/13 17:41:38 INFO llm: initialized providers=0
+2026/11/13 17:41:38 INFO notifications: initialized
+2026/11/13 17:41:38 INFO oauth-provider: OAuth login is Postgres-only in this release; /login and /callback will refuse on this dialect dialect=mysql
+2026/11/13 17:41:38 INFO oauth-provider: initialized
+2026/11/13 17:41:38 INFO pagerduty-alert: initialized
+2026/11/13 17:41:38 INFO rate-limiter: initialized mode=memory
+2026/11/13 17:41:38 INFO scheduledbackup: initialized dump_dir=/tmp/cleat-backups
+2026/11/13 17:41:38 INFO scheduler: initialized
+2026/11/13 17:41:38 INFO slack-notify: initialized
+2026/11/13 17:41:38 INFO tenant-lifecycle: initialized
+2026/11/13 17:41:38 INFO tenant-quota: initialized
+2026/11/13 17:41:38 INFO kafka-connect: initialized rest_proxy=""
+2026/11/13 17:41:38 INFO webhook-ingest: initialized
+{"time":"2026-11-13T17:41:38.386053-05:00","level":"INFO","msg":"wasmtime backend registered for Go WASM","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","instance_timeout":30000000000,"wall_clock_ceiling":300000000000,"instruction_limit":0,"memory_limit_bytes":33554432,"defer_budget":5000000000}
+{"time":"2026-11-13T17:41:38.386062-05:00","level":"INFO","msg":"adaptive batch flushing is PostgreSQL-only: this worker flushes each step directly, and --batch-flush-* settings have no effect on this driver","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","driver":"mysql"}
+{"time":"2026-11-13T17:41:38.38607-05:00","level":"INFO","msg":"database connection budget","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","pools":"core=9 + plugin=10 + heartbeat=3 = 22 fixed; plus 25 per tenant pool","configured_budget":0,"tenant_pools_that_fit":0}
+{"time":"2026-11-13T17:41:38.386221-05:00","level":"INFO","msg":"server connection limit","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","usable":150,"detail":"@@max_connections=151, one slot reserved for SUPER","this_worker_needs":22}
+{"time":"2026-11-13T17:41:38.387993-05:00","level":"WARN","msg":"authentication disabled","worker_id":"69ae59b94a72f0b38ef7d05e43d85785"}
+2026/11/13 17:41:38 INFO event-triggers: background retry worker started interval=30s
+2026/11/13 17:41:38 INFO oauth-provider: background loop started interval=5m0s
+2026/11/13 17:41:38 INFO audit-log: background started retention=1h workers=4 buffer=1000 enqueue_wait=1s retry_deadline=1m0s
+{"time":"2026-11-13T17:41:38.38862-05:00","level":"INFO","msg":"HTTP API listening","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","addr":"[::]:18795"}
+2026/11/13 17:41:38 INFO blobstore: TTL cleanup started interval=1h0m0s
+2026/11/13 17:41:38 INFO kafka-connect: consumer loop started, interval=5s
+2026/11/13 17:41:38 INFO scheduledbackup: background loop started, interval=60s
+2026/11/13 17:41:38 INFO jobqueue: worker started, poll interval=5s, reaper interval=60s
+2026/11/13 17:41:38 INFO scheduler: background loop started, interval=60s
+2026/11/13 17:41:38 INFO notifications: delivery retry loop started interval=30s
+2026/11/13 17:41:38 INFO rate-limiter: background reload started, interval=30s
+2026/11/13 17:41:38 INFO tenant-lifecycle: trial-expiry sweep started interval=1m0s
+2026/11/13 17:41:38 INFO eventstore: cleanup started interval=1h0m0s
+{"time":"2026-11-13T17:41:38.389314-05:00","level":"WARN","msg":"claim-across-tenants is set but this worker cannot serve other tenants; it will claim and fire cron for its own tenant only","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"rotating claim unavailable: this store cannot enumerate tenants"}
+{"time":"2026-11-13T17:41:38.389354-05:00","level":"INFO","msg":"running","worker_id":"69ae59b94a72f0b38ef7d05e43d85785"}
+{"time":"2026-11-13T17:41:38.389902-05:00","level":"WARN","msg":"metrics sweep: this store does not implement MetricsStore, so the stuck-workflow, event-history and concurrency-key gauges will emit no series; alerts on them cannot fire and panels will read \"No data\" rather than zero","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","store":"*engine.MySQLStore"}
+2026/11/13 17:41:38 INFO jobqueue: initial reaper cycle completed plugin=jobqueue jobs_reset=0
+2026/11/13 17:41:38 INFO jobqueue: initial abandonment sweep completed plugin=jobqueue jobs_abandoned=0
+2026/11/13 17:41:38 INFO scheduler: work cycle completed plugin=scheduler duration_ms=2 schedules_due=0 workflows_started=0 workflows_failed=0
+2026/11/13 17:41:38 INFO rate-limiter: work cycle completed plugin=rate-limiter duration_ms=2 configs_reloaded=0
+2026/11/13 17:41:38 INFO datadog-export: metric export started, interval=60s
+{"time":"2026-11-13T17:41:38.394777-05:00","level":"WARN","msg":"claim-across-tenants is set but this worker cannot rotate; claiming only this worker's own tenant","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"rotating claim unavailable: this store cannot enumerate tenants"}
+{"time":"2026-11-13T17:41:39.02122-05:00","level":"INFO","msg":"claimed workflow","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","workflow_id":"db29e794-7823-4202-b409-eef231c4f084","def_name":"journey","def_version":1}
+{"time":"2026-11-13T17:41:39.035365-05:00","level":"INFO","msg":"flusher registry not set on worker — using direct flush","workflow_id":"db29e794-7823-4202-b409-eef231c4f084"}
+{"time":"2026-11-13T17:41:39.244816-05:00","level":"INFO","msg":"workflow suspended","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","workflow_id":"db29e794-7823-4202-b409-eef231c4f084","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"cleat_sleep(1500ms)","wake_at":"2026-11-13T17:41:40.241-05:00"}
+{"time":"2026-11-13T17:41:40.251123-05:00","level":"INFO","msg":"claimed workflow","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","workflow_id":"db29e794-7823-4202-b409-eef231c4f084","def_name":"journey","def_version":1}
+{"time":"2026-11-13T17:41:40.254855-05:00","level":"INFO","msg":"flusher registry not set on worker — using direct flush","workflow_id":"db29e794-7823-4202-b409-eef231c4f084"}
+{"time":"2026-11-13T17:41:40.275511-05:00","level":"INFO","msg":"workflow suspended","worker_id":"69ae59b94a72f0b38ef7d05e43d85785","workflow_id":"db29e794-7823-4202-b409-eef231c4f084","tenant_id":"00000000-0000-0000-0000-000000000000","reason":"await_signals([\"go\"], 600000ms)","wake_at":"2026-11-13T17:51:40.258-05:00"}

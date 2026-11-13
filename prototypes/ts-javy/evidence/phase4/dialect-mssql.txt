@@ -1,0 +1,17 @@
+## mssql: database up on 127.0.0.1:32775; free disk 9.1 GiB
+## migrate-only rc=0 {"time":"2026-11-13T17:42:02.366789-05:00","level":"INFO","msg":"migrations complete","worker_id":"cff4cf8887bd605d942af416647b790a"}
+## deploy sleeper -> 201 {"created": true, "name": "sleeper", "plugin_deps": null, "version": 1}
+## deploy journey -> 201 {"created": true, "name": "journey", "plugin_deps": null, "version": 1}
+  PASS  control: with no signal sent, the run is still suspended (not done, not failed)  status=ready
+## kill -9 the worker while the run is suspended at the signal wait, then restart it
+  PASS  the worker is gone  
+  PASS  after the restart the run is still suspended  status=ready
+  PASS  the signal is accepted  200 {'idempotent_replay': False, 'status': 'delivered'}
+  PASS  the run completes  status=done error=
+  PASS  it received the signal payload we sent  signal='hello-from-mssql'
+  PASS  the child workflow ran and returned  child={'slept': 1500, 'workflow': 'ce4d83a0-9e2e-44dc-ad76-2af7ec8ac9d1'}
+  PASS  uuid, random and now were produced  
+## result {"child": {"slept": 1500, "workflow": "ce4d83a0-9e2e-44dc-ad76-2af7ec8ac9d1"}, "id": "ca80ed6a-b955-4d10-be24-2d31a1f95eb4", "now": true, "random": "1343182905509511184", "signal": "hello-from-mssql", "uuid": "5ffedf32-d79a-5a1c-b05e-44acd5ec43d0"}
+
+8 of 8 checks passed on mssql
+## removed container cleat-ts-ms; free disk 9.1 GiB

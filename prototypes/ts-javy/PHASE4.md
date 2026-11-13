@@ -121,3 +121,29 @@ is a reading of the result, not a measurement. Python's lower figure (12/s) has 
     CLEAT_PROTO_COMPONENTIZE_PY_DIR=<dir containing componentize-py> (and the same four variables) ./phase4-verify.sh   # ~12 min
 
 Without `componentize-py` the script exits 2 (UNMEASURED); it never drops Python quietly.
+
+## Dialect smoke tests (plan section 7) — run 2026-11-13, after the numbers above
+
+The plan asked for one smoke test each on MySQL and SQL Server in Phase 4. They were not run then; they were run afterwards, on request,
+with `phase4_dialects.py` (raw output `evidence/phase4/dialect-mysql.txt`, `dialect-mssql.txt`, provenance `dialect-provenance.txt`).
+
+**Result: 8 of 8 checks on MySQL 8.4.11 and 8 of 8 on SQL Server 2022.** The `journey` workflow (a sleep, a signal wait, a child workflow
+that itself sleeps) is started on a stock `cleat-worker`; while it is suspended at the signal wait the worker is `kill -9`'d and restarted;
+the signal is then sent. The run completes with the payload sent (`hello-from-<dialect>`), the child's result (`slept: 1500`), and
+`uuid`, `random` and `now` produced. A control makes the check able to fail: before the signal is sent the run must still be suspended
+(status `ready`), and it is, both before and after the kill.
+
+**What this does and does not show.** It shows the suspend, replay-after-kill and resume path works through the MySQL and SQL Server
+stores, for one run each. It is a smoke test, not a measurement: no timing, no throughput, one run per dialect. The login is the
+database superuser (`root`, `sa`), so SQL Server's row-level security was **not exercised**; auth was off and there is one tenant. Both
+images are linux/amd64 run under emulation. Definitions went in through `POST /api/definitions`, because `cleatctl deploy workflow` is
+refused on both dialects (`has not been ported`, cleat#1316), which is the same for every guest language.
+
+**Defects in my own driver, found by running it** (so they are not repeated): the worker needs `-driver mysql|mssql` (without it, it tried
+PostgreSQL on localhost and refused to start); the MySQL image starts a temporary server for its init, so a ping in between succeeds and
+the next connection is reset (the driver now waits for the init to finish); and my `random` check wrongly required a JSON number, then
+digits only, but `random` arrives as a decimal string and can be negative. The run itself was correct each time the check failed; the
+passing run above is the first with all three fixed, and the earlier failing outputs were overwritten.
+
+**Host condition, not a finding.** Earlier attempts died with `No space left on device` when the host disk was full; the containers are
+now created and removed by the script, and it refuses to start under 2.5 GiB free.
