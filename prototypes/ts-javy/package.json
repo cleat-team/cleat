@@ -1,0 +1,9 @@
+{
+  "name": "cleat-ts-javy-prototype",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Branch-only prototype (proto/ts-javy). Not published, not supported.",
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

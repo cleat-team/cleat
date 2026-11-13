@@ -1,0 +1,20 @@
+[package]
+name = "cleat-js-plugin"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "cleat_js_plugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+javy-plugin-api = { version = "=7.1.0", features = ["json"] }
+
+# Not a member of the repository's Cargo workspace: this is a branch-only prototype
+# (proto/ts-javy) and must not change what the Rust SDK's CI builds.
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true

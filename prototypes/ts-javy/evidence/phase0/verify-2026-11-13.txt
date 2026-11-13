@@ -1,0 +1,42 @@
+### versions
+javy 9.1.0
+0.28.2
+rustc 1.96.0 (ac68faa20 2026-05-25)
+wasm-tools 1.261.0
+cleat base e44bd9ae
+
+### 1. WASI import census of the deployed module against engine/wasi_policy.go
+  wasi_snapshot_preview1::environ_get          wasiDeterministic
+  wasi_snapshot_preview1::environ_sizes_get    wasiDeterministic
+  wasi_snapshot_preview1::clock_time_get       wasiIntercepted
+  wasi_snapshot_preview1::fd_close             wasiDeterministic
+  wasi_snapshot_preview1::fd_fdstat_get        wasiDeterministic
+  wasi_snapshot_preview1::fd_read              wasiDeterministic
+  wasi_snapshot_preview1::fd_seek              wasiFatal
+  wasi_snapshot_preview1::fd_write             wasiDeterministic
+  wasi_snapshot_preview1::proc_exit            wasiDeterministic
+  imports from modules other than wasi_snapshot_preview1: 0
+
+### 2. exports of the deployed module (the ABI's exports are entry points)
+(export "memory" (memory 0))
+(export "hello" (func 1503))
+
+### 3. deploy hello with cleatctl, run it on the stock worker
+Deployed hello v1 (ABI v1, minVersion=1, 1029129 bytes, SHA256=038d0f09ae81247b)
+run 02c17c90-9741-400c-8d22-54bfc550e7b9
+{"def_name": "hello", "status": "done", "result": "{\"hello\":\"ts\"}", "error": null, "reclaim_count": 0}
+
+### 4. green control: a different result in the source comes back different
+Deployed hello2 v1 (ABI v1, minVersion=1, 1029163 bytes, SHA256=1ee87fa84ada80a4)
+{"def_name": "hello2", "status": "done", "result": "{\"hello\":\"ts-two\"}", "error": null, "reclaim_count": 0}
+
+### 5. red control: the same Javy module WITHOUT the trampoline (cleat-js-link skipped)
+Deployed hello_raw v1 (ABI v1, minVersion=1, 1023157 bytes, SHA256=56ccef90fb231436)
+{"def_name": "hello_raw", "status": "failed", "result": null, "error": "host: workflow 8ea84417-6888-4aa5-b088-6ec0508f2f38: execution failed: wasm trap: host: export \"hello\": too many arguments provided", "reclaim_count": 0}
+
+### 6. dynamic mode (-C dynamic) on the stock engine
+Deployed hello_dyn v1 (ABI v1, minVersion=1, 760 bytes, SHA256=62d02819b6388d6f)
+{"def_name": "hello_dyn", "status": "failed", "result": null, "error": "host: workflow 6db92715-791d-4e1d-b918-4e6688c251a3: execution failed: wasm trap: host: instantiate: unknown import: `javy-default-plugin-v4::cabi_realloc` has not been defined", "reclaim_count": 0}
+
+### 7. nothing outside prototypes/ differs from origin/develop (empty = none)
+(end)

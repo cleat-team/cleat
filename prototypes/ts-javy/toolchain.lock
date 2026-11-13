@@ -1,0 +1,13 @@
+# Pinned toolchain for the TypeScript/Javy prototype (branch proto/ts-javy). Recorded 2026-11-13.
+# Re-derive: .tools/javy --version ; npx esbuild --version ; cargo tree -p cleat-js-plugin ; rustc --version ; wasm-tools --version
+javy            9.1.0      released 2026-07-30   (github.com/bytecodealliance/javy, tag v9.1.0)
+javy.arm-macos  sha256 99e9ec6a8e8c98e119d137c08a921d2443d3b873c675a5571e1800f4451e6294   javy-arm-macos-v9.1.0.gz (matches the published .sha256, which comes from the same release)
+javy.arm-linux  file javy-arm-linux-v9.1.0.gz (downloaded for container use; checksum in the published .sha256 beside it)
+javy-plugin-api =7.1.0     (plugin/Cargo.toml; Javy v9.1.0's own plugin-api crate is 7.1.0, its docs still say 5.0.0)
+quickjs         rquickjs-core 0.12.2 (via javy 8.1.0 crate; see plugin/Cargo.lock)
+esbuild         0.28.2     (package.json, exact)
+walrus          =0.26.4    (link/Cargo.toml; the version Javy v9.1.0's own codegen uses)
+rustc           1.96.0     target wasm32-wasip1
+wasm-tools      1.261.0
+host            Apple M4, macOS 26.5.2, arm64; Apple clang 21.0.0 builds QuickJS for wasm32-wasip1 (rquickjs-sys)
+cleat base      origin/develop e44bd9ae (engine/ untouched; see PHASE0.md)

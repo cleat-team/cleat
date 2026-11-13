@@ -1,0 +1,6 @@
+# Downloaded and built artifacts. Versions and checksums are pinned in toolchain.lock.
+.tools/
+.work/
+target/
+node_modules/
+*.wasm

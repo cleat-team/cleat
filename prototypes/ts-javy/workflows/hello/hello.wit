@@ -1,0 +1,5 @@
+package cleat:ts;
+
+world hello-world {
+  export hello: func();
+}
