@@ -1,0 +1,41 @@
+{{- /*
+  TEMPORARY. This file and _upgrade-guard.tpl exist for one release step, 0.5.0 to 0.6.0, and are
+  removed after 0.6.0 ships (cleat#3759). Delete them with upgrade.allowLiveWorkers in values.yaml.
+
+  WHY. D79: an in-place 0.5.0 to 0.6.0 upgrade is supported only if every 0.5.0 worker is stopped
+  first. This chart's migration is a pre-upgrade hook, and Helm runs hooks before it touches the
+  release's other resources, so a plain `helm upgrade` migrates the schema while the 0.5.0 pods are
+  still Ready and then rolls the workers, old beside new. It succeeds and prints "Upgrade complete".
+  Measured on a real cluster in cleat#3758.
+
+  WHAT IT DOES. Helm renders templates BEFORE it runs any hook, and `lookup` reads the live
+  Deployment, so this can refuse the upgrade before the migration Job exists. It fires only when the
+  live worker image is identifiably 0.5.x and replicas > 0 (see _upgrade-guard.tpl for the rule).
+
+  WHAT IT DOES NOT DO.
+    - `lookup` returns nothing under `helm template`, `helm upgrade --dry-run` and GitOps renderers
+      that do not talk to the cluster (Argo CD, Flux): the guard is silent there.
+    - It reads the image TAG. The chart's default tag is "latest" (cleat#3762) and a digest-only
+      image has no version, so for those it cannot know and does not fire.
+    - It reads replicas, not pods: a Deployment scaled to 0 whose pods are still draining passes.
+    - It protects Helm users only; the other deployment shapes are in docs/operations/upgrading.md,
+      and a guard in the binary is cleat#3760.
+*/ -}}
+{{- $live := lookup "apps/v1" "Deployment" .Release.Namespace (include "cleat.fullname" .) -}}
+{{- if and $live $live.spec -}}
+{{- $up := default (dict) .Values.upgrade -}}
+{{- $liveImage := "" -}}
+{{- range $c := $live.spec.template.spec.containers -}}
+{{- if eq $c.name "worker" -}}{{- $liveImage = $c.image -}}{{- end -}}
+{{- end -}}
+{{- $msg := include "cleat.upgradeRefusal" (dict
+      "liveImage" $liveImage
+      "liveReplicas" (int (default 0 $live.spec.replicas))
+      "newImage" (printf "%s:%s" .Values.image.repository (toString .Values.image.tag))
+      "allow" (default false $up.allowLiveWorkers)
+      "fullname" (include "cleat.fullname" .)
+      "namespace" .Release.Namespace
+      "name" (include "cleat.name" .)
+      "release" .Release.Name) -}}
+{{- if $msg -}}{{- fail $msg -}}{{- end -}}
+{{- end -}}

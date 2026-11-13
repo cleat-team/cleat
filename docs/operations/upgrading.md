@@ -184,6 +184,50 @@ not supported for this step.** A 0.5.0 worker started against a 0.6.0-migrated s
 is the case no test covers; stop all of them first. If rolling upgrades are wanted
 later, that is a new decision.
 
+**How to stop first, by deployment shape.**
+
+- **Helm.** A plain `helm upgrade` does **not** stop anything, and it **succeeds silently**.
+  The chart's migration is a `pre-upgrade` hook, which Helm runs before it replaces any pod,
+  so the schema migrates while the 0.5.0 pods are still Ready, and the default rolling update
+  then runs old and new workers together. Measured on a real cluster (cleat#3758), it printed
+  `Upgrade complete` and warned of nothing. Stop the workers first:
+
+  ```bash
+  # The Deployment is named <release>-cleat, or just <release> when the release name contains "cleat".
+  kubectl scale deployment/<deployment> --replicas=0 -n <namespace>
+  kubectl wait --for=delete pod -l app.kubernetes.io/instance=<release> -n <namespace> --timeout=180s
+  helm upgrade <release> <chart> -n <namespace> --set image.tag=<the 0.6.0 tag> ...
+  ```
+
+  Measured (Helm 4.3.0, Kubernetes 1.31, PostgreSQL, an empty database): the
+  HorizontalPodAutoscaler switches itself off at 0 replicas (`ScalingActive=False`,
+  `ScalingDisabled`), so it needs no separate pause; the migration hook then runs with no
+  workers; and Helm restores `replicaCount` when it applies the chart, so no scale-up is
+  needed. **Not measured:** Helm 3, runs in flight, a large database.
+
+  **The chart refuses the unsafe upgrade.** Helm renders templates before it runs any hook, so
+  `templates/upgrade-guard.yaml` reads the live Deployment and fails the upgrade before the
+  migration Job exists, with the commands above in the message. It fires only when the live
+  worker image is identifiably 0.5.x (a `0.5`, `0.5.N` or `v0.5.N` tag) and has replicas above 0,
+  and the image being deployed is not 0.5.x. **Limits:** it does not fire for the tag `latest`
+  (the chart's default, cleat#3762) or for a digest with no tag, because they carry no version;
+  it reads replicas, not pods, so a Deployment scaled to 0 whose pods are still draining passes,
+  which is why the `kubectl wait` step is there; and `lookup` returns nothing under `helm
+  template`, `helm upgrade --dry-run` and renderers that do not talk to the cluster (Argo CD,
+  Flux), so it is silent there. To skip it, set `upgrade.allowLiveWorkers=true`; that is the
+  unsupported case. The guard is temporary and is removed after 0.6.0 (cleat#3759).
+- **Raw Kubernetes (`k8s/`).** Scale the worker Deployment to zero and wait for its pods to
+  go before you apply `k8s/migrate-job.yaml`; the manifest does not do this for you (not tested).
+- **Docker Compose.** Stop the worker services before `docker compose up`, because the
+  `migrate` service otherwise runs while the old workers are still up (not tested).
+- **systemd.** `ExecStartPre` migrates on each worker's own restart, so restarting workers one
+  at a time migrates under the ones still running; stop every worker unit first, then start
+  them (not tested).
+
+Why mixing matters is an inference, not a reproduction: a post-0.5.0 PostgreSQL migration drops
+`NOT NULL` from `workflow_defs.wasm_bytes` (`005_workflow_libraries.sql`), so a 0.5.0 worker
+that reads a library member's definition could meet a `NULL` it cannot scan (cleat#3758).
+
 What is checked end to end, by `scripts/upgrade_from_v040.py --from-version v0.5.0
 --expect upgrade` (the **Upgrade From v0.5.0** workflow, on every push to a `release/**`
 branch, every pull request into one, and on demand; cleat#3735): a database seeded by the *published* 0.5.0 worker is
