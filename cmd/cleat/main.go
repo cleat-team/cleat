@@ -133,8 +133,8 @@ func main() {
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
-		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python")
-		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
+		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python, ts (branch-only prototype)")
+		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (Python target) or 'file.ts:entry_name[,entry_name]' (ts target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
@@ -280,6 +280,13 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 			outDir = "."
 		}
 		runBuildPython(pattern, outDir, runtime, channel, workflowVersion)
+		return
+	}
+	if target == "ts" {
+		if outDir == "" {
+			outDir = "."
+		}
+		runBuildTS(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
@@ -2527,6 +2534,7 @@ func isValidTarget(t string) bool {
 	valid := map[string]bool{
 		"go": true, "rust": true,
 		"java": true, "assemblyscript": true, "python": true,
+		"ts": true, // branch-only prototype (proto/ts-javy); see cmd/cleat/build_ts.go
 	}
 	return valid[t]
 }

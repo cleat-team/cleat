@@ -136,6 +136,58 @@ function resultText(v: unknown): string {
   return canon === "" ? raw : canon;
 }
 
+// ---- source maps (Phase 5, Q7) -------------------------------------------------------------------------------------------------------
+// The build appends `globalThis.__cleat_sm = <JSON>` to the bundle (build.sh): {"s": [source paths], "m": esbuild's mappings string}.
+// QuickJS reports a frame as `function.mjs:LINE:COL`, a position in the BUNDLE; this rewrites each such frame to the original
+// `src.ts:LINE:COL`. Decoded lazily, once, at the first error, so a workflow that never fails pays only for the string in its heap.
+// Absent (SOURCEMAP=0 builds) or unparsable: the stack is returned untouched, never replaced by a guess.
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+let SM: { s: string[]; lines: number[][][] } | null | undefined;
+function loadMap(): { s: string[]; lines: number[][][] } | null {
+  if (SM !== undefined) return SM;
+  SM = null;
+  try {
+    const raw = (globalThis as { __cleat_sm?: string }).__cleat_sm;
+    if (!raw) return SM;
+    const j = JSON.parse(raw) as { s: string[]; m: string };
+    const lines: number[][][] = [];
+    let sIdx = 0, sLine = 0, sCol = 0;
+    for (const line of j.m.split(";")) {
+      const segs: number[][] = [];
+      let gCol = 0;
+      if (line) {
+        for (const seg of line.split(",")) {
+          const f: number[] = [];
+          let shift = 0, val = 0;
+          for (let i = 0; i < seg.length; i++) {
+            const d = B64.indexOf(seg[i]);
+            val += (d & 31) << shift;
+            if (d & 32) shift += 5;
+            else { f.push(val & 1 ? -(val >>> 1) : val >>> 1); val = 0; shift = 0; }
+          }
+          gCol += f[0];
+          if (f.length >= 4) { sIdx += f[1]; sLine += f[2]; sCol += f[3]; segs.push([gCol, sIdx, sLine, sCol]); }
+        }
+      }
+      lines.push(segs);
+    }
+    SM = { s: j.s, lines };
+  } catch { SM = null; }
+  return SM;
+}
+function mapStack(stack: string): string {
+  const m = loadMap();
+  if (!m) return stack;
+  return stack.replace(/function\.mjs:(\d+):(\d+)/g, (whole, l: string, c: string) => {
+    const segs = m.lines[Number(l) - 1];
+    if (!segs) return whole;
+    const col0 = Number(c) - 1; // QuickJS columns are 1-based, the map's are 0-based
+    let best: number[] | undefined;
+    for (const sg of segs) { if (sg[0] <= col0) best = sg; else break; }
+    return best ? `${m.s[best[1]]}:${best[2] + 1}:${best[3] + 1}` : whole;
+  });
+}
+
 export function workflow<I = unknown, O = unknown>(fn: (ctx: Ctx, input: I) => O | Promise<O>): () => void {
   return function entry(): void {
     let input: I;
@@ -151,7 +203,7 @@ export function workflow<I = unknown, O = unknown>(fn: (ctx: Ctx, input: I) => O
         (v) => __cleat_result(resultText(v === undefined ? {} : v)),
         (e) => {
           if (e instanceof SuspendSignal) return; // the throw-mode control only: a suspension that surfaced as an exception
-          __cleat_fail(e instanceof Error ? `${e.name}: ${e.message}${e.stack ? "\n" + e.stack : ""}` : String(e));
+          __cleat_fail(e instanceof Error ? `${e.name}: ${e.message}${e.stack ? "\n" + mapStack(e.stack) : ""}` : String(e));
         },
       )
       // An exception in the success handler above is NOT caught by the failure handler beside it, and would be dropped: the plugin

@@ -1,12 +1,25 @@
 #!/bin/bash
 # Build a workflow: workflow.ts -> esbuild -> javy (static, cleat-js plugin) -> cleat-js-link -> tsmeta.
 # usage: [SUSPEND_MODE=throw] [OUT_NAME=x] [REBUILD_PLUGIN=1] build.sh <name> <abi_entry>[,<abi_entry>...]
-#   reads workflows/<name>/<name>.ts. Each ABI entry (snake_case) is the module's export; its WIT/Javy name is the kebab-case
+#   reads workflows/<name>/<name>.ts, or, when the first argument is a path (contains "/" or ends in .ts), THAT file: it may live anywhere,
+#   may `import { workflow } from "@cleat/ts"`, and gets this directory's node_modules on its resolution path. OUT_DIR=<dir> also copies
+#   the module there (what `cleat build --target ts` uses). Each ABI entry (snake_case) is the module's export; its WIT/Javy name is the kebab-case
 #   form and the TypeScript export must be the camelCase form (place_order -> place-order -> placeOrder).
 #   Language label: "javascript" (engine.WasmtimeLanguages on this branch).
 set -euo pipefail
+# A path argument is resolved BEFORE the cd below, against the caller's directory.
+SRC_ABS=""
+case "$1" in */*|*.ts) SRC_ABS="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" ;; esac
 cd "$(dirname "$0")"
-name=$1; entries=$2
+if [ -n "$SRC_ABS" ]; then
+  [ -f "$SRC_ABS" ] || { echo "UNMEASURED: no such workflow source: $SRC_ABS" >&2; exit 2; }
+  name=$(basename "$SRC_ABS" .ts); SRC="$SRC_ABS"; SRC_ROOT=${SRC_ROOT:-$(dirname "$SRC_ABS")}
+else
+  name=$1; SRC="workflows/$name/$name.ts"; SRC_ROOT=$PWD
+fi
+entries=$2
+export SRC_ROOT
+export NODE_PATH="$PWD/node_modules${NODE_PATH:+:$NODE_PATH}"
 out=${OUT_NAME:-$name}
 J=.tools/javy; W=.work
 PLUGIN=${PLUGIN:-$W/cleat-plugin.wasm}   # a determinism control build passes its own plugin variant
@@ -16,7 +29,7 @@ mkdir -p "$W"
 # built and run directly, not through `go run`, because `go run` reports every non-zero exit as 1 and this check has three
 # outcomes: 0 clean, 1 finding, 2 UNMEASURED (the check could not look). Both 1 and 2 stop the build.
 GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go build -o "$W/tscheck" ./tools/tscheck
-"$W/tscheck" "workflows/$name/$name.ts" || { rc=$?; echo "build refused by tscheck (exit $rc: 1 = finding, 2 = UNMEASURED)"; exit "$rc"; }
+"$W/tscheck" "$SRC" || { rc=$?; echo "build refused by tscheck (exit $rc: 1 = finding, 2 = UNMEASURED)"; exit "$rc"; }
 
 # The plugin: rebuilt when its sources are newer than the initialised module, or on request.
 if [ -n "${REBUILD_PLUGIN:-}" ] || [ ! -f "$W/cleat-plugin.wasm" ] || [ -n "$(find plugin/src plugin/Cargo.toml ../../crates/cleat-sdk/src -newer "$W/cleat-plugin.wasm" -type f | head -1)" ]; then
@@ -32,18 +45,43 @@ if [ -n "${NAN_POLICY:-}" ]; then define+=(--define:NAN_POLICY="\"$NAN_POLICY\""
 # a function DECLARATION with no parameters. `export const f = workflow(...)` is not seen. So the bundle's entry is a
 # generated file that wraps each workflow in a parameterless function declaration and exports that.
 entry="$W/$out.entry.ts"
-python3 - "$name" "$entries" "$entry" <<'PY'
+python3 - "$name" "$entries" "$entry" "$SRC_ABS" <<'PY'
 import sys
-name, entries, path = sys.argv[1:4]
+name, entries, path, src_abs = sys.argv[1:5]
 camel = lambda e: (lambda p: p[0] + "".join(x.title() for x in p[1:]))(e.split("_"))
-lines = [f'import * as m from "../workflows/{name}/{name}";']
+lines = [f'import * as m from "{src_abs[:-3] if src_abs else f"../workflows/{name}/{name}"}";']
 for e in entries.split(","):
     c = camel(e)
     lines.append(f"function {c}() {{ return m.{c}(); }}")
 lines.append("export { " + ", ".join(camel(e) for e in entries.split(",")) + " };")
 open(path, "w").write("\n".join(lines) + "\n")
 PY
-npx esbuild "$entry" --bundle --format=esm --target=es2020 ${define[@]+"${define[@]}"} --outfile="$W/$out.js" --log-level=warning
+# Source maps (SOURCEMAP=0 turns them off): esbuild writes an external map; it is trimmed to {sources, mappings} and APPENDED to the bundle as
+# a global, after everything else, so no line number of the bundle moves. The SDK uses it to turn `function.mjs:L:C` into `src.ts:L:C`.
+smflag=(--sourcemap=external --sources-content=false)
+if [ "${SOURCEMAP:-1}" = "0" ]; then smflag=(); fi
+npx esbuild "$entry" --bundle --format=esm --target=es2020 ${define[@]+"${define[@]}"} ${smflag[@]+"${smflag[@]}"} --alias:@cleat/ts="$PWD/packages/cleat-ts/index.ts" --outfile="$W/$out.js" --log-level=warning
+if [ "${SOURCEMAP:-1}" != "0" ]; then
+python3 - "$W/$out.js" "$W/$out.js.map" <<'PY'
+import json, os, re, sys
+js, mp = sys.argv[1:3]
+m = json.load(open(mp))
+base = os.path.dirname(mp)
+# REAL paths on both sides: on macOS /var is a symlink to /private/var, the source root comes from `pwd` (logical) and esbuild reports the
+# real path, so comparing them as written never matched and a user's file came out as ../../../../private/var/.../src/x.ts.
+root = os.path.realpath(os.environ.get("SRC_ROOT", os.getcwd()))
+def rel(x):
+    a = os.path.realpath(os.path.join(base, x))
+    r = os.path.relpath(a, root)
+    return r if not r.startswith("..") else os.path.relpath(a, os.path.realpath(os.getcwd()))   # under the user's source root: relative to it; else (SDK, node_modules) relative to this directory
+srcs = [rel(x) for x in m["sources"]]
+src = open(js).read()
+src = re.sub(r"\n?//# sourceMappingURL=.*\n?$", "\n", src)   # esbuild's own comment: the map is carried in-bundle instead
+payload = json.dumps({"s": srcs, "m": m["mappings"]}, separators=(",", ":"))
+open(js, "w").write(src + "globalThis.__cleat_sm = " + json.dumps(payload) + ";\n")
+print(f"source map embedded: {len(payload):,} bytes for {len(srcs)} source file(s)")
+PY
+fi
 
 # WIT world and link pairs from the ABI entry names.
 wit="$W/$out.wit"; pairs=()
@@ -69,4 +107,5 @@ json.dump({"pin_version": 1, "javy": subprocess.check_output([javy, "--version"]
           open(out, "w"), sort_keys=True, indent=1)
 PY
 GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go run ./tools/tsmeta -in "$W/$out.linked.wasm" -out "$W/$out.wasm" -name "$out" -entries "$entries" -language javascript -pin "$W/$out.pin.json"
+if [ -n "${OUT_DIR:-}" ]; then mkdir -p "$OUT_DIR" && cp "$W/$out.wasm" "$OUT_DIR/$out.wasm"; fi
 ls -l "$W/$out.wasm" | awk '{print "built", $9, $5, "bytes"}'

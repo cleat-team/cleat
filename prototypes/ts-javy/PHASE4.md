@@ -84,22 +84,28 @@ is a reading of the result, not a measurement. Python's lower figure (12/s) has 
    handler returns that message when `ListVersions` returns no versions, `cmd/cleat-worker/server.go`). Rounds 1 and 2 of the same
    language, and every later request, were fine. The worker's log for that run carries "recent database trouble on this worker"
    warnings from 10 seconds after it started. **Not reproduced** in the rerun that produced the numbers above (3 rounds, 1,980 starts,
-   0 refused), and **not explained**. I did not retry it away: the driver now records every refused start and fails the step. The raw
+   0 refused), and **not confirmed**. **Filed as cleat#3785, unclaimed.** By reading, the 404 cannot come from a plain read error on the
+   version list (that is a 500); the path that fits is `definitionIsInternal` (`cmd/cleat-worker/exposure_routes.go`), which fails closed
+   on any `GetWorkflowDef` error and answers the same 404 on purpose. `GetWorkflowDef` loads the whole `wasm_bytes` (19 MB for this module)
+   just to read the exposure class, which would make a loaded database most likely to fail on exactly this module. That is a hypothesis; I did
+   not test it. I did not retry it away: the driver now records every refused start and fails the step. The raw
    output of that first run went with the worktree I recreated for the rerun, so the excerpt here is from the console, not a file in
    `evidence/`. Worth a look by whoever owns the start path, because a deployed definition vanishing for one request under load is the
    kind of thing a retry in a client hides.
 2. **The worker warned during both runs** (`evidence/phase4/db.json`, `worker_warn_error_lines`): 18 "execution fenced out: run superseded
    by a later generation" (with `sent_generation` equal to `generation`: 7 TypeScript, 6 Go, 1 Rust, 4 Python, so not a guest effect);
    4 "Reaper: skipping this tick -- recent database trouble on this worker"; 1 "Reaper: skipped its last several ticks in a row"; 1
-   "this worker's pools may open 74 of the 97 connections the server allows". No run was lost or duplicated, but the machine was loaded
-   and these are likely related to that. Not investigated.
+   "this worker's pools may open 74 of the 97 connections the server allows". No run was lost or duplicated (1,980 claims, 1,980 completions, none claimed twice). Treated as expected under this load; not
+   filed, not investigated.
 3. **Python module size varies between builds of identical source** (18.4 MB, 19.3 MB, 19.4 MB across my builds), as the repo's own
    comment on componentize-py says. The figure above is the module that was deployed and measured.
 
 ## Not measured (limits of this phase)
 
 - **Dynamic mode, at all** (blocked). Only the two file sizes above exist.
-- **The optional StarlingMonkey comparison** (owner's call; not done).
+- **The optional StarlingMonkey comparison: skipped, by decision (coordinator, 2026-11-13).** Javy is far inside every performance line
+  (0.028x Python on cold start, 0.84x Go on replay), so the only remaining reason to want a heavier engine is JavaScript/npm
+  compatibility, which Phase 5 (Q6) measures. Revisit only if Q6 shows failures a fuller engine would fix.
 - Cold start through the **worker** (process start, API, claim): the harness is in-process. The throughput run includes all of that but
   does not isolate cold start.
 - A **quiet** machine, a second machine, a second architecture, a Linux Javy build.
