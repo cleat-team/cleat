@@ -84,9 +84,66 @@ func TestAReclaimedRunIsNotClobberedByItsStaleHolderUnderRLS(t *testing.T) {
 	})
 }
 
+// holderOwnOp reports whether path is one of the holder's own calls and, if so, the op it
+// names. The worker's durable calls reach the service as /call/<op>; nothing else is the
+// holder's. cleat#3711: this used to be strings.TrimPrefix, which turned ANY request on the
+// ephemeral port into an op, so a foreign client's /api/tasks counted as the stale holder
+// dispatching after its release.
+func holderOwnOp(path string) (string, bool) {
+	op, ok := strings.CutPrefix(path, "/call/")
+	if !ok || op == "" {
+		return "", false
+	}
+	return op, true
+}
+
+type holderArrival struct {
+	op    string
+	after bool // arrived after A was released
+}
+
+// staleHolderService is the HTTP service the guests call. It records the holder's own
+// requests, and answers anything else 404 and records its path separately, so a client this
+// test did not start is visible without being able to fail an assertion about the holder.
+type staleHolderService struct {
+	mu       sync.Mutex
+	arrivals []holderArrival
+	strays   []string
+	released atomic.Bool
+	// onOp runs for each of the holder's own requests, after it is recorded and before it
+	// is answered.
+	onOp func(op string)
+}
+
+func (s *staleHolderService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	op, own := holderOwnOp(r.URL.Path)
+	if !own {
+		s.mu.Lock()
+		s.strays = append(s.strays, r.URL.Path)
+		s.mu.Unlock()
+		http.NotFound(w, r)
+		return
+	}
+	s.mu.Lock()
+	s.arrivals = append(s.arrivals, holderArrival{op: op, after: s.released.Load()})
+	s.mu.Unlock()
+	if s.onOp != nil {
+		s.onOp(op)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, `{"ok":true}`)
+}
+
+func (s *staleHolderService) snapshot() ([]holderArrival, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]holderArrival(nil), s.arrivals...), append([]string(nil), s.strays...)
+}
+
 type staleHolderResult struct {
 	counts       map[string]int
 	afterRelease []string
+	strays       []string // paths of requests that were not the holder's own, uncounted
 	logsA        string
 	errA         string // the holder's "execution error" log line, if any
 }
@@ -128,36 +185,25 @@ func runAStaleHolder(t *testing.T, owner, rlsDB *sql.DB, tenant string, ageBelie
 	}
 	t.Cleanup(func() { _, _ = owner.Exec(`DELETE FROM workflow_instances WHERE id = $1`, wfID) })
 
-	type arrival struct {
-		op    string
-		after bool // arrived after A was released
-	}
 	var (
-		mu        sync.Mutex
-		arrivals  []arrival
-		released  atomic.Bool
+		svcRec    = &staleHolderService{}
 		heldFirst atomic.Bool
 		aInCall   = make(chan struct{})
 		releaseA  = make(chan struct{})
 		releaseMu sync.Once
 	)
-	release := func() { releaseMu.Do(func() { released.Store(true); close(releaseA) }) }
-
-	svc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		op := strings.TrimPrefix(r.URL.Path, "/call/")
-		mu.Lock()
-		arrivals = append(arrivals, arrival{op: op, after: released.Load()})
-		mu.Unlock()
-		// Only the FIRST arrival of work/first (A's) is held. A sync.Once would be wrong
-		// here: every other caller of Do blocks until the first returns, which would hold
-		// B's request behind A's and make B time out.
+	release := func() { releaseMu.Do(func() { svcRec.released.Store(true); close(releaseA) }) }
+	// Only the FIRST arrival of work/first (A's) is held. A sync.Once would be wrong
+	// here: every other caller of Do blocks until the first returns, which would hold
+	// B's request behind A's and make B time out.
+	svcRec.onOp = func(op string) {
 		if op == "work/first" && heldFirst.CompareAndSwap(false, true) {
 			close(aInCall)
 			<-releaseA
 		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"ok":true}`)
-	}))
+	}
+
+	svc := httptest.NewServer(svcRec)
 	defer svc.Close()
 	// Deferred AFTER svc.Close, so it runs BEFORE it: a failing test must not leave A's
 	// request held, because Server.Close waits for outstanding requests forever.
@@ -279,14 +325,20 @@ func runAStaleHolder(t *testing.T, owner, rlsDB *sql.DB, tenant string, ageBelie
 	}
 
 	res := staleHolderResult{counts: map[string]int{}, logsA: logsA.String()}
-	mu.Lock()
+	arrivals, strays := svcRec.snapshot()
 	for _, a := range arrivals {
 		res.counts[a.op]++
 		if a.after {
 			res.afterRelease = append(res.afterRelease, a.op)
 		}
 	}
-	mu.Unlock()
+	res.strays = strays
+	if len(strays) > 0 {
+		// Visible, not failing: a client this test did not start sent requests to its
+		// ephemeral port (cleat#3711). They are not the holder's, so they are not counted.
+		t.Logf("%d request(s) from a client this test did not start reached its service and were not counted, first: %s",
+			len(strays), strays[0])
+	}
 	for _, l := range strings.Split(res.logsA, "\n") {
 		if strings.Contains(l, `msg="execution error"`) {
 			res.errA = l
