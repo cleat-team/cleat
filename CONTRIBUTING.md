@@ -189,9 +189,18 @@ To build and test cleat you will need:
 **Minimum (write and run Go workflows):**
 | Tool | Version | Required | Notes |
 |------|---------|----------|-------|
-| Go | 1.27+ | Yes | Standard Go toolchain (go.mod pins `toolchain go1.27.1`; with `GOTOOLCHAIN=auto`, the default, Go downloads it for you) |
+| Go | 1.27.0 to 1.27.3 | Yes | Standard Go toolchain (go.mod pins `toolchain go1.27.3`; with `GOTOOLCHAIN=auto`, the default, Go downloads it for you **only if yours is older**, see the note below) |
 | PostgreSQL | 14+ (16 recommended) | Yes | Or MySQL 8.0+, or SQL Server 2017+ |
 | Docker | Latest | No | Only if using Docker for the database |
+
+> **Go 1.27.4 and newer cannot build cleat yet.** Its cgo refuses the `libwasmtime.a`
+> that wasmtime-go ships (`disallowed LTO section ".llvmbc" in #cgo LDFLAGS`;
+> upstream bytecodealliance/wasmtime-go#299). The `toolchain` line in `go.mod` is a
+> minimum, so a machine that already has Go 1.27.4 or newer keeps it and fails; on
+> such a machine run `GOTOOLCHAIN=go1.27.3 go build ./...` (or `export` it). The
+> repository stays on 1.27.3 until go1.27.5 or a wasmtime-go fix lands, which is the
+> govulncheck waiver (D69) and the owner's decision to wait for the upstream fix
+> (D78), both tracked on cleat#3701.
 
 **Full (develop cleat itself):**
 | Tool | Version | Required | Notes |
