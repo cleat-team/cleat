@@ -298,19 +298,26 @@ of `CHANGELOG.md` say what a step requires; `SECURITY.md` says the same about su
 
 ## Support tiers
 
+While cleat is on `0.x`, only the latest minor release is supported. This is
+the same policy as `SECURITY.md`.
+
 | Release | Support |
 |---------|---------|
 | Latest minor | Full support: bug fixes and security patches |
-| Previous minor | Security patches only |
-| Older releases | No support -- upgrade to a supported version |
+| Previous minor | No support -- upgrade to the latest minor |
+| Older releases | No support -- upgrade to the latest minor |
 
-Only the latest minor version receives patches. Users on older versions must
-upgrade to receive fixes.
+Only the latest minor version receives patches, security patches included.
+Users on any earlier minor must upgrade to receive fixes. Before 1.0 a minor
+release can change behaviour, so read the UPGRADE NOTES at the top of
+`CHANGELOG.md` and `docs/operations/upgrading.md` before you upgrade.
 
-Example: if `v1.3.0` is the latest release:
-- `v1.3.x` receives bug fixes and security patches
-- `v1.2.x` receives security patches only
-- `v1.1.x` and earlier receive no updates
+Example: if `v0.6.0` is the latest release:
+- `v0.6.x` receives bug fixes and security patches
+- `v0.5.x` and earlier receive no updates
+
+A patch policy for the previous minor may be revisited when cleat reaches 1.0.
+No such policy exists today, and none is promised.
 
 ## Deprecation policy
 
