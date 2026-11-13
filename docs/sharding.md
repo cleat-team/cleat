@@ -8,8 +8,10 @@
 >
 > - Serving more than one tenant on a sharded worker is not supported: tenant provisioning, drop, suspend and resume, and a
 >   library install answer `501`, and the rotating claim is unavailable (cleat#3606).
-> - `cleat deploy` and `cleatctl deploy` write one database, so on a sharded deployment they reach one shard and sit
->   outside the cross-shard deploy lock; only the worker's `POST /api/definitions` writes every shard (cleat#3684).
+> - `cleat deploy`, `cleatctl deploy` and `cleatctl versions deprecate`, `restore` and `purge` write one database, so on
+>   a sharded deployment they reach one shard and sit outside the cross-shard deploy lock; only the worker's API
+>   (`POST /api/definitions` and `POST /api/versions/<name>/<v>/deprecate`, `/restore` and `/purge`) writes every shard
+>   (cleat#3684).
 > - A normal start verifies the schema version of the first shard only (cleat#3724).
 > - A shard built with the old `psql` loop is not adopted by `--migrate-only` (cleat#3725).
 
@@ -84,7 +86,8 @@ writes to the shards left one shard holding a definition the name's own shard no
 longer had, and two deprecations could leave the shards disagreeing about the flag. The
 lock is transaction-scoped, so a cancelled or crashed deploy cannot leave it held.
 Each deploy in flight on one name uses two connections on that shard's pool. It
-does not cover `cleat deploy --db`, which reaches one shard only (below), or two
+does not cover the CLI commands that reach one shard only (`cleat deploy --db`,
+`cleatctl deploy`, `cleatctl versions deprecate`, `restore` and `purge`; see below), or two
 processes started with different `--shards-file` lists, which would choose
 different shards to lock; changing the list is a resharding, which routing does not
 support either.
@@ -121,12 +124,19 @@ shard before any is written. That pre-check exists for PostgreSQL; on MySQL and
 SQL Server each shard applies the rule to its own runs as it is written.
 
 `cleat deploy --db` writes by raw SQL to the one database it is given, so
-against a sharded deployment it reaches that shard only. `cleatctl deploy` does
-the same: it opens one store from one `--dsn`, which is a single database, so it
-reaches one shard and does not take the cross-shard lock. Only the worker's
-`POST /api/definitions` goes through the sharded store and writes every shard
-(cleat#3684 asks whether the CLIs should refuse a database that is one shard of
-several; they do not today).
+against a sharded deployment it reaches that shard only. `cleatctl` does the
+same for everything it does: it opens one store from one `--dsn`, which is a
+single database. So `cleatctl deploy` reaches one shard and does not take the
+cross-shard lock, and neither do `cleatctl versions deprecate`, `versions restore`
+and `versions purge`: each changes the one shard its `--dsn` names and leaves the
+others as they were. A purge that way also skips the all-or-nothing handling of
+the table above, because that lives in the sharded store the CLI does not open.
+Only the worker's API goes through the sharded store and writes every shard,
+under the lock: `POST /api/definitions` for a deploy, and
+`POST /api/versions/<name>/<v>/deprecate`, `/restore` and `/purge` for the other
+three. On a sharded deployment, use those and not the CLI. (cleat#3684 asks
+whether the CLIs should refuse a database that is one shard of several; they do
+not today.)
 
 ### Fan-Out Operations
 
