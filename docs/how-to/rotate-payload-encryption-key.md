@@ -9,7 +9,8 @@ rest, per tenant, on PostgreSQL: `event_history`'s sensitive columns
 `error_op`, `cancellation_reason`, `query_state`), `workflow_signals.payload`,
 `workflow_promises.result`/`.error_msg`,
 `workflow_update_requests.payload`/`.result`/`.error_msg`,
-`workflow_schedules.input`, and `idempotency_keys.error_msg` (cleat#2312,
+`workflow_schedules.input`, `idempotency_keys.error_msg`, and
+`workflow_payloads.compaction_state` (cleat#3774; cleat#2312 for the rest,
 closing the doc's own former overstatement of this -- "workflow input, output
 and error" read as covering all of these, and until cleat#2312 did not).
 This is a **different key from the

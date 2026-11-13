@@ -250,7 +250,9 @@ func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
   `error_code`, `error_op`, `cancellation_reason`, `query_state`);
   `workflow_signals.payload`; `workflow_promises.result`/`error_msg`;
   `workflow_update_requests.payload`/`result`/`error_msg`;
-  `workflow_schedules.input`; and `idempotency_keys.error_msg` (cleat#2312).
+  `workflow_schedules.input`; `idempotency_keys.error_msg` (cleat#2312); and
+  `workflow_payloads.compaction_state`, which holds the compacted events' sensitive
+  fields (cleat#3774; v0.4.0 and v0.5.0 wrote it in plaintext, see the CHANGELOG).
   `ListWorkflows`'s `InputContains`/`ErrorContains` substring search is
   refused outright under encryption, rather than silently searching
   ciphertext and reporting a false "no match" -- see

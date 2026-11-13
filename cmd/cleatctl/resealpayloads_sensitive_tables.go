@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -86,6 +89,23 @@ type tableSpec struct {
 	name   string
 	pkCols []string
 	cols   []string
+
+	// sealPlaintext names columns in cols whose PLAINTEXT values this sweep seals,
+	// instead of counting them as "not ciphertext" and leaving them. Empty for
+	// every column but one, on purpose: for the rest, a plaintext value is
+	// history from before encryption was turned on, which the mixed-history rule
+	// leaves alone. workflow_payloads.compaction_state is different -- see its
+	// entry.
+	sealPlaintext []string
+}
+
+func (s tableSpec) sealsPlaintext(col string) bool {
+	for _, c := range s.sealPlaintext {
+		if c == col {
+			return true
+		}
+	}
+	return false
 }
 
 // sensitiveTableSpecs is cleat#2312's own column list, restated here rather
@@ -147,12 +167,61 @@ var sensitiveTableSpecs = []tableSpec{
 		// workflow_payloads column (migration 016) but is plain JSON via
 		// encodeAllowedSignals, not one of the encrypt helpers, so it is
 		// deliberately not listed here.
+		//
+		// cleat#3774: compaction_state is the seventh. Releases through 0.5.0
+		// wrote it in the clear even with the flag on, so unlike every other
+		// column here a plaintext value in it is not history from before
+		// encryption -- it is the leak itself, written while encryption was on --
+		// and sealPlaintext has this sweep seal it in place. It cannot be nulled
+		// instead: compaction deletes the events the state summarises from
+		// event_history in the transaction that writes it, so for a run that is
+		// not finished it is the only copy of that history.
 		name:   "workflow_payloads",
 		pkCols: []string{"id"},
 		cols: []string{
 			"input", "result", "error_msg", "error_code", "error_op", "query_state",
+			"compaction_state",
 		},
+		sealPlaintext: []string{"compaction_state"},
 	},
+}
+
+// payloadEncryptionEverEnabled reports whether any worker has run against this
+// database with --encrypt-sensitive-payloads on (engine.PayloadEncryptionState).
+func payloadEncryptionEverEnabled(ctx context.Context, db *sql.DB) (bool, error) {
+	var on bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM payload_encryption_ever_enabled)`).Scan(&on)
+	return on, err
+}
+
+// isJSONObject reports whether s is a JSON object: the shape a plaintext
+// compaction_state has, and one a sealed value (a JSON string literal) never has.
+func isJSONObject(s string) bool {
+	t := strings.TrimSpace(s)
+	return strings.HasPrefix(t, "{") && json.Valid([]byte(t))
+}
+
+// sealLegacyPlaintextJSON seals a plaintext JSON object for a jsonb column in the
+// form the engine writes (a JSON string literal wrapping base64 ciphertext, bound
+// to the tenant), and verifies it opens to the same text before returning it:
+// the plaintext is gone once this is written, so a seal that does not round-trip
+// must not be.
+func sealLegacyPlaintextJSON(enc *engine.PayloadEncryption, tenant, plain string) (string, error) {
+	sealed, err := enc.Encrypt(tenant, []byte(plain))
+	if err != nil {
+		return "", err
+	}
+	back, form, err := enc.OpenAndClassify(tenant, sealed)
+	if err != nil {
+		return "", fmt.Errorf("sealed value does not open: %w", err)
+	}
+	if form != engine.PayloadFormDerived {
+		return "", fmt.Errorf("sealed value is %s, not derived", form)
+	}
+	if string(back) != plain {
+		return "", errors.New("sealed value does not round-trip")
+	}
+	return `"` + base64.StdEncoding.EncodeToString(sealed) + `"`, nil
 }
 
 // resealTable runs resealPayloads's own algorithm against one table named by
@@ -162,6 +231,18 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 	dryRun bool, out io.Writer, spec tableSpec) (resealStats, error) {
 
 	var st resealStats
+
+	// A plaintext value is sealed only on a database a worker has run with the
+	// flag on (the marker cleat#2324 keeps). On one that never has, plaintext in
+	// a column like compaction_state is simply how that deployment stores it, and
+	// sealing it would leave rows its keyless workers cannot read.
+	sealPlain := false
+	if len(spec.sealPlaintext) > 0 {
+		var err error
+		if sealPlain, err = payloadEncryptionEverEnabled(ctx, db); err != nil {
+			return st, fmt.Errorf("reading payload_encryption_ever_enabled: %w", err)
+		}
+	}
 
 	tenantFromPK := -1
 	for i, c := range spec.pkCols {
@@ -240,6 +321,17 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 			case valueCurrent:
 				st.Current++
 			case valueNotCiphertext:
+				if sealPlain && spec.sealsPlaintext(col) && isJSONObject(holders[i].String) {
+					sealed, serr := sealLegacyPlaintextJSON(enc, tenantID, holders[i].String)
+					if serr != nil {
+						st.Unreadable++
+						fmt.Fprintf(out, "  UNREADABLE %s %s %s: %v\n", spec.name, strings.Join(pk, "/"), col, serr)
+						break
+					}
+					st.Older++ // plaintext is the oldest form there is
+					changed[col] = sealed
+					break
+				}
 				st.NotCipher++
 			case valueUnreadable:
 				st.Unreadable++
