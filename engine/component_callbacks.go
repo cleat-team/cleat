@@ -284,23 +284,65 @@ func (b *wasmtimeBackend) dispatchPollCancellation(
 // durable-signals interface
 // ---------------------------------------------------------------------------
 
-// dispatchAwaitSignals handles (string,u64,u32,u32,u32,u32) -> u64.
-// Output buffers are created via ctxWithMem; only the u64 return is surfaced.
+// signalHandOverMax is the most bytes of signal name, and of payload, that
+// durable-await-signals can hand a component guest. It is not a choice of this
+// dispatcher's: the word DurableAwaitSignals returns carries each length in 16
+// bits (packAwaitSignalsResult), so 65,535 is the largest it can describe, and a
+// buffer of 65,536 would let a payload of exactly that size corrupt the word
+// (see the comment on packAwaitSignalsResult). Offering 65,535 makes anything
+// larger a truncation the host reports, instead of a length it misreports.
+const signalHandOverMax = 65535
+
+// dispatchAwaitSignals handles (string,u64) -> result<signal-outcome, call-failure>.
+//
+// This was (string,u64,u32,u32,u32,u32) -> u64: four output pointers into the
+// guest's linear memory, which a component host cannot dereference. The
+// handler wrote the name and payload into a buffer made here and this function
+// returned the word of LENGTHS and dropped the buffer, so a Python guest read
+// the right number of bytes from its own, untouched memory and received NULs
+// (cleat#3786, measured on a real worker). The buffer is now read back and
+// lifted into the return value.
 func (b *wasmtimeBackend) dispatchAwaitSignals(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 6 || b.handler == nil {
+	if int(nargs) < 2 || b.handler == nil {
 		return nil
 	}
 	names := readStrArg(args, 0, nargs)
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
-	// Create a double-sized buffer for two output params.
-	buf := make([]byte, 131072)
+	// The name at offset 0, the payload straight after it.
+	buf := make([]byte, 2*signalHandOverMax)
 	r := b.handler.DurableAwaitSignals(ctxWithMem(context.Background(), buf), nil,
-		names, timeoutMs, 0, 65536, 65536, 65536)
-	setResultU64(results, nresults, uint64(r))
+		names, timeoutMs, 0, signalHandOverMax, signalHandOverMax, signalHandOverMax)
+
+	// The stop is tested FIRST and by mask: callSuspendSentinel is bit 31, which
+	// lands inside this layout's timed-out field, so a word decoded first reads
+	// a stop as an ordinary timeout and the workflow runs on past it (§3.202).
+	if uint64(r)&uint64(callSuspendSentinel) != 0 {
+		setResultCallOutcome(results, nresults, callOutcome{suspended: true})
+		return nil
+	}
+
+	u := uint64(r)
+	if errCode := u & 0xFFFF; errCode != 0 {
+		// The delivery was consumed and recorded before the write that failed
+		// (DurableAwaitSignals), exactly as on the core path; what the guest is
+		// told is that it cannot be handed over.
+		setResultCallOutcome(results, nresults, callOutcome{failed: true, payload: fmt.Sprintf(
+			"cleat: durable-await-signals: the delivered signal's name or payload is larger than the %d bytes "+
+				"the host can hand over (error code %d)", signalHandOverMax, errCode)})
+		return nil
+	}
+	if (u>>16)&0xFFFF != 0 {
+		setResultSignalTimedOut(results, nresults)
+		return nil
+	}
+	nameLen := (u >> 48) & 0xFFFF
+	payloadLen := (u >> 32) & 0xFFFF
+	setResultSignalReceived(results, nresults,
+		string(buf[:nameLen]), string(buf[signalHandOverMax:signalHandOverMax+payloadLen]))
 	return nil
 }
 
@@ -1003,20 +1045,42 @@ func (b *wasmtimeBackend) dispatchSetScope(
 	return nil
 }
 
-// dispatchGetScope handles (u32,u32,u32,u32) -> u64.
-// Output buffers are created via ctxWithMem; only the u64 return is surfaced.
+// dispatchGetScope handles () -> scope.
+//
+// This was (u32,u32,u32,u32) -> u64, the out-pointer shape dispatchAwaitSignals
+// replaced for the same reason (cleat#3786). The scope was written into a buffer
+// made here and dropped; the guest got the packed word objTypeLen<<32|instKeyLen,
+// and the SDK's decoder read bits 0-7 of it as an error code, so a workflow that
+// had set a scope and read it back raised a CallError numbered with the length of
+// its own instance key.
+//
+// It returns a bare record rather than a result: reading the scope cannot fail
+// and is not a stop site, and a call-failure in the signature would promise a
+// refusal the host never produces (TestTheThreeStopSurfacesAgree).
 func (b *wasmtimeBackend) dispatchGetScope(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil {
+	if b.handler == nil {
 		return nil
 	}
 
-	// Create a double-sized buffer for two output params.
-	buf := make([]byte, 131072)
-	r := b.handler.GetScope(ctxWithMem(context.Background(), buf), nil, 0, 65536, 65536, 65536)
-	setResultU64(results, nresults, uint64(r))
+	// The object type at offset 0, the instance key straight after it.
+	const half = 65536
+	buf := make([]byte, 2*half)
+	r := uint64(b.handler.GetScope(ctxWithMem(context.Background(), buf), nil, 0, half, half, half))
+	objTypeLen := (r >> 32) & 0xFFFFFFFF
+	instKeyLen := r & 0xFFFFFFFF
+	if objTypeLen > half || instKeyLen > half {
+		// Cannot happen: writeResult truncates to the maximum it was offered.
+		// Said rather than sliced, so a handler that breaks that fails loudly
+		// here instead of panicking on the slice below.
+		msg := C.CString(fmt.Sprintf("cleat: get-scope: the host reported a scope of %d + %d bytes in a %d-byte buffer",
+			objTypeLen, instKeyLen, half))
+		defer C.free(unsafe.Pointer(msg))
+		return C.wasmtime_error_new(msg)
+	}
+	setResultScope(results, nresults, string(buf[:objTypeLen]), string(buf[half:half+instKeyLen]))
 	return nil
 }
 

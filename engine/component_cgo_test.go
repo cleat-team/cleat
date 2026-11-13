@@ -7,9 +7,13 @@
 package engine
 
 import (
+	"context"
+	"strings"
 	"sync"
 	"testing"
 	"unsafe"
+
+	"github.com/tetratelabs/wazero/api"
 )
 
 func TestExtractStringFromPacked(t *testing.T) {
@@ -229,8 +233,8 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"RegisterUpdateHandler", false, 20, strPtr, 1},
 		{"RegisterQueryHandler", false, 21, strPtr, 1},
 		{"ContinueAsNewVersioned", false, 22, strPtr, 2},
-		{"GetScope", false, 23, u64Ptr, 4},
-		{"AwaitSignals", false, 24, strPtr, 6},
+		{"GetScope", true, 29, nil, 0},
+		{"AwaitSignals", true, 28, strPtr, 2},
 		{"ComponentDefault", false, 25, nil, 0},
 	}
 
@@ -295,8 +299,7 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"RegisterUpdateHandler(0<1)", false, 20},
 		{"RegisterQueryHandler(0<1)", false, 21},
 		{"ContinueAsNewVersioned(0<2)", false, 22},
-		{"GetScope(0<4)", false, 23},
-		{"AwaitSignals(0<6)", false, 24},
+		{"AwaitSignals(0<2)", true, 28},
 		{"RunDetached(0<2)", false, 26},
 		{"DeferPhase(0<1)", false, 27},
 	}
@@ -545,29 +548,104 @@ func TestDispatchContinueAsNewVersioned(t *testing.T) {
 	}
 }
 
-func TestDispatchGetScope(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	u64Ptr, _, freeU64 := cgotestMakeU64Args(0, 0, 0, 0)
-	defer freeU64()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(23, u64Ptr, 4, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
+// signalWritingHandler is a mockHostHandler that does what *execSession does on
+// a delivered signal: write the name and payload through the output pointers it
+// was given, into the buffer the dispatcher made, and return the packed word of
+// LENGTHS. The dispatcher used to drop that buffer; the old test used a handler
+// that wrote nothing and asserted only that the u64 came back unchanged, so it
+// could not tell (cleat#3786).
+type signalWritingHandler struct {
+	*mockHostHandler
+	name, payload string
+}
+
+func (h signalWritingHandler) DurableAwaitSignals(ctx context.Context, _ api.Module, _ string, _ int64,
+	namePtr, nameMax, payloadPtr, payloadMax uint32) int64 {
+	buf := ctx.Value(wasmMemBufKey{}).([]byte)
+	n := copy(buf[namePtr:namePtr+nameMax], h.name)
+	p := copy(buf[payloadPtr:payloadPtr+payloadMax], h.payload)
+	return packAwaitSignalsResult(uint32(n), uint32(p), false, 0)
+}
+
+// scopeWritingHandler is the same for get-scope.
+type scopeWritingHandler struct {
+	*mockHostHandler
+	objectType, instanceKey string
+}
+
+func (h scopeWritingHandler) GetScope(ctx context.Context, _ api.Module, otPtr, otMax, ikPtr, ikMax uint32) int64 {
+	buf := ctx.Value(wasmMemBufKey{}).([]byte)
+	ot := copy(buf[otPtr:otPtr+otMax], h.objectType)
+	ik := copy(buf[ikPtr:ikPtr+ikMax], h.instanceKey)
+	return int64(uint64(ot)<<32 | uint64(ik))
+}
+
+// cleat#3786: durable-await-signals returns result<signal-outcome, call-failure>,
+// and every word the host can answer with lands in its own case -- with the name
+// and payload the handler WROTE, which is the part the old shape discarded.
+func TestDispatchAwaitSignalsMapsEachOutcomeToItsOwnCase(t *testing.T) {
+	big := strings.Repeat("p", 60000)
+	for _, c := range []struct {
+		name                  string
+		handler               HostHandler
+		wantKind              string
+		wantName, wantPayload string
+		wantMessageContains   string
+	}{
+		{"received", signalWritingHandler{&mockHostHandler{}, "go", `{"approved":true}`}, "received", "go", `{"approved":true}`, ""},
+		{"received with an empty payload", signalWritingHandler{&mockHostHandler{}, "ping", ""}, "received", "ping", "", ""},
+		{"received, multibyte", signalWritingHandler{&mockHostHandler{}, "v\u00e9rtigo", "\u65e5\u672c\u8a9e \U0001F680"}, "received", "v\u00e9rtigo", "\u65e5\u672c\u8a9e \U0001F680", ""},
+		{"received, large", signalWritingHandler{&mockHostHandler{}, "bulk", big}, "received", "bulk", big, ""},
+		{"timed out", &mockHostHandler{ret: packAwaitSignalsResult(0, 0, true, 0)}, "timed-out", "", "", ""},
+		// The stop sentinel is bit 31, which lands inside this layout's timed-out
+		// field. Reading the fields first takes it for a timeout.
+		{"stop", &mockHostHandler{ret: callSuspendSentinel}, "suspended", "", "", ""},
+		{"host error", &mockHostHandler{ret: packAwaitSignalsResult(0, 0, false, 5)}, "failed", "", "", "larger than the 65535 bytes"},
+	} {
+		b := &wasmtimeBackend{handler: c.handler}
+		argsPtr, _, freeArgs := cgotestMakeMixedArgs("sig1,sig2", uint64(1000))
+		resultPtr := cgotestAllocResult()
+		if err := b.cgotestDispatchStr(28, argsPtr, 2, resultPtr); err != nil {
+			freeArgs()
+			t.Fatalf("%s: unexpected error: %v", c.name, err)
+		}
+		freeArgs()
+		kind, name, payload, _ := cgotestReadSignalOutcome(resultPtr)
+		if kind != c.wantKind {
+			t.Errorf("%s: case = %q, want %q (an empty case means the dispatcher wrote something that is not a result<signal-outcome, call-failure>)",
+				c.name, kind, c.wantKind)
+			continue
+		}
+		if kind == "failed" {
+			if !strings.Contains(name, c.wantMessageContains) {
+				t.Errorf("%s: message = %q, want it to contain %q", c.name, name, c.wantMessageContains)
+			}
+			continue
+		}
+		if name != c.wantName || payload != c.wantPayload {
+			t.Errorf("%s: name/payload = %q/%d bytes, want %q/%d bytes", c.name, name, len(payload), c.wantName, len(c.wantPayload))
+		}
 	}
 }
 
-func TestDispatchAwaitSignals(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 42}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("sig1,sig2", uint64(0), uint64(0), uint64(0), uint64(0), uint64(0))
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(24, argsPtr, 6, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 42 {
-		t.Errorf("result = %d, want 42", got)
+// cleat#3786: get-scope returns a scope record and the scope the handler wrote is
+// the scope the guest receives.
+func TestDispatchGetScopeReturnsTheScopeTheHandlerWrote(t *testing.T) {
+	for _, c := range []struct{ name, objectType, instanceKey string }{
+		{"set", "order", "o-1"},
+		{"unset", "", ""},
+		{"multibyte", "t\u00e9", "\u65e5\u672c\u8a9e"},
+	} {
+		b := &wasmtimeBackend{handler: scopeWritingHandler{&mockHostHandler{}, c.objectType, c.instanceKey}}
+		resultPtr := cgotestAllocResult()
+		if err := b.cgotestDispatchStr(29, nil, 0, resultPtr); err != nil {
+			t.Fatalf("%s: unexpected error: %v", c.name, err)
+		}
+		ok, ot, ik := cgotestReadScope(resultPtr)
+		if !ok || ot != c.objectType || ik != c.instanceKey {
+			t.Errorf("%s: got ok=%v %q/%q, want %q/%q (ok=false means the dispatcher wrote something that is not a scope record)",
+				c.name, ok, ot, ik, c.objectType, c.instanceKey)
+		}
 	}
 }
 

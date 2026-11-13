@@ -58,8 +58,6 @@ from .memory import (
     SLEEP_STATUS_SUSPEND,
     SUSPEND_SENTINEL,
     decode_await_promise_result,
-    decode_await_signals_result,
-    decode_dual_string_result,
     decode_simple_result,
     decode_sleep_result,
     read_string,
@@ -217,6 +215,12 @@ try:
         uuid as _import_uuid,
     )
     from wit_world.imports.durable_signals import (
+        SignalOutcome_Received as _SignalOutcomeReceived,
+    )
+    from wit_world.imports.durable_signals import (
+        SignalOutcome_TimedOut as _SignalOutcomeTimedOut,
+    )
+    from wit_world.imports.durable_signals import (
         durable_await_signals as _import_cleat_await_signals,
     )
     from wit_world.imports.durable_signals import (
@@ -287,6 +291,17 @@ except ImportError:
     class _AwaitOutcomeTimedOut:  # type: ignore[no-redef]
         """Stand-in for ``await-outcome.timed-out`` outside the WASM runtime."""
 
+    class _SignalOutcomeReceived:  # type: ignore[no-redef]
+        """Stand-in for ``signal-outcome.received`` outside the WASM runtime.
+
+        ``value`` is a ``signal`` record: an object with ``name`` and ``payload``.
+        """
+
+        def __init__(self, value: Any = None) -> None:
+            self.value = value
+
+    class _SignalOutcomeTimedOut:  # type: ignore[no-redef]
+        """Stand-in for ``signal-outcome.timed-out`` outside the WASM runtime."""
 
 T = TypeVar("T")
 
@@ -832,15 +847,8 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_await_signals(
-        names: str,
-        timeout_ms: int,
-        sig_name_ptr: int,
-        sig_name_max_len: int,
-        payload_ptr: int,
-        payload_max_len: int,
-    ) -> int:
-        """Stub for WASM import ``(import "env" "cleat_await_signals") (param i32 i32 i64 i32 i32 i32 i32) (result i64)``."""
+    def _import_cleat_await_signals(names: str, timeout_ms: int) -> Any:
+        """Stub for WASM import ``durable-signals.durable-await-signals``."""
         raise NotImplementedError(
             "cleat_await_signals can only be called within a cleat WASM runtime."
         )
@@ -1368,23 +1376,16 @@ class HostCalls:
             ``(object_type, instance_key)`` or ``("", "")`` if no scope is
             active.
         """
-        ot_buf_size = OUT_BUF_SIZE // 2
-        ik_buf_offset = OUTPUT_OFFSET + ot_buf_size
-        ik_buf_size = OUT_BUF_SIZE - ot_buf_size
+        scope = _import_get_scope()
 
-        result = _import_get_scope(
-            OUTPUT_OFFSET, ot_buf_size,
-            ik_buf_offset, ik_buf_size,
-        )
-
-        ot_len, ik_len, err_code = decode_dual_string_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"get_scope failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-
-        object_type = read_string(OUTPUT_OFFSET, ot_len) if ot_len > 0 else ""
-        instance_key = read_string(ik_buf_offset, ik_len) if ik_len > 0 else ""
+        # A ``scope`` record, lifted (cleat#3786); it cannot fail. The import used to take four
+        # output pointers and return ``objTypeLen << 32 | instKeyLen``, which
+        # this method decoded as ``errCode | len1 << 8 | len2 << 32`` -- so with
+        # a scope set, bits 0-7 of that word were the low byte of the instance
+        # key's LENGTH, read as an error code: ``set_scope("order", "o-1")`` then
+        # ``get_scope()`` raised ``CallErrorNotFound (code 3)``.
+        object_type = scope.object_type
+        instance_key = scope.instance_key
 
         return (object_type, instance_key)
 
@@ -2104,46 +2105,35 @@ class HostCalls:
         if timeout_ms <= 0:
             effective_timeout = INFINITE_TIMEOUT_MS
 
-        # Upper half of scratch buffer: signal payload output.
-        payload_offset = SCRATCH_BASE + OUT_BUF_SIZE // 2
-        payload_max = OUT_BUF_SIZE // 2
+        try:
+            outcome = _import_cleat_await_signals(names_json, effective_timeout)
+        except _WitErr as err:
+            # ``err(call-failure)``. ``suspended`` is the engine stopping the
+            # workflow -- DurableAwaitSignals is a stop site, and a fresh await
+            # inside a defer segment would otherwise leave a terminated workflow
+            # waiting for a signal instead of finishing its cleanup -- and it
+            # unwinds. ``failed`` is a host error and raises. Neither is an
+            # outcome of the wait.
+            _raise_call_failure("signal", "await_signals", err.value)
+            raise  # unreachable; _raise_call_failure always raises
 
-        result = _import_cleat_await_signals(
-            names_json,
-            effective_timeout,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-            payload_offset,
-            payload_max,
-        )
-
-        # The stop sentinel, tested FIRST and by mask, before any field of the
-        # word below is read. This is not the same value as SUSPEND_SENTINEL
-        # and the difference is the entire defect this guards:
-        # DurableAwaitSignals is a stop site -- `stopBeforeNewWork` returns
-        # `callSuspendSentinel` (engine/signaller.go) because a fresh await
-        # inside a defer segment would leave a terminated workflow waiting for
-        # a signal instead of finishing its cleanup. callSuspendSentinel is bit
-        # 31, and bit 31 lands inside this layout's timed-out field: decoding
-        # first gives timed_out=True with err_code=0, an ORDINARY RESULT, and
-        # the workflow runs on past a stop it was told to obey.
-        _raise_if_stopped(result)
-
-        # SUSPEND_SENTINEL (1 << 62) is the older, unrelated case: no signal
-        # available with a non-zero timeout. Whole-word, not a mask.
-        if result == SUSPEND_SENTINEL:
-            raise SuspendSentinel()
-
-        sig_name_len, payload_len, timed_out, err_code = decode_await_signals_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"await_signals(signal_names={signal_names}) failed: {_error_code_name(err_code)} (code {err_code})"
+        # The component path returns the outcome as a value (cleat#3786). This
+        # import used to take four pointers into the guest's own linear memory
+        # and return a packed word of lengths: a component host cannot write
+        # through a guest pointer, so the name and payload were written into a
+        # buffer the host then dropped, and ``read_string`` here read the right
+        # number of bytes from memory nothing had touched -- NULs. A signal
+        # arrived with its name and payload erased, and the workflow could not
+        # tell.
+        if isinstance(outcome, _SignalOutcomeTimedOut):
+            return SignalResult(name="", payload="", timed_out=True, reply_to="")
+        if not isinstance(outcome, _SignalOutcomeReceived):
+            raise TypeError(
+                f"signal.await_signals returned {type(outcome).__name__}, not a signal-outcome"
             )
-
-        sig_name = read_string(OUTPUT_OFFSET, sig_name_len) if sig_name_len > 0 else ""
-        payload = (
-            read_string(payload_offset, payload_len) if not timed_out and payload_len > 0 else ""
-        )
+        sig_name = outcome.value.name
+        payload = outcome.value.payload
+        timed_out = False
 
         # Strip the reply envelope, if this is a request/reply signal, so the
         # receiver reads its payload exactly as the sender passed it and gets
@@ -3786,13 +3776,8 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_get_scope(
-        obj_type_ptr: int,
-        obj_type_max_len: int,
-        inst_key_ptr: int,
-        inst_key_max_len: int,
-    ) -> int:
-        """Stub for WASM import ``(import "env" "cleat_get_scope")``."""
+    def _import_get_scope() -> Any:
+        """Stub for WASM import ``durable-scope.get-scope``."""
         raise NotImplementedError("get_scope can only be called within a cleat WASM runtime.")
 
 

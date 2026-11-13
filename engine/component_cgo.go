@@ -279,6 +279,93 @@ package engine
 //     v->of.result.val = wasmtime_component_val_new(&variant);
 // }
 //
+// // A record of two string fields, as a value. The names are literals; the two
+// // strings follow component_val_set_call_ok's precondition (C-allocator
+// // storage, ownership passes to the record, not copied here).
+// static wasmtime_component_val_t component_val_string_pair(
+//     const char *name0, size_t name0_len, const char *s0, size_t s0_len,
+//     const char *name1, size_t name1_len, const char *s1, size_t s1_len) {
+//     wasmtime_component_valrecord_entry_t *fields =
+//         (wasmtime_component_valrecord_entry_t *)malloc(2 * sizeof(*fields));
+//     if (fields == NULL) { abort(); }   // dereferenced on the next line
+//     fields[0].name.data = cleat_dup(name0, name0_len);
+//     fields[0].name.size = name0_len;
+//     fields[0].val.kind = WASMTIME_COMPONENT_STRING;
+//     fields[0].val.of.string.data = (char *)s0;
+//     fields[0].val.of.string.size = s0_len;
+//     fields[1].name.data = cleat_dup(name1, name1_len);
+//     fields[1].name.size = name1_len;
+//     fields[1].val.kind = WASMTIME_COMPONENT_STRING;
+//     fields[1].val.of.string.data = (char *)s1;
+//     fields[1].val.of.string.size = s1_len;
+//
+//     wasmtime_component_val_t record;
+//     record.kind = WASMTIME_COMPONENT_RECORD;
+//     record.of.record.size = 2;
+//     record.of.record.data = fields;
+//     return record;
+// }
+//
+// // 1 if the function's declared result is a record, 0 if it is anything else,
+// // -1 if it has no result. See component_func_result_is_result.
+// static int component_func_result_is_record(const wasmtime_component_func_type_t *ty) {
+//     wasmtime_component_valtype_t r;
+//     if (!wasmtime_component_func_type_result(ty, &r)) { return -1; }
+//     int is_record = (r.kind == WASMTIME_COMPONENT_VALTYPE_RECORD);
+//     wasmtime_component_valtype_delete(&r);
+//     return is_record;
+// }
+//
+// // ok(signal-outcome): how a wait for signals ended (cleat#3786).
+// // `timed_out` != 0 is the payload-less case; otherwise received({name, payload}).
+// //
+// // PRECONDITION on `name` and `payload`: as component_val_set_call_ok's `s`.
+// // Ignored when `timed_out` is set.
+// static void component_val_set_signal_outcome(wasmtime_component_val_t *v,
+//                                              int timed_out,
+//                                              const char *name, size_t name_len,
+//                                              const char *payload, size_t payload_len) {
+//     static const char received_name[] = "received";
+//     static const char timed_out_name[] = "timed-out";
+//     static const char f_name[] = "name";
+//     static const char f_payload[] = "payload";
+//
+//     wasmtime_component_val_t variant;
+//     variant.kind = WASMTIME_COMPONENT_VARIANT;
+//     if (timed_out) {
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(timed_out_name, sizeof(timed_out_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(timed_out_name) - 1;
+//         variant.of.variant.val = NULL;
+//     } else {
+//         wasmtime_component_val_t record = component_val_string_pair(
+//             f_name, sizeof(f_name) - 1, name, name_len,
+//             f_payload, sizeof(f_payload) - 1, payload, payload_len);
+//         variant.of.variant.discriminant.data =
+//             cleat_dup(received_name, sizeof(received_name) - 1);
+//         variant.of.variant.discriminant.size = sizeof(received_name) - 1;
+//         variant.of.variant.val = wasmtime_component_val_new(&record);
+//     }
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = true;
+//     v->of.result.val = wasmtime_component_val_new(&variant);
+// }
+//
+// // The virtual object scope as a `scope` record, `{object-type, instance-key}`
+// // (cleat#3786). Not wrapped in a result: get-scope cannot fail or be stopped.
+// //
+// // PRECONDITION on `object_type` and `instance_key`: as component_val_set_call_ok's `s`.
+// static void component_val_set_scope(wasmtime_component_val_t *v,
+//                                     const char *object_type, size_t object_type_len,
+//                                     const char *instance_key, size_t instance_key_len) {
+//     static const char f_object_type[] = "object-type";
+//     static const char f_instance_key[] = "instance-key";
+//
+//     *v = component_val_string_pair(
+//         f_object_type, sizeof(f_object_type) - 1, object_type, object_type_len,
+//         f_instance_key, sizeof(f_instance_key) - 1, instance_key, instance_key_len);
+// }
+//
 // // err(call-failure.suspended) -- the defer-segment stop. No payload: there
 // // is nothing to say beyond "do not do this, unwind".
 // static void component_val_set_call_suspended(wasmtime_component_val_t *v) {
@@ -650,7 +737,7 @@ const (
 	cbTypeDeferPhase       // (bool) -> ()
 
 	// durable-signals interface
-	cbTypeAwaitSignals // (string,u64,u32,u32,u32,u32) -> u64
+	cbTypeAwaitSignals // (string,u64) -> result<signal-outcome, call-failure>
 	cbTypePollSignal   // (string) -> string
 	// cbTypeSendSignalAndWait and cbTypeReplyToSignal were here until
 	// 2026-09-06 (IMPROVEMENT-PLAN 3.220). Removing them shifts every later
@@ -700,7 +787,7 @@ const (
 
 	// durable-scope interface
 	cbTypeSetScope // (string,string) -> string
-	cbTypeGetScope // (u32,u32,u32,u32) -> u64
+	cbTypeGetScope // () -> scope
 	cbTypeUUID     // (string) -> string
 
 	// durable-stream-state interface
@@ -1062,6 +1149,76 @@ func setResultAwaitOutcome(results *C.wasmtime_component_val_t, nresults C.size_
 	C.component_val_set_await_outcome(r, C.int(kind), C.CString(payload), C.size_t(len(payload)))
 }
 
+// staleSignalScopeMessage is what a Python component built before the fix for
+// cleat#3786 gets when it calls durable-await-signals or get-scope. Both imports
+// took output pointers into the guest's linear memory, which a component host
+// cannot write through, so such a component was handed the right LENGTHS and
+// NUL bytes (await_signals) or an error code that was a string length
+// (get_scope). They now return lifted values; the old shape cannot be served,
+// and serving it would hand the workflow a signal with its name and payload
+// erased.
+//
+// It is refused on the call, BEFORE the host runs, so a refused component
+// consumes no delivery and records no await_signals or signal_received event: the
+// signal stays queued for the rebuilt workflow.
+const staleSignalScopeMessage = "cleat: this component was built against a cleat Python SDK with a known " +
+	"signal/scope data-loss bug (cleat#3786): its durable-await-signals and get-scope imports could not " +
+	"return the signal name and payload or the scope, and now return them as values. " +
+	"Rebuild the workflow against cleat >= 0.6.0."
+
+// refuseStaleSignalScope returns a trap for a component whose import does not
+// declare the result type this host now serves, nil otherwise:
+// `result<signal-outcome, call-failure>` for durable-await-signals, a `scope`
+// record for get-scope. The declared type is the guest's (see
+// component_func_result_is_result), so this is the one place the host can see
+// which signature the component was built against: wasmtime checks a
+// dynamically-typed host function against its caller only when it RETURNS,
+// after the host work has run.
+func refuseStaleSignalScope(typ cbType, ty *C.wasmtime_component_func_type_t) *C.wasmtime_error_t {
+	served := false
+	switch typ {
+	case cbTypeAwaitSignals:
+		served = C.component_func_result_is_result(ty) == 1
+	case cbTypeGetScope:
+		served = C.component_func_result_is_record(ty) == 1
+	}
+	if served {
+		return nil
+	}
+	msg := C.CString(staleSignalScopeMessage)
+	defer C.free(unsafe.Pointer(msg))
+	return C.wasmtime_error_new(msg)
+}
+
+// setResultSignalReceived writes `ok(signal-outcome.received({name, payload}))`
+// into the first result slot.
+func setResultSignalReceived(results *C.wasmtime_component_val_t, nresults C.size_t, name, payload string) {
+	if int(nresults) < 1 {
+		return
+	}
+	C.component_val_set_signal_outcome((*C.wasmtime_component_val_t)(unsafe.Pointer(results)), 0,
+		C.CString(name), C.size_t(len(name)), C.CString(payload), C.size_t(len(payload)))
+}
+
+// setResultSignalTimedOut writes `ok(signal-outcome.timed-out)`. It allocates
+// nothing for the payload: the C helper ignores the strings for this case, so a
+// C.CString here would be allocated and never freed.
+func setResultSignalTimedOut(results *C.wasmtime_component_val_t, nresults C.size_t) {
+	if int(nresults) < 1 {
+		return
+	}
+	C.component_val_set_signal_outcome((*C.wasmtime_component_val_t)(unsafe.Pointer(results)), 1, nil, 0, nil, 0)
+}
+
+// setResultScope writes the `scope` record {object-type, instance-key}.
+func setResultScope(results *C.wasmtime_component_val_t, nresults C.size_t, objectType, instanceKey string) {
+	if int(nresults) < 1 {
+		return
+	}
+	C.component_val_set_scope((*C.wasmtime_component_val_t)(unsafe.Pointer(results)),
+		C.CString(objectType), C.size_t(len(objectType)), C.CString(instanceKey), C.size_t(len(instanceKey)))
+}
+
 // extractStringFromPacked decodes the output string from a handler's packed
 // return value. The packed format is:
 //
@@ -1092,6 +1249,11 @@ func goComponentCallback(
 	// arms as `case cbTypeX: return ...dispatchX(`, and this check needs `ty`.
 	if entry.typ == cbTypeAwaitPromise {
 		if err := refusePre050AwaitPromise(ty); err != nil {
+			return err
+		}
+	}
+	if entry.typ == cbTypeAwaitSignals || entry.typ == cbTypeGetScope {
+		if err := refuseStaleSignalScope(entry.typ, ty); err != nil {
 			return err
 		}
 	}
