@@ -98,6 +98,19 @@ migration:
   # -- Seconds before the Job is failed. A first migration onto a large table can be slow.
   activeDeadlineSeconds: 900
 
+# -- Stop-first guard for the 0.5.0 to 0.6.0 upgrade (cleat#3758). TEMPORARY: removed after 0.6.0 (cleat#3759).
+#
+# An upgrade from 0.5.x is stop-first (D79): the migration hook runs BEFORE any pod is replaced, so a plain
+# `helm upgrade` migrates the schema under running 0.5.x workers. The chart refuses that, before the hook,
+# when the live worker Deployment runs an identifiably 0.5.x image (a 0.5, 0.5.N or v0.5.N tag) with replicas
+# above 0 and the image being deployed is not 0.5.x. It does NOT fire for the tag `latest` or a digest-only
+# image (they carry no version), for pods still terminating after a scale to 0, or under `helm template`,
+# `--dry-run` and GitOps renderers (no cluster to look up). See docs/operations/upgrading.md.
+upgrade:
+  # -- Skip the guard and run the unsupported rolling upgrade anyway. Only `true` skips it; any other value,
+  # including the string "false" from a quoted values file or --set-string, leaves the guard on.
+  allowLiveWorkers: false
+
 # -- HTTP API server configuration.
 api:
   # -- Port for the HTTP API, health checks, and metrics endpoint.
