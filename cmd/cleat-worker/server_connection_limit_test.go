@@ -75,6 +75,14 @@ func TestTheWarningCarriesItsArithmetic(t *testing.T) {
 			t.Errorf("the warning omits %q:\n  %s", want, msg)
 		}
 	}
+	// AND IT SAYS THE WORKER ITSELF IS FINE. On the stock postgres:16 the quick start
+	// starts, the one worker it runs logged this WARN on a healthy first run, and
+	// "a SECOND worker will not fit" alone read as a fault in the worker that was
+	// running (cleat#3792). The level stays WARN -- deciding that is not this
+	// test's business -- but the sentence that says what is and is not wrong stays.
+	if !strings.Contains(msg, "This worker fits") || !strings.Contains(msg, "Nothing is wrong with a single worker") {
+		t.Errorf("the warning does not say the running worker is fine:\n  %s", msg)
+	}
 	// AND IT NAMES THE LIMIT OF THE REMEDY. A pooler consolidates the fixed
 	// pools and does nothing for per-tenant pools, which connect as distinct
 	// roles -- so "add PgBouncer" is a half-answer, and saying so here is

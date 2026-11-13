@@ -39,7 +39,7 @@ import (
 // value-level check on the seam, in a job that always runs it.
 func TestPythonStampEnvCarriesTheWorkflowVersion(t *testing.T) {
 	for _, version := range []int{1, 2, 3, 7} {
-		env := pythonStampEnv(version, "place_order", "latest")
+		env := pythonStampEnv("place_order", version, "place_order", "latest")
 
 		got, ok := env["CLEAT_WORKFLOW_VERSION"]
 		if !ok {
@@ -63,7 +63,7 @@ func TestPythonStampEnvCarriesTheWorkflowVersion(t *testing.T) {
 // but the map is what runBuildPython ranges over, so it is worth pinning that
 // an empty value produces no entry at all rather than an empty one.
 func TestPythonStampEnvSetsOptionalValuesOnlyWhenPresent(t *testing.T) {
-	bare := pythonStampEnv(1, "", "")
+	bare := pythonStampEnv("", 1, "", "")
 	if _, ok := bare["CLEAT_ENTRY_POINTS"]; ok {
 		t.Errorf("CLEAT_ENTRY_POINTS is set to %q when no entry point was derived; "+
 			"a failed schema computation must leave it unset, not empty",
@@ -74,11 +74,23 @@ func TestPythonStampEnvSetsOptionalValuesOnlyWhenPresent(t *testing.T) {
 			bare["CLEAT_CHILD_BINDING_POLICY"])
 	}
 
-	full := pythonStampEnv(1, "place_order", "latest")
+	full := pythonStampEnv("place_order", 1, "place_order", "latest")
 	if got := full["CLEAT_ENTRY_POINTS"]; got != "place_order" {
 		t.Errorf("CLEAT_ENTRY_POINTS = %q, want %q", got, "place_order")
 	}
 	if got := full["CLEAT_CHILD_BINDING_POLICY"]; got != "latest" {
 		t.Errorf("CLEAT_CHILD_BINDING_POLICY = %q, want %q", got, "latest")
+	}
+}
+
+// cleat#3792, item 9. A Python workflow deployed as `Workflow: unknown v1`:
+// stamp_metadata.py's default for an absent name. The name reaches it through
+// CLEAT_WORKFLOW_NAME, which build_wasm.py reads and the build never set.
+func TestPythonStampEnvCarriesTheWorkflowName(t *testing.T) {
+	if got := pythonStampEnv("hello", 1, "", "")["CLEAT_WORKFLOW_NAME"]; got != "hello" {
+		t.Errorf("CLEAT_WORKFLOW_NAME = %q, want %q: a Python workflow is stamped \"unknown\" without it", got, "hello")
+	}
+	if _, ok := pythonStampEnv("", 1, "", "")["CLEAT_WORKFLOW_NAME"]; ok {
+		t.Error("an empty name must leave CLEAT_WORKFLOW_NAME unset, not set it to the empty string")
 	}
 }

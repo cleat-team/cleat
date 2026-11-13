@@ -2582,6 +2582,7 @@ func main() {
 	// of database contact either, and its reaper must not act on anyone
 	// else's staleness until it has.
 	w.lastDBTrouble.Store(time.Now().UnixNano())
+	w.startedAt = time.Now()
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)

@@ -2476,6 +2476,18 @@ type Worker struct {
 	// cleat#2005.
 	lastDBTrouble atomic.Int64
 
+	// dbTroubleSeen is set the first time recordDBTrouble runs, and never
+	// cleared. lastDBTrouble is SEEDED to the start time (see its doc), so a
+	// reaper tick inside the first reclaimAfter() window is closed by the gate
+	// whether or not anything has gone wrong; this is what tells a start-up
+	// tick from one that follows a real failure. cleat#3792.
+	dbTroubleSeen atomic.Bool
+
+	// startedAt is when this worker was constructed; the zero value (test
+	// constructors) means "no start-up window", so the gate behaves as it always
+	// did. See startingUp.
+	startedAt time.Time
+
 	// lastDBContactOK is the UnixNano of this worker's most recent CONFIRMED
 	// successful, bounded database round trip -- heartbeat (busy, via
 	// HeartbeatBatchFenced, or idle, via a DBPinger probe) or a successful
@@ -4885,7 +4897,21 @@ func (w *Worker) runIsFenced(workflowID string, generation int64) bool {
 // writes at once, itself included. See lastDBTrouble and reapingIsSafe.
 // cleat#2005.
 func (w *Worker) recordDBTrouble() {
+	w.dbTroubleSeen.Store(true)
 	w.lastDBTrouble.Store(time.Now().UnixNano())
+}
+
+// startingUp reports whether a closed reaper gate is only the start-up grace
+// period: no database trouble has been recorded, and the worker is younger than
+// twice its reclaim window. The bound is what keeps this from hiding a gate
+// that never opens for a reason other than trouble (lastDBContactOK never
+// confirmed, GAP3 in recordReapSkip's doc): past the window the tick is counted
+// and warned about exactly as before. cleat#3792.
+func (w *Worker) startingUp() bool {
+	if w.startedAt.IsZero() || w.dbTroubleSeen.Load() {
+		return false
+	}
+	return time.Since(w.startedAt) < 2*w.reclaimAfter()
 }
 
 // recordDBContactOK marks this worker's own database contact as having just
@@ -6205,6 +6231,19 @@ func (w *Worker) reapOnce() {
 	// from "my own observation of every worker just went dark, briefly,
 	// including of myself".
 	if !w.reapingIsSafe() {
+		if w.startingUp() {
+			// Nothing has gone wrong: a new worker has not yet proven a clean
+			// reclaim window, so it does not reclaim anyone's run. That is the
+			// gate working, and it used to say "recent database trouble" and
+			// then warn that the worker "has not reclaimed a stale run in a
+			// while" on a healthy first start (cleat#3792). Not counted as a
+			// skip: the streak alarm is for a gate that stays closed.
+			w.logger.InfoContext(w.ctx, "Reaper: a new worker waits out its start-up grace period before reclaiming stale runs; nothing is wrong",
+				"worker_id", w.id, "reclaim_after", w.reclaimAfter())
+			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
+			w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
+			return
+		}
 		skips := w.recordReapSkip()
 		w.logger.WarnContext(w.ctx, "Reaper: skipping this tick -- recent database trouble on this worker, waiting out the recovery grace period before trusting a stale heartbeat",
 			"worker_id", w.id, "reclaim_after", w.reclaimAfter(), "consecutive_skips", skips)
