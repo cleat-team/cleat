@@ -57,8 +57,8 @@ func (s *PostgresStore) GetWASMDigest(ctx context.Context, defName string, defVe
 	var digest sql.NullString
 	var library sql.NullString
 	if err := tx.QueryRowContext(ctx,
-		`SELECT encode(sha256(wasm_bytes), 'hex'), library FROM workflow_defs WHERE name = $1 AND version = $2`,
-		defName, defVersion).Scan(&digest, &library); err != nil {
+		`SELECT encode(sha256(wasm_bytes), 'hex'), library FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3`,
+		defName, defVersion, s.tenantID).Scan(&digest, &library); err != nil {
 		return "", err
 	}
 	if library.Valid {
