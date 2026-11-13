@@ -123,3 +123,119 @@ jobs:
           name: soak-report-${{ github.sha }}-${{ github.run_attempt }}
           path: soak-report.json
           retention-days: 30
+
+  # A failed soak must say so (cleat#3736). The weekly run failed on 2026-11-02 and 2026-11-09 and was
+  # found eleven days later by someone reading the run history; nothing posted anywhere. This job opens
+  # a tracking issue, or comments on the open one, when the soak job FAILS or is CANCELLED -- cancelled
+  # because a job that exceeds its timeout-minutes is cancelled rather than failed, and the 90-minute
+  # `go test` timeout failed the August runs the other way (a package FAIL, which is `failure`).
+  #
+  # Its own job, and not a step at the end of `soak`, so it still runs when the soak job is killed, and
+  # so the write permission is scoped to a job that runs no test and no repository-controlled code from
+  # a pull request: this workflow has only schedule and workflow_dispatch triggers. `soak` keeps the
+  # workflow-level `contents: read`. GITHUB_TOKEN only -- no bot account, no PAT (owner decision).
+  #
+  # WHAT THE ISSUE SAYS is decided by scripts/soak-failure-report.py, whose --self-test is run by the Lint
+  # job against three real soak logs (a failing run, the 90-minute timeout, a passing run). WHERE it goes
+  # is the github-script step below, which has no unit test and is proved live: a deliberately failing
+  # soak opened the issue, and a second one commented on it (cleat#3736).
+  report-failure:
+    name: Report a failed soak
+    needs: soak
+    if: ${{ always() && (needs.soak.result == 'failure' || needs.soak.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # One at a time, never cancelled: two reports racing could each find no open issue and file two.
+    concurrency:
+      group: soak-failure-report
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Absent when the soak job died before the test ran, and that is a state the script words for:
+      # continue-on-error is what lets the report say "no artifact" instead of this step failing and
+      # the report never being filed.
+      - name: Fetch the soak report
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: soak-report-${{ github.sha }}-${{ github.run_attempt }}
+          path: soak-report
+
+      - name: Render the issue text
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          HEAD_SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+          DURATION: ${{ inputs.duration || '1h' }}
+        run: |
+          python3 scripts/soak-failure-report.py \
+            --report soak-report/soak-report.json \
+            --run-url "$RUN_URL" --attempt "$RUN_ATTEMPT" --sha "$HEAD_SHA" \
+            --event "$EVENT" --duration "$DURATION" \
+            --body-out soak-failure-body.md
+          python3 scripts/soak-failure-report.py --print-title > soak-failure-title.txt
+
+      - name: Open or update the tracking issue
+        uses: actions/github-script@v9
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = fs.readFileSync('soak-failure-title.txt', 'utf8').trim();
+            const body = fs.readFileSync('soak-failure-body.md', 'utf8');
+
+            // The same key as the Tier 1 notifier, and for the same reason (cleat#2906): a run URL is
+            // identical across attempts of one run id, so a re-run that fails again must not read as
+            // "already reported" from attempt 1.
+            const reportKey = `${process.env.RUN_URL} (attempt ${process.env.RUN_ATTEMPT})`;
+
+            // Every OPEN issue, matched on the exact title and nothing else: no label filter, because a
+            // label someone removes would make the next failure open a second issue. Closed issues are
+            // not matched on purpose: a closed soak issue means it was fixed, and a new failure is new.
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = open.find(i => !i.pull_request && i.title === title);
+
+            if (existing) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                per_page: 100,
+              });
+              const already = (existing.body || '').includes(reportKey)
+                || comments.some(c => (c.body || '').includes(reportKey));
+              if (already) {
+                core.notice(`${reportKey} is already reported on #${existing.number}, skipping`);
+                return;
+              }
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Failed again.\n\n${body}`,
+              });
+              core.notice(`Commented on #${existing.number}`);
+              return;
+            }
+
+            const created = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['area/ci'],
+            });
+            core.notice(`Opened #${created.data.number}`);
