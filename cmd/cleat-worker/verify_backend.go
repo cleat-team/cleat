@@ -21,14 +21,14 @@ func wasmtimeBackendError() error {
 	if err != nil {
 		return err
 	}
-	// Via `any`: NewWasmtimeBackend returns the WasmBackend interface from the
-	// no-cgo stub but a concrete *wasmtimeBackend under cgo, and a type
-	// assertion on a concrete type does not compile. This file must build in
-	// both modes -- it is the thing that tells them apart.
-	var b any = backend
-	if closer, ok := b.(interface{ Close() error }); ok {
-		_ = closer.Close()
-	}
+	// Close it, and close it with the method it HAS. NewWasmtimeBackend starts an
+	// epoch-ticker goroutine, and Close(ctx) is what stops it. This used to be a
+	// type assertion to `interface{ Close() error }`, which no backend satisfies
+	// (WasmBackend.Close takes a context), so it never closed anything: harmless
+	// in --verify-backend, which exits, and a goroutine leaked per call once this
+	// ran at every worker start (cleat#3788 review). Calling it directly is also
+	// all the stub needs, so no assertion is required to build in both modes.
+	_ = backend.Close(context.Background())
 	return nil
 }
 
