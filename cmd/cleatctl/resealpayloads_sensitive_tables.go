@@ -196,6 +196,50 @@ func payloadEncryptionEverEnabled(ctx context.Context, db *sql.DB) (bool, error)
 
 // isJSONObject reports whether s is a JSON object: the shape a plaintext
 // compaction_state has, and one a sealed value (a JSON string literal) never has.
+// resealBeforeWrite is called once per table, after its rows have been read and
+// before the first write. Production leaves it nil; a test sets it to change a row
+// inside the window the compare-and-set closes.
+var resealBeforeWrite func(spec tableSpec)
+
+// changedSinceRead reports whether any of the columns in old no longer holds what
+// was read, or the row is gone.
+func changedSinceRead(ctx context.Context, db *sql.DB, spec tableSpec, pk []string, old map[string]string) (bool, error) {
+	cols := make([]string, 0, len(old))
+	for c := range old {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	sel := make([]string, len(cols))
+	for i, c := range cols {
+		sel[i] = quoteIdent(c) + "::text"
+	}
+	wheres := make([]string, len(spec.pkCols))
+	args := make([]any, len(pk))
+	for i, c := range spec.pkCols {
+		wheres[i] = quoteIdent(c) + "::text = $" + strconv.Itoa(i+1)
+		args[i] = pk[i]
+	}
+	//nolint:gosec // G202: identifiers come from the spec literal via quoteIdent; values are bound.
+	q := "SELECT " + strings.Join(sel, ", ") + " FROM " + quoteIdent(spec.name) + " WHERE " + strings.Join(wheres, " AND ")
+	holders := make([]sql.NullString, len(cols))
+	dest := make([]any, len(cols))
+	for i := range holders {
+		dest[i] = &holders[i]
+	}
+	if err := db.QueryRowContext(ctx, q, args...).Scan(dest...); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return true, nil
+		}
+		return false, err
+	}
+	for i, c := range cols {
+		if !holders[i].Valid || holders[i].String != old[c] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func isJSONObject(s string) bool {
 	t := strings.TrimSpace(s)
 	return strings.HasPrefix(t, "{") && json.Valid([]byte(t))
@@ -274,7 +318,8 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 
 	type pending struct {
 		pk     []string
-		values map[string]string
+		values map[string]string // the sealed replacement, by column
+		old    map[string]string // what the column held when it was read, by column
 	}
 	var work []pending
 
@@ -309,6 +354,7 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 		}
 
 		changed := map[string]string{}
+		was := map[string]string{}
 		for i, col := range spec.cols {
 			if !holders[i].Valid || holders[i].String == "" {
 				continue
@@ -318,6 +364,7 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 			case valueConverted:
 				st.Older++
 				changed[col] = next
+				was[col] = holders[i].String
 			case valueCurrent:
 				st.Current++
 			case valueNotCiphertext:
@@ -330,6 +377,7 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 					}
 					st.Older++ // plaintext is the oldest form there is
 					changed[col] = sealed
+					was[col] = holders[i].String
 					break
 				}
 				st.NotCipher++
@@ -339,7 +387,7 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 			}
 		}
 		if len(changed) > 0 {
-			work = append(work, pending{pk, changed})
+			work = append(work, pending{pk, changed, was})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -350,6 +398,13 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 
 	if dryRun {
 		return st, nil
+	}
+
+	// THE WINDOW. Everything above is a read of the whole table; what follows is
+	// the writes, one row at a time, so a worker can change a row between the two.
+	// resealBeforeWrite is where a test forces that, and it is nil in production.
+	if resealBeforeWrite != nil {
+		resealBeforeWrite(spec)
 	}
 
 	for _, w := range work {
@@ -372,6 +427,16 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 		for i, c := range spec.pkCols {
 			wheres[i] = quoteIdent(c) + "::text = $" + strconv.Itoa(i+1)
 		}
+		// COMPARE AND SET (cleat#3774, found in review). The replacement is sealed
+		// from the value READ above, so writing it keyed on the primary key alone
+		// overwrites whatever a worker wrote since. For compaction_state that is a
+		// sealed copy of the OLD state laid over a new one while compaction_step
+		// stays new, and a run that replays without the events compaction deleted.
+		// Each column being replaced must still hold exactly what was read.
+		for i, c := range names {
+			wheres = append(wheres, fmt.Sprintf("%s::text = $%d", quoteIdent(c), len(w.pk)+len(names)+i+1))
+			args = append(args, w.old[c])
+		}
 
 		//nolint:gosec // G202: same argument as the SELECT above -- identifiers
 		// from the literal spec via quoteIdent, every value bound as a parameter.
@@ -381,10 +446,22 @@ func resealTable(ctx context.Context, db *sql.DB, enc *engine.PayloadEncryption,
 		if err != nil {
 			return st, fmt.Errorf("%s row %s: write failed: %w", spec.name, strings.Join(w.pk, "/"), err)
 		}
-		// Zero rows on an UPDATE of a row just read means readable but not
-		// writable -- same refusal resealPayloads makes, for the same reason:
-		// continuing would count a rewrite that did not happen.
+		// Zero rows on an UPDATE of a row just read is one of two things, and they
+		// are told apart by reading the row again. If a value is no longer what was
+		// read (or the row is gone), a worker changed it first: nothing was
+		// overwritten, the value is left for a re-run, and the sweep goes on. If it
+		// is exactly what was read, then the row is readable but not writable --
+		// same refusal resealPayloads makes, for the same reason: continuing would
+		// count a rewrite that did not happen.
 		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			if changed, cerr := changedSinceRead(ctx, db, spec, w.pk, w.old); cerr != nil {
+				return st, fmt.Errorf("%s row %s: write matched no row and the row could not be re-read: %w",
+					spec.name, strings.Join(w.pk, "/"), cerr)
+			} else if changed {
+				st.Raced += len(names)
+				fmt.Fprintf(out, "  CHANGED SINCE READ %s %s: left as it is; run the sweep again\n", spec.name, strings.Join(w.pk, "/"))
+				continue
+			}
 			return st, fmt.Errorf("%s row %s matched no row on write: it was "+
 				"read but not written, so this connection cannot complete the sweep",
 				spec.name, strings.Join(w.pk, "/"))
@@ -413,6 +490,7 @@ func resealSensitiveTables(ctx context.Context, db *sql.DB, enc *engine.PayloadE
 		total.Current += st.Current
 		total.NotCipher += st.NotCipher
 		total.Unreadable += st.Unreadable
+		total.Raced += st.Raced
 		if err != nil {
 			return results, total, fmt.Errorf("%s: %w", spec.name, err)
 		}

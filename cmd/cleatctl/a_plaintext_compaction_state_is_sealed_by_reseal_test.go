@@ -282,3 +282,118 @@ func TestEveryWorkflowPayloadsColumnIsSealedOrNamedPlain(t *testing.T) {
 		t.Errorf("names that are not workflow_payloads columns: %v", stale)
 	}
 }
+
+// THE WINDOW (cleat#3774, found in review). The sweep reads every row, then writes
+// each replacement keyed on the primary key. A worker that compacts a run in
+// between writes a NEW state and a new compaction_step; a write that does not check
+// the value it read lays a sealed copy of the OLD state over it, and the run
+// replays without the events compaction deleted. resealBeforeWrite is the hook
+// that lets the test be the worker, inside that window.
+func TestResealDoesNotOverwriteAStateAWorkerWroteAfterItWasRead(t *testing.T) {
+	db, ctx, enc := compactionResealFixture(t)
+	markEncryptionEverEnabled(t, db, ctx)
+	const wf = "compaction-reseal-race"
+	seedCompactedRun(t, db, ctx, wf, plaintextCompactionState)
+
+	// What a compaction after the read writes: a NEWER state, already sealed (a
+	// worker on this release seals), and a newer step.
+	newPlain := `{"version": 1, "events": [{"t": 30, "svc": "billing", "resp": "NEW-STATE-MARKER"}], "compacted_step": 7}`
+	newSealed, err := sealLegacyPlaintextJSON(enc, compactionResealTenant, newPlain)
+	if err != nil {
+		t.Fatalf("seal the worker's new state: %v", err)
+	}
+	fired := 0
+	resealBeforeWrite = func(spec tableSpec) {
+		if spec.name != "workflow_payloads" {
+			return
+		}
+		fired++
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_payloads SET compaction_state = $1::jsonb, compaction_step = 7 WHERE id = $2`, newSealed, wf); err != nil {
+			t.Errorf("the simulated worker's write: %v", err)
+		}
+	}
+	t.Cleanup(func() { resealBeforeWrite = nil })
+
+	_, total, err := resealSensitiveTables(ctx, db, enc, false, io.Discard)
+	if err != nil {
+		t.Fatalf("a value that changed since it was read must not abort the sweep: %v", err)
+	}
+	resealBeforeWrite = nil
+	if fired != 1 {
+		t.Fatalf("the hook fired %d times for workflow_payloads, want 1: the test did not force the interleave", fired)
+	}
+
+	var step int
+	if err := db.QueryRowContext(ctx, `SELECT compaction_step FROM workflow_payloads WHERE id = $1`, wf).Scan(&step); err != nil {
+		t.Fatal(err)
+	}
+	if step != 7 {
+		t.Fatalf("compaction_step = %d, want 7", step)
+	}
+	if got := readCompactionState(t, db, ctx, wf); got != newSealed {
+		t.Errorf("the sweep overwrote the worker's newer state with a copy of the one it had read:\n got  %.120s\n want %.120s", got, newSealed)
+	}
+	if total.Raced != 1 || total.Rewrote != 0 {
+		t.Errorf("Raced=%d Rewrote=%d, want 1 and 0: the value was changed by someone else, so none was rewritten and it is reported", total.Raced, total.Rewrote)
+	}
+
+	// The sweep is repeatable: nothing is left that needs it (the new state was
+	// already sealed), and the result is clean.
+	_, again, err := resealSensitiveTables(ctx, db, enc, false, io.Discard)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if again.Raced != 0 || again.Older != 0 || again.Unreadable != 0 {
+		t.Errorf("second sweep: Raced=%d Older=%d Unreadable=%d, want all 0", again.Raced, again.Older, again.Unreadable)
+	}
+}
+
+// And the other half of "run it again": when the worker wrote a PLAINTEXT state in
+// the window (a worker still on 0.5.0), the next sweep seals THAT one.
+func TestResealSealsThePlaintextStateAWorkerWroteInTheWindowOnTheNextRun(t *testing.T) {
+	db, ctx, enc := compactionResealFixture(t)
+	markEncryptionEverEnabled(t, db, ctx)
+	const wf = "compaction-reseal-race-plain"
+	seedCompactedRun(t, db, ctx, wf, plaintextCompactionState)
+
+	newPlain := `{"version": 1, "events": [{"t": 30, "svc": "billing", "resp": "NEWER-PLAIN-MARKER"}], "compacted_step": 7}`
+	resealBeforeWrite = func(spec tableSpec) {
+		if spec.name != "workflow_payloads" {
+			return
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE workflow_payloads SET compaction_state = $1::jsonb, compaction_step = 7 WHERE id = $2`, newPlain, wf); err != nil {
+			t.Errorf("the simulated worker's write: %v", err)
+		}
+	}
+	t.Cleanup(func() { resealBeforeWrite = nil })
+
+	_, first, err := resealSensitiveTables(ctx, db, enc, false, io.Discard)
+	if err != nil {
+		t.Fatalf("first sweep: %v", err)
+	}
+	resealBeforeWrite = nil
+	if first.Raced != 1 {
+		t.Fatalf("first sweep Raced=%d, want 1", first.Raced)
+	}
+	if !strings.Contains(readCompactionState(t, db, ctx, wf), "NEWER-PLAIN-MARKER") {
+		t.Fatal("the worker's newer plaintext state is gone after the first sweep")
+	}
+
+	if _, _, err := resealSensitiveTables(ctx, db, enc, false, io.Discard); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	stored := readCompactionState(t, db, ctx, wf)
+	if strings.Contains(stored, "NEWER-PLAIN-MARKER") {
+		t.Fatalf("the second sweep left the newer state in the clear: %s", stored)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.Trim(stored, `"`))
+	if err != nil {
+		t.Fatalf("not base64 after the second sweep: %v", err)
+	}
+	plain, _, err := enc.OpenAndClassify(compactionResealTenant, raw)
+	if err != nil || !strings.Contains(string(plain), "NEWER-PLAIN-MARKER") {
+		t.Errorf("the sealed state does not open to the newer content: %v %s", err, plain)
+	}
+}
