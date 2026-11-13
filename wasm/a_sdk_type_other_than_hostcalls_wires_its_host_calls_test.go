@@ -19,8 +19,13 @@ import (
 // as lacking import rows, found when baseTypeName learned to unwrap generic
 // receivers (cleat#3803). Before that every method on a generic type was invisible
 // here, which is how PluginFunc.WaitFor was the first helper to be checked.
-// Tracked, not endorsed: the claim is read from the scan and was not run, and the
-// fix is a row plus, for these two, a gate entry in analyzer.sdkDurableHelpers.
+// Tracked, not endorsed. What is established, per source: the scan reads both as
+// lacking rows; cleat-review built a probe and found the imports missing from the
+// wasm (cleat#3803); and cleat#3805 reproduced the run-time failure on a real
+// worker, but for NewPromiseTyped, the constructor, which is a function and not
+// one of these two methods. A failing RUN of Promise.Await or SagaTyped.Run
+// themselves has not been shown. The fix is a row plus, for these two, a gate
+// entry in analyzer.sdkDurableHelpers.
 var knownUnwiredGenericHelpers = map[string]string{
 	"Promise.Await": "cleat#3803",
 	"SagaTyped.Run": "cleat#3803",
