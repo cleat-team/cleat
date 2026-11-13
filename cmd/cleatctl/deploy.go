@@ -351,6 +351,11 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 
 	fmt.Printf("Deployed %s v%d (ABI v%d, minVersion=%d, %d bytes, SHA256=%x)\n",
 		name, nextVersion, abiVersion, minVersion, len(wasmBytes), hash[:8])
+	// cleat#3766: name the tenant. main opened the store for the default tenant and
+	// nothing on the command line changes that; whether deploy should take a tenant
+	// is an open product question, not decided here. On stdout, beside the line it
+	// qualifies: stderr on a successful deploy reads as an error to callers.
+	fmt.Printf("  Tenant: %s (cleatctl deploys to the default tenant only)\n", defaultTenantID)
 }
 
 // restampWorkflowVersion returns wasmBytes with cleat.metadata's

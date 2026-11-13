@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -30,6 +31,27 @@ func runDebug(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dia
 	}
 
 	if flags.watch {
+		// cleat#3766: watch the events of the run's own tenant. The lookup is best
+		// effort: watching never needed the instance row, and a connection that
+		// cannot read it (row-level security) must keep watching the default
+		// tenant's runs as it did, so a failed lookup says so and falls back.
+		if db != nil {
+			inst, lerr := loadWorkflowInstance(ctx, db, d, flags.workflowID)
+			switch {
+			case lerr == nil:
+				st, release, serr := storeForInstance(ctx, store, d, inst)
+				if serr != nil {
+					fmt.Fprintf(os.Stderr, "error: %v\n", serr)
+					osExit(1)
+				}
+				defer release()
+				store = st
+			case errors.Is(lerr, sql.ErrNoRows):
+				// Not found: as before, the default tenant's store answers (with 0 events).
+			default:
+				fmt.Fprintf(os.Stderr, "note: could not read which tenant owns %q (%v); watching through the default tenant's store\n", flags.workflowID, lerr)
+			}
+		}
 		if err := runDebugWatch(ctx, store, flags.workflowID); err != nil {
 			fmt.Fprintf(os.Stderr, "debug watch failed: %v\n", err)
 			osExit(1)
@@ -137,12 +159,21 @@ type debugStepInfo struct {
 func runDebugStep(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dialect, workflowID, entryPoint string) {
 	inst, err := loadWorkflowInstance(ctx, db, d, workflowID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading workflow instance %q: %v\n", workflowID, err)
+		fmt.Fprintln(os.Stderr, describeInstanceLoadError(workflowID, err))
 		osExit(1)
 	}
 
+	// cleat#3766: the run's own tenant's store, as in replay.
+	store, release, err := storeForInstance(ctx, store, d, inst)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(1)
+	}
+	defer release()
+
 	fmt.Printf("Workflow: %s\n", workflowID)
 	fmt.Printf("  Definition: %s (v%d)\n", inst.DefName, inst.DefVersion)
+	noteTenantOnStdout(inst)
 	fmt.Printf("  Status: %s\n", inst.Status)
 	fmt.Printf("  Entry point: %s\n", entryPoint)
 

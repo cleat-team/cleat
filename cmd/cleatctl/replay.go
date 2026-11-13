@@ -30,12 +30,22 @@ func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d di
 	// Load the workflow instance from the database.
 	inst, err := loadWorkflowInstance(ctx, db, d, workflowID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading workflow instance %q: %v\n", workflowID, err)
+		fmt.Fprintln(os.Stderr, describeInstanceLoadError(workflowID, err))
 		osExit(1)
 	}
 
+	// cleat#3766: read the run's history and definition through the store of the
+	// tenant the run belongs to, not the default tenant's.
+	store, release, err := storeForInstance(ctx, store, d, inst)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(1)
+	}
+	defer release()
+
 	fmt.Printf("Workflow: %s\n", workflowID)
 	fmt.Printf("  Definition: %s (v%d)\n", inst.DefName, inst.DefVersion)
+	noteTenantOnStdout(inst)
 	fmt.Printf("  Status: %s\n", inst.Status)
 	fmt.Printf("  Entry point: %s\n", entryPoint)
 
