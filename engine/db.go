@@ -1113,6 +1113,10 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 // and the lock. It does not establish that the caller still owns the run; that
 // is a separate question (see cleat#3409).
 func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
+	tc, err := s.tenantCipherForWrite()
+	if err != nil {
+		return fmt.Errorf("compact history: cipher: %w", err)
+	}
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("compact history: begin: %w", err)
@@ -1158,11 +1162,22 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 		return fmt.Errorf("compact history: delete: %w", err)
 	}
 
+	// cleat#3774: the state is the sensitive fields of the events just deleted,
+	// copied out of a history the store had opened, so with
+	// --encrypt-sensitive-payloads on it is sealed exactly as the columns it
+	// came from are (a jsonb column holds EncryptJSON's string literal, the
+	// same shape workflow_payloads.input takes). Written in the clear it left a
+	// readable copy of data the flag exists to keep unreadable, beside the
+	// sealed originals. tc is nil, and the bytes unchanged, when it is off.
+	sealedState, err := encryptJSONColumnForStorage(string(compactionState), tc)
+	if err != nil {
+		return fmt.Errorf("compact history: seal state: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_payloads
 		SET compaction_state = $1, compaction_step = $2
 		WHERE id = $3
-	`, compactionState, compactionStep, workflowID); err != nil {
+	`, []byte(sealedState), compactionStep, workflowID); err != nil {
 		return fmt.Errorf("compact history: update: %w", err)
 	}
 
@@ -1242,8 +1257,20 @@ func (s *PostgresStore) LoadCompactionState(ctx context.Context, workflowID stri
 	if rawJSON == nil {
 		return nil, tx.Commit()
 	}
+	// cleat#3774: sealed with the rest of the sensitive columns when
+	// --encrypt-sensitive-payloads is on. A state written before that (an
+	// object, not a string literal) reads as it always did -- the mixed-history
+	// rule decryptPayloadJSON states -- and a sealed one that will not open is an
+	// error wrapping ErrPayloadDecryption. It must not become a nil state: the
+	// events it summarises are deleted from event_history in the transaction that
+	// wrote it, so a caller that carried on without it would replay the tail
+	// alone and diverge.
+	plain, err := s.decryptPayloadJSON(string(rawJSON))
+	if err != nil {
+		return nil, fmt.Errorf("load compaction state: %w", err)
+	}
 	var cs CompactionState
-	if err := json.Unmarshal(rawJSON, &cs); err != nil {
+	if err := json.Unmarshal([]byte(plain), &cs); err != nil {
 		return nil, fmt.Errorf("unmarshal compaction state: %w", err)
 	}
 	return &cs, tx.Commit()

@@ -2692,6 +2692,51 @@ func (w *Worker) runWasStopped(wf *engine.WorkflowInstance) bool {
 	return w.shuttingDown() || w.runIsFenced(wf.ID, wf.Generation)
 }
 
+// loadCompactionStateOrRelease reads a run's compaction state, and reports false
+// when the run was released instead because the state could not be read.
+//
+// THE RUN MUST NOT BE REPLAYED WITHOUT IT, whatever the error. Compaction
+// deletes the events it summarises from event_history in the transaction that
+// writes the state (PostgresStore.CompactHistory), so after it the prefix of the
+// history exists only in that column, and replaying the tail alone diverges from
+// what the run already did. This used to log a warning and carry on with a nil
+// state for every error (cleat#3774); it is the same rule the history load above
+// follows, which is why the three branches mirror it:
+//
+//   - a connection error: the database is down, release and retry.
+//   - ErrPayloadDecryption: this worker's key ring cannot open the state and one
+//     that holds the right key can, so the run goes back to the queue for it.
+//   - a stopped worker or a fenced-out run: released, not failed (cleat#2942).
+//
+// Anything else (a state that does not unmarshal, a query that failed) is logged
+// at ERROR and the run is returned to the queue with a backoff. It is not failed
+// terminally: nothing here says the run is wrong, only that this attempt could
+// not read what it needs, and a retry is the only thing that can change that.
+func (w *Worker) loadCompactionStateOrRelease(store interface {
+	LoadCompactionState(ctx context.Context, workflowID string) (*engine.CompactionState, error)
+}, wf *engine.WorkflowInstance) (*engine.CompactionState, bool) {
+	cs, err := store.LoadCompactionState(w.ctx, wf.ID)
+	if err == nil {
+		return cs, true
+	}
+	if isConnectionError(err) {
+		w.logger.WarnContext(context.Background(), "DB down loading compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		w.releaseWorkflow(wf)
+		return nil, false
+	}
+	if errors.Is(err, engine.ErrPayloadDecryption) {
+		w.releaseForAnotherWorker(wf, fmt.Sprintf("compaction state load: %v", err), "compaction_state_decrypt")
+		return nil, false
+	}
+	if w.releaseIfStopped(wf, "compaction state load", err) {
+		return nil, false
+	}
+	w.logger.ErrorContext(context.Background(), "failed to load compaction state; not replaying without it, returning the run to the queue",
+		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+	w.returnToQueueAfterBackoff(wf)
+	return nil, false
+}
+
 // releaseIfStopped releases wf and reports whether it did, when this execution
 // was stopped rather than broken. Callers invoke it from an error path, before
 // recording any failure: a stopped execution's error describes the stopping,
@@ -3733,11 +3778,9 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 
 	// ---- Load compaction state if present ----
-	var compactionState *engine.CompactionState
-	compactionState, err = execStore.LoadCompactionState(w.ctx, wf.ID)
-	if err != nil {
-		w.logger.WarnContext(context.Background(), "failed to load compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		compactionState = nil
+	compactionState, ok := w.loadCompactionStateOrRelease(execStore, wf)
+	if !ok {
+		return
 	}
 
 	// wasmtime is the only WASM backend cleat has (w.wasmtimeBackend is
