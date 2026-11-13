@@ -7413,6 +7413,43 @@ func (w *Worker) runVersionGCSweep() {
 		"min_versions_to_keep", opts.MinVersionsToKeep,
 		"max_version_age", opts.MaxVersionAge.String(),
 	)
+	w.runVersionGCSweepOfOtherTenants(opts)
+}
+
+// runVersionGCSweepOfOtherTenants runs the same collection through each other
+// tenant's own store (cleat#3708). The three statements GarbageCollectVersions
+// issues carry no tenant predicate -- row-level security is what scopes them -- so
+// through the worker's own store alone every other tenant kept every old version
+// for ever, with the flag on.
+//
+// What makes this safe to widen is the same thing that makes it narrow today: each
+// pass runs as THAT tenant, so the definitions it can see, the active-instance
+// counts that protect a version in use, and the rows it deletes are that tenant's.
+// Through a role that bypasses the policy the own pass already spans every tenant,
+// and these passes then re-read what is already gone and delete nothing, at the
+// cost of one more scan per tenant per interval.
+//
+// A tenant whose pass lists or counts nothing is a pass that found nothing; one
+// whose list or count FAILS is skipped for this interval, since GarbageCollect
+// Versions refuses to delete on a count it could not take. Per-version purge
+// failures are reported as that tenant's failure and do not stop the rest. Gated on
+// --claim-across-tenants like the other cross-tenant loops, and a no-op for MySQL
+// and a sharded store, neither of which can list tenants.
+func (w *Worker) runVersionGCSweepOfOtherTenants(opts engine.GCOptions) {
+	removed := w.sweepOtherTenants("version gc", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+		res, err := engine.GarbageCollectVersions(ctx, st, opts)
+		if err != nil {
+			return 0, err
+		}
+		if len(res.Errors) > 0 {
+			return int64(res.VersionsRemoved), fmt.Errorf("%d version(s) could not be purged, first: %w", len(res.Errors), res.Errors[0])
+		}
+		return int64(res.VersionsRemoved), nil
+	})
+	if removed > 0 {
+		w.logger.InfoContext(w.ctx, "version gc swept other tenants",
+			"worker_id", w.id, "versions_removed", removed)
+	}
 }
 
 // retentionSweepResult reports what one sweep did, per arm.

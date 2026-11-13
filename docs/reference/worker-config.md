@@ -1179,6 +1179,25 @@ Every pass logs `version gc swept` with the policy it used, **including passes
 that remove nothing** — so "ran and found nothing" and "disabled" are
 distinguishable in the log.
 
+**Which tenants it reaches.** With this set, a worker run with
+`--claim-across-tenants` collects old versions of **every tenant it serves**, each
+through that tenant's own store and under that tenant's row-level security, with
+the same policy (cleat#3708). Before that only the worker's own tenant's
+definitions were collected, so every other tenant kept every old version. A
+version with a running instance is kept whichever tenant it belongs to. The
+other tenants' passes log one extra line, `version gc swept other tenants`, when
+they removed something. Three limits worth knowing:
+
+- The statements behind a pass carry no tenant predicate; the policy is what
+  scopes them. A worker connected as a role that **bypasses** the policy already
+  sees every tenant's definitions in its own pass (that was true before), and the
+  per-tenant passes then find nothing left, at the cost of one more scan per
+  tenant per interval.
+- MySQL is single-tenant and a sharded store cannot list tenants, so for both this
+  is unchanged: the worker's own tenant only.
+- `POST /api/versions/gc` and `cleatctl versions gc` stay scoped to the tenant that
+  made the call. A request made as one tenant must not delete another's definitions.
+
 ---
 
 ### --version-gc-min-versions
