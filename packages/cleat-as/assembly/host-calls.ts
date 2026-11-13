@@ -2271,7 +2271,7 @@ export class HostCalls {
    * buffer sequentially, the host call is made, and the response is read
    * from the output buffer.
    *
-   * @param pluginName    - Name of the plugin (e.g., "blobstore", "slacknotify").
+   * @param pluginName    - Name of the plugin (e.g., "blobstore", "slack-notify").
    * @param functionName  - Plugin function name (e.g., "put", "get").
    * @param inputJson     - Input payload as a JSON string.
    * @returns The plugin call outcome with response JSON or error details.
@@ -2334,7 +2334,7 @@ export class HostCalls {
    * buffer sequentially, the host call is made, and the response is read
    * from the output buffer. Supports streaming responses from the plugin.
    *
-   * @param pluginName    - Name of the plugin (e.g., "blobstore", "slacknotify").
+   * @param pluginName    - Name of the plugin (e.g., "blobstore", "slack-notify").
    * @param functionName  - Plugin function name (e.g., "put", "get").
    * @param inputJson     - Input payload as a JSON string.
    * @returns The plugin call outcome with response JSON or error details.
