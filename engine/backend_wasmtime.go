@@ -87,8 +87,9 @@ type wasmtimeBackend struct {
 	// "Do NOT close the module" rule below, and why the bound counts entries
 	// rather than bytes.
 	moduleCache  *moduleLRU
-	compileLocks *sync.Map // per-key *sync.Mutex to serialize compilation
-	metaCache    *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
+	components   *componentCache // compiled components, in moduleCache's LRU (cleat#3748); PerExecution must copy it
+	compileLocks *sync.Map       // per-key *sync.Mutex to serialize compilation
+	metaCache    *sync.Map       // per-key *wasmMeta (envNeeded, hasWasi, language)
 
 	// envNeeded is the set of "env" module imports the WASM module requests.
 	// nil means "register everything" (conservative fallback on parse error).
@@ -171,9 +172,11 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 	}
 	eng := wasmtime.NewEngineWithConfig(cfg)
 
+	moduleCache := newModuleLRU(bcfg.moduleCacheMaxEntries, bcfg.moduleCacheMaxBytes)
 	b := &wasmtimeBackend{
 		engine:       eng,
-		moduleCache:  newModuleLRU(bcfg.moduleCacheMaxEntries, bcfg.moduleCacheMaxBytes),
+		moduleCache:  moduleCache,
+		components:   newComponentCache(moduleCache),
 		compileLocks: new(sync.Map),
 		metaCache:    new(sync.Map),
 		limits:       lim,
@@ -241,6 +244,9 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 		// that has already been selected races engine.Close() and panics.
 		<-b.epochDone
 	}
+	// The cached components first: each is a reference into the engine's compiled
+	// code, and a held reference is a C allocation nothing else will free.
+	b.components.close()
 	b.engine.Close()
 	return nil
 }
@@ -268,6 +274,7 @@ func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) Wasm
 	return &wasmtimeBackend{
 		engine:       b.engine,
 		moduleCache:  b.moduleCache,
+		components:   b.components,
 		compileLocks: b.compileLocks,
 		metaCache:    b.metaCache,
 		limits:       lim,
