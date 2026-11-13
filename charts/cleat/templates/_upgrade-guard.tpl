@@ -37,8 +37,15 @@ run the same helm upgrade again:
   kubectl scale deployment/{{ .fullname }} --replicas=0 -n {{ .namespace }}
   kubectl wait --for=delete pod -l app.kubernetes.io/name={{ .name }},app.kubernetes.io/instance={{ .release }} -n {{ .namespace }} --timeout=180s
 
-Helm restores the replica count when it applies the new chart, and the HorizontalPodAutoscaler (if
-enabled) switches itself off at 0 replicas and back on afterwards.
+What the replica count is afterwards depends on autoscaling (cleat#3761). With autoscaling.enabled=false,
+Helm restores replicaCount when it applies the new chart. With it on (the default) the chart sets no replica
+count, and the HorizontalPodAutoscaler stays off while the Deployment is at 0, so nothing brings the workers
+back: under Helm 4's default server-side apply the Deployment is left at 0 after the upgrade, every time.
+So when autoscaling is on, ALWAYS run this after the upgrade:
+
+  kubectl scale deployment/{{ .fullname }} --replicas=<autoscaling.minReplicas> -n {{ .namespace }}
+
+The autoscaler takes over from there. If the count was already 1 (client-side apply), it is harmless.
 
 To skip this check, set upgrade.allowLiveWorkers=true. That is the unsupported case.
 
