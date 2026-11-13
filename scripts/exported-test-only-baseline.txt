@@ -20,7 +20,6 @@ engine/engine.go	func WithPluginCallGuard
 engine/engine.go	func WithPluginCallObserver
 engine/errors.go	func NewCancelledError
 engine/errors.go	func NewRetriesExhaustedError
-engine/errors.go	func NewTimeoutError
 engine/events.go	func EventsFromRecords
 engine/events.go	func RecordsFromEvents
 engine/fault_injector.go	func FaultInjector.ActiveFaults

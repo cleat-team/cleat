@@ -172,6 +172,15 @@ func TestTimeLimitErrorNamesTheBoundThatApplied(t *testing.T) {
 			if hasFlag := strings.Contains(msg, "--wasm-instance-timeout"); hasFlag != tc.wantInstTmo {
 				t.Errorf("names --wasm-instance-timeout = %v, want %v: %s", hasFlag, tc.wantInstTmo, msg)
 			}
+			// What executeWithBackend reads to call a stop a workflow-duration expiry
+			// (error_code "timeout"): present exactly when the deadline was the bound.
+			var dl *workflowDeadlineError
+			if isDeadl := errors.As(got, &dl); isDeadl != tc.wantDeadl {
+				t.Errorf("marked as the workflow's deadline = %v, want %v: %s", isDeadl, tc.wantDeadl, msg)
+			}
+			if !isExecutionLimit(got) {
+				t.Errorf("no longer an execution limit, so the component path would retry it on a second budget: %s", msg)
+			}
 			// Callers that parse the number rely on this prefix being the same either way.
 			if !strings.Contains(msg, "execution time limit exceeded (") || !strings.Contains(msg, " wall-clock budget") {
 				t.Errorf("the common wording changed: %s", msg)
@@ -180,8 +189,10 @@ func TestTimeLimitErrorNamesTheBoundThatApplied(t *testing.T) {
 	}
 }
 
-// The executor reports a deadline that passed before the guest started as every
-// other workflow-duration expiry, not as a guest that failed.
+// The executor reports a workflow-duration expiry -- the deadline passed before
+// the guest started, or stopped it mid-execution -- the same way: the words
+// "execution timed out" and error_code "timeout", not a guest that failed and
+// not the "unknown" an unclassified error is recorded as. cleat#3746, cleat#3752.
 func TestExecutorReportsASpentDeadlineAsATimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -189,6 +200,14 @@ func TestExecutorReportsASpentDeadlineAsATimeout(t *testing.T) {
 		wantTimeout bool
 	}{
 		{"deadline passed before the guest started", fmt.Errorf("component call: %w", errDeadlineBeforeGuest), true},
+		// What resourceLimitError returns when the epoch budget was the time left on
+		// the workflow's deadline, as the real backend builds it.
+		{"deadline stopped the guest mid-execution", &executionLimitError{&workflowDeadlineError{
+			errors.New("execution time limit exceeded (699.98ms wall-clock budget, the time left on the workflow's deadline; configure with --max-workflow-duration): wasm trap: interrupt")}}, true},
+		// The control for the row above: the SAME trap under --wasm-instance-timeout is
+		// the epoch fence, not the workflow's deadline, and stays a guest failure.
+		{"instance timeout stopped the guest mid-execution", &executionLimitError{
+			errors.New("execution time limit exceeded (2s wall-clock budget; configure with --wasm-instance-timeout): wasm trap: interrupt")}, false},
 		// The control: the mapping is for THIS error, not for every error under an expired ctx.
 		{"any other backend error", errors.New("something else broke"), false},
 	} {
@@ -209,6 +228,22 @@ func TestExecutorReportsASpentDeadlineAsATimeout(t *testing.T) {
 			isTimeout := strings.Contains(err.Error(), "execution timed out")
 			if isTimeout != tc.wantTimeout {
 				t.Errorf("reported as timed out = %v, want %v: %v", isTimeout, tc.wantTimeout, err)
+			}
+			// The code the worker stores is read with errors.As, as setup.go does.
+			code := ErrUnknown
+			var ce *CleatError
+			if errors.As(err, &ce) {
+				code = ce.Code
+			}
+			wantCode := ErrUnknown
+			if tc.wantTimeout {
+				wantCode = ErrTimeout
+			}
+			if code != wantCode {
+				t.Errorf("error code = %s, want %s: %v", code, wantCode, err)
+			}
+			if tc.wantTimeout && !strings.HasPrefix(err.Error(), "host: workflow wf-spent-deadline: execution timed out") {
+				t.Errorf("message does not start with the shared expiry text, so one grep cannot find every expiry: %v", err)
 			}
 			if tc.wantTimeout && strings.Contains(err.Error(), "execution failed") {
 				t.Errorf("a workflow-duration expiry was reported as the guest failing: %v", err)
