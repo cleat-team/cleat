@@ -7,14 +7,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase1_lib import *
 
 key = KEY_FILE.read_text().strip()
-ITERS = 120_000_000
+ITERS = 60_000_000   # was 120M: its baseline took 23.1 s at load ~32, against the worker's 30 s instance limit, and trapped (cleat-review, 2026-11-13)
 log = W / "worker-p2-midexec.log"; log.write_bytes(b"")
 w = Worker(log); w.start()
 res = []
 def verdict(name, ok, detail=""): res.append(ok); print(f"  {'PASS' if ok else 'FAIL'}  {name}{('  ' + detail) if detail else ''}", flush=True)
 loglines = lambda wid, needle: [l for l in log.read_text(errors="replace").splitlines() if wid in l and needle in l]
 
-print(f"iterations per run: {ITERS:,} (about 12 s of CPU, no host call inside the loop)\n")
+print(f"iterations per run: {ITERS:,} (about 6 s of CPU unloaded, no host call inside the loop; the kill is sent 3 s in)\n")
 for shape, spin_first in (("burn AFTER a recorded side effect", False), ("burn BEFORE any host call", True)):
     print(f"### {shape}")
     inp = {"iters": ITERS, "spinFirst": spin_first}

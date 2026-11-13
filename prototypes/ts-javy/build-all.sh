@@ -10,6 +10,8 @@ D=.work/cleatctl
 ./build-plugin-variant.sh full ""
 cp .work/plugin-full.wasm .work/cleat-plugin.wasm      # identical to what build.sh would build: asserted in phase2_repro.sh via the pin
 for v in "off-date:date" "off-random:random" "off-lockdown:lockdown" "off-all:date,random,lockdown"; do ./build-plugin-variant.sh "${v%%:*}" "${v##*:}"; done
+./build-plugin-variant.sh fault "" random-nonnumeric                 # a host whose Math.random answer is not a number: the shim must throw
+./build-plugin-variant.sh fault-lenient randomstrict random-nonnumeric   # the same fault with the strict check removed: the known-positive
 
 for n in sleeper signaler parent racer finalizer journey busy; do ./build.sh "$n" "$n" | tail -1; $D deploy workflow "$n" ".work/$n.wasm" | tail -1; done
 SUSPEND_MODE=throw OUT_NAME=finalizer_throw ./build.sh finalizer finalizer | tail -1; $D deploy workflow finalizer_throw .work/finalizer_throw.wasm | tail -1

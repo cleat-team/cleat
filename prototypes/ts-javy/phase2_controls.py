@@ -7,9 +7,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase1_lib import *
 
 key = KEY_FILE.read_text().strip()
-SOURCES = ["dateNow", "newDate", "dateElapsed", "newDateElapsed", "dateEqualsHostNow", "dateCall", "random", "randomRange", "intl", "toLocaleDate", "toLocaleNumber",
+SOURCES = ["dateNow", "newDate", "dateElapsed", "newDateElapsed", "dateEqualsHostNow", "dateNative", "dateAcrossHostCall", "ctxNowElapsed", "dateCall", "random", "randomRange", "intl", "toLocaleDate", "toLocaleNumber",
            "perfNow", "cryptoRandom", "weakRef", "finalizationRegistry", "setTimeout", "setInterval", "setTimeoutCall", "setTimeoutComputed"]
-VARIANTS = ["full", "off-date", "off-random", "off-lockdown", "off-all"]
+VARIANTS = ["full", "off-date", "off-random", "off-lockdown", "off-all", "fault", "fault-lenient"]
+# The two fault variants (a host whose Math.random answer is not a number; plugin/src/lib.rs CLEAT_FAULT) are only asked the
+# sources that matter to them: random, plus one date source to show the fault touches nothing else.
+FAULT_VARIANTS = {"fault": ["random", "dateNow"], "fault-lenient": ["random", "dateNow"]}
+sources_for = lambda v: FAULT_VARIANTS.get(v, SOURCES)
 
 def build(variant):
     env = {**os.environ, "PLUGIN": f".work/plugin-{variant}.wasm", "OUT_NAME": f"nondet_{variant}"}
@@ -31,14 +35,17 @@ def run(variant, source, inject=None):
 
 print(f"\n{'variant':13s} {'source':20s} outcome")
 for v in VARIANTS:
-    for s in SOURCES:
+    for s in sources_for(v):
         rows[(v, s)] = o = run(v, s)
         if o["status"] == "done": print(f"{v:13s} {s:20s} same={o['same']!s:5s} recorded={o['recorded'][:24]:24s} later={o['later'][:24]}", flush=True)
         else: print(f"{v:13s} {s:20s} {o['status'].upper()} divergence={o['diverged']}  {o['error'][:90]}", flush=True)
 inj = {}
 print("\nknown-positive for the absence checks (a global is injected by user code; the check must SEE it):")
-for s, name in [("weakRef", "WeakRef"), ("finalizationRegistry", "FinalizationRegistry"), ("setTimeout", "setTimeout"), ("perfNow", "performance")]:
-    inj[s] = run("full", s, [name]); print(f"  inject {name:22s} -> {inj[s].get('recorded')}", flush=True)
+# One known-positive for EVERY absence source (a check that has never been shown to say "present" proves nothing when it says "absent").
+INJECT = [("weakRef", "WeakRef"), ("finalizationRegistry", "FinalizationRegistry"), ("setTimeout", "setTimeout"), ("setInterval", "setInterval"),
+          ("setTimeoutCall", "setTimeout"), ("perfNow", "performance"), ("cryptoRandom", "crypto")]
+for s, name in INJECT:
+    inj[s] = run("full", s, [name]); print(f"  inject {name:22s} into {s:22s} -> {inj[s].get('recorded')}", flush=True)
 w.kill9()
 
 # ---- verdicts, computed from the rows above ----
@@ -72,7 +79,29 @@ for v in ("full", "off-date", "off-lockdown"):
     verdict(f"{v}: Math.random is in [0,1), centred and not constant (400 draws)", bool(r) and r["min"] >= 0 and r["max"] < 1 and 0.4 < r["mean"] < 0.6 and r["distinct"] > 380, str(r))
 verdict("static-check limit: a computed-property timer passes the checker and then throws at run time, replay-stable", rows[("full", "setTimeoutComputed")].get("recorded", "").lstrip('"').startswith("threw:") and stable("full", "setTimeoutComputed"), str(rows[("full", "setTimeoutComputed")].get("recorded")))
 verdict("absent globals really are absent under the full plugin", all(rows[("full", s)].get("recorded") in ('"absent"', '"undefined"') for s in ("perfNow","cryptoRandom","weakRef","finalizationRegistry","setTimeout","setInterval","setTimeoutCall")))
-verdict("known-positive: the absence check notices an injected global (all four)", all(inj[s].get("recorded") not in ('"absent"', '"undefined"') for s in inj))
+verdict(f"known-positive: the absence check notices an injected global (all {len(INJECT)} absence sources)", len(inj) == len(INJECT) and all(inj[s].get("recorded") not in ('"absent"', '"undefined"') for s in inj))
+# ---- the Date facts, as verdicts about VALUES (not "stable"): a Date that was consistently wrong would be replay-stable too ----
+for v in ("full", "off-date"):
+    g = lambda s: rows[(v, s)].get("recorded")
+    verdict(f"{v}: Date.now() === ctx.now() (the host's recorded clock)", g("dateEqualsHostNow") == "true", str(g("dateEqualsHostNow")))
+    verdict(f"{v}: time does not move across a busy loop (Date and new Date)", g("dateElapsed") == "false" and g("newDateElapsed") == "false", f"{g('dateElapsed')} {g('newDateElapsed')}")
+    # MEASURED 2026-11-13, against the first draft of this check (which asserted 0 and failed with 22 and 15): time DOES advance across
+    # host calls inside a segment, by the real time each took, and replay reproduces the very same figure. So the claim is "fixed
+    # BETWEEN host calls, advances AT them, identical on replay", and the verdict is about that.
+    a = rows[(v, "dateAcrossHostCall")]
+    verdict(f"{v}: time advances AT host calls (2 side effects) and replay reproduces the same figure", a["status"] == "done" and a["same"] is True and a["recorded"].isdigit() and int(a["recorded"]) > 0, f"recorded={a['recorded']} replayed-equal={a['same']}")
+    verdict(f"{v}: ctx.now() does not move across the busy loop either", g("ctxNowElapsed") == "0", str(g("ctxNowElapsed")))
+verdict("known-positive: the full build has the Date shim and the off-date build does not (Date is native only without it)",
+        rows[("full", "dateNative")].get("recorded") == "false" and rows[("off-date", "dateNative")].get("recorded") == "true"
+        and rows[("off-all", "dateNative")].get("recorded") == "true" and rows[("off-random", "dateNative")].get("recorded") == "false",
+        f"full={rows[('full','dateNative')].get('recorded')} off-date={rows[('off-date','dateNative')].get('recorded')} off-all={rows[('off-all','dateNative')].get('recorded')}")
+# ---- the random shim fails loudly on a host answer it cannot read ----
+LOUD = 'threw:Error:cleat: Math.random: the host did not return a number'
+fr, lr = rows[("fault", "random")], rows[("fault-lenient", "random")]
+verdict("fault (host answers non-numeric): the strict shim THROWS, naming Math.random", fr["status"] == "done" and fr["recorded"].startswith(LOUD), str(fr.get("recorded"))[:90])
+verdict("known-positive: with the strict check removed the same fault is silent (returns 0, replay-stable, run completes)",
+        lr["status"] == "done" and lr["recorded"] == "0" and lr["same"] is True, f"recorded={lr.get('recorded')} same={lr.get('same')}")
+verdict("the fault touches nothing else (dateNow is replay-stable and live under both fault builds)", all(stable(v, "dateNow") and live(v, "dateNow") for v in ("fault", "fault-lenient")))
 verdict("off-all differs from full exactly where the individual controls say (no interaction hidden)", broke("off-all", "random") and (not lb or all(broke("off-all", s) for s in lb)))
 bad = [x for x in res if not x]
 print(f"\n{len(res) - len(bad)} of {len(res)} verdicts passed")

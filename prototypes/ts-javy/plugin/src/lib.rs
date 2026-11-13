@@ -35,6 +35,14 @@ const SHIMS_OFF: &str = match option_env!("CLEAT_SHIMS_OFF") {
     None => "",
 };
 
+/// A fault to inject, for a control build only (`CLEAT_FAULT=random-nonnumeric`). Empty in every shipped build. It exists so the
+/// claim "the random shim fails loudly on a host answer it cannot read" is run against a host that actually gives one, rather
+/// than asserted: no real host call returns a non-number here.
+const FAULT: &str = match option_env!("CLEAT_FAULT") {
+    Some(v) => v,
+    None => "",
+};
+
 #[derive(Default)]
 struct Io {
     args_ptr: u32,
@@ -204,7 +212,16 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
         .unwrap();
         g.set("__cleat_now", Func::from(|| -> f64 { HostCalls.now() as f64 })).unwrap();
         // The host's random value is a full i64; a JS number is not, so it crosses as a decimal string.
-        g.set("__cleat_random", Func::from(|| -> String { HostCalls.random().to_string() })).unwrap();
+        g.set(
+            "__cleat_random",
+            Func::from(|| -> String {
+                if FAULT == "random-nonnumeric" {
+                    return SUSPENDED.to_string();
+                }
+                HostCalls.random().to_string()
+            }),
+        )
+        .unwrap();
         g.set("__cleat_uuid", Func::from(|seed: String| -> String { HostCalls.uuid(&seed) })).unwrap();
         // DurableLog: a host call the Go twin makes four times. Short-circuited once this segment has suspended, like the others.
         g.set(

@@ -22,6 +22,7 @@ step() { # $1 label, rest: command. A step must start with no harness worker ali
 step bootstrap    bash -c "./bootstrap.sh > $E2/bootstrap.txt 2>&1; rc=\$?; cp -f .work/provenance.txt $E2/provenance.txt 2>/dev/null; exit \$rc"
 step selftest     bash -c "python3 harness_selftest.py > evidence/phase3/harness-selftest.txt 2>&1"
 step build        ./build-all.sh > "$E2/build-all.txt" 2>&1
+step pathindep    bash -c "./phase3_pathindep.sh > evidence/phase3/pathindep.txt 2>&1"
 step phase1       ./phase1-verify.sh > "$E2/phase1-verify-output.txt" 2>&1
 step repro        bash -c "./phase2_repro.sh > $E2/repro.txt 2>&1"
 step controls     bash -c "python3 phase2_controls.py > $E2/controls.txt 2>&1"
@@ -30,5 +31,5 @@ step midexec      bash -c "python3 phase2_midexec.py > $E2/midexec.txt 2>&1"
 step tscheck      bash -c "(GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go test -count=1 -v ./tools/tscheck/ > $E2/tscheck-tests.txt 2>&1) && ./phase2_tscheck_mutants.sh > $E2/tscheck-mutants.txt 2>&1"
 step gocontrol    bash -c "python3 phase2_go_control.py > $E2/go-control.txt 2>&1"
 step xlang        bash -c "python3 phase3_verify.py > evidence/phase3/verify.txt 2>&1"
-echo "exit codes: bootstrap=$rc_bootstrap selftest=$rc_selftest build=$rc_build phase1=$rc_phase1 repro=$rc_repro controls=$rc_controls pin=$rc_pin midexec=$rc_midexec tscheck=$rc_tscheck gocontrol=$rc_gocontrol xlang=$rc_xlang"
-[ $rc_bootstrap -eq 0 ] && [ $rc_selftest -eq 0 ] && [ $rc_build -eq 0 ] && [ $rc_phase1 -eq 0 ] && [ $rc_repro -eq 0 ] && [ $rc_controls -eq 0 ] && [ $rc_pin -eq 0 ] && [ $rc_midexec -eq 0 ] && [ $rc_tscheck -eq 0 ] && [ $rc_gocontrol -eq 0 ] && [ $rc_xlang -eq 0 ]
+echo "exit codes: bootstrap=$rc_bootstrap selftest=$rc_selftest build=$rc_build pathindep=$rc_pathindep phase1=$rc_phase1 repro=$rc_repro controls=$rc_controls pin=$rc_pin midexec=$rc_midexec tscheck=$rc_tscheck gocontrol=$rc_gocontrol xlang=$rc_xlang"
+[ $rc_bootstrap -eq 0 ] && [ $rc_selftest -eq 0 ] && [ $rc_build -eq 0 ] && [ $rc_pathindep -eq 0 ] && [ $rc_phase1 -eq 0 ] && [ $rc_repro -eq 0 ] && [ $rc_controls -eq 0 ] && [ $rc_pin -eq 0 ] && [ $rc_midexec -eq 0 ] && [ $rc_tscheck -eq 0 ] && [ $rc_gocontrol -eq 0 ] && [ $rc_xlang -eq 0 ]

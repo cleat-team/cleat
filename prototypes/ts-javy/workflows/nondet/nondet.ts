@@ -21,7 +21,7 @@ function spin(): number {
   return x;
 }
 
-const SOURCES: Record<string, (ctx: Ctx) => unknown> = {
+const SOURCES: Record<string, (ctx: Ctx) => unknown | Promise<unknown>> = {
   dateNow: () => Date.now(),
   newDate: () => new Date().getTime(),
   // Time measured across a busy loop, with no host call between the two reads. Live it is positive; if the clock is a frozen
@@ -37,6 +37,23 @@ const SOURCES: Record<string, (ctx: Ctx) => unknown> = {
     return new Date().getTime() - a > 0;
   },
   dateEqualsHostNow: (ctx) => Date.now() === ctx.now(),
+  // Known-positive for the Date shim: the shim replaces the native Date with a JS function, so a build that lost the shim is the one
+  // whose Date and Date.now still say "[native code]". Without this row, "the date sources are stable with the shim removed" cannot
+  // be told apart from "the control build still had the shim".
+  dateNative: () => String(Date).includes("[native code]") && String(Date.now).includes("[native code]"),
+  // Time across a HOST CALL (a recorded side effect) with no sleep: does the clock move when a host call happens inside a segment?
+  dateAcrossHostCall: async (ctx) => {
+    const a = Date.now();
+    await ctx.sideEffect(() => 1);
+    await ctx.sideEffect(() => 2);
+    return Date.now() - a;
+  },
+  // ctx.now() across the busy loop, for the same question about the host's own clock.
+  ctxNowElapsed: (ctx) => {
+    const a = ctx.now();
+    spin();
+    return ctx.now() - a;
+  },
   // KNOWN LIMIT of tools/tscheck: a computed property access is not seen statically. At run time the global is absent, so the
   // call throws a deterministic TypeError: the runtime is the second layer.
   setTimeoutComputed: () => (globalThis as any)["set" + "Timeout"](() => {}, 1),
@@ -65,23 +82,27 @@ const SOURCES: Record<string, (ctx: Ctx) => unknown> = {
   },
 };
 
-function observe(f: (ctx: Ctx) => unknown, ctx: Ctx): string {
+async function observe(f: (ctx: Ctx) => unknown | Promise<unknown>, ctx: Ctx): Promise<string> {
   try {
-    return JSON.stringify(f(ctx));
+    return JSON.stringify(await f(ctx));
   } catch (e) {
-    return "threw:" + (e as Error).name;
+    // The message is kept (not only the name): a source that must fail LOUDLY is judged by what it says, not just that it threw.
+    return "threw:" + (e as Error).name + ":" + String((e as Error).message).slice(0, 100);
   }
 }
 
 export const nondet = workflow<{ source: string; inject?: string[]; sleepMs?: number }, Record<string, unknown>>(async (ctx, input) => {
   // Known-positive for the absence checks: define the named globals here, so a check that expects "absent" can be shown to
   // notice one that is present. This runs in user code, after the plugin's own lockdown, so it is not itself a shim test.
-  for (const k of input.inject ?? []) (globalThis as Record<string, unknown>)[k] = k === "performance" ? { now: () => 0 } : function () {};
+  for (const k of input.inject ?? []) {
+    (globalThis as Record<string, unknown>)[k] =
+      k === "performance" ? { now: () => 0 } : k === "crypto" ? { getRandomValues: (a: Uint8Array) => a } : function () {};
+  }
   const f = SOURCES[input.source];
   if (!f) throw new Error("unknown source " + input.source);
-  const first = observe(f, ctx);
+  const first = await observe(f, ctx);
   const recorded = await ctx.sideEffect(() => first);
   await ctx.sleep(input.sleepMs ?? 1200);
-  const later = observe(f, ctx);
+  const later = await observe(f, ctx);
   return { source: input.source, recorded, replayed: first, same: recorded === first, later };
 });

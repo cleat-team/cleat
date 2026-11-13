@@ -11,4 +11,4 @@ rustc           1.96.0     target wasm32-wasip1
 wasm-tools      1.261.0
 host            Apple M4, macOS 26.5.2, arm64; Apple clang 21.0.0 builds QuickJS for wasm32-wasip1 (rquickjs-sys)
 cleat base      origin/develop e44bd9ae (engine/ untouched; see PHASE0.md)
-cleat-plugin  sha256 19dd6a61eac4a61d00b18a4163d8b09f53493f2fc5639e69ae5ab98c29e96d65   the shipped plugin (every shim on), built with `init-plugin --deterministic`; re-derive: ./build-plugin-variant.sh full && shasum -a 256 .work/plugin-full.wasm
+cleat-plugin  sha256 bce47c28e2c3877ad2733f5402d04658681a75b06be7ddcf89efb0b277dfdd9b   the shipped plugin (every shim on), built with `init-plugin --deterministic`; the same hash in any directory (phase3_pathindep.sh, 2026-11-13); re-derive: ./build-plugin-variant.sh full && shasum -a 256 .work/plugin-full.wasm

@@ -12,7 +12,10 @@ crate-type = ["cdylib"]
 javy-plugin-api = { version = "=7.1.0", features = ["json"] }
 # The host-call bindings are the repository's own Rust SDK, reused as-is: the sentinel decode, the stop-bit check and the
 # suspended flag are the ones the Rust replay tests already cover (plan section 4.1).
-cleat-sdk = { path = "../../../crates/cleat-sdk" }
+# Reached through plugin/vendor/ (symlinks to crates/cleat-sdk and crates/cleat-macro) and NOT by "../../../crates/...": cargo
+# hashes a path dependency that lies outside the workspace root by its ABSOLUTE path, that hash is mixed into every symbol, and
+# so the same source built in two directories gave two different plugins (measured 2026-11-13, evidence/phase3/pathindep.txt).
+cleat-sdk = { path = "vendor/cleat-sdk" }
 serde_json = "1"
 
 # Not a member of the repository's Cargo workspace: this is a branch-only prototype

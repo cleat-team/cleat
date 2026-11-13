@@ -27,11 +27,17 @@
   }
 
   // Math.random: a uniform double in [0, 1) from the host's recorded random value (an i64, so reinterpret as unsigned and
-  // keep the top 53 bits). A non-numeric answer is the "suspended" envelope; return 0 rather than throw into user code.
+  // keep the top 53 bits). Anything that is not a decimal integer is a host answer this shim cannot read (the "suspended"
+  // envelope is the one the binding can produce), and it THROWS: returning 0 instead is stable across replays, so it would
+  // pass every determinism check while giving user code a constant. The "randomstrict" name exists only so a control build can
+  // put the old return-0 behaviour back and show the check tells the two apart.
   if (on("random")) {
     Math.random = function random() {
       const s = __cleat_random();
-      if (!/^-?[0-9]+$/.test(s)) return 0;
+      if (!/^-?[0-9]+$/.test(s)) {
+        if (on("randomstrict")) throw new Error("cleat: Math.random: the host did not return a number: " + String(s).slice(0, 60));
+        return 0;
+      }
       // i64 -> unsigned by offset (add 2^63), exact in BigInt: [0, 2^64). Do NOT use BigInt.asUintN: in this QuickJS it left the
       // value signed and Math.random returned numbers in [-0.5, 0.5) (found by the range check in phase2_controls.py).
       const u = BigInt(s) + 9223372036854775808n;

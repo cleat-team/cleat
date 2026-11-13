@@ -20,7 +20,7 @@ GOWORK=off GOFLAGS=-mod=mod GOPROXY=off go build -o "$W/tscheck" ./tools/tscheck
 
 # The plugin: rebuilt when its sources are newer than the initialised module, or on request.
 if [ -n "${REBUILD_PLUGIN:-}" ] || [ ! -f "$W/cleat-plugin.wasm" ] || [ -n "$(find plugin/src plugin/Cargo.toml ../../crates/cleat-sdk/src -newer "$W/cleat-plugin.wasm" -type f | head -1)" ]; then
-  (cd plugin && CLEAT_SHIMS_OFF="" cargo build --target wasm32-wasip1 --release 2>&1 | grep -E '^(error|warning: unused)|Finished' || true)
+  CLEAT_SHIMS_OFF="" CLEAT_FAULT="" ./plugin-cargo.sh   # no "|| true": a failed compile must stop the build, not fall through to a stale artefact
   $J init-plugin --deterministic plugin/target/wasm32-wasip1/release/cleat_js_plugin.wasm -o "$W/cleat-plugin.wasm"
 fi
 

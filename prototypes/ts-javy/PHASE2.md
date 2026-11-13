@@ -28,8 +28,12 @@ Each `nondet` run records a value, suspends on a sleep, then REPLAYS and recompu
 **The Date row, said plainly.** The plan asked "with the override removed, does WASI interception alone still pass? Record which
 layer actually holds." Measured answer: **it passes, so the engine's `clock_time_get` interception holds on its own and the Date
 shim is not load-bearing in this engine.** The two layers cannot be told apart by value either: `Date.now() === ctx.now()` is
-true with and without the shim, and a busy loop between two reads gives `Date.now() - a > 0` = `false` both ways, i.e. the clock is
-frozen between host calls under either layer, so a branch on elapsed time takes the same path live and on replay. I hypothesised
+true with and without the shim, and a busy loop between two reads gives `Date.now() - a > 0` = `false` both ways (and `ctx.now()` reads
+0 across the same loop), i.e. the clock is frozen **between** host calls under either layer, so a branch on elapsed time takes the same
+path live and on replay. **It does advance AT a host call** (corrected 2026-11-13: cleat-review's wording was "fixed even across host
+calls", and the probe says otherwise): across two recorded side effects `Date.now()` moved by real time (22 ms with the shim, 15 ms
+without, in the run in `evidence/phase2/controls.txt`) and replay reproduced the very same figure. So time is a function of the
+recorded events, not constant within a segment, and it moves forward across a suspension as well. I hypothesised
 before running it that frozen-on-replay time would make live and replay diverge; the run says it does not. The shim stays as defence in
 depth against the interception policy changing; it is not a proven control, and I am not counting it as one.
 
@@ -40,8 +44,12 @@ added one, and removing `lockdown` changes nothing today (stated in `controls.tx
 and `0` (`inject …` lines). That is a control on the test, not on a shim.
 
 ### Not determined
-- **Whether QuickJS seeds `Math.random` from `clock_time_get` or `random_get`** (the plan asked). Unshimmed, it is not replay-stable
-  here; I did not trace which source it reads. The shim makes the question moot for workflows, not answered.
+- **What seeds QuickJS `Math.random`: determined by READING, not measured** (the plan asked). The QuickJS in `plugin/Cargo.lock`
+  (rquickjs-sys 0.12.2) runs `js_random_init` when a context is created and sets `ctx->random_state = js__gettimeofday_us()`
+  (`quickjs.c`, the `xorshift64star` generator); there is no `random_get` use. On wasm32-wasip1 `gettimeofday` is the WASI realtime
+  clock. In static mode the context is created during Wizer pre-initialisation, so the seed is whatever the clock said **at build
+  time** (a fixed value under `-C deterministic`) and every run continues the same sequence from the snapshot. I did not trace it at
+  run time; the shim replaces `Math.random` regardless.
 - **Timezone/locale.** `Intl` is absent. `new Date(0).toLocaleString()` is `"01/01/1970, 12:00:00 AM"` and
   `(1234567.891).toLocaleString()` is `"1234567.891"`, both replay-stable and not shimmed. Only a macOS host with no `TZ` was
   tried; a Linux worker, or a worker with `TZ` set, is untested.
@@ -95,9 +103,13 @@ What was measured (`evidence/phase2/pin.txt`, 13 of 13):
   shim removed, a module whose pin was edited, and a module with no pin section. It accepts the shipped one.
 - **A bump does not move an in-flight run.** A run suspended on v*a* kept executing on v*a* (`def_version` read from the worker
   log) across the deploy of a changed engine as v*b*; a run started afterwards used v*b*.
-- **Replay under a bumped engine is identical or refused, never silent.** The same persisted history, replayed in a Go harness on
-  wasmtime: the recorded engine (twice) and a benign bump (different bytes, same behaviour) give identical outcomes; a
-  behaviour-changing bump (random shim removed) is **refused with `replay divergence at step 0`**.
+- **Replay under a bumped engine is identical or refused, for a bump that changes a host-call input.** (Corrected 2026-11-13 on
+  cleat-review's checkpoint: this bullet used to say "never silent", which is wider than what was measured.) The same persisted
+  history, replayed in a Go harness on wasmtime: the recorded engine (twice) and a benign bump (different bytes, same behaviour)
+  give identical outcomes; a bump that changes a host-call input (random shim removed, so the recorded `cleat_random` call is
+  not made) is **refused with `replay divergence at step 0`**. **A bump that changes only pure computation feeding the result
+  (nothing passed to a host call) replays without error and returns the new value.** That is consistent with how the engine
+  compares a replayed call (service, operation and type, not the request bytes; PHASE3.md) but I did not run such a bump.
   The first version of this test reported a divergence even for the engine the run was recorded on, because the harness gave the
   replay a fresh random workflow id and the engine's random stream is derived per workflow. A replay must run under the run's own
   identity (`WithWorkflowID`, `WithDefName`, `WithDefVersion`).
@@ -178,3 +190,28 @@ The issue was **corrected** after I found my harness had been wrong; see the nex
       gocontrol/                      the Go twin (for cleat#3779)
       tools/tscheck/                  the static check, its fixtures and tests
       evidence/phase2/                raw output of the final run
+
+
+## Corrections after checkpoint 1 (cleat-review FINAL OK on f8674aca, seven corrections; all folded in 2026-11-13)
+
+| # | Asked | Done | Evidence |
+|---|---|---|---|
+| 1 | build from a fresh checkout | `bootstrap.sh` builds every input from the committed tree and now FAILS when a binary was not built from the committed HEAD (it exited 0 before) | `evidence/phase2/bootstrap.txt` |
+| 2 | Date facts as verdicts, with a known-positive | verdicts on VALUES for both `full` and `off-date`: `Date.now() === ctx.now()` is `true`; `dateElapsed` and `newDateElapsed` are `false`; `ctx.now()` reads 0 across the busy loop; known-positive `dateNative`: `false` on full, `true` on off-date and off-all. **One finding against the ask, below.** | `controls.txt` |
+| 3 | inject `crypto` and `setInterval` too | all seven absence sources now have an injected known-positive (added `setInterval`, `crypto`, `setTimeoutCall`) | `controls.txt`, `inject` lines |
+| 4 | the random shim must fail loudly | it now throws `cleat: Math.random: the host did not return a number: …`. Run against a plugin built with an injected fault (`CLEAT_FAULT=random-nonnumeric`, a host answering `{"suspended":true}`): strict build throws; the same build with the strict check removed returns `0`, replays identically and the run completes (the silent case) | `controls.txt` |
+| 5 | wording | the replay-bump bullet above and the Date paragraph above are corrected. **The Date wording asked for was not what the probe measured:** time is fixed between host calls (busy loop: 0) but ADVANCES at a host call and replays identically | `controls.txt` |
+| 6 | plugin hash independent of build path | **done**; cause was not what was guessed. See below | `evidence/phase3/pathindep.txt` |
+| 7 | midexec baseline too long | `ITERS` 120M to 60M (about 6 s unloaded); the kill is still sent 3 s in, so the run is still executing | `midexec.txt` |
+
+**Item 6, the cause.** `--remap-path-prefix` was tried first and changed nothing (same source, two directories, two hashes; 149,317
+bytes differ, and with `-C strip=symbols` as well 129,398 still do). The difference is in the code, not in strings: `plugin/Cargo.toml`
+reached the repository's Rust SDK as `path = "../../../crates/cleat-sdk"`, which lies **outside** the plugin's workspace root, and
+cargo hashes such a dependency by its absolute path. That hash goes into every symbol and into the order the linker lays things out.
+Reaching the same crates through symlinks **inside** the workspace (`plugin/vendor/cleat-sdk`, `plugin/vendor/cleat-macro`, relative
+symlinks, committed) removes it: one hash from two directories with no remapping at all. `phase3_pathindep.sh` rebuilds the plugin
+from a copy in a different directory and compares; **its known-positive** rebuilds the copy with the old dependency form and must
+differ (it does). A remap of the cargo home is still passed (`plugin-cargo.sh`) so a user's name is not embedded in panic strings;
+that is untested across users and only affects strings. **Not shown: two machines, two users, or a different CARGO_HOME.** What is
+shown is two directories, one user, one machine. `plugin-cargo.sh` is the one place the plugin is compiled; `build.sh` used to
+continue after a failed plugin compile (`|| true`) and so could init a stale artefact; it no longer does.
