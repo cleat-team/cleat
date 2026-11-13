@@ -1514,7 +1514,7 @@ public class HostCalls {
      * {@code pluginCall} is retained for backward compatibility.
      *
      * @param pluginName   name of the plugin (e.g. {@code "blobstore"},
-     *                     {@code "slacknotify"})
+     *                     {@code "slack-notify"})
      * @param functionName name of the function within the plugin
      *                     (e.g. {@code "put"}, {@code "send_message"})
      * @param inputJson    input JSON for the plugin function
@@ -1529,7 +1529,7 @@ public class HostCalls {
      * replay, same as {@link #cleatCall(String, String, String)}.
      *
      * @param pluginName   name of the plugin (e.g. {@code "blobstore"},
-     *                     {@code "slacknotify"})
+     *                     {@code "slack-notify"})
      * @param functionName name of the function within the plugin
      *                     (e.g. {@code "put"}, {@code "send_message"})
      * @param inputJson    input JSON for the plugin function

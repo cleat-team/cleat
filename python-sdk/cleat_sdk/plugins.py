@@ -497,7 +497,7 @@ class Plugins:
         """
         return self._call(
             self._h,
-            "eventtriggers",
+            "event-triggers",
             "await_event",
             {"event_type": event_type, "timeout_ms": timeout_ms},
             AwaitEventResult,
@@ -534,7 +534,7 @@ class Plugins:
         inp: dict = {"key": key}
         if context is not None:
             inp["context"] = context
-        return self._call(self._h, "featureflags", "evaluate_flag", inp, EvaluateFlagResult)
+        return self._call(self._h, "feature-flags", "evaluate_flag", inp, EvaluateFlagResult)
 
     # --------------------------------------------------------------------
     # kafkaconnect
@@ -575,7 +575,7 @@ class Plugins:
             inp["key"] = key
         if headers is not None:
             inp["headers"] = headers
-        return self._call(self._h, "kafkaconnect", "produce", inp, ProduceResult)
+        return self._call(self._h, "kafka-connect", "produce", inp, ProduceResult)
 
     # --------------------------------------------------------------------
     # notifications
@@ -660,7 +660,7 @@ class Plugins:
             inp["details"] = details
         return self._call(
             self._h,
-            "pagerdutyalert",
+            "pagerduty-alert",
             "trigger_incident",
             inp,
             TriggerIncidentResult,
@@ -692,7 +692,7 @@ class Plugins:
         """
         return self._call(
             self._h,
-            "pagerdutyalert",
+            "pagerduty-alert",
             "resolve_incident",
             {"config_id": config_id, "incident_key": incident_key},
             ResolveIncidentResult,
@@ -737,7 +737,7 @@ class Plugins:
             inp["channel"] = channel
         if blocks is not None:
             inp["blocks"] = blocks
-        return self._call(self._h, "slacknotify", "send_message", inp, SendMessageResult)
+        return self._call(self._h, "slack-notify", "send_message", inp, SendMessageResult)
 
     # --------------------------------------------------------------------
     # webhookingest
@@ -772,7 +772,7 @@ class Plugins:
             inp["event_type"] = event_type
         return self._call(
             self._h,
-            "webhookingest",
+            "webhook-ingest",
             "await_webhook",
             inp,
             AwaitWebhookResult,

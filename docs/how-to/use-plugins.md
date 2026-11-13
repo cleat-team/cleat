@@ -251,27 +251,40 @@ func EscalateToOnCall(h cleat.HostCalls, input string) error {
 }
 ```
 
-### Webhooks: register source and await event
+### Webhooks: await an inbound event
 
 ```go
 func AwaitWebhookEvent(h cleat.HostCalls, input string) error {
-    registerInput := map[string]interface{}{
-        "source_name":  "payment-webhook",
-        "event_types":  []string{"payment.confirmed", "payment.failed"},
-        "timeout_secs": 300,
+    // input is {"source_id": "<id>"}: the id POST /ingest/sources returned.
+    var in struct {
+        SourceID string `json:"source_id"`
     }
-    registerJSON, _ := json.Marshal(registerInput)
+    if err := json.Unmarshal([]byte(input), &in); err != nil {
+        return fmt.Errorf(`input must be {"source_id": "..."}: %w`, err)
+    }
+    req, _ := json.Marshal(map[string]string{
+        "source_id":  in.SourceID,
+        "event_type": "payment.confirmed",
+    })
 
-    resp, err := h.PluginCall("webhook-ingest", "await_webhook", string(registerJSON))
+    resp, err := h.PluginCall("webhook-ingest", "await_webhook", string(req))
     if err != nil {
-        return fmt.Errorf("webhook registration failed: %w", err)
+        return fmt.Errorf("await_webhook: %w", err)
     }
 
-    // resp contains the webhook payload once received.
+    // resp is {"found": true, "payload": ...} once a matching event is waiting
+    // and {"found": false} until then.
     h.SetQueryState("webhook_result", resp)
     return nil
 }
 ```
+
+`await_webhook` takes `source_id` (required), `event_type` and `keys`, and rejects any
+other field. **It is a single poll**: it returns `{"found": false}` at once when no
+event is waiting, so a workflow that has to wait calls it in a loop with a durable
+sleep between attempts. Creating the source, the signing secret and the master key
+the worker needs for it, delivering an event, and that loop are in
+[How to wait for an inbound webhook](wait-for-a-webhook.md).
 
 ## Plugin response formats
 
