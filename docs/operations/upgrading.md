@@ -34,8 +34,11 @@ each deployment shape does step 1:
 **A schema ahead of the binary starts.** During a rolling upgrade the migration job
 runs before the last old workers have been replaced; those workers see a schema newer
 than they know. They start, with a warning naming both versions, rather than refuse and
-wedge the rollout. This relies on migrations staying additive within a release line.
-A schema *behind* the binary is refused.
+wedge the rollout. This relies on migrations staying additive within a release line;
+the worker reports both versions and does not check that they are compatible.
+A schema *behind* the binary is refused. This is the mechanism, not a promise that two
+releases can run together: see
+[Worker binary upgrade](#worker-binary-upgrade-rolling-restart) for what is and is not tested.
 
 **Before you upgrade from a release that migrated on start:** anything that started a
 worker against a fresh or older database and relied on it migrating now needs a
@@ -44,9 +47,22 @@ un-migrated database exits with the message above.
 
 ## Worker binary upgrade (rolling restart)
 
-Cleat workers are stateless and horizontally scalable, making rolling upgrades
-straightforward. The worker handles SIGTERM gracefully, so you can rely on
-orchestrator-driven rolling updates.
+Cleat workers are stateless and horizontally scalable. A worker handles SIGTERM by
+draining in-flight work before it cancels (cleat#2285); it used to cancel at once and
+write the runs it interrupted as failed. So replacing workers one at a time does not
+fail the runs they were on.
+
+**That is about stopping one worker. It is not a statement that two releases can run
+side by side**, which a rolling update does for as long as it takes. What cleat checks
+across releases is the schema: a worker starts against a schema ahead of it and refuses
+one behind it (above). Nothing tests two different releases claiming and replaying the
+same runs together; the rolling-restart tests in `tests/upgrade` simulate replacing
+workers as goroutines claiming through one store, on PostgreSQL, all one version. So
+whether a given upgrade may be rolled is something that release's notes have to say.
+**0.5.0 to 0.6.0 may not: stop every 0.5.0 worker first** (the paragraph "Moving from
+0.5.0 to 0.6.0" under [Automatic migration](#automatic-migration-recommended)). For any
+other step, treat a rolling upgrade as untested unless the notes for that release say
+it is supported.
 
 ### Manual rolling restart
 
@@ -80,6 +96,10 @@ run again on the worker that picks the run up (at-least-once); see
 [What SIGTERM does](zero-downtime-deploy.md#what-sigterm-does).
 
 ### Kubernetes rolling update
+
+A rolling update runs the old and the new release side by side until it finishes. Read
+the note above first: it is not supported for 0.5.0 to 0.6.0, and untested otherwise
+unless the release notes say it is supported.
 
 ```bash
 # Update the worker image tag in your deployment manifest
