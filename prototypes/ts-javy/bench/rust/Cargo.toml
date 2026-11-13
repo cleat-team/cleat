@@ -1,0 +1,22 @@
+[package]
+name = "bench-rust"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cleat-sdk = { path = "../../../../crates/cleat-sdk" }
+cleat-macro = { path = "../../../../crates/cleat-macro" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Not a member of the repository's Cargo workspace (branch-only prototype; same as plugin/ and link/).
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
