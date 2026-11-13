@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +51,53 @@ func refusal(out, prefix string) string {
 	return ""
 }
 
+// appLogin3772 gives these tests a login of their OWN that is subject to row-level security and has
+// cleat_app's grants (it is a member of cleat_app and inherits them), and returns a DSN for it on the
+// scratch database. It is dropped when the test ends.
+//
+// IT DOES NOT TOUCH cleat_app. pgAppRoleDSN does: `ALTER ROLE cleat_app LOGIN PASSWORD ...` on a role
+// that is cluster-wide, so a run of these tests rewrote the password a concurrent harness on the same
+// server had set, and tests/crash's TestSIGTERM_d failed with `password authentication failed for user
+// "cleat_app"` while this ran beside it. A uniquely named login cannot collide with another test's.
+func appLogin3772(t *testing.T, owner *sql.DB, ownerDSN string) string {
+	t.Helper()
+	suffix := make([]byte, 6)
+	if _, err := rand.Read(suffix); err != nil {
+		t.Fatal(err)
+	}
+	pwBytes := make([]byte, 12)
+	if _, err := rand.Read(pwBytes); err != nil {
+		t.Fatal(err)
+	}
+	login := "cleat_3772_" + hex.EncodeToString(suffix)
+	pw := hex.EncodeToString(pwBytes)
+	if _, err := owner.Exec(`CREATE ROLE ` + login + ` LOGIN PASSWORD '` + pw + `' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE IN ROLE cleat_app`); err != nil {
+		t.Fatalf("UNMEASURED: creating this test's login (is the schema baseline applied?): %v", err)
+	}
+	t.Cleanup(func() { _, _ = owner.Exec(`DROP ROLE IF EXISTS ` + login) })
+	u, err := url.Parse(ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.User = url.UserPassword(login, pw)
+	dsn := u.String()
+	app, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { app.Close() })
+	// PRECONDITION: the login is not exempt from the policies. Without it "two tenants and it started" would
+	// say nothing about a role that is subject to them.
+	var exempt bool
+	if err := app.QueryRow(`SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&exempt); err != nil {
+		t.Fatalf("UNMEASURED: connecting as %s: %v", login, err)
+	}
+	if exempt {
+		t.Fatalf("UNMEASURED: %s bypasses row-level security, so it cannot stand for cleat_app", login)
+	}
+	return dsn
+}
+
 func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the worker binary")
@@ -66,6 +116,29 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/cleat-worker: %v\n%s", err, out)
 	}
+
+	// THE SHARED ROLE IS NOT TOUCHED. cleat_app is cluster-wide, and rewriting its password under another
+	// harness's feet is what broke tests/crash beside an earlier version of this test. Its password hash
+	// is read before and after, on the admin connection.
+	adminDB, err := sql.Open("postgres", c.admin())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { adminDB.Close() })
+	appHash := func() sql.NullString {
+		var h sql.NullString
+		if err := adminDB.QueryRow(`SELECT rolpassword FROM pg_authid WHERE rolname = 'cleat_app'`).Scan(&h); err != nil && err != sql.ErrNoRows {
+			t.Fatalf("UNMEASURED: reading cleat_app's password hash: %v", err)
+		}
+		return h
+	}
+	cleatAppBefore := appHash()
+	t.Cleanup(func() {
+		if after := appHash(); after != cleatAppBefore {
+			t.Errorf("these tests changed cleat_app's password: it is a cluster-wide role other tests connect as, so a " +
+				"concurrent harness fails with `password authentication failed for user \"cleat_app\"` (use appLogin3772)")
+		}
+	})
 
 	// migrated returns a fresh, migrated scratch database and the owner (superuser) DSN for it.
 	migrated := func(t *testing.T) (dsn string, owner *sql.DB) {
@@ -157,7 +230,7 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 	t.Run("two tenants on a role that is subject to RLS start, with --require-auth=false", func(t *testing.T) {
 		dsn, owner := migrated(t)
 		addTenant(t, owner, false)
-		app := pgAppRoleDSN(t, owner, dsn)
+		app := appLogin3772(t, owner, dsn)
 		if ok, out := startsHealthy(t, bin, "--driver=postgres", "--db="+app); !ok {
 			t.Fatalf("a worker on cleat_app with two tenants did not start:\n%s", out)
 		}
@@ -181,7 +254,7 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 
 	t.Run("the same --create-tenant on a role that is subject to RLS creates it (the control: the path works)", func(t *testing.T) {
 		dsn, owner := migrated(t)
-		app := pgAppRoleDSN(t, owner, dsn)
+		app := appLogin3772(t, owner, dsn)
 		code, out := runWorker(t, bin, nil, "--driver=postgres", "--db="+app,
 			"--create-tenant=second", "--org=00000000-0000-0000-0000-000000000000")
 		if code != 0 {
@@ -276,7 +349,7 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 
 	t.Run("the same POST on a role that is subject to RLS creates it (the control: the route works)", func(t *testing.T) {
 		dsn, owner := migrated(t)
-		app := pgAppRoleDSN(t, owner, dsn)
+		app := appLogin3772(t, owner, dsn)
 		status, body, ok := provision(t, owner, app)
 		if !ok {
 			t.Fatalf("UNMEASURED: the worker did not come up to be asked:\n%s", body)
