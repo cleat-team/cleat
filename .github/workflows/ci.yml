@@ -307,6 +307,16 @@ jobs:
           scripts/check-sdk-version-agreement.py
           LINT_GUARD_EOF
 
+      # What a failed soak says in its tracking issue (cleat#3736). The soak runs weekly and nothing watched
+      # it; a script that renders the report is only worth having if it is wired to something that runs, so
+      # its --self-test is here, against three real soak logs (scripts/testdata/soak-failure-report/).
+      - name: Soak failure report self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Soak failure report self-test" >> "$LINT_FAILURES_FILE"
+          python3 scripts/soak-failure-report.py --self-test
+          LINT_GUARD_EOF
+
       # ONE source for the Go toolchain: go.mod's `toolchain` line (cleat#2216). CI floated on
       # `go-version: stable` (which resolved to 1.27.1 the day #2215's panic appeared) and one workflow sat
       # on a hard-coded 1.26. Every go.mod/go.work carries the same go+toolchain pair, every setup-go step
