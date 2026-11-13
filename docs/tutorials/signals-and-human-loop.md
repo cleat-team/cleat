@@ -65,11 +65,17 @@ type ApprovalStatus struct {
     Comment   string `json:"comment,omitempty"`
 }
 
-//go:export submit_expense
-func submitExpense(h cleat.HostCalls, input ReportInput) (string, error) {
+// @cleatEntry(name="submit_expense")
+func SubmitExpense(h cleat.HostCalls, input string) (string, error) {
+    var report ReportInput
+    if err := json.Unmarshal([]byte(input), &report); err != nil {
+        return "", fmt.Errorf(
+            `input must be {"employee_id": ..., "amount_cents": ..., "description": ...}: %w`, err)
+    }
+
     h.DurableLog(fmt.Sprintf(
         "expense report received: employee=%s amount=%d description=%s",
-        input.EmployeeID, input.AmountCents, input.Description,
+        report.EmployeeID, report.AmountCents, report.Description,
     ))
 
     // Persist the report ID so it can be queried externally.
@@ -78,7 +84,7 @@ func submitExpense(h cleat.HostCalls, input ReportInput) (string, error) {
     h.SetQueryState("status", "pending_approval")
 
     // Check if this report even needs approval.
-    if input.AmountCents < 10000 { // under $100 -- auto-approve
+    if report.AmountCents < 10000 { // under $100 -- auto-approve
         h.DurableLog("amount below threshold, auto-approved")
         h.SetQueryState("status", "approved")
         return reportID, nil
@@ -124,6 +130,40 @@ func submitExpense(h cleat.HostCalls, input ReportInput) (string, error) {
 }
 ```
 
+Three details of the entry point are not optional:
+
+- **`// @cleatEntry(name="submit_expense")`** marks it, as in the project
+  `cleat init` generates. The name is what you start the run by in
+  `cleat.yaml`'s `entry_points`.
+- **The function name is exported** (`SubmitExpense`). `cleat build` finds
+  entry points among exported functions and reports `no workflow entry points
+  found` for a lower-case one.
+- **The input is one `string`**, which receives the whole input JSON as written,
+  and the function decodes it. A parameter of any other type binds by its Go
+  *name* (a parameter called `input` would need the run started with
+  `{"input": {"input": {...}}}`), and a run started the natural way fails with
+  `unmarshal input: unexpected end of JSON input` before any of your code runs.
+  `cleat build` prints a `W003` warning about the single `string` parameter;
+  for this shape it is expected.
+
+### Build and deploy it
+
+This assumes the worker and key from the [quick start](quick-start.md): Postgres
+running, the schema applied, the worker listening on `:8080`, and
+`CLEAT_API_KEY` set in the shell you run the commands below in.
+
+```bash
+cleat init expense-workflow
+cd expense-workflow
+# Replace main.go with the program above. In cleat.yaml, change the
+# entry_points list to:  - submit_expense
+cleat build -o out .
+cleat deploy \
+    --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
+    --name expense-workflow \
+    out/expense-workflow.wasm
+```
+
 ### Breaking it down
 
 | Line(s) | What it does |
@@ -136,40 +176,41 @@ func submitExpense(h cleat.HostCalls, input ReportInput) (string, error) {
 
 ### Auto-approval for small amounts
 
-The workflow checks `input.AmountCents < 10000` and skips the signal wait
+The workflow checks `report.AmountCents < 10000` and skips the signal wait
 entirely for expenses under $100. This is a common pattern: only involve a
 human when the risk warrants it.
 
 ## Sending signals
 
 While the workflow is paused waiting for the `approval` signal, send it via
-the REST API:
+the REST API. Like every `/api/workflows/*` route it needs your API key, and
+**`payload` is a string**: the JSON the workflow will decode goes inside it, so
+it is JSON inside JSON and its quotes are escaped. `RUN_ID` is the `id` that
+starting the run returned (the next section shows how to capture it).
 
 ```bash
-curl -X POST http://localhost:8080/api/workflows/<workflow_id>/signal \
+curl -X POST "http://localhost:8080/api/workflows/$RUN_ID/signal" \
+    -H "Authorization: Bearer $CLEAT_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{
         "signal_name": "approval",
-        "payload": {
-            "approved": true,
-            "reviewer": "jane.manager",
-            "comment": "Looks reasonable"
-        }
+        "payload": "{\"approved\": true, \"reviewer\": \"jane.manager\", \"comment\": \"Looks reasonable\"}"
     }'
+# {"idempotent_replay":false,"status":"delivered"}
 ```
+
+A payload that is a JSON object rather than a string is refused with
+`400 invalid JSON: json: cannot unmarshal object into Go struct field .payload of type string`.
 
 To reject:
 
 ```bash
-curl -X POST http://localhost:8080/api/workflows/<workflow_id>/signal \
+curl -X POST "http://localhost:8080/api/workflows/$RUN_ID/signal" \
+    -H "Authorization: Bearer $CLEAT_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{
         "signal_name": "approval",
-        "payload": {
-            "approved": false,
-            "reviewer": "jane.manager",
-            "comment": "Missing receipts"
-        }
+        "payload": "{\"approved\": false, \"reviewer\": \"jane.manager\", \"comment\": \"Missing receipts\"}"
     }'
 ```
 
@@ -228,11 +269,14 @@ is empty. Use this pattern for workflows with more than two outcomes.
 
 ## Complete end-to-end example
 
-Here is the full lifecycle of an expense report workflow:
+Here is the full lifecycle of an expense report, as one script. It captures the
+run's `id` with `sed` (so it needs nothing beyond `curl`), and the `sleep`s give
+the worker a moment to pick the run up and to resume it:
 
 ```bash
 # 1. Submit the expense report
-curl -X POST http://localhost:8080/api/workflows/expense-workflow/start \
+RUN_ID=$(curl -s -X POST http://localhost:8080/api/workflows/expense-workflow/start \
+    -H "Authorization: Bearer $CLEAT_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{
         "input": {
@@ -240,33 +284,39 @@ curl -X POST http://localhost:8080/api/workflows/expense-workflow/start \
             "amount_cents": 50000,
             "description": "Team lunch with client"
         }
-    }'
-# Response: {"workflow_id": "wf_exp_abc123", "status": "running"}
+    }' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+echo "run: $RUN_ID"
+sleep 3
 
 # 2. Check status -- should be "pending_approval"
-curl http://localhost:8080/api/workflows/wf_exp_abc123/query?key=status
-# Response: {"key": "status", "value": "pending_approval"}
+curl -s -H "Authorization: Bearer $CLEAT_API_KEY" \
+    "http://localhost:8080/api/workflows/$RUN_ID/query?key=status"
+# {"key":"status","value":"pending_approval"}
 
 # 3. Send the approval signal
-curl -X POST http://localhost:8080/api/workflows/wf_exp_abc123/signal \
+curl -s -X POST "http://localhost:8080/api/workflows/$RUN_ID/signal" \
+    -H "Authorization: Bearer $CLEAT_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{
         "signal_name": "approval",
-        "payload": {
-            "approved": true,
-            "reviewer": "jane.manager",
-            "comment": "Approved"
-        }
+        "payload": "{\"approved\": true, \"reviewer\": \"jane.manager\", \"comment\": \"Approved\"}"
     }'
-# Response: {"status": "signal_delivered"}
+# {"idempotent_replay":false,"status":"delivered"}
+sleep 3
 
 # 4. Verify the workflow completed
-curl http://localhost:8080/api/workflows/wf_exp_abc123/query?key=status
-# Response: {"key": "status", "value": "approved"}
+curl -s -H "Authorization: Bearer $CLEAT_API_KEY" \
+    "http://localhost:8080/api/workflows/$RUN_ID/query?key=status"
+# {"key":"status","value":"approved"}
 
-curl http://localhost:8080/api/workflows/wf_exp_abc123/query?key=approved_by
-# Response: {"key": "approved_by", "value": "jane.manager"}
+curl -s -H "Authorization: Bearer $CLEAT_API_KEY" \
+    "http://localhost:8080/api/workflows/$RUN_ID/query?key=approved_by"
+# {"key":"approved_by","value":"jane.manager"}
 ```
+
+The start response is `{"id":"<run id>","idempotent_replay":false}`. The query
+URLs are quoted because an unquoted `?` is a glob character in zsh. Each query
+reads one key, by design.
 
 ## Best practices
 
