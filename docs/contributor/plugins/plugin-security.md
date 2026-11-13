@@ -259,7 +259,8 @@ This matters for what the core tables guarantee a plugin. A plugin reading
 connection is subject to RLS -- a superuser bypasses it unconditionally, and
 the table's owner bypasses it unless the table is `FORCE`d. `engine.CheckRLSEnforced`
 exists to detect exactly that, and the worker refuses to start on a bypassing
-connection when `-rls-check` is left at its default.
+connection when `-rls-check` is left at its default, and, whatever it says, on any bypassing
+connection once the database holds more than one tenant (cleat#3772).
 
 ### What `DatabaseAccessReadOnly` guarantees, and what it does not
 

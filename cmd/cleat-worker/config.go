@@ -67,7 +67,10 @@ var (
 		"Row-level security enforcement check on startup. \"auto\" (the default) REFUSES "+
 			"to start on a connection that bypasses RLS, because --require-auth defaults "+
 			"true; it only warns if --require-auth=false. \"require\" always refuses, "+
-			"\"off\" skips the check. PostgreSQL only.")
+			"\"off\" skips the warning. Whatever it says, a connection that bypasses RLS "+
+			"and would serve more than one tenant (more than one row in admin.tenants, suspended "+
+			"ones counted) refuses to start, and POST /api/admin/tenants will not create a second "+
+			"tenant on one (cleat#3772). PostgreSQL only.")
 	driver      = flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
 	concurrency = flag.Int("concurrency", 10, "Max concurrent workflow executions")
 	// 200 is twenty workers' worth at the default --concurrency of 10, per
