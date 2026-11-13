@@ -192,9 +192,11 @@ produces, with each plugin that gained a migration since 0.5.0 recording it and 
 run's event history unchanged by the migration; then every run that was in flight
 completes on the release candidate (a step running at the kill, runs asleep on a timer or
 waiting on a signal, parents awaiting a child, and runs queued and never claimed), and a
-run whose recorded checksums were corrupted is refused. **PostgreSQL only so far**: the
-SQL Server and MySQL legs are tracked on cleat#3735 and are not yet in place. The
-workflow is not yet a *required* check on release branches.
+run whose recorded checksums were corrupted is refused. **PostgreSQL and SQL Server so
+far** (one job each, `Upgrade From v0.5.0 (PostgreSQL)` and `Upgrade From v0.5.0 (SQL
+Server)`): the MySQL leg is tracked on cleat#3735 and is not yet in place. On SQL Server
+the schema comparison includes column collations, because the 0.6.0 migrations changed
+several. The workflow is not yet a *required* check on release branches.
 
 **Moving from 0.4.0.** There is no export/import tool. The route is to run the two
 side by side until 0.4.0 has nothing left to do:
