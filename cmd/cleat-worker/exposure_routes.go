@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sort"
 
@@ -22,7 +23,9 @@ import (
 // wrong in a way no test would notice:
 //
 //  1. IT ANSWERS **404**, WITH THE SAME BODY THE ROUTE GIVES FOR A GENUINE
-//     MISS. The owner decision on #1986 is 404 rather than 403 so that an
+//     MISS -- when it has an answer. When it cannot READ the class it has none,
+//     and says so with a 503 instead (cleat#3785; see definitionIsInternal).
+//     The owner decision on #1986 is 404 rather than 403 so that an
 //     internal workflow's existence is not disclosed -- but a 404 whose body
 //     differs from the route's ordinary miss is exactly that disclosure, moved
 //     into the body. So callers pass the route's own not-found string rather
@@ -77,34 +80,71 @@ func (s *apiServer) refuseIfInternalRunLoaded(w http.ResponseWriter, r *http.Req
 // version-free question -- "does this NAME exist, and is any version of it
 // internal" -- is a different one, answered by refuseIfAbsentOrInternalDef.
 func (s *apiServer) refuseIfInternalDef(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name string, version int, notFound string) bool {
-	if !s.definitionIsInternal(r.Context(), st, name, version) {
-		return false
-	}
-	s.writeError(w, http.StatusNotFound, notFound)
-	return true
-}
-
-// definitionIsInternal is the single predicate all of the above reduce to.
-//
-// It FAILS CLOSED on a read error. This is an access check, and a check that
-// cannot determine the class must not serve the request -- on the run routes
-// the handler can carry on without the definition, so a transient def-read
-// error is otherwise the one path on which an `internal` run is served.
-//
-// The cost is real and accepted: a read error now answers the route's own
-// not-found rather than a 500, so an operator sees "not found" during a store
-// blip instead of a server error. That is the safe direction for an access
-// check, and it discloses nothing new -- not-found is already this route's
-// designed answer for "not yours to see".
-//
-// def == nil is NOT an error and must stay false: it means no such definition,
-// and the handler produces its own miss for that a moment later.
-func (s *apiServer) definitionIsInternal(ctx context.Context, st engine.WorkflowStore, name string, version int) bool {
-	def, err := st.GetWorkflowDef(ctx, name, version)
+	internal, err := s.definitionIsInternal(r.Context(), st, name, version)
 	if err != nil {
+		s.writeAccessCheckUnavailable(w, r, "the definition's exposure class", err)
 		return true
 	}
-	return rowIsInternal(def)
+	if internal {
+		s.writeError(w, http.StatusNotFound, notFound)
+		return true
+	}
+	return false
+}
+
+// definitionIsInternal is the single predicate all of the above reduce to. It returns an error when the
+// class could not be READ, and that is a different value from "internal" on purpose.
+//
+// IT FAILS CLOSED on a read error, and that is the security property: a check that cannot determine the
+// class must not serve the request. On the run routes the handler can carry on without the definition, so a
+// transient def-read error is otherwise the one path on which an `internal` run is served. The CALLER
+// refuses on the error (refuseIfInternalDef) and nothing here decides what to do with it.
+//
+// WHAT CHANGED, AND WHY (cleat#3785, decided by the coordinator, 2026-11-13). This used to return a bare
+// bool with `true` on any error, so a read error and an internal definition were the same value, and the
+// caller answered the route's own 404 for both. That cost was written down here as accepted: "a read error
+// now answers the route's own not-found rather than a 500". It turned out to be the wrong trade. A 404
+// tells a client the workflow does not exist and not to retry, so a database blip on a present, enabled
+// definition read as "workflow definition not found" (observed once, under load, starting a 19 MB Python
+// module), and the error was logged nowhere, so an operator could not tell a blip from a miss. The
+// security property was never in the status. Only the answer changed: a read error is a 503, which tells a
+// client to retry, with a log line; 404 is kept for "does not exist" and "internal", which are still the
+// same bytes (see the header, property 1).
+//
+// The class is read by the narrow read where the store has one (engine.DefExposureReader), because the
+// whole-row read this used to make selects `wasm_bytes` -- 19 MB for a Python module, and for a library
+// member a second read of its bytes -- to learn one short string, and is the read most likely to time out
+// under the load that makes any read fail. A store without it (a test double) is asked the wide way.
+//
+// def == nil / found == false is NOT an error and must stay "not internal": it means no such definition,
+// and the handler produces its own miss for that a moment later.
+func (s *apiServer) definitionIsInternal(ctx context.Context, st engine.WorkflowStore, name string, version int) (bool, error) {
+	if r, ok := st.(engine.DefExposureReader); ok {
+		class, found, err := r.GetWorkflowDefExposure(ctx, name, version)
+		if err != nil {
+			return false, err
+		}
+		return found && class.OrDefault() == engine.ExposureInternal, nil
+	}
+	def, err := st.GetWorkflowDef(ctx, name, version)
+	if err != nil {
+		return false, err
+	}
+	return rowIsInternal(def), nil
+}
+
+// writeAccessCheckUnavailable answers a request whose access check could not READ what it needed: 503, so
+// the client retries, with a Retry-After, and a log line that carries the error. The request is refused --
+// this is the fail-closed half, and a caller returns true on it -- but it is not a not-found, because the
+// workflow may well exist (cleat#3785).
+//
+// The driver's error is logged and NOT sent: it can carry hostnames, statement text and role names, and the
+// caller cannot act on any of it. The operator can, from the log.
+func (s *apiServer) writeAccessCheckUnavailable(w http.ResponseWriter, r *http.Request, what string, err error) {
+	slog.WarnContext(r.Context(), "could not read "+what+" to decide whether this request may proceed; refusing it with 503 (fail closed)",
+		"method", r.Method, "path", r.URL.Path, "error", err)
+	w.Header().Set("Retry-After", "1")
+	s.writeError(w, http.StatusServiceUnavailable, "the server could not check access to this workflow just now; retry shortly")
 }
 
 // rowIsInternal is the single definition of "this row is internal", applied to a
@@ -175,13 +215,13 @@ func rowIsInternal(def *engine.WorkflowDef) bool {
 //
 // A read error refuses rather than letting the handler proceed, for the reason
 // definitionIsInternal documents: a check that cannot determine the class must
-// not serve the request. The cost is the one already accepted there -- a store
-// blip answers not-found rather than 500 -- and it discloses nothing, because
-// not-found is already this family's designed answer for "not yours to see".
+// not serve the request. It answers 503 and logs, not the route's not-found,
+// for the reason definitionIsInternal gives (cleat#3785): a store blip is not a
+// miss, and a client told it was will not retry.
 func (s *apiServer) refuseIfAbsentOrInternalDef(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name, notFound string) bool {
 	defs, err := st.ListWorkflowDefs(r.Context(), name)
 	if err != nil {
-		s.writeError(w, http.StatusNotFound, notFound)
+		s.writeAccessCheckUnavailable(w, r, "the definition's versions", err)
 		return true
 	}
 	// Both arms answer with this route's own notFound, byte for byte, so the
@@ -208,7 +248,12 @@ func (s *apiServer) refuseIfAbsentOrInternalDef(w http.ResponseWriter, r *http.R
 // comparison has one home.
 func (s *apiServer) refuseIfAbsentOrInternalRun(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, runID, notFound string) bool {
 	wf, err := st.GetWorkflowByID(r.Context(), runID)
-	if err != nil || wf == nil {
+	if err != nil {
+		// A run that cannot be READ is not a run that does not exist (cleat#3785).
+		s.writeAccessCheckUnavailable(w, r, "the run", err)
+		return true
+	}
+	if wf == nil {
 		s.writeError(w, http.StatusNotFound, notFound)
 		return true
 	}

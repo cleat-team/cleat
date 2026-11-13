@@ -1,0 +1,4 @@
+test-go/engine	2	^TestTheExposureReadAnswersWhatGetWorkflowDefAnswersAndOnlyThat/(mysql|mssql)$	cleat#3785: the engine job's CLEAT_TEST_DB is Postgres-only, so of this test's registeredBackends arms only mysql and mssql skip; measured 2026-11-13 with CLEAT_TEST_POSTGRES alone.
+cluster	2	^TestTheExposureReadAnswersWhatGetWorkflowDefAnswersAndOnlyThat/(mysql|mssql)$	same test, same reason, byte-identical regex to the test-go/engine line (cleat#2158's required pairing): the cluster job's CLEAT_TEST_DB gives it Postgres only.
+multi-db/mysql	2	^TestTheExposureReadAnswersWhatGetWorkflowDefAnswersAndOnlyThat/(postgres|mssql)$	cleat#3785: this job sets only the MySQL DSN, so the other two arms skip; measured 2026-11-13 with CLEAT_TEST_MYSQL alone.
+multi-db/mssql	2	^TestTheExposureReadAnswersWhatGetWorkflowDefAnswersAndOnlyThat/(postgres|mysql)$	cleat#3785: this job sets only the SQL Server DSN, so the other two arms skip; measured 2026-11-13 with CLEAT_TEST_MSSQL alone.
