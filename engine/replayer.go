@@ -228,15 +228,24 @@ func truncatedCompactedEvents(cs *CompactionState) int {
 //
 // # Why this warns rather than failing the replay
 //
-// A repeated finalize double-counts: the row insert is idempotent but the
-// increment is unconditional, measured as event_count 3 -> 6 over two appends
-// of the same three records. That produces this exact signature with no history
-// missing. cleat#1507 records that the reachability of that path is NOT
-// established -- one caller, no retry, ErrFenceLost returns without
-// re-finalizing -- but "I could not construct it" is not "it cannot happen",
-// and failing a replay on a signal that might fire on a healthy workflow trades
-// a silent wrong answer for a loud one. Promoting this to a hard failure once
-// that path is closed is a one-line change; the reverse is not.
+// Until cleat#3779 event_count was "+ len(recs)" per append, which counts
+// append RECORDS and not rows: every wake at a still-pending await re-recorded
+// the same step, and a repeated finalize re-appended the same records, each
+// adding to the count and nothing to the rows (measured 3 -> 6 over two appends
+// of the same three records). That produced this exact signature on healthy
+// runs, and it is why the reachability question cleat#1507 left open never had
+// to be answered: the warning fired anyway. event_count is now SET to the
+// highest step plus one (eventCountAfter), which a re-record cannot inflate, so
+// a recorded > loaded reading is a real shortfall again -- but it is still a
+// counter written by a different statement from the rows it describes, so this
+// warns rather than failing the replay: failing on a signal that might fire on
+// a healthy workflow trades a silent wrong answer for a loud one. Promoting it
+// to a hard failure is a one-line change; the reverse is not.
+//
+// After compaction the loaded rows are FEWER than the steps, so `loaded` here is
+// the length of the merged replay history (compacted prefix restored from
+// compaction_state, plus the rows above it), and only a TruncatedCount in that
+// summary is subtracted: see the call site.
 func reportShortReplayHistory(recorded, loaded, truncated int) (short bool, missing int) {
 	// 0 is also what an unread or failed count looks like -- setup.go swallows
 	// GetEventCount's error and leaves the seed at zero -- and a check that
@@ -283,5 +292,5 @@ func (e *Engine) warnIfReplayHistoryIsShort(ctx context.Context, replayHistory [
 		"loaded_events", len(replayHistory),
 		"truncated_compacted_events", truncatedCompactedEvents(e.compactionState),
 		"missing", missing,
-		"note", "a tail may be missing, or a segment's finalize may have counted twice (cleat#1507)")
+		"note", "a tail of the history may be missing (cleat#1507)")
 }

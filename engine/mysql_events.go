@@ -281,13 +281,14 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
-	// Increment event_count on workflow_instances so GetEventCount and quota
-	// enforcement have an up-to-date count.
+	// Set event_count on workflow_instances so GetEventCount and quota enforcement
+	// have an up-to-date count: the highest step plus one, not "+ len(recs)" (see
+	// eventCountAfter, cleat#3779).
 	if incrementCount {
 		if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_instances SET event_count = event_count + ? WHERE id = ? AND tenant_id = ?
-	`, len(recs), workflowID, s.tenantID); err != nil {
-			return fmt.Errorf("append events in tx: increment event_count: %w", err)
+		UPDATE workflow_instances SET event_count = ? WHERE id = ? AND tenant_id = ?
+	`, eventCountAfter(recs), workflowID, s.tenantID); err != nil {
+			return fmt.Errorf("append events in tx: set event_count: %w", err)
 		}
 	}
 

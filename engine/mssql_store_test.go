@@ -2083,7 +2083,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_SuccessMock(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 		{match: "INSERT INTO event_history", affected: 1},
-		{match: "event_count = event_count"},
+		{match: "SET event_count = "},
 	})
 	defer db.Close()
 

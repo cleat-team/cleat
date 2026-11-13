@@ -2642,7 +2642,7 @@ func TestPostgresStore_AppendEventsInTx_ExecError(t *testing.T) {
 func TestPostgresStore_AppendEventsInTx_EventCountError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "INSERT INTO event_history", affected: 1},
-		{match: "event_count = event_count", err: errors.New("event count update failed")},
+		{match: "SET event_count = ", err: errors.New("event count update failed")},
 	})
 	defer db.Close()
 
@@ -2658,7 +2658,7 @@ func TestPostgresStore_AppendEventsInTx_EventCountError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "append events in tx: increment event_count") {
+	if !strings.Contains(err.Error(), "append events in tx: set event_count") {
 		t.Errorf("expected event_count error, got: %v", err)
 	}
 }
