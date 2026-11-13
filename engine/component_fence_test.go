@@ -191,7 +191,16 @@ func TestPythonComponentExecutionFence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWasmtimeBackend: %v", err)
 	}
-	const budget = 2 * time.Second
+	// 15s, not the 2s this used to be. The native component path compiles the ~19 MB
+	// component BEFORE it applies the fence, on every call and with no cache
+	// (cleat#3748), and that time is charged to ctx's deadline. A 2s budget was spent by
+	// the compile on a CI runner, so the guest never ran under the fence at all: the
+	// test passed because configureStore turned a spent deadline into a 1ms
+	// instance-timeout trap whose message happened to match the assertion below.
+	// cleat#3746 removed that clamp and this test went red with "execution timed out",
+	// which is how that came to light. The budget has to leave room for the compile,
+	// and still sit far below the 30s backend default it is distinguished from.
+	const budget = 15 * time.Second
 	eng := NewEngine(rt, &mockCaller{},
 		WithBackends(WasmtimeLanguages, wt),
 		WithDefaultWorkflowTimeout(budget),
@@ -215,13 +224,19 @@ func TestPythonComponentExecutionFence(t *testing.T) {
 		t.Errorf("error does not name the execution time limit, so the fence is not what "+
 			"stopped this: %v", execErr)
 	}
+	// And that the bound that applied was the caller's deadline: the guest ran, under the
+	// fence, and the deadline is what stopped it. "execution timed out" instead means the
+	// budget was gone before the guest started (the compile took longer than it).
+	if !strings.Contains(execErr.Error(), "the time left on the workflow's deadline") {
+		t.Errorf("the fence did not stop this on the caller's deadline: %v", execErr)
+	}
 
 	// Secondary, and deliberately loose. Its only job is to catch the specific
 	// regression of falling back to the backend-wide default
-	// (DefaultWasmtimeExecutionTimeout, 30s) instead of the 2s budget, so any
-	// threshold well between the two works and there is nothing to tune. It is
+	// (DefaultWasmtimeExecutionTimeout, 30s) instead of the 15s budget, so any
+	// threshold between the two (this one is 25s) works and there is nothing to tune. It is
 	// not measuring how promptly the fence fires.
-	if limit := DefaultWasmtimeExecutionTimeout / 2; elapsed > limit {
+	if limit := DefaultWasmtimeExecutionTimeout - 5*time.Second; elapsed > limit {
 		t.Errorf("budget was %s but execution ran %s (over %s): the fence fired on some "+
 			"deadline other than the caller's -- most likely the backend default of %s",
 			budget, elapsed, limit, DefaultWasmtimeExecutionTimeout)
