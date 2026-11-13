@@ -524,28 +524,37 @@ which the check would agree with a chain somebody had edited.
 
 ## Running old and new workers side by side
 
-Because workers are stateless and read workflow definitions from the database,
-old and new worker binaries can coexist during a rollout. The key compatibility
-rules are:
+**This is not supported for 0.5.0 to 0.6.0:** stop every 0.5.0 worker first (see
+[Moving from 0.5.0 to 0.6.0](#automatic-migration-recommended)). For any other step it is
+untested unless that release's notes say it is supported: no test in this repository runs
+two different releases against the same runs. Before 1.0 a minor release can change
+behaviour. What follows is how the pieces are designed to fit, and what each rests on.
 
 ### Database schema compatibility
 
-- **Minor/patch upgrades**: database schema changes are backward compatible.
-  Old workers ignore new columns and new tables. New workers handle the older
-  schema because migrations add columns with NULL defaults.
-- **Major upgrades**: the schema may change in non-backward-compatible ways.
-  Migrations are applied before any worker connects, so all workers see the
-  same schema. See [Major version upgrades](#major-version-upgrades).
+- A worker starts against a schema **ahead** of it, with a warning naming both versions, and
+  refuses one **behind** it (see [Migration is a deploy step](#migration-is-a-deploy-step)).
+  That is all that is checked. The design **relies on migrations staying additive within a
+  release line**; the worker reports both versions and does not check that they are
+  compatible.
+- **The 0.6.0 migrations are not all additive:** on SQL Server and MySQL they change column
+  collations (see the schema comparison under "Moving from 0.5.0 to 0.6.0"). A 0.5.0 worker
+  against that schema is the case no test covers.
+- Whether a later minor or patch release's migrations are additive is for that release's
+  notes. Do not infer it from the version number.
 
 ### Workflow definition compatibility
 
-- Old workers can execute workflows deployed as WASM blobs at any version.
-  The WASM binary is self-contained with its own host call imports.
-- New workers can execute older WASM blobs because the host call interface
-  is backward compatible within the same major version.
-- If the new binary introduces new host functions, old workers may fail to
-  execute workflows that use them. In practice, this is avoided because old
-  workers drain before new workflows are deployed.
+- A workflow definition is a WASM blob in the database, with its own host-call imports and an
+  `abi_version` in its metadata. A run executes the definition version it recorded.
+- **Nothing guarantees that a module built by one release runs on another.** A worker that
+  meets a module whose `abi_version` is higher than its own logs a warning and **runs it
+  anyway**; it does not refuse, and a host call the module expects may be missing
+  (cleat#1054). The ABI version is 1 in 0.5.0 and on the 0.6.0 development branch, so no
+  module can declare a higher one yet.
+- The host-call set (`engine/imports.go`) did not change between 0.5.0 and the 0.6.0
+  development branch as of 2026-11-13. That is an observation about two releases, not a
+  policy, and no test runs a module built by one release on a worker of another.
 
 ### Practical rollout window
 
@@ -623,10 +632,11 @@ the detour.
 
 **What to do instead**, in order of preference:
 
-1. **Roll the worker binary back and leave the schema forward.** This is the
-   supported path for a minor or patch upgrade, because those schema changes
-   are backward compatible by policy — see *Database schema compatibility*
-   below. An older worker runs against a newer schema.
+1. **Roll the worker binary back and leave the schema forward**, where the release's
+   migrations are additive. An older worker starts against a newer schema, but nothing
+   checks that the migrations were additive, so whether this is safe is for that release's
+   notes — see *Database schema compatibility* above. **For 0.5.0 to 0.6.0 it is untested**
+   (the 0.6.0 migrations change column collations), and the supported way back is item 2.
 2. **Restore from backup** if the schema change itself must be undone. Take the
    backup *before* the upgrade; this is the only way back from a major-version
    schema change, and it is why the checklist asks for one.

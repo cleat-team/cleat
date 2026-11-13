@@ -191,7 +191,9 @@ runtime role, no DDL rights needed) and:
 Ahead starts because a rolling upgrade migrates to the new version while workers on
 the old one are still running or restarting; refusing there would wedge the rollout
 on the workers it is replacing. It relies on migrations staying additive within a
-release line.
+release line. That is the schema's rule only: it does not make a rolling upgrade
+supported, and for 0.5.0 to 0.6.0 it is not (see
+[Upgrading](../operations/upgrading.md#automatic-migration-recommended)).
 
 ---
 

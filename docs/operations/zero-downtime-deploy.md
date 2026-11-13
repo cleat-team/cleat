@@ -5,6 +5,16 @@ running workflows. The strategy uses a blue/green deployment model: a new
 worker pool starts alongside the old pool, the old pool is drained, and the
 new pool handles all work before the old pool is removed.
 
+> **Read this before using the guide for a release upgrade.** The procedure below runs the
+> old and the new worker release side by side on one database. **That is not supported for
+> 0.5.0 to 0.6.0:** stop every 0.5.0 worker first (see
+> [Moving from 0.5.0 to 0.6.0](upgrading.md#automatic-migration-recommended)). For any
+> other step it is **untested**, unless that release's notes say it is supported: no test in
+> this repository runs two different releases against the same runs. Before 1.0 a minor
+> release can change behaviour, so read the UPGRADE NOTES at the top of `CHANGELOG.md`.
+> What is tested is draining one worker (SIGTERM, cleat#2285) and a worker starting against
+> a schema ahead of it.
+
 ## Prerequisites
 
 Before attempting a zero-downtime deployment, ensure:
@@ -79,8 +89,9 @@ tables. This is safe because:
   of which pool the worker belongs to.
 - **No coordination needed**: workers are stateless and do not communicate with
   each other. The database is the sole source of truth for workflow state.
-- **Version compatibility**: both worker versions must be within the same major
-  version (see [Compatibility during coexistence](#compatibility-during-coexistence)).
+- **Version compatibility**: untested across releases, and not supported for 0.5.0 to
+  0.6.0; see the note at the top of this page and
+  [Compatibility during coexistence](#compatibility-during-coexistence).
 
 ```bash
 # Both pools point at the same database URL
@@ -389,10 +400,10 @@ same database and execute workflows. The following must hold:
 
 | Component | Compatibility requirement |
 |-----------|--------------------------|
-| Worker binary | Same major version. Minor/patch differences are safe within a major version. |
+| Worker binary | **Untested across releases.** No test runs two different releases against the same runs, and before 1.0 a minor release can change behaviour. Not supported for 0.5.0 to 0.6.0: stop every 0.5.0 worker first. |
 | Database schema | Must be compatible with the oldest worker in the pool. Migrate before starting the green pool, with `cleat-worker --migrate-only`: a worker no longer migrates on start, and a blue worker on an older binary starts against the newer schema (with a warning) rather than refusing. |
-| WASM modules | WASM blobs are versioned in `workflow_defs`. Each instance runs the version recorded in `def_version`. The host call interface is backward compatible within a major version. |
-| CLI flags | New flags are ignored by old workers (they fail on unknown flags). Use a separate configuration for each pool if needed. |
+| WASM modules | WASM blobs are versioned in `workflow_defs`. Each instance runs the version recorded in `def_version`. **Nothing guarantees that a module built by one release runs on another.** A worker that meets a module whose `abi_version` is higher than its own logs a warning and runs it anyway, so a host call the module expects may be missing (cleat#1054). The ABI version is 1 in 0.5.0 and on the 0.6.0 development branch, so no module can declare a higher one yet. |
+| CLI flags | A worker rejects a flag it does not know at startup, so an old worker fails on a flag a newer release added. Give each pool its own configuration. |
 
 ### Mixing worker versions
 
