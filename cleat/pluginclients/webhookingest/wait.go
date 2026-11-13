@@ -25,6 +25,10 @@ const DefaultEventType = "webhook"
 // within <n>ms". That is how the engine reports it (a timeout is an error path
 // there, not a flag), and the order-lifecycle example turns it into a refusal.
 //
+// It is for waits of minutes. While no event arrives the engine re-checks about
+// every 6 s and records two history events each time: about 950 an hour, measured
+// (cleat#3806). Do not give it a window of hours or days.
+//
 // The wake signal's name is kept in here so a caller does not spell it. The wait
 // is durable and replay-safe: see PluginFunc.WaitFor and h.WaitForEvent.
 var AwaitWebhookWaiter = AwaitWebhook.WithWake(func(in AwaitWebhookInput) []string {
