@@ -32,27 +32,33 @@ log = W / "worker-p4.log"; log.write_bytes(b"")
 w = Worker(log); w.start()
 res = {l: [] for l in LANGS}
 bad = []
+refused = []
 def one(l):
-    ids = []
     t0 = time.time()
+    def try_start(_):
+        code, r = http("POST", f"/api/workflows/bench_{l}/start", key, {"input": inp(l)})
+        if code in (200, 201): return r["id"]
+        refused.append((l, code, str(r)[:120]))      # NEVER retried: a refusal of a deployed definition is a finding, not noise
+        return None
     with cf.ThreadPoolExecutor(8) as ex:
-        ids = list(ex.map(lambda _: start(key, f"bench_{l}", inp(l)), range(M[l])))
+        ids = [i for i in ex.map(try_start, range(M[l])) if i]
     t_started = time.time() - t0
+    if len(ids) != M[l]: print(f"  NOTE {l}: {M[l] - len(ids)} of {M[l]} start requests were refused; measuring the {len(ids)} that started", flush=True)
     arr = "ARRAY[" + ",".join(f"'{i}'" for i in ids) + "]"
     deadline = time.time() + 300
     while time.time() < deadline:
         st = dict((r.split("\t")[0], int(r.split("\t")[1])) for r in psql(f"SELECT status, count(*) FROM workflow_leases WHERE id = ANY({arr}) GROUP BY 1").splitlines() if r)
-        if sum(st.values()) == M[l] and set(st) <= {"done", "failed", "dead_lettered", "terminated", "cancelled"}:
+        if sum(st.values()) == len(ids) and set(st) <= {"done", "failed", "dead_lettered", "terminated", "cancelled"}:
             break
         time.sleep(0.05)
     else:
-        raise SystemExit(f"UNMEASURED: {l}: {M[l]} workflows did not all reach a terminal state in 300 s; last={st}")
+        raise SystemExit(f"UNMEASURED: {l}: {len(ids)} workflows did not all reach a terminal state in 300 s; last={st}")
     wall = time.time() - t0
     # correctness, not only speed: every run done, and its result is the right one (sum = N)
     sample = [json.loads(get(key, i).get("result") or "{}") for i in ids[:5] + ids[-5:]]
-    if st != {"done": M[l]} or any(s.get("sum") != N for s in sample):
+    if st != {"done": len(ids)} or any(s.get("sum") != N for s in sample):
         bad.append((l, st, sample[:2]))
-    return {"workflows": M[l], "wall_s": round(wall, 3), "start_phase_s": round(t_started, 3), "per_s": round(M[l] / wall, 2), "status": st, "load1": round(os.getloadavg()[0], 1)}
+    return {"workflows": len(ids), "refused_starts": M[l] - len(ids), "wall_s": round(wall, 3), "start_phase_s": round(t_started, 3), "per_s": round(len(ids) / wall, 2), "status": st, "load1": round(os.getloadavg()[0], 1)}
 print("\nthroughput (1 worker, PostgreSQL, sleep-free, 10 recorded host calls per workflow; start requests sent by 8 threads):")
 for r in range(ROUNDS):
     for l in LANGS:
@@ -60,6 +66,16 @@ for r in range(ROUNDS):
         print(f"  round {r + 1} {l:7s} {x['workflows']:4d} workflows in {x['wall_s']:7.2f} s = {x['per_s']:7.2f}/s   status={x['status']} load1={x['load1']}", flush=True)
 w.kill9()
 out["throughput"] = res
+out["refused_starts"] = refused
+# What the worker itself said while this ran (transparency about a shared, loaded machine): WARN/ERROR lines by message.
+import collections
+wl = collections.Counter()
+for line in log.read_text(errors="replace").splitlines():
+    try: d = json.loads(line)
+    except Exception: continue
+    if d.get("level") in ("WARN", "ERROR"): wl[(d["level"], d.get("msg", "")[:90])] += 1
+out["worker_warn_error_lines"] = {f"{k[0]} {k[1]}": v for k, v in wl.items()}
+print("\nworker WARN/ERROR lines during the run:", dict(wl) or "none")
 os.makedirs(HERE / "evidence" / "phase4", exist_ok=True)
 json.dump(out, open(HERE / "evidence" / "phase4" / "db.json", "w"), indent=1, sort_keys=True)
 med = lambda xs: sorted(xs)[len(xs) // 2]
@@ -67,5 +83,7 @@ print("\nmedian of rounds (best, worst):")
 for l in LANGS:
     p = [x["per_s"] for x in res[l]]
     print(f"  {l:7s} {med(p):7.2f}/s  ({max(p):.2f}, {min(p):.2f})")
+if refused:
+    print(f"FAIL: {len(refused)} start request(s) were refused (not retried):", refused[:5]); sys.exit(1)
 if bad:
     print("FAIL: runs that did not complete correctly:", bad); sys.exit(1)
