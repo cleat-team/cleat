@@ -45,13 +45,16 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/wasm"
 )
 
 const signalsTutorial = "docs/tutorials/signals-and-human-loop.md"
 
 var (
 	stGoFenceRe    = regexp.MustCompile("(?s)```go\n(.*?)```")
-	stEntryRe      = regexp.MustCompile(`// @cleatEntry\(name="([^"]+)"\)`)
+	stEntryFuncRe  = regexp.MustCompile(`(?m)^func ([A-Z]\w*)\(h cleat\.HostCalls,`)
+	stEntryNoteRe  = regexp.MustCompile(`// @cleatEntry\(name="([^"]+)"\)`)
 	stDocResponse  = regexp.MustCompile(`(?m)^# (\{.*\})\s*$`)
 	stPayloadKeyRe = regexp.MustCompile(`"payload"\s*:\s*(.)`)
 	stCurlRe       = regexp.MustCompile(`\bcurl\b`)
@@ -146,9 +149,16 @@ func TestSignalsTutorialExpenseIsApprovedAndRejected(t *testing.T) {
 		t.Fatalf("no ```go block in %s", signalsTutorial)
 	}
 	program := goBlocks[0][1]
-	entry := stEntryRe.FindStringSubmatch(program)
-	if entry == nil {
-		t.Fatalf("the page's program has no // @cleatEntry(name=\"...\") marker")
+	// The Go build names an entry point by its function (wasm.ToSnakeCase) and does
+	// not read the @cleatEntry comment, so the entry name is derived the way the
+	// build derives it, and the comment is only checked to agree (cleat#3792).
+	fn := stEntryFuncRe.FindStringSubmatch(program)
+	if fn == nil {
+		t.Fatalf("the page's program has no exported func (h cleat.HostCalls, ...) entry point")
+	}
+	entry := []string{"", wasm.ToSnakeCase(fn[1])}
+	if note := stEntryNoteRe.FindStringSubmatch(program); note != nil && note[1] != entry[1] {
+		t.Fatalf("the page's @cleatEntry comment says %q but the build will name the entry point %q", note[1], entry[1])
 	}
 
 	var e2e, reject string

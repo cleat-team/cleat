@@ -132,12 +132,16 @@ func SubmitExpense(h cleat.HostCalls, input string) (string, error) {
 
 Three details of the entry point are not optional:
 
-- **`// @cleatEntry(name="submit_expense")`** marks it, as in the project
-  `cleat init` generates. The name is what you start the run by in
-  `cleat.yaml`'s `entry_points`.
-- **The function name is exported** (`SubmitExpense`). `cleat build` finds
-  entry points among exported functions and reports `no workflow entry points
-  found` for a lower-case one.
+- **The function is exported, and its name is the entry point's name.**
+  `cleat build` finds entry points among exported functions that take
+  `cleat.HostCalls` first, and names each by its function name in snake case:
+  `SubmitExpense` is `submit_expense`, which is what `cleat.yaml`'s
+  `entry_points` must list. A lower-case name is not found at all
+  (`no workflow entry points found`).
+- **The `// @cleatEntry(name="submit_expense")` comment is the scaffold's
+  convention, and the Go build does not read it.** Changing the `name=` does not
+  rename the entry point (cleat#3792), so keep it equal to the snake-case
+  function name or leave it out.
 - **The input is one `string`**, which receives the whole input JSON as written,
   and the function decodes it. A parameter of any other type binds by its Go
   *name* (a parameter called `input` would need the run started with
