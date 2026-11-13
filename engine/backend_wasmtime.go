@@ -279,12 +279,6 @@ func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) Wasm
 	}
 }
 
-// errDeadlineBeforeGuest is what configureStore returns when ctx's deadline had
-// already passed before the guest started. It wraps context.DeadlineExceeded, so
-// errors.Is answers the question a caller has, and the executor reports it as
-// every other workflow-duration expiry: "execution timed out". cleat#3746.
-var errDeadlineBeforeGuest = fmt.Errorf("the workflow's deadline passed before the guest started: %w", context.DeadlineExceeded)
-
 // configureStore applies this backend's resource bounds to a freshly
 // created store, before it is used to instantiate or run any WASM code:
 //
