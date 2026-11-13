@@ -1615,6 +1615,14 @@ cosmetic. Today, on that shard:
 - the plugin-name registry and the override records of a deploy's plugin check are read and written
   (see [Deploying workflows](../how-to/deploy-workflows.md)).
 
+`--migrate-only` and `--migrate-on-start` migrate **every** shard's core schema (cleat#3718), and the plugin
+tables only on the admin shard. Before cleat#3718 they migrated the first shard alone and exited 0. Every
+shard's migration chain is checked before any is changed, and a shard that cannot be migrated fails the run
+naming it. `--migrate-db` names the first shard's migration connection only; the others are migrated through their
+own `conn_str`. A normal start checks **every** shard's migration chain and refuses, naming the shard, when one belongs to
+another release (the rule for the main database, cleat#3405); it verifies that the schema is not behind for the first shard
+only.
+
 Do not reorder the entries of a running deployment: the worker would start administering a different database.
 `cleatctl --db` names one database; for anything that reads the plugin registry, give it the admin shard's
 connection string.

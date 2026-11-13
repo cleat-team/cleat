@@ -539,7 +539,8 @@ var (
 			"Idempotent: a second run on a migrated database changes nothing. Safe to run while another --migrate-only "+
 			"or a --migrate-on-start worker migrates the same database: they queue on a named lock on every dialect. "+
 			"Exits BEFORE the worker registers or reads the secrets, so it needs no master key. Plugin migrations follow "+
-			"the same rule, and a plugin migration that fails fails the run. cleat#2117")
+			"the same rule, and a plugin migration that fails fails the run. With --shards-file the core migrations run on EVERY "+
+			"shard, plugin migrations on the first (the admin shard), and a shard that cannot be migrated fails the run, naming it. cleat#2117, cleat#3718")
 	migrateOnStart = flag.Bool("migrate-on-start", false,
 		"Let this worker apply pending migrations at startup, as every worker did before cleat#2117. Off by default: a "+
 			"normal start VERIFIES the schema and refuses to start, with the remediation in the message, if a migration "+
