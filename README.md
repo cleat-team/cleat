@@ -11,9 +11,14 @@
 
 ```bash
 git clone https://github.com/cleat-team/cleat && cd cleat
-go install github.com/cleat-team/cleat/cmd/cleat@latest
+GOTOOLCHAIN=go1.27.3 go install github.com/cleat-team/cleat/cmd/cleat@latest
 cleat dev --entry-point Greet --input '{"name":"Ada"}' ./testdata/hello/
 ```
+
+> **No C compiler, or `go install` fails with `disallowed LTO section`?** Install the
+> prebuilt `cleat` from the release assets instead -- no Go and no compiler needed,
+> ten seconds -- see [Installation](#installation). Building from source needs Go
+> **1.27.3 exactly** for now (the `GOTOOLCHAIN` above) and a C toolchain.
 
 <!-- Corrected 2026-08-09: this previously read
        docker compose up -d postgres
@@ -98,6 +103,9 @@ make setup
 #    Build into ./bin deliberately: `-o cleat` writes *inside* ./cleat/, which
 #    is a directory in this repo, so ./cleat stays a directory and is not
 #    runnable.
+#    Use Go 1.27.3: `export GOTOOLCHAIN=go1.27.3` first. Go 1.27.4 and newer
+#    cannot link wasmtime, and both of these fail with `disallowed LTO section`
+#    (cleat#3787; `make setup` in step 0 now says so rather than printing [OK]).
 go build -o ./bin/cleat ./cmd/cleat
 go build -o ./bin/cleat-worker ./cmd/cleat-worker
 
@@ -280,6 +288,65 @@ Start at the [Documentation Home](docs/index.md) to find the right page for your
 
 ## Installation
 
+**The quickest working install needs no Go and no compiler: the prebuilt release
+assets.** Building from source needs a C toolchain (the worker embeds the wasmtime
+runtime through cgo) and, until [cleat#3787](https://github.com/cleat-team/cleat/issues/3787)
+is resolved, **Go 1.27.3 -- not 1.27.4 or newer**. Both are explained below, because
+the failure for each is quiet.
+
+### Prebuilt release assets (Linux, amd64 and arm64)
+
+Needs only `curl` and `tar`. This installs `cleat` and `cleat-gen` to
+`/usr/local/bin` and the worker as a `.deb` (Debian, Ubuntu); it took ten seconds on
+a machine with nothing else installed:
+
+```bash
+ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+VER=$(curl -fsSL https://api.github.com/repos/cleat-team/cleat/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+BASE=https://github.com/cleat-team/cleat/releases/download/v$VER
+
+curl -fsSL $BASE/cleat_${VER}_linux_$ARCH.tar.gz | sudo tar -xz -C /usr/local/bin cleat cleat-gen
+curl -fsSLO $BASE/cleat-worker_${VER}_linux_$ARCH.deb && sudo dpkg -i cleat-worker_${VER}_linux_$ARCH.deb
+cleat-worker --verify-backend      # exits 0 only if the wasmtime backend is live
+```
+
+On a distro without `dpkg`, take `cleat-worker_${VER}_linux_$ARCH.tar.gz` from the same
+release instead. The `.deb` also installs a systemd unit -- see
+[Linux: `.deb` package](#linux-deb-package-with-a-systemd-unit) below. macOS has a
+`cleat_${VER}_darwin_*.zip` for the CLI, but **no prebuilt worker**; see
+[macOS](#macos-cleat-worker-needs-a-from-source-install).
+
+### From source (Go 1.27.3 and a C toolchain)
+
+**Use Go 1.27.3.** Go 1.27.4 and newer cannot link cleat: their cgo rejects the
+`libwasmtime.a` that wasmtime-go ships (`disallowed LTO section ".llvmbc" in #cgo
+LDFLAGS`, bytecodealliance/wasmtime-go#299; tracked as
+[cleat#3787](https://github.com/cleat-team/cleat/issues/3787) and
+[cleat#3701](https://github.com/cleat-team/cleat/issues/3701)). go.dev/dl serves the newest
+Go, so a fresh install of "Go 1.27+" is the broken one. Pin the toolchain for the
+command, and Go downloads 1.27.3 for you on first use:
+
+```bash
+export GOTOOLCHAIN=go1.27.3
+go install github.com/cleat-team/cleat/cmd/cleat@latest
+go install github.com/cleat-team/cleat/cmd/cleat-worker@latest
+go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
+cleat-worker --verify-backend      # exits 0 only if the wasmtime backend is live
+```
+
+**You need a C compiler, and `go install` will not tell you if you do not have one.**
+With none installed Go turns cgo off by itself: `go install` of the worker exits 0
+in seconds and installs a worker that cannot run a workflow. `cleat-worker
+--verify-backend` reports it, and the worker now refuses to start and says what to
+install. On Debian/Ubuntu install **`build-essential`** -- `gcc` alone fails on missing
+libc headers; on macOS, `xcode-select --install`.
+
+A worker built with Go 1.27.3 carries the standard-library advisory GO-2026-6859
+(`net/http`, fixed in 1.27.4), as do the release assets above; the hold on 1.27.4 is
+tracked in cleat#3701.
+
+### Homebrew
+
 macOS and Linux (with [Homebrew](https://brew.sh)):
 
 ```bash
@@ -289,27 +356,15 @@ brew install cleat-team/tap/cleat
 Installs `cleat`, `cleat-worker` and `cleat-gen` from source -- see
 "macOS: `cleat-worker` needs a from-source install" below for why -- and the
 tap is bumped automatically on every release (cleat#2068), so there is no
-version to track by hand.
+version to track by hand. It builds with whatever `go` Homebrew has, so while
+that is Go 1.27.4 or newer the build is expected to fail the same way; this has
+not been measured. If it does, use the from-source commands above.
 
-Anywhere with Go, or if you'd rather not add a tap:
+`@latest` resolves to the newest tagged release, which is behind the checkout:
+a checkout tracks ahead of any release, so build from the checkout rather than
+`@latest` when you are working in one.
 
-```bash
-# Install all CLI tools
-go install github.com/cleat-team/cleat/cmd/cleat@latest
-go install github.com/cleat-team/cleat/cmd/cleat-worker@latest
-go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
-```
-
-`@latest` resolves to the newest tagged release — **v0.3.2** at this writing —
-which is on the `develop` line, not a fork, and whose `deploy` accepts `--db`,
-`--name` and `--task-queue`. Re-derived 2026-10-03 for cleat#2999, which asked
-for the status to be stated here rather than only as a historical note: the
-earlier warning that `@latest` gave a v0.2.0 CLI with **no `--db`** belonged to
-that release and no longer applies. What does remain true is that the checkout
-tracks **ahead** of any release — 288 commits ahead of v0.3.2 — so build from a
-checkout rather than `@latest` when you are working in one.
-
-Or build from source: `git clone https://github.com/cleat-team/cleat.git && cd cleat && go install ./cmd/...`
+Or build from a checkout: `git clone https://github.com/cleat-team/cleat.git && cd cleat && GOTOOLCHAIN=go1.27.3 go install ./cmd/...`
 
 > If you are working **inside** a checkout of this repository -- following the
 > [Quick Start](#quick-start) above, or building workflows against the SDK in
@@ -368,6 +423,8 @@ for macOS as usual.
 .../cmd/cleat-worker@latest` both close that gap the same way: they compile
 the worker with CGO on your own machine, where the Xcode Command Line Tools
 that Homebrew and `go install` both already require guarantee a C toolchain.
+Use Go 1.27.3 for the `go install` form (`GOTOOLCHAIN=go1.27.3`; see
+[From source](#from-source-go-1273-and-a-c-toolchain) above).
 The formula's test block additionally runs `cleat-worker --verify-backend`, so
 a worker that cannot construct the backend fails the `brew install` rather
 than being discovered later.
