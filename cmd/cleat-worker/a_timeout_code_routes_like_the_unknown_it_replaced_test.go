@@ -80,3 +80,40 @@ func TestATimeoutCodeRoutesLikeTheUnknownItReplaced(t *testing.T) {
 		})
 	}
 }
+
+// The one history where the code does reach the record: the run's last durable
+// act was a call that exhausted its retries, and then the deadline expired. It
+// is dead-lettered by the exhaustion (the history, not the code), and its code
+// is the one develop wrote for it, retries_exhausted, whichever label the
+// engine put on the expiry. cleat#3752.
+func TestAnExhaustedRunWhoseDeadlineThenExpiredKeepsRetriesExhausted(t *testing.T) {
+	exhausted := engine.EventRecord{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted: connection refused", RetriesExhausted: true,
+	}
+	for _, code := range []string{engine.ErrUnknown.String(), engine.ErrTimeout.String()} {
+		t.Run("engine label "+code, func(t *testing.T) {
+			var sawDLQ, sawFail bool
+			var stored string
+			ms := &mockStore{}
+			ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+				sawDLQ, stored = true, errorCode
+				return nil
+			}
+			ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+				sawFail = true
+				return nil
+			}
+			w := newTestWorker(ms)
+			wf := testInstance("exhausted-then-expired-wf")
+			w.recordTerminalFailureWithHistory(wf, time.Now(), "host: workflow "+wf.ID+": execution timed out", code, "", []engine.EventRecord{exhausted}, nil)
+
+			if !sawDLQ || sawFail {
+				t.Fatalf("dead-letter=%v fail=%v, want dead-letter only", sawDLQ, sawFail)
+			}
+			if stored != engine.ErrRetriesExhausted.String() {
+				t.Errorf("stored error_code = %q, want %q: the dead-letter was decided by the exhaustion", stored, engine.ErrRetriesExhausted.String())
+			}
+		})
+	}
+}

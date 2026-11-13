@@ -27,6 +27,7 @@ import (
 func TestErrorCodeSaysRetriesExhausted(t *testing.T) {
 	unknown := engine.ErrUnknown.String()
 	permanent := engine.ErrPermanent.String()
+	timeout := engine.ErrTimeout.String()
 	exhaustedCode := engine.ErrRetriesExhausted.String()
 
 	cases := []struct {
@@ -49,6 +50,21 @@ func TestErrorCodeSaysRetriesExhausted(t *testing.T) {
 			want: permanent,
 			why: "ErrPermanent from a version check is information this signal does not have; " +
 				"trading it for a narrower answer would lose more than it gains",
+		},
+		{
+			// cleat#3752. A deadline expiry labelled timeout, on a run that ended
+			// on an exhausted call: the routing was decided by the exhaustion, so
+			// the code says so -- the same as the unknown it replaced.
+			name: "a timeout on an exhausted run is still retries_exhausted", errorCode: timeout, deadLettered: true,
+			want: exhaustedCode,
+			why:  "the dead-letter queue is triaged by why the run routed there, and develop wrote retries_exhausted",
+		},
+		{
+			// CONTROL for the row above: without the dead-letter, a timeout is
+			// the terminal cause and stays what the engine said.
+			name: "a timeout that was not dead-lettered stays timeout", errorCode: timeout, deadLettered: false,
+			want: timeout,
+			why:  "the upgrade is gated on the exhaustion signal, not applied to every timeout",
 		},
 		{
 			// CONTROL. The upgrade must be gated on the signal, not applied

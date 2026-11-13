@@ -8182,7 +8182,13 @@ func (w *Worker) notifyTerminal(wf *engine.WorkflowInstance, finalStatus string)
 // Extracted so it can be tested as a rule rather than mirrored in a test file:
 // a copy of a rule passes happily after the rule changes.
 func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
-	if deadLettered && errorCode == engine.ErrUnknown.String() {
+	// "timeout" is replaced too, and "unknown" is not the only code that gets
+	// it: the engine labels a workflow-deadline expiry timeout (cleat#3752), but a
+	// run dead-lettered because its last call exhausted its retries was routed on
+	// THAT, and the dead-letter queue is triaged by the reason it routed there.
+	// The deadline is the terminal cause only when nothing more specific was
+	// already recorded.
+	if deadLettered && (errorCode == engine.ErrUnknown.String() || errorCode == engine.ErrTimeout.String()) {
 		return engine.ErrRetriesExhausted.String()
 	}
 	return errorCode
