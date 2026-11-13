@@ -353,7 +353,11 @@ func (e *Engine) executeWithBackend(
 	// did not work: wasmtime-go does not observe ctx.Done() while fn.Call
 	// is in progress, so for an infinite loop fn.Call never returns and
 	// this line was never reached. See IMPROVEMENT-PLAN.md 1.5.
-	if callErr == nil && execCtx.Err() == context.DeadlineExceeded {
+	//
+	// Also the case where the deadline had passed before the guest started
+	// (errDeadlineBeforeGuest): the same outcome as any other workflow-duration
+	// expiry, rather than a guest that "failed". cleat#3746.
+	if (callErr == nil || errors.Is(callErr, errDeadlineBeforeGuest)) && execCtx.Err() == context.DeadlineExceeded {
 		if len(session.deferrals) > 0 {
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
