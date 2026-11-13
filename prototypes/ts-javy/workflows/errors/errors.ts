@@ -31,3 +31,11 @@ export const oom = workflow(async () => {
   const keep: string[] = [];
   for (let i = 0; ; i++) keep.push(("x" + i).repeat(1 << 16));
 });
+
+// A result that cannot be serialised. Before the trailing catch in workflow(), this surfaced only as "the workflow returned no
+// result"; it must name the cause.
+export const circular = workflow(async () => {
+  const a: Record<string, unknown> = {};
+  a.self = a;
+  return a;
+});

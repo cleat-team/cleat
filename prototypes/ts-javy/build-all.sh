@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 export GOWORK=off GOFLAGS=-mod=mod GOPROXY=off
-export CLEAT_DB_URL="postgres://postgres:postgres@127.0.0.1:54392/cleat?sslmode=disable"
+export CLEAT_DB_URL="$(python3 phase1_lib.py owner-dsn)"   # configurable: CLEAT_PROTO_* (phase1_lib.py)
 D=.work/cleatctl
 
 ./build-plugin-variant.sh full ""
@@ -13,8 +13,8 @@ for v in "off-date:date" "off-random:random" "off-lockdown:lockdown" "off-all:da
 
 for n in sleeper signaler parent racer finalizer journey busy; do ./build.sh "$n" "$n" | tail -1; $D deploy workflow "$n" ".work/$n.wasm" | tail -1; done
 SUSPEND_MODE=throw OUT_NAME=finalizer_throw ./build.sh finalizer finalizer | tail -1; $D deploy workflow finalizer_throw .work/finalizer_throw.wasm | tail -1
-./build.sh errors thrower,rejecter,late_thrower,raw_throw,oom | tail -1
-for n in thrower rejecter late_thrower raw_throw oom; do $D deploy workflow "$n" .work/errors.wasm | tail -1; done
+./build.sh errors thrower,rejecter,late_thrower,raw_throw,oom,circular | tail -1
+for n in thrower rejecter late_thrower raw_throw oom circular; do $D deploy workflow "$n" .work/errors.wasm | tail -1; done
 ./build.sh nondet nondet | tail -1
 
 # The Go twin for the engine-WARN control (cleat build, wasip1; kept in the nested module).

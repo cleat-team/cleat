@@ -5,7 +5,7 @@ import os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase1_lib import *
 
-key = (W / "p1.key").read_text().strip()
+key = KEY_FILE.read_text().strip()
 log = W / "worker-p1-replay.log"; log.write_bytes(b"")
 w = Worker(log); w.start()
 inp = {"sleepMs": 1500, "childMs": 600000}

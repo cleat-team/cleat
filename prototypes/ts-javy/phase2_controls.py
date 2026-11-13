@@ -6,7 +6,7 @@ import json, os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase1_lib import *
 
-key = (W / "p1.key").read_text().strip()
+key = KEY_FILE.read_text().strip()
 SOURCES = ["dateNow", "newDate", "dateElapsed", "newDateElapsed", "dateEqualsHostNow", "dateCall", "random", "randomRange", "intl", "toLocaleDate", "toLocaleNumber",
            "perfNow", "cryptoRandom", "weakRef", "finalizationRegistry", "setTimeout", "setInterval", "setTimeoutCall", "setTimeoutComputed"]
 VARIANTS = ["full", "off-date", "off-random", "off-lockdown", "off-all"]

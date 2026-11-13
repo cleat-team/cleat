@@ -206,6 +206,24 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
         // The host's random value is a full i64; a JS number is not, so it crosses as a decimal string.
         g.set("__cleat_random", Func::from(|| -> String { HostCalls.random().to_string() })).unwrap();
         g.set("__cleat_uuid", Func::from(|seed: String| -> String { HostCalls.uuid(&seed) })).unwrap();
+        // DurableLog: a host call the Go twin makes four times. Short-circuited once this segment has suspended, like the others.
+        g.set(
+            "__cleat_log",
+            Func::from(|message: String| {
+                if !cleat_sdk::is_suspended() {
+                    HostCalls.cleat_log(&message)
+                }
+            }),
+        )
+        .unwrap();
+        // The host's canonical JSON (ABI 6.3, cleat_json_stringify): parse and re-encode through Go's encoding/json, so keys are
+        // sorted and the byte form is the one every other language's SDK is meant to produce. Empty string = the host refused it
+        // (invalid JSON), which the SDK turns into an error rather than passing the text through.
+        g.set(
+            "__cleat_json_stringify",
+            Func::from(|text: String| -> String { HostCalls.json_stringify(&text).unwrap_or_default() }),
+        )
+        .unwrap();
         g.set("__cleat_workflow_id", Func::from(|| -> String { HostCalls.workflow_id() })).unwrap();
         g.set(
             "__cleat_set_query_state",

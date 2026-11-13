@@ -4,13 +4,13 @@ import json, os, re, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase1_lib import *
 
-key = (W / "p1.key").read_text().strip()
+key = KEY_FILE.read_text().strip()
 log = W / "worker-p1-errors.log"; log.write_bytes(b"")
 w = Worker(log); w.start()
 POLICY = re.compile(r"fd_seek|wasi|WASI|policy|unsupported import|forbidden", re.I)
 hung = []
 unmeasured = []
-for name in ("thrower", "rejecter", "late_thrower", "raw_throw", "oom"):
+for name in ("thrower", "rejecter", "late_thrower", "raw_throw", "oom", "circular"):
     mark = log.stat().st_size
     wid = start(key, name, {"__entry_point": name})
     t0 = time.time()

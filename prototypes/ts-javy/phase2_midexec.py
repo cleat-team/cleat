@@ -6,7 +6,7 @@ import json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase1_lib import *
 
-key = (W / "p1.key").read_text().strip()
+key = KEY_FILE.read_text().strip()
 ITERS = 120_000_000
 log = W / "worker-p2-midexec.log"; log.write_bytes(b"")
 w = Worker(log); w.start()

@@ -10,6 +10,9 @@
 // "throw Suspend" design the plan rejects. It exists only so a test can show a `finally` running under it.
 
 declare const SUSPEND_MODE: string | undefined;
+// Build-time switch for the Q4 red control: RESULT_CANONICAL=false sends the result as raw JSON.stringify, so a test can show a
+// multi-key result is NOT byte-identical to its Go twin without the host's canonical form (ABI 6.3, "SHOULD").
+declare const RESULT_CANONICAL: boolean | undefined;
 
 declare function __cleat_args(): string;
 declare function __cleat_result(json: string): void;
@@ -23,6 +26,8 @@ declare function __cleat_await_child(runId: string): string;
 declare function __cleat_now(): number;
 declare function __cleat_random(): string;
 declare function __cleat_uuid(seed: string): string;
+declare function __cleat_log(message: string): void;
+declare function __cleat_json_stringify(text: string): string;
 declare function __cleat_workflow_id(): string;
 declare function __cleat_set_query_state(key: string, value: string): void;
 declare function __cleat_side_effect(computed: string): string;
@@ -67,6 +72,12 @@ export interface Ctx {
   now(): number;
   random(): string;
   uuid(seed?: string): string;
+  /** Like `call`, but the request is already JSON TEXT (e.g. from `canonical`): sent as is, not stringified again. */
+  callRaw(service: string, operation: string, requestJson: string): Promise<unknown>;
+  /** DurableLog. */
+  log(message: string): void;
+  /** The host's canonical form of a JSON text (ABI 6.3): sorted keys, Go encoding/json byte form. Throws if the host refuses it. */
+  canonical(jsonText: string): string;
   sideEffect<T>(compute: () => T): Promise<T>;
   setQueryState(key: string, value: string): void;
 }
@@ -86,6 +97,13 @@ const ctx: Ctx = {
   now: () => __cleat_now(),
   random: () => __cleat_random(),
   uuid: (seed = "") => __cleat_uuid(seed),
+  callRaw: (service, operation, requestJson) => settle(__cleat_call(service, operation, requestJson)).then(parseJSON) as Promise<never>,
+  log: (message) => __cleat_log(message),
+  canonical: (jsonText) => {
+    const out = __cleat_json_stringify(jsonText);
+    if (out === "") throw new Error("the host refused to canonicalise: " + jsonText.slice(0, 80));
+    return out;
+  },
   sideEffect: <T>(compute: () => T) => settle<string>(__cleat_side_effect(JSON.stringify(compute()))).then((v) => parseJSON(v) as T),
   setQueryState: (key, value) => __cleat_set_query_state(key, value),
 };
@@ -95,6 +113,16 @@ const ctx: Ctx = {
  * reports the outcome through the plugin: a value becomes the JSON result, a rejection or a throw becomes an error
  * result, and a promise that never settles (a suspension) reports nothing, which the plugin turns into the sentinel.
  */
+// The workflow's result as text. Canonical by default: parsed and re-encoded by the host (Go encoding/json), so a TS result is
+// byte-identical to what a Go or Rust workflow returning the same value would produce. If the host refuses (it cannot, for text
+// JSON.stringify produced) the raw text is sent rather than losing the result.
+function resultText(v: unknown): string {
+  const raw = JSON.stringify(v);
+  if (typeof RESULT_CANONICAL !== "undefined" && RESULT_CANONICAL === false) return raw;
+  const canon = __cleat_json_stringify(raw);
+  return canon === "" ? raw : canon;
+}
+
 export function workflow<I = unknown, O = unknown>(fn: (ctx: Ctx, input: I) => O | Promise<O>): () => void {
   return function entry(): void {
     let input: I;
@@ -107,11 +135,14 @@ export function workflow<I = unknown, O = unknown>(fn: (ctx: Ctx, input: I) => O
     Promise.resolve()
       .then(() => fn(ctx, input))
       .then(
-        (v) => __cleat_result(JSON.stringify(v === undefined ? {} : v)),
+        (v) => __cleat_result(resultText(v === undefined ? {} : v)),
         (e) => {
           if (e instanceof SuspendSignal) return; // the throw-mode control only: a suspension that surfaced as an exception
           __cleat_fail(e instanceof Error ? `${e.name}: ${e.message}${e.stack ? "\n" + e.stack : ""}` : String(e));
         },
-      );
+      )
+      // An exception in the success handler above is NOT caught by the failure handler beside it, and would be dropped: the plugin
+      // would then report only "the workflow returned no result" and the cause (a result that will not serialise, say) is lost.
+      .catch((e) => __cleat_fail(`could not return the result: ${e instanceof Error ? e.message : String(e)}`));
   };
 }

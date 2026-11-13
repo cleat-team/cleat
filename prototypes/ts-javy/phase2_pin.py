@@ -55,7 +55,7 @@ if len(sys.argv) == 3 and sys.argv[1] == "check":
     why = engine_pin_problems(open(sys.argv[2], "rb").read())
     print("PIN OK" if not why else "REFUSED: " + "; ".join(why)); sys.exit(1 if why else 0)
 
-key = (W / "p1.key").read_text().strip()
+key = KEY_FILE.read_text().strip()
 res = []
 def verdict(name, ok, detail=""): res.append(ok); print(f"  {'PASS' if ok else 'FAIL'}  {name}{('  ' + detail) if detail else ''}", flush=True)
 
