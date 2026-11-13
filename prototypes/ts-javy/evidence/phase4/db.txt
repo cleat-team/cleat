@@ -1,0 +1,33 @@
+deploy:
+  Deployed bench_ts v1 (ABI v1, minVersion=1, 1122163 bytes, SHA256=e085cceb513de5ca)
+  Deployed bench_go v1 (ABI v1, minVersion=1, 4890563 bytes, SHA256=d34025ca9243e7a5)
+  Deployed bench_rust v1 (ABI v1, minVersion=1, 83820 bytes, SHA256=05222a9fddbb43b1)
+  Deployed bench_python v1 (ABI v1, minVersion=1, 19394396 bytes, SHA256=30d83bac4c8bc5aa)
+
+stored row (workflow_defs.wasm_bytes): octet_length = bytes as deployed; pg_column_size = bytes PostgreSQL stores (TOAST, compressed)
+  bench_go      v1 octet_length=4,890,563  pg_column_size=1,836,595  ratio=0.38
+  bench_python  v1 octet_length=19,394,396  pg_column_size=9,172,724  ratio=0.47
+  bench_rust    v1 octet_length=   83,820  pg_column_size=   46,312  ratio=0.55
+  bench_ts      v1 octet_length=1,122,163  pg_column_size=  651,823  ratio=0.58
+
+throughput (1 worker, PostgreSQL, sleep-free, 10 recorded host calls per workflow; start requests sent by 8 threads):
+  round 1 ts       200 workflows in   12.36 s =   16.18/s   status={'done': 200} load1=11.9
+  round 1 go       200 workflows in   13.03 s =   15.35/s   status={'done': 200} load1=10.8
+  round 1 rust     200 workflows in   11.11 s =   18.01/s   status={'done': 200} load1=10.9
+  round 1 python    60 workflows in    6.87 s =    8.73/s   status={'done': 60} load1=12.3
+  round 2 ts       200 workflows in   11.30 s =   17.71/s   status={'done': 200} load1=11.6
+  round 2 go       200 workflows in   11.84 s =   16.89/s   status={'done': 200} load1=11.0
+  round 2 rust     200 workflows in   11.07 s =   18.06/s   status={'done': 200} load1=10.2
+  round 2 python    60 workflows in    4.49 s =   13.38/s   status={'done': 60} load1=10.8
+  round 3 ts       200 workflows in   11.69 s =   17.10/s   status={'done': 200} load1=10.1
+  round 3 go       200 workflows in   12.46 s =   16.06/s   status={'done': 200} load1=10.6
+  round 3 rust     200 workflows in   11.95 s =   16.74/s   status={'done': 200} load1=10.5
+  round 3 python    60 workflows in    5.01 s =   11.98/s   status={'done': 60} load1=11.0
+
+worker WARN/ERROR lines during the run: {('WARN', "this worker's pools may open 74 of the 97 connections the server allows (max_connections=1"): 1, ('WARN', 'Reaper: skipping this tick -- recent database trouble on this worker, waiting out the reco'): 4, ('WARN', 'execution fenced out: run superseded by a later generation'): 18, ('WARN', 'Reaper: skipped its last several ticks in a row -- this worker has not reclaimed a stale r'): 1}
+
+median of rounds (best, worst):
+  ts        17.10/s  (17.71, 16.18)
+  go        16.06/s  (16.89, 15.35)
+  rust      18.01/s  (18.06, 16.74)
+  python    11.98/s  (13.38, 8.73)

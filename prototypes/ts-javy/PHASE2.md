@@ -31,10 +31,9 @@ Each `nondet` run records a value, suspends on a sleep, then REPLAYS and recompu
 layer actually holds." Measured answer: **it passes, so the engine's `clock_time_get` interception holds on its own and the Date
 shim is not load-bearing in this engine.** The two layers cannot be told apart by value either: `Date.now() === ctx.now()` is
 true with and without the shim, and a busy loop between two reads gives `Date.now() - a > 0` = `false` both ways (and `ctx.now()` reads
-0 across the same loop), i.e. the clock is frozen **between** host calls under either layer, so a branch on elapsed time takes the same
-path live and on replay. **It does advance AT a host call** (corrected 2026-11-13: cleat-review's wording was "fixed even across host
-calls", and the probe says otherwise): across two recorded side effects `Date.now()` moved by real time (22 ms with the shim, 15 ms
-without, in the run in `evidence/phase2/controls.txt`) and replay reproduced the very same figure. So time is a function of the
+0 across the same loop), i.e. the clock is frozen **between** recorded host calls under either layer, so a branch on elapsed time takes the same
+path live and on replay. **It does advance at a recorded host call (a `sideEffect`), not at a `ctx.now()` read** (corrected 2026-11-13: cleat-review's wording was "fixed even across host
+calls", and the probe says otherwise): across two recorded side effects `Date.now()` moved by real time (15 to 35 ms in the runs I made, with and without the shim; it is wall time, so the verdict asserts only "greater than 0 and equal on replay") and replay reproduced the very same figure. So time is a function of the
 recorded events, not constant within a segment, and it moves forward across a suspension as well. I hypothesised
 before running it that frozen-on-replay time would make live and replay diverge; the run says it does not. The shim stays as defence in
 depth against the interception policy changing; it is not a proven control, and I am not counting it as one.

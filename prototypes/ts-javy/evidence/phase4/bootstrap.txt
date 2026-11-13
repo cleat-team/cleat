@@ -1,0 +1,24 @@
+### tools
+  go: go1.27.3  rustc: 1.96.0  node: v26.4.0  docker: 29.8.2
+### the tree these binaries will be built from
+  HEAD a223d39ab58572a4068be0ab89a87b441f65cf29, 0 changed or untracked path(s)
+### javy (pinned in toolchain.lock)
+  javy 9.1.0  sha256(binary) 079e8e3c93a534c4
+### esbuild (package-lock.json, exact)
+  esbuild 0.28.2
+### the worker and cleatctl, from this tree's own engine (CGO on: wasmtime is the only backend)
+### the linker
+### PostgreSQL, the cleat_app role, a database, migrations and the API key
+created database cleat_p4
+{"time":"2026-11-13T15:11:31.987629-05:00","level":"INFO","msg":"migrations complete","worker_id":"4f25d0d19e7182af795c0
+wrote /Users/Shared/localssd/rcownie/cleat-wt-ts-fresh/prototypes/ts-javy/.work/p1.key
+### provenance
+  cleat-ts-proto provenance, written 2026-11-13T20:11:32+00:00
+  source tree: HEAD a223d39ab58572a4068be0ab89a87b441f65cf29; clean
+  .work/cleat-worker: sha256 821160ebb34ff207  built from a223d39ab585 modified=true at 2026-11-13T20:10:58Z  -> matches HEAD; vcs.modified=true ONLY because 1 verification output path(s) under evidence/ existed at build time
+  .work/cleatctl: sha256 15e292c2fd1800c8  built from a223d39ab585 modified=true at 2026-11-13T20:10:58Z  -> matches HEAD; vcs.modified=true ONLY because 1 verification output path(s) under evidence/ existed at build time
+  link/target/release/cleat-js-link: sha256 01d001aa78fa9ad1 (cargo, link/Cargo.lock)
+  .tools/javy: sha256 079e8e3c93a534c4  javy 9.1.0
+  toolchain: go version go1.27.3 darwin/arm64; rustc 1.96.0 (ac68faa20 2026-05-25); v26.4.0; 0.28.2
+  RESULT: every binary was built from the committed HEAD of a clean tree
+bootstrap complete

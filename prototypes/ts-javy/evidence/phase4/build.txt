@@ -1,0 +1,23 @@
+built .work/bench.wasm 1122163 bytes
+  Analyzing package cleatproto/bench/gobench...
+  Found 1 functions, 1 entry point(s), 1 in cleat closure.
+  Durable leaves: BenchSteps
+  Verifying HostCalls threading... OK
+
+  Generating WASM imports (7 host functions used)... OK
+  Generating host adapter... OK
+  Generating WASM exports (1 entry point(s))... OK
+  Auto-threading: no changes needed
+  Build directory: /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.CQqlalc97z
+  Compiling WASM module (go/wasip1)...
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.CQqlalc97z/gobench.wasm (4.7 MB)
+  Embedded metadata: gobench v1 (ABI v1)
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.CQqlalc97z/gobench.wasm.schema.json
+  Metadata stamped successfully.
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.6MCxOylrzd/bench_steps.wasm (18.5 MB)
+  Wrote /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T/tmp.6MCxOylrzd/bench_steps.wasm.schema.json
+4890563 .work/bench/go.wasm
+19394396 .work/bench/python.wasm
+83820 .work/bench/rust.wasm
+5398 .work/bench/ts_dynamic_not_runnable.wasm
+1122163 .work/bench/ts.wasm

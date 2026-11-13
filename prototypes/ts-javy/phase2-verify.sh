@@ -4,7 +4,8 @@
 # or a missing tool stops the run as UNMEASURED., from one script, on one freshly built tree. ~30 minutes. Exit 0 only if every part exits 0.
 #   evidence/phase1/*  evidence/phase2/*
 # To run beside someone else's run (a reviewer re-deriving a checkpoint), give yours its own database and port, then export them:
-#   export CLEAT_PROTO_PG_DB=cleat_mine CLEAT_PROTO_API_PORT=18773 CLEAT_PROTO_KEY_FILE=$PWD/.work/mine.key; ./provision-db.sh; ./phase2-verify.sh
+#   export CLEAT_PROTO_PG_DB=cleat_mine CLEAT_PROTO_API_PORT=18773 CLEAT_PROTO_KEY_FILE=$PWD/.work/mine.key; ./phase2-verify.sh
+# (just that: provision-db.sh needs .work/cleat-worker, which only bootstrap.sh builds, and bootstrap.sh already calls provision-db.sh)
 # The stale-worker handling only ever touches workers THIS checkout started (pidfile + this checkout's binary path).
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")"

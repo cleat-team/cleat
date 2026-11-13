@@ -1,0 +1,185 @@
+{
+ "host_calls_per_workflow": 10,
+ "refused_starts": [],
+ "rounds": 3,
+ "row": {
+  "bench_go": {
+   "file_bytes": 4890563,
+   "octet_length": 4890563,
+   "pg_column_size": 1836595,
+   "version": 1
+  },
+  "bench_python": {
+   "file_bytes": 19394396,
+   "octet_length": 19394396,
+   "pg_column_size": 9172724,
+   "version": 1
+  },
+  "bench_rust": {
+   "file_bytes": 83820,
+   "octet_length": 83820,
+   "pg_column_size": 46312,
+   "version": 1
+  },
+  "bench_ts": {
+   "file_bytes": 1122163,
+   "octet_length": 1122163,
+   "pg_column_size": 651823,
+   "version": 1
+  }
+ },
+ "throughput": {
+  "go": [
+   {
+    "load1": 10.8,
+    "per_s": 15.35,
+    "refused_starts": 0,
+    "start_phase_s": 2.252,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 13.026,
+    "workflows": 200
+   },
+   {
+    "load1": 11.0,
+    "per_s": 16.89,
+    "refused_starts": 0,
+    "start_phase_s": 1.752,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 11.84,
+    "workflows": 200
+   },
+   {
+    "load1": 10.6,
+    "per_s": 16.06,
+    "refused_starts": 0,
+    "start_phase_s": 1.964,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 12.455,
+    "workflows": 200
+   }
+  ],
+  "python": [
+   {
+    "load1": 12.3,
+    "per_s": 8.73,
+    "refused_starts": 0,
+    "start_phase_s": 2.907,
+    "status": {
+     "done": 60
+    },
+    "wall_s": 6.87,
+    "workflows": 60
+   },
+   {
+    "load1": 10.8,
+    "per_s": 13.38,
+    "refused_starts": 0,
+    "start_phase_s": 1.696,
+    "status": {
+     "done": 60
+    },
+    "wall_s": 4.485,
+    "workflows": 60
+   },
+   {
+    "load1": 11.0,
+    "per_s": 11.98,
+    "refused_starts": 0,
+    "start_phase_s": 2.128,
+    "status": {
+     "done": 60
+    },
+    "wall_s": 5.01,
+    "workflows": 60
+   }
+  ],
+  "rust": [
+   {
+    "load1": 10.9,
+    "per_s": 18.01,
+    "refused_starts": 0,
+    "start_phase_s": 0.821,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 11.106,
+    "workflows": 200
+   },
+   {
+    "load1": 10.2,
+    "per_s": 18.06,
+    "refused_starts": 0,
+    "start_phase_s": 0.839,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 11.074,
+    "workflows": 200
+   },
+   {
+    "load1": 10.5,
+    "per_s": 16.74,
+    "refused_starts": 0,
+    "start_phase_s": 1.079,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 11.949,
+    "workflows": 200
+   }
+  ],
+  "ts": [
+   {
+    "load1": 11.9,
+    "per_s": 16.18,
+    "refused_starts": 0,
+    "start_phase_s": 1.177,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 12.364,
+    "workflows": 200
+   },
+   {
+    "load1": 11.6,
+    "per_s": 17.71,
+    "refused_starts": 0,
+    "start_phase_s": 1.184,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 11.296,
+    "workflows": 200
+   },
+   {
+    "load1": 10.1,
+    "per_s": 17.1,
+    "refused_starts": 0,
+    "start_phase_s": 1.284,
+    "status": {
+     "done": 200
+    },
+    "wall_s": 11.693,
+    "workflows": 200
+   }
+  ]
+ },
+ "worker_warn_error_lines": {
+  "WARN Reaper: skipped its last several ticks in a row -- this worker has not reclaimed a stale r": 1,
+  "WARN Reaper: skipping this tick -- recent database trouble on this worker, waiting out the reco": 4,
+  "WARN execution fenced out: run superseded by a later generation": 18,
+  "WARN this worker's pools may open 74 of the 97 connections the server allows (max_connections=1": 1
+ },
+ "workflows_per_round": {
+  "go": 200,
+  "python": 60,
+  "rust": 200,
+  "ts": 200
+ }
+}
