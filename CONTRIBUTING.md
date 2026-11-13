@@ -287,6 +287,24 @@ for the full model.
    be merged. This includes DCO, semantic PR title, branch naming, CLA check
    (for first-time contributors), and the AI review gates.
 
+### Dependabot bumps of `web/` are rebuilt by hand
+
+`.github/dependabot.yml` has an npm entry that covers `/web`, and the required
+`Web Dashboard` check fails when the committed bundle in `cmd/cleat-worker/web/dist/`
+differs from a fresh build of `web/`. A bump that changes the bundle (a new `vite`
+or `svelte` changes the hashed asset names even when no source file moved) therefore
+opens red and stays red until the bundle is rebuilt. **The person enqueueing that PR
+does the rebuild**: check out the dependabot branch, run `npm ci && npm run build` in
+`web/` inside a container, and commit `cmd/cleat-worker/web/dist/` with `-s`. The exact
+commands are in "The committed bundle must match its source" in `web/README.md`.
+
+**It is manual on purpose** (cleat#3470). The obvious automation is a workflow that
+rebuilds and pushes, but a push made with the repository's own `GITHUB_TOKEN` starts
+no workflows, so the pushed head would carry none of the required checks and could
+never merge. A token whose pushes do start them would be a bot credential, which this
+project does not use, and the build must not hold one anyway: it runs code from the
+bumped packages.
+
 ## Quick setup
 
 For a one-command toolchain check:

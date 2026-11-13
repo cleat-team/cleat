@@ -244,7 +244,8 @@ not work with the repository's own token: a push made with `GITHUB_TOKEN` starts
 workflows, so the pushed head would carry none of the required checks and could never
 merge. It needs a token that does trigger them (a GitHub App or a PAT owned by a
 maintainer), and the build step must not run with that token, because it executes code
-from the bumped packages. Both need an owner decision and are not done (cleat#3470).
+from the bumped packages. Decided: it stays manual (cleat#3470), and who does it is written
+in CONTRIBUTING.md.
 
 ### Preview production build
 
