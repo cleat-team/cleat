@@ -237,6 +237,16 @@ def sql_run(driver: str, dsn: str, sql: str, tenant: str | None = None, pre: str
     return p.stdout.strip()
 
 
+def mssql_collate_clause(collation: str | None) -> str:
+    """` COLLATE <name>` for CREATE DATABASE, or "" when no collation was asked for.  The name is spliced into SQL,
+    and CREATE DATABASE takes no parameters, so it is held to what a collation name is made of."""
+    if not collation:
+        return ""
+    need(re.fullmatch(r"[A-Za-z0-9_]+", collation) is not None,
+         f"UPGRADE_MSSQL_COLLATION={collation!r} is not a collation name (letters, digits and underscores only)")
+    return f" COLLATE {collation}"
+
+
 def mssql_run(dsn: str, sql: str, tenant: str | None = None) -> str:
     return sql_run("sqlserver", dsn, sql, tenant)
 
@@ -341,7 +351,11 @@ class SQLServer:
             ALTER ROLE cleat_app_role ADD MEMBER cleat_app;""")
 
     def create_database(self, owner: str, name: str) -> None:
-        self.sql(owner, f"CREATE DATABASE [{name}]")
+        # Under UPGRADE_MSSQL_COLLATION when it is set, and that is the point of the variable: the harness creates
+        # the FRESH database it compares the upgraded schema with here, and a fresh database left at the server's
+        # default collation differs from a database the operator created under another one in every column that
+        # follows its collation, so the comparison could never pass (measured, cleat#3735: 251 columns each way).
+        self.sql(owner, f"CREATE DATABASE [{name}]{mssql_collate_clause(os.environ.get('UPGRADE_MSSQL_COLLATION'))}")
 
     def drop_database(self, owner: str, name: str) -> None:
         self.sql_or_empty(owner, f"IF DB_ID(N'{name}') IS NOT NULL BEGIN "
@@ -1581,6 +1595,15 @@ def self_test() -> int:
     except Unmeasured:
         check("dialect_of refuses a dialect the harness has not measured", True)
     check("only SQL Server passes -driver", (Postgres.driver_args, SQLServer.driver_args) == ([], ["-driver", "mssql"]))
+    check("no collation asked for adds no clause", (mssql_collate_clause(None), mssql_collate_clause("")) == ("", ""))
+    check("a collation asked for becomes a COLLATE clause",
+          mssql_collate_clause("SQL_Latin1_General_CP1_CS_AS") == " COLLATE SQL_Latin1_General_CP1_CS_AS")
+    for bad_name in ("x; DROP DATABASE y", "a b", "x'--"):
+        try:
+            mssql_collate_clause(bad_name)
+            check(f"a collation name {bad_name!r} is refused", False)
+        except Unmeasured:
+            check(f"a collation name {bad_name!r} is refused", True)
     # Needs a SQL Server, so it runs where one is named (the SQL Server job names it) and says so where it is not.
     ms_dsn = os.environ.get("UPGRADE_SELFTEST_MSSQL")
     if ms_dsn:
@@ -1590,6 +1613,21 @@ def self_test() -> int:
         except Unmeasured as e:
             check("sqlq reports a LATER statement that fails in the batch", "Divide by zero" in str(e))
         check("sqlq prints the first result set of a batch", mssql_run(ms_dsn, "SELECT 1; SELECT 2") == "1")
+        # The collation hook against a real server: the database comes back under the collation asked for, which is
+        # what a clause that parses and is then ignored would not do.
+        probe = f"cleat_upgrade_selftest_{os.getpid()}"
+        was = os.environ.get("UPGRADE_MSSQL_COLLATION")
+        os.environ["UPGRADE_MSSQL_COLLATION"] = "SQL_Latin1_General_CP1_CS_AS"
+        try:
+            SQLServer().create_database(ms_dsn, probe)
+            got = mssql_run(ms_dsn, f"SELECT CAST(DATABASEPROPERTYEX(N'{probe}', 'Collation') AS varchar(128))")
+            check("create_database creates the database under UPGRADE_MSSQL_COLLATION", got == "SQL_Latin1_General_CP1_CS_AS")
+        finally:
+            if was is None:
+                del os.environ["UPGRADE_MSSQL_COLLATION"]
+            else:
+                os.environ["UPGRADE_MSSQL_COLLATION"] = was
+            SQLServer().drop_database(ms_dsn, probe)
     else:
         print("  NOT RUN  sqlq batch-error cases: UPGRADE_SELFTEST_MSSQL names no SQL Server")
     ok_msg = "refusing to start: this database holds a foreign migration chain written by v0.4.0"

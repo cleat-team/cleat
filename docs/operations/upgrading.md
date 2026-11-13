@@ -193,7 +193,9 @@ run's event history unchanged by the migration; then every run that was in fligh
 completes on the release candidate (a step running at the kill, runs asleep on a timer or
 waiting on a signal, parents awaiting a child, and runs queued and never claimed), and a
 run whose recorded checksums were corrupted is refused. **On all three dialects**, one job each: `Upgrade From v0.5.0 (PostgreSQL)`, `(SQL Server)`
-and `(MySQL)`. On SQL Server and MySQL the schema comparison includes column collations,
+and `(MySQL)`, plus `(SQL Server, CS_AS)`, the SQL Server upgrade in a database created under the
+case-sensitive collation `SQL_Latin1_General_CP1_CS_AS` (it held on that and on a `_UTF8` collation when
+measured, cleat#3735; a database whose collation is not the default is not otherwise exercised). On SQL Server and MySQL the schema comparison includes column collations,
 because the 0.6.0 migrations changed several; on MySQL it also compares the tenant's own
 schema (where the runs live) to a fresh core schema. The workflow is not yet a *required* check on release branches.
 
