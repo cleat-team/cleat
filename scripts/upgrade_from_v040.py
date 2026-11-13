@@ -11,6 +11,9 @@ release candidate and run it.  cleat#3386, gate G4 of the 0.5.0 runbook.
     D79 (0.6.0 supports an in-place upgrade from 0.5.0) is `--from-version v0.5.0
     --expect upgrade`, cleat#3735.
 
+    --owner-db is a postgres:// or a sqlserver:// URL; the dialect is read from the scheme.  SQL Server
+    is `--expect upgrade` only (the 0.5.0 refusal gate, --expect refuse, was only ever measured on PostgreSQL).
+
 WHY THIS EXISTS.  tests/upgrade/ runs against a schema built fresh from
 migrations/, never against a database a released worker wrote.  Whether a
 database written by v0.4.0 can be migrated by the next release and then served
@@ -192,6 +195,230 @@ def psql_or_empty(dsn: str, sql: str) -> str:
         return psql(dsn, sql)
     except Unmeasured:
         return ""
+
+
+# --------------------------------------------------------------------------
+# dialects: PostgreSQL, and SQL Server (cleat#3735 PR 2)
+#
+# Everything in the seed and verify halves that is SQL goes through one of these, so the logic
+# above them is written once.  The PostgreSQL methods are the statements this file always ran.
+# --------------------------------------------------------------------------
+
+MSSQLQ_SRC = "./scripts/upgrade-from-v040/mssqlq"
+_mssqlq: Path | None = None
+
+
+def mssqlq_binary() -> Path:
+    """The SQL Server query helper (scripts/upgrade-from-v040/mssqlq), built once per process.
+
+    A Go program rather than sqlcmd for two reasons: the owner login is NOT exempt from row-level
+    security on SQL Server, so a read of a tenant table needs the session's tenant_id set on the SAME
+    connection as the query, and a CI runner is not promised a sqlcmd.
+    """
+    global _mssqlq
+    if _mssqlq is None:
+        need(shutil.which("go") is not None, "go is not installed; the SQL Server helper is a Go program")
+        out = Path(tempfile.gettempdir()) / f"cleat-mssqlq-{os.getpid()}"
+        p = subprocess.run(["go", "build", "-o", str(out), MSSQLQ_SRC], capture_output=True, text=True, cwd=REPO)
+        need(p.returncode == 0, f"could not build the SQL Server helper:\n{p.stderr.strip()[-400:]}")
+        _mssqlq = out
+    return _mssqlq
+
+
+def mssql_run(dsn: str, sql: str, tenant: str | None = None) -> str:
+    args = [str(mssqlq_binary()), "-dsn", dsn, "-sql", sql]
+    if tenant:
+        args += ["-tenant", tenant]
+    p = subprocess.run(args, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise Unmeasured(f"sql server query failed ({sql[:60]!r}): {p.stderr.strip()[:300]}")
+    return p.stdout.strip()
+
+
+class Postgres:
+    name = "postgres"
+    driver_args: list[str] = []
+    bad_log = ("panic:", "does not exist")
+
+    def sql(self, dsn: str, q: str, tenant: str | None = None) -> str:
+        return psql(dsn, q)
+
+    def sql_or_empty(self, dsn: str, q: str, tenant: str | None = None) -> str:
+        return psql_or_empty(dsn, q)
+
+    def app_dsn(self, owner: str) -> str:
+        return app_dsn(owner)
+
+    def swap_database(self, dsn: str, name: str) -> str:
+        return swap_database(dsn, name)
+
+    def provision_app_role(self, owner: str) -> None:
+        psql(owner, f"ALTER ROLE cleat_app LOGIN PASSWORD '{APP_ROLE_PASSWORD}'")
+
+    def create_database(self, owner: str, name: str) -> None:
+        psql(owner, f"CREATE DATABASE {name}")
+
+    def drop_database(self, owner: str, name: str) -> None:
+        psql(owner, f"DROP DATABASE IF EXISTS {name}")
+
+    # Where a run's status lives depends on the release that wrote the database: workflow_instances
+    # up to v0.4.0, workflow_leases from v0.5.0 (the storage split, which left workflow_instances
+    # without a status column).  Asked of the database, not assumed from the version string.
+    def status_table(self, owner: str, tenant: str | None) -> str:
+        return "workflow_leases" if psql(owner, "SELECT to_regclass('public.workflow_leases')").strip() else "workflow_instances"
+
+    schema_versions_sql = "SELECT string_agg(version, ' ' ORDER BY version) FROM schema_migrations"
+    plugin_steps_sql = "SELECT plugin_name||' '||max(version) FROM plugin_migrations GROUP BY plugin_name ORDER BY 1"
+    # One line per run: its event rows, in step order.  event_history is the history a resumed run replays and
+    # verifies, so a migration that rewrote, dropped or re-ordered a row would break a run that is merely PARKED,
+    # which a "did the runs finish" check finds only if it finishes.  The digest covers EVERY column the seeding
+    # release's table had, whole row by row, not a chosen few: the docs say the history is left as that release wrote
+    # it, and a payload column rewritten on a run passes a digest of step, event_type and checksum alone.  The column
+    # list is read from the seeded database and recorded in the manifest, so a column a later migration ADDS is not
+    # compared and one it rewrites is.
+    history_columns_sql = ("SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns "
+                           "WHERE table_schema = 'public' AND table_name = 'event_history'")
+
+    def history_digest_sql(self, columns: str) -> str:
+        cols = [c for c in columns.split(",") if c]
+        need(bool(cols), "the seeded database's event_history column list is empty, so its history cannot be digested")
+        row = ", ".join(f'"{c}"' for c in cols)
+        return (f"SELECT workflow_id||' '||count(*)||' '||md5(string_agg(row({row})::text, ',' ORDER BY step, event_type, checksum)) "
+                "FROM event_history GROUP BY workflow_id ORDER BY workflow_id")
+
+    def status_snapshot_sql(self, table: str) -> str:
+        return f"SELECT status, count(*) FROM {table} GROUP BY 1 ORDER BY 1"
+
+    def queued_sql(self, table: str, ids: str) -> str:
+        return (f"SELECT count(*) FROM {table} WHERE status = 'ready' AND assigned_to IS NULL AND id IN ({ids})")
+
+    def tamper_checksums(self, owner: str, tenant: str | None, rid: str) -> int:
+        rows = psql(owner, f"UPDATE event_history SET checksum = 'tampered-' || checksum "
+                           f"WHERE workflow_id = '{rid}' RETURNING 1")
+        return len(rows.splitlines())
+
+    def fingerprint(self, dsn: str, tenant: str | None) -> dict[str, list[str]]:
+        return schema_fingerprint(dsn)
+
+
+class SQLServer:
+    name = "mssql"
+    driver_args = ["-driver", "mssql"]
+    bad_log = ("panic:", "Invalid object name")
+
+    def sql(self, dsn: str, q: str, tenant: str | None = None) -> str:
+        return mssql_run(dsn, q, tenant)
+
+    def sql_or_empty(self, dsn: str, q: str, tenant: str | None = None) -> str:
+        try:
+            return mssql_run(dsn, q, tenant)
+        except Unmeasured:
+            return ""
+
+    def app_dsn(self, owner: str) -> str:
+        m = re.match(r"^(sqlserver://)([^@]*@)(.*)$", owner)
+        need(bool(m), "--owner-db must look like sqlserver://user:pass@host:port?database=db")
+        return f"{m.group(1)}cleat_app:{APP_ROLE_PASSWORD}@{m.group(3)}"
+
+    def swap_database(self, dsn: str, name: str) -> str:
+        need(re.search(r"[?&]database=[^&]*", dsn) is not None, "--owner-db has no ?database=")
+        return re.sub(r"([?&]database=)[^&]*", lambda mm: mm.group(1) + name, dsn)
+
+    def provision_app_role(self, owner: str) -> None:
+        # What deploy/mssql/900-app-role.sh does, minus its sqlcmd: a login, a user, and membership of the
+        # role the migrations created.  The owner login stays the migrator.
+        self.sql(owner, f"""
+            IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'cleat_app')
+                CREATE LOGIN cleat_app WITH PASSWORD = N'{APP_ROLE_PASSWORD}', CHECK_POLICY = OFF;
+            IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_app')
+                CREATE USER cleat_app FOR LOGIN cleat_app;
+            ALTER ROLE cleat_app_role ADD MEMBER cleat_app;""")
+
+    def create_database(self, owner: str, name: str) -> None:
+        self.sql(owner, f"CREATE DATABASE [{name}]")
+
+    def drop_database(self, owner: str, name: str) -> None:
+        self.sql_or_empty(owner, f"IF DB_ID(N'{name}') IS NOT NULL BEGIN "
+                                 f"ALTER DATABASE [{name}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
+                                 f"DROP DATABASE [{name}] END")
+
+    # No workflow_leases table exists on SQL Server at v0.5.0 (status stayed on workflow_instances).
+    def status_table(self, owner: str, tenant: str | None) -> str:
+        return ("workflow_leases" if self.sql(owner, "SELECT CASE WHEN OBJECT_ID(N'workflow_leases') IS NOT NULL "
+                                                     "THEN 1 ELSE 0 END") == "1" else "workflow_instances")
+
+    schema_versions_sql = ("SELECT STRING_AGG(CAST(version AS nvarchar(20)), ' ') WITHIN GROUP (ORDER BY version) "
+                           "FROM schema_migrations")
+    plugin_steps_sql = ("SELECT plugin_name + ' ' + CAST(MAX(version) AS varchar(10)) FROM plugin_migrations "
+                        "GROUP BY plugin_name ORDER BY plugin_name")
+    # event_history is row-level secured: this is read with the tenant's session context.  Every column the seeded
+    # release's table had goes into the digest (see Postgres.history_columns_sql).
+    history_columns_sql = ("SELECT STRING_AGG(CAST(column_name AS nvarchar(max)), ',') WITHIN GROUP (ORDER BY column_name) "
+                           "FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = 'dbo' AND table_name = 'event_history'")
+
+    def history_digest_sql(self, columns: str) -> str:
+        cols = [c for c in columns.split(",") if c]
+        need(bool(cols), "the seeded database's event_history column list is empty, so its history cannot be digested")
+        row = " + '|' + ".join(f"ISNULL(CAST([{c}] AS nvarchar(max)), N'~')" for c in cols)
+        return ("SELECT workflow_id + ' ' + CAST(COUNT(*) AS varchar(20)) + ' ' + CONVERT(varchar(32), "
+                f"HASHBYTES('MD5', STRING_AGG({row}, ',') WITHIN GROUP (ORDER BY step, event_type, checksum)), 2) "
+                "FROM event_history GROUP BY workflow_id ORDER BY workflow_id")
+
+    def status_snapshot_sql(self, table: str) -> str:
+        return f"SELECT status, COUNT(*) FROM {table} GROUP BY status ORDER BY status"
+
+    def queued_sql(self, table: str, ids: str) -> str:
+        return (f"SELECT COUNT(*) FROM {table} WHERE status = 'ready' AND assigned_to IS NULL AND id IN ({ids})")
+
+    def tamper_checksums(self, owner: str, tenant: str | None, rid: str) -> int:
+        out = self.sql(owner, f"SET NOCOUNT ON; UPDATE event_history SET checksum = 'tampered-' + checksum "
+                              f"WHERE workflow_id = '{rid}'; SELECT @@ROWCOUNT", tenant)
+        return int(out or 0)
+
+    def fingerprint(self, dsn: str, tenant: str | None) -> dict[str, list[str]]:
+        """What the schema IS, as sorted lines per facet.  Collations are part of it on purpose: D60 changed several."""
+        # Columns are returned as columns, not concatenated in SQL: the catalog views carry a different
+        # collation from this database's literals, and a `+` between them is error 451.  mssqlq joins with "|".
+        facets = {
+            "columns": "SELECT table_schema, table_name, column_name, data_type, is_nullable, character_maximum_length, "
+                       "collation_name FROM INFORMATION_SCHEMA.COLUMNS",
+            "indexes": "SELECT s.name, t.name, CASE WHEN kc.is_system_named = 1 THEN '(system-named)' ELSE i.name END, "
+                       "i.type_desc, i.is_unique, i.filter_definition FROM sys.indexes i "
+                       "JOIN sys.tables t ON t.object_id = i.object_id JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                       "LEFT JOIN sys.key_constraints kc ON kc.parent_object_id = i.object_id AND kc.unique_index_id = i.index_id "
+                       "WHERE i.name IS NOT NULL",
+            "functions": "SELECT s.name, o.name, CONVERT(varchar(32), HASHBYTES('MD5', ISNULL(OBJECT_DEFINITION(o.object_id), N'')), 2) "
+                         "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id "
+                         "WHERE o.type IN ('P', 'FN', 'IF', 'TF', 'V') AND o.is_ms_shipped = 0",
+            # A system-generated constraint name carries a hex suffix that differs per database; the
+            # name is replaced by its kind so two databases built the same way read the same.
+            "constraints": "SELECT s.name, t.name, CASE WHEN COALESCE(dc.is_system_named, cc.is_system_named, kc.is_system_named, "
+                           "fk.is_system_named) = 1 THEN '(system-named)' ELSE c.name END, c.type, "
+                           "COL_NAME(c.parent_object_id, dc.parent_column_id), OBJECT_DEFINITION(c.object_id) "
+                           "FROM sys.objects c JOIN sys.tables t ON c.parent_object_id = t.object_id "
+                           "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+                           "LEFT JOIN sys.default_constraints dc ON dc.object_id = c.object_id "
+                           "LEFT JOIN sys.check_constraints cc ON cc.object_id = c.object_id "
+                           "LEFT JOIN sys.key_constraints kc ON kc.object_id = c.object_id "
+                           "LEFT JOIN sys.foreign_keys fk ON fk.object_id = c.object_id "
+                           "WHERE c.type IN ('C', 'D', 'F', 'PK', 'UQ')",
+            "triggers": "SELECT s.name, t.name, tr.name, CONVERT(varchar(32), HASHBYTES('MD5', "
+                        "ISNULL(OBJECT_DEFINITION(tr.object_id), N'')), 2) FROM sys.triggers tr "
+                        "JOIN sys.tables t ON tr.parent_id = t.object_id JOIN sys.schemas s ON s.schema_id = t.schema_id",
+            "policies": "SELECT OBJECT_SCHEMA_NAME(p.object_id), p.name, OBJECT_SCHEMA_NAME(pr.target_object_id), "
+                        "OBJECT_NAME(pr.target_object_id), pr.predicate_type_desc, p.is_enabled, "
+                        "CONVERT(varchar(32), HASHBYTES('MD5', pr.predicate_definition), 2) FROM sys.security_policies p "
+                        "JOIN sys.security_predicates pr ON pr.object_id = p.object_id",
+        }
+        return {k: sorted(self.sql(dsn, q, tenant).splitlines()) for k, q in facets.items()}
+
+
+def dialect_of(dsn: str):
+    if dsn.startswith(("postgres://", "postgresql://")):
+        return Postgres()
+    if dsn.startswith("sqlserver://"):
+        return SQLServer()
+    raise Unmeasured("--owner-db must be a postgres:// or sqlserver:// URL")
 
 
 def http(method: str, url: str, key: str | None = None, body: dict | None = None,
@@ -461,16 +688,25 @@ class Worker:
 # seed
 # --------------------------------------------------------------------------
 
-def provision(worker_run, owner: str) -> tuple[str, str]:
-    """Create the cleat_app login, an org, a tenant and an API key; return (tenant, key)."""
+def provision(worker_run, owner: str, d) -> tuple[str, str]:
+    """Create an org, a tenant and an API key; return (tenant, key)."""
     def field(out: str, label: str) -> str:
         m = re.search(rf"{label}:\s+(\S+)", out)
         return m.group(1) if m else ""
 
-    org = field(worker_run(["-db", owner, "-create-org", "upgrade-seed-org"]), "Org ID")
-    need(bool(org), "-create-org produced no org id")
-    tenant = field(worker_run(["-db", owner, "-create-tenant", "upgrade-seed-tenant", "-org", org]), "Tenant ID")
-    need(bool(tenant), "-create-tenant produced no tenant id")
+    if d.name == "mssql":
+        # v0.5.0's -create-org and -create-tenant are PostgreSQL only ("auth: CreateOrg is not implemented for
+        # mssql", measured 2026-11-13), so on SQL Server the rows are written with SQL, as the engine's own tests
+        # do.  -generate-api-key does work there, and is what mints the key.  Fixed ids keep reruns readable.
+        org, tenant = "7f1c0a52-3b4e-4d6a-9c1e-0d79a0000001", "7f1c0a52-3b4e-4d6a-9c1e-0d79a0000002"
+        d.sql(owner, f"INSERT INTO admin.orgs (org_id, name) VALUES ('{org}', N'upgrade-seed-org'); "
+                     f"INSERT INTO admin.tenants (tenant_id, name, display_name, org_id) "
+                     f"VALUES ('{tenant}', N'upgrade-seed-tenant', N'upgrade-seed-tenant', '{org}')")
+    else:
+        org = field(worker_run(["-db", owner, "-create-org", "upgrade-seed-org"]), "Org ID")
+        need(bool(org), "-create-org produced no org id")
+        tenant = field(worker_run(["-db", owner, "-create-tenant", "upgrade-seed-tenant", "-org", org]), "Tenant ID")
+        need(bool(tenant), "-create-tenant produced no tenant id")
     key = field(worker_run(["-db", owner, "-generate-api-key", tenant]), "Key")
     need(bool(key), "-generate-api-key produced no key")
     return tenant, key
@@ -532,7 +768,8 @@ def cmd_seed(a) -> int:
     state.mkdir(parents=True, exist_ok=True)
     cache = Path(a.cache_dir).resolve()
     owner = a.owner_db
-    app = app_dsn(owner)
+    d = dialect_of(owner)
+    app = d.app_dsn(owner)
 
     mode = a.worker_mode or ("binary" if platform.system() == "Linux" else "docker")
     local_bin = Path(a.worker_bin).resolve() if a.worker_bin else None
@@ -547,6 +784,7 @@ def cmd_seed(a) -> int:
     wasm = build_workflows(cli, state / "build")
 
     def one_shot(args: list[str]) -> str:
+        args = d.driver_args + args
         p = v040.run(args)
         if p.returncode != 0:
             raise Unmeasured(f"{VERSION} worker {args[:3]} exited {p.returncode}: {(p.stdout + p.stderr).strip()[-400:]}")
@@ -554,15 +792,15 @@ def cmd_seed(a) -> int:
 
     log(f"migrating the database with {VERSION} and provisioning the cleat_app role")
     one_shot(["-db", owner, "-migrate-only"])
-    psql(owner, f"ALTER ROLE cleat_app LOGIN PASSWORD '{APP_ROLE_PASSWORD}'")
-    tenant, key = provision(one_shot, owner)
+    d.provision_app_role(owner)
+    tenant, key = provision(one_shot, owner, d)
 
     port = free_port()
     api = f"http://127.0.0.1:{port}"
     container = f"cleat-upgrade-seed-{os.getpid()}" if mode == "docker" else None
     flaky, flaky_url = start_failing_service()
-    common = ["-db", app, "-migrate-db", owner, "-api-addr", f":{port}", "-concurrency", "4",
-              "-poll", "200ms", "-bench-svc-url", flaky_url]
+    common = d.driver_args + ["-db", app, "-migrate-db", owner, "-api-addr", f":{port}", "-concurrency", "4",
+                              "-poll", "200ms", "-bench-svc-url", flaky_url]
     if container:
         # Attached, so the Popen is the container; --name lets kill9 find it.
         argv = ["docker", "run", "--network", "host", "--name", container, IMAGE] + common
@@ -631,11 +869,9 @@ def cmd_seed(a) -> int:
         worker.stop()
         flaky.shutdown()
 
-    # Where a run's status lives depends on the release that wrote the database: workflow_instances
-    # up to v0.4.0, workflow_leases from v0.5.0 (the storage split, which left workflow_instances
-    # without a status column).  Asked of the database, not assumed from the version string.
-    status_table = "workflow_leases" if psql(owner, "SELECT to_regclass('public.workflow_leases')").strip() else "workflow_instances"
-    snapshot = psql(owner, f"SELECT status, count(*) FROM {status_table} GROUP BY 1 ORDER BY 1")
+    # The table a run's status lives in is asked of the database, not assumed from the version string.
+    status_table = d.status_table(owner, tenant)
+    snapshot = d.sql(owner, d.status_snapshot_sql(status_table), tenant)
     log(f"statuses in the database when the {VERSION} worker stopped:")
     print(snapshot, flush=True)
     seen = {line.split("|")[0] for line in snapshot.splitlines()}
@@ -655,26 +891,41 @@ def cmd_seed(a) -> int:
     # 0.5 s before the kill, at --concurrency 4, so most of it has not been claimed; "most" is asked of the
     # database.
     burst_ids = ",".join(f"'{r['id']}'" for r in runs["burst"])
-    queued = int(psql(owner, f"SELECT count(*) FROM {status_table} WHERE status = 'ready' AND assigned_to IS NULL "
-                             f"AND id IN ({burst_ids})") or 0) if runs["burst"] else 0
+    queued = int(d.sql(owner, d.queued_sql(status_table, burst_ids), tenant) or 0) if runs["burst"] else 0
     need(queued > 0, "no burst run was left queued and unclaimed when the worker was killed, so a "
                      "run that has never been claimed is not covered; raise --count burst")
     log(f"in flight at the kill: running {snapshot_counts.get('running', 0)}, "
         f"waiting on a timer {len(runs['timer'])}, waiting on a signal {len(runs['signal'])}, "
         f"parents awaiting a child {len(runs['parent'])}, queued and unclaimed {queued}")
 
-    history_columns = psql_or_empty(owner, HISTORY_COLUMNS_SQL)
+    # What each finished run's status WAS when the seeding worker stopped, read from the database, so verify
+    # holds the upgrade to "nothing finished changed" rather than to an expectation about what the seeding
+    # release should have produced.  (On SQL Server v0.5.0, 6 of 10 dead-letter-mode runs ended `failed`,
+    # "service seed-flaky.Poison not configured: no endpoint registered", before any upgrade; on PostgreSQL
+    # all 10 were dead-lettered.  That is a fact about the seeding release, recorded here, not a finding.)
+    stopped = {}
+    for line in d.sql(owner, f"SELECT id, status FROM {status_table}", tenant).splitlines():
+        rid, _, st = line.partition("|")
+        stopped[rid] = st
+    status_by_run = {r["id"]: stopped.get(r["id"], "") for kind in ("ok", "fail", "deadletter") for r in runs[kind]}
+    need(all(status_by_run.values()), "a finished run's status could not be read back from the database")
+    log(f"dead-letter-mode runs at the stop: "
+        f"{sum(1 for r in runs['deadletter'] if status_by_run[r['id']] == 'dead_lettered')} dead_lettered of "
+        f"{len(runs['deadletter'])}")
+
+    history_columns = d.sql_or_empty(owner, d.history_columns_sql, tenant)
     manifest = {
         "version": VERSION, "seeded_by": str(local_bin) if local_bin else f"published {VERSION}",
-        "tenant": tenant, "api_key": key, "timer_seconds": a.timer_seconds,
+        "tenant": tenant, "api_key": key, "timer_seconds": a.timer_seconds, "status_by_run_at_stop": status_by_run,
         "stopped_at": time.time(), "counts": counts, "runs": runs,
         "status_at_stop": {l.split("|")[0]: int(l.split("|")[1]) for l in snapshot.splitlines()},
-        "migrations_by_v040": psql(owner, "SELECT string_agg(version, ' ' ORDER BY version) FROM schema_migrations"),
+        "migrations_by_v040": d.sql(owner, d.schema_versions_sql),
         # Recorded for --expect upgrade; "" where the seeding release has no such table or column, which
         # the refuse-mode seed (v0.4.0) must not fail on.
-        "plugin_steps_by_seed": psql_or_empty(owner, PLUGIN_STEPS_SQL),
+        "plugin_steps_by_seed": d.sql_or_empty(owner, d.plugin_steps_sql),
         "history_columns_by_seed": history_columns,
-        "history_digest_by_seed": psql_or_empty(owner, history_digest_sql(history_columns)) if history_columns else "",
+        "history_digest_by_seed": (d.sql_or_empty(owner, d.history_digest_sql(history_columns), tenant)
+                                   if history_columns else ""),
     }
     (state / "manifest.json").write_text(json.dumps(manifest, indent=1))
     log(f"seeded; manifest at {state / 'manifest.json'}")
@@ -710,27 +961,6 @@ def schema_fingerprint(dsn: str) -> dict[str, list[str]]:
         "SELECT schemaname||'.'||tablename||'.'||policyname||' '||md5(coalesce(qual,'')||'|'||coalesce(with_check,'')) "
         "FROM pg_policies")
     return {k: sorted(psql(dsn, q).splitlines()) for k, q in facets.items()}
-
-
-PLUGIN_STEPS_SQL = "SELECT plugin_name||' '||max(version) FROM plugin_migrations GROUP BY plugin_name ORDER BY 1"
-
-# One line per run: its event rows, in step order, reduced to what a migration must not touch.  event_history
-# is the history a resumed run replays and verifies, so a migration that rewrote, dropped or re-ordered a row
-# would break a run that is merely PARKED, which a "did the runs finish" check finds only if it finishes.
-# The digest covers EVERY column the seeding release's event_history had, whole row by row, not a chosen few: the
-# docs say the history is left as that release wrote it, and a payload column rewritten on a finished run passes a
-# digest of step, event_type and checksum alone.  The column list is read from the seeded database and recorded in the
-# manifest, so a column a later migration ADDS is not part of the comparison and one it rewrites is.
-HISTORY_COLUMNS_SQL = ("SELECT string_agg(column_name, ',' ORDER BY column_name) FROM information_schema.columns "
-                       "WHERE table_schema = 'public' AND table_name = 'event_history'")
-
-
-def history_digest_sql(columns: str) -> str:
-    cols = [c for c in columns.split(",") if c]
-    need(bool(cols), "the seeded database's event_history column list is empty, so its history cannot be digested")
-    row = ", ".join(f'"{c}"' for c in cols)
-    return (f"SELECT workflow_id||' '||count(*)||' '||md5(string_agg(row({row})::text, ',' ORDER BY step, event_type, checksum)) "
-            "FROM event_history GROUP BY workflow_id ORDER BY workflow_id")
 
 
 def parse_steps(text: str) -> dict[str, int]:
@@ -781,7 +1011,9 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
     if not str(m.get("seeded_by", "")).startswith("published"):
         log(f"CONTROL RUN: this database was seeded by {m.get('seeded_by')}, not by the published {VERSION}")
     owner = a.owner_db
-    app = app_dsn(owner)
+    d = dialect_of(owner)
+    app = d.app_dsn(owner)
+    tenant = m["tenant"]
     rc = Path(a.rc_worker).resolve()
     need(rc.exists() and os.access(rc, os.X_OK), f"--rc-worker {rc} is not an executable")
     findings: list[str] = []
@@ -792,8 +1024,8 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
 
     # -- 1. migrate ---------------------------------------------------------
     log(f"the RC's --migrate-only against the {VERSION} database")
-    before = psql(owner, "SELECT string_agg(version, ' ' ORDER BY version) FROM schema_migrations")
-    p = subprocess.run([str(rc), "-db", owner, "-migrate-only"], capture_output=True, text=True, cwd=REPO)
+    before = d.sql(owner, d.schema_versions_sql)
+    p = subprocess.run([str(rc)] + d.driver_args + ["-db", owner, "-migrate-only"], capture_output=True, text=True, cwd=REPO)
     out = p.stdout + p.stderr
     applying = len(re.findall(r"\[migration\] applying", out))
     print(f"    exit={p.returncode} applying-lines={applying} versions before: {before}", flush=True)
@@ -812,24 +1044,24 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
             finding(msg)
 
     judged(judge_history(m.get("history_digest_by_seed", ""),
-                         psql(owner, history_digest_sql(m.get("history_columns_by_seed", "")))))
+                         d.sql(owner, d.history_digest_sql(m.get("history_columns_by_seed", "")), tenant)))
     plugins = PINS.get(VERSION, {}).get("plugins_with_new_migrations")
     if plugins:
-        judged(judge_plugin_steps(m.get("plugin_steps_by_seed", ""), psql(owner, PLUGIN_STEPS_SQL), plugins))
+        judged(judge_plugin_steps(m.get("plugin_steps_by_seed", ""), d.sql(owner, d.plugin_steps_sql), plugins))
         print(f"    plugin migrations recorded for {', '.join(plugins)}", flush=True)
 
     # -- 2. does the upgraded schema equal a fresh RC schema? ----------------
     fresh_name = f"cleat_upgrade_fresh_{os.getpid()}"
-    fresh_owner = swap_database(owner, fresh_name)
-    psql(owner, f"CREATE DATABASE {fresh_name}")
+    fresh_owner = d.swap_database(owner, fresh_name)
+    d.create_database(owner, fresh_name)
     try:
-        q = subprocess.run([str(rc), "-db", fresh_owner, "-migrate-only"], capture_output=True, text=True, cwd=REPO)
+        q = subprocess.run([str(rc)] + d.driver_args + ["-db", fresh_owner, "-migrate-only"], capture_output=True, text=True, cwd=REPO)
         need(q.returncode == 0, f"the RC could not migrate a fresh database, so there is nothing to compare to:\n{(q.stdout+q.stderr)[-400:]}")
         fresh_applying = len(re.findall(r"\[migration\] applying", q.stdout + q.stderr))
         need(fresh_applying > 0, "the RC applied nothing to a FRESH database, so 'applying' lines are not countable here")
-        up_fp, fr_fp = schema_fingerprint(owner), schema_fingerprint(fresh_owner)
+        up_fp, fr_fp = d.fingerprint(owner, tenant), d.fingerprint(fresh_owner, tenant)
     finally:
-        psql(owner, f"DROP DATABASE IF EXISTS {fresh_name}")
+        d.drop_database(owner, fresh_name)
     for facet in up_fp:
         only_up = sorted(set(up_fp[facet]) - set(fr_fp[facet]))
         only_fr = sorted(set(fr_fp[facet]) - set(up_fp[facet]))
@@ -850,16 +1082,14 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
     # await_child is two events, each checksummed over the one before.
     ctl_parent = m["runs"]["parent"][-1]
     tampered = ctl_parent["id"]
-    rows = psql(owner, f"UPDATE event_history SET checksum = 'tampered-' || checksum "
-                       f"WHERE workflow_id = '{tampered}' RETURNING 1")
-    if not rows:
+    if d.tamper_checksums(owner, tenant, tampered) == 0:
         raise Unmeasured(f"the checksum control run {tampered} has no event_history rows to corrupt")
 
     # -- 3. serve ------------------------------------------------------------
     port = free_port()
     api = f"http://127.0.0.1:{port}"
     log(f"starting the RC worker on {api}")
-    worker = Worker([str(rc), "-db", app, "-migrate-db", owner, "-api-addr", f":{port}",
+    worker = Worker([str(rc)] + d.driver_args + ["-db", app, "-migrate-db", owner, "-api-addr", f":{port}",
                      "-concurrency", "4", "-poll", "200ms"], state / "rc-worker.log", api)
     try:
         worker.wait_healthy()
@@ -870,27 +1100,30 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
         stopped_terminal = {rid for rid in
                             (r["id"] for kind in ("ok", "fail", "deadletter") for r in m["runs"][kind])}
         wrong = []
+        recorded = m.get("status_by_run_at_stop", {})
         for kind, want in (("ok", {"done"}), ("fail", {"failed"}), ("deadletter", {"dead_lettered", "failed"})):
             for r in m["runs"][kind]:
                 got = status_of(api, key, r["id"])
-                if got not in want:
-                    wrong.append((kind, r["id"], got))
+                if got not in want or (r["id"] in recorded and got != recorded[r["id"]]):
+                    wrong.append((kind, r["id"], got, recorded.get(r["id"])))
         if wrong:
             finding(f"{len(wrong)} finished run(s) read a different status under the RC; first: {wrong[:3]}")
 
         # A DONE run's event history is deleted at finalize, by design (CLAUDE.md,
         # --retention-days), so only a dead-lettered run still has events to read.
-        for r in m["runs"]["deadletter"][:3]:
+        dead_lettered = [r for r in m["runs"]["deadletter"] if recorded.get(r["id"], "dead_lettered") == "dead_lettered"]
+        need(bool(dead_lettered), "no dead-letter-mode run was dead-lettered at the seed, so dead-letter reads are not covered")
+        for r in dead_lettered[:3]:
             code, hist = http("GET", f"{api}/api/workflows/{r['id']}/history", key)
             if code != 200 or not isinstance(hist, list) or not hist:
                 finding(f"history of dead-lettered run {r['id']} is not readable under the RC (HTTP {code})")
                 break
         code, dl = http("GET", f"{api}/api/dead-letters?limit=1000", key)
         listed = {w.get("id") for w in dl} if code == 200 and isinstance(dl, list) else set()
-        missing = [r["id"] for r in m["runs"]["deadletter"] if r["id"] not in listed]
+        missing = [r["id"] for r in dead_lettered if r["id"] not in listed]
         if code != 200 or missing:
             finding(f"GET /api/dead-letters answered {code} and lacks {len(missing)} of "
-                    f"{len(m['runs']['deadletter'])} dead-lettered run(s): {missing[:3]}")
+                    f"{len(dead_lettered)} dead-lettered run(s): {missing[:3]}")
 
         for path in ("/api/workflows?limit=5", "/api/definitions", "/api/schedules"):
             code, _ = http("GET", api + path, key)
@@ -952,7 +1185,7 @@ def verify_upgrade(a, state: Path, m: dict) -> int:
 
         low = worker.tail(200)
         # "checksum mismatch" is NOT here: the control run above makes it appear on purpose.
-        for pat in ("panic:", "does not exist"):
+        for pat in d.bad_log:
             if pat in low:
                 finding(f"the RC worker log contains {pat!r}")
     finally:
@@ -1032,6 +1265,8 @@ def verify_refusal_and_fresh(a, state: Path, m: dict) -> int:
     RC being broken.  So FRESH runs first and gates the verdict on REFUSAL.
     """
     owner = a.owner_db
+    need(dialect_of(owner).name == "postgres",
+         "--expect refuse is the 0.5.0 gate (D18) and was only ever measured on PostgreSQL; use --expect upgrade")
     app = app_dsn(owner)
     rc = Path(a.rc_worker).resolve()
     need(rc.exists() and os.access(rc, os.X_OK), f"--rc-worker {rc} is not an executable")
@@ -1178,6 +1413,30 @@ def self_test() -> int:
     check("swap_database without a query", swap_database("postgres://u:p@h:1/a", "b") == "postgres://u:p@h:1/b")
     check("app_dsn swaps the userinfo", app_dsn("postgres://postgres:x@h:5432/db?sslmode=disable")
           == f"postgres://cleat_app:{APP_ROLE_PASSWORD}@h:5432/db?sslmode=disable")
+    ms = SQLServer()
+    check("sqlserver swap_database replaces only the database", ms.swap_database(
+        "sqlserver://sa:p@h:1433?database=a&encrypt=disable", "b") == "sqlserver://sa:p@h:1433?database=b&encrypt=disable")
+    check("sqlserver app_dsn swaps the userinfo", ms.app_dsn("sqlserver://sa:x@h:1433?database=db")
+          == f"sqlserver://cleat_app:{APP_ROLE_PASSWORD}@h:1433?database=db")
+    check("dialect_of reads the scheme", (dialect_of("postgres://u@h/d").name, dialect_of("sqlserver://u@h?database=d").name)
+          == ("postgres", "mssql"))
+    try:
+        dialect_of("mysql://u@h/d")
+        check("dialect_of refuses a dialect the harness has not measured", False)
+    except Unmeasured:
+        check("dialect_of refuses a dialect the harness has not measured", True)
+    check("only SQL Server passes -driver", (Postgres.driver_args, SQLServer.driver_args) == ([], ["-driver", "mssql"]))
+    # Needs a SQL Server, so it runs where one is named (the SQL Server job names it) and says so where it is not.
+    ms_dsn = os.environ.get("UPGRADE_SELFTEST_MSSQL")
+    if ms_dsn:
+        try:
+            mssql_run(ms_dsn, "SELECT 1; SELECT 1/0")
+            check("sqlq reports a LATER statement that fails in the batch", False)
+        except Unmeasured as e:
+            check("sqlq reports a LATER statement that fails in the batch", "Divide by zero" in str(e))
+        check("sqlq prints the first result set of a batch", mssql_run(ms_dsn, "SELECT 1; SELECT 2") == "1")
+    else:
+        print("  NOT RUN  sqlq batch-error cases: UPGRADE_SELFTEST_MSSQL names no SQL Server")
     ok_msg = "refusing to start: this database holds a foreign migration chain written by v0.4.0"
     fk = 'pq: insert or update on table "workflow_leases" violates foreign key constraint "workflow_leases_fkey"'
     hashchain = "event hash chain verification failed at step 3"
