@@ -175,8 +175,17 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 	}
 	// wantRefusal runs the worker to completion and asserts it refused for the right reason, with the message
 	// an operator needs: the role, the tenant count, the fix, and that the two escape flags do not lift it.
-	wantRefusal := func(t *testing.T, dsn string, role string, count string, extra ...string) {
+	// The role the refusal must name is the one the DSN connects as. It was the literal "postgres", which is
+	// the superuser in a local container and not in CI, where it is "cleat": every refusal subtest failed
+	// there (and only there) on an assertion about the fixture and not about the worker. Read from the DSN
+	// the test itself hands the worker, so it is right wherever the test runs.
+	wantRefusal := func(t *testing.T, dsn string, count string, extra ...string) {
 		t.Helper()
+		u, uerr := url.Parse(dsn)
+		if uerr != nil || u.User == nil || u.User.Username() == "" {
+			t.Fatalf("UNMEASURED: cannot read the connecting role from the DSN (err=%v), so the refusal cannot be checked for naming it", uerr)
+		}
+		role := u.User.Username()
 		args := append([]string{"--driver=postgres", "--db=" + dsn, "--api-addr=127.0.0.1:0", "--require-auth=false"}, extra...)
 		code, out := runWorker(t, bin, nil, args...)
 		if code == 0 {
@@ -186,7 +195,10 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 		if msg == "" {
 			t.Fatalf("the worker exited %d but not with the multi-tenant refusal:\n%s", code, out)
 		}
-		for _, want := range []string{`"` + role + `"`, "the database holds " + count + " tenants", "superuser", "--require-auth=false", "--rls-check=off", "cleat_app", "--migrate-db"} {
+		// "this worker connects as" + the role, not the role alone: the reason lines below the headline name
+		// the role as well ("the connecting role "x" is a superuser"), so a bare `"x"` is satisfied by them
+		// even when the headline names someone else. Found by making the headline lie and watching this stay green.
+		for _, want := range []string{`this worker connects as "` + role + `"`, "the database holds " + count + " tenants", "superuser", "--require-auth=false", "--rls-check=off", "cleat_app", "--migrate-db"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("the refusal is missing %q:\n%s", want, msg)
 			}
@@ -210,21 +222,21 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 		dsn, owner := migrated(t)
 		bypasses(t, owner)
 		addTenant(t, owner, false)
-		wantRefusal(t, dsn, "postgres", "2")
+		wantRefusal(t, dsn, "2")
 	})
 
 	t.Run("-rls-check=off does not lift it", func(t *testing.T) {
 		dsn, owner := migrated(t)
 		bypasses(t, owner)
 		addTenant(t, owner, false)
-		wantRefusal(t, dsn, "postgres", "2", "--rls-check=off")
+		wantRefusal(t, dsn, "2", "--rls-check=off")
 	})
 
 	t.Run("a suspended tenant counts: a resume puts it back in service with no restart", func(t *testing.T) {
 		dsn, owner := migrated(t)
 		bypasses(t, owner)
 		addTenant(t, owner, true)
-		wantRefusal(t, dsn, "postgres", "2")
+		wantRefusal(t, dsn, "2")
 	})
 
 	t.Run("two tenants on a role that is subject to RLS start, with --require-auth=false", func(t *testing.T) {
@@ -257,7 +269,7 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 				t.Errorf("the creation warning is missing %q:\n%s", want, out)
 			}
 		}
-		wantRefusal(t, dsn, "postgres", "2")
+		wantRefusal(t, dsn, "2")
 	})
 
 	t.Run("the same --create-tenant on a role that is subject to RLS creates it (the control: the path works)", func(t *testing.T) {
