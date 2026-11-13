@@ -43,14 +43,53 @@ around the key and value are trimmed (use the API for a value with leading or tr
 spaces).
 
 PostgreSQL, MySQL and SQL Server answer the same questions the same way. Only
-PostgreSQL has a documented index for it, below.
+PostgreSQL has a documented index for it, below, and only PostgreSQL can seal the state
+(next section).
 
-### A deployment that seals payloads cannot be searched this way
+### A deployment that seals payloads is searched in the worker, over a window
 
 With `--encrypt-sensitive-payloads` the database holds `query_state` as ciphertext, and
-a database cannot compare ciphertext to a value. The request fails with **`422`**
-and a message naming the flag, rather than returning an empty list that reads as "no
-such run". That flag is PostgreSQL only.
+a database cannot compare ciphertext to a value, so it cannot answer this filter. The
+worker answers it instead: it decrypts the tenant's **most recent N runs** and matches
+the pairs itself. N is `--query-state-search-window` (default **5,000**, at most
+50,000; **0** turns the search off).
+
+**This exposes nothing the API does not already.** `GET /api/workflows/{id}/query`
+decrypts a run's published state in the worker for any caller who names the run; this
+does the same for one tenant's recent runs at once, for the caller's own tenant, and
+returns what the listing returns (the runs, redacted when `redact=true` is asked).
+
+**It is a window, and the response says what it covered**, in headers, so the body stays
+the array every caller already reads:
+
+| header | meaning |
+|---|---|
+| `X-Total-Count` | matches **inside the window**, not in the tenant's history |
+| `X-Query-State-Window` | the window the worker is configured with |
+| `X-Query-State-Scanned` | runs it actually examined |
+| `X-Query-State-Window-Exhausted` | `true` when the window was used up and **older runs were not examined** |
+| `X-Query-State-Unreadable` | runs in the window whose published state would not open |
+
+The one reading that matters: **no match with `Exhausted: false` means there is no such
+run; no match with `Exhausted: true` means only that it is not among the most recent
+runs.** The dashboard says which in words. To search further back, raise the flag; there
+is no per-request override, so the cost of a request stays something the operator chose.
+
+Runs the worker could not open (a key that is gone, a damaged value) are counted in
+`X-Query-State-Unreadable` and never matched. Runs written before sealing was turned on
+are plaintext and are searched like any other.
+
+Measured 2026-11-13, PostgreSQL 16.14 over loopback, sealed runs: **5.9 ms for a window
+of 1,000 and 8.7 ms for 2,000**, about 4 microseconds for each run more. The defaults
+follow from that (roughly 20 ms at 5,000; roughly 200 ms at the 50,000 ceiling), but
+those two are extrapolated, not measured, and a remote database adds a round trip, not
+a per-run cost. A search does not use the index described below; it reads the window.
+
+With the window switched off (`0`) the request fails with **`422`** naming both flags,
+not an empty list that would read as "no such run". A **sharded** deployment that seals is
+still refused with the `422` that names `--encrypt-sensitive-payloads`: a window of "the
+most recent N runs" across shards is a merge this does not do. This is PostgreSQL only,
+as the flag is.
 
 ### If you want exactly one run per key
 

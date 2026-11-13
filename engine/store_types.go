@@ -840,8 +840,11 @@ type WorkflowFilter struct {
 	// index an operator adds with `USING gin (query_state jsonb_path_ops)` is used with no change here.
 	// There is none by default, on purpose: the index taxes every write on a table most deployments
 	// never search (docs/how-to/find-a-run.md has the numbers). On a worker running
-	// --encrypt-sensitive-payloads the column is ciphertext and the filter is refused with
-	// ErrQueryStateFilterUnavailableUnderEncryption rather than answering "no match".
+	// --encrypt-sensitive-payloads the column is ciphertext, so ListWorkflows and CountWorkflows refuse
+	// the filter with ErrQueryStateFilterUnavailableUnderEncryption rather than answering "no match".
+	// GET /api/workflows answers it anyway, in the worker, over a window of recent runs, through
+	// QueryStateWindowSearcher (query_state_window.go) -- that is not these two methods' job, because its
+	// answer carries what it covered and a []WorkflowInstance cannot.
 	QueryState map[string]string
 }
 
