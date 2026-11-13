@@ -181,6 +181,19 @@ func replayAbortedBeforeGuest(ctx context.Context, workflowID string, verr error
 // `undefined: errDeadlineBeforeGuest`.
 var errDeadlineBeforeGuest = fmt.Errorf("the workflow's deadline passed before the guest started: %w", context.DeadlineExceeded)
 
+// workflowDeadlineError marks a guest stop that the workflow's own deadline
+// caused: the epoch budget configureStore applied was ctx's remaining time and
+// not --wasm-instance-timeout. It carries no message of its own.
+//
+// Untagged for the same reason as errDeadlineBeforeGuest: its producer is in a
+// `//go:build cgo` file and executeWithBackend, which is not, tests for it.
+// Without it a mid-guest expiry is told apart from a guest fault only by its
+// text. cleat#3752.
+type workflowDeadlineError struct{ err error }
+
+func (e *workflowDeadlineError) Error() string { return e.err.Error() }
+func (e *workflowDeadlineError) Unwrap() error { return e.err }
+
 // executeWithBackend runs a workflow execution (fresh or replay) using the
 // given WasmBackend. The backend handles compilation and execution; the
 // Engine manages the execSession, history, timeouts, and result handling.
@@ -374,7 +387,12 @@ func (e *Engine) executeWithBackend(
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(context.Background())
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
+		// error_code "timeout" and not the "unknown" an unclassified error gets:
+		// the flag's own text says such a workflow "fail[s] with a timeout error".
+		// Classification only (no op, no workflow id), so the message below is
+		// what is stored. cleat#3752.
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState,
+			NewTimeoutError("", "", fmt.Errorf("host: workflow %s: execution timed out", e.workflowID))
 	}
 	if callErr != nil && session.suspendErr == nil {
 		// Non-suspend error (trap, panic, timeout, or cancellation).
@@ -408,6 +426,25 @@ func (e *Engine) executeWithBackend(
 		session.releaseHeldScopes(context.Background())
 		if guestCompleted {
 			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
+		}
+		// The workflow's own deadline stopped the guest mid-execution: the same
+		// outcome, and now the same words and code, as the two expiries above
+		// ("execution timed out"), so one grep finds all three. The trap text
+		// that says what was running follows. cleat#3752.
+		var deadlineErr *workflowDeadlineError
+		if !guestCompleted && errors.As(callErr, &deadlineErr) {
+			msg := callErr.Error()
+			if enriched := resolveWasmTrap(wasmBytes, msg); enriched != "" {
+				msg = enriched
+			}
+			// classifyFailure still wraps: a replay that met an unresolved write-ahead
+			// intent owes its operator "ambiguous" (check the external service) before
+			// "timeout", as it did before this branch existed.
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState,
+				session.classifyFailure(NewTimeoutError("", "", &wasmTrapError{
+					cause: callErr,
+					msg:   fmt.Sprintf("host: workflow %s: execution timed out: %s", e.workflowID, msg),
+				}))
 		}
 		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
 			// wasmTrapError, not fmt.Errorf("%s"): resolveWasmTrap returns an

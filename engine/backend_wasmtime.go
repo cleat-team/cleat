@@ -601,7 +601,7 @@ func (b *wasmtimeBackend) resourceLimitError(err error, timeout time.Duration) e
 		// guest was inside it. The wording up to "wall-clock budget" is the same
 		// either way, which callers that parse the number rely on.
 		if b.epochBoundByDeadline {
-			return &executionLimitError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget, the time left on the workflow's deadline; configure with --max-workflow-duration, or the tenant's or the run's workflow timeout): %w", timeout, err)}
+			return &executionLimitError{&workflowDeadlineError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget, the time left on the workflow's deadline; configure with --max-workflow-duration, or the tenant's or the run's workflow timeout): %w", timeout, err)}}
 		}
 		return &executionLimitError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget; configure with --wasm-instance-timeout): %w", timeout, err)}
 	}
