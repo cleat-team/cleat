@@ -39,12 +39,13 @@ run the same helm upgrade again:
 
 What the replica count is afterwards depends on autoscaling (cleat#3761). With autoscaling.enabled=false,
 Helm restores replicaCount when it applies the new chart. With it on (the default) the chart sets no replica
-count: the HorizontalPodAutoscaler stays off while the Deployment is at 0, and a Helm 4 server-side apply leaves
-it at 0, so check it after the upgrade and, if it reads 0, bring the workers back yourself:
+count, and the HorizontalPodAutoscaler stays off while the Deployment is at 0, so nothing brings the workers
+back: under Helm 4's default server-side apply the Deployment is left at 0 after the upgrade, every time.
+So when autoscaling is on, ALWAYS run this after the upgrade:
 
   kubectl scale deployment/{{ .fullname }} --replicas=<autoscaling.minReplicas> -n {{ .namespace }}
 
-The autoscaler takes over from there.
+The autoscaler takes over from there. If the count was already 1 (client-side apply), it is harmless.
 
 To skip this check, set upgrade.allowLiveWorkers=true. That is the unsupported case.
 

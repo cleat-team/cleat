@@ -217,7 +217,7 @@ later, that is a new decision.
   kubectl scale deployment/<deployment> --replicas=0 -n <namespace>
   kubectl wait --for=delete pod -l app.kubernetes.io/instance=<release> -n <namespace> --timeout=180s
   helm upgrade <release> <chart> -n <namespace> --set image.tag=<the 0.6.0 tag> ...
-  # Then look at the Deployment, and if it reads 0/0 (autoscaling on, the default; see below):
+  # Autoscaling on (the default): ALWAYS run this next, not only if the Deployment looks wrong (see below):
   kubectl scale deployment/<deployment> --replicas=<autoscaling.minReplicas> -n <namespace>
   ```
 
@@ -230,10 +230,12 @@ later, that is a new decision.
   `autoscaling.enabled` is true (the default), because Helm and the autoscaler were both writing it
   and a Helm 4 `helm upgrade` then failed with a field-ownership conflict. So with autoscaling on,
   upgrading a release the 0.5.0 chart created leaves the Deployment **at 0 under Helm 4's default
-  server-side apply** (the workers stay down until you scale them up), and at 1 under client-side
-  apply (Helm 3, or a release first installed that way), from which the autoscaler raises it to
-  `autoscaling.minReplicas` within about 15 seconds. With `autoscaling.enabled=false` Helm still
-  restores `replicaCount`. **Not measured:** Helm 3 itself (client-side apply was measured with
+  server-side apply, every time** (the workers stay down, with no error, until you scale them up),
+  and at 1 under client-side apply (Helm 3, or a release first installed that way), from which the
+  autoscaler raises it to `autoscaling.minReplicas` within about 15 seconds. **So run the scale-up
+  after every stop-first upgrade with autoscaling on, whatever the Deployment reads:** under
+  server-side apply it is always needed, and under client-side apply it is harmless. With
+  `autoscaling.enabled=false` Helm still restores `replicaCount`. **Not measured:** Helm 3 itself (client-side apply was measured with
   Helm 4's `--server-side=false`), runs in flight, a large database.
 
   **The chart refuses the unsafe upgrade.** Helm renders templates before it runs any hook, so

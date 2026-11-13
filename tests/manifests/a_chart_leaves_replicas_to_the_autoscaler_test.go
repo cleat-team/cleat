@@ -90,3 +90,53 @@ func TestExactlyOneOfTheChartAndTheAutoscalerOwnsTheReplicaCount(t *testing.T) {
 		})
 	}
 }
+
+// The scale-up that ends a stop-first upgrade is written in three places -- the chart's refusal message,
+// docs/operations/upgrading.md and the CHANGELOG entry for this change -- and they must say the same thing.
+// The coordinator's decision (cleat#3761): with autoscaling on it is UNCONDITIONAL. Under Helm 4's default
+// server-side apply the count is always 0 after the upgrade, so wording like "check the Deployment, and if it
+// reads 0" turns the default path into a step people skip, and the workers stay down with no error.
+//
+// What this checks is that each of the three carries the command with the placeholder for the floor, and that
+// none of them carries the conditional wording. It cannot check that the three agree in every other respect;
+// that is what review of the prose is for.
+func TestTheStopFirstScaleUpIsUnconditionalInEveryPlaceItIsWritten(t *testing.T) {
+	const command = "--replicas=<autoscaling.minReplicas>"
+	conditional := []string{"if it reads 0", "if it reads 0/0", "check it after the upgrade", "if the Deployment reads"}
+
+	read := func(path string) string {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	section := func(text, startMarker, endMarker string) string {
+		i := strings.Index(text, startMarker)
+		if i < 0 {
+			t.Fatalf("marker %q not found", startMarker)
+		}
+		rest := text[i:]
+		if j := strings.Index(rest[len(startMarker):], endMarker); j >= 0 {
+			rest = rest[:len(startMarker)+j]
+		}
+		return rest
+	}
+
+	for name, text := range map[string]string{
+		"the refusal message":                 upgradeRefusal(t, guardInput(worker05, 3, worker06, false)),
+		"docs/operations/upgrading.md (Helm)": section(read("../../docs/operations/upgrading.md"), "- **Helm.**", "- **Raw Kubernetes"),
+		"the CHANGELOG entry for cleat#3761":  section(read("../../CHANGELOG.md"), "- **Behaviour change (Helm chart): the Deployment no longer sets", "\n- "),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(text, command) {
+				t.Errorf("does not carry the scale-up command %q", command)
+			}
+			for _, bad := range conditional {
+				if strings.Contains(text, bad) {
+					t.Errorf("carries the conditional wording %q; the scale-up is unconditional when autoscaling is on", bad)
+				}
+			}
+		})
+	}
+}
