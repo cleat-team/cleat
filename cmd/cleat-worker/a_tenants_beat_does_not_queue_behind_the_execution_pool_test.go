@@ -187,7 +187,11 @@ func runABeatAgainstASaturatedExecutionPool(t *testing.T, rig *hbRig, runTenant 
 	if err != nil {
 		t.Fatalf("ReadMetadata: %v", err)
 	}
-	defName := "hb-pool-3571-" + runTenant[len(runTenant)-4:]
+	// One definition name PER RUN. The fixture is rebuilt on every run and its bytes are not
+	// stable, and the suite database is persistent: a second run against the same database
+	// met the first run's definition with an open run on it and DeployWorkflowDef refused to
+	// replace the WASM of a version that still had one.
+	defName := fmt.Sprintf("hb-pool-3571-%s-%d", runTenant[len(runTenant)-4:], time.Now().UnixNano())
 	if err := setup.DeployWorkflowDef(ctx, &engine.WorkflowDef{
 		Name: defName, Version: meta.WorkflowVersion, WASMBytes: wasmBytes,
 		ABIVersion: meta.ABIVersion, MinVersion: meta.MinCompatibleVersion,
@@ -201,6 +205,11 @@ func runABeatAgainstASaturatedExecutionPool(t *testing.T, rig *hbRig, runTenant 
 	}
 	const workerID = "hb-pool-3571-worker"
 	claimed := claimOne(t, ctx, setup, workerID, wfID)
+	// The run is left open by nothing here: settle it, so the database a later run (or
+	// another test sharing it) meets has no open run of this test's.
+	t.Cleanup(func() {
+		_ = setup.FailWorkflow(context.Background(), wfID, workerID, claimed.Generation, "test over", "TEST", "test", nil)
+	})
 	if claimed.TenantID != runTenant {
 		t.Fatalf("claimed run belongs to %q, want %q", claimed.TenantID, runTenant)
 	}
