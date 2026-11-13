@@ -370,8 +370,10 @@ This connects as the superuser rather than `cleat_app`, since applying the
 schema needs DDL rights that role doesn't have. That means the RLS check
 from above logs a warning instead of refusing -- `--require-auth=false` is
 what turns the refusal into a warning; drop it and this exact command
-refuses to start, for the same reason Step 7 does. Fine alone on a laptop;
-not once a second tenant's data could land on that connection. See
+refuses to start, for the same reason Step 7 does. Fine alone on a laptop with
+one tenant. **With a second tenant in the database this exact command refuses to
+start** (cleat#3772), with or without `--require-auth=false` or `--rls-check=off`:
+connect as `cleat_app` instead. See
 [Upgrading](../operations/upgrading.md#migration-is-a-deploy-step) for how
 this compares to the two-step flow above.
 

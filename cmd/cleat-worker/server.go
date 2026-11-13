@@ -122,6 +122,10 @@ type apiServer struct {
 	// cleat#3552.
 	provisioner tenantProvisioner
 
+	// tenantCreationGuard refuses a tenant creation on a connection that is not subject to row-level
+	// security, with 409. Nil on every dialect but PostgreSQL. cleat#3772, owner decision D82.
+	tenantCreationGuard tenantCreationGuard
+
 	// schema is the PostgreSQL schema holding this deployment's cleat tables, the worker's --schema. A
 	// drop passes it to admin.drop_tenant, which refuses an empty one rather than resolve through search_path.
 	schema string

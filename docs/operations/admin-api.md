@@ -46,7 +46,7 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 | `POST /api/admin/tenants/{tenant}/instances/{id}/force-fail` | one workflow, in the named tenant | as above |
 | `POST /api/admin/tenants/{tenant}/instances/{id}/re-replay` | one workflow, in the named tenant | as above |
 | `POST /api/admin/tenants/{tenant}/instances/{id}/steps/{n}/resolve` | one workflow's step, in the named tenant | as above |
-| `POST /api/admin/tenants` | creates a tenant (and its org, by name) and mints its first key | **operator credential only**: a tenant key gets `403` |
+| `POST /api/admin/tenants` | creates a tenant (and its org, by name) and mints its first key | **operator credential only**: a tenant key gets `403`. `409` on a worker whose database connection is not subject to row-level security (cleat#3772): see [the startup check](../explanation/postgresql-schema.md#the-startup-check) |
 | `POST /api/admin/tenants/{tenant}/confirm` with `{"key_id": …}` | makes that key permanent | **operator credential only**, and only the principal that created the tenant |
 | `POST /api/admin/tenants/{tenant}/recovery-key` with `{"reason": …}` | mints a provisional key for a tenant with **no live key** | **admin-scoped operator key only**: a provision-scoped key and a tenant key get `403` |
 

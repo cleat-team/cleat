@@ -893,10 +893,19 @@ which would otherwise pass every other check while isolating nothing.
 |---|---|
 | `auto` (default) | Refuse to start when `--require-auth` is set; warn otherwise |
 | `require` | Always refuse to start |
-| `off` | Skip the check |
+| `off` | Skip the warning |
 
 `auto` refuses because `--require-auth` defaults to true; it only warns on a worker started with
-`--require-auth=false`, and `off` never looks. On a connection that bypasses the policies, the
+`--require-auth=false`, and `off` stays silent. **Neither lifts the refusal that applies whenever the
+database holds more than one tenant** (cleat#3772, owner decision D82): a worker whose connection is
+not subject to the policies (any reason the check reports) will not start if `admin.tenants` has more
+than one row, suspended tenants counted and dropped ones not. With one tenant there is nothing to keep
+apart, so the single-tenant laptop configuration in the tutorial still starts. The same connection
+also refuses to create a second tenant: `--create-tenant` exits, and `POST /api/admin/tenants`
+answers 409, with the same message. Use a worker connected as `cleat_app`, which can do both. **Not
+covered:** a second tenant inserted by direct SQL while a worker is already running does not stop
+that worker (cleat#3773). PostgreSQL only: SQL Server's policy applies to every principal, and
+MySQL is tenant-per-database and single-tenant. On a connection that bypasses the policies, the
 statements that read a workflow definition are scoped to the store's tenant in the SQL itself
 (cleat#3740), as they are on SQL Server and MySQL, so two tenants that hold the same workflow
 name and version do not read each other's. Before that, those reads relied on the policies

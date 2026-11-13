@@ -718,6 +718,18 @@ func main() {
 		if display == "" {
 			display = *createTenantNamed
 		}
+		// cleat#3772, D82: a second tenant is not created on a connection that is not subject to row-level
+		// security. The role the operator can use instead is cleat_app, which holds INSERT on admin.tenants.
+		if *driver == "postgres" {
+			guard := newTenantCreationGuard(gdb)
+			refusal, gErr := guard(context.Background())
+			if gErr != nil {
+				logger.WarnContext(context.Background(), "could not check row-level security before creating a tenant", "worker_id", workerID, "error", gErr)
+			} else if refusal != nil {
+				logger.ErrorContext(context.Background(), refusal.Message(), "worker_id", workerID)
+				os.Exit(1)
+			}
+		}
 		// auth.CreateTenant refuses MySQL, which is single-tenant by decision,
 		// rather than emitting SQL that cannot succeed. Surfaced as-is: the message names the dialect,
 		// which is more useful than anything this layer could add.
@@ -1971,7 +1983,13 @@ func main() {
 	// GetWorkflowByID and ListWorkflows have no application-level tenant
 	// filter, so on a connection that bypasses RLS they return every tenant's
 	// data. Every configuration cleat shipped connected as a superuser.
-	if *driver == "postgres" && *rlsCheck != "off" {
+	//
+	// cleat#3772, owner decision D82: a connection that is not subject to the policies and would serve
+	// MORE THAN ONE tenant refuses to start, whatever --require-auth and -rls-check say. The check runs
+	// under -rls-check=off too, because the guard is not the warning that flag silences: it is what stops
+	// two tenants sharing a connection that keeps them apart by nothing (cleat#3740). One tenant is the
+	// single-tenant laptop configuration the tutorial documents, and still starts.
+	if *driver == "postgres" {
 		reasons, rErr := engine.CheckRLSEnforced(ctx, db)
 		switch {
 		case rErr != nil:
@@ -1980,12 +1998,25 @@ func main() {
 			// worker continues.
 			logger.WarnContext(context.Background(), "could not verify row-level security enforcement", "worker_id", workerID, "error", rErr)
 		case len(reasons) == 0:
-			logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
-		case *rlsCheck == "require" || (*rlsCheck == "auto" && *requireAuth):
-			logger.ErrorContext(context.Background(), "refusing to start: "+engine.FormatRLSBypass(reasons), "worker_id", workerID)
-			os.Exit(1)
+			if *rlsCheck != "off" {
+				logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
+			}
 		default:
-			logger.WarnContext(context.Background(), engine.FormatRLSBypass(reasons), "worker_id", workerID)
+			if refusal, cErr := multiTenantRefusalFor(ctx, db, reasons, false); cErr != nil {
+				logger.WarnContext(context.Background(), "could not count tenants, so the refusal of a bypassing connection that serves more than one was not applied", "worker_id", workerID, "error", cErr)
+			} else if refusal != nil {
+				logger.ErrorContext(context.Background(), refusal.Message(), "worker_id", workerID)
+				os.Exit(1)
+			}
+			switch {
+			case *rlsCheck == "off":
+				// Skipped, as it always was, for the single-tenant case.
+			case *rlsCheck == "require" || (*rlsCheck == "auto" && *requireAuth):
+				logger.ErrorContext(context.Background(), "refusing to start: "+engine.FormatRLSBypass(reasons), "worker_id", workerID)
+				os.Exit(1)
+			default:
+				logger.WarnContext(context.Background(), engine.FormatRLSBypass(reasons), "worker_id", workerID)
+			}
 		}
 	}
 
@@ -2562,6 +2593,14 @@ func main() {
 	}
 	// Start HTTP API server if configured.
 
+	// cleat#3772, D82: POST /api/admin/tenants refuses to create a tenant on a connection that is not
+	// subject to row-level security. PostgreSQL only: it is the one dialect where the connection can
+	// bypass the policies (SQL Server's apply to every principal, and MySQL is tenant-per-database).
+	var creationGuard tenantCreationGuard
+	if *driver == "postgres" && db != nil {
+		creationGuard = newTenantCreationGuard(db)
+	}
+
 	if *apiAddr != "" {
 		api := &apiServer{
 			store:                store,
@@ -2574,6 +2613,7 @@ func main() {
 			requireAuth:          *requireAuth,
 			streamHub:            streamHub,
 			provisioner:          tenantProvisionerFor(*driver, store, authResolver),
+			tenantCreationGuard:  creationGuard,
 			schema:               *schemaName,
 			keys:                 authResolver,
 

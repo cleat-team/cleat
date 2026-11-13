@@ -143,6 +143,21 @@ func CheckRLSEnforced(ctx context.Context, db *sql.DB) ([]RLSBypassReason, error
 	return reasons, nil
 }
 
+// rlsBypassFix is the instruction both refusals end with, and it is one string so they cannot
+// drift apart.
+//
+// THE INSTRUCTION NAMES THE STATE AND THE OBJECT, NEVER A FILE. It used to
+// say "apply migrations/postgres/005_app_role.sql", and that file was
+// deleted by the 0.3.0 postgres compaction -- so the engine was printing a
+// wrong instruction, at an operator, at the moment tenant isolation had
+// already failed (cleat#2553). A runtime message that cites a migration
+// path is a message with an expiry date, and this one expired.
+const rlsBypassFix = "To fix: connect as the cleat_app role instead of the owner. The schema " +
+	"baseline creates it NOLOGIN and without a password, on purpose, so give it " +
+	"one -- ALTER ROLE cleat_app LOGIN PASSWORD '...' -- and point --db at it. " +
+	"If the role does not exist at all, the schema baseline has not been applied. " +
+	"Keep the owner DSN for --migrate-db, which still needs DDL rights."
+
 // FormatRLSBypass renders reasons as an operator-facing message, including
 // what to do about it. Returns "" for no reasons.
 func FormatRLSBypass(reasons []RLSBypassReason) string {
@@ -157,16 +172,83 @@ func FormatRLSBypass(reasons []RLSBypassReason) string {
 	}
 	b.WriteString("\n\nGetWorkflowByID and ListWorkflows have no application-level tenant filter, " +
 		"so on this connection they return every tenant's data.")
-	// THE INSTRUCTION NAMES THE STATE AND THE OBJECT, NEVER A FILE. It used to
-	// say "apply migrations/postgres/005_app_role.sql", and that file was
-	// deleted by the 0.3.0 postgres compaction -- so the engine was printing a
-	// wrong instruction, at an operator, at the moment tenant isolation had
-	// already failed (cleat#2553). A runtime message that cites a migration
-	// path is a message with an expiry date, and this one expired.
-	b.WriteString("\n\nTo fix: connect as the cleat_app role instead of the owner. The schema " +
-		"baseline creates it NOLOGIN and without a password, on purpose, so give it " +
-		"one -- ALTER ROLE cleat_app LOGIN PASSWORD '...' -- and point --db at it. " +
-		"If the role does not exist at all, the schema baseline has not been applied. " +
-		"Keep the owner DSN for --migrate-db, which still needs DDL rights.")
+	b.WriteString("\n\n")
+	b.WriteString(rlsBypassFix)
+	return b.String()
+}
+
+// RLSMultiTenantRefusal is the finding that a connection which is not subject to row-level security
+// is, or would be, serving more than one tenant. cleat#3772, owner decision D82.
+//
+// ONE TENANT IS THE LINE, and the reason is what the policies are for on such a connection: they are
+// the only thing keeping one tenant's rows from another's, and the connection does not apply them.
+// With a single tenant there is nothing to keep apart, which is the single-tenant laptop
+// configuration (--migrate-on-start on the superuser DSN with --require-auth=false) the tutorial
+// documents and this leaves alone. cleat#3740 is what two tenants on such a connection did: a run
+// executed the other tenant's module.
+type RLSMultiTenantRefusal struct {
+	// Role is the connecting role.
+	Role string
+	// Tenants is how many tenants the database holds. When Creating, it is the number it WOULD hold.
+	Tenants int
+	// Reasons are every reason CheckRLSEnforced gave. All of them count: each one means isolation is
+	// not enforced on this connection.
+	Reasons []RLSBypassReason
+	// Creating says this is the refusal of creating a tenant, not of starting.
+	Creating bool
+}
+
+// CountTenants returns how many tenants the database holds: every row of admin.tenants, SUSPENDED
+// ones included, because a resume puts a suspended tenant back in service with no restart in between.
+// A dropped tenant has no row (it leaves a tombstone) and so does not count. admin.tenants carries no
+// row-level security (engine.TenantLister), so this answers on any connection.
+func CountTenants(ctx context.Context, db *sql.DB) (int, error) {
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM admin.tenants`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count tenants: %w", err)
+	}
+	return n, nil
+}
+
+// CurrentRole returns the role db connects as, for the refusal's message.
+func CurrentRole(ctx context.Context, db *sql.DB) (string, error) {
+	var role string
+	if err := db.QueryRowContext(ctx, `SELECT current_user`).Scan(&role); err != nil {
+		return "", fmt.Errorf("read current role: %w", err)
+	}
+	return role, nil
+}
+
+// DecideRLSMultiTenant returns the refusal for a connection with these reasons and this many tenants,
+// or nil when there is none: the connection is subject to the policies (no reasons), or there is at
+// most one tenant. It is a pure function of its arguments so the line it draws can be tested without
+// a database.
+func DecideRLSMultiTenant(role string, reasons []RLSBypassReason, tenants int, creating bool) *RLSMultiTenantRefusal {
+	if len(reasons) == 0 || tenants <= 1 {
+		return nil
+	}
+	return &RLSMultiTenantRefusal{Role: role, Tenants: tenants, Reasons: reasons, Creating: creating}
+}
+
+// Message renders the refusal for an operator: the role, the tenant count, every reason, that neither
+// --require-auth=false nor -rls-check=off lifts it, and the fix.
+func (r *RLSMultiTenantRefusal) Message() string {
+	var b strings.Builder
+	if r.Creating {
+		fmt.Fprintf(&b, "refusing to create a tenant: this worker connects as %q, which is not subject to row-level security, "+
+			"and creating it would make %d tenants share the database", r.Role, r.Tenants)
+	} else {
+		fmt.Fprintf(&b, "refusing to start: this worker connects as %q, which is not subject to row-level security, "+
+			"and the database holds %d tenants", r.Role, r.Tenants)
+	}
+	b.WriteString(", so nothing on this connection keeps one tenant's data from another's. Why it is not subject to it:")
+	for _, reason := range r.Reasons {
+		b.WriteString("\n  - ")
+		b.WriteString(reason.Detail)
+	}
+	b.WriteString("\n\nWith one tenant there is nothing to keep apart, and that configuration still starts. " +
+		"--require-auth=false and --rls-check=off do not lift this refusal.")
+	b.WriteString("\n\n")
+	b.WriteString(rlsBypassFix)
 	return b.String()
 }

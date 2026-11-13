@@ -167,6 +167,20 @@ func (s *apiServer) handleProvisionTenant(w http.ResponseWriter, r *http.Request
 	}
 	req.OrgName = strings.TrimSpace(req.OrgName)
 
+	// cleat#3772, D82: not on a connection that is not subject to row-level security. After the body is
+	// validated, so a malformed request still answers 400 and not this.
+	if s.tenantCreationGuard != nil {
+		refusal, err := s.tenantCreationGuard(r.Context())
+		if err != nil {
+			s.writeError(w, http.StatusInternalServerError, "could not check whether this connection is subject to row-level security: "+err.Error())
+			return
+		}
+		if refusal != nil {
+			s.writeError(w, http.StatusConflict, refusal.Message())
+			return
+		}
+	}
+
 	res, err := s.provisioner.ProvisionTenant(r.Context(), req)
 	if err != nil {
 		s.writeProvisionError(w, err)
