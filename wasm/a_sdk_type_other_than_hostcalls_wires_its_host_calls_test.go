@@ -46,6 +46,17 @@ import (
 // reported Selector as clean. Each looked complete on its own output, which is
 // how the population stayed hidden -- so the test accepts both and the fixture
 // below pins both.
+// knownUnwiredGenericHelpers are helpers on GENERIC SDK types that this scan reads
+// as lacking import rows, found when baseTypeName learned to unwrap generic
+// receivers (cleat#3803). Before that every method on a generic type was invisible
+// here, which is how PluginFunc.WaitFor was the first helper to be checked.
+// Tracked, not endorsed: the claim is read from the scan and was not run, and the
+// fix is a row plus, for these two, a gate entry in analyzer.sdkDurableHelpers.
+var knownUnwiredGenericHelpers = map[string]string{
+	"Promise.Await": "cleat#3803",
+	"SagaTyped.Run": "cleat#3803",
+}
+
 func TestEverySDKHelperHasItsImports(t *testing.T) {
 	sdk := sdkDirForTest(t)
 
@@ -66,7 +77,9 @@ func TestEverySDKHelperHasItsImports(t *testing.T) {
 	}
 
 	var problems []string
+	stillBroken := map[string]bool{}
 	for _, m := range scanSDKHelperMethods(t, sdk) {
+		_, known := knownUnwiredGenericHelpers[m.key]
 		have := map[string]bool{}
 		for _, imp := range sdkHelperImports[m.key] {
 			have[imp] = true
@@ -76,10 +89,24 @@ func TestEverySDKHelperHasItsImports(t *testing.T) {
 				if imp == "" || have[imp] {
 					continue
 				}
+				if known {
+					stillBroken[m.key] = true
+					continue
+				}
 				problems = append(problems, fmt.Sprintf(
 					"%s calls h.%s (via %s) which needs %s, but sdkHelperImports[%q] does not provide it",
 					m.key, callee, m.route, imp, m.key))
 			}
+		}
+	}
+
+	// The known-gaps set can only shrink: an entry whose helper no longer reports a
+	// problem has been fixed and must be deleted, or this list becomes a place a
+	// future gap on the same key hides.
+	for key, why := range knownUnwiredGenericHelpers {
+		if !stillBroken[key] {
+			problems = append(problems, fmt.Sprintf(
+				"%s is listed in knownUnwiredGenericHelpers (%s) but reports no problem now: delete the entry", key, why))
 		}
 	}
 
@@ -113,6 +140,11 @@ func TestTheSDKHelperScanSeesBothRoutesToAHostCalls(t *testing.T) {
 		route string
 	}{
 		{"Selector.Select", "DurableSleep", "field"},
+		// A method on a GENERIC type, which the scan could not see until
+		// baseTypeName unwrapped an IndexListExpr receiver (cleat#3803). Neither
+		// Selector nor Saga is generic, so without this the control would pass
+		// with the blind spot back.
+		{"PluginFunc.WaitFor", "WaitForEvent", "parameter"},
 		// Saga.RunWithResult, not Saga.Run: cleat#2627 moved the body there and
 		// left Run delegating, so Run makes no host call of its own and the scan
 		// no longer returns it. The ROUTE is what this control pins, and
@@ -422,6 +454,17 @@ func baseTypeName(e ast.Expr) string {
 		return t.Sel.Name
 	case *ast.Ident:
 		return t.Name
+	// A generic receiver: `func (pf *PluginFunc[Req, Resp]) ...` is a StarExpr over
+	// an IndexListExpr (two type parameters) and `*Saga[T]` over an IndexExpr (one).
+	// Without these two arms every method on a generic SDK type returned "" and was
+	// skipped, so a helper declared on one (PluginFunc.WaitFor, cleat#3794) could
+	// carry a wrong or missing import row and this scan would still pass. The scan
+	// that "silently stopped matching" is the failure its own positive control
+	// exists for, and that control only names Selector and Saga, neither generic.
+	case *ast.IndexExpr:
+		return baseTypeName(t.X)
+	case *ast.IndexListExpr:
+		return baseTypeName(t.X)
 	}
 	return ""
 }

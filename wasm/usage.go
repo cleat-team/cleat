@@ -56,6 +56,20 @@ var sdkHelperImports = map[string][]string{
 	"Saga.Run":           {"cleat_log", "set_query_state"},
 	"Saga.RunWithResult": {"cleat_log", "set_query_state"},
 
+	// PluginFunc.WaitFor calls h.WaitForEvent and nothing else, so it needs
+	// WaitForEvent's own import and the ones compositeRequires lists for it.
+	// Spelled out, as the rows around it are; TestEverySDKHelperHasItsImports
+	// fails with the missing import named if WaitFor grows another call.
+	"PluginFunc.WaitFor": {
+		"cleat_wait_for_event",
+		"plugin_call",
+		"cleat_await_signals",
+		"cleat_now",
+		"cleat_complete_update",
+		"cleat_log",
+		"cleat_poll_update",
+	},
+
 	// Selector.Select calls six HostCalls methods -- DurableSleep, Now,
 	// AwaitSignals, PollSignal, PollChild and AwaitAnyChild -- and this list
 	// is the union of what each of those needs, including the update-dispatch

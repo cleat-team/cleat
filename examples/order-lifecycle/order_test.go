@@ -274,6 +274,27 @@ func TestPlaceOrder_CompensatesPastTheWebhookStep(t *testing.T) {
 	}
 }
 
+// The payment never arrives. The wait ends at paymentWindow with a timeout the
+// step reports as a failure, and the saga unwinds what ran before it. Every other
+// test stubs await_webhook as an immediate hit, so this is the only one that
+// reaches the helper's suspend and its deadline (cleat#3794).
+func TestPlaceOrder_CompensatesWhenThePaymentNeverArrives(t *testing.T) {
+	env := setupEnv()
+	env.OnPluginCall("webhook-ingest", "await_webhook").Return(`{"found":false}`, nil)
+	env.OnPluginCall("email-notify", "send").Return(`{"id":"msg_1"}`, nil)
+
+	_, err := run(t, env, smallOrder())
+	if err == nil {
+		t.Fatal("expected the order to fail when no payment confirmation arrives")
+	}
+	if !strings.Contains(err.Error(), "no payment confirmation") {
+		t.Errorf("err = %v, want it to say no payment confirmation arrived", err)
+	}
+	if compensated, _ := env.QueryState("compensated"); !strings.Contains(compensated, "reserve_inventory") {
+		t.Errorf("compensated = %q, want the reservation undone", compensated)
+	}
+}
+
 // A compensation that RUNS AND FAILS is not a compensated step.
 //
 // This is the distinction the playbook's own failure modes name — "a
