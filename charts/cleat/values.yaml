@@ -1,4 +1,7 @@
-# -- Number of worker replicas to run.
+# -- Number of worker replicas to run. Used ONLY when autoscaling.enabled is false.
+# With autoscaling on (the default) the HorizontalPodAutoscaler owns the replica count and the chart does not
+# render it (cleat#3761): a new Deployment starts at 1 and the autoscaler raises it to autoscaling.minReplicas,
+# so set minReplicas to the floor you want, not replicaCount.
 replicaCount: 3
 
 # -- Image configuration for the cleat-worker container.

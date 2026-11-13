@@ -5,7 +5,15 @@ metadata:
   labels:
     {{- include "cleat.labels" . | nindent 4 }}
 spec:
+  {{- /*
+    NOT rendered while the HorizontalPodAutoscaler is on (cleat#3761): then the autoscaler owns spec.replicas.
+    Rendering it too makes Helm and the autoscaler both write it, and under Helm 4's default server-side apply
+    the next `helm upgrade` after the autoscaler changes the count fails with a field-ownership conflict on
+    .spec.replicas. See the replicaCount note in values.yaml for what that does to the starting count.
+  */ -}}
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "cleat.selectorLabels" . | nindent 6 }}
