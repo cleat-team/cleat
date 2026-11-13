@@ -296,7 +296,7 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 			p.logger.Error("notifications: compensating delete after failed secret store",
 				"id", id, "error", delErr)
 		}
-		p.writeError(w, 500, "failed to store secret")
+		p.writeError(w, 500, plugin.StoreFailureMessage(err))
 		return
 	}
 
@@ -540,7 +540,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	if req.Secret != nil {
 		if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
 			p.logger.Error("notifications: rotate webhook secret", "error", err, "id", id)
-			p.writeError(w, 500, "failed to store secret")
+			p.writeError(w, 500, plugin.StoreFailureMessage(err))
 			return
 		}
 	}

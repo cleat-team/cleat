@@ -10,6 +10,7 @@ import (
 	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
@@ -2741,5 +2742,51 @@ func TestWH_ListEvents_ScanError(t *testing.T) {
 	// Should still return 200 — corrupt row is skipped and logged.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 despite scan error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// cleat#3789. A worker with no secret master key answered POST /ingest/sources
+// with `500 {"error":"failed to store secret"}` and nothing else; the cause was
+// in the log only. The caller can act on exactly one cause, so it is named.
+type failingPutSecrets struct {
+	plugin.Secrets
+	err error
+}
+
+func (f failingPutSecrets) Put(context.Context, string, string) error { return f.err }
+
+func TestCreatingASourceWithNoMasterKeyTellsTheCallerWhyAndWhatToSet(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		putErr     error
+		wantParts  []string
+		mustNotHas []string
+	}{
+		{"no master key", plugin.ErrNoSecretMasterKey,
+			[]string{"failed to store secret", "no secret master key", "CLEAT_SECRET_MASTER_KEY"}, nil},
+		// The control: another failure keeps the bare message and leaks nothing.
+		{"any other failure", errors.New("pq: connection refused at 10.1.2.3:5432"),
+			[]string{"failed to store secret"}, []string{"CLEAT_SECRET_MASTER_KEY", "10.1.2.3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, handler, _ := setupTestPlugin(t)
+			p.secrets = failingPutSecrets{Secrets: p.secrets, err: tc.putErr}
+			body := `{"name":"payments","source_type":"payments","secret":"whsec_local_dev"}`
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, authedRequest("POST", "/ingest/sources", strings.NewReader(body)))
+			if rec.Code != 500 {
+				t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
+			}
+			for _, want := range tc.wantParts {
+				if !strings.Contains(rec.Body.String(), want) {
+					t.Errorf("response %q does not contain %q", rec.Body.String(), want)
+				}
+			}
+			for _, no := range tc.mustNotHas {
+				if strings.Contains(rec.Body.String(), no) {
+					t.Errorf("response %q contains %q", rec.Body.String(), no)
+				}
+			}
+		})
 	}
 }

@@ -257,7 +257,7 @@ export class Plugins {
    */
   awaitEvent(event_type: string, timeout_ms: i64 = 60000): AwaitEventResult {
     let input = '{"event_type":"' + jsonEscape(event_type) + '","timeout_ms":' + timeout_ms.toString() + "}";
-    let outcome = this.host.pluginCall("eventtriggers", "await_event", input);
+    let outcome = this.host.pluginCall("event-triggers", "await_event", input);
     if (outcome.isError) return new AwaitEventResult(false);
     let r = outcome.response;
     return new AwaitEventResult(jsonBool(r, "found"), jsonStr(r, "event_id"), jsonStr(r, "event_type"), jsonStr(r, "event_data"), jsonStr(r, "received_at"));
@@ -276,7 +276,7 @@ export class Plugins {
     let input = '{"key":"' + jsonEscape(key) + '"';
     if (context.length > 0) input += ',"context":"' + jsonEscape(context) + '"';
     input += "}";
-    let outcome = this.host.pluginCall("featureflags", "evaluate_flag", input);
+    let outcome = this.host.pluginCall("feature-flags", "evaluate_flag", input);
     if (outcome.isError) return new EvaluateFlagResult(false, key);
     let r = outcome.response;
     return new EvaluateFlagResult(jsonBool(r, "enabled"), jsonStr(r, "key"), jsonStr(r, "evaluation"));
@@ -298,7 +298,7 @@ export class Plugins {
     if (key.length > 0) input += ',"key":"' + jsonEscape(key) + '"';
     if (headers.length > 0) input += ',"headers":"' + jsonEscape(headers) + '"';
     input += "}";
-    let outcome = this.host.pluginCall("kafkaconnect", "produce", input);
+    let outcome = this.host.pluginCall("kafka-connect", "produce", input);
     if (outcome.isError) return new ProduceResult(false);
     let r = outcome.response;
     return new ProduceResult(jsonBool(r, "success"), jsonStr(r, "error"));
@@ -339,7 +339,7 @@ export class Plugins {
     let input = '{"config_id":"' + jsonEscape(config_id) + '","summary":"' + jsonEscape(summary) + '","severity":"' + jsonEscape(severity) + '","source":"' + jsonEscape(source) + '"';
     if (details.length > 0) input += ',"details":"' + jsonEscape(details) + '"';
     input += "}";
-    let outcome = this.host.pluginCall("pagerdutyalert", "trigger_incident", input);
+    let outcome = this.host.pluginCall("pagerduty-alert", "trigger_incident", input);
     if (outcome.isError) return new TriggerIncidentResult("", "");
     let r = outcome.response;
     return new TriggerIncidentResult(jsonStr(r, "incident_key"), jsonStr(r, "status"));
@@ -354,7 +354,7 @@ export class Plugins {
    */
   resolveIncident(config_id: string, incident_key: string): ResolveIncidentResult {
     let input = '{"config_id":"' + jsonEscape(config_id) + '","incident_key":"' + jsonEscape(incident_key) + '"}';
-    let outcome = this.host.pluginCall("pagerdutyalert", "resolve_incident", input);
+    let outcome = this.host.pluginCall("pagerduty-alert", "resolve_incident", input);
     if (outcome.isError) return new ResolveIncidentResult("");
     return new ResolveIncidentResult(jsonStr(outcome.response, "status"));
   }
@@ -375,7 +375,7 @@ export class Plugins {
     if (channel.length > 0) input += ',"channel":"' + jsonEscape(channel) + '"';
     if (blocks.length > 0) input += ',"blocks":"' + jsonEscape(blocks) + '"';
     input += "}";
-    let outcome = this.host.pluginCall("slacknotify", "send_message", input);
+    let outcome = this.host.pluginCall("slack-notify", "send_message", input);
     if (outcome.isError) return new SendMessageResult(false);
     let r = outcome.response;
     return new SendMessageResult(jsonBool(r, "success"), jsonStr(r, "ts"));
@@ -394,7 +394,7 @@ export class Plugins {
     let input = '{"source_id":"' + jsonEscape(source_id) + '"';
     if (event_type.length > 0) input += ',"event_type":"' + jsonEscape(event_type) + '"';
     input += "}";
-    let outcome = this.host.pluginCall("webhookingest", "await_webhook", input);
+    let outcome = this.host.pluginCall("webhook-ingest", "await_webhook", input);
     if (outcome.isError) return new AwaitWebhookResult(false);
     let r = outcome.response;
     return new AwaitWebhookResult(jsonBool(r, "found"), jsonStr(r, "id"), jsonStr(r, "event_type"), jsonStr(r, "payload"), jsonStr(r, "received_at"));
