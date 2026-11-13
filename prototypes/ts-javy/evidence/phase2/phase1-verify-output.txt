@@ -1,4 +1,4 @@
-WASM unchanged: journey v4 already has the same binary (skipped)
+WASM unchanged: journey v1 already has the same binary (skipped)
 ### summary
   9 of 9 checks passed
 rc=0 ran-and-passed=True skipped=False

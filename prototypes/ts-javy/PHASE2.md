@@ -1,5 +1,7 @@
 # Phase 2 — determinism (branch `proto/ts-javy`, remote `feature/proto-ts-javy`)
 
+> **Provenance (2026-11-13).** Written from a run built from an uncommitted working tree. `evidence/phase2/` has been **regenerated from a clean checkout of `cdbfc39b`** (PHASE3.md), with cleat-review's seven checkpoint-1 corrections folded in (last section). Where a figure here differs from the regenerated evidence, the evidence is right; the largest moves are listed at the end of PHASE3.md.
+
 Prototype only. No PR to `develop`, no `tiers.yaml` entry, no support claim anywhere. Plan §4.5, Q3, and the coordinator's
 Phase 2 decisions. **For `cleat-review`, review checkpoint 1.**
 

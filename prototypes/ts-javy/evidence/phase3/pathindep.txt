@@ -1,0 +1,5 @@
+A  this tree (/Users/Shared/localssd/rcownie/cleat-wt-ts-fresh)                             bce47c28e2c3877ad2733f5402d04658681a75b06be7ddcf89efb0b277dfdd9b
+B  same sources, built under /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T//cleat-pathindep.nLZ6Lj/B/...          bce47c28e2c3877ad2733f5402d04658681a75b06be7ddcf89efb0b277dfdd9b
+C  known-positive, old-style path dependency, /var/folders/5x/nw42zfd94t30b8qkt9h6lj300000gn/T//cleat-pathindep.nLZ6Lj/C/...   7312a9f26e0b92fc07dcd30e2e14d61d0a8547f4e95881ae50b8105a191ae461
+PASS  the plugin hash is the same in two directories
+PASS  known-positive: the old dependency form DOES change the hash, so this check can see the defect

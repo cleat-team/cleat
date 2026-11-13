@@ -1,7 +1,43 @@
 {
+ "fault-lenient/dateNow": {
+  "later": "1794599079817",
+  "recorded": "1794599078599",
+  "same": true,
+  "status": "done"
+ },
+ "fault-lenient/random": {
+  "later": "0",
+  "recorded": "0",
+  "same": true,
+  "status": "done"
+ },
+ "fault/dateNow": {
+  "later": "1794599076873",
+  "recorded": "1794599075655",
+  "same": true,
+  "status": "done"
+ },
+ "fault/random": {
+  "later": "threw:Error:cleat: Math.random: the host did not return a number: {\"suspended\":true}",
+  "recorded": "threw:Error:cleat: Math.random: the host did not return a number: {\"suspended\":true}",
+  "same": true,
+  "status": "done"
+ },
  "full/cryptoRandom": {
   "later": "\"absent\"",
   "recorded": "\"absent\"",
+  "same": true,
+  "status": "done"
+ },
+ "full/ctxNowElapsed": {
+  "later": "0",
+  "recorded": "0",
+  "same": true,
+  "status": "done"
+ },
+ "full/dateAcrossHostCall": {
+  "later": "72",
+  "recorded": "25",
   "same": true,
   "status": "done"
  },
@@ -23,9 +59,15 @@
   "same": true,
   "status": "done"
  },
+ "full/dateNative": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
  "full/dateNow": {
-  "later": "1794594543067",
-  "recorded": "1794594541665",
+  "later": "1794598909290",
+  "recorded": "1794598907872",
   "same": true,
   "status": "done"
  },
@@ -42,8 +84,8 @@
   "status": "done"
  },
  "full/newDate": {
-  "later": "1794594544534",
-  "recorded": "1794594543312",
+  "later": "1794598910734",
+  "recorded": "1794598909513",
   "same": true,
   "status": "done"
  },
@@ -60,14 +102,14 @@
   "status": "done"
  },
  "full/random": {
-  "later": "0.7695431602288212",
-  "recorded": "0.5927432775344919",
+  "later": "0.44045998654283225",
+  "recorded": "0.8895847083421183",
   "same": true,
   "status": "done"
  },
  "full/randomRange": {
-  "later": "{\"min\":0.00448122236719628,\"max\":0.9900681207797707,\"mean\":0.5099444191274366,\"distinct\":400}",
-  "recorded": "{\"min\":0.0017814222451024708,\"max\":0.994852296906417,\"mean\":0.49936576806611493,\"distinct\":400}",
+  "later": "{\"min\":0.004401186480699204,\"max\":0.9979918856260089,\"mean\":0.5250791121228491,\"distinct\":400}",
+  "recorded": "{\"min\":0.007932280616416154,\"max\":0.9936072162687787,\"mean\":0.48822898869531367,\"distinct\":400}",
   "same": true,
   "status": "done"
  },
@@ -90,8 +132,8 @@
   "status": "done"
  },
  "full/setTimeoutComputed": {
-  "later": "threw:TypeError",
-  "recorded": "threw:TypeError",
+  "later": "threw:TypeError:not a function",
+  "recorded": "threw:TypeError:not a function",
   "same": true,
   "status": "done"
  },
@@ -119,6 +161,18 @@
   "same": true,
   "status": "done"
  },
+ "off-all/ctxNowElapsed": {
+  "later": "0",
+  "recorded": "0",
+  "same": true,
+  "status": "done"
+ },
+ "off-all/dateAcrossHostCall": {
+  "later": "58",
+  "recorded": "19",
+  "same": true,
+  "status": "done"
+ },
  "off-all/dateCall": {
   "later": "\"string:true\"",
   "recorded": "\"string:true\"",
@@ -137,9 +191,15 @@
   "same": true,
   "status": "done"
  },
+ "off-all/dateNative": {
+  "later": "true",
+  "recorded": "true",
+  "same": true,
+  "status": "done"
+ },
  "off-all/dateNow": {
-  "later": "1794594655053",
-  "recorded": "1794594653663",
+  "later": "1794599044130",
+  "recorded": "1794599042693",
   "same": true,
   "status": "done"
  },
@@ -156,8 +216,8 @@
   "status": "done"
  },
  "off-all/newDate": {
-  "later": "1794594656525",
-  "recorded": "1794594655305",
+  "later": "1794599045514",
+  "recorded": "1794599044297",
   "same": true,
   "status": "done"
  },
@@ -175,12 +235,12 @@
  },
  "off-all/random": {
   "diverged": true,
-  "error": "host: workflow dbd847f2-805e-4251-ba50-ae206030578f: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "error": "host: workflow 9d14e769-6e22-4492-8d1f-5f96bbee811a: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
   "status": "failed"
  },
  "off-all/randomRange": {
   "diverged": true,
-  "error": "host: workflow f7a0d5a2-86b9-4703-8edb-5ff1c2a5c605: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "error": "host: workflow 797aa309-8507-45f9-a31a-ac2f00f9da4b: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
   "status": "failed"
  },
  "off-all/setInterval": {
@@ -202,8 +262,8 @@
   "status": "done"
  },
  "off-all/setTimeoutComputed": {
-  "later": "threw:TypeError",
-  "recorded": "threw:TypeError",
+  "later": "threw:TypeError:not a function",
+  "recorded": "threw:TypeError:not a function",
   "same": true,
   "status": "done"
  },
@@ -231,6 +291,18 @@
   "same": true,
   "status": "done"
  },
+ "off-date/ctxNowElapsed": {
+  "later": "0",
+  "recorded": "0",
+  "same": true,
+  "status": "done"
+ },
+ "off-date/dateAcrossHostCall": {
+  "later": "132",
+  "recorded": "22",
+  "same": true,
+  "status": "done"
+ },
  "off-date/dateCall": {
   "later": "\"string:true\"",
   "recorded": "\"string:true\"",
@@ -249,9 +321,15 @@
   "same": true,
   "status": "done"
  },
+ "off-date/dateNative": {
+  "later": "true",
+  "recorded": "true",
+  "same": true,
+  "status": "done"
+ },
  "off-date/dateNow": {
-  "later": "1794594571461",
-  "recorded": "1794594570051",
+  "later": "1794598940994",
+  "recorded": "1794598939598",
   "same": true,
   "status": "done"
  },
@@ -268,8 +346,8 @@
   "status": "done"
  },
  "off-date/newDate": {
-  "later": "1794594572911",
-  "recorded": "1794594571674",
+  "later": "1794598942442",
+  "recorded": "1794598941222",
   "same": true,
   "status": "done"
  },
@@ -286,14 +364,14 @@
   "status": "done"
  },
  "off-date/random": {
-  "later": "0.5031011939387701",
-  "recorded": "0.2570639944314498",
+  "later": "0.2166738823099872",
+  "recorded": "0.20577869346112765",
   "same": true,
   "status": "done"
  },
  "off-date/randomRange": {
-  "later": "{\"min\":0.0024460992559987016,\"max\":0.9995754990358439,\"mean\":0.514329351841145,\"distinct\":400}",
-  "recorded": "{\"min\":0.005003029588560581,\"max\":0.9999128617785791,\"mean\":0.4955920439881276,\"distinct\":400}",
+  "later": "{\"min\":0.0027289393879740276,\"max\":0.9992182670007881,\"mean\":0.5139894493818828,\"distinct\":400}",
+  "recorded": "{\"min\":0.0037019840312512153,\"max\":0.9987417388956754,\"mean\":0.504834399231995,\"distinct\":400}",
   "same": true,
   "status": "done"
  },
@@ -316,8 +394,8 @@
   "status": "done"
  },
  "off-date/setTimeoutComputed": {
-  "later": "threw:TypeError",
-  "recorded": "threw:TypeError",
+  "later": "threw:TypeError:not a function",
+  "recorded": "threw:TypeError:not a function",
   "same": true,
   "status": "done"
  },
@@ -345,6 +423,18 @@
   "same": true,
   "status": "done"
  },
+ "off-lockdown/ctxNowElapsed": {
+  "later": "0",
+  "recorded": "0",
+  "same": true,
+  "status": "done"
+ },
+ "off-lockdown/dateAcrossHostCall": {
+  "later": "150",
+  "recorded": "32",
+  "same": true,
+  "status": "done"
+ },
  "off-lockdown/dateCall": {
   "later": "\"string:true\"",
   "recorded": "\"string:true\"",
@@ -363,9 +453,15 @@
   "same": true,
   "status": "done"
  },
+ "off-lockdown/dateNative": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
  "off-lockdown/dateNow": {
-  "later": "1794594627372",
-  "recorded": "1794594625975",
+  "later": "1794599010342",
+  "recorded": "1794599008956",
   "same": true,
   "status": "done"
  },
@@ -382,8 +478,8 @@
   "status": "done"
  },
  "off-lockdown/newDate": {
-  "later": "1794594628834",
-  "recorded": "1794594627613",
+  "later": "1794599011774",
+  "recorded": "1794599010554",
   "same": true,
   "status": "done"
  },
@@ -400,14 +496,14 @@
   "status": "done"
  },
  "off-lockdown/random": {
-  "later": "0.19988680394787106",
-  "recorded": "0.1258123997286661",
+  "later": "0.02120007476667185",
+  "recorded": "0.9936507279181259",
   "same": true,
   "status": "done"
  },
  "off-lockdown/randomRange": {
-  "later": "{\"min\":0.00024943775192798334,\"max\":0.9959828381403084,\"mean\":0.5076004262149972,\"distinct\":400}",
-  "recorded": "{\"min\":0.001162037847070585,\"max\":0.998374316058423,\"mean\":0.4999461245555716,\"distinct\":400}",
+  "later": "{\"min\":0.004513821451067601,\"max\":0.9971384684030049,\"mean\":0.5274405540003982,\"distinct\":400}",
+  "recorded": "{\"min\":0.00003952313701149901,\"max\":0.9951800306799641,\"mean\":0.4950465748485001,\"distinct\":400}",
   "same": true,
   "status": "done"
  },
@@ -430,8 +526,8 @@
   "status": "done"
  },
  "off-lockdown/setTimeoutComputed": {
-  "later": "threw:TypeError",
-  "recorded": "threw:TypeError",
+  "later": "threw:TypeError:not a function",
+  "recorded": "threw:TypeError:not a function",
   "same": true,
   "status": "done"
  },
@@ -459,6 +555,18 @@
   "same": true,
   "status": "done"
  },
+ "off-random/ctxNowElapsed": {
+  "later": "0",
+  "recorded": "0",
+  "same": true,
+  "status": "done"
+ },
+ "off-random/dateAcrossHostCall": {
+  "later": "75",
+  "recorded": "135",
+  "same": true,
+  "status": "done"
+ },
  "off-random/dateCall": {
   "later": "\"string:true\"",
   "recorded": "\"string:true\"",
@@ -477,9 +585,15 @@
   "same": true,
   "status": "done"
  },
+ "off-random/dateNative": {
+  "later": "false",
+  "recorded": "false",
+  "same": true,
+  "status": "done"
+ },
  "off-random/dateNow": {
-  "later": "1794594599705",
-  "recorded": "1794594598205",
+  "later": "1794598974923",
+  "recorded": "1794598973498",
   "same": true,
   "status": "done"
  },
@@ -496,8 +610,8 @@
   "status": "done"
  },
  "off-random/newDate": {
-  "later": "1794594601023",
-  "recorded": "1794594599807",
+  "later": "1794598976394",
+  "recorded": "1794598975084",
   "same": true,
   "status": "done"
  },
@@ -515,12 +629,12 @@
  },
  "off-random/random": {
   "diverged": true,
-  "error": "host: workflow 0d2e228f-9e9a-4cd5-abf4-d874460b2ca3: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "error": "host: workflow ed528e61-31be-4148-9589-277076c19b3c: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
   "status": "failed"
  },
  "off-random/randomRange": {
   "diverged": true,
-  "error": "host: workflow fa6fdc20-56b1-45cc-bcb6-660ca204a063: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
+  "error": "host: workflow b3b57d22-0e6e-43e2-b43e-beae9f001a41: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffec",
   "status": "failed"
  },
  "off-random/setInterval": {
@@ -542,8 +656,8 @@
   "status": "done"
  },
  "off-random/setTimeoutComputed": {
-  "later": "threw:TypeError",
-  "recorded": "threw:TypeError",
+  "later": "threw:TypeError:not a function",
+  "recorded": "threw:TypeError:not a function",
   "same": true,
   "status": "done"
  },

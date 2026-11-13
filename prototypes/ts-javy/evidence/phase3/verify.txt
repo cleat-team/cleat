@@ -1,0 +1,16 @@
+  PASS  eight tests passed: 8
+  PASS  no test failed: 0
+  PASS  no test skipped (a skip prints ok and measures nothing): 0
+  PASS  nine place_order exec->replay pairs bit-identical (3 languages x 3, incl. the same-language controls): 9
+  PASS  none of them differed: 0
+  PASS  six tampered place_order histories refused (2 histories x 3 targets): 6
+  PASS  none accepted: 0
+  PASS  fifteen canonical-JSON cases agree with Go's encoding/json: 15
+  PASS  none disagreed: 0
+  PASS  suspension events: both complete histories cross (go->ts, ts->go) to the same bytes: 2
+  PASS  suspension events: both languages' runs suspended at the signal wait and RESUMED in the other: 2
+  PASS  suspension events: four tampered child_workflow histories refused as divergences: 4
+  PASS  sleep records no event in either language: 2
+  PASS  NaN and +Infinity: Go and TS fail with the SAME message, and the lenient build (red control) returns null: 2
+  INFO  raw JS JSON.stringify differs from the canonical form in: [keysUnsorted htmlChars lineSeparators loneSurrogate bigIntegerLiteral exponentLiteral duplicateKeys]
+  INFO  go test rc=0

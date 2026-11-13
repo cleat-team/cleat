@@ -1,5 +1,7 @@
 # Phase 1 — host calls and suspension (branch `proto/ts-javy`, remote `feature/proto-ts-javy`)
 
+> **Provenance (2026-11-13).** This document was written from a run whose worker (`bd775a64…`) and `cleatctl` (`e44bd9ae…`) were built from an uncommitted working tree. `evidence/phase1/` has since been **regenerated from a clean checkout of `cdbfc39b`** (PHASE3.md); the structure, mechanisms and limits below stand, and every figure should be read against that regenerated evidence, not the earlier one.
+
 Prototype only. No PR to `develop`, no `tiers.yaml` entry, no support claim anywhere. Plan:
 `cleat-internal/typescript-javy-prototype-plan-2026-11-08.md`, Q1–Q2 and §4.3/§4.4.
 

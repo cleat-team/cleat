@@ -1,5 +1,7 @@
 # Phase 0: toolchain and bridge (prototype, branch `proto/ts-javy`, 2026-11-13)
 
+> **Provenance (2026-11-13).** The numbers below were measured in the earlier session with a worker and `cleatctl` built from an uncommitted working tree (`vcs.modified=true`). **They are not vouched for and Phase 0 was not re-run from a clean checkout** (see PHASE3.md, "What produced the numbers"). Phase 4 re-measures module size.
+
 **This is a prototype. It supports nothing, is not in `tiers.yaml`, and claims nothing.** Plan:
 `cleat-internal/typescript-javy-prototype-plan-2026-11-08.md`. Raw output behind every measured line below is in
 `evidence/phase0/verify-2026-11-13.txt`, produced by `phase0-verify.sh` against a fresh database.

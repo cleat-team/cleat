@@ -1,5 +1,5 @@
-  WASM unchanged: go_journey v1 already has the same binary (skipped)
-  WASM unchanged: go_sleeper v1 already has the same binary (skipped)
+  Deployed go_journey v1 (ABI v1, minVersion=1, 5004297 bytes, SHA256=fc347d017fe82437)
+  Deployed go_sleeper v1 (ABI v1, minVersion=1, 5004297 bytes, SHA256=fc347d017fe82437)
 
 -- pass 1
 js no kill                        status=done  event_count=6 warnings=1

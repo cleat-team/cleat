@@ -1,9 +1,9 @@
 === RUN   TestReplayUnderABumpedEngine
-    replay_test.go:217: loaded 1 persisted events for 8c329260-afba-4f9d-aebb-85b94456baa9: side_effect
+    replay_test.go:217: loaded 1 persisted events for 959cbd1b-6c6c-4373-b568-a1dc19f0dd25: side_effect
     replay_test.go:237: a (recorded engine):   err="" suspended="cleat_sleep(900000ms)"
     replay_test.go:238: a again:               err="" suspended="cleat_sleep(900000ms)"
     replay_test.go:239: b (benign bump):       err="" suspended="cleat_sleep(900000ms)"
-    replay_test.go:240: c (behaviour change):  err="host: workflow 8c329260-afba-4f9d-aebb-85b94456baa9: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffect produced \\\"\\\\\\\"0.31114463161513184\\\\\\\""
---- PASS: TestReplayUnderABumpedEngine (0.54s)
+    replay_test.go:240: c (behaviour change):  err="host: workflow 959cbd1b-6c6c-4373-b568-a1dc19f0dd25: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffect produced \\\"\\\\\\\"0.9838005544526975\\\\\\\"\\"
+--- PASS: TestReplayUnderABumpedEngine (0.52s)
 PASS
-ok  	cleatproto/replay	0.978s
+ok  	cleatproto/replay	1.024s

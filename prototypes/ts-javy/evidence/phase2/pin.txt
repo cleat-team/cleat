@@ -1,7 +1,7 @@
 ### build three engines of the same workflow (a: shipped, b: benign bump, c: random shim removed)
 
 ### T1 the pin is in the module and the check can refuse
-  pin of a: {"deterministic_build": true, "javy": "javy 9.1.0", "pin_version": 1, "plugin_sha256": "c4fa0c938d2b291ac0c3379d5713f2e269291da924c36af0c4bb4ff6d84d05ed", "rquickjs_core": "0.12.2", "sdk_sha256": "b91a03792550c23a772a699f08a5527ea
+  pin of a: {"deterministic_build": true, "javy": "javy 9.1.0", "pin_version": 1, "plugin_sha256": "bce47c28e2c3877ad2733f5402d04658681a75b06be7ddcf89efb0b277dfdd9b", "rquickjs_core": "0.12.2", "sdk_sha256": "1b227f34ec0aea49d663fa1125148ffd9
   PASS  a carries exactly the pinned engine  []
   PASS  CONTROL b (a different plugin build) is refused  plugin_sha256 is not the pinned plugin
   PASS  CONTROL c (random shim removed) is refused
@@ -10,33 +10,33 @@
   PASS  placeholder
 
 ### T2 a bump does not move an in-flight run
-  Deployed pinprobe v15 (ABI v1, minVersion=14, 1119865 bytes, SHA256=da08662f77ef4cef)
-  PASS  the pin survives deployment: the pin read back from workflow_defs (v15) equals the file's and passes the check (deploy re-stamps the version in cleat.metadata, so the bytes are not compared whole)
-  R1 ac09ac5c (25 s sleep) and R3 8c329260 (15 min sleep) are suspended on v1; history of R3: ['side_effect']
+  Deployed pinprobe v1 (ABI v1, minVersion=1, 1126217 bytes, SHA256=560ed25df4fe764b)
+  PASS  the pin survives deployment: the pin read back from workflow_defs (v1) equals the file's and passes the check (deploy re-stamps the version in cleat.metadata, so the bytes are not compared whole)
+  R1 adeda933 (25 s sleep) and R3 959cbd1b (15 min sleep) are suspended on v1; history of R3: ['side_effect']
 
 ### T3 replay of R3's persisted history under three engines (Go harness, wasmtime)
-    replay_test.go:217: loaded 1 persisted events for 8c329260-afba-4f9d-aebb-85b94456baa9: side_effect
+    replay_test.go:217: loaded 1 persisted events for 959cbd1b-6c6c-4373-b568-a1dc19f0dd25: side_effect
     replay_test.go:237: a (recorded engine):   err="" suspended="cleat_sleep(900000ms)"
     replay_test.go:238: a again:               err="" suspended="cleat_sleep(900000ms)"
     replay_test.go:239: b (benign bump):       err="" suspended="cleat_sleep(900000ms)"
-    replay_test.go:240: c (behaviour change):  err="host: workflow 8c329260-afba-4f9d-aebb-85b94456baa9: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffect produced \\\"\\
-    --- PASS: TestReplayUnderABumpedEngine (0.54s)
-    ok  	cleatproto/replay	0.978s
+    replay_test.go:240: c (behaviour change):  err="host: workflow 959cbd1b-6c6c-4373-b568-a1dc19f0dd25: execution failed: wasm trap: host: export \"nondet\": {\"error\":\"Error: replay divergence at step 0: SideEffect produced \\\"\\
+    --- PASS: TestReplayUnderABumpedEngine (0.52s)
+    ok  	cleatproto/replay	1.024s
   PASS  replay under the recorded engine, a benign bump, and a behaviour-changing bump: identical, identical, REFUSED (go test passed, test ran)
 
 ### T2 (continued) deploy the bumped engine as v2 while R1 and R3 are suspended on v1
-  Deployed pinprobe v16 (ABI v1, minVersion=15, 1118342 bytes, SHA256=1db2333b3ddbdf8b)
+  Deployed pinprobe v2 (ABI v1, minVersion=1, 1124754 bytes, SHA256=63f5befe383601ce)
   PASS  R1 (started before the bump) completed  same=True
-  PASS  R1 ran only on def_version 15 (the engine it recorded on), across the deploy  versions seen in the worker log: [15]
-  PASS  R2 (started after the bump) ran on def_version 16  versions: [16]
+  PASS  R1 ran only on def_version 1 (the engine it recorded on), across the deploy  versions seen in the worker log: [1]
+  PASS  R2 (started after the bump) ran on def_version 2  versions: [2]
   PASS  the two engines are different bytes (so the test could have disagreed)
 
 ### T4 deploy identity: the same source, rebuilt, must not look like a new version
-  rebuilt b, deployed again: WASM unchanged: pinprobe v16 already has the same binary (skipped)
-  PASS  a rebuild of unchanged source deploys as 'WASM unchanged' (no new version)  WASM unchanged: pinprobe v16 already has the same binary (skipped)
+  rebuilt b, deployed again: WASM unchanged: pinprobe v2 already has the same binary (skipped)
+  PASS  a rebuild of unchanged source deploys as 'WASM unchanged' (no new version)  WASM unchanged: pinprobe v2 already has the same binary (skipped)
   CONTROL, javy build WITHOUT -C deterministic, same source, two builds, two deploys:
-    Deployed pinprobe v17 (ABI v1, minVersion=16, 1118342 bytes, SHA256=2e1be6f1bd46fddf) 
-    Deployed pinprobe v18 (ABI v1, minVersion=17, 1118342 bytes, SHA256=86c50cfc1fb9507f)
+    Deployed pinprobe v3 (ABI v1, minVersion=2, 1124754 bytes, SHA256=26a472bfa1fe7cd5) 
+    Deployed pinprobe v4 (ABI v1, minVersion=3, 1124754 bytes, SHA256=8b5157116f0b67db)
   PASS  CONTROL: without the deterministic flag the same source deploys as a NEW version each time
 
 13 of 13 verdicts passed
