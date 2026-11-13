@@ -194,7 +194,8 @@ To build and test cleat you will need:
 | Docker | Latest | No | Only if using Docker for the database |
 
 > **Go 1.27.4 and newer cannot build cleat yet.** Its cgo refuses the `libwasmtime.a`
-> that wasmtime-go ships (`disallowed LTO section ".llvmbc" in #cgo LDFLAGS`;
+> that wasmtime-go ships (`disallowed LTO section ".llvmbc" in #cgo LDFLAGS` on
+> Linux, `disallowed LTO section __LLVM,__bitcode in #cgo LDFLAGS` on macOS;
 > upstream bytecodealliance/wasmtime-go#299). The `toolchain` line in `go.mod` is a
 > minimum, so a machine that already has Go 1.27.4 or newer keeps it and fails; on
 > such a machine run `GOTOOLCHAIN=go1.27.3 go build ./...` (or `export` it). The
