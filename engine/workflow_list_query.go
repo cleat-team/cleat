@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -94,6 +96,7 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter, id
 	if filter.ResultContains != "" {
 		qb.AddLikeCondition(d.castExpr("result"), "%"+filter.ResultContains+"%", true)
 	}
+	applyQueryStateFilter(qb, d, filter.QueryState)
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
 		n := qb.NextPos()
@@ -121,6 +124,74 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter, id
 			d.likeExpr("def_name", n+1, true)))
 		qb.AddArgs(pattern, pattern)
 	}
+}
+
+// applyQueryStateFilter appends the predicate for WorkflowFilter.QueryState: every pair is published by
+// the run with exactly that value. cleat#3775. Nothing for an empty map.
+//
+// THE POSTGRESQL FORM IS THE CONTAINMENT OPERATOR, `query_state @> '{...}'::jsonb`, and not
+// `query_state ->> 'key' = 'value'`, because only `@>` can use a GIN index on the column. There is none
+// by default (see WorkflowFilter.QueryState); this is what lets an operator add one with no change to
+// cleat. One document carries every pair, which is the AND of the equalities.
+//
+// MySQL has JSON_CONTAINS, which means the same for an object candidate. SQL Server has no containment
+// operator, so it is one EXISTS over OPENJSON per pair (at most MaxQueryStateFilterPairs of them). The
+// VALUE comparison carries an explicit binary collation: OPENJSON returns [value] in the database's
+// default collation, which is case-insensitive, and a JSON value that differs only by case is a different
+// value. The KEY needs none -- OPENJSON returns [key] as Latin1_General_BIN2 already (read from
+// sys.dm_exec_describe_first_result_set on the test instance, 2026-11-13; an earlier draft of this
+// function collated it too, and removing that left every test green because there was nothing to remove).
+// What pins both is TestARunIsFoundByWhatItPublished: its "KEY that differs only by case" and "VALUE that
+// differs only by case" cases each fail on SQL Server when the property they name is lost.
+func applyQueryStateFilter(qb *QueryBuilder, d Dialect, pairs map[string]string) {
+	if len(pairs) == 0 {
+		return
+	}
+	switch d {
+	case DialectPostgres, DialectMySQL:
+		// encoding/json writes a map[string]string in key order and cannot fail on one.
+		doc, _ := json.Marshal(pairs)
+		n := qb.NextPos()
+		if d == DialectPostgres {
+			qb.AddRaw("AND query_state @> " + d.placeholder(n) + "::jsonb")
+		} else {
+			qb.AddRaw("AND JSON_CONTAINS(query_state, CAST(" + d.placeholder(n) + " AS JSON))")
+		}
+		qb.AddArgs(string(doc))
+	case DialectMSSQL:
+		keys := make([]string, 0, len(pairs))
+		for k := range pairs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			n := qb.NextPos()
+			qb.AddRaw(fmt.Sprintf("AND EXISTS (SELECT 1 FROM OPENJSON(query_state) WHERE [key] = %s AND [value] = %s COLLATE Latin1_General_100_BIN2)",
+				d.placeholder(n), d.placeholder(n+1)))
+			qb.AddArgs(k, pairs[k])
+		}
+	default:
+		panic("unknown dialect: " + string(d))
+	}
+}
+
+// queryStateFilterError is the check every store's ListWorkflows and CountWorkflows makes first.
+func queryStateFilterError(filter WorkflowFilter) error {
+	if len(filter.QueryState) > MaxQueryStateFilterPairs {
+		return ErrQueryStateFilterTooManyPairs
+	}
+	return nil
+}
+
+// queryStateFilterError is the PostgreSQL form: the same, plus the refusal under encryption.
+func (s *PostgresStore) queryStateFilterError(filter WorkflowFilter) error {
+	if err := queryStateFilterError(filter); err != nil {
+		return err
+	}
+	if len(filter.QueryState) > 0 && s.encryption != nil && s.encryptSensitivePayloads {
+		return ErrQueryStateFilterUnavailableUnderEncryption
+	}
+	return nil
 }
 
 // workflowListOrder is the sort the listing pages over, and it is a TOTAL
@@ -187,6 +258,9 @@ func applyWorkflowListPaging(qb *QueryBuilder, d Dialect, filter WorkflowFilter,
 // defect as a summary table maintained by hand from the documents it
 // summarises.
 func (s *PostgresStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	if err := s.queryStateFilterError(filter); err != nil {
+		return 0, err
+	}
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("count workflows: begin: %w", err)
@@ -199,6 +273,11 @@ func (s *PostgresStore) CountWorkflows(ctx context.Context, filter WorkflowFilte
 	// which rows match -- the whole point of sharing applyWorkflowFilters.
 	qb := NewQueryBuilder(d, "SELECT COUNT(*) FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id WHERE 1=1")
 	applyWorkflowFilters(qb, d, filter, "l.id")
+	if len(filter.QueryState) > 0 {
+		// The listing is scoped by row-level security alone; the published-state filter names its tenant in
+		// the SQL as well (cleat#3740 is what a statement with only the policy under it did).
+		qb.AddCondition("p.tenant_id = %s", s.tenantID)
+	}
 
 	query, args := qb.SQL()
 	var n int
@@ -211,6 +290,9 @@ func (s *PostgresStore) CountWorkflows(ctx context.Context, filter WorkflowFilte
 // CountWorkflows: MySQL. Tenant scoping is an explicit predicate here, as it is
 // in this store's ListWorkflows -- MySQL has no row-level security.
 func (s *MySQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	if err := queryStateFilterError(filter); err != nil {
+		return 0, err
+	}
 	d := s.dialect
 	qb := NewQueryBuilder(d, "SELECT COUNT(*) FROM workflow_instances WHERE tenant_id = ?")
 	qb.AddArgs(s.tenantID)
@@ -226,6 +308,9 @@ func (s *MySQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) 
 
 // CountWorkflows: SQL Server.
 func (s *MSSQLStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	if err := queryStateFilterError(filter); err != nil {
+		return 0, err
+	}
 	// beginTxWithContext, not bare s.db -- cleat#2210: a WithTenant copy must
 	// run under its own tenant's SESSION_CONTEXT, not whatever the pool's
 	// original connection happened to carry.

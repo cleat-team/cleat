@@ -702,6 +702,14 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		ConcurrencyKey: q.Get("concurrency_key"),
 	}
 
+	// cleat#3775: find a run by what it published. Refused, not ignored, when it cannot be honoured.
+	state, stateErr := queryStateFilterFromParams(q)
+	if stateErr != nil {
+		s.writeError(w, 400, stateErr.Error())
+		return
+	}
+	filter.QueryState = state
+
 	// Paging, mirroring handleGetInstanceEvents: both parameters read from the
 	// query, a server ceiling applied rather than assumed, and the total sent
 	// as a header.
@@ -758,12 +766,12 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeListWorkflowsError(w, err)
 		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeListWorkflowsError(w, err)
 		return
 	}
 	// cleat#1986 slice 2b, moved into the query by cleat#3009: the internal
@@ -778,6 +786,20 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		workflows = []engine.WorkflowInstance{}
 	}
 	s.writeWorkflows(w, r, workflows)
+}
+
+// writeListWorkflowsError answers a failed listing. A published-state filter on a worker that seals
+// query_state is the caller asking for something this deployment cannot do, which is 422 and says which
+// flag (cleat#3775); a refusal as a 500 would read as a fault to retry. Everything else is the 500 it was.
+func (s *apiServer) writeListWorkflowsError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, engine.ErrQueryStateFilterUnavailableUnderEncryption):
+		s.writeError(w, http.StatusUnprocessableEntity, engine.ErrQueryStateFilterUnavailableUnderEncryption.Error())
+	case errors.Is(err, engine.ErrQueryStateFilterTooManyPairs):
+		s.writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		s.writeError(w, 500, err.Error())
+	}
 }
 
 // handleWorkflows routes /api/workflows/* requests.

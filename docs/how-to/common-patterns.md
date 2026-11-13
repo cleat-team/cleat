@@ -708,6 +708,10 @@ curl "http://localhost:8080/api/workflows/<id>/query?key=driver_name"
 
 Query state persists across replays and ContinueAsNew.
 
+### Finding the run, when you do not have its id
+
+Everything above starts from a run id. To go from a value the run published to the run, filter the listing: `GET /api/workflows?state.order_id=123`. See [Find a run by a value it published](find-a-run.md), which also covers what it costs and the opt-in index.
+
 ### Reading a key you do not know
 
 Omit `?key=` and the endpoint lists everything the run published:

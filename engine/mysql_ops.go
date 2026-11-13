@@ -693,6 +693,9 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 
 // ListWorkflows returns workflow instances filtered by the given filter parameters.
 func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	if err := queryStateFilterError(filter); err != nil {
+		return nil, err
+	}
 	d := s.dialect
 	qb := NewQueryBuilder(d,
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE tenant_id = ?",

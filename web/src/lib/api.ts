@@ -35,13 +35,24 @@ async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export async function listWorkflows(status?: string): Promise<WorkflowInstance[]> {
+export async function listWorkflows(
+  status?: string,
+  state?: Record<string, string>,
+): Promise<WorkflowInstance[]> {
   // redact=true: the dashboard is somewhere people look at what happened, so it
   // asks for the redacted view (cleat#3581). The flag can only add redaction; a
   // programmatic caller that omits it gets the data as stored. A test pins that
-  // every data-bearing call below carries it.
-  const qs = status ? `?status=${encodeURIComponent(status)}&redact=true` : '?redact=true';
-  return fetchJSON<WorkflowInstance[]>(`/api/workflows${qs}`);
+  // every data-bearing call below carries it, and it stays last so the URLs of
+  // the calls that existed before `state` are byte-identical.
+  const params: string[] = [];
+  if (status) params.push(`status=${encodeURIComponent(status)}`);
+  // cleat#3775: find a run by what it published, `state.<key>=<value>`. The key
+  // is encoded as well as the value, because it is part of the parameter NAME.
+  for (const [key, value] of Object.entries(state ?? {})) {
+    params.push(`state.${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  }
+  params.push('redact=true');
+  return fetchJSON<WorkflowInstance[]>(`/api/workflows?${params.join('&')}`);
 }
 
 export async function getWorkflow(id: string): Promise<WorkflowInstance> {
