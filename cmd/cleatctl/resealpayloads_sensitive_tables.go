@@ -194,8 +194,6 @@ func payloadEncryptionEverEnabled(ctx context.Context, db *sql.DB) (bool, error)
 	return on, err
 }
 
-// isJSONObject reports whether s is a JSON object: the shape a plaintext
-// compaction_state has, and one a sealed value (a JSON string literal) never has.
 // resealBeforeWrite is called once per table, after its rows have been read and
 // before the first write. Production leaves it nil; a test sets it to change a row
 // inside the window the compare-and-set closes.
@@ -240,6 +238,8 @@ func changedSinceRead(ctx context.Context, db *sql.DB, spec tableSpec, pk []stri
 	return false, nil
 }
 
+// isJSONObject reports whether s is a JSON object: the shape a plaintext
+// compaction_state has, and one a sealed value (a JSON string literal) never has.
 func isJSONObject(s string) bool {
 	t := strings.TrimSpace(s)
 	return strings.HasPrefix(t, "{") && json.Valid([]byte(t))
