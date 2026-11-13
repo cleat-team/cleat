@@ -274,8 +274,9 @@ is empty. Use this pattern for workflows with more than two outcomes.
 ## Complete end-to-end example
 
 Here is the full lifecycle of an expense report, as one script. It captures the
-run's `id` with `sed` (so it needs nothing beyond `curl`), and the `sleep`s give
-the worker a moment to pick the run up and to resume it:
+run's `id` with `sed` (so it needs nothing beyond `curl` and `grep`), and the two
+loops wait, up to 30 seconds each, for the worker to pick the run up and to
+resume it after the signal:
 
 ```bash
 # 1. Submit the expense report
@@ -290,7 +291,14 @@ RUN_ID=$(curl -s -X POST http://localhost:8080/api/workflows/expense-workflow/st
         }
     }' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 echo "run: $RUN_ID"
-sleep 3
+
+# Wait (up to 30 s) for the worker to pick the run up and publish its status
+for _ in $(seq 30); do
+    curl -s -H "Authorization: Bearer $CLEAT_API_KEY" \
+        "http://localhost:8080/api/workflows/$RUN_ID/query?key=status" |
+        grep -q pending_approval && break
+    sleep 1
+done
 
 # 2. Check status -- should be "pending_approval"
 curl -s -H "Authorization: Bearer $CLEAT_API_KEY" \
@@ -306,7 +314,14 @@ curl -s -X POST "http://localhost:8080/api/workflows/$RUN_ID/signal" \
         "payload": "{\"approved\": true, \"reviewer\": \"jane.manager\", \"comment\": \"Approved\"}"
     }'
 # {"idempotent_replay":false,"status":"delivered"}
-sleep 3
+
+# Wait (up to 30 s) for the run to resume and record the decision
+for _ in $(seq 30); do
+    curl -s -H "Authorization: Bearer $CLEAT_API_KEY" \
+        "http://localhost:8080/api/workflows/$RUN_ID/query?key=status" |
+        grep -q '"approved"' && break
+    sleep 1
+done
 
 # 4. Verify the workflow completed
 curl -s -H "Authorization: Bearer $CLEAT_API_KEY" \
