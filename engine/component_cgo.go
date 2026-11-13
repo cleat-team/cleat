@@ -1274,7 +1274,12 @@ func withCleatEntryKey(input []byte, entryPoint string) ([]byte, error) {
 func (b *wasmtimeBackend) ExecuteComponentCGo(
 	ctx context.Context, wasmBytes []byte, entryPoint string, input []byte, outBufSz uint32,
 ) (*ExecResult, error) {
-	component, err := componentCompile(b.engine, wasmBytes)
+	// A cache hit and a fresh compile both hand back a reference this call owns,
+	// so the delete below is right for either (cleat#3748). It stays BEFORE
+	// configureStore, as the compile always was: a hit leaves more of the
+	// deadline, and an already-expired ctx must still reach configureStore's check
+	// and not start a guest.
+	component, err := b.acquireComponent(wasmBytes)
 	if err != nil {
 		return nil, err
 	}
