@@ -23,7 +23,8 @@
 #
 # WHERE IT RUNS. On a push to a release/** branch, on EVERY pull request whose
 # base is a release/** branch, and on demand. One job per dialect, each its own
-# check: PostgreSQL, SQL Server and MySQL (cleat#3735).
+# check: PostgreSQL, SQL Server and MySQL (cleat#3735), and a fourth, SQL Server in a database created
+# under a case-sensitive collation (CS_AS), beside the default-collation one.
 #
 # THE PULL REQUEST TRIGGER IS FOR THE RULESET. Release branches take changes through
 # pull requests, and a required status context that runs only on a push never
@@ -211,6 +212,113 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: upgrade-from-v050-mssql-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .upgrade-state/*.log
+            .upgrade-state/manifest.json
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
+
+  # The same upgrade on SQL Server, in a database created under a CASE-SENSITIVE collation (cleat#3735).
+  #
+  # WHY THIS ROW AND NOT ANOTHER: operators create databases under collations of their own, and D60 (the
+  # 0.6.0 collation work) is where an upgrade could break on one. Measured 2026-11-13 on develop 15e27ed5: the
+  # upgrade held under SQL_Latin1_General_CP1_CS_AS and under a _UTF8 collation. Only the first is a row here:
+  # in the upgraded schema the only varchar or char columns are hashes and hex keys, which are ASCII, so a
+  # _UTF8 database exercises almost nothing the default one does not.
+  #
+  # WHAT MAKES IT MEAN SOMETHING, and what to check if it is ever edited:
+  #   * UPGRADE_MSSQL_COLLATION is read by the harness's create_database, which creates the FRESH database the
+  #     upgraded schema is compared with. Without it that database takes the server's default collation, every
+  #     column that follows the collation differs, and this job fails ("251 only in the upgraded database,
+  #     251 only in the fresh one", measured). That failure is the known-positive: the comparison does see a
+  #     collation.
+  #   * the step "Assert the database collation" reads the collation BACK, so a CREATE DATABASE whose clause
+  #     was lost cannot leave a job that tested the default and says it tested another.
+  #
+  # The server's own default collation stays the image's (SQL_Latin1_General_CP1_CI_AS), so the database also
+  # differs from tempdb, which is the situation an operator who sets a collation on one database is in.
+  upgrade-from-v050-mssql-cs-as:
+    name: Upgrade From v0.5.0 (SQL Server, CS_AS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      mssql:
+        # Pinned by digest, the same one as every other mssql service in this repo
+        # (tier1-gate.yml has the rationale); scripts/check-workflow-guards.py wants
+        # MSSQL_MEMORY_LIMIT_MB on every one.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+
+    env:
+      OWNER_DB: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat
+      # Read by scripts/upgrade_from_v040.py: the database below and the fresh one it compares with.
+      UPGRADE_MSSQL_COLLATION: SQL_Latin1_General_CP1_CS_AS
+      STATE_DIR: ${{ github.workspace }}/.upgrade-state
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Names the service container, so the self-test's SQL Server cases run here and not only elsewhere.
+      - name: Harness self-test
+        env:
+          UPGRADE_SELFTEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+        run: python3 scripts/upgrade_from_v040.py --self-test
+
+      # An EMPTY database: the seed step migrates it with the v0.5.0 worker.
+      - name: Create the cleat database under a case-sensitive collation
+        run: |
+          go run ./scripts/upgrade-from-v040/sqlq -driver sqlserver \
+            -dsn "sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" \
+            -sql "CREATE DATABASE cleat COLLATE $UPGRADE_MSSQL_COLLATION"
+
+      # The precondition, printed: what the database is under, read back from the server.
+      - name: Assert the database collation
+        run: |
+          got="$(go run ./scripts/upgrade-from-v040/sqlq -driver sqlserver \
+            -dsn "sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" \
+            -sql "SELECT CAST(DATABASEPROPERTYEX(N'cleat', 'Collation') AS varchar(128))")"
+          echo "database collation: $got (want $UPGRADE_MSSQL_COLLATION)"
+          test "$got" = "$UPGRADE_MSSQL_COLLATION"
+
+      - name: Build the release candidate's cleat-worker
+        run: |
+          go build -o "$RUNNER_TEMP/cleat-worker-rc" ./cmd/cleat-worker
+          "$RUNNER_TEMP/cleat-worker-rc" -verify-backend
+
+      - name: Seed a database with the published v0.5.0, runs in flight
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py seed --from-version v0.5.0 --owner-db "$OWNER_DB" --state-dir "$STATE_DIR"
+          echo "mssql seed_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upgrade in place with the release candidate; every in-flight run completes
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py verify --expect upgrade --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
+          echo "mssql verify_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload worker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-from-v050-mssql-cs-as-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             .upgrade-state/*.log
             .upgrade-state/manifest.json
