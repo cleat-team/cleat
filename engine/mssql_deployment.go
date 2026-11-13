@@ -238,6 +238,9 @@ func (s *MSSQLStore) ResolveAPIKey(ctx context.Context, keyHash []byte) (tenantI
 // Supported filters: Status, InputContains, ErrorContains, Search.
 // Supports pagination via Offset and Limit (default 100, max 1000).
 func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	if err := queryStateFilterError(filter); err != nil {
+		return nil, err
+	}
 	// beginTxWithContext, not bare s.db -- cleat#2210, same reason as LoadWASM above.
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {

@@ -830,6 +830,19 @@ type WorkflowFilter struct {
 	// tile without double-counting a row on the boundary.
 	StartedAfter  time.Time
 	StartedBefore time.Time
+
+	// QueryState selects runs by what they published (cleat#3775): every key here must be published
+	// by the run with exactly this value. An empty map is no filter. At most MaxQueryStateFilterPairs
+	// pairs, ANDed; any more is ErrQueryStateFilterTooManyPairs.
+	//
+	// It is equality on strings and not a search: a run's query state is a map[string]string. On
+	// PostgreSQL it compiles to `query_state @> '{"key":"value",...}'`, the containment form, so an
+	// index an operator adds with `USING gin (query_state jsonb_path_ops)` is used with no change here.
+	// There is none by default, on purpose: the index taxes every write on a table most deployments
+	// never search (docs/how-to/find-a-run.md has the numbers). On a worker running
+	// --encrypt-sensitive-payloads the column is ciphertext and the filter is refused with
+	// ErrQueryStateFilterUnavailableUnderEncryption rather than answering "no match".
+	QueryState map[string]string
 }
 
 // RoutingRule represents a traffic-splitting rule for A/B testing.

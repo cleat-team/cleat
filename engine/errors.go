@@ -36,6 +36,26 @@ var ErrSearchUnavailableUnderEncryption = errors.New(
 	"input/error substring search is not available with --encrypt-sensitive-payloads: " +
 		"these columns are ciphertext on disk, so a LIKE search against them cannot find a match")
 
+// ErrQueryStateFilterUnavailableUnderEncryption is returned by ListWorkflows and CountWorkflows when a
+// caller filters by published query state while --encrypt-sensitive-payloads is on. cleat#3775.
+//
+// With the flag on, query_state is not an object but a JSON string literal wrapping base64
+// ciphertext, so `query_state @> '{"order_id":"123"}'` is false for every row: the filter would not
+// fail, it would answer "no run has that", which is exactly what a caller would read as "there is
+// no such run". Refusing it outright is the same choice ErrSearchUnavailableUnderEncryption made.
+var ErrQueryStateFilterUnavailableUnderEncryption = errors.New(
+	"filtering by published state is not available with --encrypt-sensitive-payloads: " +
+		"query_state is ciphertext on disk, so the database cannot match a key and value in it")
+
+// MaxQueryStateFilterPairs bounds how many key/value pairs one query-state filter may carry. Each
+// pair is a predicate every row is tested against (on SQL Server, a subquery per pair), and a caller
+// who needs more than a few is looking for something this filter is not.
+const MaxQueryStateFilterPairs = 4
+
+// ErrQueryStateFilterTooManyPairs is returned for a query-state filter over MaxQueryStateFilterPairs.
+var ErrQueryStateFilterTooManyPairs = fmt.Errorf(
+	"a query-state filter takes at most %d key/value pairs", MaxQueryStateFilterPairs)
+
 // ErrorCode classifies errors for retry decisions.
 type ErrorCode int
 

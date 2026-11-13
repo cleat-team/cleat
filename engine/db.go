@@ -636,6 +636,9 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		s.encryption != nil && s.encryptSensitivePayloads {
 		return nil, ErrSearchUnavailableUnderEncryption
 	}
+	if err := s.queryStateFilterError(filter); err != nil {
+		return nil, err
+	}
 
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -652,6 +655,9 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	)
 
 	applyWorkflowFilters(qb, d, filter, "l.id")
+	if len(filter.QueryState) > 0 {
+		qb.AddCondition("p.tenant_id = %s", s.tenantID) // see CountWorkflows
+	}
 	applyWorkflowListPaging(qb, d, filter, "l.id")
 
 	query, args := qb.SQL()

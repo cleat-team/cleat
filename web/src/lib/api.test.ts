@@ -128,6 +128,59 @@ describe('API Client', () => {
       );
     });
 
+    // cleat#3775: find a run by what it published.
+    it('sends a published-state filter as state.<key>=<value>, before redact', async () => {
+      mockFetchOk([mockWorkflowInstance]);
+      await listWorkflows(undefined, { order_id: '123' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?state.order_id=123&redact=true',
+        undefined,
+      );
+    });
+
+    it('composes a state filter with a status filter', async () => {
+      mockFetchOk([]);
+      await listWorkflows('ready', { order_id: '123' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?status=ready&state.order_id=123&redact=true',
+        undefined,
+      );
+    });
+
+    it('encodes the state key and value, so neither can add a parameter', async () => {
+      mockFetchOk([]);
+      await listWorkflows(undefined, { 'a b': 'x&state.evil=1' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?state.a%20b=x%26state.evil%3D1&redact=true',
+        undefined,
+      );
+    });
+
+    it('sends an empty value, which is a value', async () => {
+      mockFetchOk([]);
+      await listWorkflows(undefined, { status: '' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?state.status=&redact=true',
+        undefined,
+      );
+    });
+
+    it('an empty state object is no filter', async () => {
+      mockFetchOk([]);
+      await listWorkflows(undefined, {});
+      expect(globalThis.fetch).toHaveBeenCalledWith('/api/workflows?redact=true', undefined);
+    });
+
+    it('surfaces the server message when the deployment cannot search by state', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({ error: 'sealed: see --encrypt-sensitive-payloads' }),
+      });
+      await expect(listWorkflows(undefined, { order_id: '1' })).rejects.toThrow('--encrypt-sensitive-payloads');
+    });
+
     it('throws on network error', async () => {
       mockFetchNetworkError('Failed to fetch');
       await expect(listWorkflows()).rejects.toThrow('Failed to fetch');

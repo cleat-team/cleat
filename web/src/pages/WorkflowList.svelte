@@ -10,13 +10,24 @@
   let error = $state('');
   let statusFilter = $state('');
 
+  // cleat#3775: find a run by what it published. `stateInput` is what is typed;
+  // `stateFilter` is what the listing was last asked for, so editing the box does
+  // not change the results until Search (or Enter), and the empty-result message
+  // can say what was searched for rather than what is half-typed.
+  let stateInput = $state('');
+  let stateFilter = $state<Record<string, string> | undefined>(undefined);
+  let stateHint = $state('');
+
   async function load() {
     loading = true;
     error = '';
     try {
-      workflows = await listWorkflows(statusFilter || undefined);
+      workflows = await listWorkflows(statusFilter || undefined, stateFilter);
     } catch (e: any) {
+      // A deployment that cannot search by published state answers with a message
+      // naming the flag (422); it is shown as it comes, not paraphrased.
       error = e.message;
+      workflows = [];
     } finally {
       loading = false;
     }
@@ -25,6 +36,41 @@
   $effect(() => { load(); });
 
   function onFilterChange() { load(); }
+
+  // key=value, split at the FIRST '=', so a value may contain one. Spaces around
+  // the key and the value are trimmed: "order_id = 123" is what people type, and
+  // searching for the key "order_id " would find nothing and say so only as
+  // "No runs". A value with leading or trailing spaces is reachable by the API.
+  function parseStateInput(text: string): Record<string, string> | undefined | null {
+    const t = text.trim();
+    if (!t) return undefined;
+    const i = t.indexOf('=');
+    const key = i < 0 ? '' : t.slice(0, i).trim();
+    if (!key) return null;
+    return { [key]: t.slice(i + 1).trim() };
+  }
+
+  function searchState() {
+    const parsed = parseStateInput(stateInput);
+    if (parsed === null) {
+      stateHint = 'Enter a published value as key=value, for example order_id=123';
+      return;
+    }
+    stateHint = '';
+    stateFilter = parsed;
+    load();
+  }
+
+  function clearState() {
+    stateInput = '';
+    stateHint = '';
+    stateFilter = undefined;
+    load();
+  }
+
+  const stateLabel = $derived(
+    stateFilter ? Object.entries(stateFilter).map(([k, v]) => `${k}=${v}`).join(', ') : '',
+  );
 </script>
 
 <h2>Workflows</h2>
@@ -40,14 +86,28 @@
     <option value="failed">Failed</option>
     <option value="dead_letter">Dead Letter</option>
   </select>
+  <input
+    type="text"
+    class="state-filter"
+    placeholder="Published value, e.g. order_id=123"
+    aria-label="Find a run by a value it published (key=value)"
+    value={stateInput}
+    oninput={(e) => { stateInput = (e.target as HTMLInputElement).value; }}
+    onkeydown={(e) => { if (e.key === 'Enter') searchState(); }}
+  />
+  <button class="btn btn-primary btn-sm" onclick={searchState}>Search</button>
+  <button class="btn btn-sm" onclick={clearState} disabled={!stateInput && !stateFilter}>Clear</button>
   <button class="btn btn-primary btn-sm" onclick={load}>Refresh</button>
 </div>
+{#if stateHint}<div class="error-banner" role="alert">{stateHint}</div>{/if}
 
 <div class="card">
   {#if loading}
     <p style="color: var(--color-text-muted)">Loading...</p>
   {:else if workflows.length === 0}
-    <p style="color: var(--color-text-muted)">No workflows found.</p>
+    <p style="color: var(--color-text-muted)">
+      {#if stateFilter}No runs found that published {stateLabel}.{:else}No workflows found.{/if}
+    </p>
   {:else}
     <table>
       <thead>
