@@ -38,6 +38,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -145,6 +146,12 @@ func main() {
 		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
 	}
 	defer closer.Close()
+
+	// cleat#3766: replay and debug read a run through the store of the tenant that
+	// owns it, which they learn from the run itself.
+	tenantStoreOpener = func(ctx context.Context, tenantID string) (engine.WorkflowStore, io.Closer, error) {
+		return factory.OpenStore(ctx, tenantID)
+	}
 
 	// Before the subcommand runs: some are not written for this dialect, and
 	// the refusal has to precede the first statement rather than follow a
