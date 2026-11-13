@@ -1,9 +1,23 @@
 # Database Sharding
 
-Cleat supports horizontal scaling by distributing workflow data across multiple
-PostgreSQL instances (shards).  A `ShardedStore` implements the same
-`WorkflowStore` interface as the single-node `PostgresStore`, so the worker
-daemon, API server, and CLI all work without code changes once configured.
+> **Sharding is EXPERIMENTAL in 0.6.0** (owner decision D80, 2026-11-13). It is not a supported configuration of
+> this release: it has known gaps, it is not part of the release gate, and it can change or be removed without the
+> notice a supported feature gets. Try it on a deployment you can rebuild.
+>
+> **Known gaps** (each is an open issue; none is scheduled for 0.6.0 unless a fix turns out to be needed for correctness):
+>
+> - Serving more than one tenant on a sharded worker is not supported: tenant provisioning, drop, suspend and resume, and a
+>   library install answer `501`, and the rotating claim is unavailable (cleat#3606).
+> - `cleat deploy` and `cleatctl deploy` write one database, so on a sharded deployment they reach one shard and sit
+>   outside the cross-shard deploy lock; only the worker's `POST /api/definitions` writes every shard (cleat#3684).
+> - A normal start verifies the schema version of the first shard only (cleat#3724).
+> - A shard built with the old `psql` loop is not adopted by `--migrate-only` (cleat#3725).
+
+Cleat can distribute workflow data across multiple PostgreSQL instances
+(shards).  A `ShardedStore` implements the same `WorkflowStore` interface as the
+single-node `PostgresStore`, so the worker daemon, API server, and CLI are meant
+to work without code changes once configured; the gaps above are where they do
+not.
 
 ---
 

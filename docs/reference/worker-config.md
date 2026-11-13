@@ -1597,6 +1597,10 @@ retired with #1926; it is not defined anywhere in `engine/`.
 |------|---------|-------------|
 | string | `""` | Path to shards JSON config for multi-shard operation |
 
+**EXPERIMENTAL in 0.6.0** (owner decision D80, 2026-11-13). Sharding is not a supported configuration of this
+release; it has known gaps (cleat#3606, cleat#3684, cleat#3724, cleat#3725), listed with the rest of its limits in
+[Database sharding](../sharding.md).
+
 JSON format:
 
 ```json
