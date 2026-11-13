@@ -358,8 +358,8 @@ func (s *PostgresStore) beginWorkflowDefPurge(ctx context.Context, name string, 
 		return nil, fmt.Errorf("purge workflow def: begin: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM workflow_defs WHERE name = $1 AND version = $2
-	`, name, version); err != nil {
+		DELETE FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, name, version, s.tenantID); err != nil {
 		_ = tx.Rollback()
 		return nil, fmt.Errorf("purge workflow def: %w", err)
 	}
@@ -388,13 +388,13 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 	if name == "" {
 		rows, err = tx.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
-			FROM workflow_defs ORDER BY name, version DESC
-		`)
+			FROM workflow_defs WHERE tenant_id = $1 ORDER BY name, version DESC
+		`, s.tenantID)
 	} else {
 		rows, err = tx.QueryContext(ctx, `
 			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
-			FROM workflow_defs WHERE name = $1 ORDER BY version DESC
-		`, name)
+			FROM workflow_defs WHERE name = $1 AND tenant_id = $2 ORDER BY version DESC
+		`, name, s.tenantID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list workflow defs: %w", err)
@@ -444,8 +444,8 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
 		SELECT name, version, wasm_bytes, library, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled, exposure
-		FROM workflow_defs WHERE name = $1 AND version = $2
-	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &library, &def.ABIVersion,
+		FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &library, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled, &def.Exposure)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
@@ -506,8 +506,8 @@ func (s *PostgresStore) MarkVersionDeprecated(ctx context.Context, name string, 
 		UPDATE workflow_defs
 		   SET disabled_at = CASE WHEN $3 THEN COALESCE(disabled_at, now()) ELSE NULL END,
 		       gc_eligible = $3
-		 WHERE name = $1 AND version = $2
-	`, name, version, deprecated)
+		 WHERE name = $1 AND version = $2 AND tenant_id = $4
+	`, name, version, deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("mark version deprecated: %w", err)
 	}
@@ -524,8 +524,8 @@ func (s *PostgresStore) PurgeWorkflowDef(ctx context.Context, name string, versi
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		DELETE FROM workflow_defs WHERE name = $1 AND version = $2
-	`, name, version)
+		DELETE FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3
+	`, name, version, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("purge workflow def: %w", err)
 	}
@@ -547,9 +547,9 @@ func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, v
 	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_leases l
 		JOIN workflow_payloads p ON p.id = l.id
-		WHERE p.def_name = $1 AND p.def_version = $2
+		WHERE p.def_name = $1 AND p.def_version = $2 AND l.tenant_id = $3
 		  AND l.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
-	`, name, version).Scan(&count)
+	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
 	}
@@ -571,8 +571,9 @@ func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (m
 		FROM workflow_leases l
 		JOIN workflow_payloads p ON p.id = l.id
 		WHERE l.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
+		  AND l.tenant_id = $1
 		GROUP BY p.def_name, p.def_version
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get active instance counts: %w", err)
 	}

@@ -1188,19 +1188,15 @@ version with a running instance is kept whichever tenant it belongs to. The
 other tenants' passes log one extra line, `version gc swept other tenants`, when
 they removed something. Three limits worth knowing:
 
-- **Run this only as a role the row-level-security policy applies to.** The statements
-  behind a pass carry no tenant predicate; the policy is what scopes them, and the
-  collection groups definitions **by workflow name alone**. A worker connected as a role
-  that **bypasses** the policy sees every tenant's definitions in every pass, so two
-  tenants' same-named workflows are treated as one: measured on PostgreSQL as a
-  superuser, with one tenant holding versions 1 and 2 and the default tenant 3 and 4 of
-  one name and a minimum of 2 kept, one pass **deleted the other tenant's versions 1 and
-  2 and kept the default tenant's 3 and 4** (cleat-review reproduced the same on PG 17).
-  That is how the own pass has behaved since this loop shipped, not something this change
-  introduced, and the per-tenant passes add nothing to it, but it is reachable:
-  `--rls-check` defaults to `auto` and only warns when `--require-auth` is off. **Do not set
-  `--version-gc-interval` on a worker whose connection bypasses the policy.** SQL Server has
-  no such principal. A fix is tracked in #3729.
+- **The definition statements behind a pass are scoped to the store's own tenant in the SQL
+  itself (cleat#3729), not only by row-level security.** The collection groups
+  definitions by workflow name, so this is what keeps two tenants' same-named workflows
+  apart on a connection the policy does not apply to (a superuser, or a role with
+  `BYPASSRLS`; an operator's `--db` DSN commonly is one). Before #3729 such a connection
+  saw every tenant's definitions in every pass, and one pass could delete another
+  tenant's versions while keeping its own: on a release that predates it, do not set
+  `--version-gc-interval` on a worker whose connection bypasses the policy. SQL Server
+  has no such principal, and already carried the predicates.
 - MySQL is single-tenant and a sharded store cannot list tenants, so for both this
   is unchanged: the worker's own tenant only.
 - `POST /api/versions/gc` and `cleatctl versions gc` stay scoped to the tenant that
