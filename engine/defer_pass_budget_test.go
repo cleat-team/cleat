@@ -149,12 +149,21 @@ func TestDeferPassIsBoundedInAggregate(t *testing.T) {
 	elapsed := time.Since(start)
 
 	budgets := reportedBudgets(t, logs.String())
-	if len(budgets) != 3 {
-		t.Fatalf("the host reported %d execution-limit failures, expected 3 (one per "+
-			"runaway defer).\n\nLogs:\n%s\n\n"+
-			"Fewer than 3 means defers were skipped rather than bounded, which is a "+
-			"different and worse behaviour; more means the parse is picking up "+
-			"something else.", len(budgets), logs.String())
+	// A defer that would start after the pass's shared deadline has gone is not started: the
+	// backend reports errDeadlineBeforeGuest and runDefers logs it. That is the bound doing its
+	// job, so it counts, where it used to be given one epoch tick (up to 50ms) under a 1ms
+	// clamp and read as a fourth kind of execution-limit failure. cleat#3746.
+	skipped := strings.Count(logs.String(), errDeadlineBeforeGuest.Error())
+	if len(budgets)+skipped != 3 {
+		t.Fatalf("the host reported %d execution-limit failures and %d defers not started because "+
+			"the pass deadline had gone, expected 3 in all (one per runaway defer).\n\nLogs:\n%s\n\n"+
+			"Fewer than 3 means defers vanished without being either bounded or reported; more "+
+			"means the parse is picking up something else.", len(budgets), skipped, logs.String())
+	}
+	// And the first defer must have RUN under the fence: a pass that starts nothing satisfies the
+	// count above while dropping all the cleanup, which is the failure the control test below guards.
+	if len(budgets) < 1 {
+		t.Fatalf("no defer ran under the fence (all %d were not started):\n%s", skipped, logs.String())
 	}
 
 	var atFullBudget int
@@ -179,6 +188,34 @@ func TestDeferPassIsBoundedInAggregate(t *testing.T) {
 	if elapsed > 5*time.Second {
 		t.Errorf("the pass took %v for a %s budget.\n\nbudgets reported: %v",
 			elapsed.Round(time.Millisecond), passBudget, budgets)
+	}
+}
+
+// TestDeferPassWhoseDeadlineHasGoneStartsNoDefer is the deterministic half of the case
+// TestDeferPassIsBoundedInAggregate reaches only sometimes: a defer that would start after the
+// pass's shared deadline has gone is not started, and is reported as such. The aggregate test sees
+// it when the second runaway defer ends a hair past the deadline (it did on CI, not on a laptop);
+// here the deadline is gone before the first, so every defer is in that case. cleat#3746.
+//
+// Before cleat#3746 each of them was given one epoch tick under a 1ms clamp and reported as an
+// instance-timeout trap, which is what this asserts against.
+func TestDeferPassWhoseDeadlineHasGoneStartsNoDefer(t *testing.T) {
+	eng, wasmBytes, logs := deferBudgetEngine(t, runawayDefersWat, WithDeferPassBudget(time.Nanosecond))
+
+	start := time.Now()
+	eng.runDefers(context.Background(), wasmBytes, threeDeferrals())
+	elapsed := time.Since(start)
+
+	got := logs.String()
+	if n := strings.Count(got, errDeadlineBeforeGuest.Error()); n != 3 {
+		t.Errorf("%d of 3 defers were reported as not started because the pass deadline had gone, want 3:\n%s", n, got)
+	}
+	if budgets := reportedBudgets(t, got); len(budgets) != 0 {
+		t.Errorf("a guest was started under a spent pass deadline and reported budgets %v:\n%s", budgets, got)
+	}
+	// Three runaway defers that started would cost an epoch tick each at the least.
+	if elapsed > time.Second {
+		t.Errorf("the pass took %v with its deadline already gone", elapsed)
 	}
 }
 
