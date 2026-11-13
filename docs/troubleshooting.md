@@ -26,7 +26,10 @@ tables, and the same fix. For a single node or development, `--migrate-on-start`
 the worker migrate itself. If a `--migrate-only` run is already in progress, wait for it.
 
 The opposite case is not an error: a schema *ahead* of the binary starts, with a
-warning, so that a rolling upgrade does not wedge on the workers it is replacing.
+warning, so that a rolling upgrade does not wedge on the workers it is replacing. That is
+the schema's rule only: whether a rolling upgrade is supported is for each release's notes,
+and it is not for 0.5.0 to 0.6.0 (see
+[Upgrading](operations/upgrading.md#automatic-migration-recommended)).
 
 ## Table of Contents
 

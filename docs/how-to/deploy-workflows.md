@@ -229,8 +229,9 @@ older worker writes nothing, and the worker table has no plugin column to fill i
 migration `008` runs until the first upgraded worker starts, every deploy or install that declares
 `plugin_deps` is refused. **Upgrade at least one worker before deploying definitions that declare
 `plugin_deps`, or pass `--allow-missing-plugins`** (deploy only; an install has no override, so install after
-an upgraded worker has started). During a rolling upgrade an older worker still claims and releases runs
-exactly as before: the check a worker makes against its own loaded plugins when it claims a run is unchanged,
+an upgraded worker has started). During a rolling upgrade (supported only where that release's notes say so, and not for
+0.5.0 to 0.6.0: see [Upgrading](../operations/upgrading.md#automatic-migration-recommended))
+an older worker still claims and releases runs exactly as before: the check a worker makes against its own loaded plugins when it claims a run is unchanged,
 and the registry plays no part in it.
 
 ## Locking child workflow versions

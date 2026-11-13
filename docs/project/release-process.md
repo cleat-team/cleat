@@ -252,6 +252,10 @@ Cleat follows [Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH).
 | **MINOR** | New features without breaking existing APIs | `1.0.0` -> `1.1.0` | Backward compatible; new functionality available |
 | **PATCH** | Bug fixes, security patches, documentation | `1.0.0` -> `1.0.1` | No behavioral changes for correct code |
 
+**Before 1.0 the table is the intent, not a guarantee.** A `0.x` MINOR release can change
+behaviour, and has: 0.5.0 requires a fresh database. Each release's UPGRADE NOTES at the top
+of `CHANGELOG.md` say what a step requires; `SECURITY.md` says the same about support.
+
 ### What constitutes a breaking change (MAJOR bump)
 
 - **WASM boundary**: adding, removing, or changing the signature of any host
