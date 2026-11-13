@@ -187,11 +187,25 @@ func TestPythonComponentExecutionFence(t *testing.T) {
 	}
 	defer rt.Close(ctx)
 
-	wt, err := NewWasmtimeBackend(ctx)
+	// The backend's own bound is raised to 10 minutes so the CALLER's deadline is the only
+	// bound that can stop this guest, and the "fell back to the backend default" regression
+	// below is a distance of minutes away from the budget rather than a few seconds.
+	const backendBound = 10 * time.Minute
+	wt, err := NewWasmtimeBackend(ctx, WithWasmtimeExecutionTimeout(backendBound))
 	if err != nil {
 		t.Fatalf("NewWasmtimeBackend: %v", err)
 	}
-	const budget = 2 * time.Second
+	// 90s, not the 2s this used to be, and far above any compile. The native component path
+	// compiles the ~19 MB component BEFORE it applies the fence, on every call and with no
+	// cache (cleat#3748), and that time is charged to ctx's deadline: about 19s per compile
+	// was measured on a loaded CI runner (tests/plugin-harness), and a 2s budget was spent by
+	// the compile, so the guest never ran under the fence at all. The test passed because
+	// configureStore turned a spent deadline into a 1ms instance-timeout trap whose message
+	// happened to match the assertion below. cleat#3746 removed that clamp and this test went
+	// red with "execution timed out", which is how that came to light. The budget has to
+	// survive a slow compile, so it is set against the load that caused this and not against
+	// a quiet machine; the guest never returns, so the test takes about this long.
+	const budget = 90 * time.Second
 	eng := NewEngine(rt, &mockCaller{},
 		WithBackends(WasmtimeLanguages, wt),
 		WithDefaultWorkflowTimeout(budget),
@@ -215,15 +229,21 @@ func TestPythonComponentExecutionFence(t *testing.T) {
 		t.Errorf("error does not name the execution time limit, so the fence is not what "+
 			"stopped this: %v", execErr)
 	}
+	// And that the bound that applied was the caller's deadline: the guest ran, under the
+	// fence, and the deadline is what stopped it. "execution timed out" instead means the
+	// budget was gone before the guest started (the compile took longer than it).
+	if !strings.Contains(execErr.Error(), "the time left on the workflow's deadline") {
+		t.Errorf("the fence did not stop this on the caller's deadline: %v", execErr)
+	}
 
 	// Secondary, and deliberately loose. Its only job is to catch the specific
-	// regression of falling back to the backend-wide default
-	// (DefaultWasmtimeExecutionTimeout, 30s) instead of the 2s budget, so any
-	// threshold well between the two works and there is nothing to tune. It is
-	// not measuring how promptly the fence fires.
-	if limit := DefaultWasmtimeExecutionTimeout / 2; elapsed > limit {
+	// regression of falling back to the backend-wide bound (backendBound, 10 minutes
+	// here) instead of the 90s budget, so any threshold between the two works and there
+	// is nothing to tune; this one is 5 minutes. It is not measuring how promptly the
+	// fence fires.
+	if limit := 5 * time.Minute; elapsed > limit {
 		t.Errorf("budget was %s but execution ran %s (over %s): the fence fired on some "+
 			"deadline other than the caller's -- most likely the backend default of %s",
-			budget, elapsed, limit, DefaultWasmtimeExecutionTimeout)
+			budget, elapsed, limit, backendBound)
 	}
 }

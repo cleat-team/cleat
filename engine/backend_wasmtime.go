@@ -71,6 +71,12 @@ type wasmtimeBackend struct {
 	// IMPROVEMENT-PLAN 3.90; see engine/wasmtime_hostbudget.go.
 	budget *hostBudget
 
+	// epochBoundByDeadline records that the epoch budget configureStore applied
+	// was ctx's remaining deadline, not this backend's executionTimeout, so the
+	// error resourceLimitError builds names the bound that actually stopped the
+	// guest. Per-execution, like budget. cleat#3746.
+	epochBoundByDeadline bool
+
 	// moduleCache holds compiled wasmtime Modules keyed by xxhash of wasmBytes.
 	// Shared across PerExecution instances to avoid serialized recompilation.
 	//
@@ -300,16 +306,29 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 	if timeout <= 0 {
 		timeout = DefaultWasmtimeExecutionTimeout
 	}
+	b.epochBoundByDeadline = false
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining < timeout {
 			if remaining <= 0 {
-				// ctx is already past its deadline; still apply a bound
-				// (rather than skip epoch interruption entirely) so the
-				// module is interrupted at the next tick instead of
-				// running unbounded.
-				remaining = time.Millisecond
+				// ctx is already past its deadline, and the guest has not
+				// started. Say so, and do not start it.
+				//
+				// This used to clamp the budget to one millisecond "so the
+				// module is interrupted at the next tick", which ran the guest
+				// for one 50ms tick and then reported a 1ms --wasm-instance-timeout
+				// trap: a different limit, a number nobody configured, and
+				// (for a component) a half-initialised CPython. What it was
+				// reached by was time spent BEFORE this call -- the native
+				// component path compiles first and caches nothing -- so a
+				// workflow whose deadline had merely been used up by that read
+				// as a guest that ran away. cleat#3746.
+				//
+				// The post-start fence is untouched: a deadline that passes
+				// DURING execution still interrupts the guest at the next tick.
+				return 0, errDeadlineBeforeGuest
 			}
 			timeout = remaining
+			b.epochBoundByDeadline = true
 		}
 	}
 	ticks := uint64(timeout / epochTickInterval)
@@ -576,6 +595,14 @@ func (b *wasmtimeBackend) resourceLimitError(err error, timeout time.Duration) e
 		return nil
 	}
 	timeLimit := func() error {
+		// Which bound stopped the guest decides which flag to point at. When it
+		// was ctx's remaining deadline (--max-workflow-duration, or a tenant's or
+		// a run's lower value), --wasm-instance-timeout is the wrong advice: the
+		// guest was inside it. The wording up to "wall-clock budget" is the same
+		// either way, which callers that parse the number rely on.
+		if b.epochBoundByDeadline {
+			return &executionLimitError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget, the time left on the workflow's deadline; configure with --max-workflow-duration, or the tenant's or the run's workflow timeout): %w", timeout, err)}
+		}
 		return &executionLimitError{fmt.Errorf("execution time limit exceeded (%s wall-clock budget; configure with --wasm-instance-timeout): %w", timeout, err)}
 	}
 	fuelLimit := func() error {

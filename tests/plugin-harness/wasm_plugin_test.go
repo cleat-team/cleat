@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/cleat/wasmtest"
 
@@ -768,7 +769,15 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 	wasmBytes := buildPythonWorkflowWasm(t)
 
 	// Create wasmtest env with the plugin registry wired in.
-	wenv := wasmtest.NewWasmTestEnv(t, wasmtest.WithPluginRegistry(env.Registry))
+	//
+	// Two minutes PER CALL, not the default 30s: the native component path
+	// compiles the 19 MB component afresh on every Execute and every Replay
+	// (cleat#3748), measured at about 19s each on a loaded CI runner, and that
+	// time counts against the call's deadline. cleat#3746. A hung guest still
+	// fails, after two minutes.
+	wenv := wasmtest.NewWasmTestEnv(t,
+		wasmtest.WithPluginRegistry(env.Registry),
+		wasmtest.WithCallTimeout(2*time.Minute))
 	defer wenv.Close()
 
 	// Execute the workflow. Python WASM components always export "run" as

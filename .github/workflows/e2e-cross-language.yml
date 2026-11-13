@@ -143,7 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     # Raised from 20 to 35, cleat#3482: 20 was 1.62x the longest successful
     # pull_request run, below the 2.5x margin cleat#3479 uses.
-    timeout-minutes: 35  # max 12.1m over 55 successful runs (develop push + pull_request samples); internal go test -timeout 10m, 2026-10-27; cleat#3482
+    timeout-minutes: 35  # max 12.1m over 55 successful runs (develop push + pull_request samples); internal go test -timeout 15m (was 10m; the engine package ran 541s and 546s against it on #3750, whose fence test now takes ~90s), 2026-11-13; cleat#3482, cleat#3746
 
     steps:
       - uses: actions/checkout@v7
@@ -244,7 +244,7 @@ jobs:
           # only job that installs componentize-py, so it is the only place
           # that failure could ever have shown up.
           set -o pipefail
-          go test -count=1 -short=false -timeout=10m \
+          go test -count=1 -short=false -timeout=15m \
             -v \
             -run "TestRust|TestARust|TestPython|TestAssemblyScript|TestJava|TestADeferBody|TestAMissingDeferExport|TestTheBackendLogsToTheConfiguredLogger|TestTheHostRunsDefersOfAKilled|TestTheWazeroPathRunsDefers" \
             ./engine/... 2>&1 | tee e2e-report.txt
@@ -271,7 +271,7 @@ jobs:
           set -o pipefail
           # ../../: the report lands at the repo root, because the Skip budget
           # step below runs scripts/check-skip-budget.sh from there.
-          go test -count=1 -short=false -timeout=10m -json \
+          go test -count=1 -short=false -timeout=15m -json \
             ./... 2>&1 | tee ../../cross-language-report.json
 
       # 0, and the number is the point: every test in that suite needs cargo and

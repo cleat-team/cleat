@@ -169,6 +169,18 @@ func replayAbortedBeforeGuest(ctx context.Context, workflowID string, verr error
 	return nil
 }
 
+// errDeadlineBeforeGuest is what a backend returns when ctx's deadline had already
+// passed before the guest started, so the guest was not started. It wraps
+// context.DeadlineExceeded, so errors.Is answers the question a caller has, and
+// executeWithBackend reports it as every other workflow-duration expiry:
+// "execution timed out". cleat#3746.
+//
+// Declared HERE and not beside its only producer (wasmtimeBackend.configureStore,
+// which is `//go:build cgo`) because this file is untagged and references it: a
+// declaration in the tagged file leaves every CGO-less build with
+// `undefined: errDeadlineBeforeGuest`.
+var errDeadlineBeforeGuest = fmt.Errorf("the workflow's deadline passed before the guest started: %w", context.DeadlineExceeded)
+
 // executeWithBackend runs a workflow execution (fresh or replay) using the
 // given WasmBackend. The backend handles compilation and execution; the
 // Engine manages the execSession, history, timeouts, and result handling.
@@ -353,7 +365,11 @@ func (e *Engine) executeWithBackend(
 	// did not work: wasmtime-go does not observe ctx.Done() while fn.Call
 	// is in progress, so for an infinite loop fn.Call never returns and
 	// this line was never reached. See IMPROVEMENT-PLAN.md 1.5.
-	if callErr == nil && execCtx.Err() == context.DeadlineExceeded {
+	//
+	// Also the case where the deadline had passed before the guest started
+	// (errDeadlineBeforeGuest): the same outcome as any other workflow-duration
+	// expiry, rather than a guest that "failed". cleat#3746.
+	if (callErr == nil || errors.Is(callErr, errDeadlineBeforeGuest)) && execCtx.Err() == context.DeadlineExceeded {
 		if len(session.deferrals) > 0 {
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
