@@ -236,20 +236,28 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 		}
 	})
 
-	t.Run("creating a tenant is refused on a bypassing connection, and nothing is created", func(t *testing.T) {
+	// An earlier draft refused this, and cleat's own tenant-sandbox and B2B scenarios failed in CI: --create-tenant
+	// is an administrative command whose documented DSN is an owner or superuser one. What is refused is
+	// SERVING, so the creation succeeds and the next start on that DSN is the thing that stops.
+	t.Run("--create-tenant works on a bypassing (owner) connection; serving a second tenant there is what is refused", func(t *testing.T) {
 		dsn, owner := migrated(t)
 		bypasses(t, owner)
 		code, out := runWorker(t, bin, nil, "--driver=postgres", "--db="+dsn,
 			"--create-tenant=second", "--org=00000000-0000-0000-0000-000000000000")
-		if code == 0 {
-			t.Fatalf("--create-tenant on a bypassing connection exited 0; it must refuse.\n%s", out)
+		if code != 0 {
+			t.Fatalf("--create-tenant on an owner connection exited %d; it is the documented provisioning path.\n%s", code, out)
 		}
-		if msg := refusal(out, "refusing to create a tenant:"); msg == "" || !strings.Contains(msg, "would make 2 tenants") {
-			t.Fatalf("the refusal is missing or does not say how many tenants it would make:\n%s", out)
+		if n := tenants(t, owner); n != 2 {
+			t.Fatalf("--create-tenant left %d tenants, want 2", n)
 		}
-		if n := tenants(t, owner); n != 1 {
-			t.Errorf("a refused --create-tenant left %d tenants, want 1", n)
+		// And the operator is told, because workers already serving this database on a bypassing role are
+		// now serving two tenants until they restart. A warning, not a failure: the exit status above is 0.
+		for _, want := range []string{"WARNING: this tenant was created on a connection", "now holds 2 tenants", "its next start will refuse", "cleat_app", "docs/explanation/postgresql-schema.md"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the creation warning is missing %q:\n%s", want, out)
+			}
 		}
+		wantRefusal(t, dsn, "postgres", "2")
 	})
 
 	t.Run("the same --create-tenant on a role that is subject to RLS creates it (the control: the path works)", func(t *testing.T) {
@@ -262,6 +270,9 @@ func TestAWorkerOnAConnectionThatBypassesRLSRefusesToServeMoreThanOneTenant(t *t
 		}
 		if n := tenants(t, owner); n != 2 {
 			t.Errorf("--create-tenant as cleat_app left %d tenants, want 2", n)
+		}
+		if strings.Contains(out, "WARNING: this tenant was created") {
+			t.Errorf("a connection that IS subject to RLS was warned about bypassing it:\n%s", out)
 		}
 	})
 

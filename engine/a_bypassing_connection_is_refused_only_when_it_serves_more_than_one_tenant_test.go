@@ -61,6 +61,30 @@ func TestABypassingConnectionIsRefusedOnlyWhenItServesMoreThanOneTenant(t *testi
 		}
 	})
 
+	// The warning --create-tenant prints after creating one. It is rendered from the same decision as the
+	// refusals, so the line it draws is the same line: with one tenant (or a connection that is subject to
+	// the policies) there is nothing to render.
+	t.Run("the creation warning names the role, the count, the restart consequence and the fix, and is absent where the decision is nil", func(t *testing.T) {
+		warn := DecideRLSMultiTenant("owner", reasons, 2, false).CreatedWarning()
+		for _, want := range []string{
+			"WARNING", `"owner"`, "now holds 2 tenants", "until it restarts", "its next start will refuse",
+			reasons[0].Detail, reasons[1].Detail, rlsBypassFix, "docs/explanation/postgresql-schema.md",
+		} {
+			if !strings.Contains(warn, want) {
+				t.Errorf("the creation warning is missing %q:\n%s", want, warn)
+			}
+		}
+		if strings.Contains(warn, "refusing") {
+			t.Error("a warning must not read as a refusal: the command it comes from succeeded")
+		}
+		if d := DecideRLSMultiTenant("owner", reasons, 1, false); d != nil {
+			t.Errorf("one tenant produced a decision to warn about: %+v", d)
+		}
+		if d := DecideRLSMultiTenant("cleat_app", nil, 5, false); d != nil {
+			t.Errorf("a connection subject to the policies produced a decision to warn about: %+v", d)
+		}
+	})
+
 	t.Run("both refusals end with the same fix as the single-tenant one", func(t *testing.T) {
 		if !strings.Contains(FormatRLSBypass(reasons), rlsBypassFix) ||
 			!strings.Contains(DecideRLSMultiTenant("owner", reasons, 2, false).Message(), rlsBypassFix) {

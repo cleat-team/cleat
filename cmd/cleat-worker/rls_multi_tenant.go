@@ -36,6 +36,23 @@ func multiTenantRefusalFor(ctx context.Context, db *sql.DB, reasons []engine.RLS
 	return engine.DecideRLSMultiTenant(role, reasons, n, creating), nil
 }
 
+// tenantCreatedWarning is what `--create-tenant` prints after it has created a tenant: the warning when
+// the connection bypasses row-level security and the database now holds more than one tenant, "" when it
+// does not. It is called AFTER the creation, so the count already includes the new tenant. It never
+// decides anything: the command's exit status is not its business (cleat#3772, owner decision D82 is about
+// a connection that serves, and this one does not).
+func tenantCreatedWarning(ctx context.Context, db *sql.DB) (string, error) {
+	reasons, err := engine.CheckRLSEnforced(ctx, db)
+	if err != nil {
+		return "", err
+	}
+	refusal, err := multiTenantRefusalFor(ctx, db, reasons, false)
+	if err != nil || refusal == nil {
+		return "", err
+	}
+	return refusal.CreatedWarning(), nil
+}
+
 // newTenantCreationGuard builds the guard for a PostgreSQL connection. It interrogates the connection
 // again on every call rather than trusting what startup saw, so it is right for a role changed under a
 // running worker, and so that it applies under -rls-check=off, which skips the startup warning but not

@@ -718,18 +718,12 @@ func main() {
 		if display == "" {
 			display = *createTenantNamed
 		}
-		// cleat#3772, D82: a second tenant is not created on a connection that is not subject to row-level
-		// security. The role the operator can use instead is cleat_app, which holds INSERT on admin.tenants.
-		if *driver == "postgres" {
-			guard := newTenantCreationGuard(gdb)
-			refusal, gErr := guard(context.Background())
-			if gErr != nil {
-				logger.WarnContext(context.Background(), "could not check row-level security before creating a tenant", "worker_id", workerID, "error", gErr)
-			} else if refusal != nil {
-				logger.ErrorContext(context.Background(), refusal.Message(), "worker_id", workerID)
-				os.Exit(1)
-			}
-		}
+		// cleat#3772, D82 is NOT enforced here, and an earlier draft did. This is an administrative command,
+		// and its documented use is an owner or superuser DSN: `--create-org` prints exactly that hint, the
+		// tenant-sandbox and B2B scenarios provision this way, and role provisioning below needs it. A
+		// refusal here broke all three in CI. The rule is enforced where a connection SERVES -- the worker's
+		// startup, and POST /api/admin/tenants on a running worker -- so a second tenant created from here
+		// is still refused the moment the same DSN is used to serve.
 		// auth.CreateTenant refuses MySQL, which is single-tenant by decision,
 		// rather than emitting SQL that cannot succeed. Surfaced as-is: the message names the dialect,
 		// which is more useful than anything this layer could add.
@@ -737,6 +731,13 @@ func main() {
 		if cErr != nil {
 			logger.ErrorContext(context.Background(), "failed to create tenant", "worker_id", workerID, "name", *createTenantNamed, "error", cErr)
 			os.Exit(1)
+		}
+		if *driver == "postgres" {
+			if warning, wErr := tenantCreatedWarning(context.Background(), gdb); wErr != nil {
+				logger.WarnContext(context.Background(), "could not check whether this connection bypasses row-level security after creating the tenant", "worker_id", workerID, "error", wErr)
+			} else if warning != "" {
+				logger.WarnContext(context.Background(), warning, "worker_id", workerID)
+			}
 		}
 		// PROVISION THE ROLE, when role isolation is configured. cleat#1307.
 		//
@@ -2002,6 +2003,13 @@ func main() {
 				logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
 			}
 		default:
+			// FAILS OPEN when the tenants cannot be counted, as the check beside it does when it cannot tell
+			// whether the connection bypasses (above), and for the same reason: refusing on an inconclusive
+			// read makes a database hiccup fatal. It matters only where nothing below would refuse anyway
+			// (--require-auth=false, or -rls-check=off), and only for a role that bypasses row-level security
+			// yet cannot read admin.tenants -- a superuser or the table owner can always count. POST
+			// /api/admin/tenants fails closed (500) instead, because there a refusal costs one request and
+			// not a restart loop. Reviewer's note on #3780, left as a choice rather than an accident.
 			if refusal, cErr := multiTenantRefusalFor(ctx, db, reasons, false); cErr != nil {
 				logger.WarnContext(context.Background(), "could not count tenants, so the refusal of a bypassing connection that serves more than one was not applied", "worker_id", workerID, "error", cErr)
 			} else if refusal != nil {

@@ -230,6 +230,27 @@ func DecideRLSMultiTenant(role string, reasons []RLSBypassReason, tenants int, c
 	return &RLSMultiTenantRefusal{Role: role, Tenants: tenants, Reasons: reasons, Creating: creating}
 }
 
+// CreatedWarning renders what an operator is told when a tenant was just created from a connection that is
+// not subject to row-level security and the database now holds more than one. It is a WARNING and not a
+// refusal because the creating command is not what serves (cleat#3772): the risk is the workers already
+// serving this database on a bypassing role, which keep running with more than one tenant until they
+// restart, and whose next start will refuse.
+func (r *RLSMultiTenantRefusal) CreatedWarning() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "WARNING: this tenant was created on a connection (role %q) that is not subject to row-level security, "+
+		"and the database now holds %d tenants. Any worker serving this database on a role that bypasses row-level security "+
+		"is now serving more than one tenant, with nothing keeping one tenant's data from another's, until it restarts; "+
+		"its next start will refuse (cleat#3772). Why this connection is not subject to it:", r.Role, r.Tenants)
+	for _, reason := range r.Reasons {
+		b.WriteString("\n  - ")
+		b.WriteString(reason.Detail)
+	}
+	b.WriteString("\n\n")
+	b.WriteString(rlsBypassFix)
+	b.WriteString(" See docs/explanation/postgresql-schema.md, the section on row-level security.")
+	return b.String()
+}
+
 // Message renders the refusal for an operator: the role, the tenant count, every reason, that neither
 // --require-auth=false nor -rls-check=off lifts it, and the fix.
 func (r *RLSMultiTenantRefusal) Message() string {
