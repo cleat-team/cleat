@@ -167,6 +167,35 @@ allowed. That is the rolling-upgrade case described under
 [Migration is a deploy step](#migration-is-a-deploy-step), where workers on release
 N run against a database release N+1's deploy step already migrated.
 
+**Moving from 0.5.0 to 0.6.0** is an in-place upgrade (owner decision D79, which
+reverses D18 for this step). The supported path is:
+
+1. **Stop every 0.5.0 worker.**
+2. Run 0.6.0's `cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"` against the
+   database (with `--migrate-db` for a role that has DDL rights). It applies the
+   migrations added since 0.5.0 and the plugins' own, and leaves every run's event
+   history as 0.5.0 wrote it.
+3. Start the 0.6.0 workers. Runs that were in flight are resumed: runs that were parked
+   on a timer or a signal, runs that were queued and not yet claimed, and a step that
+   was executing when its worker stopped (it is reclaimed once its lease expires).
+
+**Running 0.5.0 and 0.6.0 workers at the same time (a rolling upgrade) is untested and
+not supported for this step.** A 0.5.0 worker started against a 0.6.0-migrated schema
+is the case no test covers; stop all of them first. If rolling upgrades are wanted
+later, that is a new decision.
+
+What is checked end to end, by `scripts/upgrade_from_v040.py --from-version v0.5.0
+--expect upgrade` (the **Upgrade From v0.5.0** workflow, on every push to a `release/**`
+branch and on demand; cleat#3735): a database seeded by the *published* 0.5.0 worker is
+migrated in place by the release candidate to the schema a fresh release candidate
+produces, with each plugin that gained a migration since 0.5.0 recording it and every
+run's event history unchanged by the migration; then every run that was in flight
+completes on the release candidate (a step running at the kill, runs asleep on a timer or
+waiting on a signal, parents awaiting a child, and runs queued and never claimed), and a
+run whose recorded checksums were corrupted is refused. **PostgreSQL only so far**: the
+SQL Server and MySQL legs are tracked on cleat#3735 and are not yet in place. The
+workflow is not yet a *required* check on release branches.
+
 **Moving from 0.4.0.** There is no export/import tool. The route is to run the two
 side by side until 0.4.0 has nothing left to do:
 

@@ -1,0 +1,125 @@
+# ---------------------------------------------------------------------------
+# Upgrade From v0.5.0 (cleat#3735, owner decision D79)
+#
+# 0.6.0 supports an in-place upgrade from 0.5.0 (D79 reverses D18 for 0.5.0 to
+# 0.6.0). This job seeds a database with the PUBLISHED v0.5.0 cleat-worker, kills
+# it with runs in flight, then runs the release candidate against it:
+#
+#   * `--migrate-only` migrates it in place (exit 0), runs every migration since
+#     v0.5.0 and the plugins' migrations (event-triggers, jobqueue, notifications
+#     and scheduler gained steps), leaves every run's event history byte-for-byte
+#     as the seed wrote it, and produces the schema a FRESH release candidate
+#     produces;
+#   * the release candidate then serves it and every run that was in flight
+#     completes: a step that was RUNNING at the kill (reclaimed after its lease),
+#     runs SLEEPING on a timer or WAITING on a signal, parents awaiting a child,
+#     and runs QUEUED and never claimed;
+#   * a control run whose recorded checksums were corrupted must be refused, so a
+#     clean resume of the others proves the history chain was verified.
+#
+# The v0.5.0 artifacts are pinned by sha256 and image digest in
+# scripts/upgrade_from_v040.py (PINS); see the comment there for which commit
+# they were built from and how that was established.
+#
+# WHERE IT RUNS. On a push to a release/** branch and on demand, like the v0.4.0
+# job. PostgreSQL only in this file; SQL Server and MySQL follow (cleat#3735).
+# Making it a REQUIRED check on release branches is a ruleset change and the
+# owner's, not this file's.
+#
+# Exit statuses: 0 passed, 1 a finding, 2 UNMEASURED (the check could not look,
+# which is a failure of the check, not a finding about cleat).
+# ---------------------------------------------------------------------------
+name: Upgrade From v0.5.0
+
+on:
+  push:
+    branches: ["release/**"]
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    paths:
+      - .github/workflows/upgrade-from-v050.yml
+  workflow_dispatch:
+
+# Keyed on the commit for pushes, so one queued release-branch run is never
+# cancelled by the next push; superseded PR runs are cancelled.
+# scripts/check-workflow-concurrency.sh requires exactly this shape.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-from-v050:
+    name: Upgrade From v0.5.0 (PostgreSQL)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # 127.0.0.1, not localhost: see engine-race.yml.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # An EMPTY database: the seed step migrates it with the v0.5.0 worker.
+      OWNER_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      STATE_DIR: ${{ github.workspace }}/.upgrade-state
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Harness self-test
+        run: python3 scripts/upgrade_from_v040.py --self-test
+
+      # CGO on: with it off there is no WASM backend and the worker exits 1
+      # at startup (CLAUDE.md, "Build and test with CGO on"). --verify-backend
+      # turns that into a failure HERE rather than a migration-shaped one below.
+      - name: Build the release candidate's cleat-worker
+        run: |
+          go build -o "$RUNNER_TEMP/cleat-worker-rc" ./cmd/cleat-worker
+          "$RUNNER_TEMP/cleat-worker-rc" -verify-backend
+
+      - name: Seed a database with the published v0.5.0, runs in flight
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py seed --from-version v0.5.0 --owner-db "$OWNER_DB" --state-dir "$STATE_DIR"
+          echo "seed_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upgrade in place with the release candidate; every in-flight run completes
+        run: |
+          start=$SECONDS
+          python3 scripts/upgrade_from_v040.py verify --expect upgrade --owner-db "$OWNER_DB" --state-dir "$STATE_DIR" --rc-worker "$RUNNER_TEMP/cleat-worker-rc"
+          echo "verify_seconds=$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
+
+      # include-hidden-files: STATE_DIR is `.upgrade-state`, a hidden directory,
+      # and upload-artifact skips hidden files by default (cleat#3461). `warn`
+      # and not `error`: when an early step fails there is legitimately no
+      # state directory, and a second failure would bury the first.
+      - name: Upload worker logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-from-v050-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .upgrade-state/*.log
+            .upgrade-state/manifest.json
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
