@@ -55,7 +55,7 @@ Cleat's architecture imposes four non-negotiable constraints on the VM:
 - **Immature non-Go toolchains.** The 38 fork/port issues are direct evidence —
   AS SDK doesn't compile on current AS 0.27.32, TeaVM has 6 blockers, Python
   WASM binaries are ~20MB.
-- **Go version lock-in.** cleat requires Go 1.27+ (go.mod pins `toolchain go1.27.1`);
+- **Go version lock-in.** cleat requires Go 1.27+ (go.mod pins `toolchain go1.27.3`, and Go 1.27.4 and newer cannot build it yet, see CONTRIBUTING.md);
   `//go:wasmimport` and `//go:wasmexport` themselves need Go 1.24+. This is
   bleeding-edge.
 - **Debugging is primitive.** No step-through debugger for WASM workflows.

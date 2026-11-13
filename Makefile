@@ -448,7 +448,7 @@ tools-go:
 		fi; \
 	else \
 		echo "[MISSING] Go $(GO_MIN_VERSION)+ — install from https://go.dev/dl/"; \
-		echo "  Linux:   wget https://go.dev/dl/go1.27.1.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.27.1.linux-amd64.tar.gz"; \
+		echo "  Linux:   wget https://go.dev/dl/go1.27.3.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.27.3.linux-amd64.tar.gz"; \
 		echo "  macOS:   brew install go"; \
 	fi
 
