@@ -269,6 +269,12 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	}
 
 	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {
+		// No build script anywhere is an environment problem, and its own message
+		// says how to fix it. The advice below is about a compile that ran and failed.
+		if wasm.IsPythonBuildScriptNotFound(err) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Make sure the Python file has a @cleat_entry decorated function.\n")
 		fmt.Fprintf(os.Stderr, "Check that (1) the Python file has valid syntax, (2) the @cleat_entry function exists and is not async, (3) all imports are available.\n")

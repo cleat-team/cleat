@@ -7,7 +7,7 @@ from cleat_sdk import HostCalls, cleat_entry
 
 @cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, name: str) -> str:
-    resp = h.cleat_call("greeter", "Greet", {"name": name})
+    resp = h.call("greeter", "Greet", {"name": name})
     return resp
 ```
 
@@ -15,9 +15,18 @@ def my_workflow(h: HostCalls, name: str) -> str:
 
 ## Installation
 
+Install into a virtual environment. A current Debian or Ubuntu refuses a global
+`pip install` (PEP 668, `externally-managed-environment`), and `python3 -m venv`
+there needs `sudo apt install python3-venv` first.
+
 ```bash
-pip install cleat-sdk
+python3 -m venv .venv
+. .venv/bin/activate
+pip install cleat-sdk 'componentize-py>=0.12.0'
 ```
+
+Quote the requirement. Unquoted, `>=0.12.0` is a shell redirect: it creates a file
+named `=0.12.0` and installs `componentize-py` with no constraint.
 
 Or from source:
 
@@ -25,6 +34,12 @@ Or from source:
 cd python-sdk/
 pip install -e .
 ```
+
+The package ships the WIT and the build script, so with the `cleat` CLI this is
+everything `cleat build --target python` needs: no checkout of this repository.
+(`cleat-sdk` 0.5.0 on PyPI predates that and ships neither.) For a complete
+walk-through from an empty directory to a workflow that has run, see the
+[Python quick start](../docs/tutorials/python-quick-start.md).
 
 ## Quick start
 
@@ -41,14 +56,16 @@ class GreetingRequest:
 
 @cleat_entry("hello_workflow")
 def hello_workflow(h: HostCalls, request: GreetingRequest) -> str:
-    h.cleat_log(f"Hello workflow started for {request.name}")
-    response = h.cleat_call(
+    h.log(f"Hello workflow started for {request.name}")
+    response = h.call(
         "greeter", "Greet",
         {"name": request.name, "language": request.language}
     )
-    h.cleat_log(f"Got response: {response}")
+    h.log(f"Got response: {response}")
     return response
 ```
+
+The input is a JSON object keyed by the parameter names, so `my_workflow(h, name: str)` from the first snippet is started with `{"input": {"name": "Ada"}}`. A bare string (`{"input": "Ada"}`) is refused with `type: want object, got string`. Return a JSON object (a `dict`), not a bare string. The [Python quick start](../docs/tutorials/python-quick-start.md) runs one end to end.
 
 The decorator generates a WASM export wrapper conforming to the Cleat ABI (`(args_ptr, args_len, out_ptr, max_out_len) -> i64`). On replay, completed calls return cached results instead of re-executing.
 
@@ -70,18 +87,18 @@ places.
 - `min_version() -> int` -- minimum supported version
 
 ### Durable Execution
-- `cleat_call(service, operation, request) -> str` -- recorded API call
-- `cleat_call_typed(service, operation, request, result_type) -> T` -- typed variant with automatic JSON deserialisation
-- `cleat_call_with_retry(service, operation, request, retry_policy) -> str` -- server-side retry
-- `cleat_call_with_heartbeat(service, operation, request, interval_ms, progress_cb) -> str` -- long-running call with progress updates
-- `cleat_sleep(duration_ms) -> None` -- suspend for a duration (survives restarts)
-- `cleat_log(message) -> None` -- emit a log message
-- `cleat_fetch(url, method, headers, body) -> (body, status)` -- durable HTTP fetch via host
-- `cleat_send(service, operation, request) -> None` -- fire-and-forget (no response)
+- `call(service, operation, request, timeout_ms=None) -> str` -- recorded API call
+- `call_typed(service, operation, request, result_type) -> T` -- typed variant with automatic JSON deserialisation
+- `call_with_retry(service, operation, request, retry) -> str` -- server-side retry, `retry` is a `RetryPolicy`
+- `call_with_heartbeat(service, operation, request, heartbeat_interval_ms) -> str` -- long-running call that reports liveness
+- `sleep(timeout_seconds) -> bool` -- suspend for a duration **in seconds** (survives restarts); `sleep_ms(timeout_ms)` is the milliseconds form
+- `log(message) -> None` -- emit a log message
+- `fetch(url, method="GET", headers=None, body="") -> (body, status)` -- durable HTTP fetch via host
+- `send(service, operation, request) -> None` -- fire-and-forget (no response)
 - `schedule_invoke(service, operation, request, delay_ms) -> None` -- delayed one-shot invocation
 
 ### Signals & Events
-- `await_signals(signal_names, timeout_ms) -> SignalResult` -- wait for external signals
+- `await_signals(signal_names, timeout_seconds) -> SignalResult` -- wait for external signals; `0` waits indefinitely, and `await_signals_ms` is the milliseconds form
 - `poll_signal(name) -> (payload, found)` -- non-blocking signal check
 - `poll_cancellation() -> (cancelled, reason)` -- check for cancellation
 
@@ -95,7 +112,7 @@ places.
 
 ### Promises
 - `create_promise(name, ttl_ms=None) -> str` -- create a durable promise, returns promise ID
-- `await_promise(promise_id, timeout_ms) -> PromiseResult` -- await a promise with timeout
+- `await_promise(promise_id, timeout_seconds) -> PromiseResult` -- await a promise with timeout; `await_promise_ms` is the milliseconds form
 - `resolve_promise(promise_id, value) -> None` -- resolve a promise from within the workflow
 - `reject_promise(promise_id, error) -> None` -- reject a promise from within the workflow
 
@@ -108,16 +125,16 @@ only inside this SDK's own test harness. Use `set_query_state` to publish
 state that any caller can read via `GET /api/workflows/:id/query?key=X`.
 
 ### Lifecycle
-- `cleat_defer(description) -> str` -- register cleanup to run on exit, returns defer ID
+- `defer(description) -> str` -- register cleanup to run on exit, returns defer ID
 - `continue_as_new(input) -> None` -- start a fresh run with new input
 - `run_detached(name, input_json) -> None` -- start a workflow that outlives this one
 
 ### Plugin Calls
 - `plugin_call(plugin_name, function_name, input) -> str` -- call a host plugin function
 
-### cleat_log vs print/stdout
+### `h.log` vs print/stdout
 
-`cleat_log()` writes to the **workflow event history** -- it is deterministic, recorded, and replayed. Messages appear in the workflow's event log and are visible through the Cleat monitoring UI, even when replaying from history.
+`log()` writes to the **workflow event history** -- it is deterministic, recorded, and replayed. Messages appear in the workflow's event log and are visible through the Cleat monitoring UI, even when replaying from history.
 
 `print()` / `stdout` writes to the **host console** -- it is non-deterministic and **not** replayed. During replay, `print()` output will only appear if the workflow code actually executes (e.g., cached results skip execution entirely).
 
@@ -130,15 +147,15 @@ def my_workflow(h: HostCalls, name: str) -> str:
     # CORRECT: goes to the worker's logger, tagged with the workflow id, and
     # suppressed on replay so a resumed run does not re-emit it.
     # NOT recorded in event history -- see cleat#1308.
-    h.cleat_log(f"Processing {name}")
+    h.log(f"Processing {name}")
 
-    result = h.cleat_call("service", "Op", {"name": name})
+    result = h.call("service", "Op", {"name": name})
 
     # WRONG: stdout is not replayed
     print(f"Result: {result}")
 
-    # CORRECT: cleat_log is replayed deterministically
-    h.cleat_log(f"Result: {result}")
+    # CORRECT: log is replayed deterministically
+    h.log(f"Result: {result}")
     return result
 ```
 
@@ -146,12 +163,12 @@ def my_workflow(h: HostCalls, name: str) -> str:
 
 | Use Case | Method | Reason |
 |----------|--------|--------|
-| Workflow-visible logging | `cleat_log()` | Survives replay, recorded in history |
+| Workflow-visible logging | `log()` | Survives replay, recorded in history |
 | Debugging during development | `print()` | Immediate stdout output, no host call overhead |
 | Structured observability | `log_kv()` | Key-value logging, recorded in history |
 | External logging pipeline | `plugin_call("logger", "send", ...)` | Forward events to an external system |
 
-Use `cleat_log` for messages that should appear in the workflow event history. Use `print` sparingly for development-time debugging only.
+Use `log` for messages that should appear in the workflow event history. Use `print` sparingly for development-time debugging only.
 
 ## Examples
 
@@ -172,8 +189,8 @@ The `examples/` directory contains ready-to-run workflows:
 # CORRECT: synchronous code
 @cleat_entry("my_workflow")
 def my_workflow(h: HostCalls, name: str) -> str:
-    h.cleat_log(f"Processing {name}")
-    result = h.cleat_call("service", "Op", {"name": name})
+    h.log(f"Processing {name}")
+    result = h.call("service", "Op", {"name": name})
     return result
 
 # WRONG: async is not supported
@@ -181,7 +198,7 @@ def my_workflow(h: HostCalls, name: str) -> str:
 # async def my_workflow(h: HostCalls, name: str) -> str:  ...  # won't work
 ```
 
-When a workflow calls `cleat_sleep()` or `await_signals()` on a fresh execution, the host suspends the workflow. On replay, the same calls return cached results without suspending. The user code never sees the suspend/resume cycle -- it is handled by the `@cleat_entry` wrapper.
+When a workflow calls `sleep()` or `await_signals()` on a fresh execution, the host suspends the workflow. On replay, the same calls return cached results without suspending. The user code never sees the suspend/resume cycle -- it is handled by the `@cleat_entry` wrapper.
 
 ### Converting async Python to synchronous WASM code
 
@@ -209,13 +226,13 @@ from cleat_sdk import HostCalls, cleat_entry
 import json
 
 def fetch_data(h: HostCalls, url: str) -> dict:
-    response, status = h.cleat_fetch(url, "GET")
+    response, status = h.fetch(url, "GET")
     return json.loads(response)
 
 @cleat_entry("process_order")
 def process_order(h: HostCalls, order_id: str) -> dict:
     data = fetch_data(h, f"https://api.example.com/orders/{order_id}")
-    h.cleat_sleep(5000)           # instead of asyncio.sleep(5)
+    h.sleep(5)              # instead of asyncio.sleep(5)
     return {"order_id": order_id, "data": data}
 ```
 
@@ -225,10 +242,10 @@ def process_order(h: HostCalls, order_id: str) -> dict:
 |---------------|-------------------------------|
 | `async def fn()` | `def fn()` |
 | `await call()` | `call()` (synchronous) |
-| `asyncio.sleep(n)` | `h.cleat_sleep(n * 1000)` |
-| `aiohttp.ClientSession()` | `h.cleat_fetch()` or `h.cleat_call()` |
+| `asyncio.sleep(n)` | `h.sleep(n)` |
+| `aiohttp.ClientSession()` | `h.fetch()` or `h.call()` |
 | `asyncio.gather(*tasks)` | `h.await_all_children(run_ids)` or sequential calls |
-| `asyncio.wait_for(coro, timeout)` | `h.await_signals(names, timeout_ms)` or `h.await_promise(id, timeout_ms)` |
+| `asyncio.wait_for(coro, timeout)` | `h.await_signals(names, timeout_seconds)` or `h.await_promise(id, timeout_seconds)` |
 | `async for` (stream) | `h.plugin_call_streaming()` (iterator-based) |
 | `async with` (context manager) | Regular `with` statement |
 
@@ -276,7 +293,7 @@ These modules are partially available with documented restrictions:
 | `pathlib` | ⚠️ Limited | Path manipulation works. No real filesystem I/O (`read_text`, `write_text`, etc.) |
 | `random` | ⚠️ Limited | Basic PRNG works. Use `h.random()` for deterministic workflow randomness instead |
 | `json` | ✅ Fully available, see above | |
-| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.cleat_sleep()`) |
+| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.sleep()`) |
 
 ### Not available
 
@@ -293,9 +310,9 @@ These modules will **fail at import time or runtime** in WASM:
 | `select` / `selectors` | No I/O multiplexing |
 | `mmap` | No memory mapping |
 | `ctypes` / `cffi` | No native code interop |
-| `ssl` | No TLS/SSL (use host's `cleat_call` instead) |
+| `ssl` | No TLS/SSL (use host's `call` instead) |
 | `http.client` / `urllib` | No outbound HTTP (use host calls instead) |
-| `requests` | Third-party HTTP library (use `h.cleat_fetch()` instead) |
+| `requests` | Third-party HTTP library (use `h.fetch()` instead) |
 | `xml` / `xmlrpc` | XML parsing may be unavailable; avoid |
 | `tkinter` | No GUI support in WASM |
 | `concurrent.futures` | Depends on threading |
@@ -308,11 +325,11 @@ Replace standard Python HTTP libraries with host-provided durable calls:
 ```python
 # INSTEAD OF: import requests; requests.get(url)
 # USE:
-response = h.cleat_fetch(url, "GET", {}, None)
+response = h.fetch(url, "GET", {}, None)
 
 # INSTEAD OF: import urllib.request; urllib.request.urlopen(url)
 # USE:
-response = h.cleat_call("http", "fetch", {"url": url, "method": "GET"})
+response = h.call("http", "fetch", {"url": url, "method": "GET"})
 ```
 
 The host calls are recorded in the workflow history and replayed deterministically, which standard HTTP libraries cannot provide.
@@ -323,12 +340,12 @@ WASM workflows **cannot make direct database connections**. Modules like `sqlite
 
 Data access must go through one of these deterministic alternatives:
 
-1. **`cleat_call` to a service** -- Call a registered backend service that performs the database operation:
+1. **`call` to a service** -- Call a registered backend service that performs the database operation:
 
 ```python
 # INSTEAD OF: import psycopg2; conn.execute("SELECT ...")
 # USE:
-response = h.cleat_call("db-service", "query", {"sql": "SELECT * FROM orders"})
+response = h.call("db-service", "query", {"sql": "SELECT * FROM orders"})
 ```
 
 2. **`plugin_call` to a host plugin** -- Use a host-registered plugin that provides database access:
@@ -337,48 +354,43 @@ response = h.cleat_call("db-service", "query", {"sql": "SELECT * FROM orders"})
 response = h.plugin_call("postgres", "query", {"sql": "SELECT * FROM orders"})
 ```
 
-3. **`cleat_fetch` to a REST API** -- Call an external API that wraps database access:
+3. **`fetch` to a REST API** -- Call an external API that wraps database access:
 
 ```python
-response, status = h.cleat_fetch("https://api.example.com/orders", "GET")
+response, status = h.fetch("https://api.example.com/orders", "GET")
 ```
 
 All three approaches are recorded in the workflow event history and survive replay, which direct database connections cannot guarantee.
 
 ## Unit Differences (Cleat vs. Other Frameworks)
 
-Cleat uses **milliseconds** for all time-related host calls. This is important when porting workflows from other frameworks:
+The Python SDK's timeouts are in **seconds**, the same as Temporal's and DBOS's Python APIs. Each call that takes a timeout has a `_ms` variant (`sleep_ms`, `await_signals_ms`, `await_promise_ms`) for the millisecond form, and the WASM host ABI underneath uses `i64` milliseconds throughout. The two are easy to mix up, and the cost is not a failure: `h.sleep(5000)` is a legal call that suspends the workflow for about 83 minutes.
 
 | Framework | Sleep Unit | Example |
 |-----------|-----------|---------|
-| **Cleat** | milliseconds | `cleat_sleep(5000)` = 5 seconds |
+| **Cleat (Python)** | seconds; `sleep_ms` takes milliseconds | `h.sleep(5)` or `h.sleep_ms(5000)` |
 | **Temporal** | Go: `time.Duration`, Java: `Duration`, Python: `timedelta` / seconds | `sleep(Duration.ofSeconds(5))` |
 | **DBOS** | seconds | `DBOS.sleepSeconds(5)` |
 | **Restate** | `Duration` / milliseconds (SDK-dependent) | `Duration.ofSeconds(5)` |
 
-Cleat's `cleat_sleep(duration_ms)` always takes **milliseconds**. The `advance_time(ms)` method in the test harness also uses milliseconds. This is consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
+`h.call(..., timeout_ms=...)` and the `CleatTestHarness`'s `advance_time(ms)` are milliseconds, because they are named that way: read the parameter name.
+
+**`CleatTestHarness` is the exception to "seconds".** Its `sleep`, `await_signals` and `await_promise` take **milliseconds**, so the same `h.sleep(5)` that sleeps 5 s on a worker advances a harness clock by 5 ms, and a harness test whose assertions depend on elapsed time is off by 1000×. `sleep_ms` and the other `_ms` forms are not implemented by the harness (cleat#3820).
 
 Conversion examples when porting from other frameworks:
 
 ```python
 # Temporal (Python): workflow.sleep(timedelta(seconds=5))
 # Cleat:
-h.cleat_sleep(5000)  # 5 seconds in ms
+h.sleep(5)
 
 # DBOS: DBOS.sleepSeconds(5)
 # Cleat:
-h.cleat_sleep(5_000)
+h.sleep(5)
 
 # Restate (Java): Duration.ofSeconds(5)
 # Cleat:
-h.cleat_sleep(5_000)
-
-# Helper pattern for readability:
-def sleep_seconds(h: HostCalls, secs: int) -> None:
-    """Sleep for the given number of seconds."""
-    h.cleat_sleep(secs * 1000)
-
-sleep_seconds(h, 5)  # 5 seconds
+h.sleep(5)
 ```
 
 ## Virtual Objects (Entity Workflows)
@@ -395,17 +407,16 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
     # Scope all state operations to this entity instance
     h.set_scope("counter", instance_key)
 
-    # Initialize or restore state
+    # State is an ordinary local. Replay re-runs this code against the recorded
+    # history, so the value is rebuilt, not stored: there is no state API to call.
     count = 0
-    if h.has_state("count"):
-        count = counter          # an ordinary local: replay makes it durable
 
-    h.cleat_log(f"Counter {instance_key} starting at {count}")
+    h.log(f"Counter {instance_key} starting at {count}")
 
     # Process signals in a loop (long-lived entity)
     while True:
         # Wait for the next signal
-        result = h.await_signals(["increment", "reset", "get", "stop"], None)
+        result = h.await_signals(["increment", "reset", "get", "stop"], 0)
 
         if result.timed_out:
             continue
@@ -414,20 +425,19 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
         payload = result.payload
 
         if name == "increment":
-            count = h.incr_state("count", 1)
-            h.cleat_log(f"Counter {instance_key} incremented to {count}")
+            count += 1
+            h.log(f"Counter {instance_key} incremented to {count}")
 
         elif name == "reset":
-            counter = 0
             count = 0
-            h.cleat_log(f"Counter {instance_key} reset to 0")
+            h.log(f"Counter {instance_key} reset to 0")
 
         elif name == "get":
             # Return current value via query state
             h.set_query_state("value", str(count))
 
         elif name == "stop":
-            h.cleat_log(f"Counter {instance_key} stopping at {count}")
+            h.log(f"Counter {instance_key} stopping at {count}")
             return f'{{"final_count": {count}}}'
 
     return f'{{"count": {count}}}'
@@ -453,25 +463,26 @@ Signals are one-way messages delivered to a workflow. The workflow polls or awai
 h.signal_workflow(target_run_id, "increment", '{"delta": 1}')
 ```
 
-**Request-response with signals** (`send_signal_and_wait` / `reply_to_signal`):
+**Request-response with two signals.** `send_signal_and_wait` and `reply_to_signal` were
+removed on 2026-09-06 (the WIT world has no interface for them, so they raise), and the
+replacement is two ordinary signals, one in each direction:
 ```python
 # Sender workflow:
-response = h.send_signal_and_wait(
-    target_run_id, "approve_request",
-    '{"id": "req-42"}', timeout_ms=30000
-)
+h.signal_workflow(target_run_id, "approve_request",
+                  f'{{"id": "req-42", "reply_to": "{h.current_run_id()}"}}')
+reply = h.await_signals(["approve_reply"], 30)   # seconds; reply.timed_out if none came
 
-# Receiver workflow (inside signal handler):
-result = h.await_signals(["approve_request"], None)
-# Parse correlation ID from payload and respond:
-h.reply_to_signal(correlation_id, '{"approved": true}')
+# Receiver workflow:
+request = h.await_signals(["approve_request"], 0)  # 0 waits indefinitely
+# ... decode request.payload, read its "reply_to" run id, decide ...
+h.signal_workflow(reply_to_run_id, "approve_reply", '{"approved": true}')
 ```
 
 **Non-blocking signal poll** (`poll_signal`):
 ```python
 payload, found = h.poll_signal("update")
 if found:
-    h.cleat_log(f"Received signal: {payload}")
+    h.log(f"Received signal: {payload}")
 ```
 
 ### Update handler pattern (bi-directional RPC)
@@ -494,7 +505,7 @@ def approval_workflow(h: HostCalls, input: str) -> str:
     h.register_update_handler("approve", approve_handler, approve_validator)
 
     # Workflow continues...
-    result = h.await_signals(["done"], 60000)
+    result = h.await_signals(["done"], 60)
     return '{"status": "completed"}'
 ```
 
@@ -503,7 +514,7 @@ def approval_workflow(h: HostCalls, input: str) -> str:
 | Pattern | Method | Use Case |
 |---------|--------|----------|
 | Fire-and-forget signal | `signal_workflow` | Notifications, events without response needed |
-| Request-response (signal) | `send_signal_and_wait` / `reply_to_signal` | Cross-workflow RPC with a response |
+| Request-response (two signals) | `signal_workflow` + `await_signals`, once each way | Cross-workflow RPC with a response |
 | Non-blocking poll | `poll_signal` | Periodic checks without suspending |
 | Update handler | `register_update_handler` | External client RPC with validation |
 
@@ -515,9 +526,9 @@ def approval_workflow(h: HostCalls, input: str) -> str:
 
 ## Per-call timeout limitations
 
-Per-call timeouts are **under development** and not yet enforced on the host side during WASM execution. The `cleat_call_with_retry` host import does not accept a timeout parameter.
+Per-call timeouts are **under development** and not yet enforced on the host side during WASM execution. The `call_with_retry` host import does not accept a timeout parameter.
 
-**Workaround:** Use `cleat_sleep` + polling for timeout-aware patterns:
+**Workaround:** Use `sleep` + polling for timeout-aware patterns:
 
 ```python
 def call_with_timeout(
@@ -529,10 +540,10 @@ def call_with_timeout(
 
     while h.now() < deadline:
         try:
-            return h.cleat_call(service, op, request)
+            return h.call(service, op, request)
         except RuntimeError as e:
             last_error = e
-            h.cleat_sleep(1000)  # poll interval
+            h.sleep(1)  # poll interval, in seconds
 
     raise RuntimeError(f"Call timed out after {timeout_ms}ms: {last_error}")
 ```
@@ -545,7 +556,7 @@ Cleat does **not** have an `all_handlers_finished` equivalent (found in Temporal
 
 **Alternative patterns:**
 
-1. **Manual handler counting** -- Track handler invocations with state keys:
+1. **Manual handler counting** -- Count in-flight handlers in a local the handlers close over:
 
 ```python
 @cleat_entry("tracked_workflow")
@@ -553,15 +564,15 @@ def tracked_workflow(h: HostCalls, input: str) -> str:
     pending_handlers = 0
 
     def handler(payload: str) -> str:
-        h.incr_state("pending_handlers", 1)
+        nonlocal pending_handlers
+        pending_handlers += 1
         try:
-            result = h.cleat_call("service", "Op", payload)
-            return result
+            return h.call("service", "Op", payload)
         finally:
-            h.incr_state("pending_handlers", -1)
+            pending_handlers -= 1
 
     h.register_update_handler("process", handler)
-    # ... workflow continues ...
+    # ... workflow continues; check `pending_handlers == 0` before returning ...
 ```
 
 2. **Durable promises** -- External callers signal completion via promises:
@@ -572,7 +583,7 @@ def promise_tracked_workflow(h: HostCalls, input: str) -> str:
     promise_id = h.create_promise("all_handlers_done")
 
     def handler(payload: str) -> str:
-        result = h.cleat_call("service", "Op", payload)
+        result = h.call("service", "Op", payload)
         # Signal done via the promise
         h.resolve_promise(promise_id, "done")
         return result
@@ -580,7 +591,7 @@ def promise_tracked_workflow(h: HostCalls, input: str) -> str:
     h.register_update_handler("process", handler)
 
     # Wait for the promise instead of all_handlers_finished
-    result = h.await_promise(promise_id, 30000)
+    result = h.await_promise(promise_id, 30)
     return result.result
 ```
 
@@ -595,15 +606,15 @@ from cleat_sdk import HostCalls, cleat_entry
 
 @cleat_entry("place_order")
 def place_order(h: HostCalls, input: str) -> str:
-    return h.cleat_call("orders", "Place", input)
+    return h.call("orders", "Place", input)
 
 @cleat_entry("cancel_order")
 def cancel_order(h: HostCalls, input: str) -> str:
-    return h.cleat_call("orders", "Cancel", input)
+    return h.call("orders", "Cancel", input)
 
 @cleat_entry("get_order_status")
 def get_order_status(h: HostCalls, input: str) -> str:
-    return h.cleat_call("orders", "Status", input)
+    return h.call("orders", "Status", input)
 ```
 
 When compiled to WASM, `componentize-py` generates a named export for each decorated function. The host dispatches invocations by matching the called workflow name to the export name. Each export wrapper handles ABI marshalling, suspend/resume, and error serialization independently.
@@ -614,81 +625,47 @@ Compile Python workflows to WASM using `componentize-py` from the [Bytecode Alli
 
 ### Prerequisites
 
-Install the required tools:
+Python 3.10 or newer, in a virtual environment, with both packages installed
+([Installation](#installation)):
 
 ```bash
-# Install componentize-py (requires Python 3.10+)
-pip install componentize-py>=0.12.0
-
-# Install the Cleat Python SDK (ensures cleat_sdk is importable)
-pip install cleat-sdk
-# Or from source:
-# cd python-sdk/ && pip install -e .
-```
-
-Verify the installation:
-
-```bash
+pip install cleat-sdk 'componentize-py>=0.12.0'
 componentize-py --version
-# Expected output: componentize-py 0.x.y
 ```
 
-If you encounter `command not found`, ensure your Python Scripts/bin directory is on `PATH`:
-
-```bash
-# Unix/macOS:
-export PATH="$HOME/.local/bin:$PATH"
-# Windows:
-# pip install --user will add to %APPDATA%\Python\Scripts
-```
-
-### Configuration (pyproject.toml)
-
-The `componentize-py` tool reads WIT configuration from `pyproject.toml` under the `[tool.componentize-py]` table. The canonical configuration for this SDK is:
-
-```toml
-[tool.componentize-py]
-wit_path = "wit/"
-world = "cleat-workflow"
-```
-
-- `wit_path` -- directory containing the Cleat WIT files (`.wit` files defining the WASM component interface)
-- `world` -- the WIT world your workflow component implements (must match what `componentize-py` expects)
-
-If you are writing a workflow outside this repository, copy the `wit/` directory from the SDK or install the SDK as a dependency so the WIT files are discoverable.
+If `componentize-py` is `command not found`, the environment is not active, or
+its `bin/` directory is not on `PATH`.
 
 ### Compilation Command
 
-The basic `componentize-py` invocation (modern syntax):
+Use the Cleat CLI. It resolves paths, runs the determinism check, derives the
+entry point's input schema, and stamps `cleat.metadata`, none of which a bare
+`componentize-py` invocation does:
 
 ```bash
-componentize-py componentize my_workflow.py \
-  --wit-path wit/ \
-  --world cleat-workflow \
-  -o my_workflow.wasm
+mkdir -p out
+cleat build --target python -o out ./workflow.py
 ```
 
-Required flags:
+`cleat build` runs the `python3` on `PATH` and finds the build script and the WIT
+inside the installed `cleat-sdk`; inside a checkout of this repository it uses
+`python-sdk/` instead. Flags go before the path.
 
-| Flag | Purpose |
-|------|---------|
-| `componentize <file>` | Subcommand; the Python file containing your `@cleat_entry` workflow function |
-| `--wit-path <dir>` | Path to the directory with the Cleat WIT files (`cleat.wit`) |
-| `--world <name>` | The WIT world to implement (e.g. `cleat-workflow`) |
-| `-o <file>` | Output WASM file path |
+A file with more than one `@cleat_entry` takes the entry explicitly:
+`cleat build --target python -o out ./workflow.py:place_order`.
 
-The SDK directory must be on `PYTHONPATH` so `cleat_sdk` is importable:
+You should not need to call `componentize-py` yourself. If you must, the form for
+current releases puts the WIT and the world **before** the subcommand, and names a
+*module* rather than a file; `--wit-path` was removed:
 
 ```bash
-export PYTHONPATH=/path/to/python-sdk:$PYTHONPATH
-componentize-py componentize my_workflow.py --wit-path wit/ --world cleat-workflow -o my_workflow.wasm
+componentize-py -d "$(python3 -c 'import cleat_sdk,os;print(os.path.dirname(cleat_sdk.__file__))')/wit" \
+    -w cleat-workflow componentize hello -p . -o hello.wasm
 ```
 
-The Cleat CLI provides a convenience wrapper that handles paths automatically:
-
-```bash
-cleat build --target python ./workflow.py
-```
+That produces a bare component with **no** `cleat.metadata` (the name, version and
+entry points `cleat build` stamps in). `python-sdk/scripts/build_wasm.py` is the
+supported wrapper, and what `cleat build` runs.
 
 ### Handling Imports in WASM Context
 
@@ -704,38 +681,13 @@ Always test your imports by compiling and running a minimal workflow before addi
 
 ### Step-by-Step Example
 
-Compile the `hello_workflow.py` example to WASM:
-
-```bash
-# 1. Install dependencies
-pip install componentize-py>=0.12.0
-pip install -e python-sdk/
-
-# 2. Verify the WIT directory exists
-ls python-sdk/wit/cleat.wit
-
-# 3. Compile the workflow
-cd python-sdk/
-componentize-py componentize examples/hello_workflow.py \
-  --wit-path wit/ \
-  --world cleat-workflow \
-  -o hello_workflow.wasm
-
-# 4. Verify the output
-ls -lh hello_workflow.wasm
-# Expected: hello_workflow.wasm (~5-15 MB for CPython + workflow code)
-
-# 5. Inspect the WASM exports (requires wasm-tools or wasm-objdump)
-wasm-tools dump hello_workflow.wasm | head -20
-# Or:
-wasm-objdump -x hello_workflow.wasm | grep Export
-```
-
-The output WASM file can be loaded by the Cleat worker runtime. The compiled component exports entry points that dispatch to your `@cleat_entry`-decorated functions.
+The [Python quick start](../docs/tutorials/python-quick-start.md) builds, deploys
+and runs a first workflow end to end, and is the page to follow.
 
 ### Using the Makefile
 
-A `Makefile` in the SDK root provides convenience targets:
+A `Makefile` in this directory is for working **on** the SDK, from a checkout. It
+compiles every example workflow and stamps their metadata:
 
 ```bash
 cd python-sdk/
@@ -750,9 +702,11 @@ See the [Makefile](./Makefile) for details.
 
 | Error | Likely Cause | Solution |
 |-------|-------------|----------|
-| `componentize-py: command not found` | Not installed or not on `PATH` | `pip install componentize-py`; verify `PATH` includes `~/.local/bin` |
-| `Error: No such file or directory: 'wit/...'` | WIT path is incorrect | Pass `--wit-path` pointing to the directory with `cleat.wit` |
-| `ModuleNotFoundError: No module named 'cleat_sdk'` | SDK not on Python path | `pip install -e python-sdk/` or set `PYTHONPATH` |
+| `componentize-py: command not found` | Not installed in the active environment | `pip install 'componentize-py>=0.12.0'` in the environment you build from |
+| `finding repo root: go.mod not found` | `cleat-sdk` 0.5.0, which ships no build script | Upgrade `cleat-sdk`, or build from a checkout |
+| `has no build script` | An older `cleat-sdk` is active | `pip install --upgrade cleat-sdk` |
+| `Error: unexpected argument '--wit-path' found` | A hand-written `componentize-py` command in the pre-0.13 form | Use `cleat build`, or the `-d … -w … componentize <module>` form above |
+| `ModuleNotFoundError: No module named 'cleat_sdk'` | The virtual environment is not active | `. .venv/bin/activate` |
 | `Error: Component model world 'cleat-workflow' not found` | WIT path does not contain the correct world | Verify WIT files; check the `world` name in `pyproject.toml` |
 | `RuntimeError: async function` | Async code in workflow | Remove `async`/`await`; all Cleat workflows are synchronous |
 | `Build FAILED (exit code 1)` without clear error | Try verbose mode | Add `--verbose` to see full `componentize-py` output |
@@ -764,8 +718,8 @@ See the [Makefile](./Makefile) for details.
 
 - **Python 3.10+** -- the SDK uses `typing.get_type_hints` and `inspect.signature` for parameter introspection
 - **componentize-py >= 0.12.0** -- required for WASM compilation (installed via `pip install componentize-py`)
-- **Cleat CLI** (`cleat build`) -- for the full build pipeline (optional; use `componentize-py` directly as shown above)
-- **WIT files** -- the `wit/` directory defining the Cleat component model interface
+- **Cleat CLI** (`cleat build`) -- the supported way to build a workflow
+- **WIT files** -- shipped inside the package (`cleat_sdk/wit/`); nothing to copy
 
 Optional dependencies for development:
 
@@ -805,7 +759,7 @@ surface"). Each method handles the pointer+length string protocol and bit-packed
 - `SignalResult(name, payload, timed_out)` — returned by `await_signals`
 - `ChildResult(run_id, result, error)` — returned by `await_all_children`
 - `PromiseResult(result, timed_out, rejected)` — returned by `await_promise` (``rejected`` is ``True`` if the promise was rejected)
-- `RetryPolicy(max_attempts, initial_interval_ms, backoff_coefficient, max_interval_ms, non_retryable_errors)` — for `cleat_call_with_retry`
+- `RetryPolicy(max_attempts, initial_interval_ms, backoff_coefficient, max_interval_ms, non_retryable_errors)` — for `call_with_retry`
 - `SuspendSentinel` — exception raised to signal workflow suspension
 - `TerminalError` — exception raised from a saga step to trigger immediate compensation (non-retryable)
 - `CleatCallError` — raised when a durable call fails, with `CleatCallTimeoutError`,
@@ -850,8 +804,8 @@ from cleat_sdk import HostCalls, cleat_entry, CleatTestHarness
 
 @cleat_entry("GreetWorkflow")
 def GreetWorkflow(h: HostCalls, name: str) -> str:
-    h.cleat_log(f"Hello {name}")
-    return h.cleat_call("greeter", "Greet", {"name": name})
+    h.log(f"Hello {name}")
+    return h.call("greeter", "Greet", {"name": name})
 
 def test_greet_workflow():
     harness = CleatTestHarness()
@@ -864,7 +818,7 @@ def test_greet_workflow():
 
 Key methods:
 - `run(entry_fn, input)` — execute a `@cleat_entry` workflow against mock host calls
-- `register_call_stub(service, operation, response)` — stub a `cleat_call` response
+- `register_call_stub(service, operation, response)` — stub a `call` response
 - `register_call_handler(service, operation, handler)` — register a dynamic handler
 - `assert_called(service, operation, times=None)` — assert a call was recorded
 - `deliver_signal(signal_name, payload)` — simulate signal delivery
