@@ -141,6 +141,12 @@ var crossTenantLedger = map[string]bypassKind{
 	// One transaction claims and advances every tenant's due rows.
 	"plugins/eventtriggers/background.go:(*Plugin).Run": kindClaimAcrossTenants,
 	"plugins/jobqueue/background.go:(*Plugin).Run":      kindClaimAcrossTenants,
+
+	// cleat#3835: the awaiter reconciler's scan reads which awaiters, of any
+	// tenant, have a stranded event; it writes nothing. Each result is then
+	// handled under plugin.ForTenant for the tenant on its own row.
+	"plugins/eventtriggers/reconcile.go:(*Plugin).reconcileAwaiters": kindDiscovery,
+
 	// cleat#2125: the non-MSSQL arm moved out of Run and into its own
 	// function so SQL Server's per-tenant loop (sweepAbandonedJobsPerTenant)
 	// could sit beside it without sharing a marked ctx -- same statement,

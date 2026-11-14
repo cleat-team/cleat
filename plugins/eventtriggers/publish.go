@@ -333,9 +333,10 @@ func triggerMatchingWorkflows(
 // cost is PER AWAITER, so N awaiters that all fail cost up to N times that. There
 // is no total budget per publish; one would bound a store-wide failure.
 //
-// It does not close the gap. A publisher that dies between the INSERT and this
-// call, or whose retries all fail, leaves an event stored and nobody told; closing
-// that needs a reconciler that re-signals stored events with a registered awaiter.
+// It does not close the gap by itself. A publisher that dies between the INSERT
+// and this call, or whose retries all fail, leaves an event stored and nobody
+// told. reconcileAwaiters (reconcile.go, cleat#3835) is what closes it: a sweep
+// that re-signals a stored, unprocessed event that has a registered awaiter.
 //
 // A duplicate wake is harmless: a waiter re-claims after every wake, and a wake
 // for an event an earlier wake already claimed finds nothing and goes back to
@@ -412,53 +413,95 @@ func signalAwaiters(
 		return
 	}
 
-	signalName := "__evt:" + eventType
 	for _, wfID := range workflowIDs {
-		if err := signalWithRetry(ctx, env, wfID, signalName, eventData); err != nil {
-			if errors.Is(err, plugin.ErrWorkflowNotFound) {
-				// The awaiter's own workflow is gone -- purged, or the row
-				// was already stale -- not a delivery failure.
-				//
-				// Before cleat#2218, SignalWorkflow returned a plain error
-				// for this case (an FK violation, on the dialects that have
-				// one), which this function had no branch for: it fell to
-				// the generic failure path below, logged a WARN, and did
-				// NOT unregister -- so the awaiter leaked forever, because
-				// a permanently-gone workflow produces the identical error
-				// on every future publish (cleat#2213). cleat#2218 changed
-				// this same case to return nil instead, closing an
-				// existence oracle -- and, as a side effect, that already
-				// stopped the leak: nil fell to the SUCCESS path below,
-				// which unregisters unconditionally. What #2218 did not fix
-				// is that the success path also logs "signal delivered to
-				// awaiter", which was false for this case -- the workflow
-				// never received anything.
-				//
-				// cleat#2227 gives "not found" its own path instead of
-				// relying on that accident: same outcome as before
-				// (unregister), but honestly, with a log line that says
-				// what actually happened rather than claiming a delivery
-				// that did not occur.
-				logger.Info("event-triggers: awaiter's workflow no longer exists, unregistering",
-					"workflow_id", wfID,
-					"signal", signalName,
-				)
-				unregisterAwaiter(ctx, db, logger, wfID, eventType, key1, key2, key3)
-				continue
-			}
-			logger.Warn("event-triggers: signal awaiter failed",
+		deliverToAwaiter(ctx, db, logger, env, wfID, eventType, eventData, key1, key2, key3, false)
+	}
+}
+
+// awaiterOutcome is what deliverToAwaiter did.
+type awaiterOutcome int
+
+const (
+	// awaiterDelivered: the signal was accepted by the engine.
+	awaiterDelivered awaiterOutcome = iota
+	// awaiterGone: the awaiter's own workflow no longer exists.
+	awaiterGone
+	// awaiterFailed: every attempt to deliver the signal failed. The awaiter
+	// is left registered, or is for the caller to put back when it had already
+	// taken the row (rowTaken).
+	awaiterFailed
+)
+
+// deliverToAwaiter signals ONE awaiter with the event's payload and, unless
+// the caller already took the row, unregisters it. It is the single delivery
+// path: signalAwaiters (a publish telling the awaiters it just matched) and
+// reconcileAwaiters (the sweep for an event stored and never signalled) both
+// call it, so a reconciled delivery carries the same signal name, the same
+// retry schedule and the same payload handling as a direct one. cleat#3835.
+//
+// rowTaken is true when the caller removed the awaiter row itself, as the
+// reconciler does to make one delivery out of N workers sweeping the same
+// awaiter. Then there is nothing left to unregister, and on awaiterFailed the
+// caller is the one who has to register it again.
+func deliverToAwaiter(
+	ctx context.Context,
+	db plugin.PluginDB,
+	logger *slog.Logger,
+	env *plugin.Environment,
+	wfID, eventType, eventData string,
+	key1, key2, key3 string,
+	rowTaken bool,
+) awaiterOutcome {
+	signalName := "__evt:" + eventType
+	if err := signalWithRetry(ctx, env, wfID, signalName, eventData); err != nil {
+		if errors.Is(err, plugin.ErrWorkflowNotFound) {
+			// The awaiter's own workflow is gone -- purged, or the row
+			// was already stale -- not a delivery failure.
+			//
+			// Before cleat#2218, SignalWorkflow returned a plain error
+			// for this case (an FK violation, on the dialects that have
+			// one), which this function had no branch for: it fell to
+			// the generic failure path below, logged a WARN, and did
+			// NOT unregister -- so the awaiter leaked forever, because
+			// a permanently-gone workflow produces the identical error
+			// on every future publish (cleat#2213). cleat#2218 changed
+			// this same case to return nil instead, closing an
+			// existence oracle -- and, as a side effect, that already
+			// stopped the leak: nil fell to the SUCCESS path below,
+			// which unregisters unconditionally. What #2218 did not fix
+			// is that the success path also logs "signal delivered to
+			// awaiter", which was false for this case -- the workflow
+			// never received anything.
+			//
+			// cleat#2227 gives "not found" its own path instead of
+			// relying on that accident: same outcome as before
+			// (unregister), but honestly, with a log line that says
+			// what actually happened rather than claiming a delivery
+			// that did not occur.
+			logger.Info("event-triggers: awaiter's workflow no longer exists, unregistering",
 				"workflow_id", wfID,
 				"signal", signalName,
-				"error", err,
 			)
-			continue
+			if !rowTaken {
+				unregisterAwaiter(ctx, db, logger, wfID, eventType, key1, key2, key3)
+			}
+			return awaiterGone
 		}
-		logger.Info("event-triggers: signal delivered to awaiter",
+		logger.Warn("event-triggers: signal awaiter failed",
 			"workflow_id", wfID,
 			"signal", signalName,
+			"error", err,
 		)
+		return awaiterFailed
+	}
+	logger.Info("event-triggers: signal delivered to awaiter",
+		"workflow_id", wfID,
+		"signal", signalName,
+	)
+	if !rowTaken {
 		unregisterAwaiter(ctx, db, logger, wfID, eventType, key1, key2, key3)
 	}
+	return awaiterDelivered
 }
 
 // unregisterAwaiter removes the awaiter record matching the given workflow,

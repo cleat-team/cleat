@@ -37,13 +37,17 @@ type eventWaiter interface {
 // eventtriggers.ClaimOrRegisterAwaiter, which claims a second time after it
 // registers. What neither covers is a publish whose INSERT committed and whose
 // signalAwaiters then failed: that logs a WARN, keeps the awaiter registered and
-// never signals that event again, so only a re-claim can find it.
+// never signals that event again, so only a re-claim can find it -- or, since
+// cleat#3835, the event-triggers reconciler, which a worker runs every 30 s and
+// which delivers the missing signal for an awaiter whose event has sat unclaimed
+// for 15 s.
 //
 // It was a constant 6 s, and every iteration records a plugin_call and an
 // await_signals, so a wait with no event grew its history by about 950 events an
 // hour (measured: cleat#3806), roughly 52 hours from the default quota. The cost
-// of the doubling is that a failed delivery can now take up to eventRecheckMaxMs
-// to be noticed, not 6 s.
+// of the doubling is that the WAIT can now take up to eventRecheckMaxMs to notice
+// a failed delivery by itself, not 6 s; the reconciler is what keeps that from
+// being the delivery's latency.
 //
 // IT DOES NOT NEED TO BE RECORDED FOR REPLAY: each iteration's wait goes through
 // DurableAwaitSignals, which writes its own TimeoutMs into the await_signals
