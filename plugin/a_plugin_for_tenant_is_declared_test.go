@@ -103,6 +103,11 @@ var pluginForTenantLedger = map[string]bool{
 	// silently no-op (cleat#1515).
 	"plugins/eventtriggers/background.go:(*Plugin).processBatch": true,
 
+	// cleat#3835: the reconciler's per-awaiter work, built from
+	// context.Background() for the same reason as processBatch above. The
+	// tenant is the awaiter row's own column, read by a scan that spans tenants.
+	"plugins/eventtriggers/reconcile.go:(*Plugin).reconcileOne": true,
+
 	// PublishEvent: tenantID is the webhook_sources row's own tenant, which
 	// must be used even when the request context disagrees -- the value
 	// comes from a lookup keyed on the event, not from the requester
