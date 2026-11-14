@@ -1,6 +1,9 @@
 include README.md
 include pyproject.toml
+include setup.py
 recursive-include cleat_sdk *.py
 recursive-include wit *.wit
+include scripts/build_wasm.py
+include scripts/stamp_metadata.py
 prune tests
 prune examples
