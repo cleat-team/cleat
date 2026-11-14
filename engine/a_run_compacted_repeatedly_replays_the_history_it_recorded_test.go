@@ -149,6 +149,59 @@ func TestARunCompactedRepeatedlyReplaysTheHistoryItRecordedOnEveryStore(t *testi
 				}
 				prevBoundary = first
 			}
+
+			// With --encrypt-sensitive-payloads on, the state is sealed before it is
+			// written (cleat#3774). The boundary checksum is added to the state
+			// before that, and a second compaction reads the sealed state back,
+			// extends it and seals it again: none of that may lose the anchor or the
+			// events already in it.
+			if pg, ok := store.(*PostgresStore); ok {
+				t.Run("a sealed state is extended and keeps its boundary", func(t *testing.T) {
+					enc, err := NewPayloadEncryption(validKey(t))
+					if err != nil {
+						t.Fatalf("NewPayloadEncryption: %v", err)
+					}
+					sealed := NewPostgresStore(pg.db).WithEncryption(enc, true)
+					sid := fmt.Sprintf("chain-sealed-%d", time.Now().UnixNano())
+					if _, _, err := sealed.StartNewRun(ctx, sid, "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
+						t.Fatalf("StartNewRun: %v", err)
+					}
+					sealedNext := 0
+					for round := 1; round <= 2; round++ {
+						for ; sealedNext < round*40; sealedNext++ {
+							if err := sealed.AppendEventHistory(ctx, sid, recorded[sealedNext]); err != nil {
+								t.Fatalf("append step %d: %v", sealedNext, err)
+							}
+						}
+						if err := CompactWorkflowHistory(ctx, sealed, sid, threshold, nil); err != nil {
+							t.Fatalf("round %d: CompactWorkflowHistory: %v", round, err)
+						}
+						cs, err := sealed.LoadCompactionState(ctx, sid)
+						if err != nil || cs == nil {
+							t.Fatalf("round %d: LoadCompactionState = %v, %v", round, cs, err)
+						}
+						if cs.PrevChecksum == "" {
+							t.Fatalf("round %d: the sealed state lost its boundary checksum", round)
+						}
+						if err := sealed.VerifyWorkflowEvents(ctx, sid); err != nil {
+							t.Fatalf("round %d: the run does not verify with a sealed state: %v", round, err)
+						}
+						tail, err := sealed.LoadEventHistory(ctx, sid)
+						if err != nil {
+							t.Fatal(err)
+						}
+						full := buildFullHistoryFromCompaction(tail, cs)
+						if len(full) != sealedNext {
+							t.Fatalf("round %d: rebuilt %d events, %d recorded", round, len(full), sealedNext)
+						}
+						for i := range full {
+							if err := sameRecordedEvent(full[i], recorded[i]); err != nil {
+								t.Fatalf("round %d: sealed state: step %d differs from the recorded one: %v", round, i, err)
+							}
+						}
+					}
+				})
+			}
 		})
 	}
 }
