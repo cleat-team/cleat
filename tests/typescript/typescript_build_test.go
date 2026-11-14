@@ -67,6 +67,9 @@ func needToolchain(t *testing.T) (root string) {
 	if _, err := exec.LookPath("cargo"); err != nil {
 		missing("cargo is not installed")
 	}
+	if _, err := exec.LookPath("node"); err != nil {
+		missing("node is not installed")
+	}
 	if out, err := exec.Command("rustup", "target", "list", "--installed").Output(); err != nil || !strings.Contains(string(out), "wasm32-wasip1") {
 		missing("the Rust target wasm32-wasip1 is not installed")
 	}
