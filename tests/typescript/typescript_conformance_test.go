@@ -103,3 +103,37 @@ func TestTypeScriptDateSettersAgreeWithNode(t *testing.T) {
 	src := "tests/typescript/testdata/conformance/dates.ts"
 	compareLines(t, "Date setters", guestResult(t, root, src, "dates"), nodeOracle(t, root, src, "dates"))
 }
+
+// TestTypeScriptURLAgreesWithNode is the second silent divergence: QuickJS has no URL, so `new URL(x)` was a ReferenceError and
+// zod's z.url(), which calls it inside a try/catch, reported every URL invalid. The shim is the WHATWG algorithm for what can be
+// done exactly. Every getter of every result, over absolute inputs, a relative-resolution grid against twelve bases, the two
+// setters it supports, and the way zod decides.
+func TestTypeScriptURLAgreesWithNode(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/conformance/urls.ts"
+	compareLines(t, "URL", guestResult(t, root, src, "urls"), nodeOracle(t, root, src, "urls"))
+}
+
+// TestTypeScriptURLSearchParamsAgreeWithNode covers every constructor form, every method, iteration (including mutation during
+// it), invalid UTF-8 in percent-escapes, and the sort.
+func TestTypeScriptURLSearchParamsAgreeWithNode(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/conformance/searchparams.ts"
+	compareLines(t, "URLSearchParams", guestResult(t, root, src, "search_params"), nodeOracle(t, root, src, "searchParams")) // the guest takes the ABI name, Node calls the function
+}
+
+// TestTypeScriptURLRefusesWhatItCannotAnswer is the other half of the contract. The shim does not guess: an input or an operation
+// outside what it can do exactly must throw its own error, never return a value, because a plausible wrong value is the failure
+// the shim exists to remove. Node answers all of these, so only the guest runs it, and every line must read "loud".
+func TestTypeScriptURLRefusesWhatItCannotAnswer(t *testing.T) {
+	root := needToolchain(t)
+	lines := guestResult(t, root, "tests/typescript/testdata/conformance/urls_loud.ts", "urls_loud")
+	if len(lines) == 0 {
+		t.Fatal("no cases ran, so nothing was checked")
+	}
+	for _, l := range lines {
+		if l != "loud" {
+			t.Errorf("%s", l)
+		}
+	}
+}

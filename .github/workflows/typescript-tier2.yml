@@ -158,13 +158,17 @@ jobs:
           fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
           pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
           passed=$(grep '"Action":"pass"' "$f" | grep -c '"Test":' || true)
-          echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed"
+          # Top-level tests only: a subtest name carries a "/", and counting subtests let a floor of N be met while a top-level test
+          # had not run at all (cleat-review, on #3888).
+          top=$(grep '"Action":"pass"' "$f" | grep '"Test":' | grep -vc '"Test":"[^"]*/' || true)
+          echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed (top-level: $top)"
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
           # TestTypeScriptLabelIsRoutedToWasmtime needs no toolchain; the five build tests, the `cleat build --target ts`
-          # test and the Date conformance test (which also needs node, as an oracle) do; the two worker smoke tests need the
-          # toolchain and PostgreSQL; the numbers test needs the toolchain (and componentize-py where declared). That is
-          # eleven top-level tests: fewer means one did not run, which a green exit status would not say.
-          [ "$passed" -ge 11 ] || { echo "only $passed tests passed; the eleven top-level tests in tests/typescript must all run" >&2; exit 1; }
+          # test, the Date conformance test and the three URL tests (which also need node, as an oracle, except the refusal
+          # test) do; the two worker smoke tests need the toolchain and PostgreSQL; the numbers test needs the toolchain (and
+          # componentize-py where declared). That is fourteen top-level tests: fewer means one did not run, which a green exit
+          # status would not say. Re-derive: grep -h '^func Test' tests/typescript/*_test.go | grep -c .
+          [ "$top" -ge 14 ] || { echo "only $top top-level tests passed; the fourteen in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
       - name: "Skip budget (zero, because the toolchain was declared)"
