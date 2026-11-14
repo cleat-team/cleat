@@ -526,7 +526,14 @@ var (
 			"error that names this cap, rather than being cut. Only read when --enable-workflow-fetch "+
 			"is set. cleat#3377")
 	encryptSensitivePayloads = flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
-	migrationLockTimeout     = flag.Duration("migration-lock-timeout", migration.DefaultLockTimeout,
+	queryStateSearchWindow   = flag.Int("query-state-search-window", defaultQueryStateSearchWindow,
+		"With --encrypt-sensitive-payloads, GET /api/workflows?state.<key>=<value> cannot be answered by the "+
+			"database (query_state is ciphertext), so the worker decrypts and matches the tenant's most recent N "+
+			"runs. This is N. The response says how many runs it examined and whether older ones were not, so a "+
+			"search that finds nothing is never mistaken for 'no such run'. 0 turns it off (the request is "+
+			"refused, naming this flag). Ignored without --encrypt-sensitive-payloads, where the database "+
+			"answers exactly. cleat#3775")
+	migrationLockTimeout = flag.Duration("migration-lock-timeout", migration.DefaultLockTimeout,
 		"How long a migration statement waits for a lock before failing. A migration needing ACCESS EXCLUSIVE "+
 			"(ALTER TABLE, CREATE INDEX without CONCURRENTLY, DROP) otherwise waits forever behind any conflicting "+
 			"lock -- an idle-in-transaction session is enough -- and queues every later reader behind itself. It is "+
