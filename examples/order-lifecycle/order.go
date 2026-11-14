@@ -429,7 +429,7 @@ func refundPSP(orderID string, totalCents int) error {
 }
 
 // paymentWindow is how long the order waits for the PSP's webhook before it gives
-// up and the saga compensates. It is the argument to webhookingest.Wait, not a
+// up and the saga compensates. It is the argument to WaitFor, not a
 // pair of constants inside a loop.
 const paymentWindow = 30 * time.Second
 

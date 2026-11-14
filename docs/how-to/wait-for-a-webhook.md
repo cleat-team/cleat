@@ -117,10 +117,32 @@ def wait_for_payment(h: HostCalls, source_id: str) -> str:
     raise RuntimeError("no payment.confirmed event within 60 s")
 ```
 
-`examples/order-lifecycle` shows the version that suspends on the plugin's own
-wake-up signal instead of sleeping on a timer, and correlates one event to one
-order. A single call that does the loop for you is proposed in
-[cleat#3794](https://github.com/cleat-team/cleat/issues/3794).
+### One call, for a wait of minutes
+
+In Go, the SDK in this repository has a typed call that does the waiting for you.
+It suspends on the plugin's own wake-up signal instead of polling on a timer, takes
+a window as a `time.Duration`, and can correlate one event to one order with
+`Keys`: `webhookingest.AwaitWebhookWaiter.WaitFor(h, webhookingest.AwaitWebhookInput{SourceID: id, EventType: "payment.confirmed"}, 5*time.Minute)`,
+from `github.com/cleat-team/cleat/cleat/pluginclients/webhookingest`. It returns the
+claimed event's `AwaitWebhookOutput` (its `Payload` is the event body) and an error.
+
+**It is not in a published release yet, so this page does not show it as a code
+block**: the snippet guard compiles every block against the released SDK, which
+does not have it. `awaitPaymentConfirmation` in `examples/order-lifecycle/order.go`
+is the working call, built and tested in CI.
+
+A window that closes with no event is an **error**, not `found: false`
+(on a worker, `wait_for_event: no event for webhook-ingest/await_webhook within <n>ms`;
+the in-process `cleattest` runtime words it differently), so the `err` branch is also
+your timeout branch. `examples/order-lifecycle` uses it and
+turns the timeout into a compensation.
+
+Two limits. It is **for waits of minutes**: while no event arrives the engine
+re-checks about every 6 s and records history events each time: about 950 an
+hour, measured on a real worker (cleat#3806 tracks an engine-level wait that
+records none). For a wait of hours or days use the loop above, with a
+longer sleep between attempts. And it landed in cleat#3804; **as of 2026-11-14 it is not in 0.6.0**,
+so on 0.6.0 use the loop.
 
 ## 4. Deliver an event
 
