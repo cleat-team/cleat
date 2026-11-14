@@ -635,12 +635,20 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 }
 
 // VerifyWorkflowEvents loads all events for a workflow, recomputes their
-// SHA-256 checksums, and verifies integrity against stored checksums.
+// xxHash64 checksums, and verifies integrity against stored checksums.
 func (s *MSSQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
 	// Load the full event history for the workflow.
 	events, err := s.LoadEventHistory(ctx, workflowID)
 	if err != nil {
 		return fmt.Errorf("verify events: load: %w", err)
+	}
+
+	// The compaction state is read before the transaction below opens: it is
+	// loaded on its own connection, and holding two per verification is how a
+	// small pool is exhausted.
+	cs, err := s.LoadCompactionState(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("verify events: load compaction state: %w", err)
 	}
 
 	// beginTxWithContext, not bare s.db -- cleat#2210/cleat#3281: a WithTenant
@@ -685,20 +693,10 @@ func (s *MSSQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		return nil
 	}
 
-	// Recompute and compare checksums with chaining.
-	var prevChecksum string
-	for _, ev := range events {
-		expected, ok := storedChecksums[ev.Step]
-		if !ok || expected == "" {
-			prevChecksum = "" // Missing event breaks the chain
-			continue
-		}
-		actual := computeEventChecksum(ev, prevChecksum)
-		if actual != expected {
-			return fmt.Errorf("verify events: workflow %s step %d: checksum mismatch (expected %s, got %s)",
-				workflowID, ev.Step, expected, actual)
-		}
-		prevChecksum = expected
+	// Recompute and compare checksums with chaining, starting from the
+	// compaction boundary when the run has been compacted (cleat#3837).
+	if err := verifyEventChain(workflowID, events, storedChecksums, cs); err != nil {
+		return err
 	}
 	return nil
 }

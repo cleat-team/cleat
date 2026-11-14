@@ -94,7 +94,7 @@ func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) b
 	// every consumed event passes through, so it does not need repeating for
 	// each event type.
 	if rec != nil {
-		s.lastChecksum = computeEventChecksum(*rec, s.lastChecksum)
+		s.lastChecksum = s.chainAnchor.next(*rec, s.lastChecksum)
 	}
 	if s.stepCallback == nil {
 		return true

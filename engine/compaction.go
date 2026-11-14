@@ -187,6 +187,13 @@ type CompactionState struct {
 	OpenChildren  []CompactedChild  `json:"open_children,omitempty"`
 	QueryState    map[string]string `json:"query_state,omitempty"`
 
+	// PrevChecksum is the stored checksum of the last event row the compaction
+	// deleted: the predecessor of the first row it kept. Verification and replay
+	// both start the checksum chain from it (cleat#3837). Set by CompactHistory,
+	// in the transaction that deletes the row, so the store has not been
+	// compacted without it; empty on a state written before that fix.
+	PrevChecksum string `json:"prev_checksum,omitempty"`
+
 	// Summary is populated when Events exceeds DefaultMaxCompactedEvents and is
 	// truncated. It records the truncation count for observability.
 	Summary *TruncationSummary `json:"summary,omitempty"`
@@ -373,6 +380,25 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 	}
 	if perDefinition > 0 {
 		effective = perDefinition
+	}
+
+	// cleat#3838: a run that has already been compacted is not compacted again.
+	// The state is built from the rows being removed alone, so a second pass
+	// REPLACES the first pass's events with ones taken from the retained tail,
+	// and keepStep below is an index into that tail but CompactHistory deletes
+	// by step. Measured on PostgreSQL with a workflow that sums 30 signal
+	// payloads: 1713 against the correct 1335, finished "done", nothing
+	// reported. Skipping costs only space -- the history keeps growing -- and
+	// is removed by the change that makes a second compaction extend the state.
+	prev, err := store.LoadCompactionState(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("compact: load existing compaction state: %w", err)
+	}
+	if prev != nil {
+		// Debug, not Warn: the candidate query selects this run on every pass.
+		slog.DebugContext(ctx, "compact skipped: the run is already compacted and a second compaction is not supported (cleat#3838)",
+			"workflow_id", workflowID)
+		return nil
 	}
 
 	events, err := store.LoadEventHistory(ctx, workflowID)
