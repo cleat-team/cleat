@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -276,4 +278,85 @@ var routesThatAnswerAStoreError = []string{
 	"workflows/terminal run",
 	"workflows/update a run",
 	"workflows/write allowed signals",
+}
+
+// cleat#3883. The seven 500s that put an error's text AFTER a sentence of their own ("failed to deploy: " + err),
+// and the admin-op default branch that answered `msg := err.Error()`. writeStoreErrorDuring keeps the handler's
+// sentence and drops the text.
+func TestWriteStoreErrorDuringKeepsTheHandlersSentenceAndNotTheText(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		err        error
+		status     int
+		wantText   string
+		retryAfter bool
+	}{
+		{"an unclassified error is a 500 that names what failed", errors.New(driverError), http.StatusInternalServerError, "checking the tenant's opt-in failed", false},
+		{"a transient one is a 503 that names what failed and says to retry", context.DeadlineExceeded, http.StatusServiceUnavailable, "checking the tenant's opt-in failed just now; retry shortly", true},
+		{"a domain error still keeps its own status and message", engine.ErrWorkflowDefNotFound, http.StatusNotFound, "workflow def not found", false},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			logs := capturedLog(t)
+			rec := httptest.NewRecorder()
+			newTestAPIServer(&mockStore{}).writeStoreErrorDuring(rec, httptest.NewRequest(http.MethodPost, "/x", nil), "checking the tenant's opt-in", c.err)
+			body := rec.Body.String()
+			if rec.Code != c.status {
+				t.Errorf("status %d, want %d (%s)", rec.Code, c.status, body)
+			}
+			if !strings.Contains(body, c.wantText) {
+				t.Errorf("body %q does not contain %q", body, c.wantText)
+			}
+			if got := rec.Header().Get("Retry-After") != ""; got != c.retryAfter {
+				t.Errorf("Retry-After present = %v, want %v", got, c.retryAfter)
+			}
+			if strings.Contains(body, driverError) {
+				t.Errorf("the error's text reached the client: %s", body)
+			}
+			if c.status >= 500 && (requestIDOf(body) == "" || !strings.Contains(logs.String(), requestIDOf(body))) {
+				t.Errorf("no request id in the body that the log also carries.\nbody: %s\nlog: %q", body, logs.String())
+			}
+		})
+	}
+}
+
+// The upload route's default branch ("failed to deploy: " + err.Error() until cleat#3883). Driven the way
+// TestAnUploadRefusedForOpenRunsIsAConflictNotAServerError drives it, with the unclassified error that test
+// uses as its control.
+func TestAnUploadThatFailsInTheStoreDoesNotSendTheStoresText(t *testing.T) {
+	logs := capturedLog(t)
+	ms := &mockStore{deployWorkflowDefFn: func(context.Context, *engine.WorkflowDef) error { return errors.New(driverError) }}
+	api := &apiServer{store: ms, worker: newTestWorker(ms), maxBodySize: 1 << 20}
+	payload, _ := json.Marshal(map[string]any{
+		"name": "uploaded", "version": 1,
+		"wasm_bytes_base64": base64.StdEncoding.EncodeToString([]byte("\x00asm\x01\x00\x00\x00")),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/definitions", strings.NewReader(string(payload)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	api.handleCreateDefinition(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, driverError) {
+		t.Fatalf("the store's error reached the client (%d): %s", rec.Code, body)
+	}
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(body, "deploying the workflow definition failed") || requestIDOf(body) == "" {
+		t.Errorf("got %d %s; want a 500 that names what failed and carries a request id", rec.Code, body)
+	}
+	if !strings.Contains(logs.String(), driverError) {
+		t.Errorf("the error was swallowed: nothing was logged. log: %q", logs.String())
+	}
+}
+
+// LoadDAGSpec on a run whose definition is gone returned a plain error ("workflow def not found: wfd v1"), so the
+// DAG route answered a 500 carrying it. It is a sentinel now and the route answers what is true.
+func TestTheDAGOfARunWhoseDefinitionIsGoneIsA404(t *testing.T) {
+	entry := entryFor(t, everyWorkflowRoute)
+	ms := storeServing(engine.ExposureAuth, true)
+	ms.loadDAGSpecFn = func(context.Context, string, int) (json.RawMessage, error) {
+		return nil, fmt.Errorf("%w: wfd v1", engine.ErrWorkflowDefNotFound)
+	}
+	rec := drive(t, entry, newTestAPIServer(ms), externalRoute{"handleGetDAG", "read the DAG", http.MethodGet, "/api/workflows/RUN/dag", false, ""})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("answered %d %s; want 404", rec.Code, rec.Body.String())
+	}
 }

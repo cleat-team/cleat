@@ -1222,9 +1222,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			if schema, ok := def.EntryPointSchemas[entryPoint]; ok && len(schema.Params) > 0 {
 				violation, schemaErr := jsonschema.Validate(schema.Params, input.Input)
 				if schemaErr != nil {
-					s.writeError(w, 500, fmt.Sprintf(
-						"entry point %q of %s v%d has a stored input schema that could not be parsed: %v",
-						entryPoint, name, targetVersion, schemaErr))
+					s.writeStoreErrorDuring(w, r, fmt.Sprintf("reading the stored input schema of entry point %q of %s v%d", entryPoint, name, targetVersion), schemaErr)
 					return
 				}
 				if violation != nil {
@@ -1694,7 +1692,7 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 			// cleat#1975 (D3): a pre-emptive cancel on a settled row now comes
 			// back as engine.ErrAdminStateConflict -> 409, via the same
 			// mapping re-replay and force-fail/force-complete use.
-			s.handleAdminOpError(w, err)
+			s.handleAdminOpError(w, r, err)
 			return
 		}
 		// Names the OUTCOME, not the current state, which is what terminate
@@ -2366,7 +2364,7 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	// Parse the spec so we can add workflow_id metadata.
 	var dagData map[string]any
 	if err := json.Unmarshal(spec, &dagData); err != nil {
-		s.writeError(w, 500, "invalid dag_spec JSON: "+err.Error())
+		s.writeStoreErrorDuring(w, r, "reading the stored DAG specification", err)
 		return
 	}
 
@@ -2678,7 +2676,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	// Generate a promise ID so the caller can track the update outcome.
 	promiseID, err := generateUpdatePromiseID()
 	if err != nil {
-		s.writeError(w, 500, "failed to generate promise ID: "+err.Error())
+		s.writeStoreErrorDuring(w, r, "generating the update's promise id", err)
 		return
 	}
 
@@ -3140,7 +3138,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	if reader, ok := st.(engine.TenantExposurePolicyReader); ok && tid != "" {
 		allowed, aerr := reader.AllowsPublicExposure(r.Context(), tid)
 		if aerr != nil {
-			s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "checking public exposure opt-in: " + aerr.Error()})
+			s.writeStoreErrorDuring(w, r, "checking the tenant's public exposure opt-in", aerr)
 			return
 		}
 		tenantAllowsPublic = allowed
@@ -3215,7 +3213,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		slog.Error("deploy workflow def failed", "error", err)
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
+		s.writeStoreErrorDuring(w, r, "deploying the workflow definition", err)
 		return
 	}
 

@@ -404,7 +404,7 @@ func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Req
 		// dead_lettered -> terminated transition this route exists to do --
 		// now comes back as engine.ErrAdminStateConflict. handleAdminOpError
 		// is the one place that maps it to 409, the same class re-replay uses.
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "terminated"})
@@ -441,7 +441,7 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 	// handleAdminOpError maps its ErrAdminStateConflict to 409, the same class
 	// terminate and re-replay use above.
 	if err := engine.RetryWorkflow(r.Context(), st, id); err != nil {
-		s.handleAdminOpError(w, err)
+		s.handleAdminOpError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"id": id, "status": "retried"})

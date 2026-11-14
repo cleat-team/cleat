@@ -81,7 +81,7 @@ func (s *apiServer) handleInstallLibrary(w http.ResponseWriter, r *http.Request)
 	if reader, ok := st.(engine.TenantExposurePolicyReader); ok && tid != "" {
 		allowed, err := reader.AllowsPublicExposure(r.Context(), tid)
 		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, "checking public exposure opt-in: "+err.Error())
+			s.writeStoreErrorDuring(w, r, "checking the tenant's public exposure opt-in", err)
 			return
 		}
 		tenantAllowsPublic = allowed
