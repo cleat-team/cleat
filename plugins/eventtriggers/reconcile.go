@@ -44,6 +44,15 @@ const (
 	reconcileMaxPages = 50
 )
 
+// reconcileSweepBudget bounds one sweep's wall time. The sweep runs inline in
+// Run's loop, the goroutine processBatch also uses, so an unbounded one would
+// hold the retry sweep off for as long as deliveries kept failing slowly (each
+// failed delivery sleeps through signalRetryDelays). It is checked between
+// awaiters, after at least one, and is safe to cut short: every awaiter attempted
+// leaves the due set -- delivered, gone, or in backoff -- so the next sweep
+// reaches the ones this one did not. A variable only so a test can shrink it.
+var reconcileSweepBudget = 20 * time.Second
+
 // reconcilePageSize bounds one scan page. The scan pages by awaiter id rather
 // than taking the first N, so a run of awaiters that keep failing and sit in
 // backoff cannot fill the page and keep a deliverable one from ever being
@@ -106,21 +115,25 @@ OFFSET 0 ROWS FETCH NEXT %d ROWS ONLY`, int(reconcileGrace.Seconds()), pageSize)
 }
 
 // oldestStrandedEvent reads, without locking, the payload of the oldest
-// unprocessed event an awaiter is waiting on. Oldest first, as the claim is
-// (cleat#2641). The reconciler only wakes the waiter; the waiter's own claim
-// is what consumes the event.
+// unprocessed event an awaiter is waiting on, and its age in milliseconds.
+// Oldest first, as the claim is (cleat#2641). The reconciler only wakes the
+// waiter; the waiter's own claim is what consumes the event.
+//
+// THE AGE IS COMPUTED BY THE DATABASE, for the reason the grace comparison is:
+// subtracting a stored column from the sweep's Go clock mixes two clocks, and
+// MySQL returns a TIMESTAMP in the session's time zone.
 var oldestStrandedEvent = plugin.Query{
-	Default: `SELECT event_data, received_at FROM ingested_events
+	Default: `SELECT event_data, (EXTRACT(EPOCH FROM (NOW() - received_at)) * 1000)::bigint FROM ingested_events
 WHERE tenant_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5
   AND NOT processed
 ORDER BY seq
 LIMIT 1`,
-	MySQL: `SELECT event_data, received_at FROM ingested_events
+	MySQL: `SELECT event_data, TIMESTAMPDIFF(MICROSECOND, received_at, NOW(6)) DIV 1000 FROM ingested_events
 WHERE tenant_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5
   AND processed = 0
 ORDER BY seq
 LIMIT 1`,
-	MSSQL: `SELECT event_data, received_at FROM ingested_events
+	MSSQL: `SELECT event_data, DATEDIFF_BIG(millisecond, received_at, SYSUTCDATETIME()) FROM ingested_events
 WHERE tenant_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5
   AND processed = 0
 ORDER BY seq
@@ -136,6 +149,7 @@ type awaiterKey struct {
 type backoffEntry struct {
 	failures int
 	retryAt  time.Time
+	refused  bool
 }
 
 // reconcileBackoff is the in-memory, per-worker delay between attempts to
@@ -174,6 +188,24 @@ func (b *reconcileBackoff) failed(k awaiterKey, now time.Time) time.Duration {
 	return d
 }
 
+// refused records a refusal: straight to the cap, whatever came before. It
+// reports whether this is the first refusal this table has seen for k, so the
+// caller can log it once.
+func (b *reconcileBackoff) refused(k awaiterKey, now time.Time) (first bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.entries == nil {
+		b.entries = make(map[awaiterKey]backoffEntry)
+	}
+	e := b.entries[k]
+	first = !e.refused
+	e.failures++
+	e.retryAt = now.Add(reconcileBackoffMax)
+	e.refused = true
+	b.entries[k] = e
+	return first
+}
+
 func (b *reconcileBackoff) clear(k awaiterKey) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -210,6 +242,8 @@ func (p *Plugin) reconcileAwaiters(parent context.Context, now time.Time) int {
 		key awaiterKey
 	}
 	delivered := 0
+	attempted := 0
+	deadline := time.Now().Add(reconcileSweepBudget)
 	seen := make(map[awaiterKey]struct{})
 	cursor := zeroUUID
 	complete := false
@@ -258,7 +292,11 @@ func (p *Plugin) reconcileAwaiters(parent context.Context, now time.Time) int {
 			if !p.backoff.due(s.key, now) {
 				continue
 			}
-			if p.reconcileOne(s.id, s.key, now) {
+			if attempted > 0 && time.Now().After(deadline) {
+				return delivered
+			}
+			attempted++
+			if p.reconcileOne(parent, s.id, s.key, now) {
 				delivered++
 			}
 		}
@@ -284,15 +322,23 @@ func (p *Plugin) reconcileAwaiters(parent context.Context, now time.Time) int {
 // affects zero rows and stops. A failed delivery puts the registration back,
 // so the next sweep -- after the backoff -- finds it again, which is also what
 // keeps the waiter findable by the publisher's own signalAwaiters meanwhile.
-func (p *Plugin) reconcileOne(awaiterID string, k awaiterKey, now time.Time) bool {
-	ctx := plugin.ForTenant(context.Background(), k.tenantID)
+func (p *Plugin) reconcileOne(parent context.Context, awaiterID string, k awaiterKey, now time.Time) bool {
+	// FOR THE TENANT, NOT FROM parent. parent is Run's context, which carries the
+	// cross-tenant bypass, and a ForTenant applied over that is silently ignored
+	// (cleat#1515). So the tenant context starts from Background and takes only
+	// the CANCELLATION from parent: a sweep in the middle of a delivery's retry
+	// sleeps stops when the worker shuts down.
+	tenantCtx := plugin.ForTenant(context.Background(), k.tenantID)
+	ctx, cancel := context.WithCancel(tenantCtx)
+	defer cancel()
+	defer context.AfterFunc(parent, cancel)()
 
 	var (
-		payload    []byte
-		receivedAt time.Time
+		payload []byte
+		ageMs   int64
 	)
 	if err := p.db.QueryRow(ctx, oldestStrandedEvent.For(p.dialect),
-		k.tenantID, k.eventType, k.key1, k.key2, k.key3).Scan(&payload, &receivedAt); err != nil {
+		k.tenantID, k.eventType, k.key1, k.key2, k.key3).Scan(&payload, &ageMs); err != nil {
 		// Claimed by the waiter's own recheck since the scan: not stranded now.
 		return false
 	}
@@ -306,6 +352,16 @@ func (p *Plugin) reconcileOne(awaiterID string, k awaiterKey, now time.Time) boo
 		return false
 	}
 
+	// Putting the registration back must not depend on the sweep still being
+	// live: a shutdown between the DELETE and here would otherwise lose it.
+	reRegister := func() {
+		if err := registerAwaiterCore(tenantCtx, p.db, p.dialect, p.logger,
+			k.tenantID.String(), k.workflowID, k.eventType, k.key1, k.key2, k.key3); err != nil {
+			p.logger.Error("event-triggers: reconcile: could not put the awaiter back after a failed delivery; the waiter's own re-check is now the only way it finds the event",
+				"tenant_id", k.tenantID, "workflow_id", k.workflowID, "event_type", k.eventType, "error", err)
+		}
+	}
+
 	switch deliverToAwaiter(ctx, p.db, p.logger, p.env, k.workflowID, k.eventType, string(payload), k.key1, k.key2, k.key3, true) {
 	case awaiterDelivered:
 		p.backoff.clear(k)
@@ -314,18 +370,25 @@ func (p *Plugin) reconcileOne(awaiterID string, k awaiterKey, now time.Time) boo
 			"tenant_id", k.tenantID,
 			"event_type", k.eventType,
 			"workflow_id", k.workflowID,
-			"event_age_ms", now.Sub(receivedAt).Milliseconds(),
+			"event_age_ms", ageMs,
 		)
 		return true
 	case awaiterGone:
 		p.backoff.clear(k)
 		return false
-	default:
-		if err := registerAwaiterCore(ctx, p.db, p.dialect, p.logger,
-			k.tenantID.String(), k.workflowID, k.eventType, k.key1, k.key2, k.key3); err != nil {
-			p.logger.Error("event-triggers: reconcile: could not put the awaiter back after a failed delivery; the waiter's own re-check is now the only way it finds the event",
-				"tenant_id", k.tenantID, "workflow_id", k.workflowID, "event_type", k.eventType, "error", err)
+	case awaiterRefused:
+		// Not a delivery failure and not going to become one by waiting a bit:
+		// the worker will say no again until someone grants this plugin the
+		// signal. So it goes straight to the longest backoff, and is reported
+		// once per worker rather than on every attempt.
+		reRegister()
+		if p.backoff.refused(k, now) {
+			p.logger.Warn("event-triggers: reconcile: the worker refuses this plugin's signal to the awaiter (--require-signal-auth without a grant in allowed_signals); it will be checked again every "+reconcileBackoffMax.String()+" and not reported again",
+				"tenant_id", k.tenantID, "workflow_id", k.workflowID, "event_type", k.eventType)
 		}
+		return false
+	default:
+		reRegister()
 		d := p.backoff.failed(k, now)
 		p.logger.Warn("event-triggers: reconcile: delivery failed, backing off",
 			"tenant_id", k.tenantID, "workflow_id", k.workflowID, "event_type", k.eventType, "retry_in", d)

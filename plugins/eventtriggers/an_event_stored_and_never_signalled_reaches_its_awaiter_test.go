@@ -236,11 +236,16 @@ func TestAStoredEventNeverSignalledReachesItsAwaiter(t *testing.T) {
 
 		f.age(t)
 		var stored []byte
-		var storedAt time.Time
+		var storedAgeMs int64
 		k1s, k2s, k3s, _ := keySlots(keys)
 		if err := f.db.QueryRow(f.ctx, oldestStrandedEvent.For(f.dialect),
-			f.tenant, eventType, k1s, k2s, k3s).Scan(&stored, &storedAt); err != nil {
+			f.tenant, eventType, k1s, k2s, k3s).Scan(&stored, &storedAgeMs); err != nil {
 			t.Fatalf("UNMEASURED: read the stored event back: %v", err)
+		}
+		// The age the sweep logs is the database's own, so it is right whatever
+		// the session time zone: the events were aged by five minutes.
+		if storedAgeMs < 4*60*1000 || storedAgeMs > 6*60*1000 {
+			t.Errorf("event age read back as %d ms on %s, want about 300000", storedAgeMs, f.be.Name)
 		}
 		if n := w.reconcileAwaiters(context.Background(), time.Now()); n != 1 {
 			t.Fatalf("sweep delivered %d, want 1 (log: %s)", n, f.logBuf.String())
@@ -540,4 +545,114 @@ func TestReconcileBackoffDoublesToItsCap(t *testing.T) {
 	if !b.due(k, now) {
 		t.Errorf("retain did not forget a key that is no longer stranded")
 	}
+}
+
+
+// --require-signal-auth without a grant: the worker refuses every signal this
+// plugin sends, and asking again gets the same answer. The reconciler must say
+// so once and go to the longest backoff, not retry it at the pace of a
+// transient failure on every worker for as long as the waiter waits.
+func TestARefusedSignalIsNotRetriedAndIsReportedOnce(t *testing.T) {
+	eachBackend(t, func(t *testing.T, f *reconcileFixture) {
+		// The real retry schedule is left in place on purpose: a retry would show
+		// as a second attempt. Only its sleeps are shortened.
+		saved := signalRetryDelays
+		signalRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+		t.Cleanup(func() { signalRetryDelays = saved })
+
+		w := f.newWorker()
+		f.strand(t, "wf-refused", "refused.event", json.RawMessage(`{}`), nil)
+		f.age(t)
+		f.signals.fail = func(string) error {
+			return fmt.Errorf("signal auth denied: event-triggers not in allowed_signals of wf-refused: %w", plugin.ErrSignalNotAllowed)
+		}
+
+		t0 := time.Now()
+		if n := w.reconcileAwaiters(context.Background(), t0); n != 0 {
+			t.Fatalf("delivered %d to a workflow that refuses the signal", n)
+		}
+		if got := len(f.signals.forWorkflow("wf-refused")); got != 1 {
+			t.Errorf("a refusal was attempted %d times in one sweep, want 1: it will not succeed on a retry", got)
+		}
+		if got := f.awaiterCount(t, "wf-refused"); got != 1 {
+			t.Errorf("awaiter rows after a refusal: %d, want 1 -- the registration is not the reconciler's to drop", got)
+		}
+
+		// Straight to the longest backoff, not the first rung.
+		w.reconcileAwaiters(context.Background(), t0.Add(reconcileBackoffMax-time.Second))
+		if got := len(f.signals.forWorkflow("wf-refused")); got != 1 {
+			t.Errorf("retried inside the longest backoff: %d attempts, want 1", got)
+		}
+		w.reconcileAwaiters(context.Background(), t0.Add(reconcileBackoffMax+time.Second))
+		if got := len(f.signals.forWorkflow("wf-refused")); got != 2 {
+			t.Errorf("not retried after the longest backoff: %d attempts, want 2", got)
+		}
+
+		if got := bytes.Count(f.logBuf.Bytes(), []byte("the worker refuses this plugin's signal")); got != 1 {
+			t.Errorf("the refusal was reported %d times across two attempts, want exactly 1:\n%s", got, f.logBuf.String())
+		}
+	})
+}
+
+// A sweep stops when its time budget is spent, after at least one awaiter, and
+// the next sweep carries on: every awaiter attempted leaves the due set.
+func TestASweepStopsAtItsBudgetAndTheNextOneCarriesOn(t *testing.T) {
+	eachBackend(t, func(t *testing.T, f *reconcileFixture) {
+		saved := reconcileSweepBudget
+		reconcileSweepBudget = time.Nanosecond
+		t.Cleanup(func() { reconcileSweepBudget = saved })
+
+		w := f.newWorker()
+		const n = 3
+		for i := 0; i < n; i++ {
+			f.strand(t, fmt.Sprintf("wf-budget-%d", i), "budget.event", json.RawMessage(`{}`), nil)
+		}
+		f.age(t)
+		for sweep := 1; sweep <= n; sweep++ {
+			if got := w.reconcileAwaiters(context.Background(), time.Now()); got != 1 {
+				t.Fatalf("sweep %d delivered %d with a spent budget, want exactly 1 (at least one, no more)", sweep, got)
+			}
+		}
+		if got := w.reconcileAwaiters(context.Background(), time.Now()); got != 0 {
+			t.Errorf("a sweep after all were delivered delivered %d", got)
+		}
+		if got := f.signals.total(); got != n {
+			t.Errorf("the engine saw %d signals, want %d", got, n)
+		}
+	})
+}
+
+// Shutdown reaches the sweep: cancelling the context it was handed stops it
+// between awaiters, and a delivery in progress sees the cancellation.
+func TestShutdownStopsASweepBetweenAwaiters(t *testing.T) {
+	eachBackend(t, func(t *testing.T, f *reconcileFixture) {
+		w := f.newWorker()
+		for i := 0; i < 4; i++ {
+			f.strand(t, fmt.Sprintf("wf-stop-%d", i), "stop.event", json.RawMessage(`{}`), nil)
+		}
+		f.age(t)
+
+		parent, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var sawCancelled bool
+		f.signals.fail = nil
+		w.env.SignalWorkflow = func(ctx context.Context, wf, name, payload string) error {
+			cancel() // the worker is shutting down as the first delivery is made
+			// context.AfterFunc runs on its own goroutine, so the derived
+			// context is cancelled shortly after, not synchronously.
+			select {
+			case <-ctx.Done():
+				sawCancelled = true
+			case <-time.After(2 * time.Second):
+			}
+			return f.signals.signal(ctx, wf, name, payload)
+		}
+		w.reconcileAwaiters(parent, time.Now())
+		if got := f.signals.total(); got != 1 {
+			t.Errorf("a sweep whose context was cancelled went on to %d deliveries, want 1", got)
+		}
+		if !sawCancelled {
+			t.Errorf("the per-awaiter context did not carry the cancellation: a retry sleep would outlive shutdown")
+		}
+	})
 }
