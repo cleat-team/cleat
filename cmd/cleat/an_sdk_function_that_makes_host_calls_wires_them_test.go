@@ -35,6 +35,8 @@ var sdkFixtures = []struct {
 	leaves []string // short names that must be durable leaves; the entry point is always Run
 }{
 	{"promisetyped", []string{"cleat_create_promise", "cleat_await_promise"}, []string{"Run"}},
+	// The seven imports the hand-list row for PluginFunc.WaitFor carried (cleat#3794), now derived.
+	{"waitfor", []string{"cleat_wait_for_event", "plugin_call", "cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"}, []string{"Run"}},
 	{"pluginviadep", []string{"plugin_call", "plugin_call_streaming"}, []string{"Run"}},
 	{"sagarun", []string{"cleat_log", "set_query_state"}, []string{"Run"}},
 	{"sagatyped", []string{"cleat_log"}, []string{"Run"}},
@@ -128,6 +130,8 @@ func TestEverySDKFunctionThatReachesAHostCallHasAFixture(t *testing.T) {
 		"PluginCallTyped":            "plugincalltyped",
 		"PluginFunc.Call":            "pluginfunc",
 		"PluginFunc.Bind":            "pluginfunc",
+		"PluginFunc.WaitFor":         "waitfor",
+		"PluginFunc.WithWake":        "waitfor",
 		"BoundPluginFunc.Call":       "pluginfunc",
 		// Covered by fixtures that predate this one.
 		"Saga.AddStepCall":   "testdata/sagaparameterised",
