@@ -474,4 +474,5 @@ tests/plugin-harness	buildPythonWorkflowWasm	3
 tests/plugin-harness	buildRustHostCallWasm	2
 tests/plugin-harness	buildRustWorkflowWasm	2
 tests/soak	TestSoakWorkflowMix	1
+tests/typescript	needPostgres	1
 tests/typescript	needToolchain	1
