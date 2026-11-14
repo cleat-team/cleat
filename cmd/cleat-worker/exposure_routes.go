@@ -47,13 +47,23 @@ import (
 // and refuses with notFound when that version is internal. It reports whether
 // it refused, so a handler returns immediately on true.
 //
-// A run or definition that cannot be read is NOT this function's refusal: it
-// returns false and lets the handler produce its own miss, so the two cases
-// cannot drift apart. Answering 404 here for a read error would be the right
-// status for the wrong reason, and would hide a store failure.
+// A run that does not exist (nil, no error) is NOT this function's refusal: it returns false and lets the
+// handler produce its own miss, so the two cases cannot drift apart.
+//
+// A run that cannot be READ is refused with a retryable 503, as refuseIfAbsentOrInternalRun does and as an
+// unreadable definition class already is (cleat#3785): a check that cannot find out must not serve. This used
+// to return false for an error too, on the reasoning that the handler reads the run again and produces its own
+// miss. That holds for a handler that does. Signal and cancel do not, and with no tenant in the request context
+// (callerOwnsTarget then skips its own read of the run) the guard's read was the only one, so an unreadable run
+// was signalled or cancelled whatever its definition's class (cleat#3799). 404 would be the wrong answer for
+// the error, for the reason refuseIfAbsentOrInternalRun says.
 func (s *apiServer) refuseIfInternalRun(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, runID, notFound string) bool {
 	wf, err := st.GetWorkflowByID(r.Context(), runID)
-	if err != nil || wf == nil {
+	if err != nil {
+		s.writeAccessCheckUnavailable(w, r, "the run", err)
+		return true
+	}
+	if wf == nil {
 		return false
 	}
 	return s.refuseIfInternalDef(w, r, st, wf.DefName, wf.DefVersion, notFound)
