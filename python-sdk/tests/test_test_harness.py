@@ -268,7 +268,7 @@ class TestClockControl:
     def test_sleep_advances_clock(self):
         h = CleatTestHarness()
         before = h.now_ms
-        h.sleep(3000)
+        h.sleep_ms(3000)
         assert h.now_ms - before == 3000
 
 
@@ -296,13 +296,13 @@ class TestSignals:
     def test_await_signals_immediate(self):
         h = CleatTestHarness()
         h.stub_signal("approved", '{"ok": true}')
-        result = h.await_signals(["approved"], 5000)
+        result = h.await_signals_ms(["approved"], 5000)
         assert not result.timed_out
         assert result.name == "approved"
 
     def test_await_signals_timeout(self):
         h = CleatTestHarness()
-        result = h.await_signals(["never_arrives"], 100)
+        result = h.await_signals_ms(["never_arrives"], 100)
         assert result.timed_out
         assert result.name == ""
         assert result.payload == ""
@@ -312,15 +312,15 @@ class TestSignals:
         in the test harness when no signal is available."""
         h = CleatTestHarness()
         with pytest.raises(SuspendSentinel):
-            h.await_signals(["anything"], 0)
+            h.await_signals_ms(["anything"], 0)
         with pytest.raises(SuspendSentinel):
-            h.await_signals(["anything"], -1)
+            h.await_signals_ms(["anything"], -1)
 
     def test_await_signals_indefinite_with_signal(self):
         """With a signal available, indefinite wait returns immediately."""
         h = CleatTestHarness()
         h.stub_signal("greeting", "hello")
-        result = h.await_signals(["greeting"], 0)
+        result = h.await_signals_ms(["greeting"], 0)
         assert not result.timed_out
         assert result.name == "greeting"
         assert result.payload == "hello"
@@ -353,7 +353,7 @@ class TestPromises:
     def test_await_pending_promise(self):
         h = CleatTestHarness()
         pid = h.create_promise("wait")
-        result = h.await_promise(pid, 100)
+        result = h.await_promise_ms(pid, 100)
         assert result.timed_out
         assert result.result == ""
 
@@ -361,7 +361,7 @@ class TestPromises:
         h = CleatTestHarness()
         pid = h.create_promise("done")
         h.stub_promise(pid, '{"status": "ok"}')
-        result = h.await_promise(pid, 1000)
+        result = h.await_promise_ms(pid, 1000)
         assert not result.timed_out
         assert not result.rejected
         assert "ok" in result.result
@@ -370,7 +370,7 @@ class TestPromises:
         h = CleatTestHarness()
         h.stub_promise("pre-existing", "value")
         pid = h.create_promise("pre-existing")
-        result = h.await_promise(pid, 1000)
+        result = h.await_promise_ms(pid, 1000)
         assert not result.timed_out
         assert result.result == "value"
 
@@ -378,14 +378,14 @@ class TestPromises:
         h = CleatTestHarness()
         pid = h.create_promise("fail")
         h.stub_reject_promise(pid, "something went wrong")
-        result = h.await_promise(pid, 1000)
+        result = h.await_promise_ms(pid, 1000)
         assert result.rejected
 
     def test_resolve_promise(self):
         h = CleatTestHarness()
         pid = h.create_promise("manual")
         h.resolve_promise(pid, "resolved_value")
-        result = h.await_promise(pid, 1000)
+        result = h.await_promise_ms(pid, 1000)
         assert not result.timed_out
         assert result.result == "resolved_value"
 
@@ -393,7 +393,7 @@ class TestPromises:
         h = CleatTestHarness()
         pid = h.create_promise("manual_reject")
         h.reject_promise(pid, "manual error")
-        result = h.await_promise(pid, 1000)
+        result = h.await_promise_ms(pid, 1000)
         assert result.rejected
 
 

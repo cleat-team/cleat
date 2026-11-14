@@ -169,7 +169,7 @@ class TestDurableSleep:
         h = CleatTestHarness()
         h.reset()
         before = h.now_ms
-        result = h.sleep(5000)
+        result = h.sleep_ms(5000)
         after = h.now_ms
         assert after - before == 5000
         assert result is False
@@ -179,9 +179,9 @@ class TestDurableSleep:
         h = CleatTestHarness()
         h.reset()
         start = h.now_ms
-        h.sleep(1000)
-        h.sleep(2000)
-        h.sleep(3000)
+        h.sleep_ms(1000)
+        h.sleep_ms(2000)
+        h.sleep_ms(3000)
         assert h.now_ms == start + 6000
 
     def test_sleep_zero_is_noop(self):
@@ -189,14 +189,14 @@ class TestDurableSleep:
         h = CleatTestHarness()
         h.reset()
         before = h.now_ms
-        h.sleep(0)
+        h.sleep_ms(0)
         assert h.now_ms == before
 
     def test_advance_time_equivalence(self):
         """``advance_time`` produces the same clock result as ``sleep``."""
         h1 = CleatTestHarness()
         h1.reset()
-        h1.sleep(5000)
+        h1.sleep_ms(5000)
 
         h2 = CleatTestHarness()
         h2.reset()
@@ -208,9 +208,9 @@ class TestDurableSleep:
         """In the test harness ``sleep`` never suspends (returns ``False``)."""
         h = CleatTestHarness()
         h.reset()
-        assert h.sleep(100) is False
-        assert h.sleep(0) is False
-        assert h.sleep(86_400_000) is False
+        assert h.sleep_ms(100) is False
+        assert h.sleep_ms(0) is False
+        assert h.sleep_ms(86_400_000) is False
 
 
 # ========================================================================
@@ -226,7 +226,7 @@ class TestAwaitSignals:
         h = CleatTestHarness()
         h.reset()
         h.stub_signal("payment_received", '{"amount": 100}')
-        result = h.await_signals(["payment_received"], 5000)
+        result = h.await_signals_ms(["payment_received"], 5000)
         assert not result.timed_out
         assert result.name == "payment_received"
         assert result.payload == '{"amount": 100}'
@@ -235,7 +235,7 @@ class TestAwaitSignals:
         """Awaiting a signal that is never delivered eventually times out."""
         h = CleatTestHarness()
         h.reset()
-        result = h.await_signals(["never_sent"], 100)
+        result = h.await_signals_ms(["never_sent"], 100)
         assert result.timed_out
         assert result.name == ""
         assert result.payload == ""
@@ -263,10 +263,10 @@ class TestAwaitSignals:
         h.reset()
         h.stub_signal("one_shot", '"delivered"')
 
-        result1 = h.await_signals(["one_shot"], 5000)
+        result1 = h.await_signals_ms(["one_shot"], 5000)
         assert not result1.timed_out
 
-        result2 = h.await_signals(["one_shot"], 10)
+        result2 = h.await_signals_ms(["one_shot"], 10)
         assert result2.timed_out
 
     def test_await_multiple_signal_names(self):
@@ -275,7 +275,7 @@ class TestAwaitSignals:
         h.reset()
         h.stub_signal("signal_a", '"payload_a"')
 
-        result = h.await_signals(["signal_a", "signal_b"], 5000)
+        result = h.await_signals_ms(["signal_a", "signal_b"], 5000)
         assert not result.timed_out
         assert result.name == "signal_a"
         assert result.payload == '"payload_a"'
@@ -478,7 +478,7 @@ class TestRetryWithBackoff:
                     int(retry.initial_interval_ms * (retry.backoff_coefficient**attempt)),
                     retry.max_interval_ms,
                 )
-                h.sleep(delay)
+                h.sleep_ms(delay)
 
         assert result == '"success"'
         assert h.call_count("svc", "op") == 3
@@ -674,7 +674,7 @@ class TestPromises:
         assert promise_id.startswith("test-prom-my-promise")
 
         h.stub_promise(promise_id, '"resolved-value"')
-        result = h.await_promise(promise_id, 5000)
+        result = h.await_promise_ms(promise_id, 5000)
         assert not result.timed_out
         assert result.result == '"resolved-value"'
         assert not result.rejected
@@ -685,7 +685,7 @@ class TestPromises:
         h.reset()
         promise_id = h.create_promise("fail-promise")
         h.stub_reject_promise(promise_id, "something went wrong")
-        result = h.await_promise(promise_id, 5000)
+        result = h.await_promise_ms(promise_id, 5000)
         assert not result.timed_out
         assert result.rejected
 
@@ -695,7 +695,7 @@ class TestPromises:
         h.reset()
         promise_id = h.create_promise("never-resolved")
         # Do NOT stub — promise stays "pending"
-        result = h.await_promise(promise_id, 10)
+        result = h.await_promise_ms(promise_id, 10)
         assert result.timed_out
 
 
