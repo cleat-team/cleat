@@ -408,7 +408,7 @@ func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStor
 		return err
 	}
 	if !signalCallerAllowed(callers, pluginName) {
-		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s: %w", pluginName, workflowID, plugin.ErrSignalNotAllowed)
 	}
 	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
 		if errors.Is(err, engine.ErrWorkflowNotFound) {

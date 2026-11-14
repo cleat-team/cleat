@@ -345,11 +345,12 @@ var signalRetryDelays = []time.Duration{100 * time.Millisecond, 400 * time.Milli
 
 // signalWithRetry calls env.SignalWorkflow, retrying a failure after each of
 // signalRetryDelays. plugin.ErrWorkflowNotFound is not retried: the workflow is
-// gone, and asking again gets the same answer. A cancelled ctx stops the retries.
+// gone, and asking again gets the same answer. Neither is plugin.ErrSignalNotAllowed,
+// the worker's refusal under --require-signal-auth, for the same reason. A cancelled ctx stops the retries.
 func signalWithRetry(ctx context.Context, env *plugin.Environment, workflowID, signalName, payload string) error {
 	err := env.SignalWorkflow(ctx, workflowID, signalName, payload)
 	for _, delay := range signalRetryDelays {
-		if err == nil || errors.Is(err, plugin.ErrWorkflowNotFound) {
+		if err == nil || errors.Is(err, plugin.ErrWorkflowNotFound) || errors.Is(err, plugin.ErrSignalNotAllowed) {
 			return err
 		}
 		select {
@@ -430,6 +431,10 @@ const (
 	// is left registered, or is for the caller to put back when it had already
 	// taken the row (rowTaken).
 	awaiterFailed
+	// awaiterRefused: the worker refused the signal (plugin.ErrSignalNotAllowed,
+	// --require-signal-auth without a grant for this plugin). Like awaiterFailed
+	// the awaiter stays registered, but a retry would be refused again.
+	awaiterRefused
 )
 
 // deliverToAwaiter signals ONE awaiter with the event's payload and, unless
@@ -492,6 +497,9 @@ func deliverToAwaiter(
 			"signal", signalName,
 			"error", err,
 		)
+		if errors.Is(err, plugin.ErrSignalNotAllowed) {
+			return awaiterRefused
+		}
 		return awaiterFailed
 	}
 	logger.Info("event-triggers: signal delivered to awaiter",
