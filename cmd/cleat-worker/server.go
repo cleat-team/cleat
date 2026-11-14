@@ -938,7 +938,7 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 	// Return full workflow info.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -1751,7 +1751,9 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, id string) bool {
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		// A run that cannot be READ is not a run that does not exist, and the driver's text is not for the client
+		// (cleat#3866, as cleat#3799 did for the guard).
+		s.writeAccessCheckUnavailable(w, r, "the run", err)
 		return false
 	}
 	if wf == nil {
@@ -2315,7 +2317,7 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	// Look up the workflow instance to get def_name and def_version.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
@@ -2566,7 +2568,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	// Verify the workflow exists.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {
