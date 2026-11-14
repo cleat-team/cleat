@@ -14,7 +14,10 @@ import (
 // fails in, the fix is to justify the edit in the comment on WasmtimeLanguages
 // and update this list -- not to loosen the assertion.
 func TestWasmtimeLanguages(t *testing.T) {
-	want := []string{"go", "assemblyscript", "java", "rust", "python"}
+	// "javascript" (cleat#3825) was added ahead of the build chain, as a label; the
+	// justification is the comment on WasmtimeLanguages, which says what was and was
+	// not verified on this branch. The exact-match assertion stays exact.
+	want := []string{"go", "assemblyscript", "java", "rust", "python", "javascript"}
 	if !reflect.DeepEqual(WasmtimeLanguages, want) {
 		t.Errorf("WasmtimeLanguages = %v, want %v", WasmtimeLanguages, want)
 	}
