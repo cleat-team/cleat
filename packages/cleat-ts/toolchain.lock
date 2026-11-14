@@ -1,0 +1,21 @@
+# The TypeScript guest's pinned toolchain (cleat#3825). One `key value [asset]` per line; bootstrap.sh reads it
+# and refuses to run anything whose sha256 it does not match. Lines starting with # are comments.
+#
+# Re-derive every checksum, do not copy it from a page: download the asset and run `shasum -a 256 <asset>`
+# (the three below were hashed locally on 2026-11-14 and also equal the digest GitHub reports for the asset).
+#
+# The pin is of the COMPRESSED asset as published, because that is what is downloaded and what can be checked
+# before anything is executed.
+javy.version                9.1.0
+javy.sha256.darwin-arm64    99e9ec6a8e8c98e119d137c08a921d2443d3b873c675a5571e1800f4451e6294  javy-arm-macos-v9.1.0.gz
+javy.sha256.linux-arm64     826962f0e82354cf97d6e928ea36777872bbae76c626e326948e0367c4b55cb5  javy-arm-linux-v9.1.0.gz
+javy.sha256.linux-x86_64    a68b122d48eb3dfc1b801d4e14c39271fde3638243d3272d206e376ac9189e39  javy-x86_64-linux-v9.1.0.gz
+#
+# Not pinned here, and why: darwin-x86_64 and windows were never run. A platform with no line above is refused
+# by bootstrap.sh as UNMEASURED, not guessed at.
+#
+# esbuild is pinned by package.json (exact) and package-lock.json; bootstrap.sh checks `esbuild --version`.
+esbuild.version             0.28.2
+# The Javy plugin API crate is pinned in crates/cleat-js-plugin/Cargo.toml (=7.1.0) and its Cargo.lock; the
+# linker's walrus in crates/cleat-js-link/Cargo.toml (=0.26.4, the version Javy 9.1.0's own codegen uses).
+rust.target                 wasm32-wasip1

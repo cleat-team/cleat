@@ -1,0 +1,9 @@
+{
+  "name": "@cleat/ts",
+  "private": true,
+  "version": "0.0.0",
+  "description": "The cleat TypeScript SDK (cleat#3825). In development, not supported, not published: see tiers.yaml.",
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

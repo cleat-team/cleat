@@ -66,12 +66,13 @@ updates:
           - "minor"
           - "patch"
 
-  # The admin dashboard and the AssemblyScript SDK.
+  # The admin dashboard, the AssemblyScript SDK and the TypeScript guest's build chain (cleat#3825).
   - package-ecosystem: "npm"
     directories:
       - "/web"
       - "/packages/cleat-as"
       - "/packages/cleat-as/transform"
+      - "/packages/cleat-ts"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -135,6 +136,8 @@ updates:
       - "/crates/cleat-sdk"
       - "/crates/cleat-macro"
       - "/crates/cleat-test"
+      - "/crates/cleat-js-plugin"
+      - "/crates/cleat-js-link"
     schedule:
       interval: "weekly"
       day: "monday"

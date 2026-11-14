@@ -1,0 +1,11 @@
+[package]
+name = "cleat-js-link"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+walrus = "=0.26.4"
+anyhow = "1"
+
+[workspace]

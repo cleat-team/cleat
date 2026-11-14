@@ -1,0 +1,146 @@
+name: TypeScript Tier 2
+
+# The TypeScript guest (cleat#3825) is IN DEVELOPMENT and NOT SUPPORTED: see tiers.yaml. This job is where its
+# toolchain is provisioned and its tests run, on Linux, which is where nothing was measured before it existed (the
+# prototype ran on macOS arm64 only, and no Linux javy binary had ever been executed).
+#
+# NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64)
+# It is not to be added to any ruleset: tier 2 must RUN and may fail, so it is deliberately not in tiers.yaml's
+# required_contexts. It also has no merge_group trigger, for the same reason: nothing here gates a merge.
+#
+# Every download is verified against packages/cleat-ts/toolchain.lock BEFORE it is run (bootstrap.sh), and a mismatch
+# fails the job closed. The tests declare the toolchain with CLEAT_REQUIRE_TOOLCHAINS=typescript, so a setup step that
+# stopped installing it turns every test into a FAILURE, not a skip; and scripts/check-skip-budget.sh holds the skip
+# count at zero.
+#
+# Only x86_64 is run here. The repository's workflows use no arm runner, and an arm64 number from this job would be an
+# invention; arm64 is measured separately and labelled as container-measured where it is reported.
+
+# cleat#3073: surfaces the triggering activity type in the run's display title, so a PR body edit's run set is
+# distinguishable from the one it shares a SHA with. Full rationale in ci.yml, next to the same expression.
+run-name: >-
+  ${{ github.event.pull_request.title || github.event.head_commit.message || github.ref_name }}${{ github.event.action && format(' [{0}]', github.event.action) || '' }}
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "packages/cleat-ts/**"
+      - "crates/cleat-js-plugin/**"
+      - "crates/cleat-js-link/**"
+      - "crates/cleat-sdk/**"
+      - "crates/cleat-macro/**"
+      - "cmd/cleat-ts-check/**"
+      - "cmd/cleat-ts-meta/**"
+      - "tests/typescript/**"
+      - "wasm/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/typescript-tier2.yml"
+  pull_request:
+    branches: [main, develop, "release/**"]
+    paths:
+      - "packages/cleat-ts/**"
+      - "crates/cleat-js-plugin/**"
+      - "crates/cleat-js-link/**"
+      - "crates/cleat-sdk/**"
+      - "crates/cleat-macro/**"
+      - "cmd/cleat-ts-check/**"
+      - "cmd/cleat-ts-meta/**"
+      - "tests/typescript/**"
+      - "wasm/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/typescript-tier2.yml"
+    # `edited` is required, not decorative: it is the activity type a BASE CHANGE fires. Without it a PR retargeted
+    # onto this branch filter would never trigger this workflow at all. scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+# Least-privilege token: this job only checks out code and runs tests.
+permissions:
+  contents: read
+
+concurrency:
+  # Every push gets its own group; PR runs share one per ref and supersede. A BODY EDIT MUST NOT SUPERSEDE THE RUN IT
+  # RACES (cleat#1688, cleat#3809): an `edited` that did not change the base gets its own group, so it cancels nothing.
+  # ONE LINE ON PURPOSE: scripts/check-workflow-concurrency.sh reads the single line matching `^\s*group:`.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Declares the toolchain to the tests themselves, so a missing one is a failure here and a skip on a laptop.
+  CLEAT_REQUIRE_TOOLCHAINS: typescript
+
+jobs:
+  typescript-tier2:
+    name: TypeScript Tier 2 (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # wasm32-wasip1 is the target the Javy plugin and the linker's input are built for.
+      - name: Setup Rust + wasm32-wasip1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # The verifier's own negative control runs first, every time: a bootstrap whose refusal cannot be shown to
+      # work is the thing this step exists to prevent.
+      - name: Prove the checksum verifier refuses a tampered file
+        run: packages/cleat-ts/bootstrap.sh --self-test
+
+      # Downloads javy, checks its sha256 against toolchain.lock BEFORE decompressing or executing it, runs
+      # `npm ci` and checks the pinned esbuild. Exit 2 (UNMEASURED) on a mismatch: nothing was executed.
+      - name: Install the pinned toolchain
+        run: packages/cleat-ts/bootstrap.sh
+
+      - name: Tests (the TypeScript tests, toolchain declared)
+        run: |
+          set -o pipefail
+          go test -count=1 -json ./tests/typescript/... | tee typescript-tier2-report.json > /dev/null
+
+      # The three numbers, not the exit status: a package that did not build contributes nothing to a count keyed
+      # on "Test", and `go test` exits 0 for a pattern that matches nothing.
+      - name: Read the result (failures, package failures, tests that ran)
+        run: |
+          f=typescript-tier2-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          passed=$(grep '"Action":"pass"' "$f" | grep -c '"Test":' || true)
+          echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed"
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          # TestTypeScriptLabelIsRoutedToWasmtime needs no toolchain; the three build tests do. Fewer than four means
+          # a test did not run, which a green exit status would not say.
+          [ "$passed" -ge 4 ] || { echo "only $passed tests passed; the four in tests/typescript must all run" >&2; exit 1; }
+
+      - name: "Skip budget (zero, because the toolchain was declared)"
+        run: scripts/check-skip-budget.sh typescript-tier2 typescript-tier2-report.json
+
+      # The first Linux numbers for this guest. Not a performance claim: one run on a shared runner, reported as
+      # measured, with the machine it ran on.
+      - name: Record what was measured on this runner
+        run: |
+          {
+            echo "### TypeScript guest, Linux $(uname -m), measured on a shared GitHub runner"
+            echo
+            echo "- kernel: $(uname -sr); cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+            echo "- javy: $(packages/cleat-ts/.tools/javy --version) (archive pinned in toolchain.lock, verified before running)"
+            echo "- esbuild: $(packages/cleat-ts/node_modules/.bin/esbuild --version); rustc: $(rustc --version); go: $(go version | cut -d' ' -f3)"
+            echo "- plugin (initialised): $(stat -c %s packages/cleat-ts/.work/cleat-plugin.wasm) bytes"
+            for m in hello sleeper; do
+              [ -f "packages/cleat-ts/.work/$m.wasm" ] && echo "- module $m: $(stat -c %s "packages/cleat-ts/.work/$m.wasm") bytes"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
