@@ -73,9 +73,12 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 	}
 
 	// ---- Step 2: Decompose the component model binary to a core module ----
-	// wasm-tools >= 1.230 removed "component decompose". The wasmtime
-	// backend's native Component Model path handles component binaries, so
-	// we only decompose if the tool is available (for wazero fallback).
+	// This said wasm-tools >= 1.230 removed "component decompose". That is not what was found (cleat#3870,
+	// 2026-11-14): `wasm-tools component decompose` is absent from every release that was run, 1.200.0 to
+	// 1.261.0 including 1.229.0, so on every tool seen canDecompose below is false and this step is skipped.
+	// Whether the subcommand ever existed in a release was not established. The wasmtime backend's native
+	// Component Model path handles component binaries, so we only decompose if the tool can (for a wazero
+	// fallback that, with the tools found, never runs).
 	if pythonWasm.canDecompose() {
 		coreWasmPath := pythonWasm.decomposeComponent(t, wasmPath)
 		if coreWasmPath != wasmPath {

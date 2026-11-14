@@ -101,8 +101,10 @@ Build SUCCESS
 
 - **The build needs no tool beyond `componentize-py`.** The output is a WASM
   Component Model binary, which is what the worker runs Python from. (`Decompose
-  skipped` is information, not a warning: core WASM is only for the wazero developer
-  tooling, which you ask for with `--runtime wazero` and which needs `wasm-tools`.)
+  skipped` is information, not a warning. **Python does not currently build for
+  wazero** (the developer tooling): `--runtime wazero` needs core WASM, and none of
+  the `wasm-tools` releases checked has the `component decompose` subcommand that
+  produces it, so it exits 1. Use the default.)
 - **18 MB for a hello world is normal.** The component carries a whole CPython.
   The worker loads it once and caches it.
 
