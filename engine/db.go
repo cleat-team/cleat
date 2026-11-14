@@ -757,7 +757,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	var wf WorkflowInstance
 	var nextWakeAt, heartbeatAt, completedAt, startedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
-	var result sql.NullString
+	var result, resultRaw sql.NullString
 	var errorCode, errorOp sql.NullString
 	var continuedFrom, parentWorkflowID sql.NullString
 	var inputRaw json.RawMessage
@@ -771,7 +771,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	// sides' tenant_id the caller's own.
 	err = tx.QueryRowContext(ctx, `
 		SELECT l.id, p.def_name, p.def_version, l.status, p.input,
-		       l.assigned_to, l.heartbeat_at, l.next_wake_at, p.completed_at, l.started_at, p.result #>> '{}', p.error_msg, p.error_code, p.error_op,
+		       l.assigned_to, l.heartbeat_at, l.next_wake_at, p.completed_at, l.started_at, p.result #>> '{}', p.result::text, p.error_msg, p.error_code, p.error_op,
 		       l.generation, COALESCE(l.priority, 0) AS priority,
 		       COALESCE(p.trace_id, ''), l.tenant_id, l.continued_from, l.reclaim_count, l.parent_workflow_id,
 		       l.created_at, COALESCE(l.pending_terminal_status, ''),
@@ -780,7 +780,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id
 		WHERE l.id = $1 AND l.tenant_id = $2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &resultRaw, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
 		&wf.CreatedAt, &wf.PendingTerminalStatus,
@@ -811,6 +811,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		return v
 	}
 	inputRaw = json.RawMessage(keepJSON(s.decryptPayloadJSON(string(inputRaw))))
+	extractedResult := result.String
 	if result.Valid {
 		// result #>> '{}' above TEXT-EXTRACTS the jsonb value, which for a
 		// JSON STRING scalar strips the surrounding quotes -- so a sealed
@@ -823,6 +824,12 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		// with no error (sealedShape saw a quoted form that was never
 		// there and judged it "never sealed").
 		result.String = keepText(s.decryptTextColumnFromStorage(result.String, "result"))
+	}
+	// cleat#3807: `#>> '{}'` above strips a plaintext string scalar's quotes and turns JSON null into SQL NULL, so
+	// a workflow that returned the string "yes" read back as `yes`. The exact JSON text is what the API serves.
+	result.String = exactJSONText(extractedResult, result.String, resultRaw.String)
+	if resultRaw.Valid {
+		result.Valid = true
 	}
 	errorMsg.String = keepText(s.decryptTextColumnFromStorage(errorMsg.String, "error_msg"))
 	errorCode.String = keepText(s.decryptTextColumnFromStorage(errorCode.String, "error_code"))

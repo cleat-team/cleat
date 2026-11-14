@@ -677,7 +677,8 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				nextWakeAt,                         // next_wake_at
 				completedAt,                        // completed_at
 				startedAt,                          // started_at (cleat#1090)
-				`{"result":"ok"}`,                  // result::text
+				`{"result":"ok"}`,                  // result #>> '{}'
+				`{"result":"ok"}`,                  // result::text (cleat#3807)
 				"",                                 // error_msg
 				nil,                                // error_code
 				nil,                                // error_op
@@ -743,7 +744,7 @@ func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "SELECT status, result #>> '{}'",
-			data:  [][]driver.Value{{"resolved", `{"ok":true}`, ""}},
+			data:  [][]driver.Value{{"resolved", `{"ok":true}`, `{"ok":true}`, ""}},
 		},
 	}, nil)
 	defer db.Close()
@@ -755,6 +756,31 @@ func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	}
 	if status != "resolved" || result != `{"ok":true}` || errMsg != "" {
 		t.Errorf("unexpected: status=%q result=%q errMsg=%q", status, result, errMsg)
+	}
+}
+
+// cleat#3807: `#>> '{}'` hands back yes for the stored JSON string "yes" and nothing for JSON null; the exact text
+// (`result::text`) is the second column, and is what a typed Await unmarshals.
+func TestPostgresStore_GetPromise_StringAndNullResultsKeepTheirJSON(t *testing.T) {
+	for _, c := range []struct{ name, extracted, raw, want string }{
+		{"a string", "yes", `"yes"`, `"yes"`},
+		{"an escaped string", `a"b`, `"a\"b"`, `"a\"b"`},
+		{"an empty string", "", `""`, `""`},
+		{"json null", "", "null", "null"},
+	} {
+		var extracted driver.Value = c.extracted
+		if c.name == "json null" {
+			extracted = nil // #>> turns JSON null into SQL NULL
+		}
+		db := newMockDBForPostgres(t, []mockRowsResult{
+			{match: "SELECT status, result #>> '{}'", data: [][]driver.Value{{"resolved", extracted, c.raw, ""}}},
+		}, nil)
+		store := NewPostgresStore(db)
+		_, got, _, err := store.GetPromise(testCtx, "wf-1", "promise-1")
+		db.Close()
+		if err != nil || got != c.want {
+			t.Errorf("%s: GetPromise result = %q, %v; want %q", c.name, got, err, c.want)
+		}
 	}
 }
 
@@ -1364,8 +1390,8 @@ func TestPostgresStore_ListPromises(t *testing.T) {
 		{
 			match: "SELECT promise_id, promise_name",
 			data: [][]driver.Value{
-				{"p-1", "promise-a", "resolved", "ok", "", createdAt, resolvedAt},
-				{"p-2", "promise-b", "pending", "", "", createdAt, nil},
+				{"p-1", "promise-a", "resolved", "ok", `"ok"`, "", createdAt, resolvedAt},
+				{"p-2", "promise-b", "pending", "", "", "", createdAt, nil},
 			},
 		},
 	}, nil)
@@ -1387,6 +1413,13 @@ func TestPostgresStore_ListPromises(t *testing.T) {
 	}
 	if promises[1].ResolvedAt != nil {
 		t.Error("expected nil ResolvedAt for pending promise")
+	}
+	// cleat#3807: "ok" is what `#>> '{}'` extracts from the stored JSON string "ok"; the caller needs the JSON.
+	if promises[0].Result != `"ok"` {
+		t.Errorf("a string result lost its quotes: %q, want %q", promises[0].Result, `"ok"`)
+	}
+	if promises[1].Result != "" {
+		t.Errorf("a pending promise's result = %q, want empty", promises[1].Result)
 	}
 }
 
@@ -2035,6 +2068,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				nil,               // next_wake_at (NULL)
 				nil,               // completed_at (NULL)
 				nil,               // started_at (NULL: never claimed)
+				nil,               // result #>> '{}' (NULL)
 				nil,               // result::text (NULL)
 				nil,               // error_msg (NULL)
 				nil,               // error_code (NULL)
