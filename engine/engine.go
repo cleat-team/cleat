@@ -25,26 +25,29 @@ var DebugTiming = os.Getenv("CLEAT_DEBUG_TIMING") == "1"
 // Engine provides cleat execution semantics (Execute/Replay) on top of a
 // Runtime using a checkpoint/replay model.
 type Engine struct {
-	rt                   *Runtime
-	caller               ServiceCaller
-	fetcher              Fetcher
-	signalStore          SignalStore
-	promiseStore         PromiseStore
-	updateStore          UpdateStore
-	state                WorkflowState
-	workflowID           string
-	childWfStore         ChildWorkflowStore
-	concurrencyKeyStore  ConcurrencyKeyStore
-	compactionState      *CompactionState
-	pluginRegistry       *PluginRegistry
-	pluginStreamRegistry *PluginStreamRegistry
-	streamHub            *StreamHub
-	pluginCallGuard      *PluginCallGuard
-	pluginCallObserver   PluginCallObserver
-	tenantID             string
-	db                   *sql.DB // tenant-scoped DB for plugin host functions
-	maxRetries           int     // retry ceiling; 0 = MaxRetryAttempts
-	schema               string  // PostgreSQL schema name
+	rt                  *Runtime
+	caller              ServiceCaller
+	fetcher             Fetcher
+	signalStore         SignalStore
+	promiseStore        PromiseStore
+	updateStore         UpdateStore
+	state               WorkflowState
+	workflowID          string
+	childWfStore        ChildWorkflowStore
+	concurrencyKeyStore ConcurrencyKeyStore
+	compactionState     *CompactionState
+	// compactionTailChecksum is the stored checksum of the first retained row,
+	// for a compaction state with no PrevChecksum. See WithCompactionTailChecksum.
+	compactionTailChecksum string
+	pluginRegistry         *PluginRegistry
+	pluginStreamRegistry   *PluginStreamRegistry
+	streamHub              *StreamHub
+	pluginCallGuard        *PluginCallGuard
+	pluginCallObserver     PluginCallObserver
+	tenantID               string
+	db                     *sql.DB // tenant-scoped DB for plugin host functions
+	maxRetries             int     // retry ceiling; 0 = MaxRetryAttempts
+	schema                 string  // PostgreSQL schema name
 
 	defName                string
 	defVersion             int
@@ -241,6 +244,14 @@ func WithConcurrencyKeyStore(cks ConcurrencyKeyStore) EngineOption {
 // WithCompactionState sets the compaction state.
 func WithCompactionState(cs *CompactionState) EngineOption {
 	return func(e *Engine) { e.compactionState = cs }
+}
+
+// WithCompactionTailChecksum supplies the stored checksum of the first row a
+// compaction kept, for a compaction state written before cleat#3837 that has no
+// PrevChecksum. Without it a resumed run chains its next event from nothing and
+// fails verification on the one after.
+func WithCompactionTailChecksum(checksum string) EngineOption {
+	return func(e *Engine) { e.compactionTailChecksum = checksum }
 }
 
 // WithDefName sets the workflow definition name.

@@ -232,6 +232,7 @@ func (e *Engine) executeWithBackend(
 		execRunID:    e.workflowID,
 		tenantID:     e.tenantID,
 		stepCallback: e.stepCallback,
+		chainAnchor:  e.chainAnchor(),
 		// originalInput and eventCount were set only in executeCompiled, the
 		// wazero path that CLI tooling uses. This is the backend path -- the
 		// one a worker runs -- and without them the event cap did two wrong
@@ -561,6 +562,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		originalInput: string(input),
 		eventCount:    e.initialEventCount,
 		stepCallback:  e.stepCallback,
+		chainAnchor:   e.chainAnchor(),
 	}
 
 	execCtx, stepCancel := context.WithCancel(ctx)

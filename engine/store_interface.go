@@ -109,10 +109,15 @@ type WorkflowStore interface {
 	AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error
 
 	// VerifyWorkflowEvents loads all events for a workflow and verifies their
-	// integrity by recomputing SHA-256 checksums and comparing them against the
-	// stored checksums (once the event_history.checksum column is migrated).
-	// Before the migration, it loads and computes checksums silently and returns
-	// nil. Returns an error if any checksum mismatch is detected.
+	// integrity by recomputing their xxHash64 checksums and comparing them
+	// against the stored checksums (once the event_history.checksum column is
+	// migrated). The checksum is unkeyed: this detects corruption and says
+	// nothing about tampering. Before the migration, it loads and computes
+	// checksums silently and returns nil. Returns an error if any checksum
+	// mismatch is detected.
+	//
+	// A compacted run's chain starts at its compaction state's PrevChecksum
+	// (cleat#3837), not at an empty predecessor.
 	VerifyWorkflowEvents(ctx context.Context, workflowID string) error
 
 	// LoadWASM returns the compiled WASM bytes for a workflow definition.
