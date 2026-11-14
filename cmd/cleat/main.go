@@ -133,8 +133,8 @@ func main() {
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
-		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python")
-		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
+		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python, ts (tier 2: in development, not supported)")
+		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target) or 'file.ts:entry_name[,entry_name]' (for the ts target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: the component, as for wasmtime)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
@@ -146,7 +146,7 @@ func main() {
 			os.Exit(1)
 		}
 		if !isValidTarget(target) {
-			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, assemblyscript, python\n", target)
+			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, rust, java, assemblyscript, python, ts\n", target)
 			os.Exit(1)
 		}
 		// Default channel: when --db is provided, default to "stable".
@@ -297,6 +297,14 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		}
 		ensureOutDir(outDir)
 		runBuildPython(pattern, outDir, runtime, channel, workflowVersion)
+		return
+	}
+	if target == "ts" {
+		if outDir == "" {
+			outDir = "."
+		}
+		ensureOutDir(outDir)
+		runBuildTS(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
@@ -2572,6 +2580,7 @@ func isValidTarget(t string) bool {
 	valid := map[string]bool{
 		"go": true, "rust": true,
 		"java": true, "assemblyscript": true, "python": true,
+		"ts": true, // tier 2, in development, not supported: see cmd/cleat/build_ts.go and tiers.yaml
 	}
 	return valid[t]
 }

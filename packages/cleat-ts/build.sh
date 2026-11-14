@@ -85,28 +85,61 @@ smflag=(--sourcemap=external --sources-content=false)
 [ "${SOURCEMAP:-1}" != "0" ] || smflag=()
 npx esbuild "$entry" --bundle --format=esm --target=es2020 ${define[@]+"${define[@]}"} ${smflag[@]+"${smflag[@]}"} \
   --alias:@cleat/ts="$HERE/index.ts" --outfile="$W/$out.js" --log-level=warning || unmeasured "esbuild failed"
-if [ "${SOURCEMAP:-1}" != "0" ]; then
-python3 - "$W/$out.js" "$W/$out.js.map" <<'PY'
+# Path hygiene (cleat#3833), ALWAYS: esbuild writes a `// <path>` comment above each file it bundles, relative to this
+# directory, and Javy embeds the whole bundle in the module as `javy_source`. For a source outside this repository that
+# comment is a run of `../` whose length is the distance between the two, so the same source built in two places was two
+# different modules. Every file is relabelled by ONE function, used for those comments and for the source map alike, so a
+# label never depends on where the file lives:
+#   under the source root        -> relative to it           (src/orders.ts)
+#   under this toolchain dir     -> relative to this dir     (index.ts, node_modules/...)
+#   reached through node_modules -> from that segment on     (node_modules/zod/lib/index.js, wherever it is hoisted)
+#   anything else                -> external/<file name>
+# REAL paths on every side: on macOS /var is a symlink to /private/var, the source root comes from `pwd` (logical) and
+# esbuild reports the real path, so comparing them as written never matches.
+SOURCEMAP=${SOURCEMAP:-1} python3 - "$W/$out.js" "$W/$out.js.map" <<'PY'
 import json, os, re, sys
 js, mp = sys.argv[1:3]
-m = json.load(open(mp))
-base = os.path.dirname(mp)
-# REAL paths on both sides: on macOS /var is a symlink to /private/var, the source root comes from `pwd` (logical) and
-# esbuild reports the real path, so comparing them as written never matches.
-root = os.path.realpath(os.environ.get("SRC_ROOT", os.getcwd()))
-def rel(x):
-    a = os.path.realpath(os.path.join(base, x))
-    r = os.path.relpath(a, root)
-    # Under the user's source root: relative to it; otherwise (the SDK, node_modules) relative to this directory.
-    return r if not r.startswith("..") else os.path.relpath(a, os.path.realpath(os.getcwd()))
-srcs = [rel(x) for x in m["sources"]]
+here = os.path.realpath(os.getcwd())
+root = os.path.realpath(os.environ.get("SRC_ROOT", here))
+def under(a, d):
+    r = os.path.relpath(a, d)
+    return None if r == ".." or r.startswith(".." + os.sep) else r
+def label(a):
+    a = os.path.realpath(a)
+    r = under(a, root)
+    if r is not None:
+        return r
+    r = under(a, here)
+    if r is not None:
+        return r
+    parts = a.split(os.sep)
+    if "node_modules" in parts:
+        return "/".join(parts[parts.index("node_modules"):])
+    return "external/" + os.path.basename(a)
 src = open(js).read()
-src = re.sub(r"\n?//# sourceMappingURL=.*\n?$", "\n", src)   # esbuild's own comment: the map is carried in-bundle instead
-payload = json.dumps({"s": srcs, "m": m["mappings"]}, separators=(",", ":"))
-open(js, "w").write(src + "globalThis.__cleat_sm = " + json.dumps(payload) + ";\n")
-print(f"source map embedded: {len(payload):,} bytes for {len(srcs)} source file(s)")
+# esbuild resolves these against its working directory, which is this one.
+def comment(m):
+    p = os.path.join(here, m.group(1))
+    return "// " + label(p) if os.path.isfile(p) else m.group(0)
+src = re.sub(r"(?m)^// (\S.*)$", comment, src)
+# A CommonJS (or lazily initialised ESM) dependency is wrapped as `__commonJS({ "<path>"(exports, module) { ... } })`: the
+# module's KEY is the same relative path, so it needs the same label.
+def wrapped(m):
+    p = os.path.join(here, m.group(2))
+    return m.group(1) + '"' + label(p) + '"' + m.group(3) if os.path.isfile(p) else m.group(0)
+src = re.sub(r'(?m)^(\s*)"([^"\n]+\.(?:[cm]?[jt]sx?|json))"(\()', wrapped, src)
+if os.environ.get("SOURCEMAP", "1") != "0":
+    m = json.load(open(mp))
+    base = os.path.dirname(mp)
+    srcs = [label(os.path.join(base, x)) for x in m["sources"]]
+    # esbuild's own comment: the map is carried in-bundle instead, APPENDED after everything else so no line number of the
+    # bundle moves. The SDK uses it to turn `function.mjs:L:C` into `src.ts:L:C`.
+    src = re.sub(r"\n?//# sourceMappingURL=.*\n?$", "\n", src)
+    payload = json.dumps({"s": srcs, "m": m["mappings"]}, separators=(",", ":"))
+    src = src + "globalThis.__cleat_sm = " + json.dumps(payload) + ";\n"
+    print(f"source map embedded: {len(payload):,} bytes for {len(srcs)} source file(s)")
+open(js, "w").write(src)
 PY
-fi
 
 # WIT world and link pairs from the ABI entry names.
 wit="$W/$out.wit"; pairs=()
