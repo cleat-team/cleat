@@ -547,7 +547,6 @@ func TestReconcileBackoffDoublesToItsCap(t *testing.T) {
 	}
 }
 
-
 // --require-signal-auth without a grant: the worker refuses every signal this
 // plugin sends, and asking again gets the same answer. The reconciler must say
 // so once and go to the longest backoff, not retry it at the pace of a
