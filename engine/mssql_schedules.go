@@ -308,7 +308,9 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		  -- regardless.
 		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id AND e.tenant_id = @p3)
 		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
-		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id AND e2.tenant_id = @p3))
+		  -- Only a run that has never been compacted: see the PostgreSQL half in
+		  -- engine/db.go (cleat#3838).
+		  AND w.compaction_step IS NULL
 		ORDER BY w.created_at
 		OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY
 	`, threshold, limit, s.tenantID)
@@ -414,6 +416,23 @@ func (s *MSSQLStore) compactHistoryOnce(ctx context.Context, workflowID string, 
 	}
 	if err != nil {
 		return fmt.Errorf("compact history: fence: %w", err)
+	}
+
+	// cleat#3837: the first row this leaves behind chains its checksum from the
+	// last one it deletes, so that checksum goes into the state, read in the
+	// same transaction and before the delete. Without it nothing can verify the
+	// retained history from its first row, and the run fails on resume.
+	var boundary sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT TOP 1 checksum FROM event_history
+		WHERE workflow_id = @p1 AND step < @p2 AND tenant_id = @p3
+		ORDER BY step DESC
+	`, workflowID, keepStep, s.tenantID).Scan(&boundary)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("compact history: read boundary checksum: %w", err)
+	}
+	if compactionState, err = withBoundaryChecksum(compactionState, boundary.String); err != nil {
+		return fmt.Errorf("compact history: %w", err)
 	}
 
 	// Delete events older than keepStep.
