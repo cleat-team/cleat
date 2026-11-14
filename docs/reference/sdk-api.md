@@ -713,6 +713,11 @@ promise, _ := cleat.NewPromiseTyped[ApprovalResult](h, "manager_approval")
 result, timedOut, err := promise.Await(30 * time.Minute)
 ```
 
+A promise's result is JSON text: resolve with the JSON of the value (`"yes"` for a string, `{"by":"alice"}` for a
+struct), and `Await` unmarshals it into `T`. **On SQL Server only a JSON object or array can be stored** (a string,
+number, boolean or `null` result is refused by the database; cleat#3816), so on SQL Server make `T` a struct or a
+slice. PostgreSQL and MySQL accept any JSON value.
+
 ---
 
 ## CronScheduler -- Recurring Triggers
