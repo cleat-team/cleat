@@ -58,4 +58,10 @@ places and compares what each prints: the guest through the module `build.sh` bu
 esbuild. The oracle is Node itself, not a belief about Node. Every fix is also run **with its shim left out of the build**
 (`CLEAT_SHIMS_OFF=<name> REBUILD_PLUGIN=1`), and the test must fail: row 1 does (235 of 631 cases differ without it), and row 2 does (all three tests fail with `URL is not defined`).
 
+The oracle is **Node 24 or newer** for the URL rows, and the tests fail, not skip, on an older one. Node 20 (which the tier-2 job used until
+this row) leaves `^` unencoded in a path and drops the root slash of a non-special URL whose path `..` climbs above the root (`foo:`
+where the current specification gives `foo:/`): against it the corpus reports 9 differences that are the oracle's age and not the
+shim's. Measured 2026-11-14 on Node 20.20.2, 24.21.0 and 26.4.0; the last two agree with the shim on every case. Two answers that vary
+by Node version, `new URLSearchParams(null)` and the key order of an iterator's result object, are left out of the corpus.
+
 A control build leaves the shim-less plugin in `packages/cleat-ts/.work/`, and the next ordinary build reuses it (cleat#3897): run the next build with `REBUILD_PLUGIN=1` to put the shipped plugin back.

@@ -1,5 +1,8 @@
 // URLSearchParams, compared with Node (cleat#3829): every constructor form, every method, the iteration order, the percent
 // decoding of invalid UTF-8, and the sort. See urls.ts for why the same source runs in both places.
+//
+// Left out on purpose, because Node's own answer depends on its version: `new URLSearchParams(null)` (Node 20 reads it as empty, current
+// WebIDL as the string "null", which is what the shim does) and the key order of an iterator's result object.
 declare function __cleat_result(json: string): void;
 
 const show = (f: () => unknown): string => {
@@ -22,7 +25,7 @@ export function searchParams(): void {
   // Other constructor forms.
   const inits: Array<[string, () => any]> = [
     ["pairs", () => [["a", "1"], ["b", "2"]]], ["object", () => ({ a: "1", b: "2" })], ["copy", () => new URLSearchParams("x=1&y=2")], ["empty array", () => []],
-    ["short pair", () => [["a"]]], ["long pair", () => [["a", "1", "2"]]], ["null", () => null], ["number", () => 5], ["undefined", () => undefined],
+    ["short pair", () => [["a"]]], ["long pair", () => [["a", "1", "2"]]], ["number", () => 5], ["undefined", () => undefined],
     ["Map", () => new Map([["m", "1"], ["n", "2"]])], ["string pair", () => ["ab"]], ["non-iterable pair", () => [1]], ["object with numbers", () => ({ a: 1, b: null, c: undefined })],
     ["symbol key", () => ({ [Symbol("s")]: "x", t: "y" })], ["non-enumerable", () => Object.defineProperty({ v: "1" }, "h", { value: "2", enumerable: false })],
     ["array-like object", () => ({ length: 1, 0: "x" })], ["boolean", () => true], ["generator", () => (function* () { yield ["g", "1"]; yield ["h", "2"]; })()],
@@ -88,7 +91,9 @@ export function searchParams(): void {
   for (const [k] of m2) { m2seen.push(k); if (k === "a") m2.delete("a"); }
   out.push(`mutate in for-of -> ${m2seen.join(",")} | ${m2.toString()}`);
   const iter = new URLSearchParams("a=1").entries();
-  out.push(`iterator -> ${JSON.stringify(iter.next())} ${JSON.stringify(iter.next())} ${JSON.stringify(iter.next())} | tag ${Object.prototype.toString.call(iter)} | self ${String(iter[Symbol.iterator]() === iter)}`);
+  // The fields, not JSON.stringify of the result object: the order of its keys is not the same in every Node.
+  const fields = (r: IteratorResult<[string, string]>) => `${String(r.done)}:${JSON.stringify(r.value)}`;
+  out.push(`iterator -> ${fields(iter.next())} ${fields(iter.next())} ${fields(iter.next())} | tag ${Object.prototype.toString.call(iter)} | self ${String(iter[Symbol.iterator]() === iter)}`);
   out.push(`tag -> ${Object.prototype.toString.call(base())} | String -> ${String(base())} | JSON -> ${JSON.stringify({ p: base() })} | keys -> ${JSON.stringify(Object.keys(base()))}`);
 
   // Serialisation of every byte that matters: unreserved, space, reserved, and non-ASCII.

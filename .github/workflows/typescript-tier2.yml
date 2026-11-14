@@ -119,7 +119,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          # 24, not 20: the URL conformance tests use Node as the oracle, and Node 20's URL parser predates two changes to the
+          # specification (see needNodeAtLeast in tests/typescript/typescript_conformance_test.go).
+          node-version: "24"
 
       # The verifier's own negative control runs first, every time: a bootstrap whose refusal cannot be shown to
       # work is the thing this step exists to prevent.

@@ -295,9 +295,9 @@
       const it = iterState.get(this);
       if (!it) throw new TypeError("Illegal invocation");
       const list = it.state.list;
-      if (it.i >= list.length) return { done: true, value: undefined };
+      if (it.i >= list.length) return { value: undefined, done: true };
       const p = list[it.i++];
-      return { done: false, value: it.kind === "keys" ? p[0] : it.kind === "values" ? p[1] : [p[0], p[1]] };
+      return { value: it.kind === "keys" ? p[0] : it.kind === "values" ? p[1] : [p[0], p[1]], done: false };
     } });
     Object.defineProperty(IterProto, Symbol.toStringTag, { value: "URLSearchParams Iterator", configurable: true });
     const makeIter = (o, kind) => { const it = Object.create(IterProto); iterState.set(it, { state: st(o), i: 0, kind }); return it; };
