@@ -43,6 +43,23 @@ if [ "${1:-}" = "--self-test" ]; then
   verify "$t/good" "not-a-checksum" 2>/dev/null && { echo "  FAIL  a malformed pin was accepted"; bad=1; } || echo "  ok    a malformed pin is refused"
   verify "$t/nonexistent" "$want" 2>/dev/null && { echo "  FAIL  a missing file was accepted"; bad=1; } || echo "  ok    a missing file is refused"
   rm -f "$t/good" "$t/tampered"; rmdir "$t"
+  # The INSTALL path, not only verify(): a copy of this script runs in a scratch directory with a `curl` that serves
+  # bytes the lock does not pin, and with a planted .tools/javy that would leave a marker if anything executed it.
+  # Deleting the verify call from the install path, or trusting an existing binary, turns this red.
+  d=$(mktemp -d "${TMPDIR:-/tmp}/cleat-ts-selftest-install.XXXXXX")
+  mkdir -p "$d/bin" "$d/pkg/.tools"
+  cp bootstrap.sh "$LOCK" "$d/pkg/"
+  # shellcheck disable=SC2016  # the stub is a literal script: its $ expansions belong to the stub, not to this shell
+  printf '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = "-o" ] && out=$2; shift; done\nprintf "%%s" "not the pinned javy archive" > "$out"\n' > "$d/bin/curl"
+  chmod +x "$d/bin/curl"
+  printf '#!/bin/sh\ntouch "%s/EXECUTED"\necho "javy %s"\n' "$d" "$(awk '$1=="javy.version"{print $2; exit}' "$LOCK")" > "$d/pkg/.tools/javy"
+  chmod +x "$d/pkg/.tools/javy"
+  rc=0; PATH="$d/bin:$PATH" "$d/pkg/bootstrap.sh" >/dev/null 2>"$d/err" || rc=$?
+  if [ "$rc" = 2 ]; then echo "  ok    the install path exits 2 on a download the lock does not pin"; else echo "  FAIL  the install path exited $rc on a tampered download, want 2"; bad=1; fi
+  if [ ! -e "$d/pkg/.tools/javy" ]; then echo "  ok    no runnable javy is left behind"; else echo "  FAIL  a runnable .tools/javy survived a refused install"; bad=1; fi
+  if [ ! -e "$d/EXECUTED" ]; then echo "  ok    a pre-existing binary is not executed unverified"; else echo "  FAIL  a pre-existing .tools/javy was EXECUTED before verification"; bad=1; fi
+  if grep -q 'does not match' "$d/err"; then echo "  ok    the refusal says why"; else echo "  FAIL  the refusal does not say the checksum did not match"; bad=1; fi
+  rm -rf "$d"
   [ "$bad" = 0 ] && { echo "self-test: the verifier accepts the pinned file and refuses every case above"; exit 0; }
   echo "self-test: FAILED" >&2; exit 1
 fi
@@ -65,16 +82,20 @@ ver=$(lock javy.version); want=$(lock "javy.sha256.$plat"); asset=$(lock_asset "
 [ -n "$ver" ] && [ -n "$want" ] && [ -n "$asset" ] || unmeasured "$LOCK has no javy pin for $plat"
 
 mkdir -p .tools
-if [ ! -x .tools/javy ] || [ "$(.tools/javy --version 2>/dev/null)" != "javy $ver" ]; then
+# The binary is ALWAYS derived from an archive whose sha256 was just checked, never trusted because it is already
+# there: a leftover .tools/javy has no provenance, and `--version` would execute it. It is removed first, so a
+# failed install cannot leave a runnable binary of unknown origin for build.sh to pick up.
+rm -f .tools/javy
+if [ ! -f ".tools/$asset" ] || ! verify ".tools/$asset" "$want" 2>/dev/null; then
   curl -fsSL -o ".tools/$asset" "https://github.com/bytecodealliance/javy/releases/download/v$ver/$asset" \
     || unmeasured "could not download $asset"
-  # Verified BEFORE it is decompressed or made executable.
-  verify ".tools/$asset" "$want" || unmeasured "the downloaded $asset does not match $LOCK; nothing was executed"
-  gunzip -c ".tools/$asset" > .tools/javy
-  chmod +x .tools/javy
 fi
+# Verified BEFORE it is decompressed or made executable. The archive is left in place on a mismatch.
+verify ".tools/$asset" "$want" || unmeasured "the downloaded $asset does not match $LOCK; nothing was executed"
+gunzip -c ".tools/$asset" > .tools/javy
+chmod +x .tools/javy
 [ "$(.tools/javy --version)" = "javy $ver" ] || unmeasured "javy --version is '$(.tools/javy --version)', $LOCK pins $ver"
-echo "javy $ver ($plat), archive sha256 $want"
+echo "javy $ver ($plat), archive sha256 $want (verified before it was decompressed)"
 
 npm ci --no-audit --no-fund >/dev/null 2>&1 || unmeasured "npm ci failed"
 ewant=$(lock esbuild.version)
