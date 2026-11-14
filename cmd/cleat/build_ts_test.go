@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -188,6 +189,53 @@ func TestTSBuildDoesNotPassTheCallersBuildControlsToTheScript(t *testing.T) {
 	// The control: the variables the command sets on purpose do arrive, so "<unset>" above is the scrub and not a broken log.
 	if !strings.Contains(string(b), "OUT_DIR="+filepath.Join(work, "out")) {
 		t.Errorf("OUT_DIR did not arrive, so the log proves nothing:\n%s", b)
+	}
+}
+
+// TestTSScrubListCoversEveryBuildControlBuildShReads checks the scrub list against two readings that do not come from the list
+// itself. The test above sets and checks whatever tsScrubbedEnv says, so it agrees with the list by construction: a control missing
+// from the list is invisible to it.
+//
+//  1. A literal set of the build controls, written here. It includes the two the plugin crate reads (they never appear in
+//     build.sh's code, only in its header comment), so parsing the script could not find them.
+//  2. Every upper-case variable build.sh itself references. Each must be scrubbed or classified below as something that is not a
+//     build control. A variable added to build.sh later fails here until someone decides which it is.
+func TestTSScrubListCoversEveryBuildControlBuildShReads(t *testing.T) {
+	scrubbed := map[string]bool{}
+	for _, v := range tsScrubbedEnv {
+		scrubbed[v] = true
+	}
+	for _, v := range []string{"OUT_NAME", "JAVY_DETERMINISTIC", "SOURCEMAP", "NAN_POLICY", "SUSPEND_MODE", "RESULT_CANONICAL",
+		"PLUGIN", "CLEAT_SHIMS_OFF", "CLEAT_FAULT"} {
+		if !scrubbed[v] {
+			t.Errorf("%s changes the module and is not in tsScrubbedEnv", v)
+		}
+	}
+
+	notAControl := map[string]string{
+		"OUT_DIR": "set by tsBuild", "SRC_ROOT": "set by tsBuild",
+		"REBUILD_PLUGIN": "only forces a rebuild of the shipped plugin",
+		"HOME":           "plumbing", "CARGO_HOME": "plumbing", "RUSTFLAGS": "plumbing", "NODE_PATH": "plumbing", "BASH_SOURCE": "plumbing",
+		"HERE": "local", "ROOT": "local", "W": "local", "J": "local", "E": "local", "LINK_DIR": "local", "PLUGIN_DIR": "local", "SRC_ABS": "local",
+	}
+	src, err := os.ReadFile(filepath.Join("..", "..", "packages", "cleat-ts", "build.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := regexp.MustCompile(`\$\{?([A-Z][A-Z0-9_]*)|os\.environ\.get\("([A-Z][A-Z0-9_]*)"`).FindAllStringSubmatch(string(src), -1)
+	if len(refs) < 10 {
+		t.Fatalf("found only %d variable references in build.sh, so the pattern is not reading it", len(refs))
+	}
+	seen := map[string]bool{}
+	for _, m := range refs {
+		v := m[1] + m[2]
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		if !scrubbed[v] && notAControl[v] == "" {
+			t.Errorf("build.sh reads %s, which is neither scrubbed nor classified as not a build control", v)
+		}
 	}
 }
 

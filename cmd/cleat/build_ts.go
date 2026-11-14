@@ -120,7 +120,8 @@ func tsSourceRoot(abs string) string {
 
 // tsScrubbedEnv are the variables build.sh reads as development controls. `cleat build` does not expose them, so one inherited from
 // the caller's shell would change the module with nothing on the command line to show it.
-var tsScrubbedEnv = []string{"OUT_NAME", "JAVY_DETERMINISTIC", "SOURCEMAP", "NAN_POLICY", "CLEAT_SHIMS_OFF", "CLEAT_FAULT"}
+var tsScrubbedEnv = []string{"OUT_NAME", "JAVY_DETERMINISTIC", "SOURCEMAP", "NAN_POLICY", "SUSPEND_MODE", "RESULT_CANONICAL",
+	"PLUGIN", "CLEAT_SHIMS_OFF", "CLEAT_FAULT"}
 
 // tsBuild runs the build and returns the exit code: 0, 1 (the source was refused) or 2 (UNMEASURED). Any other status the script
 // ends with, and a signal, mean it did not run to the end, so they are 2 as well.
