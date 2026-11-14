@@ -321,6 +321,8 @@ behind.
   realistic workflow with multiple steps and compensation
 - [Signals and the human loop](signals-and-human-loop.md) -- add human
   approval steps to your workflows
+- [Python quick start](python-quick-start.md) -- the same, for a workflow
+  written in Python
 - [Common patterns](../how-to/common-patterns.md) -- Saga, fan-out, child
   workflows, retry policies
 - [Deploying to production](../operations/deploying-to-production.md) --

@@ -9,7 +9,10 @@ function (decorated with @cleat_entry) into a WASM component that can
 be loaded by the cleat worker runtime.
 """
 
+from __future__ import annotations
+
 import argparse
+import atexit
 import os
 import shutil
 import subprocess
@@ -18,9 +21,70 @@ from pathlib import Path
 
 
 def find_sdk_root() -> Path:
-    """Find the python-sdk root directory."""
+    """Find the python-sdk root directory (a checkout's layout only)."""
     script_dir = Path(__file__).resolve().parent
     return script_dir.parent
+
+
+class SdkLayout:
+    """Where the SDK's pieces are, in a checkout or in an installed wheel.
+
+    This script ships in two places and the pieces sit differently in each:
+
+        checkout   python-sdk/scripts/build_wasm.py    python-sdk/wit/cleat.wit
+                   python-sdk/cleat_sdk/               <- put python-sdk/ on the path
+        installed  <site-packages>/cleat_sdk/_build/build_wasm.py
+                   <site-packages>/cleat_sdk/wit/cleat.wit
+                   <site-packages>/cleat_sdk/          <- NOT site-packages itself
+
+    The installed case is why ``python_path`` is a field and not just the SDK
+    root. componentize-py bundles whatever is on ``-p`` into the component, and
+    site-packages holds every other package in the environment, componentize-py
+    itself among them. So an installed build stages a copy of ``cleat_sdk``
+    alone in a temporary directory and points ``-p`` there. Call ``close()``
+    when the build is done to remove it.
+
+    cleat#3793: until this, ``pip install cleat-sdk`` shipped neither the WIT
+    nor this script, and ``cleat build --target python`` needed a 305 MB
+    checkout of the repository to find them.
+    """
+
+    def __init__(self, script: Path | None = None):
+        script_dir = (script or Path(__file__)).resolve().parent
+        self._staged: Path | None = None
+        if script_dir.name == "_build":
+            package = script_dir.parent
+            self.installed = True
+            self.wit_dir = package / "wit"
+            self.stamp_script = script_dir / "stamp_metadata.py"
+            self._package = package
+            self.python_path = package.parent  # replaced by stage()
+        else:
+            root = script_dir.parent
+            self.installed = False
+            self.wit_dir = root / "wit"
+            self.stamp_script = script_dir / "stamp_metadata.py"
+            self._package = root / "cleat_sdk"
+            self.python_path = root
+
+    def stage(self) -> None:
+        """Make ``python_path`` safe to hand to componentize-py. A no-op in a checkout."""
+        if not self.installed or self._staged is not None:
+            return
+        import tempfile
+
+        self._staged = Path(tempfile.mkdtemp(prefix="cleat-sdk-stage-"))
+        shutil.copytree(
+            self._package,
+            self._staged / "cleat_sdk",
+            ignore=shutil.ignore_patterns("__pycache__", "_build", "wit"),
+        )
+        self.python_path = self._staged
+
+    def close(self) -> None:
+        if self._staged is not None:
+            shutil.rmtree(self._staged, ignore_errors=True)
+            self._staged = None
 
 
 def parse_entry(entry: str) -> tuple[str, str]:
@@ -289,12 +353,14 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    sdk_root = find_sdk_root()
-    wit_dir = sdk_root / "wit"
+    layout = SdkLayout()
+    atexit.register(layout.close)
+    wit_dir = layout.wit_dir
 
     if not wit_dir.exists():
         print(f"Error: WIT directory not found: {wit_dir}. "
-              "Run 'componentize-py init' to initialize the WIT directory.",
+              "This build script ships with cleat-sdk: reinstall it with "
+              "'pip install --force-reinstall cleat-sdk'.",
               file=sys.stderr)
         sys.exit(1)
 
@@ -313,6 +379,8 @@ def main():
     # Determine output path
     output = args.output or f"{func_name}.wasm"
 
+    layout.stage()
+
     print("Building WASM component...")
     print(f"  Entry:  {entry_file}:{func_name}")
     print(f"  Output: {output}")
@@ -320,7 +388,7 @@ def main():
     print()
 
     success = run_componentize_py(
-        entry_file, func_name, output, wit_dir, sdk_root, args.verbose
+        entry_file, func_name, output, wit_dir, layout.python_path, args.verbose
     )
 
     if not success:
@@ -483,7 +551,7 @@ def main():
     # Always stamp at least the language so consumers can identify the source.
     stamp_args = [
         sys.executable,
-        str(sdk_root / "scripts" / "stamp_metadata.py"),
+        str(layout.stamp_script),
         output,
         "--language", "python",
     ]
