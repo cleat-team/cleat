@@ -10,11 +10,13 @@ package main
 // fails closed on an unreadable run exactly as it already does on an unreadable definition class
 // (cleat#3785): a 503 with Retry-After, the error logged, nothing done.
 //
-// WHERE IT BITES: callerOwnsTarget, which runs first, reads the run itself whenever the request carries a tenant,
-// and answers its own 500 when that read fails -- so on the authenticated path an unreadable run never reaches
-// the guard. With NO tenant in the request context (a worker without --require-auth) callerOwnsTarget returns
-// without reading, and the guard's read is the only one before the action. That is the case driven first below;
-// the tenant case is kept as the control that shows the other layer holding.
+// WHERE IT BITES. Signal and cancel authorise through callerOwnsTarget, which reads the run itself when the
+// request carries a tenant and answers its own 500 if that fails, so on the authenticated path an unreadable run
+// never reaches the guard for those two (they still answer 500 with the driver's text, which is not changed
+// here). With NO tenant in the request context (a worker without --require-auth) callerOwnsTarget returns without
+// reading, and the guard's read is the only one before the action: that is where signal and cancel were served.
+// The other six handlers that use the guard authorise through scopedStore, which does not read the run, so they
+// reach the guard in both variants. Which handlers go through which is read off the source, below.
 //
 // Every run-addressed route in the two tables is driven with the run unreadable and the definition INTERNAL, so
 // that serving the request is the wrong answer on both counts. Which of them go through refuseIfInternalRun
@@ -90,6 +92,7 @@ func handlersCalling(t *testing.T, guard string) map[string]bool {
 
 func TestARunThatCannotBeReadIsNeverServed(t *testing.T) {
 	plain := handlersCalling(t, "refuseIfInternalRun")
+	owns := handlersCalling(t, "callerOwnsTarget")
 	// Known positives: a scan that found nothing, or missed these two, would pass every row below vacuously.
 	for _, must := range []string{"handleSignal", "handleCancel"} {
 		if !plain[must] {
@@ -135,9 +138,10 @@ func TestARunThatCannotBeReadIsNeverServed(t *testing.T) {
 						t.Fatalf("%s answered %d %s with the run unreadable and its definition internal; want a 5xx",
 							r.handler, rec.Code, strings.TrimSpace(rec.Body.String()))
 					}
-					// With a tenant, callerOwnsTarget reads the run first and answers its own 500; only the tenant-less
-					// request reaches the guard's read, which is the one that changed.
-					if withTenant || !plain[r.handler] {
+					// With a tenant, a handler that authorises through callerOwnsTarget reads the run first and answers
+					// its own 500; the tenant-less request, and every handler that does not use callerOwnsTarget,
+					// reaches the guard's read, which is the one that changed.
+					if !plain[r.handler] || (withTenant && owns[r.handler]) {
 						return
 					}
 					if rec.Code != http.StatusServiceUnavailable {
