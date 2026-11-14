@@ -143,6 +143,18 @@ describe('WorkflowList: find a run by what it published', () => {
       expect(screen.queryByRole('status')).toBeNull();
     });
 
+    it('says which status the runs it searched were limited to', async () => {
+      render(WorkflowList, { onNavigate: () => {} });
+      await screen.findByText('process-order');
+      listWorkflowsDetailed.mockResolvedValue({ workflows: [run], window: window({ scanned: 12 }) });
+      await fireEvent.change(screen.getByRole('combobox'), { target: { value: 'running' } });
+      await search('order_id=123');
+      expect(await screen.findByText(/Searched all 12 runs with status running\./)).toBeTruthy();
+      listWorkflowsDetailed.mockResolvedValue({ workflows: [], window: window({ scanned: 5000, exhausted: true }) });
+      await search('order_id=999');
+      expect(await screen.findByText(/Searched the most recent 5000 runs with status running\. Older runs/)).toBeTruthy();
+    });
+
     it('drops the note when the filter is cleared', async () => {
       render(WorkflowList, { onNavigate: () => {} });
       await screen.findByText('process-order');

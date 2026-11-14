@@ -83,9 +83,12 @@
   const windowNote = $derived.by(() => {
     const w = searchWindow;
     if (!stateFilter || !w) return '';
+    // The window is over the runs that match the OTHER filters, so with a status selected "all 12 runs" would
+    // mean all 12 of that status; say so rather than let it read as every run there is.
+    const of = statusFilter ? ` with status ${statusFilter}` : '';
     const base = w.exhausted
-      ? `Searched the most recent ${w.scanned} runs. Older runs were not searched, so a run that is not listed may exist.`
-      : `Searched all ${w.scanned} runs.`;
+      ? `Searched the most recent ${w.scanned} runs${of}. Older runs were not searched, so a run that is not listed may exist.`
+      : `Searched all ${w.scanned} runs${of}.`;
     return w.unreadable > 0
       ? `${base} ${w.unreadable} run${w.unreadable === 1 ? '' : 's'} could not be read and ${w.unreadable === 1 ? 'was' : 'were'} not matched.`
       : base;
