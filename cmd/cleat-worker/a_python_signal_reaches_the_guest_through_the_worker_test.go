@@ -233,7 +233,15 @@ func TestAPythonSignalReachesTheGuestThroughTheWorker(t *testing.T) {
 }
 
 // unwrapStoredResult returns the workflow's own result text from the stored
-// result, which the Python entry wraps as {"result": "<text>"} or stores bare.
+// result, which the Python entry wraps as {"result": "<text>"} or stores as a
+// JSON string.
+//
+// A result that is a JSON string comes back from the API as JSON text, quotes and
+// all (cleat#3807). Until then PostgreSQL returned it BARE, because the read
+// text-extracted the jsonb value, so this helper treated an unwrapped result as
+// the text itself and the assertions below passed on the stripped form. MySQL
+// always returned the JSON text. A client reading a string result decodes it, as
+// this does.
 func unwrapStoredResult(t *testing.T, stored string) string {
 	t.Helper()
 	var wrapped struct {
@@ -241,6 +249,10 @@ func unwrapStoredResult(t *testing.T, stored string) string {
 	}
 	if json.Unmarshal([]byte(stored), &wrapped) == nil && wrapped.Result != nil {
 		return *wrapped.Result
+	}
+	var text string
+	if json.Unmarshal([]byte(stored), &text) == nil {
+		return text
 	}
 	return stored
 }

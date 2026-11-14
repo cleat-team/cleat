@@ -147,11 +147,11 @@ func (s *PostgresStore) GetPromise(ctx context.Context, workflowID, promiseID st
 	}
 	defer tx.Rollback()
 
-	var resultStr, errStr sql.NullString
+	var resultStr, rawStr, errStr sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT status, result #>> '{}', error_msg FROM workflow_promises
+		SELECT status, result::text, error_msg FROM workflow_promises
 		WHERE workflow_id = $1 AND promise_id = $2 AND tenant_id = $3
-	`, workflowID, promiseID, s.tenantID).Scan(&status, &resultStr, &errStr)
+	`, workflowID, promiseID, s.tenantID).Scan(&status, &rawStr, &errStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "pending", "", "", tx.Commit()
 	}
@@ -164,12 +164,20 @@ func (s *PostgresStore) GetPromise(ctx context.Context, workflowID, promiseID st
 	// result arrives here as bare base64, decryptTextColumnFromStorage's
 	// shape, not decryptPayloadJSON's quoted one. See GetWorkflowByID's
 	// identical comment on its own `result #>> '{}'`.
+	// The column is read as its exact JSON text; what `#>> '{}'` would return is derived from it (cleat#3807).
+	resultStr = sql.NullString{String: extractedJSONText(rawStr.String), Valid: rawStr.Valid}
+	extracted := resultStr.String
 	if resultStr.Valid {
 		decrypted, derr := s.decryptTextColumnFromStorage(resultStr.String, "result")
 		if derr != nil {
 			return "", "", "", fmt.Errorf("get promise: %w", derr)
 		}
 		resultStr.String = decrypted
+	}
+	// cleat#3807: `#>> '{}'` above strips a plaintext string scalar's quotes and turns JSON null into SQL NULL;
+	// the exact JSON text is what the guest has to unmarshal.
+	resultStr.String = exactJSONText(extracted, resultStr.String, rawStr.String)
+	if resultStr.String != "" {
 		compacted := bytes.NewBuffer(nil)
 		if err := json.Compact(compacted, []byte(resultStr.String)); err == nil {
 			resultStr.String = compacted.String()
@@ -195,7 +203,7 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT promise_id, promise_name, status, COALESCE(result #>> '{}', ''), COALESCE(error_msg, ''), created_at, resolved_at
+		SELECT promise_id, promise_name, status, COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at, resolved_at
 		FROM workflow_promises
 		WHERE workflow_id = $1 AND tenant_id = $2
 		ORDER BY priority ASC, created_at
@@ -208,13 +216,16 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 	var promises []PromiseInfo
 	for rows.Next() {
 		var pi PromiseInfo
+		var rawResult string
 		var resolvedAt sql.NullTime
-		if err := rows.Scan(&pi.PromiseID, &pi.PromiseName, &pi.Status, &pi.Result, &pi.ErrorMsg, &pi.CreatedAt, &resolvedAt); err != nil {
+		if err := rows.Scan(&pi.PromiseID, &pi.PromiseName, &pi.Status, &rawResult, &pi.ErrorMsg, &pi.CreatedAt, &resolvedAt); err != nil {
 			return nil, err
 		}
 		// cleat#2312: `result #>> '{}'` in the SELECT above text-extracts the
 		// jsonb value, stripping a JSON string scalar's quotes -- see
 		// GetWorkflowByID's identical comment.
+		pi.Result = extractedJSONText(rawResult)
+		extractedResult := pi.Result
 		if decrypted, derr := s.decryptTextColumnFromStorage(pi.Result, "result"); derr == nil {
 			pi.Result = decrypted
 		} else {
@@ -225,6 +236,8 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 		} else {
 			s.log().WarnContext(ctx, "decrypt listed promise error_msg failed", "promise_id", pi.PromiseID, "error", derr)
 		}
+		// cleat#3807: see GetPromise.
+		pi.Result = exactJSONText(extractedResult, pi.Result, rawResult)
 		if len(pi.Result) > 0 {
 			compacted := bytes.NewBuffer(nil)
 			if err := json.Compact(compacted, []byte(pi.Result)); err == nil {
