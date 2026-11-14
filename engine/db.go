@@ -1242,7 +1242,7 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		-- workflow_payloads columns; read them there.
 		JOIN workflow_payloads p ON p.id = w.id
 		JOIN (
-			SELECT workflow_id, COUNT(*) AS cnt
+			SELECT workflow_id, COUNT(*) AS cnt, MAX(step) AS max_step
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
@@ -1253,12 +1253,14 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		LEFT JOIN workflow_defs d
 		       ON d.name = p.def_name AND d.version = p.def_version
 		      AND d.tenant_id = w.tenant_id
+		-- max_step, not cnt, on the right of the second condition: compaction_step
+		-- is a STEP (the first one kept), and once a run has been compacted its
+		-- remaining rows no longer start at 0, so a row count is not on the same
+		-- scale. Against cnt a re-compaction waited until the history was
+		-- compaction_step + threshold rows long (cleat#3838).
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), $1)
-		  -- Only a run that has never been compacted (cleat#3838): the worker
-		  -- declines to compact one twice, and ordering by cnt would otherwise
-		  -- rank those runs first and let enough of them fill the limit, so no
-		  -- other run was ever compacted.
-		  AND p.compaction_step IS NULL
+		  AND (p.compaction_step IS NULL
+		       OR p.compaction_step < e.max_step - COALESCE(NULLIF(d.max_history_length, 0), $1))
 		ORDER BY e.cnt DESC
 		LIMIT $2
 	`, threshold, limit)

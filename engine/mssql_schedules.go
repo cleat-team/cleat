@@ -308,9 +308,7 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		  -- regardless.
 		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id AND e.tenant_id = @p3)
 		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
-		  -- Only a run that has never been compacted: see the PostgreSQL half in
-		  -- engine/db.go (cleat#3838).
-		  AND w.compaction_step IS NULL
+		  AND (w.compaction_step IS NULL OR w.compaction_step < (SELECT MAX(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id AND e2.tenant_id = @p3))
 		ORDER BY w.created_at
 		OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY
 	`, threshold, limit, s.tenantID)

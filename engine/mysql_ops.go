@@ -554,7 +554,7 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		SELECT w.id
 		FROM workflow_instances w
 		JOIN (
-			SELECT workflow_id, COUNT(*) AS cnt
+			SELECT workflow_id, COUNT(*) AS cnt, MAX(step) AS max_step
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
@@ -565,13 +565,12 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		       ON d.name = w.def_name AND d.version = w.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), ?)
-		  -- Only a run that has never been compacted: see the PostgreSQL half
-		  -- in engine/db.go (cleat#3838).
-		  AND w.compaction_step IS NULL
+		  AND (w.compaction_step IS NULL
+		       OR w.compaction_step < e.max_step - COALESCE(NULLIF(d.max_history_length, 0), ?))
 		  AND w.tenant_id = ?
 		ORDER BY e.cnt DESC
 		LIMIT ?
-	`, threshold, s.tenantID, limit)
+	`, threshold, threshold, s.tenantID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("GetCompactionCandidates: %w", err)
 	}
