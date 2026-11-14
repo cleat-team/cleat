@@ -117,10 +117,36 @@ def wait_for_payment(h: HostCalls, source_id: str) -> str:
     raise RuntimeError("no payment.confirmed event within 60 s")
 ```
 
-`examples/order-lifecycle` shows the version that suspends on the plugin's own
-wake-up signal instead of sleeping on a timer, and correlates one event to one
-order. A single call that does the loop for you is proposed in
-[cleat#3794](https://github.com/cleat-team/cleat/issues/3794).
+### One call, for a wait of minutes
+
+In Go, the SDK has a typed call that does the waiting for you. It suspends on the
+plugin's own wake-up signal instead of polling on a timer, takes a window as a
+`time.Duration`, and can correlate one event to one order with `Keys`:
+
+```go
+import "github.com/cleat-team/cleat/cleat/pluginclients/webhookingest"
+
+got, err := webhookingest.AwaitWebhookWaiter.WaitFor(h, webhookingest.AwaitWebhookInput{
+	SourceID:  in.SourceID,
+	EventType: "payment.confirmed",
+}, 5*time.Minute)
+if err != nil {
+	return "", fmt.Errorf("no payment within 5 minutes: %w", err)
+}
+return string(got.Payload), nil
+```
+
+A window that closes with no event is an **error**, not `found: false`
+(`wait_for_event: no event for webhook-ingest/await_webhook within <n>ms`), so the
+`err` branch is also your timeout branch. `examples/order-lifecycle` uses it and
+turns the timeout into a compensation.
+
+Two limits. It is **for waits of minutes**: while no event arrives the engine
+re-checks about every 6 s and records history events each time: about 950 an
+hour, measured on a real worker (cleat#3806 tracks an engine-level wait that
+records none). For a wait of hours or days use the loop above, with a
+longer sleep between attempts. And it is in the tree since cleat#3804, which is
+**not in 0.6.0**: on 0.6.0, use the loop.
 
 ## 4. Deliver an event
 
