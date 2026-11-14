@@ -32,6 +32,7 @@ on:
       - "crates/cleat-macro/**"
       - "cmd/cleat-ts-check/**"
       - "cmd/cleat-ts-meta/**"
+      - "cmd/cleat/**"
       - "tests/typescript/**"
       - "wasm/**"
       - "python-sdk/**"
@@ -48,6 +49,7 @@ on:
       - "crates/cleat-macro/**"
       - "cmd/cleat-ts-check/**"
       - "cmd/cleat-ts-meta/**"
+      - "cmd/cleat/**"
       - "tests/typescript/**"
       - "wasm/**"
       - "python-sdk/**"
@@ -158,10 +160,11 @@ jobs:
           passed=$(grep '"Action":"pass"' "$f" | grep -c '"Test":' || true)
           echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed"
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
-          # TestTypeScriptLabelIsRoutedToWasmtime needs no toolchain; the three build tests do; the two worker smoke tests
-          # need the toolchain and PostgreSQL; the numbers test needs the toolchain and componentize-py (it does not touch
-          # PostgreSQL). Fewer than seven means a test did not run, which a green exit status would not say.
-          [ "$passed" -ge 7 ] || { echo "only $passed tests passed; the seven top-level tests in tests/typescript must all run" >&2; exit 1; }
+          # TestTypeScriptLabelIsRoutedToWasmtime needs no toolchain; the five build tests and the `cleat build --target ts`
+          # test do; the two worker smoke tests need the toolchain and PostgreSQL; the numbers test needs the toolchain
+          # (and componentize-py where declared). That is ten top-level tests: fewer means one did not run, which a green
+          # exit status would not say.
+          [ "$passed" -ge 10 ] || { echo "only $passed tests passed; the ten top-level tests in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
       - name: "Skip budget (zero, because the toolchain was declared)"
