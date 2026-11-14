@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -19,7 +20,9 @@ func fakeTSToolchain(t *testing.T, bootstrapped bool) (dir, log string) {
 	dir = t.TempDir()
 	log = filepath.Join(t.TempDir(), "call.log")
 	script := "#!/usr/bin/env bash\n" +
-		"{ echo \"args=$*\"; echo \"OUT_DIR=$OUT_DIR\"; echo \"SRC_ROOT=$SRC_ROOT\"; } > \"$FAKE_LOG\"\n" +
+		"{ echo \"args=$*\"; echo \"OUT_DIR=$OUT_DIR\"; echo \"SRC_ROOT=$SRC_ROOT\"; for v in " + strings.Join(tsScrubbedEnv, " ") +
+		"; do echo \"$v=${!v-<unset>}\"; done; } > \"$FAKE_LOG\"\n" +
+		"[ -z \"${FAKE_BUILD_KILL:-}\" ] || kill -KILL $$\n" +
 		"mkdir -p \"$OUT_DIR\" && : > \"$OUT_DIR/$(basename \"$1\" .ts).wasm\"\n" +
 		"exit \"${FAKE_BUILD_EXIT:-0}\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "build.sh"), []byte(script), 0o755); err != nil {
@@ -128,6 +131,111 @@ func TestTSBuildCallsTheScriptAndKeepsItsExitStatuses(t *testing.T) {
 	// The source is under the working directory, so labels are relative to it (src/orders.ts), not to the source's directory.
 	if !strings.Contains(got, "SRC_ROOT="+work) && !strings.Contains(got, "SRC_ROOT="+filepath.Dir(filepath.Dir(realSrc))) {
 		t.Errorf("SRC_ROOT is not the working directory %s:\n%s", work, got)
+	}
+}
+
+// A status other than 0, 1 or 2, and death by a signal, are neither a finding nor a build: they are a script that did not run to
+// the end (an OOM kill is 137, a missing interpreter 127). Passed through, 137 would be read by a caller as its own code, and a
+// signal would be reported as exit -1. Both are UNMEASURED, which is 2.
+func TestTSBuildReportsAnyOtherExitStatusOrASignalAsUNMEASURED(t *testing.T) {
+	fakeTSToolchain(t, true)
+	work := t.TempDir()
+	t.Chdir(work)
+	writeSource(t, work, "a.ts")
+	for _, c := range []struct{ name, exit, kill string }{
+		{"exit 3", "3", ""},
+		{"exit 127 (interpreter not found)", "127", ""},
+		{"exit 137 (OOM-killed)", "137", ""},
+		{"killed by a signal", "0", "1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("FAKE_BUILD_EXIT", c.exit)
+			t.Setenv("FAKE_BUILD_KILL", c.kill)
+			var stderr bytes.Buffer
+			if got := tsBuild("a.ts:f", filepath.Join(work, "out"), "latest", 1, &stderr); got != 2 {
+				t.Fatalf("tsBuild = %d, want 2 (UNMEASURED)\n%s", got, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "UNMEASURED") {
+				t.Errorf("the output does not say UNMEASURED:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+// The module must be a function of the source and the toolchain, not of the caller's environment. build.sh reads OUT_NAME and
+// several development controls (a shim switched off, a fault injected, the determinism flag); one left in a shell would change
+// the module with nothing on the command line to show it.
+func TestTSBuildDoesNotPassTheCallersBuildControlsToTheScript(t *testing.T) {
+	_, log := fakeTSToolchain(t, true)
+	work := t.TempDir()
+	t.Chdir(work)
+	writeSource(t, work, "a.ts")
+	for _, v := range tsScrubbedEnv {
+		t.Setenv(v, "stray")
+	}
+	var stderr bytes.Buffer
+	if got := tsBuild("a.ts:f", filepath.Join(work, "out"), "latest", 1, &stderr); got != 0 {
+		t.Fatalf("tsBuild = %d\n%s", got, stderr.String())
+	}
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range tsScrubbedEnv {
+		if !strings.Contains(string(b), v+"=<unset>\n") {
+			t.Errorf("%s reached the build script:\n%s", v, b)
+		}
+	}
+	// The control: the variables the command sets on purpose do arrive, so "<unset>" above is the scrub and not a broken log.
+	if !strings.Contains(string(b), "OUT_DIR="+filepath.Join(work, "out")) {
+		t.Errorf("OUT_DIR did not arrive, so the log proves nothing:\n%s", b)
+	}
+}
+
+// TestTSScrubListCoversEveryBuildControlBuildShReads checks the scrub list against two readings that do not come from the list
+// itself. The test above sets and checks whatever tsScrubbedEnv says, so it agrees with the list by construction: a control missing
+// from the list is invisible to it.
+//
+//  1. A literal set of the build controls, written here. It includes the two the plugin crate reads (they never appear in
+//     build.sh's code, only in its header comment), so parsing the script could not find them.
+//  2. Every upper-case variable build.sh itself references. Each must be scrubbed or classified below as something that is not a
+//     build control. A variable added to build.sh later fails here until someone decides which it is.
+func TestTSScrubListCoversEveryBuildControlBuildShReads(t *testing.T) {
+	scrubbed := map[string]bool{}
+	for _, v := range tsScrubbedEnv {
+		scrubbed[v] = true
+	}
+	for _, v := range []string{"OUT_NAME", "JAVY_DETERMINISTIC", "SOURCEMAP", "NAN_POLICY", "SUSPEND_MODE", "RESULT_CANONICAL",
+		"PLUGIN", "CLEAT_SHIMS_OFF", "CLEAT_FAULT"} {
+		if !scrubbed[v] {
+			t.Errorf("%s changes the module and is not in tsScrubbedEnv", v)
+		}
+	}
+
+	notAControl := map[string]string{
+		"OUT_DIR": "set by tsBuild", "SRC_ROOT": "set by tsBuild",
+		"REBUILD_PLUGIN": "only forces a rebuild of the shipped plugin",
+		"HOME":           "plumbing", "CARGO_HOME": "plumbing", "RUSTFLAGS": "plumbing", "NODE_PATH": "plumbing", "BASH_SOURCE": "plumbing",
+		"HERE": "local", "ROOT": "local", "W": "local", "J": "local", "E": "local", "LINK_DIR": "local", "PLUGIN_DIR": "local", "SRC_ABS": "local",
+	}
+	src, err := os.ReadFile(filepath.Join("..", "..", "packages", "cleat-ts", "build.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := regexp.MustCompile(`\$\{?([A-Z][A-Z0-9_]*)|os\.environ\.get\("([A-Z][A-Z0-9_]*)"`).FindAllStringSubmatch(string(src), -1)
+	if len(refs) < 10 {
+		t.Fatalf("found only %d variable references in build.sh, so the pattern is not reading it", len(refs))
+	}
+	seen := map[string]bool{}
+	for _, m := range refs {
+		v := m[1] + m[2]
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		if !scrubbed[v] && notAControl[v] == "" {
+			t.Errorf("build.sh reads %s, which is neither scrubbed nor classified as not a build control", v)
+		}
 	}
 }
 
