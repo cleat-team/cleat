@@ -1778,7 +1778,32 @@ func analysisRefusals(usage *wasm.UsageInfo, channel string) []string {
 	if msg := frozenChildBindingError(usage, channel); msg != "" {
 		out = append(out, msg)
 	}
+	if msg := opaqueHostCallError(usage); msg != "" {
+		out = append(out, msg)
+	}
 	return out
+}
+
+// opaqueHostCallError is the refusal for a workflow that reaches a function from another package which hands the
+// host-call runtime to code the build cannot read (cleat#3803).
+//
+// The build links a host function only for a call it can see. It sees a function's own body, and it follows the
+// calls inside a dependency's body, but a call through an INTERFACE method that is passed the runtime could run
+// anything. Reporting "this reaches no host call" for it would build a module that fails at run time with "the
+// HostCalls runtime was not initialized" -- a message that names the entry point and points away from the cause --
+// so the build says it cannot tell instead. The repair is on the workflow's side: call the host through h
+// directly where the build can see it, or declare what the dependency needs with //cleat:require.
+func opaqueHostCallError(usage *wasm.UsageInfo) string {
+	if usage == nil || len(usage.OpaqueHostCalls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "cannot tell which host calls %d dependency call(s) make, so the module could fail at run time with \"the HostCalls runtime was not initialized\":\n", len(usage.OpaqueHostCalls))
+	for _, o := range usage.OpaqueHostCalls {
+		fmt.Fprintf(&b, "  %s: %s reaches %s, where %s -- %s\n", o.Pos, o.Callee, o.Inside, o.Call, o.Why)
+	}
+	b.WriteString("Call the host through h where the build can see it, or name what the dependency needs with //cleat:require <HostCallsMethod>[,...] in its package.")
+	return b.String()
 }
 
 // addRefusals puts analysisRefusals into the JSON diagnostics as errors.

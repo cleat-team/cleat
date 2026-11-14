@@ -87,12 +87,10 @@ func (pf *PluginFunc[Req, Resp]) WithWake(wake func(Req) []string) *PluginFunc[R
 // The PluginFunc must have been given a wake with WithWake, and timeout must be
 // at least a millisecond. Both are refused rather than allowed to wait forever.
 //
-// SDKDurableHelpers and sdkHelperImports (wasm/usage.go) both list
-// "PluginFunc.WaitFor": a build finds a workflow's host calls by looking for them
-// in the workflow's own source, so a helper that makes one on the workflow's
-// behalf has to be declared in both or the module builds, imports nothing, and
-// returns a zero value at run time (cleat#3794 measured it: a package-level
-// function doing this compiled clean and died with a nil pointer).
+// The build finds the host calls a workflow makes through this method by reading its body (analyzer.DepHostCalls,
+// cleat#3803): h.WaitForEvent here is what links cleat_wait_for_event. Before that it was named in two hand lists,
+// and cleat#3794 measured what an unlisted helper does: a package-level function making the same call compiled
+// clean and died on a real worker with a nil pointer. testdata/sdkhelpers/waitfor is the fixture.
 func (pf *PluginFunc[Req, Resp]) WaitFor(h HostCalls, req Req, timeout time.Duration) (Resp, error) {
 	var zero Resp
 	if pf.wake == nil {
