@@ -4,8 +4,9 @@ name: TypeScript Tier 2
 # toolchain is provisioned and its tests run, on Linux, which is where nothing was measured before it existed (the
 # prototype ran on macOS arm64 only, and no Linux javy binary had ever been executed).
 #
-# NOT a required check, and not to be added to any ruleset: tier 2 must RUN and may fail. It is deliberately not in
-# tiers.yaml's required_contexts. It also has no merge_group trigger, for the same reason: nothing here gates a merge.
+# NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64)
+# It is not to be added to any ruleset: tier 2 must RUN and may fail, so it is deliberately not in tiers.yaml's
+# required_contexts. It also has no merge_group trigger, for the same reason: nothing here gates a merge.
 #
 # Every download is verified against packages/cleat-ts/toolchain.lock BEFORE it is run (bootstrap.sh), and a mismatch
 # fails the job closed. The tests declare the toolchain with CLEAT_REQUIRE_TOOLCHAINS=typescript, so a setup step that
