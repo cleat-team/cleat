@@ -219,6 +219,37 @@ func TestAnSDKFunctionUsedAsAValueIsRefusedAndNotMiswired(t *testing.T) {
 	}
 }
 
+// Two dependency packages that each declare a method of the same name on a type of the same name must not be
+// taken for one another. The index was keyed by analyzer.FuncFQName, which carries no package path for a method,
+// so the later package's declaration replaced the earlier one's and a workflow calling the earlier one linked no
+// import and had no durable leaf (found in review of cleat#3814). stampclash calls the one that makes a host call
+// and stamponlyb, the control, the one that makes none.
+func TestTwoDependenciesDeclaringTheSameMethodAreNotConflated(t *testing.T) {
+	_, cg, _, _, usage, _ := analyze(sdkFixturePattern(t, "stampclash"))
+	if !usage.Used["cleat_now"] {
+		t.Errorf("stampa.Client.Stamp makes a host call and stampb.Client.Stamp, declared the same way, makes none; the build linked no cleat_now (imports: %v), so it took the wrong one", sortedKeys(usage.Used))
+	}
+	found := false
+	for fq := range cg.DurableLeaves {
+		if strings.HasSuffix(fq, ".Run") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Run calls the Stamp that reads the clock and is not a durable leaf (leaves: %v)", sortedKeys(cg.DurableLeaves))
+	}
+
+	_, cg2, _, _, usage2, _ := analyze(sdkFixturePattern(t, "stamponlyb"))
+	if usage2.Used["cleat_now"] {
+		t.Errorf("stamponlyb calls only the Stamp that makes no host call, and the build linked cleat_now: methods are matched by name across packages")
+	}
+	for fq := range cg2.DurableLeaves {
+		if strings.HasSuffix(fq, ".Run") {
+			t.Errorf("stamponlyb's Run was made a durable leaf by a Stamp that makes no host call")
+		}
+	}
+}
+
 // What the build links is what the COMPILED MODULE imports. This builds the documented typed promise, a method on
 // a generic type, and the package-level-h helper for real and reads the import section of the .wasm, which is the
 // thing the worker links against.

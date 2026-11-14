@@ -63,6 +63,15 @@ type depDecl struct {
 	pkg  *Package
 }
 
+// depKey identifies a declaration across every package the build loaded. FuncFQName alone is not enough: for a
+// method it prints the receiver type WITHOUT its package path (the receiver's own package is elided), so two
+// dependency packages that each declare Client.Stamp would share a key and the later one would replace the
+// earlier one's declaration. A workflow calling the earlier one then linked no import and had no durable leaf
+// (found in review of cleat#3814).
+func depKey(fn *types.Func) string {
+	return fn.Pkg().Path() + "|" + FuncFQName(fn)
+}
+
 // depIndex is built once per AnalysisResult, on first use.
 type depIndex struct {
 	once    sync.Once
@@ -76,7 +85,7 @@ type depIndex struct {
 // has source for (the target module's own functions are read directly, and the standard library makes no
 // host call).
 //
-// A generic function or method is read through its origin (FuncFQName resolves it), so an instantiation such as
+// A generic function or method is read through its origin (depKey resolves it), so an instantiation such as
 // NewPromiseTyped[string] and a method on Promise[string] resolve to the one declaration.
 func (r *AnalysisResult) DepHostCalls(fn *types.Func) *DepSummary {
 	if r == nil || fn == nil || fn.Pkg() == nil {
@@ -84,7 +93,7 @@ func (r *AnalysisResult) DepHostCalls(fn *types.Func) *DepSummary {
 	}
 	r.dep.once.Do(r.buildDepIndex)
 
-	key := FuncFQName(fn)
+	key := depKey(fn)
 	r.dep.mu.Lock()
 	defer r.dep.mu.Unlock()
 	if s, ok := r.dep.summary[key]; ok {
@@ -153,7 +162,7 @@ func (r *AnalysisResult) buildDepIndex() {
 				if !ok {
 					continue
 				}
-				r.dep.decls[FuncFQName(obj)] = &depDecl{decl: fd, pkg: pkg}
+				r.dep.decls[depKey(obj)] = &depDecl{decl: fd, pkg: pkg}
 			}
 		}
 	}
@@ -174,7 +183,7 @@ func (ix *depIndex) directOf(key string) *depDirect {
 		if fn == nil || fn.Pkg() == nil {
 			return // a universe method such as error.Error
 		}
-		d.callees[FuncFQName(fn)] = true
+		d.callees[depKey(fn)] = true
 	}
 	ast.Inspect(decl.decl.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
