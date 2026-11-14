@@ -139,14 +139,6 @@ func TestActiveInstanceCountersReadStatusFromWorkflowLeases(t *testing.T) {
 	if counts[active+":1"] != 1 || counts[settled+":1"] != 0 {
 		t.Errorf("GetActiveInstanceCountsByVersion = %v, want %s:1=1 and no %s -- it read workflow_instances.status", counts, active, settled)
 	}
-
-	versions, err := NewWorkflowLoader(db, nil, nil).ActiveVersions(ctx)
-	if err != nil {
-		t.Fatalf("ActiveVersions: %v", err)
-	}
-	if len(versions[active]) != 1 || len(versions[settled]) != 0 {
-		t.Errorf("ActiveVersions = %v, want %s and not %s -- it read workflow_instances.status", versions, active, settled)
-	}
 }
 
 func TestGetRunLimitsReadsWorkflowLeases(t *testing.T) {

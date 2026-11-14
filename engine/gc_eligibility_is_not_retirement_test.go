@@ -15,11 +15,10 @@ import (
 // the ONLY thing in the tree that exercises the difference.
 //
 // WHY THAT IS NOT AN OVERSTATEMENT, AND WHY IT MATTERS. Every shipped path that
-// writes either column writes BOTH -- the three stores' MarkVersionDeprecated
-// and WorkflowLoader.Deprecate. (An earlier draft of this comment said
-// `cleatctl versions deprecate` was the only one; WorkflowLoader.Deprecate is a
-// second, and finding it is why the both-move-together property is asserted per
-// writer below rather than argued once from a single call site.)
+// writes either column writes BOTH -- the three stores' MarkVersionDeprecated.
+// (WorkflowLoader.Deprecate was a second writer until it was deleted as dead
+// code, cleat#3765; finding it is why the both-move-together property was
+// asserted per writer rather than argued once from a single call site.)
 // So in every deployment the two columns agree in every row, forever. A reader
 // who measures production will find them identical and conclude one is
 // redundant -- and they will be right about the data and wrong about the

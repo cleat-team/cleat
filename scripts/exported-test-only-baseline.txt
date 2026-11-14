@@ -6,7 +6,6 @@ engine/adaptive_flush.go	func AdaptiveFlusher.GetRate
 engine/adaptive_flush.go	func AdaptiveFlusher.InBatchMode
 engine/app.go	func NewApp
 engine/callerrors.go	func GuestCallErrorCodes
-engine/child_version.go	func ResolveChildVersion
 engine/cron.go	func NextCronTime
 engine/encryption.go	func NewPayloadEncryption
 engine/engine.go	func Engine.ExecuteCompiled
@@ -83,9 +82,6 @@ engine/testutil/workflow_seed.go	func SeedRun
 engine/version_gc.go	func PurgeVersions
 engine/version_handler.go	func StaticVersionStore
 engine/version_metrics.go	func LogStaleAlerts
-engine/versioned_loader.go	func NewWorkflowLoader
-engine/versioned_loader.go	func WorkflowLoader.Deploy
-engine/versioned_loader.go	func WorkflowLoader.Deprecate
 engine/wasm_cache.go	func NewWASMCache
 engine/wasm_disk_cache.go	func WasmDiskCache.LookupBytes
 internal/telemetry/tracing.go	func InitTracing

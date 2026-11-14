@@ -37,8 +37,8 @@ func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string
 }
 
 // ReplayCompiled is like Replay but takes a pre-compiled module.
-// Use this when the module has already been compiled and cached by a
-// WorkflowLoader, avoiding redundant compilation.
+// Use this when the module has already been compiled and cached by the
+// caller, avoiding redundant compilation.
 func (e *Engine) ReplayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
 	return e.replayCompiled(ctx, compiled, entryPoint, input, history, nil)
 }
