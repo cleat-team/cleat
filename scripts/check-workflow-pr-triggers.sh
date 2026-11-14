@@ -92,6 +92,52 @@ for p in paths:
                           as_list(pr.get("branches")),
                           types or ["<default: opened, synchronize, reopened>"]))
 
+# SECOND RULE (cleat#3809). Subscribing to `edited` has a cost beyond the extra
+# run: `github.ref` is identical for every pull_request activity type, so an
+# `edited` run for a BODY edit shares a concurrency group with the run it
+# follows, and with `cancel-in-progress` it cancels it. A cancelled run renders
+# as a failure. ci.yml gives such a run its own group (cleat#1688); the two
+# upgrade workflows did not, and on release/v0.6.0 their contexts are required.
+# Any workflow that lists `edited`, cancels in progress, and does not mention
+# `github.event.action == 'edited'` in its group is the same defect. A job-level
+# `concurrency:` block is not read; none exists today.
+import re, yaml
+CARVE_OUT = re.compile(r"github\.event\.action\s*==\s*'edited'")
+examined, cancelling = 0, []
+for p in paths:
+    with open(p) as fh:
+        doc = yaml.safe_load(fh) or {}
+    pr = load_triggers(p).get("pull_request")
+    if not isinstance(pr, dict) or "edited" not in [str(t) for t in as_list(pr.get("types"))]:
+        continue
+    conc = doc.get("concurrency")
+    if not isinstance(conc, dict):
+        continue  # no group, or a bare string group: nothing cancels
+    cancel = conc.get("cancel-in-progress")
+    if cancel is None or cancel is False or str(cancel).strip().lower() == "false":
+        continue  # a literal opt-out; an expression is assumed to cancel
+    examined += 1
+    if not CARVE_OUT.search(str(conc.get("group", ""))):
+        cancelling.append(os.path.basename(p))
+
+if examined == 0:
+    print("ERROR: no workflow both lists `edited` and cancels in progress, so the "
+          "second rule examined nothing. ci.yml and the two upgrade workflows "
+          "do today; either that changed or the parse is broken.", file=sys.stderr)
+    sys.exit(2)
+
+if cancelling:
+    print(f"{len(cancelling)} of {examined} workflow(s) that list `edited` and cancel "
+          f"in progress let a body edit cancel the run it follows (cleat#3809):\n",
+          file=sys.stderr)
+    for name in cancelling:
+        print(f"    {name}", file=sys.stderr)
+    print("\nGive an `edited` event that did not change the base its own group: "
+          "see the concurrency block in ci.yml, whose group line carries "
+          "`github.event.action == 'edited' && !github.event.changes.base && "
+          "github.run_id`.", file=sys.stderr)
+    sys.exit(1)
+
 if checked == 0:
     print("ERROR: no workflow filters pull_request by branch, so this guard "
           "examined nothing. Either the filters were removed -- in which case "
@@ -111,4 +157,5 @@ if offenders:
     sys.exit(1)
 
 print(f"OK: all {checked} branch-filtered workflow(s) trigger on `edited`.")
+print(f"OK: all {examined} workflow(s) that list `edited` and cancel in progress give a body edit its own group.")
 PY
