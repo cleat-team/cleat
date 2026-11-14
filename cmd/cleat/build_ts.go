@@ -118,7 +118,12 @@ func tsSourceRoot(abs string) string {
 	return root
 }
 
-// tsBuild runs the build and returns the exit code.
+// tsScrubbedEnv are the variables build.sh reads as development controls. `cleat build` does not expose them, so one inherited from
+// the caller's shell would change the module with nothing on the command line to show it.
+var tsScrubbedEnv = []string{"OUT_NAME", "JAVY_DETERMINISTIC", "SOURCEMAP", "NAN_POLICY", "CLEAT_SHIMS_OFF", "CLEAT_FAULT"}
+
+// tsBuild runs the build and returns the exit code: 0, 1 (the source was refused) or 2 (UNMEASURED). Any other status the script
+// ends with, and a signal, mean it did not run to the end, so they are 2 as well.
 func tsBuild(spec, outDir string, channel string, workflowVersion int, stderr io.Writer) int {
 	file, entries, err := parseTSEntry(spec)
 	if err != nil {
@@ -157,14 +162,20 @@ func tsBuild(spec, outDir string, channel string, workflowVersion int, stderr io
 		return 1
 	}
 	cmd := exec.Command("bash", filepath.Join(dir, "build.sh"), abs, strings.Join(entries, ",")) //nolint:gosec // G204: fixed interpreter, arguments passed as an array, no shell; the variable parts are a toolchain directory found by walking up (or $CLEAT_TS_DIR) and the source path the developer just typed, and the entry names matched ^[a-z][a-z0-9]*(_[a-z0-9]+)*$ above.
-	cmd.Env = append(os.Environ(), "OUT_DIR="+absOut, "SRC_ROOT="+tsSourceRoot(abs))
+	cmd.Env = append(tsEnvWithout(os.Environ(), tsScrubbedEnv), "OUT_DIR="+absOut, "SRC_ROOT="+tsSourceRoot(abs))
 	cmd.Stdout, cmd.Stderr = stderr, stderr
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			// build.sh's own statuses are kept: 1 = a finding (the static check refused the source), 2 = UNMEASURED.
-			fmt.Fprintf(stderr, "\nError: the TypeScript build failed (exit %d); no artifact was emitted.\n", ee.ExitCode())
-			return ee.ExitCode()
+			if code := ee.ExitCode(); code == 1 || code == 2 {
+				fmt.Fprintf(stderr, "\nError: the TypeScript build failed (exit %d); no artifact was emitted.\n", code)
+				return code
+			}
+			// -1 is a signal; anything else outside 0..2 is a script that died or could not start its tools.
+			fmt.Fprintf(stderr, "\nUNMEASURED: the TypeScript build did not run to the end (%v); no artifact was emitted.\n"+
+				"  (this is a failure of the setup, not a finding about the workflow)\n", ee)
+			return 2
 		}
 		fmt.Fprintf(stderr, "UNMEASURED: could not run the TypeScript build: %v\n", err)
 		return 2
@@ -176,4 +187,19 @@ func tsBuild(spec, outDir string, channel string, workflowVersion int, stderr io
 
 func runBuildTS(spec, outDir, channel string, workflowVersion int) {
 	os.Exit(tsBuild(spec, outDir, channel, workflowVersion, os.Stderr))
+}
+
+// tsEnvWithout returns env without the named variables.
+func tsEnvWithout(env, names []string) []string {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); !drop[k] {
+			out = append(out, kv)
+		}
+	}
+	return out
 }

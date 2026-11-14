@@ -248,6 +248,46 @@ func TestTypeScriptBuildIsIndependentOfWhereAnImportLives(t *testing.T) {
 	}
 }
 
+// TestTypeScriptAFailedBuildStepIsUNMEASUREDNotAFinding pins the exit-status contract: 1 means the source was refused (a finding
+// about the workflow) and 2 means the build could not look (a failure of the setup). A Python step that fails inside build.sh is
+// the second, never the first: with `set -e` an uncaught failure exits with the step's own status, which for a Python exception is
+// 1, so a broken environment would read as "your workflow was refused". Each of the three Python steps (the entry generator, the
+// path relabelling, the engine pin) is made to fail in turn by a `python3` on PATH that fails when it is handed that step's script
+// and runs the real one otherwise.
+func TestTypeScriptAFailedBuildStepIsUNMEASUREDNotAFinding(t *testing.T) {
+	root := needToolchain(t)
+	realPython, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("build.sh needs python3 and there is none on PATH: %v", err) // a prerequisite of the toolchain, not an optional resource
+	}
+	for _, step := range []struct{ name, marker string }{
+		{"the entry generator", "camel = lambda"},
+		{"the path relabelling", "def label("},
+		{"the engine pin", "pin_version"},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			dir := t.TempDir()
+			wrapper := "#!/usr/bin/env bash\n" +
+				"input=$(cat)\n" +
+				"if printf '%s' \"$input\" | grep -q -F -e '" + step.marker + "'; then echo 'simulated failure in a python step' >&2; exit 1; fi\n" +
+				"printf '%s\\n' \"$input\" | exec '" + realPython + "' \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(wrapper), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			res := build(t, root, "tests/typescript/testdata/workflows/hello.ts", "hello", "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if res.exit != 2 {
+				t.Fatalf("a failing %s: exit = %d, want 2 (UNMEASURED, a failure of the setup)\n%s", step.name, res.exit, res.output)
+			}
+			if !strings.Contains(res.output, "UNMEASURED") || !strings.Contains(res.output, "not a finding about the workflow") {
+				t.Errorf("the failure does not say it is UNMEASURED and not a finding:\n%s", res.output)
+			}
+			if res.module != "" {
+				t.Errorf("a failed build still reported a module: %s", res.module)
+			}
+		})
+	}
+}
+
 // TestTypeScriptStaticCheckRefusesATimerAndNamesTheLine builds a workflow that calls setTimeout. The build must stop with
 // exit 1 (a finding), say which file and line, and write no module: a timer is not a durable operation.
 func TestTypeScriptStaticCheckRefusesATimerAndNamesTheLine(t *testing.T) {

@@ -67,7 +67,7 @@ define=()
 # DECLARATION with no parameters. `export const f = workflow(...)` is not seen. So the bundle's entry is a generated
 # file that wraps each workflow in a parameterless function declaration and exports that.
 entry="$W/$out.entry.ts"
-python3 - "$entries" "$entry" "$SRC_ABS" <<'PY'
+python3 - "$entries" "$entry" "$SRC_ABS" <<'PY' || unmeasured "generating the entry file failed"
 import sys
 entries, path, src_abs = sys.argv[1:4]
 camel = lambda e: (lambda p: p[0] + "".join(x.title() for x in p[1:]))(e.split("_"))
@@ -94,9 +94,12 @@ npx esbuild "$entry" --bundle --format=esm --target=es2020 ${define[@]+"${define
 #   under this toolchain dir     -> relative to this dir     (index.ts, node_modules/...)
 #   reached through node_modules -> from that segment on     (node_modules/zod/lib/index.js, wherever it is hoisted)
 #   anything else                -> external/<file name>
+#     (that last label keeps only the file NAME, so two such files of one name in different directories carry the same label.
+#     Measured: the bundle is still correct, since each module is its own `__commonJS` call with its own variable and
+#     its own code. What is lost is telling the two apart in a `// <label>` comment or a source-map `sources` entry.)
 # REAL paths on every side: on macOS /var is a symlink to /private/var, the source root comes from `pwd` (logical) and
 # esbuild reports the real path, so comparing them as written never matches.
-SOURCEMAP=${SOURCEMAP:-1} python3 - "$W/$out.js" "$W/$out.js.map" <<'PY'
+SOURCEMAP=${SOURCEMAP:-1} python3 - "$W/$out.js" "$W/$out.js.map" <<'PY' || unmeasured "relabelling the bundle's paths failed"
 import json, os, re, sys
 js, mp = sys.argv[1:3]
 here = os.path.realpath(os.getcwd())
@@ -155,7 +158,7 @@ echo "}" >> "$wit"
 "$LINK_DIR/target/release/cleat-js-link" "$W/$out.javy.wasm" "$W/$out.linked.wasm" "${pairs[@]}" || unmeasured "cleat-js-link failed"
 # The engine pin: what this module carries, computed from the real artefacts (nothing typed). QuickJS comes from the
 # plugin's lockfile, the plugin and SDK by content hash. A rebuild with any of them changed is a different pin.
-python3 - "$J" "$PLUGIN" "$W/$out.pin.json" "${JAVY_DETERMINISTIC:-y}" "$PLUGIN_DIR/Cargo.lock" "$HERE/index.ts" <<'PY'
+python3 - "$J" "$PLUGIN" "$W/$out.pin.json" "${JAVY_DETERMINISTIC:-y}" "$PLUGIN_DIR/Cargo.lock" "$HERE/index.ts" <<'PY' || unmeasured "computing the engine pin failed"
 import hashlib, json, re, subprocess, sys
 javy, plugin, out, det, lockfile, sdk = sys.argv[1:7]
 sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
