@@ -242,18 +242,21 @@ func editChainState(t *testing.T, store WorkflowStore, what string, args ...any)
 		q := map[string]string{
 			"checksum": `UPDATE event_history SET checksum = 'deadbeefdeadbeef' WHERE workflow_id = $1 AND step = $2`,
 			"legacy":   `UPDATE workflow_payloads SET compaction_state = compaction_state - 'prev_checksum' WHERE id = $1`,
+			"trim":     `DELETE FROM event_history WHERE workflow_id = $1 AND step < $2`,
 		}[what]
 		_, err = s.db.ExecContext(ctx, q, args...)
 	case *MySQLStore:
 		q := map[string]string{
 			"checksum": `UPDATE event_history SET checksum = 'deadbeefdeadbeef' WHERE workflow_id = ? AND step = ?`,
 			"legacy":   `UPDATE workflow_instances SET compaction_state = JSON_REMOVE(compaction_state, '$.prev_checksum') WHERE id = ?`,
+			"trim":     `DELETE FROM event_history WHERE workflow_id = ? AND step < ?`,
 		}[what]
 		_, err = s.db.ExecContext(ctx, q, args...)
 	case *MSSQLStore:
 		q := map[string]string{
 			"checksum": `UPDATE event_history SET checksum = 'deadbeefdeadbeef' WHERE workflow_id = @p1 AND step = @p2`,
 			"legacy":   `UPDATE workflow_instances SET compaction_state = JSON_MODIFY(compaction_state, '$.prev_checksum', NULL) WHERE id = @p1`,
+			"trim":     `DELETE FROM event_history WHERE workflow_id = @p1 AND step < @p2`,
 		}[what]
 		var tx *sql.Tx
 		if tx, err = s.beginTxWithContext(ctx); err == nil {

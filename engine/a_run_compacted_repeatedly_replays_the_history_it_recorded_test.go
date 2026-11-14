@@ -150,6 +150,82 @@ func TestARunCompactedRepeatedlyReplaysTheHistoryItRecordedOnEveryStore(t *testi
 				prevBoundary = first
 			}
 
+			// A run whose rows and state disagree about where the history starts is
+			// refused by CompactWorkflowHistory, and refusing does not change what the
+			// candidate query sees: it stays a candidate every pass, ten of them fill
+			// a batch of ten, and no other run is ever compacted (cleat-review's
+			// measurement on cleat#3842). The old second compaction produced exactly
+			// this shape, so a database upgraded from 0.5.0 arrives with some.
+			t.Run("runs the compactor refuses do not crowd a fresh run out", func(t *testing.T) {
+				const refused = 3
+				var refusedIDs []string
+				for i := 0; i < refused; i++ {
+					rid := fmt.Sprintf("chain-refused-%d-%d", i, time.Now().UnixNano())
+					if _, _, err := store.StartNewRun(ctx, rid, "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
+						t.Fatalf("StartNewRun: %v", err)
+					}
+					for _, ev := range recorded[:110] {
+						if err := store.AppendEventHistory(ctx, rid, ev); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := CompactWorkflowHistory(ctx, store, rid, threshold, nil); err != nil {
+						t.Fatalf("compact: %v", err)
+					}
+					for _, ev := range recorded[110:170] {
+						if err := store.AppendEventHistory(ctx, rid, ev); err != nil {
+							t.Fatal(err)
+						}
+					}
+					// Rows 0..(boundary+2) go missing: the state still says the history
+					// starts at the boundary, the rows say it starts three steps later.
+					cs, err := store.LoadCompactionState(ctx, rid)
+					if err != nil || cs == nil {
+						t.Fatalf("no state: %v, %v", cs, err)
+					}
+					editChainState(t, store, "trim", rid, cs.firstRetainedStep()+3)
+					if err := CompactWorkflowHistory(ctx, store, rid, threshold, nil); err == nil {
+						t.Fatal("control: a state and rows that disagree were compacted, so this is not the refused shape")
+					}
+					refusedIDs = append(refusedIDs, rid)
+				}
+				fresh := fmt.Sprintf("chain-fresh-%d", time.Now().UnixNano())
+				if _, _, err := store.StartNewRun(ctx, fresh, "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0); err != nil {
+					t.Fatal(err)
+				}
+				for _, ev := range recorded[:30] {
+					if err := store.AppendEventHistory(ctx, fresh, ev); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ids, err := store.GetCompactionCandidates(ctx, threshold, refused)
+				if err != nil {
+					t.Fatalf("GetCompactionCandidates: %v", err)
+				}
+				got := map[string]bool{}
+				for _, id := range ids {
+					got[id] = true
+				}
+				if !got[fresh] {
+					t.Errorf("a never-compacted run over the threshold was not offered in a batch of %d: got %v", refused, ids)
+				}
+				for _, id := range refusedIDs {
+					if got[id] {
+						t.Errorf("run %s, whose rows and state disagree, is offered for compaction every pass", id)
+					}
+				}
+				// One pass, as the worker runs it: every offered run is compacted and
+				// nothing in it is an error.
+				for _, id := range ids {
+					if err := CompactWorkflowHistory(ctx, store, id, threshold, nil); err != nil {
+						t.Errorf("pass: %s: %v", id, err)
+					}
+				}
+				if cs, err := store.LoadCompactionState(ctx, fresh); err != nil || cs == nil {
+					t.Errorf("the fresh run was not compacted by the pass: %v, %v", cs, err)
+				}
+			})
+
 			// With --encrypt-sensitive-payloads on, the state is sealed before it is
 			// written (cleat#3774). The boundary checksum is added to the state
 			// before that, and a second compaction reads the sealed state back,
