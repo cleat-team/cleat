@@ -656,6 +656,21 @@ jobs:
           scripts/check-no-raw-rebind.py
           LINT_GUARD_EOF
 
+      # A cmd/cleat-worker handler that answers a 500 with the text of an error
+      # value sends the database driver's message to the client (cleat#3878:
+      # 47 such sites, found by this guard on the tree before the sweep).
+      # Self-test first, as every guard above: it carries eight known-positives
+      # (the literal shape, the StatusInternalServerError spelling, an
+      # identifier that is not `err`, a statement split across lines, the
+      # writeJSON map form, and an allow marker with no reason or too far above) so a pass means the scan could see the shape.
+      - name: No error text in a 500 guard
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "No error text in a 500 guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-no-error-text-in-500.py --self-test
+          scripts/check-no-error-text-in-500.py
+          LINT_GUARD_EOF
+
       # MSSQLStore.WithTenant copies the struct but not the pool: the pool's
       # connector still carries the ORIGINAL tenant's SESSION_CONTEXT, so a
       # method querying s.db directly instead of through beginTxWithContext

@@ -123,7 +123,7 @@ func (s *apiServer) handleInstallLibrary(w http.ResponseWriter, r *http.Request)
 			// of such an artifact is.
 			s.writeError(w, http.StatusBadRequest, err.Error())
 		default:
-			s.writeError(w, http.StatusInternalServerError, err.Error())
+			s.writeStoreError(w, r, err)
 		}
 		return
 	}

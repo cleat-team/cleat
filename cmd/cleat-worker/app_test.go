@@ -103,8 +103,12 @@ func TestHandleDeadLettersList_StoreError(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !strings.Contains(body["error"], "db connection lost") {
-		t.Errorf("expected error about db connection lost, got %v", body)
+	// The driver's text is logged, not sent (cleat#3878); the client gets a fixed sentence and a request id.
+	if strings.Contains(body["error"], "db connection lost") {
+		t.Errorf("the store's error text reached the client: %v", body)
+	}
+	if body["request_id"] == "" {
+		t.Errorf("expected a request_id the operator can find in the log, got %v", body)
 	}
 }
 

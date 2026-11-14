@@ -239,12 +239,12 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
@@ -304,7 +304,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	// Create a new run from the dead-lettered workflow's definition and input.
 	versions, verr := st.ListVersions(r.Context(), wf.DefName)
 	if verr != nil {
-		s.writeError(w, 500, verr.Error())
+		s.writeStoreError(w, r, verr)
 		return
 	}
 	if len(versions) == 0 {
@@ -331,7 +331,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, idempotencyKey, s.tenantFor(r), 0)
 	if serr != nil {
-		s.writeError(w, 500, serr.Error())
+		s.writeStoreError(w, r, serr)
 		return
 	}
 	// The original response plus the flag, same as start -- cleat#1169. These
