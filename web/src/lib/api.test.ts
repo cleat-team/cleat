@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   listDeadLetters,
   listWorkflows,
+  listWorkflowsDetailed,
   getWorkflow,
   startWorkflow,
   signalWorkflow,
@@ -199,6 +200,71 @@ describe('API Client', () => {
     it('throws on 500 with JSON error body', async () => {
       mockFetchError(500, { error: 'Server crashed' });
       await expect(listWorkflows()).rejects.toThrow('Server crashed');
+    });
+  });
+
+  // -- listWorkflowsDetailed ------------------------------------------------
+
+  describe('listWorkflowsDetailed', () => {
+    // cleat#3775, part 2: on a deployment that seals query_state the worker searches a WINDOW of recent
+    // runs and says how much it covered in headers. Without them an exact answer and a window that ran
+    // out would look the same.
+    function mockFetchWithHeaders(body: any, headers: Record<string, string>) {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue(body),
+        headers: { get: (k: string) => (k in headers ? headers[k] : null) },
+      });
+    }
+
+    it('asks for the same URL as listWorkflows', async () => {
+      mockFetchOk([]);
+      await listWorkflowsDetailed('ready', { order_id: '123' });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/workflows?status=ready&state.order_id=123&redact=true',
+        undefined,
+      );
+    });
+
+    it('reads the window the worker reports', async () => {
+      mockFetchWithHeaders([mockWorkflowInstance], {
+        'X-Query-State-Window': '5000',
+        'X-Query-State-Scanned': '5000',
+        'X-Query-State-Window-Exhausted': 'true',
+        'X-Query-State-Unreadable': '2',
+      });
+      const r = await listWorkflowsDetailed(undefined, { order_id: '123' });
+      expect(r.workflows).toEqual([mockWorkflowInstance]);
+      expect(r.window).toEqual({ size: 5000, scanned: 5000, exhausted: true, unreadable: 2 });
+    });
+
+    it('reads "false" as not exhausted, so a complete window is not shown as a limit', async () => {
+      mockFetchWithHeaders([], {
+        'X-Query-State-Window': '5000',
+        'X-Query-State-Scanned': '40',
+        'X-Query-State-Window-Exhausted': 'false',
+        'X-Query-State-Unreadable': '0',
+      });
+      const r = await listWorkflowsDetailed(undefined, { order_id: '1' });
+      expect(r.window?.exhausted).toBe(false);
+    });
+
+    it('an answer without the window headers is an exact one, and has no window', async () => {
+      mockFetchWithHeaders([mockWorkflowInstance], {});
+      expect((await listWorkflowsDetailed(undefined, { order_id: '1' })).window).toBeUndefined();
+      mockFetchOk([mockWorkflowInstance]); // a response object with no headers at all
+      expect((await listWorkflowsDetailed()).window).toBeUndefined();
+    });
+
+    it('surfaces the server message on a refusal', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: 'Unprocessable Entity',
+        json: () => Promise.resolve({ error: 'start with --query-state-search-window' }),
+      });
+      await expect(listWorkflowsDetailed(undefined, { a: '1' })).rejects.toThrow('--query-state-search-window');
     });
   });
 

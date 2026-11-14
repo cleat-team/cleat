@@ -43,6 +43,11 @@ var ErrSearchUnavailableUnderEncryption = errors.New(
 // ciphertext, so `query_state @> '{"order_id":"123"}'` is false for every row: the filter would not
 // fail, it would answer "no run has that", which is exactly what a caller would read as "there is
 // no such run". Refusing it outright is the same choice ErrSearchUnavailableUnderEncryption made.
+//
+// The stores keep refusing. What changed in part 2 is the HTTP layer: where the store is a
+// QueryStateWindowSearcher and --query-state-search-window is not 0, GET /api/workflows does not call
+// ListWorkflows for this filter at all and answers from a window search that says what it covered. This
+// error is still what a store that cannot search a window, or a worker with the window switched off, returns.
 var ErrQueryStateFilterUnavailableUnderEncryption = errors.New(
 	"filtering by published state is not available with --encrypt-sensitive-payloads: " +
 		"query_state is ciphertext on disk, so the database cannot match a key and value in it")

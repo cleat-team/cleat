@@ -450,6 +450,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if err := validateQueryStateSearchWindow(*queryStateSearchWindow); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	// Before anything else, and before any database is needed: --verify-backend
 	// answers "does this binary have the wasmtime backend?" and exits.
@@ -2621,19 +2625,20 @@ func main() {
 
 	if *apiAddr != "" {
 		api := &apiServer{
-			store:                store,
-			worker:               w,
-			maxBodySize:          *maxBodySize,
-			maxPriorityMagnitude: *maxPriorityMagnitude,
-			db:                   db,
-			factory:              factory,
-			taskQueues:           taskQueues,
-			requireAuth:          *requireAuth,
-			streamHub:            streamHub,
-			provisioner:          tenantProvisionerFor(*driver, store, authResolver),
-			tenantCreationGuard:  creationGuard,
-			schema:               *schemaName,
-			keys:                 authResolver,
+			store:                  store,
+			worker:                 w,
+			maxBodySize:            *maxBodySize,
+			maxPriorityMagnitude:   *maxPriorityMagnitude,
+			queryStateSearchWindow: *queryStateSearchWindow,
+			db:                     db,
+			factory:                factory,
+			taskQueues:             taskQueues,
+			requireAuth:            *requireAuth,
+			streamHub:              streamHub,
+			provisioner:            tenantProvisionerFor(*driver, store, authResolver),
+			tenantCreationGuard:    creationGuard,
+			schema:                 *schemaName,
+			keys:                   authResolver,
 
 			maxStreamPollReaders: *maxStreamPollReadersFlag,
 			streamPollInterval:   *streamPollIntervalFlag,

@@ -85,6 +85,10 @@ type apiServer struct {
 	maxBodySize int64
 	db          *sql.DB
 
+	// queryStateSearchWindow is how many of a tenant's most recent runs a published-state search examines
+	// on a deployment that seals query_state (cleat#3775). 0 refuses that search, naming the flag.
+	queryStateSearchWindow int
+
 	// libraryEntitlement is the one hook point for a per-tenant entitlement to install
 	// a library (cleat#3540, D45). nil allows every tenant every library.
 	libraryEntitlement libraryEntitlementCheck
@@ -769,6 +773,11 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	filter.ExcludeDefNames = internalNames
+
+	// cleat#3775 part 2: where query_state is ciphertext the database cannot match it, so the worker does.
+	if len(filter.QueryState) > 0 && s.searchSealedQueryState(w, r, st, filter) {
+		return
+	}
 
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
