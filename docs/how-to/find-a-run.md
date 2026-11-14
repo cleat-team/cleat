@@ -52,7 +52,8 @@ With `--encrypt-sensitive-payloads` the database holds `query_state` as cipherte
 a database cannot compare ciphertext to a value, so it cannot answer this filter. The
 worker answers it instead: it decrypts the tenant's **most recent N runs** and matches
 the pairs itself. N is `--query-state-search-window` (default **5,000**, at most
-50,000; **0** turns the search off).
+50,000; **0** turns the search off). The default and the ceiling are **extrapolated** from
+measurements at 1,000 and 2,000 runs, not measured at those sizes; see below.
 
 **This exposes nothing the API does not already.** `GET /api/workflows/{id}/query`
 decrypts a run's published state in the worker for any caller who names the run; this
@@ -135,7 +136,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_payloads_query_state
   `ON <schema>.workflow_payloads`.
 - If a `CONCURRENTLY` build is interrupted it leaves an `INVALID` index behind. Drop it
   and run the statement again.
-- **Use that name.** A later release that ships an index of its own would pick a different one.
+- **Use that name.** If a later release ships this index in a migration, it will use the same name with `CREATE INDEX IF NOT EXISTS`, so an index you created is adopted, not duplicated or refused.
 - The filter needs no change to use it: it is written as `query_state @> '{...}'::jsonb`,
   the containment form a GIN index serves, and not `query_state ->> 'key' = 'value'`,
   which none can.
