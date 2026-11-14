@@ -500,7 +500,14 @@ class CleatTestHarness(HostCalls):
     # call
     # ------------------------------------------------------------------
 
-    def call(self, service: str, operation: str, request: Any) -> str:
+    def call(
+        self, service: str, operation: str, request: Any, timeout_ms: int | None = None
+    ) -> str:
+        # ``timeout_ms`` is accepted so a workflow that passes it runs under the
+        # harness (HostCalls.call takes it, and the harness raised TypeError on it:
+        # cleat#3820). It is not enforced: a stubbed call returns at once, so there is
+        # no latency for a deadline to cut, and a stub that should fail with a timeout
+        # is expressed as a stubbed error.
         req_str = self._marshal(request)
 
         # Find first matching stub
@@ -564,9 +571,20 @@ class CleatTestHarness(HostCalls):
     # sleep
     # ------------------------------------------------------------------
 
-    def sleep(self, duration_ms: int) -> bool:
+    # ``sleep``, ``await_signals`` and ``await_promise`` are deliberately NOT
+    # overridden here. :class:`HostCalls` defines each in SECONDS and delegates to
+    # its ``_ms`` form, and the ``_ms`` form is the primitive a host implements.
+    # Overriding only the primitive means a workflow's ``h.sleep(5)`` converts to
+    # 5000 ms exactly as it does on a worker, and the harness has no second copy
+    # of the conversion to get wrong. cleat#3820: the harness used to override the
+    # three seconds-named methods with MILLISECOND signatures, so the same
+    # ``h.sleep(5)`` that sleeps 5 s on a worker advanced the harness clock 5 ms,
+    # and ``sleep_ms`` and the other ``_ms`` forms raised NotImplementedError.
+    # tests/test_harness_units_match_hostcalls.py pins the correspondence.
+
+    def sleep_ms(self, timeout_ms: int) -> bool:
         # In the test harness, sleep advances the clock immediately
-        self.now_ms += duration_ms
+        self.now_ms += timeout_ms
         return False
 
     # ------------------------------------------------------------------
@@ -580,7 +598,7 @@ class CleatTestHarness(HostCalls):
                 return (sig.payload, True)
         return ("", False)
 
-    def await_signals(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
+    def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
         # Check for any immediately available signal
         for i, sig in enumerate(self._pending_signals):
             if sig.name in signal_names and sig.deliver_at_ms <= self.now_ms:
@@ -666,7 +684,7 @@ class CleatTestHarness(HostCalls):
             self._promises[promise_id] = _PromiseState(name=name)
         return promise_id
 
-    def await_promise(self, promise_id: str, timeout_ms: int) -> PromiseResult:
+    def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
         ps = self._promises.get(promise_id)
         if ps is None:
             raise RuntimeError(f"promise {promise_id} not found")
