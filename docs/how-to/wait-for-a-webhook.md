@@ -146,8 +146,8 @@ Two limits. It is **for waits of minutes**: while no event arrives the engine
 re-checks about every 6 s and records history events each time: about 950 an
 hour, measured on a real worker (cleat#3806 tracks an engine-level wait that
 records none). For a wait of hours or days use the loop above, with a
-longer sleep between attempts. And it landed in cleat#3804; **as of 2026-11-14 it is not in 0.6.0**
-(it is slated for 0.7.0), so on 0.6.0 use the loop.
+longer sleep between attempts. And it landed in cleat#3804; **as of 2026-11-14 it is not in 0.6.0**,
+so on 0.6.0 use the loop.
 
 ## 4. Deliver an event
 
