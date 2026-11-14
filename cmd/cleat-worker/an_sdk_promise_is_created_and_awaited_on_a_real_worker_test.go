@@ -28,6 +28,13 @@ import (
 // buildSDKHelperFixture builds testdata/sdkhelpers/<name> with `cleat build`, as a user would.
 func buildSDKHelperFixture(t *testing.T, name string) []byte {
 	t.Helper()
+	return buildFixture(t, filepath.Join("testdata", "sdkhelpers", name))
+}
+
+// buildFixture builds the workflow at relDir (relative to the repository root) with `cleat build`, as a user
+// would, and returns the module.
+func buildFixture(t *testing.T, relDir string) []byte {
+	t.Helper()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
@@ -39,7 +46,7 @@ func buildSDKHelperFixture(t *testing.T, name string) []byte {
 
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "cleat"),
-		"build", "--target", "go", "-o", tmpDir, filepath.Join(projectRoot, "testdata", "sdkhelpers", name))
+		"build", "--target", "go", "-o", tmpDir, filepath.Join(projectRoot, relDir))
 	cmd.Dir = projectRoot
 	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
