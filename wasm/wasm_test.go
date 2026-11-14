@@ -800,7 +800,7 @@ func TestCollectHostCallsCallsNilBody(t *testing.T) {
 		Ast:  &ast.FuncDecl{Body: nil},
 	}
 	info := &UsageInfo{}
-	collectHostCallsCalls(fd, info)
+	collectHostCallsCalls(&analyzer.AnalysisResult{}, fd, info)
 	// Should not panic when Ast is nil.
 }
 
