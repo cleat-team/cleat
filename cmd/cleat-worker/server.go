@@ -321,7 +321,7 @@ func (s *apiServer) scopedStore(w http.ResponseWriter, r *http.Request) (engine.
 			s.writeError(w, http.StatusUnauthorized, "authentication required")
 			return nil, false
 		}
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreError(w, r, err)
 		return nil, false
 	}
 	return st, true
@@ -781,12 +781,12 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 
 	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeListWorkflowsError(w, err)
+		s.writeListWorkflowsError(w, r, err)
 		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
-		s.writeListWorkflowsError(w, err)
+		s.writeListWorkflowsError(w, r, err)
 		return
 	}
 	// cleat#1986 slice 2b, moved into the query by cleat#3009: the internal
@@ -806,14 +806,14 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 // writeListWorkflowsError answers a failed listing. A published-state filter on a worker that seals
 // query_state is the caller asking for something this deployment cannot do, which is 422 and says which
 // flag (cleat#3775); a refusal as a 500 would read as a fault to retry. Everything else is the 500 it was.
-func (s *apiServer) writeListWorkflowsError(w http.ResponseWriter, err error) {
+func (s *apiServer) writeListWorkflowsError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, engine.ErrQueryStateFilterUnavailableUnderEncryption):
 		s.writeError(w, http.StatusUnprocessableEntity, engine.ErrQueryStateFilterUnavailableUnderEncryption.Error())
 	case errors.Is(err, engine.ErrQueryStateFilterTooManyPairs):
 		s.writeError(w, http.StatusBadRequest, err.Error())
 	default:
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 	}
 }
 
@@ -928,7 +928,7 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 	if key := r.URL.Query().Get("key"); key != "" {
 		value, err := st.GetQueryState(r.Context(), id, key)
 		if err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"key": key, "value": queryValueFor(r, value)})
@@ -977,7 +977,7 @@ func (s *apiServer) handleGetTerminalRun(w http.ResponseWriter, r *http.Request,
 	}
 	wf, err := st.GetTerminalRun(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if wf == nil {
@@ -1098,7 +1098,14 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// a word (cleat#3552).
 	suspended, serr := engine.TenantSuspended(r.Context(), st, tenantID)
 	if serr != nil {
-		s.writeError(w, 500, serr.Error())
+		if errors.Is(serr, engine.ErrTenantSuspensionUnanswerable) {
+			// Our own configuration error, written for the operator: it names the store type that has to
+			// implement the question. Not a store failure, so it keeps its text (cleat#3878).
+			// error-text-ok: engine.ErrTenantSuspensionUnanswerable is our own sentence, naming the store type
+			s.writeError(w, 500, serr.Error())
+			return
+		}
+		s.writeStoreError(w, r, serr)
 		return
 	}
 	if suspended {
@@ -1111,7 +1118,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// Find the latest version of this workflow.
 	versions, err := st.ListVersions(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if len(versions) == 0 {
@@ -1149,7 +1156,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// API -- the request is well-formed and the state says no.
 	ok, vErr := st.ValidateVersion(r.Context(), name, targetVersion)
 	if vErr != nil {
-		s.writeError(w, 500, vErr.Error())
+		s.writeStoreError(w, r, vErr)
 		return
 	}
 	if !ok {
@@ -1208,7 +1215,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// or not this feature exists, when determineEntryPoint runs again at
 	// execution time.
 	if def, defErr := st.GetWorkflowDef(r.Context(), name, targetVersion); defErr != nil {
-		s.writeError(w, 500, defErr.Error())
+		s.writeStoreError(w, r, defErr)
 		return
 	} else if def != nil && !def.InputValidationDisabled && len(def.EntryPointSchemas) > 0 {
 		if entryPoint, epErr := determineEntryPoint(in, def.WASMBytes); epErr == nil {
@@ -1296,7 +1303,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 				"detail": "idempotency_key_input_mismatch",
 			})
 		default:
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 		}
 		return
 	}
@@ -1419,7 +1426,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		ttl := 30 * time.Minute
 		acquired, err := st.AcquireConcurrencyKey(r.Context(), concurrencyKey, runID, ttl)
 		if err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		if !acquired {
@@ -1481,7 +1488,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 				// was enforced.
 				slog.ErrorContext(r.Context(), "concurrency key conflict: could not reject the losing run, it remains runnable",
 					"run_id", runID, "concurrency_key", concurrencyKey, "error", err)
-				s.writeError(w, 500, "workflow already running with key "+concurrencyKey+", and the losing run could not be rejected: "+err.Error())
+				s.writeError(w, 500, "workflow already running with key "+concurrencyKey+", and the losing run could not be rejected; the error is in the worker log")
 				return
 			}
 			// cleat#1172: the refusal used to say only "workflow already
@@ -1570,7 +1577,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 				s.writeError(w, 404, "not found")
 				return
 			}
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		if !signalCallerAllowed(callers, "*") {
@@ -1603,7 +1610,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 				s.writeError(w, 404, "not found")
 				return
 			}
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		// 200 either way, and `status` says only WHAT HAPPENED. It used to
@@ -1626,7 +1633,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 			s.writeError(w, 404, "not found")
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	// Keyless: no token, so nothing to replay -- the caller keeps the right to
@@ -1702,7 +1709,7 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	if err := st.RequestCancellation(r.Context(), id, req.Reason); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "cancellation_requested"})
@@ -1862,7 +1869,7 @@ func (s *apiServer) handleListRoutingRules(w http.ResponseWriter, r *http.Reques
 	}
 	rules, err := st.GetRoutingRules(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	// A list, never null: an empty routing table is the normal state, and a
@@ -1919,7 +1926,7 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	// deprecated is precisely the mistake worth refusing.
 	valid, vErr := st.ValidateVersion(r.Context(), name, req.TargetVersion)
 	if vErr != nil {
-		s.writeError(w, 500, vErr.Error())
+		s.writeStoreError(w, r, vErr)
 		return
 	}
 	if !valid {
@@ -1930,7 +1937,7 @@ func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request,
 	}
 
 	if err := st.SetRoutingRule(r.Context(), name, req.TargetVersion, weight); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 201, map[string]any{
@@ -1964,7 +1971,7 @@ func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Reque
 			s.writeError(w, 404, "routing rule not found: "+ruleID)
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "removed"})
@@ -2011,7 +2018,7 @@ func (s *apiServer) handleListWorkflowTags(w http.ResponseWriter, r *http.Reques
 	}
 	tags, err := st.GetWorkflowTags(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	// An object, never null: no tags is the normal state for most definitions.
@@ -2075,7 +2082,7 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 	// policy that spreads it.
 	valid, vErr := st.ValidateVersion(r.Context(), name, req.Version)
 	if vErr != nil {
-		s.writeError(w, 500, vErr.Error())
+		s.writeStoreError(w, r, vErr)
 		return
 	}
 	if !valid {
@@ -2089,7 +2096,7 @@ func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request,
 	// that already exists MOVES it rather than creating a second one. The store
 	// upserts; the verb should say so.
 	if err := st.SetWorkflowTag(r.Context(), name, req.Version, req.Tag); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]any{
@@ -2108,7 +2115,7 @@ func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "removed"})
@@ -2136,13 +2143,13 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 
 	total, err := st.CountEventHistory(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
 	history, err := st.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if history == nil {
@@ -2284,7 +2291,7 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 	if !r.URL.Query().Has("key") {
 		all, err := st.ListQueryState(r.Context(), id)
 		if err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeStoreError(w, r, err)
 			return
 		}
 		if wantsRedaction(r) {
@@ -2300,7 +2307,7 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 	key := r.URL.Query().Get("key")
 	value, err := st.GetQueryState(r.Context(), id, key)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"key": key, "value": queryValueFor(r, value)})
@@ -2348,7 +2355,7 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	// the other twelve handlers already did. Found by WS-3 sweeping the shape.
 	spec, err := st.LoadDAGSpec(r.Context(), wf.DefName, wf.DefVersion)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if spec == nil {
@@ -2395,7 +2402,7 @@ func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Reque
 			s.writeError(w, 404, "workflow not found")
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if callers == nil {
@@ -2441,7 +2448,7 @@ func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Reque
 			s.writeError(w, 404, "workflow not found")
 			return
 		}
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]any{"allowed_signals": req.AllowedSignals})
@@ -2458,7 +2465,7 @@ func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, i
 	}
 	promises, err := st.ListPromises(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if promises == nil {
@@ -2494,7 +2501,7 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if err := st.ResolvePromise(r.Context(), promiseID, req.Result); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "resolved"})
@@ -2522,7 +2529,7 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err := st.RejectPromise(r.Context(), promiseID, req.Reason); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "rejected"})
@@ -2626,7 +2633,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	// Check if there's already a pending update with the same name.
 	pending, pErr := st.GetPendingUpdateRequests(r.Context(), id)
 	if pErr != nil {
-		s.writeError(w, 500, pErr.Error())
+		s.writeStoreError(w, r, pErr)
 		return
 	}
 	for _, p := range pending {
@@ -2690,7 +2697,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	// concurrency control: one request per name may be in flight, and the next
 	// one is accepted the moment that one is answered.
 	if err := st.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
@@ -2722,7 +2729,7 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 	}
 	schedules, err := st.ListSchedules(r.Context())
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if schedules == nil {
@@ -2966,7 +2973,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 
 	defs, err := st.ListWorkflowDefs(r.Context(), "")
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -376,7 +377,9 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 	// ---- the durable part ----
 	history, err := st.LoadEventHistory(r.Context(), id)
 	if err != nil {
-		msg := err.Error()
+		// The driver's text is logged, not sent (cleat#3878); a decryption refusal gets a sentence it can act on.
+		slog.ErrorContext(r.Context(), "stream: could not load the run's history", "run_id", id, "error", err)
+		msg := "the server could not read this workflow's history"
 		if errors.Is(err, engine.ErrPayloadDecryption) {
 			// This is the strict load, so an unreadable history is an error
 			// rather than a transcript of "[DECRYPTION_FAILED]" chunks that
@@ -624,7 +627,8 @@ func (s *apiServer) followFromHistory(
 			if ctx.Err() != nil {
 				return
 			}
-			out.event("error", "", map[string]any{"message": err.Error()})
+			slog.ErrorContext(ctx, "stream: could not read the run's stream chunks", "run_id", id, "error", err)
+			out.event("error", "", map[string]any{"message": "the server could not read this workflow's stream"})
 			return
 		}
 		for _, rec := range recs {

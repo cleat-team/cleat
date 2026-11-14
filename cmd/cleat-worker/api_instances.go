@@ -59,13 +59,13 @@ func (s *apiServer) handleGetInstanceEvents(w http.ResponseWriter, r *http.Reque
 
 	total, err := st.CountEventHistory(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 
 	history, err := st.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeStoreError(w, r, err)
 		return
 	}
 	if history == nil {

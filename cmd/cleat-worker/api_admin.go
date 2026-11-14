@@ -287,7 +287,7 @@ func (s *apiServer) scopedStoreForTenant(w http.ResponseWriter, r *http.Request,
 	}
 	st, err := s.openTenantStore(r, tenant)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreError(w, r, err)
 		return nil, false
 	}
 	return st, true
