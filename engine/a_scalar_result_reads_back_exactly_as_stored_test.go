@@ -12,8 +12,8 @@ package engine
 // are in the table on purpose -- the fix keeps `#>>` for the decrypt step, and a version that read the exact text
 // everywhere would have broken them.
 //
-// SQL Server stores only objects and arrays (CHECK ck_workflow_promises_result / ck_workflow_instances_result,
-// cleat#3816), so its scalar rows are not run; that refusal is a separate defect and is not pinned here.
+// SQL Server is in the table too. It used to refuse every scalar through CHECK ck_workflow_promises_result /
+// ck_workflow_instances_result (isjson(x) is 0 for a bare scalar); the SQL Server migration 019_a_json_scalar_result_is_stored.sql (cleat#3816) uses isjson(x, VALUE).
 
 import (
 	"context"
@@ -92,15 +92,6 @@ func TestAScalarResultReadsBackExactlyAsStored(t *testing.T) {
 				ctx := context.Background()
 
 				shapes := resultShapes()
-				if backend.Name() == "mssql" {
-					kept := shapes[:0]
-					for _, sh := range shapes {
-						if !sh.scalar {
-							kept = append(kept, sh)
-						}
-					}
-					shapes = kept
-				}
 				if len(shapes) == 0 {
 					t.Fatal("no shapes to run")
 				}
