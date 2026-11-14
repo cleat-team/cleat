@@ -64,7 +64,7 @@ func main() {
 		}
 		b = appendCustomSection(b, pinSection, p)
 	}
-	if err := os.WriteFile(*out, b, 0o644); err != nil {
+	if err := os.WriteFile(*out, b, 0o644); err != nil { //nolint:gosec // G703: -out is the module path the build script passes; a build tool writes where it was told, and the module is not a secret
 		fatal(err)
 	}
 }

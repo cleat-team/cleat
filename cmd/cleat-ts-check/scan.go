@@ -58,7 +58,7 @@ func isIdentPart(c byte) bool { return isIdentStart(c) || (c >= '0' && c <= '9')
 // quote inside one can desynchronise the scan; an unterminated string, template or comment at end of file is reported as
 // UNMEASURED so that desynchronisation cannot silently hide a finding behind a swallowed remainder.
 func checkFile(path string) result {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // G703: the path is the workflow source the developer named on this command line; a build tool reads the file it was asked to check
 	if err != nil {
 		return result{unmeasured: "cannot read the file: " + err.Error()}
 	}
