@@ -75,12 +75,10 @@ var goFixtureExpectations = map[string]string{
 	// cleat#1967: the workflow README.md's first command runs. No DurableCall,
 	// so it must verify cleanly with nothing else running.
 	"hello": "",
-	// cleat#1131. Verifies cleanly BECAUSE of analyzer.SDKDurableHelper: its
-	// saga steps are StepCall data, so the DurableCall lives in the SDK and
-	// nothing in this package writes a HostCalls method. Before that predicate
-	// it also "verified cleanly" -- and produced a module importing no
-	// cleat_call, which is why the real guard is the import check in
-	// testdata/sagaparameterised's sibling test rather than this row.
+	// cleat#1131. Its saga steps are StepCall data, so the DurableCall lives in the SDK and nothing in this
+	// package writes a HostCalls method. It verifies cleanly because analyzer.DepHostCalls reads Saga.AddStepCall's
+	// body (cleat#3803; a hand list of names before that). Without it the module built, imported no cleat_call,
+	// and failed at run time; the import check is in cmd/cleat's an_sdk_function_that_makes_host_calls_wires_them_test.go.
 	"sagaparameterised": "",
 	"minimal-wf":        "",
 	"noargs":            "",

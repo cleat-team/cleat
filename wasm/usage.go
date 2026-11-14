@@ -30,78 +30,6 @@ const GoTarget = "go"
 // Used by the Go build system to dispatch to the componentize-py pipeline.
 const PythonTarget = "python"
 
-// sdkHelperImports maps an SDK helper method to the host functions it makes on
-// the caller's behalf. Keyed by "Type.Method".
-//
-// This exists because collectHostCallsCalls finds imports by spotting HostCalls
-// methods in workflow code. A helper that makes the call itself is invisible to
-// that, and the failure is silent: the module builds, imports nothing, and dies
-// at run time with "the HostCalls runtime was not initialized" -- the same
-// symptom as cleat#1005, from the opposite direction.
-var sdkHelperImports = map[string][]string{
-	"Saga.AddStepCall": {"cleat_call"},
-
-	// Saga.Run and Saga.RunWithResult share one body -- Run delegates to
-	// RunWithResult (cleat#2627) -- so both need the same imports: the saga's
-	// own LogKV, and the SetQueryState it publishes its progress with. The
-	// steps' calls are closures the workflow wrote, so they need nothing here.
-	//
-	// TWO KEYS, not one, because the analyzer sees the method the WORKFLOW
-	// calls: saga.Run(h) hits the first, saga.RunWithResult(h) the second.
-	// Before #2627 the saga made no SetQueryState call and order-lifecycle
-	// wrote its own in workflow code, which the ordinary scan caught. The saga
-	// makes it now, so it has to be declared here or the module builds, imports
-	// nothing, and publishes nothing at run time -- the failure this table
-	// exists to prevent, and one a host-side test cannot see.
-	"Saga.Run":           {"cleat_log", "set_query_state"},
-	"Saga.RunWithResult": {"cleat_log", "set_query_state"},
-
-	// Selector.Select calls six HostCalls methods -- DurableSleep, Now,
-	// AwaitSignals, PollSignal, PollChild and AwaitAnyChild -- and this list
-	// is the union of what each of those needs, including the update-dispatch
-	// imports the composites pull in. (It called AwaitChild until cleat#3369,
-	// which suspended on a running child instead of racing it.)
-	//
-	// Spelled out rather than derived, to match hostFunctions and
-	// compositeRequires, which are hand lists for the same reason: the tables
-	// are the contract and a source-derived TEST is what keeps them honest.
-	// TestEverySDKHelperHasItsImports is that test for this row, and it fails
-	// with the missing import named if Select grows a sixth call.
-	"Selector.Select": {
-		"cleat_sleep",
-		"cleat_now",
-		"cleat_await_signals",
-		"cleat_poll_signal",
-		"cleat_poll_child",
-		"cleat_await_any_child",
-		"cleat_poll_update",
-		"cleat_complete_update",
-		"cleat_log",
-	},
-
-	// AddTimer only reads the clock, and an unwired clock is not a lesser
-	// version of this bug: Now() returns 0, so the deadline is computed from
-	// the epoch and has already passed.
-	"Selector.AddTimer": {"cleat_now"},
-}
-
-// sdkHelperKey renders a selection as "Type.Method", or "" when the receiver is
-// not a named SDK type. Pointer receivers are unwrapped, so *Saga keys as Saga.
-func sdkHelperKey(sel *types.Selection, method string) string {
-	if sel == nil {
-		return ""
-	}
-	t := sel.Recv()
-	if ptr, ok := t.(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	named, ok := t.(*types.Named)
-	if !ok || named.Obj() == nil {
-		return ""
-	}
-	return named.Obj().Name() + "." + method
-}
-
 // HostFunction identifies a host function that can be imported from the
 // WASM host environment (e.g., "cleat_call", "cleat_sleep").
 type HostFunction struct {
@@ -291,6 +219,30 @@ type UsageInfo struct {
 	// the two -- a fail-open in the exact field this feature protects, decided
 	// by which file sorts last. See collectExposure.
 	ExposureConflict string
+
+	// OpaqueHostCalls lists the places the workflow reaches a dependency function that hands the host-call
+	// runtime to code the build cannot read (cleat#3803). The build cannot say which host calls that code
+	// makes, so it refuses rather than emit a module that may fail at run time. Empty for every function in
+	// the SDK today; see TestNoSDKFunctionHandsTheRuntimeToCodeTheBuildCannotRead.
+	OpaqueHostCalls []OpaqueHostCall
+}
+
+// OpaqueHostCall is one such place.
+type OpaqueHostCall struct {
+	Pos    string // where the workflow references the dependency function
+	Callee string // that function
+	Inside string // the call inside the dependency the build cannot follow
+	Call   string // that call as written
+	Why    string
+}
+
+func (u *UsageInfo) addOpaque(o OpaqueHostCall) {
+	for _, have := range u.OpaqueHostCalls {
+		if have.Callee == o.Callee && have.Inside == o.Inside {
+			return
+		}
+	}
+	u.OpaqueHostCalls = append(u.OpaqueHostCalls, o)
 }
 
 // AnalyzeUsage scans every function in the cleat closure and returns
@@ -315,7 +267,7 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 		if !durableSet[fd.FullyQualifiedName()] {
 			continue
 		}
-		collectHostCallsCalls(fd, info)
+		collectHostCallsCalls(result, fd, info)
 	}
 
 	// Incorporate //cleat:require directives from source comments.
@@ -601,7 +553,7 @@ func collectExposure(result *analyzer.AnalysisResult, info *UsageInfo) {
 
 // collectHostCallsCalls walks a function body and records which HostCalls
 // methods are called.
-func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
+func collectHostCallsCalls(result *analyzer.AnalysisResult, fd *analyzer.FuncDecl, info *UsageInfo) {
 	if fd.Ast.Body == nil || fd.Pkg.Info == nil {
 		return
 	}
@@ -622,6 +574,47 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 	// own reasons, because that marked the import used by another route.
 	fieldToImport := fieldImports()
 
+	// useHostCall records the imports a HostCalls method needs. Both routes to a host call use it: a method
+	// the workflow names itself, and one a dependency function makes on its behalf (below).
+	useHostCall := func(fieldName string) {
+		for _, importName := range fieldToImport[fieldName] {
+			if importName != "" {
+				info.Used[importName] = true
+			}
+		}
+		// Wrappers implemented over another host call. See compositeRequires.
+		for _, importName := range compositeRequires[fieldName] {
+			info.Used[importName] = true
+		}
+	}
+
+	// Host calls made by functions the workflow merely invokes (cleat#3803, cleat#3805).
+	//
+	// This scan finds imports by spotting HostCalls methods in WORKFLOW source. A call inside an SDK function
+	// -- cleat.NewPromiseTyped, Promise.Await, SagaTyped.Run, Selector.Select -- is invisible to that, and
+	// the failure is silent: the module builds, imports nothing, and dies at run time with "the HostCalls
+	// runtime was not initialized". This used to be answered by a hand list of "Type.Method" names, which a
+	// package-level function or a method on a generic type could never be in. The summary is read from the
+	// function's own body instead (analyzer.DepHostCalls), so there is no list to forget to extend.
+	for _, ref := range result.DepReferences(fd) {
+		for _, m := range ref.Summary.Methods {
+			useHostCall(m)
+		}
+		if ref.Summary.PluginCall {
+			info.Used["plugin_call"] = true
+			info.Used["plugin_call_streaming"] = true
+		}
+		for _, o := range ref.Summary.Opaque {
+			info.addOpaque(OpaqueHostCall{
+				Pos:    fd.Pkg.Fset.Position(ref.Pos).String(),
+				Callee: ref.Fn.FullName(),
+				Inside: o.Pos,
+				Call:   o.Callee,
+				Why:    o.Why,
+			})
+		}
+	}
+
 	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -641,37 +634,10 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 				info.Used["plugin_call"] = true
 				info.Used["plugin_call_streaming"] = true
 			}
-			// SDK helpers that make a host call the workflow never writes.
-			//
-			// Saga.AddStepCall takes a StepCall -- data -- and builds the
-			// DurableCall closures inside the SDK, which is the whole point:
-			// it is the one form that can be parameterised without tripping
-			// E009 or the durable-leaf check (cleat#1131). But this scan finds
-			// imports by looking for HostCalls methods in WORKFLOW code, and
-			// AddStepCall's receiver is *Saga, so nothing here saw it: the
-			// module built clean, imported no cleat_call, and would have failed
-			// at RUN time on the first step.
-			//
-			// Saga.AddStep does not need a row, because the user writes the
-			// closure and its h.DurableCall is visible to the scan above. This
-			// is the first SDK API where the durable call is not in user code.
-			if analyzer.SDKDurableHelper(sel) {
-				for _, importName := range sdkHelperImports[sdkHelperKey(sel, selExpr.Sel.Name)] {
-					info.Used[importName] = true
-				}
-			}
 			return true
 		}
 		fieldName := selExpr.Sel.Name
-		for _, importName := range fieldToImport[fieldName] {
-			if importName != "" {
-				info.Used[importName] = true
-			}
-		}
-		// Wrappers implemented over another host call. See compositeRequires.
-		for _, importName := range compositeRequires[fieldName] {
-			info.Used[importName] = true
-		}
+		useHostCall(fieldName)
 
 		// Extract the child workflow name from the first argument.
 		if fieldName == "ChildWorkflow" || fieldName == "ChildWorkflowWithOptions" || fieldName == "ChildWorkflowTyped" {
