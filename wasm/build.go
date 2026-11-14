@@ -608,7 +608,8 @@ func AbsoluteEntryPath(entry string) string {
 // the output format based on targetRuntime:
 //   - "wasmtime" — Component Model binary (skip decomposition)
 //   - "wazero"   — decomposed core WASM module
-//   - ""         — both formats (default)
+//   - ""         — the component, as for "wasmtime" (default; it used to mean both formats and
+//     warned about wasm-tools on every build, cleat#3818)
 //
 // WHERE build_wasm.py COMES FROM. Until cleat#3793 this found it only by walking
 // up from the project directory to a cleat repo root and into

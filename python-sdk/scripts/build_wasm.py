@@ -340,9 +340,11 @@ def main():
         "--runtime",
         default=None,
         help="Target WASM runtime: 'wasmtime' or 'wazero'. "
-             "When 'wasmtime', the output is decomposed core WASM with component backup. "
-             "When 'wazero', the output is a decomposed core WASM module. "
-             "When unset, both formats are produced (default).",
+             "When 'wasmtime', or when unset (the default), the output is the WASM Component "
+             "Model binary componentize-py produced, which is what the worker runs; no other "
+             "tool is needed. "
+             "When 'wazero', the output is a decomposed core WASM module, which needs wasm-tools "
+             "(wazero backs developer tooling only, not the worker).",
     )
 
     args = parser.parse_args()
@@ -423,7 +425,7 @@ def main():
     # ---- Apply --runtime to control decomposition behavior ----
     # --runtime wasmtime  -> no decomposition; wasmtime runs the component itself
     # --runtime wazero    -> decompose, keep only core WASM (no component)
-    # No --runtime        -> produce both, but decomposition is best-effort
+    # No --runtime        -> the same as wasmtime: no decomposition (cleat#3818)
     #
     # The wasmtime branch used to set skip_decompose = False, with a comment
     # reading "(wasmtime backend uses core WASM)". That stopped being true on
@@ -443,7 +445,22 @@ def main():
         args.skip_decompose = False
         args.keep_component = False
     elif args.runtime is None:
-        # Default: produce both formats.
+        # Default: the component, as for wasmtime (cleat#3818).
+        #
+        # This used to "produce both formats", with decomposition best-effort, and it
+        # warned on every default build on every machine: wasm-tools absent printed "no
+        # core WASM module was produced", and a wasm-tools new enough to have dropped
+        # `component decompose` (1.261.0 has) printed "not available in this version.
+        # Install an older wasm-tools", which is advice to downgrade a tool for an output
+        # nothing consumes. The component is what the worker runs Python from, and the
+        # core module is only for wazero, which backs developer tooling and is chosen
+        # with --runtime wazero. Measured 2026-11-14 on a hello-world build: both of
+        # those configurations wrote a component (magic 00 61 73 6d 0d 00 01 00) and
+        # exited 0 with the warning. By reading, not run (the installed 1.261.0 cannot
+        # decompose): a wasm-tools OLD enough to decompose replaced the output with the
+        # core module (the os.replace below), so the default output depended on which
+        # tool version happened to be installed.
+        args.skip_decompose = True
         args.keep_component = True
 
     # ---- Decompose component model to core WASM ----
