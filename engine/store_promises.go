@@ -382,7 +382,7 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT workflow_id, COALESCE(request_id, update_name), update_name, payload #>> '{}', COALESCE(promise_id, ''), status,
+		SELECT workflow_id, COALESCE(request_id, update_name), update_name, COALESCE(payload #>> '{}', ''), COALESCE(promise_id, ''), status,
 		       COALESCE(result #>> '{}', ''), COALESCE(error_msg, ''), created_at
 		FROM workflow_update_requests
 		WHERE workflow_id = $1 AND tenant_id = $2 AND status = 'pending'
@@ -400,6 +400,10 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 			&r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
 		}
+		// cleat#3822: `payload #>> '{}'` is SQL NULL for a JSON null payload, which Scan refuses to put in a
+		// string, so one `null` update made this whole list unreadable; it is COALESCEd to '', as the result
+		// column already was and as MySQL and SQL Server read a null payload.
+		//
 		// cleat#2312: decrypt before compaction -- this feeds the guest's
 		// update-dispatch path, not only display. `payload #>> '{}'` and
 		// `result #>> '{}'` in the SELECT above text-extract the jsonb
