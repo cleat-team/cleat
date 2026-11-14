@@ -1,0 +1,12 @@
+# The Python twin of the numbers workflow is built with componentize-py (cleat build --target python), which is the only
+# thing that produces a Python Component Model binary. Pinned exactly, with the sha256 of EVERY file PyPI publishes for this
+# version, and installed with `pip install --require-hashes`: pip refuses a file whose hash is not listed, so a swapped or
+# tampered wheel fails the job closed before it is imported. 0.25.1 was published 2026-09-12; it has no dependencies.
+# Re-derive the hashes: curl -s https://pypi.org/pypi/componentize-py/<version>/json
+componentize-py==0.25.1 \
+    --hash=sha256:65fbc4a94df1de8acf7da50a1f5ed1711230188844e53e6332d99029be4e0afa \
+    --hash=sha256:a556991534cc496207a9d2ca733c4b0f17ed38ef56a8d6b5f1847fdf1225dd1b \
+    --hash=sha256:7b6a87c520358166843af0daa86d2312d7af4cbcbbf1e598951085cf7f2991ca \
+    --hash=sha256:8623cd8cab8453cb0cd8bf03f3c7103420d06f2f3d360186a280a70a1ca5e89f \
+    --hash=sha256:c7fd552fb0849858b0c1e8981543ed5dff4b0cc1597a8ea0bc26a495786dc0c6 \
+    --hash=sha256:e4087e916b06171303f803c8ffdd5f177e2422e87d9bed6ffe55cc41b2248aa8
