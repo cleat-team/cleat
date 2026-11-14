@@ -957,9 +957,9 @@ public class Plugins {
     public AwaitEventResult awaitEvent(String eventType, long timeoutMs) {
         String input = "{\"event_type\":\"" + JsonHelper.escapeJson(eventType)
             + "\",\"timeout_ms\":" + timeoutMs + "}";
-        CleatResult<String> pluginResult = host.pluginCall("eventtriggers", "await_event", input);
+        CleatResult<String> pluginResult = host.pluginCall("event-triggers", "await_event", input);
         if (pluginResult.isErr()) {
-            throw new RuntimeException("plugin_call(eventtriggers.await_event) failed: " + pluginResult.getError());
+            throw new RuntimeException("plugin_call(event-triggers.await_event) failed: " + pluginResult.getError());
         }
         String response = pluginResult.getValue();
         return AwaitEventResult.fromJson(response);
@@ -986,9 +986,9 @@ public class Plugins {
         }
         sb.append("}");
 
-        CleatResult<String> pluginResult = host.pluginCall("featureflags", "evaluate_flag", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("feature-flags", "evaluate_flag", sb.toString());
         if (pluginResult.isErr()) {
-            throw new RuntimeException("plugin_call(featureflags.evaluate_flag) failed: " + pluginResult.getError());
+            throw new RuntimeException("plugin_call(feature-flags.evaluate_flag) failed: " + pluginResult.getError());
         }
         String response = pluginResult.getValue();
         return EvaluateFlagResult.fromJson(response);
@@ -1022,9 +1022,9 @@ public class Plugins {
         }
         sb.append("}");
 
-        CleatResult<String> pluginResult = host.pluginCall("kafkaconnect", "produce", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("kafka-connect", "produce", sb.toString());
         if (pluginResult.isErr()) {
-            throw new RuntimeException("plugin_call(kafkaconnect.produce) failed: " + pluginResult.getError());
+            throw new RuntimeException("plugin_call(kafka-connect.produce) failed: " + pluginResult.getError());
         }
         String response = pluginResult.getValue();
         return ProduceResult.fromJson(response);
@@ -1093,9 +1093,9 @@ public class Plugins {
         }
         sb.append("}");
 
-        CleatResult<String> pluginResult = host.pluginCall("pagerdutyalert", "trigger_incident", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("pagerduty-alert", "trigger_incident", sb.toString());
         if (pluginResult.isErr()) {
-            throw new RuntimeException("plugin_call(pagerdutyalert.trigger_incident) failed: " + pluginResult.getError());
+            throw new RuntimeException("plugin_call(pagerduty-alert.trigger_incident) failed: " + pluginResult.getError());
         }
         String response = pluginResult.getValue();
         return TriggerIncidentResult.fromJson(response);
@@ -1112,9 +1112,9 @@ public class Plugins {
     public ResolveIncidentResult resolveIncident(String configId, String incidentKey) {
         String input = "{\"config_id\":\"" + JsonHelper.escapeJson(configId)
             + "\",\"incident_key\":\"" + JsonHelper.escapeJson(incidentKey) + "\"}";
-        CleatResult<String> pluginResult = host.pluginCall("pagerdutyalert", "resolve_incident", input);
+        CleatResult<String> pluginResult = host.pluginCall("pagerduty-alert", "resolve_incident", input);
         if (pluginResult.isErr()) {
-            throw new RuntimeException("plugin_call(pagerdutyalert.resolve_incident) failed: " + pluginResult.getError());
+            throw new RuntimeException("plugin_call(pagerduty-alert.resolve_incident) failed: " + pluginResult.getError());
         }
         String response = pluginResult.getValue();
         return ResolveIncidentResult.fromJson(response);
@@ -1151,9 +1151,9 @@ public class Plugins {
         }
         sb.append("}");
 
-        CleatResult<String> pluginResult = host.pluginCall("slacknotify", "send_message", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("slack-notify", "send_message", sb.toString());
         if (pluginResult.isErr()) {
-            throw new RuntimeException("plugin_call(slacknotify.send_message) failed: " + pluginResult.getError());
+            throw new RuntimeException("plugin_call(slack-notify.send_message) failed: " + pluginResult.getError());
         }
         String response = pluginResult.getValue();
         return SendMessageResult.fromJson(response);
@@ -1179,9 +1179,9 @@ public class Plugins {
         }
         sb.append("}");
 
-        CleatResult<String> pluginResult = host.pluginCall("webhookingest", "await_webhook", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("webhook-ingest", "await_webhook", sb.toString());
         if (pluginResult.isErr()) {
-            throw new RuntimeException("plugin_call(webhookingest.await_webhook) failed: " + pluginResult.getError());
+            throw new RuntimeException("plugin_call(webhook-ingest.await_webhook) failed: " + pluginResult.getError());
         }
         String response = pluginResult.getValue();
         return AwaitWebhookResult.fromJson(response);

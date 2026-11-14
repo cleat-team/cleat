@@ -245,6 +245,28 @@ var tutorialDocs = []tutorialDoc{
 		},
 	},
 	{
+		// cleat#3789. The page that replaced use-plugins.md's webhook example,
+		// which compiled for months while sending fields the plugin rejects:
+		// compiling proves the Go is well-formed, and the page's commands were
+		// run separately (see the PR). The Python and shell blocks are not Go
+		// fences and are not covered here.
+		path:     "docs/how-to/wait-for-a-webhook.md",
+		perBlock: true,
+		fragments: []tutorialFragment{
+			{
+				marker: "func WaitForPayment(",
+				header: "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\n\t\"github.com/cleat-team/cleat/cleat\"\n)",
+			},
+		},
+		knownBroken: &tutorialFragment{marker: "func WaitForPayment("},
+		brokenText: "func WaitForPayment(h cleat.HostCalls, input string) (string, error) {\n" +
+			"\tunusedLocal := 1\n" +
+			"\t_ = json.RawMessage{}\n" +
+			"\t_ = fmt.Sprint(\"\")\n" +
+			"\treturn \"\", nil\n}\n",
+		brokenWant: "declared and not used: unusedLocal",
+	},
+	{
 		// cleat#3097. A how-to page is a different SHAPE from a tutorial: each
 		// block is an independent illustration rather than a part of one program,
 		// so it is compiled one file per block (perBlock).

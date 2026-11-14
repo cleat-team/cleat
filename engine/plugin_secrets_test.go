@@ -29,6 +29,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -553,5 +554,39 @@ func TestPluginSecretsRequestPathPutCreatesOwnRowAndDoesNotTouchAnother(t *testi
 				t.Fatalf("tenant A's secret was touched by tenant B's Put: got=%q err=%v", got, err)
 			}
 		})
+	}
+}
+
+// cleat#3789: a worker with no secret master key must hand a plugin an error it
+// can recognise. engine.ErrNoSecretMasterKey is not importable from plugin
+// code, so the adapter translates it, as it does for not-found. Both Put
+// shapes, because they are two methods that each needed the translation.
+func TestPluginSecretsPutWithNoMasterKeyReturnsThePluginSentinel(t *testing.T) {
+	// A handle that is never used: PutSecret seals before it touches the database,
+	// and with no ring there is nothing to seal with, so it returns first.
+	db, err := sql.Open("postgres", "postgres://nobody@127.0.0.1:1/none?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewSecretStore(db, "postgres", nil) // nil master: no ring to seal with
+	if err != nil {
+		t.Fatal(err)
+	}
+	tid := uuid.New()
+	ctx := tenantctx.With(context.Background(), tid)
+	adapter := NewPluginSecrets(store)
+
+	if err := adapter.Put(ctx, "name", "value"); !errors.Is(err, plugin.ErrNoSecretMasterKey) {
+		t.Errorf("Put: err = %v, want errors.Is(plugin.ErrNoSecretMasterKey)", err)
+	}
+	if err := adapter.ForTenant(tid.String()).Put(ctx, "name", "value"); !errors.Is(err, plugin.ErrNoSecretMasterKey) {
+		t.Errorf("ForTenant(...).Put: err = %v, want errors.Is(plugin.ErrNoSecretMasterKey)", err)
+	}
+	// And the translation is not a blanket one: an unrelated failure must not be
+	// reported as a missing key. (No tenant in the context is such a failure.)
+	err = adapter.Put(context.Background(), "name", "value")
+	if err == nil || errors.Is(err, plugin.ErrNoSecretMasterKey) {
+		t.Errorf("Put with no tenant in ctx: err = %v, want a non-nil error that is NOT the master-key sentinel", err)
 	}
 }

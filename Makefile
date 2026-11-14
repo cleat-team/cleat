@@ -429,6 +429,16 @@ clew:
 # ---- tools ------------------------------------------------------------------
 
 GO_MIN_VERSION := 1.27
+# The first Go release whose cgo refuses wasmtime-go's libwasmtime.a ("disallowed
+# LTO section .llvmbc in #cgo LDFLAGS", bytecodealliance/wasmtime-go#299). Every
+# Go from here up fails to link cleat-worker and cleat; go.mod stays on 1.27.3
+# for the same reason (D78, cleat#3701). `make setup` says so instead of printing
+# [OK] and letting step 1 fail (cleat#3787).
+#
+# WHEN THE HOLD IS LIFTED, change or delete this and the check in tools-go below.
+# cmd/cleat-worker/a_makefile_does_not_reject_the_toolchain_gomod_pins_test.go
+# fails the moment go.mod's toolchain reaches this version, which is the reminder.
+GO_CGO_BROKEN_FROM := 1.27.4
 .PHONY: tools
 tools: tools-go tools-rust tools-python tools-java tools-as
 	@echo "=== All toolchains checked ==="
@@ -442,6 +452,17 @@ tools-go:
 		MIN_MAJOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f1); \
 		MIN_MINOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f2); \
 		if [ "$$MAJOR" -gt "$$MIN_MAJOR" ] || ([ "$$MAJOR" -eq "$$MIN_MAJOR" ] && [ "$$MINOR" -ge "$$MIN_MINOR" ]); then \
+			PATCH=$$(go version | sed -nE 's/^go version go[0-9]+\.[0-9]+\.([0-9]+).*/\1/p'); PATCH=$${PATCH:-0}; \
+			BMAJOR=$$(echo $(GO_CGO_BROKEN_FROM) | cut -d. -f1); BMINOR=$$(echo $(GO_CGO_BROKEN_FROM) | cut -d. -f2); BPATCH=$$(echo $(GO_CGO_BROKEN_FROM) | cut -d. -f3); \
+			if [ "$$MAJOR" -gt "$$BMAJOR" ] || ([ "$$MAJOR" -eq "$$BMAJOR" ] && [ "$$MINOR" -gt "$$BMINOR" ]) || ([ "$$MAJOR" -eq "$$BMAJOR" ] && [ "$$MINOR" -eq "$$BMINOR" ] && [ "$$PATCH" -ge "$$BPATCH" ]); then \
+				echo "[BROKEN] Go $$(go version | head -1) cannot build cleat yet: its cgo refuses the wasmtime library"; \
+				echo "  (disallowed LTO section .llvmbc in #cgo LDFLAGS; cleat#3787, cleat#3701). Go $(GO_CGO_BROKEN_FROM) and newer fail the same way."; \
+				echo "  Use Go 1.27.3 (a worker built with it carries GO-2026-6859, fixed in 1.27.4; see cleat#3701):"; \
+				echo "      export GOTOOLCHAIN=go1.27.3   # Go downloads it on first use; then run make setup again"; \
+				echo "  Or skip building: the release assets (cleat-worker .deb, cleat tarball) need no Go and no compiler:"; \
+				echo "      https://github.com/cleat-team/cleat/releases"; \
+				exit 1; \
+			fi; \
 			echo "[OK] Go $$(go version | head -1)"; \
 		else \
 			echo "[OLD] Go $$(go version | head -1) — need $(GO_MIN_VERSION)+. Install from https://go.dev/dl/"; \
