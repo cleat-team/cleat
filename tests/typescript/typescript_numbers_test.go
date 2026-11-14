@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/cleat/wasmtest"
 	"github.com/cleat-team/cleat/engine"
 )
 
@@ -59,13 +58,8 @@ func newBenchEngine(t *testing.T) (*engine.Engine, func()) {
 		t.Fatalf("engine.NewWasmtimeBackend: %v", err)
 	}
 	e := engine.NewEngine(rt, nopCaller{},
-		engine.WithSignalStore(wasmtest.NewInMemorySignalStore()),
-		engine.WithPromiseStore(wasmtest.NewInMemoryPromiseStore()),
-		engine.WithWorkflowState(wasmtest.NewTestWorkflowState()),
 		engine.WithWorkflowID(benchWF),
 		engine.WithDefName("bench"),
-		engine.WithChildWorkflowStore(wasmtest.NewInMemoryChildWorkflowStore()),
-		engine.WithConcurrencyKeyStore(wasmtest.NewInMemoryConcurrencyKeyStore()),
 		engine.WithDefVersion(1),
 		engine.WithBackends(engine.WasmtimeLanguages, wt),
 	)
@@ -219,9 +213,6 @@ func buildGoTwin(t *testing.T, root string) []byte {
 }
 
 func TestTypeScriptStartupAndReplayNumbers(t *testing.T) {
-	if testing.Short() {
-		t.Skip("measures; takes about a minute")
-	}
 	root := needToolchain(t)
 
 	res := build(t, root, "tests/typescript/testdata/workflows/bench.ts", "bench_steps")
