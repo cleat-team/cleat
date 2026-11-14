@@ -1,0 +1,4 @@
+test-go/engine	2	^TestAnUpdateResultThatIsAJSONScalarIsStored/(mysql|mssql)$	cleat#3816: the engine job's CLEAT_TEST_DB is Postgres-only, so of this test's registeredBackends arms the mysql and mssql ones skip (two) while the postgres arm runs; measured 2026-11-14 with CLEAT_TEST_POSTGRES alone.
+cluster	2	^TestAnUpdateResultThatIsAJSONScalarIsStored/(mysql|mssql)$	same test, same reason, byte-identical regex to the test-go/engine line (cleat#2158's required pairing): the cluster job's CLEAT_TEST_DB gives it Postgres only.
+multi-db/mysql	2	^TestAnUpdateResultThatIsAJSONScalarIsStored/(postgres|mssql)$	cleat#3816: this job sets only the MySQL DSN, so the other two dialects' arms skip (two); measured 2026-11-14 with CLEAT_TEST_MYSQL alone.
+multi-db/mssql	2	^TestAnUpdateResultThatIsAJSONScalarIsStored/(postgres|mysql)$	cleat#3816: this job sets only the SQL Server DSN, so the other two dialects' arms skip (two); measured 2026-11-14 with CLEAT_TEST_MSSQL alone.
