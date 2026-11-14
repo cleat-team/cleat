@@ -742,7 +742,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT status, result #>> '{}'",
+			match: "SELECT status, result::text",
 			data:  [][]driver.Value{{"resolved", `{"ok":true}`, ""}},
 		},
 	}, nil)
@@ -755,6 +755,28 @@ func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	}
 	if status != "resolved" || result != `{"ok":true}` || errMsg != "" {
 		t.Errorf("unexpected: status=%q result=%q errMsg=%q", status, result, errMsg)
+	}
+}
+
+// cleat#3807: the exact JSON text (`result::text`) is what a typed Await unmarshals; a string keeps its quotes and
+// escapes and JSON null stays null. Only a pending promise's result is empty.
+func TestPostgresStore_GetPromise_StringAndNullResultsKeepTheirJSON(t *testing.T) {
+	for _, c := range []struct{ name, raw, want string }{
+		{"a string", `"yes"`, `"yes"`},
+		{"an escaped string", `"a\"b"`, `"a\"b"`},
+		{"an empty string", `""`, `""`},
+		{"json null", "null", "null"},
+		{"an object", `{"by": "alice"}`, `{"by":"alice"}`},
+	} {
+		db := newMockDBForPostgres(t, []mockRowsResult{
+			{match: "SELECT status, result::text", data: [][]driver.Value{{"resolved", c.raw, ""}}},
+		}, nil)
+		store := NewPostgresStore(db)
+		_, got, _, err := store.GetPromise(testCtx, "wf-1", "promise-1")
+		db.Close()
+		if err != nil || got != c.want {
+			t.Errorf("%s: GetPromise result = %q, %v; want %q", c.name, got, err, c.want)
+		}
 	}
 }
 
@@ -1364,7 +1386,7 @@ func TestPostgresStore_ListPromises(t *testing.T) {
 		{
 			match: "SELECT promise_id, promise_name",
 			data: [][]driver.Value{
-				{"p-1", "promise-a", "resolved", "ok", "", createdAt, resolvedAt},
+				{"p-1", "promise-a", "resolved", `"ok"`, "", createdAt, resolvedAt},
 				{"p-2", "promise-b", "pending", "", "", createdAt, nil},
 			},
 		},
@@ -1387,6 +1409,13 @@ func TestPostgresStore_ListPromises(t *testing.T) {
 	}
 	if promises[1].ResolvedAt != nil {
 		t.Error("expected nil ResolvedAt for pending promise")
+	}
+	// cleat#3807: the stored JSON string "ok" is what the caller needs back, quotes included.
+	if promises[0].Result != `"ok"` {
+		t.Errorf("a string result lost its quotes: %q, want %q", promises[0].Result, `"ok"`)
+	}
+	if promises[1].Result != "" {
+		t.Errorf("a pending promise's result = %q, want empty", promises[1].Result)
 	}
 }
 
