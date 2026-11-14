@@ -85,6 +85,13 @@ func TestAJSONNullUpdatePayloadDoesNotBreakThePendingList(t *testing.T) {
 				// MySQL and SQL Server read a null payload as an empty string. PostgreSQL does too unless the payload
 				// was sealed: a sealed value comes back as the JSON text it was sealed from, `null`, as it does for
 				// every other value that is not an object or number (a string comes back quoted; see below).
+				//
+				// THE SEALED PostgreSQL EXPECTATION IS CURRENT BEHAVIOUR, NOT A CONTRACT, and it is meant to change:
+				// the decision (cleat#3852) is that encryption must be transparent, so when that lands this arm's
+				// answer becomes "" and this branch goes. The mysql and mssql "sealed" arms are the plain arms again:
+				// `--encrypt-sensitive-payloads` is PostgreSQL-only and those stores' CreateUpdateRequest only runs
+				// encodeJSONPayload, so WithEncryption seals nothing there. They are kept so the table is complete,
+				// not because they exercise a sealed path.
 				want := ""
 				if backend.Name() == "postgres" && sealed {
 					want = "null"
