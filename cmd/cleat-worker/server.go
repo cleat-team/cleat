@@ -762,8 +762,10 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 	internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
 	if ierr != nil {
 		// Fail closed: an unreadable definition set cannot be excluded, and an
-		// unfiltered list would show every internal run.
-		s.writeError(w, 500, ierr.Error())
+		// unfiltered list would show every internal run. 503 and a log line, as
+		// every other access check answers (cleat#3785); it was a 500 carrying
+		// the driver's text.
+		s.writeAccessCheckUnavailable(w, r, "which definitions are internal", ierr)
 		return
 	}
 	filter.ExcludeDefNames = internalNames
@@ -1796,7 +1798,9 @@ func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.
 func (s *apiServer) defExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name string) bool {
 	defs, err := st.ListWorkflowDefs(r.Context(), name)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		// Fails closed, as before, but answers what every other access check answers when it cannot
+		// read: 503 and a log line, not a 500 carrying the driver's text (cleat#3785).
+		s.writeAccessCheckUnavailable(w, r, "the definition's versions", err)
 		return false
 	}
 	if len(defs) == 0 {
@@ -2722,8 +2726,8 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 		internalNames, ierr := s.internalDefinitionNames(r.Context(), st)
 		if ierr != nil {
 			// Fail closed, as the run list does: an unreadable set would blank
-			// nothing and disclose every internal name in the list.
-			s.writeError(w, 500, ierr.Error())
+			// nothing and disclose every internal name in the list. 503, as there.
+			s.writeAccessCheckUnavailable(w, r, "which definitions are internal", ierr)
 			return
 		}
 		hideInternalScheduleTargets(internalNames, schedules)
