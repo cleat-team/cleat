@@ -448,17 +448,18 @@ var receiversWithoutRLS = map[string]bool{
 }
 
 // receiversWithNoProductionConstructor were examined and excluded, with the
-// command that re-derives the exclusion. Both reach RLS tables outside a
-// transaction and neither can execute in a running worker: their only
+// command that re-derives the exclusion. FaultInjector reaches RLS tables
+// outside a transaction and cannot execute in a running worker: its only
 // constructor calls are in engine/unit_test.go, every one passing a nil db.
+// (WorkflowLoader was the second entry until it was deleted, cleat#3765.)
 //
-//	grep -rn 'NewWorkflowLoader(\|NewFaultInjector(' --include='*.go' . | grep -v 'func New'
+//	grep -rn 'NewFaultInjector(' --include='*.go' . | grep -v 'func New'
 //
-// Guarding them would add nine exemptions for no safety, and a guard that
-// reports non-faults gets switched off. If either is ever wired into a worker,
-// the statements are already written and this exclusion is what to revisit.
+// Guarding it would add exemptions for no safety, and a guard that reports
+// non-faults gets switched off. If it is ever wired into a worker, the
+// statements are already written and this exclusion is what to revisit.
 var receiversWithNoProductionConstructor = map[string]bool{
-	"WorkflowLoader": true, "FaultInjector": true,
+	"FaultInjector": true,
 }
 
 func receiverTypeName(fn *ast.FuncDecl) string {

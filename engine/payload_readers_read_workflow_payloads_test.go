@@ -191,7 +191,7 @@ func TestGetAllowedSignalCallersReadsWorkflowPayloads(t *testing.T) {
 // workflow_instances no longer has a def_name (cleat#3245 B5), so the counts
 // below can only be answered from workflow_payloads.
 func TestActiveInstanceCountsReadDefNameFromWorkflowPayloads(t *testing.T) {
-	store, db := newRunTestStore(t)
+	store, _ := newRunTestStore(t)
 	ctx := context.Background()
 	startPayloadReaderRun(t, store, "b1a-active-counts")
 
@@ -207,13 +207,6 @@ func TestActiveInstanceCountsReadDefNameFromWorkflowPayloads(t *testing.T) {
 	}
 	if counts["b1a-active-counts:1"] != 1 || counts["b1a-another-def:1"] != 0 {
 		t.Errorf("GetActiveInstanceCountsByVersion = %v, want b1a-active-counts:1=1", counts)
-	}
-	active, err := (&WorkflowLoader{db: db}).ActiveVersions(ctx)
-	if err != nil {
-		t.Fatalf("ActiveVersions: %v", err)
-	}
-	if len(active["b1a-active-counts"]) != 1 || len(active["b1a-another-def"]) != 0 {
-		t.Errorf("ActiveVersions = %v, want only b1a-active-counts", active)
 	}
 }
 
