@@ -91,17 +91,18 @@ Expected output, abridged:
 Entry functions: hello
 Durable closure (1 functions): hello
   Compiling Python to WASM via componentize-py...
-  Warning: wasm-tools not found, so no core WASM module was produced.
   ...
 Build SUCCESS
-  Size:   19,403,156 bytes (18.5 MB)
-  Wrote out/hello.wasm (18.5 MB)
+  Size:   18,449,262 bytes (17.59 MB)
+  Decompose skipped: output is a WASM Component Model binary (not core WASM)
+  Wrote out/hello.wasm (17.6 MB)
   Wrote out/hello.wasm.schema.json
 ```
 
-- **The `wasm-tools` warning is expected and harmless.** The component is what the
-  worker runs Python from; `wasm-tools` would only produce core WASM that nothing
-  here consumes.
+- **The build needs no tool beyond `componentize-py`.** The output is a WASM
+  Component Model binary, which is what the worker runs Python from. (`Decompose
+  skipped` is information, not a warning: core WASM is only for the wazero developer
+  tooling, which you ask for with `--runtime wazero` and which needs `wasm-tools`.)
 - **18 MB for a hello world is normal.** The component carries a whole CPython.
   The worker loads it once and caches it.
 
