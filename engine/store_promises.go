@@ -533,7 +533,7 @@ func computeEventChecksum(rec EventRecord, previousChecksum string) string {
 }
 
 // VerifyWorkflowEvents loads all events for a workflow, recomputes their
-// SHA-256 checksums, and verifies integrity. When the checksum column is
+// xxHash64 checksums, and verifies integrity. When the checksum column is
 // available (after migration), it compares stored vs. recomputed checksums.
 // Before the migration, it computes checksums silently and returns nil.
 //

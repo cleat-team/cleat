@@ -4041,6 +4041,24 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	}
 	if compactionState != nil {
 		engineOpts = append(engineOpts, engine.WithCompactionState(compactionState))
+		// A state compacted before cleat#3837 has no PrevChecksum, so the chain
+		// can only be restarted from the first retained row's own stored
+		// checksum. Newer states carry the anchor and need no read.
+		if compactionState.PrevChecksum == "" && len(history) > 0 {
+			if r, ok := execStore.(engine.EventChecksumReader); ok {
+				sum, err := r.StoredEventChecksum(w.ctx, wf.ID, history[0].Step)
+				if err != nil {
+					if w.releaseIfStopped(wf, "compaction tail checksum", err) {
+						return
+					}
+					w.logger.ErrorContext(context.Background(), "failed to read the first retained event's checksum; returning the run to the queue",
+						"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+					w.returnToQueueAfterBackoff(wf)
+					return
+				}
+				engineOpts = append(engineOpts, engine.WithCompactionTailChecksum(sum))
+			}
+		}
 		w.logger.InfoContext(context.Background(), "loaded compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "compacted_step", compactionState.CompactedStep)
 	}
 	// When replaying, validate version compatibility between the old

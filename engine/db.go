@@ -1161,6 +1161,23 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 		return fmt.Errorf("compact history: fence: %w", err)
 	}
 
+	// cleat#3837: the first row this leaves behind chains its checksum from the
+	// last one it deletes, so that checksum goes into the state, read in the
+	// same transaction and before the delete. Without it nothing can verify the
+	// retained history from its first row, and the run fails on resume.
+	var boundary sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT checksum FROM event_history
+		WHERE workflow_id = $1 AND step < $2
+		ORDER BY step DESC LIMIT 1
+	`, workflowID, keepStep).Scan(&boundary)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("compact history: read boundary checksum: %w", err)
+	}
+	if compactionState, err = withBoundaryChecksum(compactionState, boundary.String); err != nil {
+		return fmt.Errorf("compact history: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2
 	`, workflowID, keepStep)

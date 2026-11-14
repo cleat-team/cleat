@@ -187,6 +187,13 @@ type CompactionState struct {
 	OpenChildren  []CompactedChild  `json:"open_children,omitempty"`
 	QueryState    map[string]string `json:"query_state,omitempty"`
 
+	// PrevChecksum is the stored checksum of the last event row the compaction
+	// deleted: the predecessor of the first row it kept. Verification and replay
+	// both start the checksum chain from it (cleat#3837). Set by CompactHistory,
+	// in the transaction that deletes the row, so the store has not been
+	// compacted without it; empty on a state written before that fix.
+	PrevChecksum string `json:"prev_checksum,omitempty"`
+
 	// Summary is populated when Events exceeds DefaultMaxCompactedEvents and is
 	// truncated. It records the truncation count for observability.
 	Summary *TruncationSummary `json:"summary,omitempty"`

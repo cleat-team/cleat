@@ -702,6 +702,10 @@ type execSession struct {
 	// avoiding a DB round-trip to re-fetch it for the next step's chain.
 	lastChecksum string
 
+	// chainAnchor is set when the run resumed from a compaction. It keeps
+	// lastChecksum from chaining over the virtual prefix, which has no rows.
+	chainAnchor *chainAnchor
+
 	// mu protects maps (queryState, deferrals) from
 	// concurrent access when wasmtime host functions race with Go dispatch.
 	mu sync.Mutex
