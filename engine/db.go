@@ -771,7 +771,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	// sides' tenant_id the caller's own.
 	err = tx.QueryRowContext(ctx, `
 		SELECT l.id, p.def_name, p.def_version, l.status, p.input,
-		       l.assigned_to, l.heartbeat_at, l.next_wake_at, p.completed_at, l.started_at, p.result #>> '{}', p.result::text, p.error_msg, p.error_code, p.error_op,
+		       l.assigned_to, l.heartbeat_at, l.next_wake_at, p.completed_at, l.started_at, p.result::text, p.error_msg, p.error_code, p.error_op,
 		       l.generation, COALESCE(l.priority, 0) AS priority,
 		       COALESCE(p.trace_id, ''), l.tenant_id, l.continued_from, l.reclaim_count, l.parent_workflow_id,
 		       l.created_at, COALESCE(l.pending_terminal_status, ''),
@@ -780,7 +780,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		FROM workflow_leases l JOIN workflow_payloads p ON l.id = p.id
 		WHERE l.id = $1 AND l.tenant_id = $2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &resultRaw, &errorMsg, &errorCode, &errorOp,
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &resultRaw, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
 		&wf.CreatedAt, &wf.PendingTerminalStatus,
@@ -811,6 +811,8 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 		return v
 	}
 	inputRaw = json.RawMessage(keepJSON(s.decryptPayloadJSON(string(inputRaw))))
+	// The column is read as its exact JSON text; what `#>> '{}'` returned is derived from it (cleat#3807).
+	result = sql.NullString{String: extractedJSONText(resultRaw.String), Valid: resultRaw.Valid}
 	extractedResult := result.String
 	if result.Valid {
 		// result #>> '{}' above TEXT-EXTRACTS the jsonb value, which for a

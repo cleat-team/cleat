@@ -1,5 +1,7 @@
 package engine
 
+import "encoding/json"
+
 // cleat#3807. A jsonb result column is read on PostgreSQL with `result #>> '{}'`, which TEXT-EXTRACTS the value.
 // That is what the sealed path needs (a sealed value is a JSON string scalar wrapping base64, and extracting it
 // leaves the bare base64 the decrypt step reads), but for an UNSEALED scalar it is lossy:
@@ -15,7 +17,9 @@ package engine
 // Numbers, booleans, objects and arrays survive extraction unchanged, which is why this went unnoticed. MySQL and
 // SQL Server store the JSON text and return it as written.
 //
-// The fix keeps the extraction for the decrypt step and also reads the exact JSON text (`result::text`).
+// The fix reads only the exact JSON text (`result::text`) and derives what `#>> '{}'` would have returned from it
+// in Go (extractedJSONText), so the column crosses the wire once. The extraction is still what the decrypt step
+// reads; the exact text is what an unsealed value returns.
 
 // exactJSONText chooses what a result column reads back as.
 //
@@ -36,4 +40,21 @@ func exactJSONText(extracted, decrypted, raw string) string {
 		return raw
 	}
 	return decrypted
+}
+
+// extractedJSONText is what `result #>> '{}'` returns for the jsonb text `raw` (`result::text`): the unquoted,
+// unescaped text of a JSON string, the text itself for a number, boolean, object or array, and nothing for JSON null
+// (SQL NULL). It exists so one `result::text` column can serve both the decrypt step, which reads the extraction,
+// and the unsealed read, which wants the exact text; selecting both doubled the bytes a large result sends.
+func extractedJSONText(raw string) string {
+	switch {
+	case raw == "" || raw == "null":
+		return ""
+	case raw[0] == '"':
+		var s string
+		if err := json.Unmarshal([]byte(raw), &s); err == nil {
+			return s
+		}
+	}
+	return raw
 }

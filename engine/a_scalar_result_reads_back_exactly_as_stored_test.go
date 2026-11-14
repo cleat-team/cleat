@@ -200,3 +200,24 @@ func TestExactJSONTextLeavesAnEmptyColumnEmpty(t *testing.T) {
 		}
 	}
 }
+
+// extractedJSONText must agree with what PostgreSQL's `#>> '{}'` returns, because the decrypt step reads the
+// extraction. The live test above proves it end to end for every shape; this pins the rule itself.
+func TestExtractedJSONTextIsWhatTextExtractionReturned(t *testing.T) {
+	for _, c := range []struct{ raw, want string }{
+		{"", ""},
+		{"null", ""},
+		{`"yes"`, "yes"},
+		{`"a\"b"`, `a"b`},
+		{`""`, ""},
+		{`"Zm9v"`, "Zm9v"}, // a sealed value: the bare base64 the decrypt step reads
+		{`5`, "5"},
+		{`true`, "true"},
+		{`{"by": "alice"}`, `{"by": "alice"}`},
+		{`[1, 2]`, `[1, 2]`},
+	} {
+		if got := extractedJSONText(c.raw); got != c.want {
+			t.Errorf("extractedJSONText(%q) = %q, want %q", c.raw, got, c.want)
+		}
+	}
+}
