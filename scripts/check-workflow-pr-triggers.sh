@@ -99,11 +99,16 @@ for p in paths:
 # as a failure. ci.yml gives such a run its own group (cleat#1688); the two
 # upgrade workflows did not, and on release/v0.6.0 their contexts are required.
 # Any workflow that lists `edited`, cancels in progress, and does not mention
-# `github.event.action == 'edited'` in its group is the same defect. A job-level
+# `github.event.action == 'edited'` and `!github.event.changes.base` in its group is the same defect. A job-level
 # `concurrency:` block is not read; none exists today.
 import re, yaml
-CARVE_OUT = re.compile(r"github\.event\.action\s*==\s*'edited'")
-examined, cancelling = 0, []
+CARVE_ACTION = re.compile(r"github\.event\.action\s*==\s*'edited'")
+CARVE_BASE = re.compile(r"!\s*github\.event\.changes\.base")
+def has_carve_out(group):
+    # Both halves: without the base test an `edited` that RETARGETS the PR would
+    # also get its own group and could not supersede the run it re-evaluates.
+    return bool(CARVE_ACTION.search(group)) and bool(CARVE_BASE.search(group))
+examined, cancelling, second_failed = 0, [], False
 for p in paths:
     with open(p) as fh:
         doc = yaml.safe_load(fh) or {}
@@ -117,13 +122,15 @@ for p in paths:
     if cancel is None or cancel is False or str(cancel).strip().lower() == "false":
         continue  # a literal opt-out; an expression is assumed to cancel
     examined += 1
-    if not CARVE_OUT.search(str(conc.get("group", ""))):
+    if not has_carve_out(str(conc.get("group", ""))):
         cancelling.append(os.path.basename(p))
 
 if examined == 0:
-    print("ERROR: no workflow both lists `edited` and cancels in progress, so the "
-          "second rule examined nothing. ci.yml and the two upgrade workflows "
-          "do today; either that changed or the parse is broken.", file=sys.stderr)
+    print("UNMEASURED: no workflow both lists `edited` and cancels in progress, so "
+          "the second rule examined nothing. ci.yml and the two upgrade workflows "
+          "do today; either that changed or the parse is broken.\n"
+          "(this is a failure of the check, not a finding about cleat)",
+          file=sys.stderr)
     sys.exit(2)
 
 if cancelling:
@@ -135,8 +142,8 @@ if cancelling:
     print("\nGive an `edited` event that did not change the base its own group: "
           "see the concurrency block in ci.yml, whose group line carries "
           "`github.event.action == 'edited' && !github.event.changes.base && "
-          "github.run_id`.", file=sys.stderr)
-    sys.exit(1)
+          "github.run_id`.\n", file=sys.stderr)
+    second_failed = True
 
 if checked == 0:
     print("ERROR: no workflow filters pull_request by branch, so this guard "
@@ -154,6 +161,9 @@ if offenders:
     print("\nAdd `edited` to that workflow's pull_request.types. See the header "
           "of this script for what a retargeted PR reports without it.",
           file=sys.stderr)
+    sys.exit(1)
+
+if second_failed:
     sys.exit(1)
 
 print(f"OK: all {checked} branch-filtered workflow(s) trigger on `edited`.")
