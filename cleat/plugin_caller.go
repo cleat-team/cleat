@@ -76,13 +76,16 @@ func (pf *PluginFunc[Req, Resp]) WithWake(wake func(Req) []string) *PluginFunc[R
 // error whose text names "no event for <plugin>/<function>" is the window
 // closing; any other is the claim failing.
 //
-// COST OF A LONG WAIT. While no event arrives the engine re-checks the claim
-// about every 6 s and records two history events each time. Measured on a real
-// worker: 80 events in 302 s, about 950 an hour and 23,000 a day, against a
-// default quota of 50,000 events (cleat#3806). A window of minutes, such as a
-// payment confirmation, costs tens of events and is what this is for. Do not use
-// it for a wait of hours or days: a day-long window is most of a run's quota in
-// events that record only that nothing happened.
+// COST OF A LONG WAIT. While no event arrives the engine re-checks the claim,
+// waiting 6 s, then 12 s, doubling to a cap of 5 minutes, and records two history
+// events each time. Measured on a real worker over 35 minutes: 24 events, and
+// 12 of those in the first five minutes, so about 24 an hour once past the
+// ramp. At a constant 6 s the same wait recorded 556 events (about 950 an hour).
+// A window of minutes, such as a payment confirmation, costs tens of events. A
+// window of hours or days costs about 24 an hour and still grows: it is bounded
+// in practice, not constant. A wake that fails to deliver (the publisher stopped
+// between storing the event and signalling it) can take up to those 5 minutes to
+// be noticed (cleat#3806).
 //
 // The PluginFunc must have been given a wake with WithWake, and timeout must be
 // at least a millisecond. Both are refused rather than allowed to wait forever.

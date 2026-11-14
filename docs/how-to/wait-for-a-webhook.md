@@ -137,12 +137,13 @@ the in-process `cleattest` runtime words it differently), so the `err` branch is
 your timeout branch. `examples/order-lifecycle` uses it and
 turns the timeout into a compensation.
 
-Two limits. It is **for waits of minutes**: while no event arrives the engine
-re-checks about every 6 s and records history events each time: about 950 an
-hour, measured on a real worker (cleat#3806 tracks an engine-level wait that
-records none). For a wait of hours or days use the loop above, with a
-longer sleep between attempts. And it landed in cleat#3804; **as of 2026-11-14 it is not in 0.6.0**,
-so on 0.6.0 use the loop.
+Two limits. While no event arrives the engine re-checks the claim, waiting 6 s
+and then doubling to a cap of 5 minutes, and records history events each time:
+24 events in 35 minutes on a real worker, about 24 an hour once past the first
+five minutes (cleat#3806), so a window of hours is affordable and still grows. A
+wake that fails to deliver can take up to those 5 minutes to be noticed. And it
+landed in cleat#3804; **as of 2026-11-14 it is not in 0.6.0**, so on 0.6.0 use
+the loop above.
 
 ## 4. Deliver an event
 
