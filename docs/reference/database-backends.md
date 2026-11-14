@@ -52,7 +52,7 @@ type StoreFactory interface {
 | PostgreSQL | 16 | 16 | RLS, `SKIP LOCKED`, `gen_random_uuid()`, and `JSONB` all available since 9.5+, and nothing in the codebase checks `server_version`. `tiers.yaml` (DECIDED 2026-08-08) states the claim as 16+ because that is what CI has ever actually tested, not because anything below it is known to fail — see `tiers.yaml`'s `dialect_versions` comment for the full reasoning. |
 | MySQL | 8.0 | 8.4 | `SKIP LOCKED` requires 8.0+. `NOW(6)` for microsecond precision. |
 | MariaDB | 10.6 | 11.x | Tested alongside MySQL 8.4. Supports `SKIP LOCKED`. Does not support RLS. |
-| SQL Server | 2022 | 2022 | `ISJSON(x, VALUE)` — used by the payload CHECK constraints so a JSON scalar is accepted, as PostgreSQL and MySQL do — requires 2022. Azure SQL Database fully supported. See IMPROVEMENT-PLAN §3.18. |
+| SQL Server | 2022 | 2022 | `ISJSON(x, VALUE)` — used by the payload CHECK constraints and, since `019_a_json_scalar_result_is_stored.sql`, the three `result` ones, so a JSON scalar is accepted, as PostgreSQL and MySQL do — requires 2022. Azure SQL Database fully supported. See IMPROVEMENT-PLAN §3.18. |
 
 ---
 
