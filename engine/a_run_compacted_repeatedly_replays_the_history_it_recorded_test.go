@@ -14,6 +14,14 @@ import (
 // 1335, with nothing reported. The replay hands the guest whatever this rebuilt
 // history says, so the property that matters is that it IS the history recorded.
 
+// extractCompactionState is the first-compaction form of extractCompactionStateFrom.
+// It lives here because production always has a previous state to pass (nil for
+// the first pass), and a wrapper only tests call is dead code to the test-only
+// guard.
+func extractCompactionState(events []EventRecord) (*CompactionState, error) {
+	return extractCompactionStateFrom(nil, events)
+}
+
 // sameRecordedEvent compares the fields chainEventMix writes, which are the ones
 // a replay reads back for those event types.
 func sameRecordedEvent(got, want EventRecord) error {

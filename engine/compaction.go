@@ -492,13 +492,9 @@ func isCompactionDeadlockError(err error) bool {
 
 // extractCompactionState builds a CompactionState from the events being
 // compacted away.
-func extractCompactionState(events []EventRecord) (*CompactionState, error) {
-	return extractCompactionStateFrom(nil, events)
-}
-
 // extractCompactionStateFrom builds the state that covers prev's events and then
 // the rows in events, which must be the rows that directly follow them. With a
-// nil prev it is extractCompactionState.
+// nil prev it builds the state for a first compaction.
 //
 // CompactedStep always means "the events for steps 0..CompactedStep-1 are in
 // Events" (less any truncated from the front), which is what a second
