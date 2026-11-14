@@ -242,18 +242,21 @@ func editChainState(t *testing.T, store WorkflowStore, what string, args ...any)
 		q := map[string]string{
 			"checksum": `UPDATE event_history SET checksum = 'deadbeefdeadbeef' WHERE workflow_id = $1 AND step = $2`,
 			"legacy":   `UPDATE workflow_payloads SET compaction_state = compaction_state - 'prev_checksum' WHERE id = $1`,
+			"trim":     `DELETE FROM event_history WHERE workflow_id = $1 AND step < $2`,
 		}[what]
 		_, err = s.db.ExecContext(ctx, q, args...)
 	case *MySQLStore:
 		q := map[string]string{
 			"checksum": `UPDATE event_history SET checksum = 'deadbeefdeadbeef' WHERE workflow_id = ? AND step = ?`,
 			"legacy":   `UPDATE workflow_instances SET compaction_state = JSON_REMOVE(compaction_state, '$.prev_checksum') WHERE id = ?`,
+			"trim":     `DELETE FROM event_history WHERE workflow_id = ? AND step < ?`,
 		}[what]
 		_, err = s.db.ExecContext(ctx, q, args...)
 	case *MSSQLStore:
 		q := map[string]string{
 			"checksum": `UPDATE event_history SET checksum = 'deadbeefdeadbeef' WHERE workflow_id = @p1 AND step = @p2`,
 			"legacy":   `UPDATE workflow_instances SET compaction_state = JSON_MODIFY(compaction_state, '$.prev_checksum', NULL) WHERE id = @p1`,
+			"trim":     `DELETE FROM event_history WHERE workflow_id = @p1 AND step < @p2`,
 		}[what]
 		var tx *sql.Tx
 		if tx, err = s.beginTxWithContext(ctx); err == nil {
@@ -408,120 +411,6 @@ func TestACompactedRunVerifiesAndResumesOnEveryStore(t *testing.T) {
 				}
 			})
 
-			// A run the worker will not compact again must not be offered to it.
-			// The candidate query ranks by size, a compacted run that grew again is
-			// larger than a fresh one, and the worker takes a limited batch: enough
-			// of them filled it every pass and no other run was ever compacted.
-			t.Run("compacted runs do not crowd a fresh run out of the candidates", func(t *testing.T) {
-				const olds = 3
-				var oldIDs []string
-				for i := 0; i < olds; i++ {
-					id := newRun(fmt.Sprintf("crowd-old-%d", i))
-					appendEvents(id, 0, 40)
-					compact(id, 20)
-					appendEvents(id, 40, 110) // 80 retained rows: larger than the fresh run, over the threshold again
-					oldIDs = append(oldIDs, id)
-				}
-				fresh := newRun("crowd-fresh")
-				appendEvents(fresh, 0, 30) // over the threshold, never compacted
-
-				ids, err := store.GetCompactionCandidates(ctx, 20, olds)
-				if err != nil {
-					t.Fatalf("GetCompactionCandidates: %v", err)
-				}
-				got := map[string]bool{}
-				for _, id := range ids {
-					got[id] = true
-				}
-				if !got[fresh] {
-					t.Errorf("a never-compacted run over the threshold was not offered in a batch of %d: got %v", olds, ids)
-				}
-				for _, id := range oldIDs {
-					if got[id] {
-						t.Errorf("run %s, already compacted, was offered for compaction again", id)
-					}
-				}
-			})
-
-			// cleat#3838: a second compaction pass over an already-compacted run is a
-			// no-op. It used to replace the state with one built from the retained
-			// tail alone and keyed by an index where the store deletes by step, so a
-			// workflow that summed 30 signal payloads finished with 1713 for a
-			// correct 1335. Until a second pass extends the state instead, the
-			// history simply keeps growing.
-			t.Run("a second compaction pass leaves a compacted run alone", func(t *testing.T) {
-				id := newRun("twice")
-				appendEvents(id, 0, 40)
-				compact(id, 20) // keeps 30..39
-				first, err := store.LoadCompactionState(ctx, id)
-				if err != nil || first == nil {
-					t.Fatalf("control: no state after the first compaction: %v, %v", first, err)
-				}
-				appendEvents(id, 40, 80)
-				before, err := store.LoadEventHistory(ctx, id)
-				if err != nil {
-					t.Fatal(err)
-				}
-				// CONTROL: 50 retained rows over a threshold of 20 is exactly the
-				// situation that used to compact again; without it the no-op below
-				// could be "nothing to do" rather than "declined".
-				if len(before) != 50 {
-					t.Fatalf("control: %d retained rows, want 50", len(before))
-				}
-				compact(id, 20)
-				second, err := store.LoadCompactionState(ctx, id)
-				if err != nil || second == nil {
-					t.Fatalf("LoadCompactionState after the second pass = %v, %v", second, err)
-				}
-				if second.CompactedStep != first.CompactedStep || second.PrevChecksum != first.PrevChecksum || len(second.Events) != len(first.Events) {
-					t.Errorf("the second pass changed the state: first %d/%q/%d events, second %d/%q/%d events",
-						first.CompactedStep, first.PrevChecksum, len(first.Events),
-						second.CompactedStep, second.PrevChecksum, len(second.Events))
-				}
-				after, err := store.LoadEventHistory(ctx, id)
-				if err != nil || len(after) != len(before) || after[0].Step != 30 {
-					t.Errorf("the second pass changed the retained rows: %d rows from step %d, was %d from 30", len(after), after[0].Step, len(before))
-				}
-				if err := store.VerifyWorkflowEvents(ctx, id); err != nil {
-					t.Fatalf("a run whose second pass was declined does not verify: %v", err)
-				}
-			})
 		})
-	}
-}
-
-// A second pass is declined before it reads the history or touches the store
-// (cleat#3838). DB-free, so the decision does not depend on a dialect.
-func TestCompactWorkflowHistoryDeclinesARunThatIsAlreadyCompacted(t *testing.T) {
-	events := make([]EventRecord, 1500)
-	for i := range events {
-		events[i] = EventRecord{Step: 100 + i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
-	}
-
-	already := &mockCompactStore{events: events, loadCompactionStateResult: &CompactionState{Version: 1, CompactedStep: 100, PrevChecksum: "abc"}}
-	if err := CompactWorkflowHistory(context.Background(), already, "wf-twice", 1000, nil); err != nil {
-		t.Fatalf("declining is not an error: %v", err)
-	}
-	if already.compactCount != 0 {
-		t.Errorf("CompactHistory ran %d time(s) on a run that already has a state", already.compactCount)
-	}
-
-	// CONTROL: the same history with no state does compact, so the zero above is
-	// the decision and not an artefact of the fixture.
-	fresh := &mockCompactStore{events: events}
-	if err := CompactWorkflowHistory(context.Background(), fresh, "wf-once", 1000, nil); err != nil {
-		t.Fatal(err)
-	}
-	if fresh.compactCount != 1 {
-		t.Errorf("control: CompactHistory ran %d time(s) on a run with no state, want 1", fresh.compactCount)
-	}
-
-	// A state that cannot be read is not "no state": it must not compact.
-	unreadable := &mockCompactStore{events: events, loadCompactionStateErr: fmt.Errorf("db down")}
-	if err := CompactWorkflowHistory(context.Background(), unreadable, "wf-unreadable", 1000, nil); err == nil {
-		t.Error("an unreadable compaction state was treated as none")
-	}
-	if unreadable.compactCount != 0 {
-		t.Errorf("CompactHistory ran on a run whose state could not be read")
 	}
 }

@@ -308,9 +308,14 @@ func (s *MSSQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		  -- regardless.
 		  AND (SELECT COUNT(*) FROM event_history e WHERE e.workflow_id = w.id AND e.tenant_id = @p3)
 		      > COALESCE(NULLIF(d.max_history_length, 0), @p1)
-		  -- Only a run that has never been compacted: see the PostgreSQL half in
-		  -- engine/db.go (cleat#3838).
-		  AND w.compaction_step IS NULL
+		  -- A run is a candidate if it was never compacted, or if its recorded
+		  -- boundary is the first row it still has. compaction_step is the first
+		  -- retained STEP, so on a consistent run it equals the smallest step left.
+		  -- A run where it does not (the old second compaction wrote an index there
+		  -- and deleted by step) is refused by CompactWorkflowHistory every time;
+		  -- left in, enough of them fill the batch and no other run is compacted
+		  -- (cleat#3838, found by cleat-review).
+		  AND (w.compaction_step IS NULL OR w.compaction_step = (SELECT MIN(e2.step) FROM event_history e2 WHERE e2.workflow_id = w.id AND e2.tenant_id = @p3))
 		ORDER BY w.created_at
 		OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY
 	`, threshold, limit, s.tenantID)
