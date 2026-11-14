@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
@@ -318,6 +319,48 @@ func triggerMatchingWorkflows(
 	return matched, nil
 }
 
+// signalRetryDelays is the wait before each RETRY of a failed delivery, so a
+// delivery is attempted 1+len(signalRetryDelays) times in all. A variable so a test
+// can zero it; production leaves it alone.
+//
+// cleat#3806. A failed SignalWorkflow used to be logged once and forgotten: the
+// event was already stored, so nothing re-signalled it, and the awaiter sat
+// registered until something re-claimed -- which for a workflow suspended in
+// WaitForEvent is its unprompted re-check, now up to 300 s apart rather than 6 s.
+// The failures this can help are the transient ones (a connection reset, a lock
+// timeout). It is deliberately SHORT, because it runs inside the publisher's
+// request: a failing awaiter costs the publish at most the sum of these, and the
+// cost is PER AWAITER, so N awaiters that all fail cost up to N times that. There
+// is no total budget per publish; one would bound a store-wide failure.
+//
+// It does not close the gap. A publisher that dies between the INSERT and this
+// call, or whose retries all fail, leaves an event stored and nobody told; closing
+// that needs a reconciler that re-signals stored events with a registered awaiter.
+//
+// A duplicate wake is harmless: a waiter re-claims after every wake, and a wake
+// for an event an earlier wake already claimed finds nothing and goes back to
+// sleep. So retrying a call that failed AFTER delivering costs one spurious wake.
+var signalRetryDelays = []time.Duration{100 * time.Millisecond, 400 * time.Millisecond}
+
+// signalWithRetry calls env.SignalWorkflow, retrying a failure after each of
+// signalRetryDelays. plugin.ErrWorkflowNotFound is not retried: the workflow is
+// gone, and asking again gets the same answer. A cancelled ctx stops the retries.
+func signalWithRetry(ctx context.Context, env *plugin.Environment, workflowID, signalName, payload string) error {
+	err := env.SignalWorkflow(ctx, workflowID, signalName, payload)
+	for _, delay := range signalRetryDelays {
+		if err == nil || errors.Is(err, plugin.ErrWorkflowNotFound) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		err = env.SignalWorkflow(ctx, workflowID, signalName, payload)
+	}
+	return err
+}
+
 // signalAwaiters delivers a signal to every workflow registered as waiting
 // for the given event type WITH MATCHING CORRELATION KEYS. Called from the
 // publish handler after an event has been successfully stored.
@@ -371,7 +414,7 @@ func signalAwaiters(
 
 	signalName := "__evt:" + eventType
 	for _, wfID := range workflowIDs {
-		if err := env.SignalWorkflow(ctx, wfID, signalName, eventData); err != nil {
+		if err := signalWithRetry(ctx, env, wfID, signalName, eventData); err != nil {
 			if errors.Is(err, plugin.ErrWorkflowNotFound) {
 				// The awaiter's own workflow is gone -- purged, or the row
 				// was already stale -- not a delivery failure.
