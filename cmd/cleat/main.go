@@ -135,7 +135,7 @@ func main() {
 		fs.IntVar(&workflowVersion, "version", 1, "workflow version number embedded in WASM metadata")
 		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), rust, java, assemblyscript, python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
-		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
+		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: the component, as for wasmtime)")
 		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")

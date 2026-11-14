@@ -61,7 +61,8 @@ func pythonStampEnv(workflowVersion int, entryPoints, channel string) map[string
 //   - "file.py"               — a single .py file (auto-detects function)
 //   - "path/to/dir/"          — a directory (looks for .py files)
 //
-// runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for both.
+// runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for the component, as for wasmtime
+// (cleat#3818: "" used to mean both formats and warned about wasm-tools on every build).
 func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion int) {
 	pyFile := ""
 	funcName := ""
