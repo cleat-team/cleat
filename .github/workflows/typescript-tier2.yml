@@ -34,6 +34,7 @@ on:
       - "cmd/cleat-ts-meta/**"
       - "tests/typescript/**"
       - "wasm/**"
+      - "python-sdk/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/typescript-tier2.yml"
@@ -49,6 +50,7 @@ on:
       - "cmd/cleat-ts-meta/**"
       - "tests/typescript/**"
       - "wasm/**"
+      - "python-sdk/**"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/typescript-tier2.yml"
@@ -70,8 +72,9 @@ concurrency:
 
 env:
   # Declares the toolchain to the tests themselves, so a missing one is a failure here and a skip on a laptop.
-  # `postgres` is declared too: the worker smoke tests need a database, and an unset DSN must be a failure here.
-  CLEAT_REQUIRE_TOOLCHAINS: typescript,postgres
+  # `postgres` is declared too: the worker smoke tests need a database, and an unset DSN must be a failure here. `python`
+  # likewise: the numbers test builds a Python twin with componentize-py, and an absent one must fail, not drop the language.
+  CLEAT_REQUIRE_TOOLCHAINS: typescript,postgres,python
   # 127.0.0.1, not localhost -- see test-go's identical comment on the ::1-vs-IPv4 hazard.
   CLEAT_TEST_POSTGRES: postgres://postgres:sandbox@127.0.0.1:5432/postgres?sslmode=disable
   TS_NUMBERS_OUT: ${{ github.workspace }}/typescript-numbers.json
@@ -126,6 +129,20 @@ jobs:
       - name: Install the pinned toolchain
         run: packages/cleat-ts/bootstrap.sh
 
+      # componentize-py builds the Python twin of the numbers workflow. Exact version, every file's sha256 listed, and
+      # --require-hashes so pip refuses anything not on that list; the version check below catches a different install.
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned componentize-py
+        run: |
+          python -m pip install --require-hashes --no-deps -r tests/typescript/python-requirements.txt
+          got=$(componentize-py --version)
+          echo "$got"
+          [ "$got" = "componentize-py 0.25.1" ] || { echo "UNMEASURED: expected componentize-py 0.25.1, got '$got'" >&2; exit 2; }
+
       - name: Tests (the TypeScript tests, toolchain declared)
         run: |
           set -o pipefail
@@ -142,8 +159,8 @@ jobs:
           echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed"
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
           # TestTypeScriptLabelIsRoutedToWasmtime needs no toolchain; the three build tests do; the two worker smoke tests
-          # and the numbers test need the toolchain and PostgreSQL. Fewer than seven means a test did not run, which a
-          # green exit status would not say.
+          # need the toolchain and PostgreSQL; the numbers test needs the toolchain and componentize-py (it does not touch
+          # PostgreSQL). Fewer than seven means a test did not run, which a green exit status would not say.
           [ "$passed" -ge 7 ] || { echo "only $passed tests passed; the seven top-level tests in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
@@ -165,7 +182,7 @@ jobs:
               [ -f "packages/cleat-ts/.work/$m.wasm" ] && echo "- module $m: $(stat -c %s "packages/cleat-ts/.work/$m.wasm") bytes"
             done
             echo
-            echo '### Startup and replay, TypeScript vs its Go twin (in-process, wasmtime, compiled module cached)'
+            echo '### Startup and replay, TypeScript vs its Go and Python twins (in-process, wasmtime, compiled module cached)'
             echo
             echo 'Indicative only: one run on a shared runner. `best_round_ms`/`worst_round_ms` give the spread across three interleaved rounds.'
             echo

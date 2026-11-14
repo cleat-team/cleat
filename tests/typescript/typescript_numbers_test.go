@@ -16,9 +16,10 @@ import (
 )
 
 // The startup and replay numbers for the TypeScript guest, measured where the worker runs it: in-process, on the wasmtime
-// backend the worker uses, with the compiled module cached. The Go twin of the same workflow is measured in the same run, in
-// the same process, interleaved round by round, so machine drift lands on both and the ratio between them is the figure to
-// read. THIS TEST RECORDS NUMBERS AND ASSERTS NONE OF THEM: tier 2 must run and may fail, and a pass here says only that the
+// backend the worker uses, with the compiled module cached. The Go and Python twins of the same workflow are measured in the
+// same run, in the same process, interleaved round by round, so machine drift lands on all three and the ratios between them
+// are the figures to read. The go/no-go criteria are stated against both: replay within 5x of Go, cold start within 2x of
+// Python. THIS TEST RECORDS NUMBERS AND ASSERTS NONE OF THEM: tier 2 must run and may fail, and a pass here says only that the
 // measurement happened, which the checks below are written to make true.
 //
 // What is measured, and what is not:
@@ -26,8 +27,9 @@ import (
 //   - cold start: instantiate, one recorded host call, finish, on a module that is already compiled;
 //   - the first run after deploy, which includes compilation (once per worker per module version);
 //   - replay of a 1,000-event history to the suspension point, and a live execution of the same input for the ratio.
-//   - NOT measured: peak guest memory, and throughput through a database. A Python twin is not built here either, so the
-//     "cold start within 2x of Python" line has no Linux number from this test.
+//   - NOT measured: peak guest memory, and throughput through a database.
+//   - The Python twin needs componentize-py. Where it is absent the Python figures are reported UNMEASURED with the reason,
+//     never dropped quietly; where the job declares python in CLEAT_REQUIRE_TOOLCHAINS an absent one is a failure.
 //
 // The history is checked to hold at least the number of steps asked for, and the run to have suspended on the sleep. The
 // first draft of this workload in the prototype used a host call that records nothing, measured a 0-event history, and
@@ -189,27 +191,52 @@ func (l *langRun) summary() map[string]any {
 	}
 }
 
-// buildGoTwin builds testdata/gobench the way a user's Go build does and returns the module.
-func buildGoTwin(t *testing.T, root string) []byte {
+// buildCleat builds the cleat CLI once; both twins are built with it.
+func buildCleat(t *testing.T, root string) string {
 	t.Helper()
-	bin := t.TempDir()
-	cleatBin := filepath.Join(bin, "cleat")
+	cleatBin := filepath.Join(t.TempDir(), "cleat")
 	goBuild(t, root, cleatBin, "./cmd/cleat")
+	return cleatBin
+}
+
+// cleatBuild runs `cleat build <args>` into a fresh directory and returns the one .wasm it wrote.
+func cleatBuild(t *testing.T, cleatBin, root string, env []string, args ...string) []byte {
+	t.Helper()
 	out := t.TempDir()
-	cmd := exec.Command(cleatBin, "build", "-o", out, "./tests/typescript/testdata/gobench/")
+	cmd := exec.Command(cleatBin, append([]string{"build", "-o", out}, args...)...)
 	cmd.Dir = root
+	cmd.Env = append(os.Environ(), env...)
 	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("cleat build of the Go twin: %v\n%s", err, b)
+		t.Fatalf("cleat build %v: %v\n%s", args, err, b)
 	}
 	found, _ := filepath.Glob(filepath.Join(out, "*.wasm"))
 	if len(found) != 1 {
-		t.Fatalf("cleat build wrote %d .wasm files (%v), want exactly 1", len(found), found)
+		t.Fatalf("cleat build %v wrote %d .wasm files (%v), want exactly 1", args, len(found), found)
 	}
 	b, err := os.ReadFile(found[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// buildGoTwin builds testdata/gobench the way a user's Go build does.
+func buildGoTwin(t *testing.T, cleatBin, root string) []byte {
+	t.Helper()
+	return cleatBuild(t, cleatBin, root, nil, "./tests/typescript/testdata/gobench/")
+}
+
+// buildPythonTwin builds testdata/pybench with componentize-py. It returns (nil, reason) when componentize-py is absent
+// and the job did not declare it: that is UNMEASURED, said out loud, and not a silent drop of the language.
+func buildPythonTwin(t *testing.T, cleatBin, root string) ([]byte, string) {
+	t.Helper()
+	if _, err := exec.LookPath("componentize-py"); err != nil {
+		if toolchainRequired("python") {
+			t.Fatalf("%s names python, but componentize-py is not on PATH: the job's toolchain step is broken, not the test", requireToolchainEnv)
+		}
+		return nil, "UNMEASURED: componentize-py is not on PATH (and " + requireToolchainEnv + " does not name python)"
+	}
+	return cleatBuild(t, cleatBin, root, nil, "--target", "python", "./tests/typescript/testdata/pybench/bench_workflow.py"), ""
 }
 
 func TestTypeScriptStartupAndReplayNumbers(t *testing.T) {
@@ -224,30 +251,51 @@ func TestTypeScriptStartupAndReplayNumbers(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts := &langRun{lang: "ts", entry: "bench_steps", wasm: tsWasm}
-	gw := &langRun{lang: "go", entry: "bench_steps", wasm: buildGoTwin(t, root)}
+	cleatBin := buildCleat(t, root)
+	gw := &langRun{lang: "go", entry: "bench_steps", wasm: buildGoTwin(t, cleatBin, root)}
+	pyWasm, pyWhy := buildPythonTwin(t, cleatBin, root)
+	var py *langRun
+	if pyWasm != nil {
+		py = &langRun{lang: "py", entry: "bench_steps", wasm: pyWasm}
+	}
 
 	// Interleaved: each round runs both languages, so a busy machine slows both alike. The spread across rounds is reported
 	// beside the median, because a number from a shared runner is indicative and the spread says how much.
 	for r := 0; r < benchRounds; r++ {
 		ts.round(t)
 		gw.round(t)
+		if py != nil {
+			py.round(t)
+		}
 	}
 
+	pyOut := any(pyWhy)
+	ratiosPy := any("UNMEASURED: no Python twin was built")
+	if py != nil {
+		pyOut = py.summary()
+		ratiosPy = map[string]float64{
+			"replay_of_history": medianF(ts.replayMed) / medianF(py.replayMed),
+			"cold_start_cached": medianF(ts.coldMed) / medianF(py.coldMed),
+			"module_bytes":      float64(len(ts.wasm)) / float64(len(py.wasm)),
+		}
+	}
 	out := map[string]any{
-		"what":       "TypeScript guest (Javy static mode) vs its Go twin, in-process on the wasmtime backend, compiled module cached",
-		"rounds":     benchRounds,
-		"os":         runtime.GOOS,
-		"arch":       runtime.GOARCH,
-		"cpus":       runtime.NumCPU(),
-		"go":         runtime.Version(),
-		"typescript": ts.summary(),
-		"go_twin":    gw.summary(),
+		"what":        "TypeScript guest (Javy static mode) vs its Go and Python twins, in-process on the wasmtime backend, compiled module cached",
+		"rounds":      benchRounds,
+		"os":          runtime.GOOS,
+		"arch":        runtime.GOARCH,
+		"cpus":        runtime.NumCPU(),
+		"go":          runtime.Version(),
+		"typescript":  ts.summary(),
+		"go_twin":     gw.summary(),
+		"python_twin": pyOut,
 		"ratios_typescript_over_go": map[string]float64{
 			"replay_of_history": medianF(ts.replayMed) / medianF(gw.replayMed),
 			"cold_start_cached": medianF(ts.coldMed) / medianF(gw.coldMed),
 			"module_bytes":      float64(len(ts.wasm)) / float64(len(gw.wasm)),
 		},
-		"not_measured": "peak guest memory; database throughput; a Python twin (so no Linux figure for the cold-start-vs-Python line)",
+		"ratios_typescript_over_python": ratiosPy,
+		"not_measured":                  "peak guest memory; database throughput",
 	}
 	b, _ := json.MarshalIndent(out, "", " ")
 	t.Logf("startup and replay numbers:\n%s", b)
