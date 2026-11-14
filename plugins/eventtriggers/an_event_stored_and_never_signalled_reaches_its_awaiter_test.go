@@ -298,13 +298,14 @@ func TestAStoredEventNeverSignalledReachesItsAwaiter(t *testing.T) {
 			t.Errorf("reconciled payload is not the stored event_data:\n reconciled %s\n stored     %s", reconciled, stored)
 		}
 		// And whether the stored form is the published one depends on the column.
-		// SQL Server keeps the text as published, so a reconciled payload is
-		// byte-identical to a directly published one there. PostgreSQL (JSONB)
-		// re-renders the text, and MySQL's JSON column re-renders it AND
-		// narrows a number past float64, so neither is. That is a property of
-		// storage, shared by the claim path, and is recorded rather than hidden.
+		// SQL Server and MySQL keep the text as published, so a reconciled payload is
+		// byte-identical to a directly published one there (MySQL since cleat#3873
+		// converted event_data from JSON to LONGTEXT; the JSON type rewrote a number
+		// past float64 and re-rendered the body). PostgreSQL's JSONB re-renders the
+		// text, so there it is not. That is a property of storage, shared by the claim
+		// path, and is recorded rather than hidden.
 		if reconciled != direct[0].payload {
-			if f.dialect == plugin.DialectMSSQL {
+			if f.dialect != plugin.DialectPostgres {
 				t.Errorf("reconciled payload differs from the directly published one on %s:\n reconciled %s\n direct     %s", f.be.Name, reconciled, direct[0].payload)
 			}
 			t.Logf("MEASURED on %s: published bytes are NOT preserved through storage:\n reconciled %s\n direct     %s", f.be.Name, reconciled, direct[0].payload)
