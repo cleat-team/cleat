@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -1815,6 +1816,18 @@ def hello_workflow(h: HostCalls, name: str) -> str:
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build_wasm.py failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// cleat#3818: a default build writes the WASM Component Model binary and says nothing about wasm-tools.
+	// The default used to produce "both formats" and warned on every machine, whether wasm-tools was absent
+	// ("no core WASM module was produced") or too new to have `component decompose` ("Install an older
+	// wasm-tools"); an old one that could decompose is read, not run, to have written a core module instead.
+	if strings.Contains(strings.ToLower(string(out)), "warning") {
+		t.Errorf("a default Python build printed a warning; the component is all it needs:\n%s", string(out))
+	}
+	if head, rerr := os.ReadFile(wasmOutput); rerr != nil || len(head) < 8 ||
+		!bytes.Equal(head[:8], []byte{0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00}) {
+		t.Errorf("the default output is not a WASM Component Model binary (want the 00 61 73 6d 0d 00 01 00 header); read error %v", rerr)
 	}
 
 	// Verify .wasm file exists and is non-empty.
