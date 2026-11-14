@@ -44,8 +44,17 @@ on:
 # cancelled by the next push (GitHub keeps one pending run per group, and a
 # cancelled run is a gate that did not run); superseded PR runs are cancelled.
 # scripts/check-workflow-concurrency.sh requires exactly this shape.
+# A title or body edit must not supersede the run it races (cleat#3809, the same
+# defect cleat#1688 fixed in ci.yml). `edited` is subscribed for a BASE change,
+# but it also fires for a body edit, and `github.ref` is identical for every
+# pull_request activity type, so the edited run landed in the push run's group
+# and cancelled it. A cancelled run renders as a failure, and on release/v0.6.0
+# these contexts are required. An `edited` that did not change the base gets
+# its own group (`github.run_id`), so it cancels nothing and the run it raced
+# finishes; it then runs the jobs again, as ci.yml's does. One line on purpose:
+# check-workflow-concurrency.sh reads the single line matching `^\s*group:`.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
