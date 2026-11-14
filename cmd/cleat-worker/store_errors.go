@@ -26,6 +26,7 @@ var storeDomainErrors = []struct {
 	status int
 }{
 	{engine.ErrWorkflowNotFound, http.StatusNotFound},
+	{engine.ErrWorkflowDefNotFound, http.StatusNotFound},
 	{engine.ErrPromiseNotFound, http.StatusNotFound},
 	{engine.ErrRoutingRuleNotFound, http.StatusNotFound},
 	{engine.ErrScheduleNotFound, http.StatusNotFound},
@@ -53,6 +54,18 @@ var storeDomainErrors = []struct {
 // scripts/check-no-error-text-in-500.py fails the build when that shape comes
 // back.
 func (s *apiServer) writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	s.writeStoreErrorDuring(w, r, "", err)
+}
+
+// writeStoreErrorDuring is writeStoreError for a handler that wants the client told WHAT failed, in a sentence of
+// its own ("checking the tenant's public exposure opt-in"), without any of the error's text. `what` is ours: it
+// must be a phrase the handler wrote, never anything derived from the error. The body reads "<what> failed" for a
+// 500 and "<what> failed just now; retry shortly" for a 503; an empty `what` gives the generic sentences.
+//
+// It exists because the first sweep (cleat#3878) left the 500s that put an error AFTER a sentence of their own
+// ("checking public exposure opt-in: " + err.Error()): the sentence was useful and the text was the leak, and a
+// helper with one fixed body would have cost those sites the sentence (cleat#3883).
+func (s *apiServer) writeStoreErrorDuring(w http.ResponseWriter, r *http.Request, what string, err error) {
 	for _, d := range storeDomainErrors {
 		if errors.Is(err, d.err) {
 			s.writeError(w, d.status, d.err.Error())
@@ -62,15 +75,21 @@ func (s *apiServer) writeStoreError(w http.ResponseWriter, r *http.Request, err 
 	id := newRequestID()
 	status := http.StatusInternalServerError
 	msg := "the server could not complete this request"
+	if what != "" {
+		msg = what + " failed"
+	}
 	level := slog.LevelError
 	if engine.StoreErrorIsTransient(err) {
 		status = http.StatusServiceUnavailable
 		msg = "the server could not complete this request just now; retry shortly"
+		if what != "" {
+			msg = what + " failed just now; retry shortly"
+		}
 		level = slog.LevelWarn
 		w.Header().Set("Retry-After", "1")
 	}
 	slog.Log(r.Context(), level, "store call failed; answering without the error text",
-		"request_id", id, "method", r.Method, "path", r.URL.Path, "status", status, "error", err)
+		"request_id", id, "method", r.Method, "path", r.URL.Path, "status", status, "what", what, "error", err)
 	w.Header().Set("X-Request-Id", id)
 	s.writeJSON(w, status, map[string]string{"error": msg, "request_id": id})
 }

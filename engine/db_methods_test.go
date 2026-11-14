@@ -5343,6 +5343,10 @@ func TestPostgresStore_LoadDAGSpec_NotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), "workflow def not found") {
 		t.Errorf("expected 'workflow def not found' error, got: %v", err)
 	}
+	// cleat#3883: matchable, so the HTTP layer can answer 404 and not a 500 carrying the sentence.
+	if !errors.Is(err, ErrWorkflowDefNotFound) {
+		t.Errorf("the not-found is not ErrWorkflowDefNotFound: %v", err)
+	}
 }
 
 // TestPostgresStore_LoadDAGSpec_NullSpec is the case that was missing, and the

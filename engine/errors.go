@@ -5,6 +5,12 @@ import (
 	"fmt"
 )
 
+// ErrWorkflowDefNotFound is returned by the stores' workflow-definition reads (LoadDAGSpec, the history-limit
+// lookup) when no definition exists for the name and version in the caller's tenant. Its text is unchanged:
+// "workflow def not found: <name> v<version>" still reads the same, and is now matchable with errors.Is, so
+// an HTTP handler can answer 404 for it instead of a 500 carrying the sentence (cleat#3883).
+var ErrWorkflowDefNotFound = errors.New("workflow def not found")
+
 // ErrFenceLost is returned by the generation-fenced workflow lifecycle
 // methods (CompleteWorkflow, FailWorkflow, MoveToDeadLetterQueue,
 // ContinueAsNew, FinalizeWorkflowSegment) when the fencing UPDATE affected
