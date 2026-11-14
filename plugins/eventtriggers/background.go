@@ -36,9 +36,12 @@ func (p *Plugin) Run(ctx context.Context) error {
 	interval := defaultRetryInterval
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	reconcileTicker := time.NewTicker(reconcileInterval)
+	defer reconcileTicker.Stop()
 
 	p.logger.Info("event-triggers: background retry worker started",
-		"interval", interval)
+		"interval", interval,
+		"reconcile_interval", reconcileInterval, "reconcile_grace", reconcileGrace)
 
 	for {
 		select {
@@ -48,6 +51,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 		case <-ticker.C:
 			p.processBatch(ctx)
+
+		case <-reconcileTicker.C:
+			p.reconcileAwaiters(ctx, time.Now())
 		}
 	}
 }
