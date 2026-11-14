@@ -343,8 +343,9 @@ def main():
              "When 'wasmtime', or when unset (the default), the output is the WASM Component "
              "Model binary componentize-py produced, which is what the worker runs; no other "
              "tool is needed. "
-             "When 'wazero', the output is a decomposed core WASM module, which needs wasm-tools "
-             "(wazero backs developer tooling only, not the worker).",
+             "When 'wazero', the output is a decomposed core WASM module, which needs a wasm-tools "
+             "with `component decompose`; none of the releases checked (1.200.0 to 1.261.0) has it, "
+             "so this exits 1 (wazero backs developer tooling only, not the worker).",
     )
 
     args = parser.parse_args()
@@ -497,11 +498,35 @@ def main():
                 # If wasm-tools removed the decompose subcommand (newer versions),
                 # fall back gracefully rather than failing the build.
                 if "unrecognized subcommand" in stderr or "unrecognized" in stderr:
+                    # --runtime wazero asked for core WASM, and this is the one thing it cannot get here, so
+                    # it is an error and not a warning (cleat#3870). The warning below is for a caller that
+                    # did not ask for core WASM; since cleat#3818 the only way to reach this step is
+                    # --runtime wazero, so that is the only branch a build normally takes.
+                    #
+                    # WHAT TO TELL THE READER. This used to say "Install an older wasm-tools", and that advice
+                    # is not one that was found to work: `wasm-tools component decompose` is absent from every
+                    # release that was checked on 2026-11-14 (1.200.0, 1.210.0, 1.220.0, 1.225.0, 1.228.0,
+                    # 1.229.0 and 1.261.0; the engine tests record it as removed in 1.230, but 1.229.0 and
+                    # everything older that was tried lacks it too). So no version is named, and the way out
+                    # that is known to work is the one that does not need the tool.
+                    if args.runtime == "wazero":
+                        print("Error: --runtime wazero needs core WASM, and the wasm-tools on PATH cannot produce it",
+                              file=sys.stderr)
+                        print("", file=sys.stderr)
+                        print("  This build decomposes the component with `wasm-tools component decompose`, and",
+                              file=sys.stderr)
+                        print("  that subcommand does not exist in this wasm-tools (see `wasm-tools --version`).",
+                              file=sys.stderr)
+                        print("  wazero cannot load a WASM Component Model binary, so there is no output this",
+                              file=sys.stderr)
+                        print("  build can give it. Build with --runtime wasmtime (the default) instead: the",
+                              file=sys.stderr)
+                        print("  worker runs the component, and wazero backs developer tooling only.",
+                              file=sys.stderr)
+                        sys.exit(1)
                     print("  Warning: wasm-tools component decompose not available in this version.",
                           file=sys.stderr)
                     print("  The output is a WASM Component Model binary (usable with wasmtime).",
-                          file=sys.stderr)
-                    print("  Install an older wasm-tools or use --runtime wasmtime to skip this step.",
                           file=sys.stderr)
                 else:
                     print(f"Error: wasm-tools decompose failed (exit code {decompose_result.returncode})",
