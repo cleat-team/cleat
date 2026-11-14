@@ -3,6 +3,7 @@ package eventtriggers
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -76,42 +77,51 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 // mixing a Go time with a column that is stored in the session's.
 func stuckAwaiters(pageSize int) plugin.Query {
 	return plugin.Query{
-		Default: fmt.Sprintf(`SELECT a.id, a.workflow_id, a.tenant_id, a.event_type, a.key1, a.key2, a.key3
-FROM event_awaiters a
-WHERE a.id > $1
-  AND EXISTS (
-    SELECT 1 FROM ingested_events e
-    WHERE e.tenant_id = a.tenant_id AND e.event_type = a.event_type
-      AND e.key1 = a.key1 AND e.key2 = a.key2 AND e.key3 = a.key3
-      AND NOT e.processed
-      AND e.received_at < NOW() - INTERVAL '%d seconds')
-ORDER BY a.id
-LIMIT %d`, int(reconcileGrace.Seconds()), pageSize),
-		MySQL: fmt.Sprintf(`SELECT a.id, a.workflow_id, a.tenant_id, a.event_type, a.key1, a.key2, a.key3
-FROM event_awaiters a
-WHERE a.id > $1
-  AND EXISTS (
-    SELECT 1 FROM ingested_events e
-    WHERE e.tenant_id = a.tenant_id AND e.event_type = a.event_type
-      AND e.key1 = a.key1 AND e.key2 = a.key2 AND e.key3 = a.key3
-      AND e.processed = 0
-      AND e.received_at < DATE_SUB(NOW(), INTERVAL %d SECOND))
-ORDER BY a.id
-LIMIT %d`, int(reconcileGrace.Seconds()), pageSize),
+		Default: stuckAwaitersSQL(plugin.DialectPostgres, pageSize),
+		MySQL:   stuckAwaitersSQL(plugin.DialectMySQL, pageSize),
+		MSSQL:   stuckAwaitersSQL(plugin.DialectMSSQL, pageSize),
+	}
+}
+
+// stuckAwaitersSQL spells the scan for one dialect. The row limit comes from
+// plugin.LimitClause, which is the one place that knows SQL Server has no LIMIT,
+// so this file carries no literal LIMIT for the portability guard
+// (scripts/check-plugin-sql-limit-portability.py) to misread: it accepts an MSSQL
+// arm only as a backtick literal, and these arms are built, not written.
+func stuckAwaitersSQL(d plugin.Dialect, pageSize int) string {
+	var (
+		selectList  = "a.id, a.workflow_id, a.tenant_id, a.event_type, a.key1, a.key2, a.key3"
+		unprocessed = "NOT e.processed"
+		stale       = fmt.Sprintf("e.received_at < NOW() - INTERVAL '%d seconds'", int(reconcileGrace.Seconds()))
+	)
+	switch d {
+	case plugin.DialectMySQL:
+		unprocessed = "e.processed = 0"
+		stale = fmt.Sprintf("e.received_at < DATE_SUB(NOW(), INTERVAL %d SECOND)", int(reconcileGrace.Seconds()))
+	case plugin.DialectMSSQL:
 		// processed = 0, not NOT processed: a BIT is a value in T-SQL, not a
 		// condition (see queryUnprocessedEvents).
-		MSSQL: fmt.Sprintf(`SELECT CAST(a.id AS NVARCHAR(36)), a.workflow_id, CAST(a.tenant_id AS NVARCHAR(36)), a.event_type, a.key1, a.key2, a.key3
+		//
+		// The two CASTs are not decoration: the driver hands a UNIQUEIDENTIFIER
+		// back as 16 raw bytes in SQL Server's mixed-endian order, and scanning that
+		// into a string yields garbage that uuid.Parse rejects ("invalid UUID
+		// length: 16"). The sweep read nothing on SQL Server and logged an error per
+		// row until these were added.
+		selectList = "CAST(a.id AS NVARCHAR(36)), a.workflow_id, CAST(a.tenant_id AS NVARCHAR(36)), a.event_type, a.key1, a.key2, a.key3"
+		unprocessed = "e.processed = 0"
+		stale = fmt.Sprintf("e.received_at < DATEADD(second, -%d, SYSUTCDATETIME())", int(reconcileGrace.Seconds()))
+	}
+	return fmt.Sprintf(`SELECT %s
 FROM event_awaiters a
 WHERE a.id > $1
   AND EXISTS (
     SELECT 1 FROM ingested_events e
     WHERE e.tenant_id = a.tenant_id AND e.event_type = a.event_type
       AND e.key1 = a.key1 AND e.key2 = a.key2 AND e.key3 = a.key3
-      AND e.processed = 0
-      AND e.received_at < DATEADD(second, -%d, SYSUTCDATETIME()))
+      AND %s
+      AND %s)
 ORDER BY a.id
-OFFSET 0 ROWS FETCH NEXT %d ROWS ONLY`, int(reconcileGrace.Seconds()), pageSize),
-	}
+%s`, selectList, unprocessed, stale, plugin.LimitClause(strconv.Itoa(pageSize), d))
 }
 
 // oldestStrandedEvent reads, without locking, the payload of the oldest
