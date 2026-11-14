@@ -10,13 +10,12 @@ package main
 // fails closed on an unreadable run exactly as it already does on an unreadable definition class
 // (cleat#3785): a 503 with Retry-After, the error logged, nothing done.
 //
-// WHERE IT BITES. Signal and cancel authorise through callerOwnsTarget, which reads the run itself when the
-// request carries a tenant and answers its own 500 if that fails, so on the authenticated path an unreadable run
-// never reaches the guard for those two (they still answer 500 with the driver's text, which is not changed
-// here). With NO tenant in the request context (a worker without --require-auth) callerOwnsTarget returns without
-// reading, and the guard's read is the only one before the action: that is where signal and cancel were served.
-// The other six handlers that use the guard authorise through scopedStore, which does not read the run, so they
-// reach the guard in both variants. Which handlers go through which is read off the source, below.
+// IT HOLDS ON EVERY RUN-ADDRESSED ROUTE, WITH OR WITHOUT A TENANT (cleat#3866 extended cleat#3799). Signal and
+// cancel authorise through callerOwnsTarget, which reads the run itself when the request carries a tenant, and the
+// history, events, state, query-state and promise-list routes read it through runExists; each of those used to
+// answer 500 with the driver's text in the body. They now go through the same writeAccessCheckUnavailable as the
+// guard. With no tenant in the request context callerOwnsTarget returns without reading, so there the guard's read
+// is the only one before the action (the cleat#3799 fail-open).
 //
 // Every run-addressed route in the two tables is driven with the run unreadable and the definition INTERNAL, so
 // that serving the request is the wrong answer on both counts. Which of them go through refuseIfInternalRun
@@ -26,16 +25,13 @@ package main
 import (
 	"context"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 )
 
@@ -55,51 +51,7 @@ func driveWithoutATenant(t *testing.T, entry apiEntry, api *apiServer, r externa
 	return rec
 }
 
-// handlersCalling returns the handlers, by name, whose body calls the named guard.
-func handlersCalling(t *testing.T, guard string) map[string]bool {
-	t.Helper()
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := map[string]bool{}
-	fset := token.NewFileSet()
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		parsed, err := parser.ParseFile(fset, f, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", f, err)
-		}
-		for _, d := range parsed.Decls {
-			fd, ok := d.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
-			}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if call, ok := n.(*ast.CallExpr); ok {
-					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == guard {
-						found[fd.Name.Name] = true
-					}
-				}
-				return true
-			})
-		}
-	}
-	return found
-}
-
 func TestARunThatCannotBeReadIsNeverServed(t *testing.T) {
-	plain := handlersCalling(t, "refuseIfInternalRun")
-	owns := handlersCalling(t, "callerOwnsTarget")
-	// Known positives: a scan that found nothing, or missed these two, would pass every row below vacuously.
-	for _, must := range []string{"handleSignal", "handleCancel"} {
-		if !plain[must] {
-			t.Fatalf("the source scan did not find %s calling refuseIfInternalRun (found %v); the test would hold nothing to the 503", must, plain)
-		}
-	}
-
 	driven := 0
 	for _, table := range []struct {
 		name string
@@ -132,20 +84,9 @@ func TestARunThatCannotBeReadIsNeverServed(t *testing.T) {
 					}
 					driven++
 
-					// Whatever guards it, an unreadable run is not served: a 2xx or a 404 here is the fail-open (a 404
-					// is also the wrong answer for an error, which is what cleat#3785 changed).
-					if rec.Code < 500 {
-						t.Fatalf("%s answered %d %s with the run unreadable and its definition internal; want a 5xx",
-							r.handler, rec.Code, strings.TrimSpace(rec.Body.String()))
-					}
-					// With a tenant, a handler that authorises through callerOwnsTarget reads the run first and answers
-					// its own 500; the tenant-less request, and every handler that does not use callerOwnsTarget,
-					// reaches the guard's read, which is the one that changed.
-					if !plain[r.handler] || (withTenant && owns[r.handler]) {
-						return
-					}
+					// An unreadable run is not served, and it is a retryable 503, not a 5xx of the driver's making.
 					if rec.Code != http.StatusServiceUnavailable {
-						t.Errorf("%s calls refuseIfInternalRun and answered %d %s; want 503, which tells a client to retry",
+						t.Errorf("%s answered %d %s with the run unreadable and its definition internal; want 503, which tells a client to retry",
 							r.handler, rec.Code, strings.TrimSpace(rec.Body.String()))
 					}
 					if rec.Header().Get("Retry-After") == "" {
@@ -163,5 +104,44 @@ func TestARunThatCannotBeReadIsNeverServed(t *testing.T) {
 	}
 	if driven == 0 {
 		t.Fatal("no run-addressed route was driven")
+	}
+}
+
+// The admin helpers read the run too and are not in the route tables above, so they are driven directly: the
+// authorisation every /api/admin/instances/* route without a named tenant goes through, and the dead-letter
+// reprocess handler. (adminTargetStore's named-tenant branch, which opens another tenant's store, is not driven.)
+func TestTheAdminReadsOfARunAnswer503WhenItCannotBeRead(t *testing.T) {
+	failing := func() *mockStore {
+		ms := storeServing(engine.ExposureInternal, true)
+		fail := errors.New(driverError)
+		ms.getWorkflowByIDFn = func(context.Context, string) (*engine.WorkflowInstance, error) { return nil, fail }
+		return ms
+	}
+	for _, c := range []struct {
+		name string
+		call func(s *apiServer, w http.ResponseWriter, r *http.Request)
+	}{
+		{"callerOwnsTarget", func(s *apiServer, w http.ResponseWriter, r *http.Request) { s.callerOwnsTarget(w, r, "RUN") }},
+		{"handleDeadLetterReprocess", func(s *apiServer, w http.ResponseWriter, r *http.Request) { s.handleDeadLetterReprocess(w, r, "RUN") }},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			logs := capturedLog(t)
+			ctx, cancel := context.WithTimeout(auth.WithTenantID(context.Background(), exposureTestTenant), time.Second)
+			defer cancel()
+			req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{}`)).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			c.call(newTestAPIServer(failing()), rec, req)
+			if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+				t.Errorf("%s answered %d %s (Retry-After %q); want 503 with Retry-After",
+					c.name, rec.Code, strings.TrimSpace(rec.Body.String()), rec.Header().Get("Retry-After"))
+			}
+			if strings.Contains(rec.Body.String(), driverError) {
+				t.Errorf("%s put the driver's error in the response body:\n%s", c.name, rec.Body.String())
+			}
+			if !strings.Contains(logs.String(), driverError) {
+				t.Errorf("%s swallowed the error: nothing was logged", c.name)
+			}
+		})
 	}
 }
