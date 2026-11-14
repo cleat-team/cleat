@@ -189,6 +189,15 @@ var sdkDurableHelpers = map[string]bool{
 	// saga.RunWithResult(h) the other.
 	"Saga.Run":           true,
 	"Saga.RunWithResult": true,
+
+	// PluginFunc.WaitFor is typed access to h.WaitForEvent (cleat#3794). Its
+	// receiver is a PluginCaller, so the scan already sees it as a plugin_call
+	// -- which is not enough: the call it makes is WaitForEvent, and without
+	// this row (and its imports in wasm's sdkHelperImports) the module builds
+	// without cleat_wait_for_event and the call dies at run time on a nil
+	// adapter. Measured: a package-level function making the same call compiled
+	// clean and failed every run with a nil pointer dereference.
+	"PluginFunc.WaitFor": true,
 }
 
 // SDKDurableHelper reports whether a selection is an SDK helper that makes a

@@ -160,8 +160,16 @@ at all, which is the gap the comparison is naming, not a feature.
 | **total** | | **439** |
 
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
-on the same date: **723**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
+on the same date: **716** (corrected below). Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
+
+**Corrected 2026-11-13 (cleat#3794): cleat 723 → 716.** Seven code lines. `awaitPaymentConfirmation`
+was a 32-line loop (claim, a bounded loop of suspends, a re-claim after each wake) and is now one call
+to `webhookingest.AwaitWebhookWaiter.WaitFor`, 13 lines with its empty-source guard, so the cleat side
+shrank. DBOS is unchanged at **439**, so the app ratio goes from 1.65x to **1.63x** (716/439). The
+cleat harness reads **470** from the script today, one more than the 469 quoted below; nothing in this
+change touched it. With both harnesses counted the ratio is **1.96x** (`(716+470)/(439+165)`), against
+the 1.97x quoted below. The dated paragraphs below are history and still quote their own figures.
 
 **Corrected 2026-10-26 (cleat#3368): cleat 731 → 723.** Eight code lines. The backend's private
 `authTransport`, a `RoundTripper` that set the worker API key, was replaced by

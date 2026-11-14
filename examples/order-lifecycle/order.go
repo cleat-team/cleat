@@ -428,104 +428,50 @@ func refundPSP(orderID string, totalCents int) error {
 	return nil
 }
 
-// webhookEventType is the event_type handleIngestWebhook assigns a PSP
-// callback that sets neither X-Github-Event nor X-Event-Type -- which the
-// README's curl example does not, so every payment webhook this workflow
-// receives carries this value. It has to agree with webhookingest's own
-// default (plugins/webhookingest/routes.go's defaultWebhookEventType) for
-// AwaitSignals below to ever see the signal a matching webhook fires: the
-// claim eventtriggers.ClaimOrRegisterAwaiter performs is keyed on an EXACT
-// event_type, not "whatever came in".
-const webhookEventType = "webhook"
+// paymentWindow is how long the order waits for the PSP's webhook before it gives
+// up and the saga compensates. It is the argument to webhookingest.Wait, not a
+// pair of constants inside a loop.
+const paymentWindow = 30 * time.Second
 
 // awaitPaymentConfirmation waits for the PSP's webhook as a STEP.
 //
 // This is the shape worth copying: the workflow does not register a handler and
 // the handler does not look up an order. The ingress route verifies the HMAC,
-// stores the event, and this call — which is already parked on the right order
-// — picks it up. Correlation is the engine's.
+// stores the event, and this call -- which is already parked on the right order --
+// picks it up. Correlation is the engine's.
 //
-// A REAL SUSPEND, NOT A POLL -- cleat#2649. Before this, a found:false
-// result from await_webhook was a real answer, not an error (its own doc
-// said so), and "the workflow engine will retry according to its retry
-// policy" was not true in practice: a call that SUCCEEDS is never retried,
-// whatever it returned, so the wait had to be a loop over DurableSleep --
-// 30 iterations, a full second apart, burning a durable-call round trip on
-// every attempt regardless of whether anything happened. await_webhook now
-// claims through the same key-slot correlation await_event uses
-// (eventtriggers.ClaimOrRegisterAwaiter): a not-found result registers this
-// workflow as an awaiter for (sourceID, orderID), and the publish handler
-// signals it directly the moment a matching webhook arrives
-// (plugins/eventtriggers/publish.go's signalAwaiters, "__evt:"+event_type) --
-// so the loop below is a genuine suspend, no worker held, woken by the one
-// event that matches rather than by the next tick of a timer -- it is a
-// bounded loop of suspends, not a poll, because a wake is not proof of a
-// claimable event (see the loop's own comment) and the ordinary case exits
-// on the first iteration.
+// ONE CALL. Until cleat#3794 this was a 32-line loop: claim, then a bounded loop
+// of AwaitSignals on "__evt:"+type with a re-claim after each wake (a wake is not
+// proof of a claimable event), across five attempts of six seconds that were two
+// constants rather than a parameter. The loop already existed once, in the
+// engine, as h.WaitForEvent (one host call, deadline from the durable clock);
+// AwaitWebhookWaiter.WaitFor is typed access to it. It suspends rather than
+// polls (cleat#2649): no worker is held, and the one event that matches wakes it.
+// An error means the claim failed or the window closed, and either way the saga
+// unwinds, so this step does not tell them apart. The DBOS port of this scenario is one line,
+// `DBOS.recv('payment-confirmed', { timeoutSeconds: 30 })`.
+//
+// Keys: []string{orderID} -- key1 is always this source's own id
+// (handleIngestWebhook adds it automatically), so this is key2: the value the
+// README's source setup step tells the PSP to echo back as "order_id" in its
+// webhook body, which handleIngestWebhook extracts via the source's configured
+// correlation_key_field. Without it, this call would correlate on sourceID alone
+// -- fine for a source used by exactly one order at a time, wrong the moment two
+// orders share it, which is the ordinary case this README's source is
+// deliberately set up to show.
+//
+// No EventType is passed: the README's curl example sets neither X-Github-Event
+// nor X-Event-Type, so the plugin stores the event under its default type, which
+// is also what Wait waits on when none is given.
 func awaitPaymentConfirmation(sourceID, orderID string) error {
 	if sourceID == "" {
 		return fmt.Errorf("no webhook source configured; see the README's setup step")
 	}
-
-	// Keys: []string{orderID} -- key1 is always this source's own id
-	// (handleIngestWebhook adds it automatically), so this is key2: the
-	// value the README's source setup step tells the PSP to echo back as
-	// "order_id" in its webhook body, which handleIngestWebhook extracts via
-	// the source's configured correlation_key_field. Without it, this call
-	// would correlate on sourceID alone -- fine for a source used by exactly
-	// one order at a time, wrong the moment two orders share it, which is
-	// the ordinary case this README's source is deliberately set up to show.
-	got, err := webhookingest.AwaitWebhook.Call(h, webhookingest.AwaitWebhookInput{
-		SourceID: sourceID,
-		Keys:     []string{orderID},
-	})
+	_, err := webhookingest.AwaitWebhookWaiter.WaitFor(h, webhookingest.AwaitWebhookInput{SourceID: sourceID, Keys: []string{orderID}}, paymentWindow)
 	if err != nil {
-		return err
+		return fmt.Errorf("no payment confirmation from source %s within %s: %w", sourceID, paymentWindow, err)
 	}
-	if got.Found {
-		return nil
-	}
-
-	// Not found: the call above already registered this workflow as an
-	// awaiter for exactly (sourceID, orderID). Suspend on the signal that
-	// registration wakes, rather than polling.
-	//
-	// A WAKE IS NOT PROOF OF A CLAIMABLE EVENT -- cleat-review's finding on
-	// this PR. A publish's INSERT and its signalAwaiters call are two
-	// separate steps (plugins/eventtriggers/publish.go), so a signal can
-	// arrive for an event a DIFFERENT, earlier wake of this same awaiter (or
-	// eventtriggers.ClaimOrRegisterAwaiter's own internal re-check, which
-	// closes the race this signal exists to cover -- see claim.go) already
-	// claimed. Treating one wake as authoritative and erroring when the
-	// re-check finds nothing turns an ordinary spurious wakeup -- the same
-	// hazard any condition variable has -- into a false failure. So this
-	// loops on the CONDITION (found a claimable event) rather than the
-	// EVENT (a signal arrived), across a fixed number of attempts rather
-	// than tracking wall-clock time: plain Go code between host calls is
-	// replayed, so a real time.Now() read here would not be.
-	const attempts = 5
-	const perAttemptWait = 6 * time.Second // attempts * perAttemptWait = 30s total, same budget as before this PR.
-
-	for i := 0; i < attempts; i++ {
-		h.AwaitSignals([]string{"__evt:" + webhookEventType}, perAttemptWait)
-
-		// The signal only wakes the workflow; it is not the claim. Re-call
-		// so the atomic claim/mark-consumed still happens exactly once,
-		// through the same mechanism, regardless of how many awaiters a
-		// given publish woke, or whether this particular wake was spurious.
-		got, err = webhookingest.AwaitWebhook.Call(h, webhookingest.AwaitWebhookInput{
-			SourceID: sourceID,
-			Keys:     []string{orderID},
-		})
-		if err != nil {
-			return err
-		}
-		if got.Found {
-			return nil
-		}
-	}
-	return fmt.Errorf("no payment confirmation from source %s within %s",
-		sourceID, attempts*perAttemptWait)
+	return nil
 }
 
 func dispatchFulfilment(input OrderInput) error {
