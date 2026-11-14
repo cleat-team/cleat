@@ -554,7 +554,7 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		SELECT w.id
 		FROM workflow_instances w
 		JOIN (
-			SELECT workflow_id, COUNT(*) AS cnt
+			SELECT workflow_id, COUNT(*) AS cnt, MIN(step) AS min_step
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
@@ -565,9 +565,14 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		       ON d.name = w.def_name AND d.version = w.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), ?)
-		  -- Only a run that has never been compacted: see the PostgreSQL half
-		  -- in engine/db.go (cleat#3838).
-		  AND w.compaction_step IS NULL
+		  -- A run is a candidate if it was never compacted, or if its recorded
+		  -- boundary is the first row it still has. compaction_step is the first
+		  -- retained STEP, so on a consistent run it equals the smallest step left.
+		  -- A run where it does not (the old second compaction wrote an index there
+		  -- and deleted by step) is refused by CompactWorkflowHistory every time;
+		  -- left in, enough of them fill the batch and no other run is compacted
+		  -- (cleat#3838, found by cleat-review).
+		  AND (w.compaction_step IS NULL OR w.compaction_step = e.min_step)
 		  AND w.tenant_id = ?
 		ORDER BY e.cnt DESC
 		LIMIT ?

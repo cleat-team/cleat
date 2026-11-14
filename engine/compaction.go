@@ -382,23 +382,12 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 		effective = perDefinition
 	}
 
-	// cleat#3838: a run that has already been compacted is not compacted again.
-	// The state is built from the rows being removed alone, so a second pass
-	// REPLACES the first pass's events with ones taken from the retained tail,
-	// and keepStep below is an index into that tail but CompactHistory deletes
-	// by step. Measured on PostgreSQL with a workflow that sums 30 signal
-	// payloads: 1713 against the correct 1335, finished "done", nothing
-	// reported. Skipping costs only space -- the history keeps growing -- and
-	// is removed by the change that makes a second compaction extend the state.
+	// A run that has been compacted before already has a state covering steps
+	// 0..first-retained-1. This pass extends it (cleat#3838). A state that cannot
+	// be read is not "no state": compacting without it would replace it.
 	prev, err := store.LoadCompactionState(ctx, workflowID)
 	if err != nil {
 		return fmt.Errorf("compact: load existing compaction state: %w", err)
-	}
-	if prev != nil {
-		// Debug, not Warn: the candidate query selects this run on every pass.
-		slog.DebugContext(ctx, "compact skipped: the run is already compacted and a second compaction is not supported (cleat#3838)",
-			"workflow_id", workflowID)
-		return nil
 	}
 
 	events, err := store.LoadEventHistory(ctx, workflowID)
@@ -411,15 +400,31 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 
 	// Determine the compaction point: keep the most recent effective/2 events
 	// as the tail, compact everything before that.
-	keepStep := len(events) - effective/2
-	if keepStep < 0 {
-		keepStep = 0
+	//
+	// keepIdx is a position in the rows loaded, which after an earlier compaction
+	// start at the first retained step and not at 0. keepStep is the STEP of the
+	// first row kept, and it is what CompactHistory deletes below and what the
+	// state records. They were one number until a second compaction made them
+	// differ (cleat#3838): the index was used as a step, the store deleted
+	// nothing, and the state was written for rows it had not removed.
+	keepIdx := len(events) - effective/2
+	if keepIdx < 1 {
+		return nil // nothing to remove
+	}
+	keepStep := events[len(events)-1].Step + 1
+	if keepIdx < len(events) {
+		keepStep = events[keepIdx].Step
+	}
+	if prev != nil && events[0].Step != prev.firstRetainedStep() {
+		// The rows and the state disagree about where the history starts. Not
+		// compacting is always safe; extending a state from the wrong place is not.
+		return fmt.Errorf("compact: workflow %s history starts at step %d but its compaction state says the first retained step is %d",
+			workflowID, events[0].Step, prev.firstRetainedStep())
 	}
 	compactedStep := keepStep
 
-	// Extract compaction state from the events being compacted.
-	compactedEvents := events[:keepStep]
-	cs, err := extractCompactionState(compactedEvents)
+	// Extend the state with the events being removed.
+	cs, err := extractCompactionStateFrom(prev, events[:keepIdx])
 	if err != nil {
 		// Not compacting is always safe; compacting wrongly is not.
 		return err
@@ -465,10 +470,10 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 	}
 
 	if metrics != nil {
-		metrics.AddCompactionEventsDeleted(ctx, int64(compactedStep))
+		metrics.AddCompactionEventsDeleted(ctx, int64(keepIdx))
 	}
 	slog.InfoContext(ctx, "compact completed",
-		"workflow_id", workflowID, "events", len(events), "compacted", compactedStep, "kept", len(events)-keepStep, "state_size", len(csJSON))
+		"workflow_id", workflowID, "events", len(events), "compacted", keepIdx, "kept", len(events)-keepIdx, "state_size", len(csJSON))
 	return nil
 }
 
@@ -487,7 +492,16 @@ func isCompactionDeadlockError(err error) bool {
 
 // extractCompactionState builds a CompactionState from the events being
 // compacted away.
-func extractCompactionState(events []EventRecord) (*CompactionState, error) {
+// extractCompactionStateFrom builds the state that covers prev's events and then
+// the rows in events, which must be the rows that directly follow them. With a
+// nil prev it builds the state for a first compaction.
+//
+// CompactedStep always means "the events for steps 0..CompactedStep-1 are in
+// Events" (less any truncated from the front), which is what a second
+// compaction has to preserve: a state built from the removed rows alone covers
+// only those, and the replay that rebuilds the prefix from it hands the guest
+// events from the wrong steps (cleat#3838).
+func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*CompactionState, error) {
 	cs := &CompactionState{
 		Version:       1,
 		CompactedStep: len(events),
@@ -498,6 +512,26 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 
 	defersSeen := make(map[string]string) // deferID -> description
 	openChildren := make(map[string]bool) // runID -> still open
+	childDetails := make(map[string]CompactedChild)
+	prevTruncated := 0
+	if prev != nil {
+		cs.Events = append(cs.Events, prev.Events...)
+		cs.CompactedStep = prev.CompactedStep + len(events)
+		for _, d := range prev.PendingDefers {
+			defersSeen[d.ID] = d.Description
+		}
+		for _, c := range prev.OpenChildren {
+			openChildren[c.RunID] = true
+			childDetails[c.RunID] = c
+		}
+		if len(prev.QueryState) > 0 {
+			cs.QueryState = make(map[string]string, len(prev.QueryState))
+			for k, v := range prev.QueryState {
+				cs.QueryState[k] = v
+			}
+		}
+		prevTruncated = truncatedCompactedEvents(prev)
+	}
 
 	for _, ev := range events {
 		// CHECKED, not a bare lookup. A map miss used to yield 0 -- which was
@@ -550,6 +584,9 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 			ce.ParentWorkflowID = ev.ParentWorkflowID
 			ce.ParentClosePolicy = ev.ParentClosePolicy
 			openChildren[ev.RunID] = true
+			if _, ok := childDetails[ev.RunID]; !ok {
+				childDetails[ev.RunID] = CompactedChild{RunID: ev.RunID, Name: ev.ChildName, Input: ev.ChildInput}
+			}
 		case EventTypeAwaitChild:
 			ce.RunID = ev.RunID
 			ce.Response = ev.Response
@@ -687,15 +724,8 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 
 	// Build list of still-open children with their details.
 	for runID := range openChildren {
-		for _, ev := range events {
-			if ev.EventType == EventTypeChildWorkflow && ev.RunID == runID {
-				cs.OpenChildren = append(cs.OpenChildren, CompactedChild{
-					RunID: runID,
-					Name:  ev.ChildName,
-					Input: ev.ChildInput,
-				})
-				break
-			}
+		if c, ok := childDetails[runID]; ok {
+			cs.OpenChildren = append(cs.OpenChildren, c)
 		}
 	}
 
@@ -704,7 +734,9 @@ func extractCompactionState(events []EventRecord) (*CompactionState, error) {
 		truncated := len(cs.Events) - DefaultMaxCompactedEvents
 		cs.Events = cs.Events[truncated:]
 		cs.CompactedStep -= truncated
-		cs.Summary = &TruncationSummary{TruncatedCount: truncated}
+		cs.Summary = &TruncationSummary{TruncatedCount: truncated + prevTruncated}
+	} else if prevTruncated > 0 {
+		cs.Summary = &TruncationSummary{TruncatedCount: prevTruncated}
 	}
 
 	return cs, nil
