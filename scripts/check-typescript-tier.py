@@ -9,7 +9,9 @@
      not grant). Nothing checked this before. It fails CLOSED on wording it does not
      recognise: a Tier cell must be a bare 1, 2 or a dash, and a language tiers.yaml does not
      grant must carry a status that says it is not built, in development or not supported.
-     README.md is also scanned for a line that pairs TypeScript with a support claim. NOT
+     README.md is also scanned, line by line, for TypeScript or JavaScript paired with a support
+     word or a check mark. That is a LINE HEURISTIC, not a parser: it misses a claim split over two
+     lines and one hidden by a negation of another language on the same line. NOT
      covered: the rest of docs/ -- a scan there measured two hits, both comparisons with
      other products, so it is left out rather than made noisy.
 
@@ -67,12 +69,26 @@ NOT_SUPPORTED = re.compile(r"^\s*(IN DEVELOPMENT|NOT SUPPORTED)", re.I)
 # not claim support, not a denylist of wording that does: a denylist passes "Stable, released"
 # and "Beta" and "Available", and every new synonym. An unrecognised status is a finding.
 NON_CLAIMING = re.compile(r"^\s*(not built|in development|not supported|planned|not started)\b", re.I)
+# ...and the wording must not claim support ANYWHERE in the cell either: a prefix match alone
+# passes "In development; supported on Linux". The negated forms are removed first, so "In
+# development, not supported" is not a claim.
+_NEGATED = re.compile(r"\b(?:not|un)\s*(?:yet\s+)?supported\b", re.I)
+_SUPPORT_WORD = re.compile(r"\bsupport(?:s|ed)?\b|\bships?\b|\bshipped\b|\bproduction\b|\bstable\b|"
+                           r"\bavailable\b|\breleased\b|\bGA\b|\btier\s*[12]\b|\u2705", re.I)
+
+
+def status_is_non_claiming(status):
+    return bool(NON_CLAIMING.match(status)) and not _SUPPORT_WORD.search(_NEGATED.sub("", status))
 # Tier cell: a bare digit, or a dash for none. Anything else ("Tier 2", "Beta", "**2**") is
 # refused rather than mapped to "none", which would equal "not granted" and pass.
 TIER_CELL = re.compile(r"^(?:\*{0,2})([12]|[\u2014\u2013-])(?:\*{0,2})$")
 # README: a line that pairs TypeScript with a support claim, minus the negations.
-README_CLAIM = re.compile(r"typescript", re.I)
-README_SUPPORT = re.compile(r"\bsupport(s|ed)?\b|\bships?\b|\bshipped\b|\bproduction\b|\btier [12]\b|\bstable\b", re.I)
+# A LINE HEURISTIC, not a parser. It reads each README line alone, so it misses a claim split
+# over two lines, and a negation of ANOTHER language on the same line ("Rust is not supported;
+# TypeScript is") hides a claim. It is a tripwire for the obvious sentence and table row; the
+# rest is review's job. The tiers.yaml entry says the same.
+README_CLAIM = re.compile(r"typescript|javascript", re.I)
+README_SUPPORT = re.compile(r"\bsupport(s|ed)?\b|\bships?\b|\bshipped\b|\bproduction\b|\btier [12]\b|\bstable\b|\u2705", re.I)
 README_NEGATION = re.compile(r"not supported|in development|not built|unsupported", re.I)
 
 NAME_PREFIX = re.compile(r"^func (Test(?:TypeScript|JavaScript|Javy|QuickJS)\w*)\(", re.M)
@@ -148,13 +164,13 @@ def check_docs(tiers, doc_text, readme_text=""):
         if claimed != granted:
             findings.append(f"LANGUAGE_SUPPORT.md says tier '{tier.strip()}' for {name}, but tiers.yaml grants "
                             f"{'tier ' + str(granted) if granted else 'no support'}")
-        if granted == 0 and not NON_CLAIMING.match(status):
+        if granted == 0 and not status_is_non_claiming(status):
             findings.append(f"LANGUAGE_SUPPORT.md status for {name} reads '{status}', but tiers.yaml grants it no "
                             f"support, so the status must say not built, in development or not supported")
     if lv.get("typescript", 0) == 0:
         for i, line in enumerate(readme_text.splitlines(), 1):
             if README_CLAIM.search(line) and README_SUPPORT.search(line) and not README_NEGATION.search(line):
-                findings.append(f"README.md:{i} pairs TypeScript with a support claim, but tiers.yaml grants TypeScript "
+                findings.append(f"README.md:{i} pairs TypeScript/JavaScript with a support claim, but tiers.yaml grants TypeScript "
                                 f"no support: {line.strip()[:100]}")
     return findings
 
@@ -335,7 +351,11 @@ def self_test():
     for cell in ("Tier 2", "Beta", "2 (beta)", ""):
         d = _DOC.replace("~1.1 MB | — |", f"~1.1 MB | {cell} |")
         expect(f"known-positive: Tier cell '{cell}' is not a bare 1, 2 or dash", docs(d), "not a bare")
-    for wording in ("Not built", "In development, not supported", "Planned", "Not supported"):
+    for wording in ("In development; supported on Linux", "Not built, but shipped in beta", "Planned (production in Q3)",
+                    "In development \u2705 supported"):
+        expect(f"known-positive: status '{wording}' starts well and claims support later",
+               docs(_DOC.replace("In development, not supported", wording)), "must say not built")
+    for wording in ("Not built", "In development, not supported", "Planned", "Not supported", "In development; not yet supported"):
         expect(f"negative control: status '{wording}' is fine for an ungranted language",
                docs(_DOC.replace("In development, not supported", wording)), None)
     expect("negative control: a bold dash tier cell is fine", docs(_DOC.replace("~1.1 MB | — |", "~1.1 MB | **—** |")), None)
@@ -346,7 +366,8 @@ def self_test():
     t = copy.deepcopy(_TIERS); t["tier2"]["components"][1]["status"] = "supported"
     expect("known-positive: tiers.yaml grants TypeScript tier 2 but the doc says dash", docs(t=t), "tier '—' for TypeScript")
     print("-- rule 1: README")
-    for line in ("cleat supports TypeScript workflows.", "TypeScript is production-ready (tier 2).", "TypeScript: stable."):
+    for line in ("cleat supports TypeScript workflows.", "TypeScript is production-ready (tier 2).", "TypeScript: stable.",
+                 "| TypeScript | \u2705 |", "JavaScript workflows are supported."):
         expect(f"known-positive: README line '{line}'", docs(r=_README + line + "\n"), "README.md:3")
     for line in ("TypeScript is in development and not supported.", "We write the dashboard in TypeScript."):
         expect(f"negative control: README line '{line}'", docs(r=_README + line + "\n"), None)

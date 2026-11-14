@@ -784,7 +784,10 @@ tier2:
         so that the work has a tier from its first commit, and marked NOT SUPPORTED so that
         having a tier is not read as having support. Nothing in this entry grants a claim.
         scripts/check-typescript-tier.py fails if LANGUAGE_SUPPORT.md's language table or
-        README.md says more than this file. That is the whole of what it checks: the rest of
+        README.md says more than this file. The table is parsed; the README check is a LINE
+        HEURISTIC (TypeScript or JavaScript beside a support word or a check mark, one line
+        at a time), so a claim split over two lines, or hidden behind a negation of another
+        language on the same line, is missed. That is the whole of what it checks: the rest of
         docs/ is NOT scanned, because a scan there measured two hits, both comparisons with
         other products, so a rule over it would be noise. A support claim in another doc is
         therefore caught by review, not by CI.
