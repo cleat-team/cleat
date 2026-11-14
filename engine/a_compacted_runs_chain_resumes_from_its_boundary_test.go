@@ -408,6 +408,41 @@ func TestACompactedRunVerifiesAndResumesOnEveryStore(t *testing.T) {
 				}
 			})
 
+			// A run the worker will not compact again must not be offered to it.
+			// The candidate query ranks by size, a compacted run that grew again is
+			// larger than a fresh one, and the worker takes a limited batch: enough
+			// of them filled it every pass and no other run was ever compacted.
+			t.Run("compacted runs do not crowd a fresh run out of the candidates", func(t *testing.T) {
+				const olds = 3
+				var oldIDs []string
+				for i := 0; i < olds; i++ {
+					id := newRun(fmt.Sprintf("crowd-old-%d", i))
+					appendEvents(id, 0, 40)
+					compact(id, 20)
+					appendEvents(id, 40, 110) // 80 retained rows: larger than the fresh run, over the threshold again
+					oldIDs = append(oldIDs, id)
+				}
+				fresh := newRun("crowd-fresh")
+				appendEvents(fresh, 0, 30) // over the threshold, never compacted
+
+				ids, err := store.GetCompactionCandidates(ctx, 20, olds)
+				if err != nil {
+					t.Fatalf("GetCompactionCandidates: %v", err)
+				}
+				got := map[string]bool{}
+				for _, id := range ids {
+					got[id] = true
+				}
+				if !got[fresh] {
+					t.Errorf("a never-compacted run over the threshold was not offered in a batch of %d: got %v", olds, ids)
+				}
+				for _, id := range oldIDs {
+					if got[id] {
+						t.Errorf("run %s, already compacted, was offered for compaction again", id)
+					}
+				}
+			})
+
 			// cleat#3838: a second compaction pass over an already-compacted run is a
 			// no-op. It used to replace the state with one built from the retained
 			// tail alone and keyed by an index where the store deletes by step, so a

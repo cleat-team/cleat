@@ -1234,8 +1234,11 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		       ON d.name = p.def_name AND d.version = p.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), $1)
-		  AND (p.compaction_step IS NULL
-		       OR p.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), $1))
+		  -- Only a run that has never been compacted (cleat#3838): the worker
+		  -- declines to compact one twice, and ordering by cnt would otherwise
+		  -- rank those runs first and let enough of them fill the limit, so no
+		  -- other run was ever compacted.
+		  AND p.compaction_step IS NULL
 		ORDER BY e.cnt DESC
 		LIMIT $2
 	`, threshold, limit)
