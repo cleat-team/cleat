@@ -45,7 +45,7 @@ Because every external interaction is recorded for durability, that same data pr
 execution) for versioned loading, checkpoint/replay, and worker failover. It never
 compiled — `WorkflowInstance`/`Worker` were declared twice in package `worker` since the
 repo's initial commit — and every concept it sketched has since been built for real, with
-tests: `engine/versioned_loader.go` + `engine/store_versioning.go` (versioned WASM
+tests: `engine/store_versioning.go` (versioned WASM
 loading), `engine/` checkpoint/replay and worker failover handling. Deleted rather than
 fixed or parked; see `tiers.yaml`'s note above `tier1.modules`.
 

@@ -995,7 +995,7 @@ The design is strongest for Segment A, viable for Segment B, and a hard sell for
 
 > **2026-08-07:** The `wasm-demo/` directory described below has been deleted — it never
 > compiled, and every mechanism it sketched now has a real, tested implementation in
-> `engine/` (e.g. `engine/versioned_loader.go`, `engine/store_versioning.go`). The
+> `engine/` (e.g. `engine/store_versioning.go`). The
 > paragraphs below are kept as a historical record of what Phase 1 covered, not as a
 > pointer to code that still exists.
 

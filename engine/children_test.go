@@ -1391,14 +1391,6 @@ func TestRunDetached_FreshWithoutStore(t *testing.T) {
 	}
 }
 
-func TestChildWorkflowWithOptions_ExplicitVersion(t *testing.T) {
-	// Test that ChildWorkflowOptions{Version: 10} resolves to version 10
-	opts := ChildWorkflowOptions{Version: 10}
-	if opts.Version != 10 {
-		t.Errorf("expected Version 10, got %d", opts.Version)
-	}
-}
-
 func TestChildWorkflowWithOptions_Wrapper(t *testing.T) {
 	// ChildWorkflowWithOptions is a thin wrapper over childWorkflowWithVersion.
 	// Test that it delegates correctly with version/priority passthrough.
