@@ -37,9 +37,15 @@ import (
 // --version defaults to 1), so every Python run was released as "version_check"
 // on claim and looped forever without ever running. Rust, Java and
 // AssemblyScript get the same value from nonGoMetadata.
-func pythonStampEnv(workflowVersion int, entryPoints, channel string) map[string]string {
+func pythonStampEnv(workflowName string, workflowVersion int, entryPoints, channel string) map[string]string {
 	env := map[string]string{
 		"CLEAT_WORKFLOW_VERSION": strconv.Itoa(workflowVersion),
+	}
+	// stamp_metadata.py defaults the name to "unknown", and `cleat deploy` printed
+	// `Workflow: unknown v1` for every Python workflow where a Go one prints its
+	// own name (cleat#3792). The name is the one the output file is given.
+	if workflowName != "" {
+		env["CLEAT_WORKFLOW_NAME"] = workflowName
 	}
 	// Only set when there is something to say: build_wasm.py treats an empty
 	// value as absent, and an entry point name derived from a failed schema
@@ -263,7 +269,7 @@ func runBuildPython(pattern, outDir, runtime, channel string, workflowVersion in
 	// computation; that computation is a separate python3 process
 	// (cleat_sdk.jsonschema_emitter) that does not read it, so setting it here
 	// instead changes nothing.
-	for k, v := range pythonStampEnv(workflowVersion, entryPointName, channel) {
+	for k, v := range pythonStampEnv(name, workflowVersion, entryPointName, channel) {
 		os.Setenv(k, v)
 		defer os.Unsetenv(k)
 	}

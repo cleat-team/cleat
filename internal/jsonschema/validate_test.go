@@ -240,3 +240,40 @@ func TestValidateBase64ContentEncodingIsStringTyped(t *testing.T) {
 		t.Errorf("got %+v, want a type violation", v)
 	}
 }
+
+// cleat#3792. A Python `hello(h, name: str)` started with {"input":"Ada"} was
+// refused with `type: want object, got string`, `field:""`: it named neither the
+// parameter nor the shape, and the fix ({"input":{"name":"Ada"}}) was not
+// derivable from it.
+func TestValidateRootTypeMismatchNamesTheShapeItWants(t *testing.T) {
+	schema := `{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"integer"}},"required":["name"],"additionalProperties":true}`
+
+	v := mustValidate(t, schema, `"Ada"`)
+	if v == nil {
+		t.Fatal("a string against an object schema was accepted")
+	}
+	want := `want object, got string; this entry point takes its input as an object keyed by parameter name: {"age": <integer> (optional), "name": <string>}`
+	if v.Message != want {
+		t.Errorf("message = %q\nwant      %q", v.Message, want)
+	}
+	if v.Field != "" || v.Rule != "type" {
+		t.Errorf("field/rule = %q/%q, want \"\"/type: the hint must not change what a client branches on", v.Field, v.Rule)
+	}
+}
+
+// The hint belongs to a root violation only. A nested one already carries its
+// Field, and a schema with nothing to list has nothing to say.
+func TestValidateTheShapeHintIsRootOnly(t *testing.T) {
+	nested := `{"type":"object","properties":{"item":{"type":"object","properties":{"n":{"type":"integer"}}}}}`
+	if v := mustValidate(t, nested, `{"item":"x"}`); v == nil || v.Field != "item" || v.Message != "want object, got string" {
+		t.Errorf("nested violation = %+v, want field item and the bare message", v)
+	}
+	noProps := `{"type":"object"}`
+	if v := mustValidate(t, noProps, `"x"`); v == nil || v.Message != "want object, got string" {
+		t.Errorf("object schema with no properties = %+v, want the bare message", v)
+	}
+	scalar := `{"type":"integer"}`
+	if v := mustValidate(t, scalar, `"x"`); v == nil || v.Message != "want integer, got string" {
+		t.Errorf("scalar schema = %+v, want the bare message", v)
+	}
+}

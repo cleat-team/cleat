@@ -59,6 +59,14 @@ func TestBuildRefusesAnEntryPointsManifestMismatch(t *testing.T) {
 	if !strings.Contains(out, "goodbye") || !strings.Contains(out, "hello") {
 		t.Errorf("error message should name both the declared and the actual entry point, got:\n%s", out)
 	}
+	// cleat#3792 item 5: with `// @cleatEntry(name="sigecho")` above `func SigEcho`
+	// the build found sig_echo, and changing the name= to anything changed
+	// nothing. The scaffold's own Hello/"hello" coincide, which hid it. The error
+	// has to say where the name comes from, or it reads as a bug in the comment.
+	if !strings.Contains(out, "snake case") || !strings.Contains(out, "@cleatEntry") {
+		t.Errorf("error message should say the name comes from the function in snake case and that "+
+			"an @cleatEntry comment is not read, got:\n%s", out)
+	}
 	if matches, _ := filepath.Glob(filepath.Join(proj, "out", "*.wasm")); len(matches) != 0 {
 		t.Errorf("build refused the manifest check but still wrote a .wasm output: %v", matches)
 	}

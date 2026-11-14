@@ -253,11 +253,25 @@ func main() {
 	}
 }
 
+// ensureOutDir creates the -o directory for the targets that write their .wasm
+// into it themselves. The Go build creates what it needs; the Java, Rust,
+// AssemblyScript and Python builds compiled for minutes and then failed at the
+// last step with `open <dir>/<name>.wasm: no such file or directory`, after the
+// Python build had printed `Build SUCCESS` (cleat#3792). Making it first also
+// means a directory that cannot be created fails before the compile, not after.
+func ensureOutDir(outDir string) {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not create the output directory %s: %v\n", outDir, err)
+		os.Exit(1)
+	}
+}
+
 func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool, workflowVersion int) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildJava(pattern, outDir, channel, workflowVersion)
 		return
 	}
@@ -265,6 +279,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildAssemblyScript(pattern, outDir, channel, workflowVersion)
 		return
 	}
@@ -272,6 +287,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildRust(pattern, outDir, channel, workflowVersion)
 		return
 	}
@@ -279,6 +295,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
+		ensureOutDir(outDir)
 		runBuildPython(pattern, outDir, runtime, channel, workflowVersion)
 		return
 	}
@@ -2023,6 +2040,9 @@ func checkEntryPointsAgainstManifest(srcDir string, exported []string) {
 	fmt.Fprintf(os.Stderr,
 		"Error: cleat.yaml's entry_points: (%s) does not match what cleat build "+
 			"actually found (%s).\n"+
+			"The Go build names an entry point by its exported function in snake case "+
+			"(SigEcho is sig_echo); a `// @cleatEntry(name=...)` comment is not read, so "+
+			"changing its name= does not rename anything.\n"+
 			"Update cleat.yaml, or the entry point's exported Go function, so they "+
 			"agree -- a caller starting a run by the manifest's stale name would "+
 			"otherwise fail at start time, after the run id has already been handed "+

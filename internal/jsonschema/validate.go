@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -72,7 +73,59 @@ func Validate(schemaJSON, instanceJSON json.RawMessage) (*ValidationError, error
 	if err := json.Unmarshal(instanceJSON, &instance); err != nil {
 		return &ValidationError{Rule: "type", Message: "input is not valid JSON: " + err.Error()}, nil
 	}
-	return validate(schema, instance, "")
+	v, err := validate(schema, instance, "")
+	if v != nil {
+		v.Message += objectShapeHint(schema, v)
+	}
+	return v, err
+}
+
+// objectShapeHint says what the root object should look like when the instance
+// was not an object at all. A bare `want object, got string` named neither the
+// parameter nor the shape: a Python `hello(h, name: str)` started with
+// {"input":"Ada"} was refused with {"field":"","rule":"type"} and nothing that
+// said the input is bound by parameter NAME, so the fix is {"input":{"name":"Ada"}}
+// (cleat#3792). Only a root-level type violation against an object schema with
+// properties gets a hint; a nested violation already carries its Field.
+func objectShapeHint(schema map[string]any, v *ValidationError) string {
+	if v.Field != "" || v.Rule != "type" {
+		return ""
+	}
+	if primaryType(schemaTypes(schema["type"])) != "object" {
+		return ""
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if len(props) == 0 {
+		return ""
+	}
+	required := map[string]bool{}
+	if req, ok := schema["required"].([]any); ok {
+		for _, r := range req {
+			if name, ok := r.(string); ok {
+				required[name] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(props))
+	for name := range props {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		typ := "value"
+		if ps, ok := props[name].(map[string]any); ok {
+			if t := primaryType(schemaTypes(ps["type"])); t != "" {
+				typ = t
+			}
+		}
+		part := fmt.Sprintf("%q: <%s>", name, typ)
+		if !required[name] {
+			part += " (optional)"
+		}
+		parts = append(parts, part)
+	}
+	return "; this entry point takes its input as an object keyed by parameter name: {" + strings.Join(parts, ", ") + "}"
 }
 
 func validate(schema map[string]any, instance any, field string) (*ValidationError, error) {
