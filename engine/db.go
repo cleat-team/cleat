@@ -667,6 +667,17 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	}
 	defer rows.Close()
 
+	workflows, err := s.scanListedWorkflows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	return workflows, tx.Commit()
+}
+
+// scanListedWorkflows reads the rows of a postgresWorkflowListJoinColumns() query into instances, decrypting
+// what the listing displays. ListWorkflows and the query-state window search (cleat#3775) both read
+// through it, so a page found by searching shows exactly what the same page shows when listed.
+func (s *PostgresStore) scanListedWorkflows(ctx context.Context, rows *sql.Rows) ([]WorkflowInstance, error) {
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
@@ -716,7 +727,7 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return workflows, tx.Commit()
+	return workflows, nil
 }
 
 // GetWorkflowByID returns a single workflow instance by ID.

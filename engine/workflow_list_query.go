@@ -134,6 +134,11 @@ func applyWorkflowFilters(qb *QueryBuilder, d Dialect, filter WorkflowFilter, id
 // by default (see WorkflowFilter.QueryState); this is what lets an operator add one with no change to
 // cleat. One document carries every pair, which is the AND of the equalities.
 //
+// THE INDEX NAME IS A COMMITMENT. docs/how-to/find-a-run.md tells operators to create it as
+// idx_payloads_query_state. If cleat ever ships that index in a migration it MUST use the same name with
+// CREATE INDEX IF NOT EXISTS, so an operator's copy is adopted rather than duplicated or refused
+// (coordinator, 2026-11-14).
+//
 // MySQL has JSON_CONTAINS, which means the same for an object candidate. SQL Server has no containment
 // operator, so it is one EXISTS over OPENJSON per pair (at most MaxQueryStateFilterPairs of them). The
 // VALUE comparison carries an explicit binary collation: OPENJSON returns [value] in the database's

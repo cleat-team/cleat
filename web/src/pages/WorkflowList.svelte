@@ -1,6 +1,7 @@
 <script lang="ts">
   import StatusBadge from '../components/StatusBadge.svelte';
-  import { listWorkflows } from '../lib/api';
+  import { listWorkflowsDetailed } from '../lib/api';
+  import type { StateSearchWindow } from '../lib/api';
   import type { WorkflowInstance } from '../lib/types';
 
   let { onNavigate }: { onNavigate: (path: string) => void } = $props();
@@ -17,17 +18,22 @@
   let stateInput = $state('');
   let stateFilter = $state<Record<string, string> | undefined>(undefined);
   let stateHint = $state('');
+  // Set when the worker searched a WINDOW of recent runs because it seals query_state (cleat#3775, part 2).
+  let searchWindow = $state<StateSearchWindow | undefined>(undefined);
 
   async function load() {
     loading = true;
     error = '';
     try {
-      workflows = await listWorkflows(statusFilter || undefined, stateFilter);
+      const result = await listWorkflowsDetailed(statusFilter || undefined, stateFilter);
+      workflows = result.workflows;
+      searchWindow = result.window;
     } catch (e: any) {
       // A deployment that cannot search by published state answers with a message
       // naming the flag (422); it is shown as it comes, not paraphrased.
       error = e.message;
       workflows = [];
+      searchWindow = undefined;
     } finally {
       loading = false;
     }
@@ -71,6 +77,22 @@
   const stateLabel = $derived(
     stateFilter ? Object.entries(stateFilter).map(([k, v]) => `${k}=${v}`).join(', ') : '',
   );
+
+  // What a window search covered, in words a person can act on. "None found" means two different things
+  // depending on whether the window ran out, and only one of them says the run does not exist.
+  const windowNote = $derived.by(() => {
+    const w = searchWindow;
+    if (!stateFilter || !w) return '';
+    // The window is over the runs that match the OTHER filters, so with a status selected "all 12 runs" would
+    // mean all 12 of that status; say so rather than let it read as every run there is.
+    const of = statusFilter ? ` with status ${statusFilter}` : '';
+    const base = w.exhausted
+      ? `Searched the most recent ${w.scanned} runs${of}. Older runs were not searched, so a run that is not listed may exist.`
+      : `Searched all ${w.scanned} runs${of}.`;
+    return w.unreadable > 0
+      ? `${base} ${w.unreadable} run${w.unreadable === 1 ? '' : 's'} could not be read and ${w.unreadable === 1 ? 'was' : 'were'} not matched.`
+      : base;
+  });
 </script>
 
 <h2>Workflows</h2>
@@ -100,13 +122,14 @@
   <button class="btn btn-primary btn-sm" onclick={load}>Refresh</button>
 </div>
 {#if stateHint}<div class="error-banner" role="alert">{stateHint}</div>{/if}
+{#if windowNote}<p class="window-note" role="status" style="color: var(--color-text-muted)">{windowNote}</p>{/if}
 
 <div class="card">
   {#if loading}
     <p style="color: var(--color-text-muted)">Loading...</p>
   {:else if workflows.length === 0}
     <p style="color: var(--color-text-muted)">
-      {#if stateFilter}No runs found that published {stateLabel}.{:else}No workflows found.{/if}
+      {#if stateFilter}No runs found that published {stateLabel}.{#if searchWindow?.exhausted} That is not the same as there being none: see above.{/if}{:else}No workflows found.{/if}
     </p>
   {:else}
     <table>
