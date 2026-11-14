@@ -410,7 +410,33 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 		// value, stripping a JSON string scalar's quotes -- see
 		// GetWorkflowByID's identical comment on its own `result #>> '{}'`.
 		if decrypted, derr := s.decryptTextColumnFromStorage(r.Payload, "payload"); derr == nil {
-			r.Payload = decrypted
+			// cleat#3852: a sealed row never went through `#>> '{}'`. The column
+			// holds the base64 ciphertext AS A JSON STRING, so `#>>` hands this
+			// code the ciphertext and the decrypt returns the JSON text
+			// encodeJSONPayload wrote -- quotes included. Unsealed, `#>>` is what
+			// unquotes a string payload, so sealed and unsealed disagreed about
+			// every value that is not already an object or an array: `"yes"` came
+			// back as `"yes"` rather than `yes`, `hello` as `"hello"`, `"{\"a\":1}"`
+			// as a JSON-text string rather than a compacted object, and `null` as
+			// the text `null` rather than empty.
+			//
+			// decodeJSONPayload is the contract this column is documented to obey
+			// (and what the MySQL and SQL Server readers of this same column call),
+			// so applying it to the decrypted text is what makes sealing
+			// transparent. It also covers the bare `null` case: unmarshalling JSON
+			// null into a Go string is a no-op that returns no error, so it yields
+			// "", which is what COALESCE gives the unsealed path.
+			//
+			// Guarded on the value having CHANGED, and that guard is load-bearing.
+			// A row written before encryption was turned on -- or any read with it
+			// off -- comes back unchanged and has ALREADY been through `#>>`; the
+			// payload `"null"` (the four-character string) reaches this point as
+			// `null` and must stay `null`, not become "".
+			if decrypted != r.Payload {
+				r.Payload = decodeJSONPayload(decrypted)
+			} else {
+				r.Payload = decrypted
+			}
 		} else {
 			return nil, fmt.Errorf("get pending update requests: %w", derr)
 		}
