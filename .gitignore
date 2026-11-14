@@ -299,3 +299,11 @@ testdata/agentclientas/dist/
 # directly. cleat#1996.
 /states/
 specs/states/
+
+# The TypeScript guest's build chain (cleat#3825). Its two crates are BINARIES built with `cargo build --locked`, so
+# their lockfiles are the pin and must be tracked; **/Cargo.lock above ignores every other crate's. What bootstrap.sh
+# downloads and build.sh writes is not source.
+!crates/cleat-js-plugin/Cargo.lock
+!crates/cleat-js-link/Cargo.lock
+packages/cleat-ts/.tools/
+packages/cleat-ts/.work/
