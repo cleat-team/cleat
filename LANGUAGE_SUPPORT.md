@@ -292,7 +292,7 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 | **AssemblyScript** | asc (mature) | Shipped | 10-50 KB (design estimate) | 2 |
 | **C** | clang (mature) | Not built | 10-50 KB (design estimate) | — |
 | **Zig** | zig build-exe (mature) | Not built | 5-30 KB (design estimate) | — |
-| **TypeScript** (real) | Javy/QuickJS (mature) | Not built | 1-5 MB (design estimate) | — |
+| **TypeScript** (real) | Javy/QuickJS | In development, not supported (see `tiers.yaml`, cleat#3825) | ~1.1 MB (prototype, macOS arm64 only) | — |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | Not built | 1-5 MB (design estimate) | — |
 
 ---

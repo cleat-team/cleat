@@ -820,7 +820,17 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //     that nothing routes to is a liability rather than a safety net.
 //
 // See IMPROVEMENT-PLAN.md 2.72 and 1.5/2.28.
-var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python"}
+//
+// "javascript" is the TypeScript/JavaScript guest built on Javy (cleat#3825), and it is a
+// LABEL ahead of the build chain: it selects the wasmtime backend's direct-export path
+// (the one assemblyscript and rust take) and nothing else. Nothing on this branch can
+// build such a module yet, and the language is IN DEVELOPMENT and NOT SUPPORTED in
+// tiers.yaml; the label is here first so that the module's own declaration is true,
+// instead of a TypeScript module having to call itself "rust" to be routed. The
+// prototype measured that routing on its own branch (its Phase 0), not here. It is
+// deliberately NOT in deferSegmentLanguages below, so a defer segment for a
+// "javascript" guest fails closed until its SDK decodes the sentinel (cleat#3826).
+var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python", "javascript"}
 
 // deferSegmentLanguages are the guest languages whose SDK decodes
 // callSuspendSentinel, and so can be run as a defer segment.

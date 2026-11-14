@@ -777,6 +777,40 @@ tier2:
            drain one line earlier. __cleat_run_deferred is emitted too, so §3.35 phase 4's
            kill-path cleanup reaches AssemblyScript guests"
 
+    - id: sdk-typescript
+      status: IN DEVELOPMENT -- NOT SUPPORTED    # cleat#3825; no support claim until the last PR of that issue
+      why: |
+        TypeScript guests on Javy (QuickJS), static mode, as a tier-2 language. Listed here
+        so that the work has a tier from its first commit, and marked NOT SUPPORTED so that
+        having a tier is not read as having support. Nothing in this entry grants a claim:
+        README, LANGUAGE_SUPPORT.md and the docs say "in development" until this status
+        changes, and scripts/check-typescript-tier.py fails if they say more than this file.
+
+        What exists: a prototype on branch feature/proto-ts-javy, measured on one macOS
+        arm64 machine, PostgreSQL for every number except two dialect smoke runs. What does
+        not exist on develop: a build chain, an SDK, host-call bindings, a Linux CI job, or
+        a published list of divergences from Node. The status changes in the PR that adds
+        the LANGUAGE_SUPPORT.md row, which is the last of the series.
+
+        Where its tests live, and why it matters (the exclusion is structural, not a list):
+        every toolchain-dependent TypeScript test is named TestTypeScript* and lives in
+        tests/typescript/, a package in tier2.packages and in NO tier-1 pattern, so it
+        cannot run in the Tier 1 gate, where a skip is a failure. This is the shape that
+        has leaked three times -- a tier-2 test in a tier-1 package. The guard refuses a
+        TestTypeScript* function anywhere else, and refuses to pass if tests/typescript/
+        holds none.
+      open_items:
+        - "two SILENT divergences from Node block any support claim (cleat#3829): zod's z.url()
+           reports a valid URL as invalid because the guest has no URL, and QuickJS Date
+           setters leave the date unchanged on a non-finite argument, so date-fns reports
+           isValid(parseISO(\"nope\")) as true. Both deterministic, neither fixable by the
+           workflow author"
+        - "macOS arm64 only: no Linux Javy build has been run (cleat#3832)"
+        - "no build chain, SDK, host-call bindings, cleattest equivalent or docs on develop
+           (cleat#3827, cleat#3828, cleat#3831)"
+        - "a deployed module is about 1.1 MB (the Javy plugin is about 1.07 MB); the 100 KB
+           line applies to dynamic mode only, which is out of scope"
+
     - id: plugins
       why: 22 built-in, all with unit tests; 10 covered by the integration harness.
       open_items:
@@ -1223,6 +1257,11 @@ tier2:
     # pins a tagged tarball, builds the worker with CGO, and runs it in its test
     # block). Release tooling is real, and it is not a product support claim.
     - ./packaging/...
+    # Added with the TypeScript tier-2 scaffolding (cleat#3825). The TypeScript tests live
+    # here and nowhere else, so this is the one place that decides they are tier 2: the
+    # package is in no tier-1 pattern, and scripts/check-typescript-tier.py checks both
+    # halves. It must hold at least one test, or "must run" is satisfied by nothing.
+    - ./tests/typescript/...
 
   # Tier-2 suites gated by a dedicated job rather than by scripts/tier2-gate.sh, because
   # that job already enforces something STRICTER than this gate would.
