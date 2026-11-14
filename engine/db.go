@@ -1231,7 +1231,7 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		-- workflow_payloads columns; read them there.
 		JOIN workflow_payloads p ON p.id = w.id
 		JOIN (
-			SELECT workflow_id, COUNT(*) AS cnt
+			SELECT workflow_id, COUNT(*) AS cnt, MIN(step) AS min_step
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
@@ -1243,11 +1243,14 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		       ON d.name = p.def_name AND d.version = p.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), $1)
-		  -- Only a run that has never been compacted (cleat#3838): the worker
-		  -- declines to compact one twice, and ordering by cnt would otherwise
-		  -- rank those runs first and let enough of them fill the limit, so no
-		  -- other run was ever compacted.
-		  AND p.compaction_step IS NULL
+		  -- A run is a candidate if it was never compacted, or if its recorded
+		  -- boundary is the first row it still has. compaction_step is the first
+		  -- retained STEP, so on a consistent run it equals the smallest step left.
+		  -- A run where it does not (the old second compaction wrote an index there
+		  -- and deleted by step) is refused by CompactWorkflowHistory every time;
+		  -- left in, enough of them fill the batch and no other run is compacted
+		  -- (cleat#3838, found by cleat-review).
+		  AND (p.compaction_step IS NULL OR p.compaction_step = e.min_step)
 		ORDER BY e.cnt DESC
 		LIMIT $2
 	`, threshold, limit)
