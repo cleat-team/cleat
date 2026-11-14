@@ -375,7 +375,7 @@ The Python SDK's timeouts are in **seconds**, the same as Temporal's and DBOS's 
 
 `h.call(..., timeout_ms=...)` and the `CleatTestHarness`'s `advance_time(ms)` are milliseconds, because they are named that way: read the parameter name.
 
-**`CleatTestHarness` is the exception to "seconds".** Its `sleep`, `await_signals` and `await_promise` take **milliseconds**, so `h.sleep(5)` advances a harness clock by 5 ms where a worker sleeps 5 s (cleat#3820). Under the harness, write the millisecond value; the same call in a workflow that runs on a worker takes seconds.
+**`CleatTestHarness` is the exception to "seconds".** Its `sleep`, `await_signals` and `await_promise` take **milliseconds**, so the same `h.sleep(5)` that sleeps 5 s on a worker advances a harness clock by 5 ms, and a harness test whose assertions depend on elapsed time is off by 1000×. `sleep_ms` and the other `_ms` forms are not implemented by the harness (cleat#3820).
 
 Conversion examples when porting from other frameworks:
 
