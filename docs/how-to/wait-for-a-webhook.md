@@ -119,22 +119,17 @@ def wait_for_payment(h: HostCalls, source_id: str) -> str:
 
 ### One call, for a wait of minutes
 
-In Go, the SDK has a typed call that does the waiting for you. It suspends on the
-plugin's own wake-up signal instead of polling on a timer, takes a window as a
-`time.Duration`, and can correlate one event to one order with `Keys`:
+In Go, the SDK in this repository has a typed call that does the waiting for you.
+It suspends on the plugin's own wake-up signal instead of polling on a timer, takes
+a window as a `time.Duration`, and can correlate one event to one order with
+`Keys`: `webhookingest.AwaitWebhookWaiter.WaitFor(h, webhookingest.AwaitWebhookInput{SourceID: id, EventType: "payment.confirmed"}, 5*time.Minute)`,
+from `github.com/cleat-team/cleat/cleat/pluginclients/webhookingest`. It returns the
+claimed event's `AwaitWebhookOutput` (its `Payload` is the event body) and an error.
 
-```go
-import "github.com/cleat-team/cleat/cleat/pluginclients/webhookingest"
-
-got, err := webhookingest.AwaitWebhookWaiter.WaitFor(h, webhookingest.AwaitWebhookInput{
-	SourceID:  in.SourceID,
-	EventType: "payment.confirmed",
-}, 5*time.Minute)
-if err != nil {
-	return "", fmt.Errorf("no payment within 5 minutes: %w", err)
-}
-return string(got.Payload), nil
-```
+**It is not in a published release yet, so this page does not show it as a code
+block**: the snippet guard compiles every block against the released SDK, which
+does not have it. `awaitPaymentConfirmation` in `examples/order-lifecycle/order.go`
+is the working call, built and tested in CI.
 
 A window that closes with no event is an **error**, not `found: false`
 (on a worker, `wait_for_event: no event for webhook-ingest/await_webhook within <n>ms`;
