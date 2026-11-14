@@ -797,7 +797,9 @@ External REST client for interacting with the Cleat host:
 
 ### `CleatTestHarness()`
 
-In-memory test harness for unit-testing workflows without a running host. Simulates the WASM execution environment in pure Python with a mock linear memory, providing deterministic test coverage comparable to Go's `cleattest.TestEnv`.
+A `HostCalls` subclass for unit-testing a workflow without WASM, a worker or a database. It records every call, answers from stubs you register first, and keeps a simulated clock. It is not the worker: it does not replay, so it checks what a workflow does with the answers it is given, not durability.
+
+A function decorated with `@cleat_entry` is the WASM export wrapper, which takes the raw input JSON, not `(h, ...)`. The function you wrote is `.__wrapped__`: call that with the harness.
 
 ```python
 from cleat_sdk import HostCalls, cleat_entry, CleatTestHarness
@@ -809,21 +811,23 @@ def GreetWorkflow(h: HostCalls, name: str) -> str:
 
 def test_greet_workflow():
     harness = CleatTestHarness()
-    harness.register_call_stub("greeter", "Greet", '{"result": "Hello Alice"}')
+    harness.stub_call("greeter", "Greet", '{"result": "Hello Alice"}')
 
-    result = harness.run(GreetWorkflow, "Alice")
+    result = GreetWorkflow.__wrapped__(harness, "Alice")
+
     assert result == '{"result": "Hello Alice"}'
-    harness.assert_called("greeter", "Greet", times=1)
+    assert harness.call_count("greeter", "Greet") == 1
+    assert harness.assert_called("greeter", "Greet")
 ```
 
-Key methods:
-- `run(entry_fn, input)` — execute a `@cleat_entry` workflow against mock host calls
-- `register_call_stub(service, operation, response)` — stub a `call` response
-- `register_call_handler(service, operation, handler)` — register a dynamic handler
-- `assert_called(service, operation, times=None)` — assert a call was recorded
-- `deliver_signal(signal_name, payload)` — simulate signal delivery
-- `advance_time(ms)` — advance the simulated clock by milliseconds
-- `call_count` / `call_records` — inspect recorded calls
+Key members:
+- `stub_call(service, operation, response="", error=None)` -- stub a `call`; stubs for one service and operation are used in the order registered, and `error` makes the call raise
+- `stub_signal(signal_name, payload)` -- queue a signal for `await_signals` and `poll_signal` to deliver
+- `stub_promise(promise_id, value)` and `stub_reject_promise(promise_id, error)` -- settle a promise
+- `stub_child_workflow(name, result, error=None)` and `register_child_stub(name, response)` -- stub a child workflow
+- `advance_time(ms)`, `set_time(epoch_ms)` and `now_ms` -- the simulated clock, in **milliseconds**; `sleep` and `await_signals` take seconds, like `HostCalls`, and advance it. `await_signals(names, 0)` with no signal queued raises `SuspendSentinel`, as a wait with no deadline suspends on a worker
+- `call_count(service, operation) -> int`, `assert_called(service, operation) -> bool` and `assert_not_called(...) -> bool` -- these **return** a bool, so write `assert harness.assert_called(...)`; `last_call(service, operation)` returns the last `CallRecord` or `None`; `call_history` lists them all
+- `reset()` -- clear stubs, history, clock and promises
 
 ### `Plugins(host)`
 
