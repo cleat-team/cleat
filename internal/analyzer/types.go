@@ -84,6 +84,10 @@ type AnalysisResult struct {
 	NumDurableLeaves  int
 	NumDurableClosure int
 	NumPure           int
+
+	// dep answers what a function from another package makes on the workflow's behalf; see
+	// DepHostCalls. Built on first use.
+	dep depIndex
 }
 
 // FullyQualifiedName returns the fully-qualified name for a function,
@@ -135,121 +139,6 @@ func HostCallsMethod(sel *types.Selection) bool {
 		return false
 	}
 	return IsHostCallsType(sel.Recv())
-}
-
-// sdkDurableHelpers is the set of "Type.Method" names SDKDurableHelper
-// accepts -- the keys the predicate below looks up.
-// THE SET IS THE SOURCE OF TRUTH, and the predicate reads it. It used to be a
-// switch inside the predicate, which made the accepted names unaddressable by
-// name -- and they need to be addressable, because the imports these helpers
-// require live in a SECOND hand list (wasm's sdkHelperImports) that must agree
-// with this one. Neither direction of disagreement fails loudly: a name here
-// with no row there contributes no import, and a row there with no name here is
-// never consulted at all. In both cases the module builds, the call reaches a
-// nil adapter, and it returns a zero value at run time. cleat#2627 was the
-// first change that had to update both lists in lockstep, and only one of the
-// two was covered by a test -- so TestEverySDKHelperRowIsAcceptedByTheGate
-// (wasm) now checks them against each other through SDKDurableHelperName.
-var sdkDurableHelpers = map[string]bool{
-	"Saga.AddStepCall": true,
-
-	// Selector.Select is the SECOND of these and it was not found the way
-	// Saga.AddStepCall was. Saga.AddStepCall was reasoned about while the
-	// feature was being written; this one shipped, and a cleat.Selector timer
-	// fired instantly in every compiled workflow that did not independently
-	// write h.DurableSleep -- for as long as the type has existed.
-	//
-	// Measured on 8ca97d46 through the ports harness, two guest packages that
-	// differ by exactly one line:
-	//
-	//	no h.DurableSleep in the package: generation 1, 87ms, a 1500ms timer
-	//	                                  fired, durable clock advanced 0ms
-	//	one h.DurableSleep in the package: generation 2, the timer waited, the
-	//	                                  durable clock advanced exactly 1500ms
-	//
-	// Same Selector, same deadline. The variable is whether the WORKFLOW's own
-	// source happens to mention the host call the SDK makes on its behalf.
-	"Selector.Select": true,
-
-	// AddTimer is here for Now() and looks harmless next to Select. It is not:
-	// an unwired Now() returns 0, so every deadline this Selector computes is
-	// measured from the epoch and is already in the past. A Select that sleeps
-	// correctly would then fire immediately anyway, for a second reason, and
-	// fixing only Select would have looked like fixing nothing.
-	"Selector.AddTimer": true,
-
-	// Saga.Run and Saga.RunWithResult share one body -- Run delegates to
-	// RunWithResult (cleat#2627) -- so both routes make the same host calls no
-	// workflow wrote: LogKV, and SetQueryState, which is how a saga now
-	// publishes its progress. The steps' calls are closures the workflow wrote,
-	// so every other layer already sees them.
-	//
-	// BOTH KEYS ARE LOAD-BEARING and neither implies the other: the analyzer
-	// sees the method the WORKFLOW writes, so saga.Run(h) consults one row and
-	// saga.RunWithResult(h) the other.
-	"Saga.Run":           true,
-	"Saga.RunWithResult": true,
-
-	// PluginFunc.WaitFor is typed access to h.WaitForEvent (cleat#3794). Its
-	// receiver is a PluginCaller, so the scan already sees it as a plugin_call
-	// -- which is not enough: the call it makes is WaitForEvent, and without
-	// this row (and its imports in wasm's sdkHelperImports) the module builds
-	// without cleat_wait_for_event and the call dies at run time on a nil
-	// adapter. Measured: a package-level function making the same call compiled
-	// clean and failed every run with a nil pointer dereference.
-	"PluginFunc.WaitFor": true,
-}
-
-// SDKDurableHelper reports whether a selection is an SDK helper that makes a
-// durable host call on the caller's behalf, rather than a HostCalls method the
-// workflow wrote itself.
-//
-// Saga.AddStepCall is the first of these (cleat#1131). It takes a StepCall --
-// data -- and builds the DurableCall closures inside the SDK, which is the
-// point: it is the only form that can be PARAMETERISED without tripping E009
-// or the durable-leaf check. But three separate layers decide what a workflow
-// does by looking for HostCalls methods in workflow code, and none of them
-// could see it:
-//
-//	callgraph.hasHostCallsCall  -> not a durable leaf
-//	closure analysis            -> not in the durable closure, so...
-//	wasm.collectHostCallsCalls  -> never scanned, so no cleat_call import
-//
-// The module then built clean, imported nothing, and would have failed at RUN
-// time on its first step -- the cleat#1005 symptom reached from the opposite
-// direction. One predicate, asked by all three, keeps them from disagreeing.
-//
-// Saga.AddStep needs no entry: the caller writes the closure and its
-// h.DurableCall is visible to every layer already.
-func SDKDurableHelper(sel *types.Selection) bool {
-	if sel == nil {
-		return false
-	}
-	t := sel.Recv()
-	if ptr, ok := t.(*types.Pointer); ok {
-		t = ptr.Elem()
-	}
-	named, ok := t.(*types.Named)
-	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
-		return false
-	}
-	if named.Obj().Pkg().Name() != "cleat" {
-		return false
-	}
-	return SDKDurableHelperName(named.Obj().Name() + "." + sel.Obj().Name())
-}
-
-// SDKDurableHelperName reports whether "Type.Method" names an SDK helper whose
-// durable host calls the analyzer has to import on the workflow's behalf.
-//
-// It takes the key rather than a *types.Selection for one reason: the gate and
-// the import table it decides whether to consult (wasm's sdkHelperImports) are
-// TWO hand lists that have to agree, and agreeing is only checkable by name. A
-// row whose key this refuses is never read, so it contributes no import, and
-// the module builds and returns a zero value at run time. cleat#2627 was the
-// first change that had to update both lists in lockstep.
-func SDKDurableHelperName(key string) bool {
-	return sdkDurableHelpers[key]
 }
 
 // PluginCallerMethod reports whether the given selection is a method call

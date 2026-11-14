@@ -25,13 +25,11 @@ import (
 // cleat/dagrun/dagrun.go:28 carries such a directive, correct about what
 // dagrun needs, written by someone who expected it to work.
 //
-// WHY THE TABLE ROUTE CANNOT COVER THIS, so that nobody "simplifies" this test
-// away by adding a row to sdkHelperImports. SDKDurableHelper
-// (internal/analyzer/types.go) refuses any receiver whose package is not named
-// "cleat", and dagrun's package is named dagrun -- so a row for DAG.Execute
-// would be written and never consulted. That is also why dagrun is in
-// sdkHelperScanSkipDirs, and why it stays there: the table is not how dagrun
-// declares its needs.
+// WHY THIS READS THE DIRECTIVE BY ITSELF. Until cleat#3803 the build learned what an SDK helper needs from a
+// hand list of "Type.Method" names that refused any receiver outside a package named "cleat", so dagrun's needs
+// could only be declared by this directive. The build now also reads the bodies of the functions a workflow calls
+// (analyzer.DepHostCalls), which wires the same imports for a workflow that calls DAG.Execute. That made the
+// assertion below pass with the directive deleted, so it asks collectRequirements alone.
 func TestARequiredHostCallIsReadFromAnImportedPackage(t *testing.T) {
 	const pkg = "github.com/cleat-team/cleat/testdata/dagguest"
 
@@ -45,6 +43,13 @@ func TestARequiredHostCallIsReadFromAnImportedPackage(t *testing.T) {
 		t.Fatalf("callgraph.Build: %v", err)
 	}
 	usage := AnalyzeUsage(result, closure.Compute(result, cg))
+
+	// The directive ALONE. Since cleat#3803 the build also reads the bodies of the functions this workflow
+	// calls, so AnalyzeUsage wires these imports with or without the directive -- removing the directive left
+	// this test green when it was measured. The directive is still a supported route (a library names what it
+	// needs whether or not the body scan can attribute the call), so it is read here by itself.
+	fromDirective := &UsageInfo{Used: map[string]bool{}, Children: map[string]bool{}}
+	collectRequirements(result, fromDirective)
 
 	var got []string
 	for imp := range usage.Used {
@@ -63,7 +68,7 @@ func TestARequiredHostCallIsReadFromAnImportedPackage(t *testing.T) {
 	}
 
 	for _, imp := range []string{"cleat_child_workflow_with_options", "cleat_await_any_child"} {
-		if usage.Used[imp] {
+		if fromDirective.Used[imp] {
 			continue
 		}
 		t.Errorf("a workflow whose only host-call route is cleat/dagrun does not wire %s.\n"+
