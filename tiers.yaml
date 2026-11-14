@@ -782,9 +782,12 @@ tier2:
       why: |
         TypeScript guests on Javy (QuickJS), static mode, as a tier-2 language. Listed here
         so that the work has a tier from its first commit, and marked NOT SUPPORTED so that
-        having a tier is not read as having support. Nothing in this entry grants a claim:
-        README, LANGUAGE_SUPPORT.md and the docs say "in development" until this status
-        changes, and scripts/check-typescript-tier.py fails if they say more than this file.
+        having a tier is not read as having support. Nothing in this entry grants a claim.
+        scripts/check-typescript-tier.py fails if LANGUAGE_SUPPORT.md's language table or
+        README.md says more than this file. That is the whole of what it checks: the rest of
+        docs/ is NOT scanned, because a scan there measured two hits, both comparisons with
+        other products, so a rule over it would be noise. A support claim in another doc is
+        therefore caught by review, not by CI.
 
         What exists: a prototype on branch feature/proto-ts-javy, measured on one macOS
         arm64 machine, PostgreSQL for every number except two dialect smoke runs. What does

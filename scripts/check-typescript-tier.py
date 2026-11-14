@@ -6,14 +6,22 @@
      about that language. tiers.yaml is the source of truth for support; a row that says
      Tier 2 or "Shipped" for a language tiers.yaml marks IN DEVELOPMENT or NOT SUPPORTED is
      the defect this repo's CLAUDE.md opens with (prose that claims what the manifest does
-     not grant). Nothing checked this before.
+     not grant). Nothing checked this before. It fails CLOSED on wording it does not
+     recognise: a Tier cell must be a bare 1, 2 or a dash, and a language tiers.yaml does not
+     grant must carry a status that says it is not built, in development or not supported.
+     README.md is also scanned for a line that pairs TypeScript with a support claim. NOT
+     covered: the rest of docs/ -- a scan there measured two hits, both comparisons with
+     other products, so it is left out rather than made noisy.
 
-  2. TypeScript tests live in ONE tier-2 package. Every function named TestTypeScript* must be
-     under tests/typescript/, and tests/typescript/ must be in tiers.yaml's tier2.packages and
-     in no tier-1 pattern. A tier-2 test in a tier-1 package has leaked three times in this
+  2. TypeScript tests live in ONE tier-2 package. A test function whose name starts with
+     TestTypeScript, TestJavaScript, TestJavy or TestQuickJS, and any test file that names the
+     toolchain (javy, esbuild, quickjs), must be under tests/typescript/. That package must be
+     in tiers.yaml's tier2.packages and must NOT be selected by any tier-1 pattern -- decided by
+     asking `go list`, not by comparing strings, because a pattern can reach the package
+     without containing its name (`./tests/typescript`, `./tests/typescript/`,
+     `./tests/type...`). A tier-2 test in a tier-1 package has leaked three times in this
      repo; the exclusion is structural, so there is no pattern list to rot. The rule also
-     refuses to pass over zero tests: a package that holds none satisfies "must run" with
-     nothing.
+     refuses to pass over zero tests, and over a `go list` that cannot show engine in tier 1.
 
 Exit statuses (CLAUDE.md, "give 'I could not look' its own exit status"):
   0  passed
@@ -55,8 +63,20 @@ LANG_KEY = {
 }
 
 NOT_SUPPORTED = re.compile(r"^\s*(IN DEVELOPMENT|NOT SUPPORTED)", re.I)
-# A status cell that claims support. "not supported" and "unsupported" do not.
-CLAIMS_SUPPORT = re.compile(r"\bshipped\b|(?<!not )(?<!un)\bsupported\b|\bproduction\b", re.I)
+# A language tiers.yaml does not grant must say so. This is an ALLOWLIST of wording that does
+# not claim support, not a denylist of wording that does: a denylist passes "Stable, released"
+# and "Beta" and "Available", and every new synonym. An unrecognised status is a finding.
+NON_CLAIMING = re.compile(r"^\s*(not built|in development|not supported|planned|not started)\b", re.I)
+# Tier cell: a bare digit, or a dash for none. Anything else ("Tier 2", "Beta", "**2**") is
+# refused rather than mapped to "none", which would equal "not granted" and pass.
+TIER_CELL = re.compile(r"^(?:\*{0,2})([12]|[\u2014\u2013-])(?:\*{0,2})$")
+# README: a line that pairs TypeScript with a support claim, minus the negations.
+README_CLAIM = re.compile(r"typescript", re.I)
+README_SUPPORT = re.compile(r"\bsupport(s|ed)?\b|\bships?\b|\bshipped\b|\bproduction\b|\btier [12]\b|\bstable\b", re.I)
+README_NEGATION = re.compile(r"not supported|in development|not built|unsupported", re.I)
+
+NAME_PREFIX = re.compile(r"^func (Test(?:TypeScript|JavaScript|Javy|QuickJS)\w*)\(", re.M)
+TOOLCHAIN = re.compile(r"\bjavy\b|esbuild|quickjs", re.I)
 
 
 class Unmeasured(Exception):
@@ -109,7 +129,7 @@ def doc_rows(text):
     return rows
 
 
-def check_docs(tiers, doc_text):
+def check_docs(tiers, doc_text, readme_text=""):
     lv = levels(tiers)
     findings = []
     for name, status, tier in doc_rows(doc_text):
@@ -119,45 +139,90 @@ def check_docs(tiers, doc_text):
             continue
         key = LANG_KEY[name]
         granted = lv.get(key, 0) if key else 0
-        claimed = {"1": 1, "2": 2}.get(tier.strip(), 0)
+        m = TIER_CELL.match(tier.strip())
+        if not m:
+            findings.append(f"LANGUAGE_SUPPORT.md Tier cell for {name} is '{tier.strip()}', which is not a bare "
+                            f"1, 2 or a dash; the guard will not guess what other wording means")
+            continue
+        claimed = {"1": 1, "2": 2}.get(m.group(1), 0)
         if claimed != granted:
             findings.append(f"LANGUAGE_SUPPORT.md says tier '{tier.strip()}' for {name}, but tiers.yaml grants "
                             f"{'tier ' + str(granted) if granted else 'no support'}")
-        if granted == 0 and CLAIMS_SUPPORT.search(status):
-            findings.append(f"LANGUAGE_SUPPORT.md status for {name} reads '{status}', which claims support "
-                            f"tiers.yaml does not grant")
+        if granted == 0 and not NON_CLAIMING.match(status):
+            findings.append(f"LANGUAGE_SUPPORT.md status for {name} reads '{status}', but tiers.yaml grants it no "
+                            f"support, so the status must say not built, in development or not supported")
+    if lv.get("typescript", 0) == 0:
+        for i, line in enumerate(readme_text.splitlines(), 1):
+            if README_CLAIM.search(line) and README_SUPPORT.search(line) and not README_NEGATION.search(line):
+                findings.append(f"README.md:{i} pairs TypeScript with a support claim, but tiers.yaml grants TypeScript "
+                                f"no support: {line.strip()[:100]}")
     return findings
 
 
-def check_placement(tiers, test_files):
-    """test_files: {path: source text} for every tracked *_test.go."""
+def check_placement(tiers, test_files, resolve, ts_pkg_path):
+    """test_files: {path: source text} for every tracked *_test.go.
+    resolve(patterns) -> set of package import paths, as `go list` would answer.
+    ts_pkg_path: the import path of tests/typescript."""
     findings = []
     t2 = (tiers.get("tier2") or {}).get("packages") or []
     t1 = (tiers.get("tier1") or {}).get("packages") or []
     if TS_PATTERN not in t2:
         findings.append(f"tiers.yaml tier2.packages does not list {TS_PATTERN}")
-    covering = [p for p in t1 if p == TS_PATTERN or p == "./..." or
-                (p.endswith("/...") and ("./" + TS_PKG + "/").startswith(p[:-3]))]
-    if covering:
-        findings.append(f"tiers.yaml tier1.packages covers the TypeScript package via {covering}; "
-                        f"its tests would run in the Tier 1 gate")
+    else:
+        got = resolve([TS_PATTERN])
+        if got != {ts_pkg_path}:
+            findings.append(f"tier2 pattern {TS_PATTERN} resolves to {sorted(got)}, want exactly {ts_pkg_path}")
+    t1_set = resolve(t1)
+    # The positive control: a resolver that returns nothing, or cannot see engine, would make
+    # "the TypeScript package is not in tier 1" true of everything.
+    if not any(p.endswith("/engine") for p in t1_set):
+        raise Unmeasured("resolving tier1.packages did not include engine, so the resolver cannot be trusted to "
+                         "say the TypeScript package is absent")
+    if ts_pkg_path in t1_set:
+        via = [p for p in t1 if ts_pkg_path in resolve([p])]
+        findings.append(f"tier1.packages selects the TypeScript package (via {via}); its tests would run in the "
+                        f"Tier 1 gate, where a skip is a failure")
     inside = 0
     for path, src in sorted(test_files.items()):
-        for m in re.finditer(r"^func (TestTypeScript\w*)\(", src, re.M):
-            if path.startswith(TS_PKG + "/"):
+        in_pkg = path.startswith(TS_PKG + "/")
+        for m in NAME_PREFIX.finditer(src):
+            if in_pkg:
                 inside += 1
             else:
                 findings.append(f"{path}: {m.group(1)} is outside {TS_PKG}/ (a TypeScript test in another "
                                 f"package can run in Tier 1, where a skip is a failure)")
+        if not in_pkg and TOOLCHAIN.search(src):
+            findings.append(f"{path} names the TypeScript toolchain (javy, esbuild or quickjs) but is outside "
+                            f"{TS_PKG}/; a test that needs it cannot run in Tier 1")
     if inside == 0:
         raise Unmeasured(f"{TS_PKG}/ holds no TestTypeScript* function, so the placement rule examined nothing "
                          f"and 'must run' would be satisfied by an empty package")
     return findings
 
 
+def go_resolver(root):
+    def resolve(patterns):
+        if not patterns:
+            return set()
+        try:
+            out = subprocess.run(["go", "list"] + list(patterns), cwd=root, capture_output=True, text=True)
+        except FileNotFoundError:
+            raise Unmeasured("`go` is not on PATH; the check cannot ask which packages a tier-1 pattern selects")
+        if out.returncode != 0:
+            raise Unmeasured(f"`go list` failed: {out.stderr.strip()[:200]}")
+        return {l for l in out.stdout.split("\n") if l}
+    # The package's own import path, from go itself. `go list -m` is not usable here: in this
+    # repo's workspace (go.work, several modules) it prints EVERY module, one per line.
+    own = resolve(["./" + TS_PKG])
+    if len(own) != 1:
+        raise Unmeasured(f"`go list ./{TS_PKG}` returned {sorted(own)}, want exactly one package")
+    return resolve, next(iter(own))
+
+
 def repo_inputs(root):
     tiers = yaml.safe_load(open(os.path.join(root, "tiers.yaml")))
     doc = open(os.path.join(root, "LANGUAGE_SUPPORT.md")).read()
+    readme = open(os.path.join(root, "README.md")).read()
     # git ls-files, not a directory walk: a walk descends into .claude/worktrees/ (a second
     # copy of the repo) and attributes a test to a package that exists only in a scratch checkout.
     out = subprocess.run(["git", "ls-files", "*_test.go"], cwd=root, capture_output=True, text=True)
@@ -172,16 +237,39 @@ def repo_inputs(root):
                 pass  # a tracked file deleted in the working tree: nothing to read
     if not files:
         raise Unmeasured("git ls-files found no *_test.go files")
-    return tiers, doc, files
+    return tiers, doc, readme, files
 
 
-def run(tiers, doc, files):
-    return check_docs(tiers, doc) + check_placement(tiers, files)
+def run(tiers, doc, readme, files, resolve, ts_pkg_path):
+    return check_docs(tiers, doc, readme) + check_placement(tiers, files, resolve, ts_pkg_path)
 
 
 # ---------------------------------------------------------------------------------------------
 # --self-test: each rule against a case that must be refused and one that must pass.
 
+_MOD = "example.com/m"
+_UNIVERSE = ["engine", "cmd/cleat", "plugins/x", "tests/integrity", "tests/typescript", "tests/typeahead"]
+
+
+def _fake_resolve(patterns):
+    """Mimics `go list` for the three pattern spellings that matter: `./a/...` (a and below),
+    `./a` or `./a/` (exactly a), and `./a/pre...` (a wildcard over the final element)."""
+    out = set()
+    for p in patterns:
+        q = p[2:] if p.startswith("./") else p
+        if q.endswith("/..."):
+            base = q[:-4]
+            out |= {f"{_MOD}/{d}" for d in _UNIVERSE if d == base or d.startswith(base + "/")}
+        elif q.endswith("..."):
+            pre = q[:-3]
+            out |= {f"{_MOD}/{d}" for d in _UNIVERSE if d.startswith(pre)}
+        else:
+            q = q.rstrip("/")
+            out |= {f"{_MOD}/{d}" for d in _UNIVERSE if d == q}
+    return out
+
+
+_TS = _MOD + "/" + TS_PKG
 _TIERS = {
     "tier1": {"languages": ["go", "python"], "packages": ["./engine/...", "./cmd/..."]},
     "tier2": {"packages": ["./plugins/...", TS_PATTERN],
@@ -200,17 +288,18 @@ _DOC = """# Language support
 
 after the table
 """
+_README = "# cleat\nA durable workflow engine. Go and Python are tier 1.\n"
 _TESTS = {"tests/typescript/a_test.go": "package typescript\nfunc TestTypeScriptLabel(t *testing.T) {}\n",
           "engine/x_test.go": "package engine\nfunc TestSomething(t *testing.T) {}\n"}
 
 
 def self_test():
+    import copy
     bad = 0
 
-    def expect(name, findings, want_substr):
+    def expect(name, findings, want):
         nonlocal bad
-        ok = (want_substr is None and not findings) or \
-             (want_substr is not None and any(want_substr in f for f in findings))
+        ok = (want is None and not findings) or (want is not None and any(want in f for f in findings))
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}" + ("" if ok else f"   got: {findings}"))
         bad += 0 if ok else 1
 
@@ -219,46 +308,71 @@ def self_test():
         try:
             fn()
         except Unmeasured as e:
-            print(f"  ok    {name}   ({e})")
+            print(f"  ok    {name}   ({str(e)[:90]})")
             return
         print(f"  FAIL  {name}   did not raise Unmeasured")
         bad += 1
 
-    import copy
-    expect("negative control: a consistent tree passes", run(_TIERS, _DOC, _TESTS), None)
+    def docs(d=_DOC, r=_README, t=_TIERS):
+        return check_docs(t, d, r)
 
-    # known-positives, one per way the rule can be violated
+    def place(t=_TIERS, f=_TESTS):
+        return check_placement(t, f, _fake_resolve, _TS)
+
+    print("-- negative control")
+    expect("a consistent tree passes both rules", docs() + place(), None)
+
+    print("-- rule 1: the doc table")
     d = _DOC.replace("| In development, not supported | ~1.1 MB | — |", "| Shipped | ~1.1 MB | 2 |")
-    expect("known-positive: doc says TypeScript is tier 2 and Shipped", check_docs(_TIERS, d), "tier '2' for TypeScript")
-    d = _DOC.replace("In development, not supported", "Shipped")
-    expect("known-positive: doc says Shipped, tier cell still dash", check_docs(_TIERS, d), "claims support")
-    d = _DOC.replace("In development, not supported", "Supported on Linux")
-    expect("known-positive: doc says Supported", check_docs(_TIERS, d), "claims support")
-    d = _DOC.replace("| Rust | cargo | Shipped | ~50 KB | 2 |", "| Rust | cargo | Shipped | ~50 KB | — |").replace(
-        "| **Rust** | cargo | Shipped | ~50 KB | 2 |", "| **Rust** | cargo | Shipped | ~50 KB | — |")
-    expect("known-positive: doc UNDER-claims a tier-2 language (disagreement either way is a finding)",
-           check_docs(_TIERS, d), "tier '—' for Rust")
-    d = _DOC.replace("after the table", "| **Brainfuck** | none | Shipped | 1 B | 1 |\nafter the table")
+    expect("known-positive: tier 2 and Shipped", docs(d), "tier '2' for TypeScript")
+    expect("known-positive: Shipped with a dash tier", docs(_DOC.replace("In development, not supported", "Shipped")),
+           "must say not built")
+    for wording in ("Beta", "Available", "Stable, released", "Supported on Linux", "Experimental"):
+        expect(f"known-positive: status '{wording}' is not an allowed non-claiming wording",
+               docs(_DOC.replace("In development, not supported", wording)), "must say not built")
+    expect("known-positive: a bold **2** is read as the digit (bold is formatting) and refused as a tier mismatch",
+           docs(_DOC.replace("~1.1 MB | — |", "~1.1 MB | **2** |")), "says tier '**2**' for TypeScript")
+    for cell in ("Tier 2", "Beta", "2 (beta)", ""):
+        d = _DOC.replace("~1.1 MB | — |", f"~1.1 MB | {cell} |")
+        expect(f"known-positive: Tier cell '{cell}' is not a bare 1, 2 or dash", docs(d), "not a bare")
+    for wording in ("Not built", "In development, not supported", "Planned", "Not supported"):
+        expect(f"negative control: status '{wording}' is fine for an ungranted language",
+               docs(_DOC.replace("In development, not supported", wording)), None)
+    expect("negative control: a bold dash tier cell is fine", docs(_DOC.replace("~1.1 MB | — |", "~1.1 MB | **—** |")), None)
+    d = _DOC.replace("| **Rust** | cargo | Shipped | ~50 KB | 2 |", "| **Rust** | cargo | Shipped | ~50 KB | — |")
+    expect("known-positive: the doc UNDER-claims a tier-2 language", docs(d), "tier '—' for Rust")
     d = _DOC.replace("| **TypeScript**", "| **Brainfuck** | x | Shipped | 1 B | 1 |\n| **TypeScript**")
-    expect("known-positive: a language the guard does not know", check_docs(_TIERS, d), "not in this guard's language map")
-
+    expect("known-positive: a language the guard does not know", docs(d), "not in this guard's language map")
     t = copy.deepcopy(_TIERS); t["tier2"]["components"][1]["status"] = "supported"
-    expect("known-positive: tiers.yaml itself grants TypeScript tier 2 but the doc says dash",
-           check_docs(t, _DOC), "tier '—' for TypeScript")
-    expect("negative control: 'not supported' wording does not trip the support regex",
-           [f for f in check_docs(_TIERS, _DOC) if "claims support" in f], None)
+    expect("known-positive: tiers.yaml grants TypeScript tier 2 but the doc says dash", docs(t=t), "tier '—' for TypeScript")
+    print("-- rule 1: README")
+    for line in ("cleat supports TypeScript workflows.", "TypeScript is production-ready (tier 2).", "TypeScript: stable."):
+        expect(f"known-positive: README line '{line}'", docs(r=_README + line + "\n"), "README.md:3")
+    for line in ("TypeScript is in development and not supported.", "We write the dashboard in TypeScript."):
+        expect(f"negative control: README line '{line}'", docs(r=_README + line + "\n"), None)
 
+    print("-- rule 2: placement")
     f = dict(_TESTS); f["engine/ts_test.go"] = "package engine\nfunc TestTypeScriptThing(t *testing.T) {}\n"
-    expect("known-positive: TestTypeScript* outside tests/typescript/", check_placement(_TIERS, f), "engine/ts_test.go")
+    expect("known-positive: TestTypeScript* outside tests/typescript/", place(f=f), "engine/ts_test.go")
+    for nm in ("TestJavaScriptGuestBuildsWithJavy", "TestJavyThing", "TestQuickJSThing"):
+        f = dict(_TESTS); f["engine/zz_test.go"] = f"package engine\nfunc {nm}(t *testing.T) {{}}\n"
+        expect(f"known-positive: {nm} outside tests/typescript/", place(f=f), "engine/zz_test.go")
+    f = dict(_TESTS); f["engine/zz_test.go"] = "package engine\n// builds with esbuild\nfunc TestBuilds(t *testing.T) {}\n"
+    expect("known-positive: an unprefixed test that names the toolchain", place(f=f), "names the TypeScript toolchain")
+    f = dict(_TESTS); f["internal/plugingen/typescript_test.go"] = "package plugingen\nfunc TestGenerateTypeScript_Simple(t *testing.T) {}\n"
+    expect("negative control: TestGenerateTypeScript_* (the client generator) is not a guest test", place(f=f), None)
     t = copy.deepcopy(_TIERS); t["tier2"]["packages"].remove(TS_PATTERN)
-    expect("known-positive: package missing from tier2.packages", check_placement(t, _TESTS), "does not list")
-    t = copy.deepcopy(_TIERS); t["tier1"]["packages"].append("./tests/...")
-    expect("known-positive: tier 1 covers the package by a parent pattern", check_placement(t, _TESTS), "covers")
-    t = copy.deepcopy(_TIERS); t["tier1"]["packages"].append("./tests/integrity/...")
-    expect("negative control: an unrelated tests/ tier-1 pattern does not cover it", check_placement(t, _TESTS), None)
-
+    expect("known-positive: package missing from tier2.packages", place(t=t), "does not list")
+    for pat in ("./tests/...", "./tests/typescript", "./tests/typescript/", "./tests/type...", "./tests/typescript/..."):
+        t = copy.deepcopy(_TIERS); t["tier1"]["packages"].append(pat)
+        expect(f"known-positive: tier 1 gains '{pat}'", place(t=t), "selects the TypeScript package")
+    for pat in ("./tests/integrity/...", "./tests/typea..."):
+        t = copy.deepcopy(_TIERS); t["tier1"]["packages"].append(pat)
+        expect(f"negative control: tier 1 gains '{pat}', which does not reach it", place(t=t), None)
     expect_unmeasured("UNMEASURED: tests/typescript/ holds no TestTypeScript* test",
-                      lambda: check_placement(_TIERS, {"engine/x_test.go": _TESTS["engine/x_test.go"]}))
+                      lambda: place(f={"engine/x_test.go": _TESTS["engine/x_test.go"]}))
+    t = copy.deepcopy(_TIERS); t["tier1"]["packages"] = ["./nothing/..."]
+    expect_unmeasured("UNMEASURED: tier-1 resolution cannot show engine (the positive control)", lambda: place(t=t))
     expect_unmeasured("UNMEASURED: the doc has no language table", lambda: doc_rows("# nothing here\n"))
     expect_unmeasured("UNMEASURED: the table has no rows",
                       lambda: doc_rows("| Language | WASM compiler | Status | Binary | Tier |\n|---|---|---|---|---|\n"))
@@ -276,8 +390,9 @@ def main():
     root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip() \
         or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
-        tiers, doc, files = repo_inputs(root)
-        findings = run(tiers, doc, files)
+        tiers, doc, readme, files = repo_inputs(root)
+        resolve, ts_pkg_path = go_resolver(root)
+        findings = run(tiers, doc, readme, files, resolve, ts_pkg_path)
     except Unmeasured as e:
         print(f"UNMEASURED: {e}\n(this is a failure of the check, not a finding about the tree)", file=sys.stderr)
         return 2
