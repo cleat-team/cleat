@@ -84,7 +84,7 @@ func (s *apiServer) handleGetInstanceState(w http.ResponseWriter, r *http.Reques
 	}
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return
 	}
 	if wf == nil {

@@ -250,7 +250,7 @@ func (s *apiServer) adminTargetStore(w http.ResponseWriter, r *http.Request, id,
 	}
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return nil, false
 	}
 	if wf == nil {
@@ -330,7 +330,7 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 	// job for attackers and for everybody else equally.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		s.writeAccessCheckUnavailable(w, r, "the run", err) // cleat#3866: not the driver's text, and retryable
 		return nil, false
 	}
 	// EqualFold, not ==. A UUID is case-insensitive by definition, and SQL
