@@ -26,6 +26,29 @@
     g.Date = CleatDate;
   }
 
+  // Date setters (cleat#3829). Given a non-finite argument QuickJS answers NaN but LEAVES THE DATE UNCHANGED; the specification
+  // makes the date Invalid (a setter returns the new time value, so NaN means the result is not a time). date-fns builds its dates
+  // with setUTCFullYear, so `isValid(parseISO("nope"))` was true in the guest: a plausible, silent, wrong answer. The original
+  // does all the argument conversion and every other case; this only completes the one it gets wrong, by setting the time to
+  // NaN when the original says NaN. An already-invalid receiver, and setFullYear on one (which the specification treats as time
+  // value +0), are the original's and unchanged: typescript_conformance_test.go compares all of it with Node.
+  if (on("datesetters")) {
+    const P = g.Date.prototype;
+    const setTime = P.setTime;
+    const names = ["setMilliseconds", "setUTCMilliseconds", "setSeconds", "setUTCSeconds", "setMinutes", "setUTCMinutes",
+                   "setHours", "setUTCHours", "setDate", "setUTCDate", "setMonth", "setUTCMonth", "setFullYear", "setUTCFullYear"];
+    for (const name of names) {
+      const original = P[name];
+      const patched = { [name](...args) {
+        const result = original.apply(this, args);
+        if (result !== result) setTime.call(this, NaN);
+        return result;
+      } }[name];
+      Object.defineProperty(patched, "length", { value: original.length, configurable: true });
+      Object.defineProperty(P, name, { value: patched, writable: true, configurable: true, enumerable: false });
+    }
+  }
+
   // Math.random: a uniform double in [0, 1) from the host's recorded random value (an i64, so reinterpret as unsigned and
   // keep the top 53 bits). Anything that is not a decimal integer is a host answer this shim cannot read (the "suspended"
   // envelope is the one the binding can produce), and it THROWS: returning 0 instead is stable across replays, so it would
