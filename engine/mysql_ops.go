@@ -565,12 +565,13 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 		       ON d.name = w.def_name AND d.version = w.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), ?)
-		  AND (w.compaction_step IS NULL
-		       OR w.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), ?))
+		  -- Only a run that has never been compacted: see the PostgreSQL half
+		  -- in engine/db.go (cleat#3838).
+		  AND w.compaction_step IS NULL
 		  AND w.tenant_id = ?
 		ORDER BY e.cnt DESC
 		LIMIT ?
-	`, threshold, threshold, s.tenantID, limit)
+	`, threshold, s.tenantID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("GetCompactionCandidates: %w", err)
 	}
@@ -666,6 +667,23 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 	}
 	if err != nil {
 		return fmt.Errorf("CompactHistory: fence: %w", err)
+	}
+
+	// cleat#3837: the first row this leaves behind chains its checksum from the
+	// last one it deletes, so that checksum goes into the state, read in the
+	// same transaction and before the delete. Without it nothing can verify the
+	// retained history from its first row, and the run fails on resume.
+	var boundary sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT checksum FROM event_history
+		WHERE workflow_id = ? AND tenant_id = ? AND step < ?
+		ORDER BY step DESC LIMIT 1
+	`, workflowID, s.tenantID, keepStep).Scan(&boundary)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("CompactHistory: read boundary checksum: %w", err)
+	}
+	if compactionState, err = withBoundaryChecksum(compactionState, boundary.String); err != nil {
+		return fmt.Errorf("CompactHistory: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `

@@ -237,6 +237,14 @@ func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID str
 		return fmt.Errorf("verify events: load: %w", err)
 	}
 
+	// The compaction state is read before the transaction below opens: it is
+	// loaded on its own connection, and holding two per verification is how a
+	// small pool is exhausted.
+	cs, err := s.LoadCompactionState(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("verify events: load compaction state: %w", err)
+	}
+
 	// Try to load stored checksums from the DB. If the column doesn't exist
 	// (pre-migration), this query will fail, and we skip verification.
 	tx, err := s.beginTxWithRLS(ctx)
@@ -276,20 +284,10 @@ func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID str
 		return nil
 	}
 
-	// Recompute and compare checksums with chaining.
-	var prevChecksum string
-	for _, ev := range events {
-		expected, ok := storedChecksums[ev.Step]
-		if !ok || expected == "" {
-			prevChecksum = "" // Missing event breaks the chain
-			continue          // No stored checksum for this step (pre-migration partial data).
-		}
-		actual := computeEventChecksum(ev, prevChecksum)
-		if actual != expected {
-			return fmt.Errorf("verify events: workflow %s step %d: checksum mismatch (expected %s, got %s)",
-				workflowID, ev.Step, expected, actual)
-		}
-		prevChecksum = expected
+	// Recompute and compare checksums with chaining, starting from the
+	// compaction boundary when the run has been compacted (cleat#3837).
+	if err := verifyEventChain(workflowID, events, storedChecksums, cs); err != nil {
+		return err
 	}
 
 	// The chain above certifies payload, which is the only copy the checksum

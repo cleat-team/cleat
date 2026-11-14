@@ -1170,6 +1170,23 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 		return fmt.Errorf("compact history: fence: %w", err)
 	}
 
+	// cleat#3837: the first row this leaves behind chains its checksum from the
+	// last one it deletes, so that checksum goes into the state, read in the
+	// same transaction and before the delete. Without it nothing can verify the
+	// retained history from its first row, and the run fails on resume.
+	var boundary sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT checksum FROM event_history
+		WHERE workflow_id = $1 AND step < $2
+		ORDER BY step DESC LIMIT 1
+	`, workflowID, keepStep).Scan(&boundary)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("compact history: read boundary checksum: %w", err)
+	}
+	if compactionState, err = withBoundaryChecksum(compactionState, boundary.String); err != nil {
+		return fmt.Errorf("compact history: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2
 	`, workflowID, keepStep)
@@ -1226,8 +1243,11 @@ func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold i
 		       ON d.name = p.def_name AND d.version = p.def_version
 		      AND d.tenant_id = w.tenant_id
 		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), $1)
-		  AND (p.compaction_step IS NULL
-		       OR p.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), $1))
+		  -- Only a run that has never been compacted (cleat#3838): the worker
+		  -- declines to compact one twice, and ordering by cnt would otherwise
+		  -- rank those runs first and let enough of them fill the limit, so no
+		  -- other run was ever compacted.
+		  AND p.compaction_step IS NULL
 		ORDER BY e.cnt DESC
 		LIMIT $2
 	`, threshold, limit)
