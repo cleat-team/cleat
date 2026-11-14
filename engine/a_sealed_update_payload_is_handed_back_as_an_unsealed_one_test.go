@@ -26,6 +26,15 @@ package engine
 // jsonb column itself rather than `#>>`). They passed before the fix; they are
 // here so a future change cannot make one path transparent and the other not,
 // and the string-wrapped-object shape below is the one clew delivers.
+//
+// The `result` and `error_msg` columns are read on the same row, are decrypted,
+// and are NOT unwrapped, so they carry the same asymmetry the payload had. They
+// are asserted instead of fixed: a pending row cannot carry either today
+// (CompleteUpdateRequest writes a result and moves status off 'pending' in one
+// statement), and the test asserts both are empty on both arms AND equal between
+// them. That converts "these columns are out of scope because nothing sets them
+// on a pending row" from a claim about consumers into a measurement -- and a
+// change that starts setting one fails here rather than shipping the asymmetry.
 
 import (
 	"context"
@@ -148,10 +157,10 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 			if len(plainUpdates) != len(payloads) || len(sealedUpdates) != len(payloads) {
 				t.Fatalf("pending updates: %d unsealed, %d sealed, want %d of each", len(plainUpdates), len(sealedUpdates), len(payloads))
 			}
-			byName := func(rs []UpdateRequestInfo) map[string]string {
-				m := make(map[string]string, len(rs))
+			byName := func(rs []UpdateRequestInfo) map[string]UpdateRequestInfo {
+				m := make(map[string]UpdateRequestInfo, len(rs))
 				for _, r := range rs {
-					m[r.UpdateName] = r.Payload
+					m[r.UpdateName] = r
 				}
 				return m
 			}
@@ -160,8 +169,30 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 
 			for i, tc := range payloads {
 				name := fmt.Sprintf("p%d", i)
-				if got, want := sealedByName[name], plainByName[name]; got != want {
-					t.Errorf("%s: the update payload read back as %q with encryption on, %q with it off", tc.name, got, want)
+				pr, onPlain := plainByName[name]
+				sr, onSealed := sealedByName[name]
+				if !onPlain || !onSealed {
+					t.Fatalf("%s: the request is missing from the pending list (unsealed=%v sealed=%v)", tc.name, onPlain, onSealed)
+				}
+				if sr.Payload != pr.Payload {
+					t.Errorf("%s: the update payload read back as %q with encryption on, %q with it off", tc.name, sr.Payload, pr.Payload)
+				}
+
+				// cleat#3852 does not touch `result` or `error_msg`, and these two
+				// assertions are the reason stated as a measurement rather than as a
+				// claim about consumers. A pending row cannot carry either today:
+				// CompleteUpdateRequest is the only writer and it sets status and
+				// result in one statement, so the row stops being pending. If a later
+				// change lets a pending row carry one, THIS fails -- instead of the
+				// same read asymmetry shipping quietly through the other two columns,
+				// which decrypt and never unwrap.
+				if pr.Result != "" || pr.ErrorMsg != "" || sr.Result != "" || sr.ErrorMsg != "" {
+					t.Errorf("%s: a PENDING update row carries result=%q error_msg=%q (unsealed) / %q %q (sealed); cleat#3852 leaves those columns alone on the assumption they are empty here",
+						tc.name, pr.Result, pr.ErrorMsg, sr.Result, sr.ErrorMsg)
+				}
+				if sr.Result != pr.Result || sr.ErrorMsg != pr.ErrorMsg {
+					t.Errorf("%s: result/error_msg read back as %q/%q with encryption on, %q/%q with it off",
+						tc.name, sr.Result, sr.ErrorMsg, pr.Result, pr.ErrorMsg)
 				}
 
 				pl, foundPlain, err := plain.PollSignal(ctx, wfPlain, name)
