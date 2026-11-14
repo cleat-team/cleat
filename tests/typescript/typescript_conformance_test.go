@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -102,4 +103,60 @@ func TestTypeScriptDateSettersAgreeWithNode(t *testing.T) {
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/conformance/dates.ts"
 	compareLines(t, "Date setters", guestResult(t, root, src, "dates"), nodeOracle(t, root, src, "dates"))
+}
+
+// needNodeAtLeast fails, not skips, when the oracle is older than the corpus was written against: the toolchain is declared, so a
+// missing capability is a failure of the setup. Node 20's URL parser predates two changes to the specification (it leaves "^"
+// unencoded in a path, and it drops the root slash of a non-special URL whose path ".." climbs above the root), so against it the
+// corpus reports differences that are the oracle's age and not the shim's.
+func needNodeAtLeast(t *testing.T, major int) {
+	t.Helper()
+	out, err := exec.Command("node", "-p", "process.versions.node").Output()
+	if err != nil {
+		t.Fatalf("node is needed as the oracle: %v", err)
+	}
+	v := strings.TrimSpace(string(out))
+	got, err := strconv.Atoi(strings.SplitN(v, ".", 2)[0])
+	if err != nil {
+		t.Fatalf("cannot read the Node version %q", v)
+	}
+	if got < major {
+		t.Fatalf("the URL corpus needs Node %d or newer as its oracle (older URL parsers disagree with the current specification); this is Node %s", major, v)
+	}
+}
+
+// TestTypeScriptURLAgreesWithNode is the second silent divergence: QuickJS has no URL, so `new URL(x)` was a ReferenceError and
+// zod's z.url(), which calls it inside a try/catch, reported every URL invalid. The shim is the WHATWG algorithm for what can be
+// done exactly. Every getter of every result, over absolute inputs, a relative-resolution grid against twelve bases, the two
+// setters it supports, and the way zod decides.
+func TestTypeScriptURLAgreesWithNode(t *testing.T) {
+	root := needToolchain(t)
+	needNodeAtLeast(t, 24)
+	src := "tests/typescript/testdata/conformance/urls.ts"
+	compareLines(t, "URL", guestResult(t, root, src, "urls"), nodeOracle(t, root, src, "urls"))
+}
+
+// TestTypeScriptURLSearchParamsAgreeWithNode covers every constructor form, every method, iteration (including mutation during
+// it), invalid UTF-8 in percent-escapes, and the sort.
+func TestTypeScriptURLSearchParamsAgreeWithNode(t *testing.T) {
+	root := needToolchain(t)
+	needNodeAtLeast(t, 24)
+	src := "tests/typescript/testdata/conformance/searchparams.ts"
+	compareLines(t, "URLSearchParams", guestResult(t, root, src, "search_params"), nodeOracle(t, root, src, "searchParams")) // the guest takes the ABI name, Node calls the function
+}
+
+// TestTypeScriptURLRefusesWhatItCannotAnswer is the other half of the contract. The shim does not guess: an input or an operation
+// outside what it can do exactly must throw its own error, never return a value, because a plausible wrong value is the failure
+// the shim exists to remove. Node answers all of these, so only the guest runs it, and every line must read "loud".
+func TestTypeScriptURLRefusesWhatItCannotAnswer(t *testing.T) {
+	root := needToolchain(t)
+	lines := guestResult(t, root, "tests/typescript/testdata/conformance/urls_loud.ts", "urls_loud")
+	if len(lines) == 0 {
+		t.Fatal("no cases ran, so nothing was checked")
+	}
+	for _, l := range lines {
+		if l != "loud" {
+			t.Errorf("%s", l)
+		}
+	}
 }

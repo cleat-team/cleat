@@ -14,21 +14,54 @@ lodash-es 4.18.1, uuid 14.0.3) unmodified; there may be more.
 | # | Divergence | Kind | Status | Held by |
 |---|---|---|---|---|
 | 1 | `Date` setters given a non-finite argument returned `NaN` but left the date unchanged (spec: an Invalid Date). `date-fns` `isValid(parseISO("nope"))` was `true`. | **silent** | **fixed** (the `datesetters` shim in `crates/cleat-js-plugin/src/shims.js`) | `TestTypeScriptDateSettersAgreeWithNode`: 631 cases against Node |
-| 2 | No `URL` or `URLSearchParams`. zod's `z.url()` calls `new URL(...)` inside a `try`/`catch`, so the `ReferenceError` was swallowed and a valid URL reported invalid. | **silent** | **open** | none yet |
+| 2 | No `URL` or `URLSearchParams`. zod's `z.url()` calls `new URL(...)` inside a `try`/`catch`, so the `ReferenceError` was swallowed and a valid URL reported invalid. | **silent** | **fixed** for what can be answered exactly (the `url` shim); for the rest it throws, which a catch-all such as zod's still reads as "invalid" (see below) | `TestTypeScriptURLAgreesWithNode` (867 cases), `TestTypeScriptURLSearchParamsAgreeWithNode` (135), `TestTypeScriptURLRefusesWhatItCannotAnswer` |
 | 3 | No `TextEncoder` / `TextDecoder`. | loud (`ReferenceError`) | open | none yet |
 | 4 | No timers: `setTimeout`, `setInterval`, `setImmediate` are not defined, by design (a timer is not a durable operation). lodash-es `debounce` fails with `setTimeout is not defined`. The static check refuses a source that names one. | loud | by design | `TestTypeScriptStaticCheckRefusesATimerAndNamesTheLine` |
 | 5 | No `crypto`. uuid `v4()`/`v7()` with no arguments fails with `crypto is not defined`. With the `random` option supplied they equal Node: pass the SDK's replay-safe random in. | loud | by design | none yet |
 | 6 | Local time is UTC: the guest has no time zone. A workflow must not depend on the machine's zone anyway, since a replay may run elsewhere. | — | by design | the conformance tests run Node with `TZ=UTC` |
 
+## What the URL shim does and does not do
+
+It is the WHATWG URL algorithm for the part that can be done exactly: the special schemes (`http`, `https`, `ws`, `wss`, `ftp`)
+and generic ones, relative resolution against a base, percent-encoding, IPv4 hosts (including the hex, octal and short forms),
+`URLSearchParams` in full, `URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
+
+It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for: a `file:` URL, an IPv6 host, a
+host that is not ASCII or that contains an `xn--` label (both need IDNA processing), and setting `href`, `protocol`,
+`username`, `password`, `host`, `hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one.
+
+**That is loud to code that lets the error out, and not to code that catches everything.** zod's `z.url()` wraps `new URL` in a
+`try`/`catch`, which is how the `ReferenceError` was swallowed in the first place: for an input in the list above `z.url()` still
+reports "invalid" where Node says valid. So row 2 is fixed for every input the shim answers and **remains silent through a
+catch-all for the ones it refuses** (an IPv6 host, an internationalised host, a `file:` URL). It is not a support claim for those.
+The remaining inputs are cleat#3898.
+
+**Where Node itself departs from the specification** (measured on Node 26.4.0, not in the guest): a relative input that carries a
+fragment is accepted against a base with an opaque path (`new URL("x#y", "foo:bar")` is `foo:bar/x#y`, while `new URL("x",
+"foo:bar")` throws). The specification makes every one of them a failure unless the input starts with `#`, and the guest follows
+the specification. Those pairs are excluded from the comparison in `urls.ts`.
+
 ## What fixing one costs
 
 Row 1 is a patch over the setters in the plugin's initialisation script. Measured on macOS arm64, `hello.ts`: the plugin
 grows by 377 bytes (1,082,221 to 1,082,598) and a deployed module by 4,340 bytes (1,125,603 to 1,129,943, about 0.4%), because
-the initialised heap carries the patched functions. The size cost of `URL`/`URLSearchParams` (row 2) is **not yet measured**.
+the initialised heap carries the patched functions.
+
+Row 2, measured 2026-11-14 on the same machine with the same toolchain: the plugin grows by 1,405 bytes (1,274,892 to
+1,276,297) and a deployed `hello.ts` module by **74,202 bytes (1,330,301 to 1,404,503, about 5.6%)**, for the compiled classes
+that the initialised heap carries. That is the price of removing a silent wrong answer from every module, used or not.
 
 ## How a row is held
 
 A conformance test runs one source, plain JavaScript in a `.ts` file under `tests/typescript/testdata/conformance/`, in both
 places and compares what each prints: the guest through the module `build.sh` builds, Node through the same source bundled by
 esbuild. The oracle is Node itself, not a belief about Node. Every fix is also run **with its shim left out of the build**
-(`CLEAT_SHIMS_OFF=<name> REBUILD_PLUGIN=1`), and the test must fail: row 1 does (235 of 631 cases differ without it).
+(`CLEAT_SHIMS_OFF=<name> REBUILD_PLUGIN=1`), and the test must fail: row 1 does (235 of 631 cases differ without it), and row 2 does (all three tests fail with `URL is not defined`).
+
+The oracle is **Node 24 or newer** for the URL rows, and the tests fail, not skip, on an older one. Node 20 (which the tier-2 job used until
+this row) leaves `^` unencoded in a path and drops the root slash of a non-special URL whose path `..` climbs above the root (`foo:`
+where the current specification gives `foo:/`): against it the corpus reports 9 differences that are the oracle's age and not the
+shim's. Measured 2026-11-14 on Node 20.20.2, 24.21.0 and 26.4.0; the last two agree with the shim on every case. Two answers that vary
+by Node version, `new URLSearchParams(null)` and the key order of an iterator's result object, are left out of the corpus.
+
+A control build leaves the shim-less plugin in `packages/cleat-ts/.work/`, and the next ordinary build reuses it (cleat#3897): run the next build with `REBUILD_PLUGIN=1` to put the shipped plugin back.
