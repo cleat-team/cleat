@@ -153,6 +153,57 @@ package engine
 //     *msglen = payload->of.string.size;
 //     return kind;
 // }
+//
+// // Reads two string fields out of a `record{string, string}` (the shape of
+// // `scope`, and of the payload inside `signal-outcome.received`). Returns 0 and
+// // fills both, or -1 for anything else -- including a bare u64, which is what a
+// // dispatcher still returning its packed word writes.
+// static int cgotest_record_get_string_pair(const wasmtime_component_val_t *rec,
+//                                           const char **s0, size_t *l0,
+//                                           const char **s1, size_t *l1) {
+//     if (rec == NULL || rec->kind != WASMTIME_COMPONENT_RECORD || rec->of.record.size != 2) { return -1; }
+//     const wasmtime_component_valrecord_entry_t *f = rec->of.record.data;
+//     if (f[0].val.kind != WASMTIME_COMPONENT_STRING || f[1].val.kind != WASMTIME_COMPONENT_STRING) { return -1; }
+//     *s0 = f[0].val.of.string.data;
+//     *l0 = f[0].val.of.string.size;
+//     *s1 = f[1].val.of.string.data;
+//     *l1 = f[1].val.of.string.size;
+//     return 0;
+// }
+//
+// // signal-outcome: 0 received (both strings set), 2 timed-out, 11 suspended,
+// // 12 failed (s0 = message, code set), -1 anything else.
+// static int cgotest_val_get_signal_outcome(const wasmtime_component_val_t *v,
+//                                           const char **s0, size_t *l0,
+//                                           const char **s1, size_t *l1,
+//                                           uint32_t *code) {
+//     *s0 = NULL; *l0 = 0; *s1 = NULL; *l1 = 0; *code = 0;
+//     if (v->kind != WASMTIME_COMPONENT_RESULT) { return -1; }
+//     if (v->of.result.val == NULL) { return -1; }
+//     if (!v->of.result.is_ok) {
+//         int r = cgotest_val_get_call_outcome(v, s0, l0, code);
+//         return r == 1 ? 11 : (r == 2 ? 12 : -1);
+//     }
+//     const wasmtime_component_val_t *inner = v->of.result.val;
+//     if (inner->kind != WASMTIME_COMPONENT_VARIANT) { return -1; }
+//     const char *d = inner->of.variant.discriminant.data;
+//     size_t dlen = inner->of.variant.discriminant.size;
+//     const wasmtime_component_val_t *payload = inner->of.variant.val;
+//     if (dlen == 9 && memcmp(d, "timed-out", 9) == 0) { return payload == NULL ? 2 : -1; }
+//     if (dlen == 8 && memcmp(d, "received", 8) == 0) {
+//         return cgotest_record_get_string_pair(payload, s0, l0, s1, l1) == 0 ? 0 : -1;
+//     }
+//     return -1;
+// }
+//
+// // scope: a bare record. 0 ok (both strings set), -1 anything else -- including a
+// // result wrapper or a u64, which is what a dispatcher in an older shape writes.
+// static int cgotest_val_get_scope(const wasmtime_component_val_t *v,
+//                                  const char **s0, size_t *l0,
+//                                  const char **s1, size_t *l1) {
+//     *s0 = NULL; *l0 = 0; *s1 = NULL; *l1 = 0;
+//     return cgotest_record_get_string_pair(v, s0, l0, s1, l1) == 0 ? 0 : -1;
+// }
 import "C"
 import (
 	"fmt"
@@ -289,6 +340,37 @@ func cgotestReadAwaitOutcome(r unsafe.Pointer) (kind, payload string, code uint3
 	return "", "", 0
 }
 
+// cgotestReadSignalOutcome reads a `result<signal-outcome, call-failure>` out of
+// a result slot: kind is "received", "timed-out", "suspended" or "failed", and ""
+// for a value that is none of them (a dispatcher still writing its packed u64).
+func cgotestReadSignalOutcome(r unsafe.Pointer) (kind, name, payload string, code uint32) {
+	var s0, s1 *C.char
+	var l0, l1 C.size_t
+	var cCode C.uint32_t
+	switch C.cgotest_val_get_signal_outcome((*C.wasmtime_component_val_t)(r), &s0, &l0, &s1, &l1, &cCode) {
+	case 0:
+		return "received", cgotestGoStr(s0, l0), cgotestGoStr(s1, l1), 0
+	case 2:
+		return "timed-out", "", "", 0
+	case 11:
+		return "suspended", "", "", 0
+	case 12:
+		return "failed", cgotestGoStr(s0, l0), "", uint32(cCode)
+	}
+	return "", "", "", 0
+}
+
+// cgotestReadScope reads the `scope` record out of a result slot; ok is false for
+// anything else.
+func cgotestReadScope(r unsafe.Pointer) (ok bool, objectType, instanceKey string) {
+	var s0, s1 *C.char
+	var l0, l1 C.size_t
+	if C.cgotest_val_get_scope((*C.wasmtime_component_val_t)(r), &s0, &l0, &s1, &l1) != 0 {
+		return false, "", ""
+	}
+	return true, cgotestGoStr(s0, l0), cgotestGoStr(s1, l1)
+}
+
 func cgotestGoStr(p *C.char, n C.size_t) string {
 	if p == nil {
 		return ""
@@ -320,6 +402,8 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		20: b.dispatchChildWorkflowWithOptions,
 		22: b.dispatchAwaitPromise,
 		23: b.dispatchPollSignal,
+		28: b.dispatchAwaitSignals,
+		29: b.dispatchGetScope,
 	}[method]
 	// A missing key yields a nil func value, and calling it segfaults rather
 	// than failing a test. The map has had gaps since the durable-state family
@@ -360,8 +444,6 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 		20: b.dispatchRegisterUpdateHandler,
 		21: b.dispatchRegisterQueryHandler,
 		22: b.dispatchContinueAsNewVersioned,
-		23: b.dispatchGetScope,
-		24: b.dispatchAwaitSignals,
 		25: b.dispatchComponentDefault,
 		26: b.dispatchRunDetached,
 		27: b.dispatchDeferPhase,

@@ -429,9 +429,9 @@ var sdkUnreachedBaseline = map[string][]string{
 		// durable-run-detached uses. A core-ABI guest receives the run id
 		// through an out-pointer into its own linear memory; the component
 		// dispatch writes into a HOST buffer, so out-pointers do not survive
-		// the crossing -- that is the same defect stopSurfaces records as OPEN
-		// for durable-await-signals, which is declared with out-pointers and
-		// has therefore never worked on a component. So the Python binding
+		// the crossing -- that is the same defect durable-await-signals had
+		// until cleat#3786 (out-pointers, so it never worked on a component;
+		// it now returns its values). So the Python binding
 		// needs `durable-start-detached: func(...) -> result<string,
 		// call-failure>`, a dispatcher in component_cgo.go, and regenerated
 		// componentize-py bindings -- and regeneration must first reproduce the
@@ -454,20 +454,19 @@ var sdkUnreachedBaseline = map[string][]string{
 		//
 		// The out-pointer shape is why a table row alone would not fix it: an
 		// out-pointer addresses the guest's own linear memory while component
-		// dispatch writes into a HOST buffer. And the wrong-answer mode is not
-		// hypothetical in this family -- durable-await-signals IS declared and
-		// IS bound in Python, so its guest reads whatever sat at
-		// OUTPUT_OFFSET. That is the shape §3.267 records.
+		// dispatch writes into a HOST buffer. And the wrong-answer mode was not
+		// hypothetical in this family -- durable-await-signals WAS declared and
+		// WAS bound in Python, so its guest read whatever sat at
+		// OUTPUT_OFFSET, until cleat#3786. That was the shape §3.267 records.
 		//
 		// THE SAME as cleat_start_detached in the respect that matters here,
 		// not different from it: neither has a WIT declaration of its own, and
-		// neither is bound. What both contrast with is durable-await-signals --
-		// the one call of the three that is declared AND bound, and so the only
-		// one whose guest reads whatever sat at OUTPUT_OFFSET.
+		// neither is bound. What both contrasted with is durable-await-signals --
+		// the one call of the three that was declared AND bound, and so the only
+		// one whose guest read whatever sat at OUTPUT_OFFSET (until cleat#3786).
 		//
 		// stopSurfaces carries reasonNotInTheComponentWorld here, because
-		// cleat_wait_for_event has no WIT declaration of its own to name,
-		// against reasonWitIsStillCoreABI on DurableAwaitSignals. The
+		// cleat_wait_for_event has no WIT declaration of its own to name. The
 		// detached-run site carries neither: it names durable-run-detached, the
 		// declaration cleat_run_detached uses, so cleat_start_detached rides on
 		// it without one of its own. All of it is the out-pointer state
