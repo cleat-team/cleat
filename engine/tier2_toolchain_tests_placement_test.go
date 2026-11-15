@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -168,12 +169,12 @@ func TestEveryToolchainBuildingTestIsExcludedFromTier1AndRunByTheE2EJob(t *testi
 				"preinstalls node/java/gradle, so this test RUNS there rather "+
 				"than skipping, and spends the tier-1 gate's budget on a tier-2 "+
 				"language. Add an anchored pattern to tiers.yaml exclude_tests, "+
-				"and add the name to e2e-cross-language.yml's -run in the same "+
-				"change.", name, lang, lang)
+				"and add the name to E2E_SELECTOR in e2e-cross-language.yml in "+
+				"the same change.", name, lang, lang)
 		}
 		if !e2e.MatchString(name) {
 			t.Errorf("%s builds the %s toolchain but e2e-cross-language.yml's "+
-				"-run selector does not match it.\n\n"+
+				"E2E_SELECTOR does not match it.\n\n"+
 				"That job is the only one that provisions %s. If this test is "+
 				"also excluded from the tier-1 gate -- and it must be -- then it "+
 				"runs NOWHERE, silently, because `go test -skip` leaves no "+
@@ -275,13 +276,29 @@ func tier1Exclusions() ([]*regexp.Regexp, error) {
 	return out, nil
 }
 
-// e2eSelector reads the -run regex from the cross-language job.
+// e2eSelector reads E2E_SELECTOR from the cross-language workflow: the one
+// place the E2E test selector is written.
+//
+// It used to read the `-run` regex out of the job's test step. That job is
+// sharded now (four matrix legs), and each leg builds its own -run from a
+// slice of E2E_SELECTOR computed at run time -- so there is no longer one -run
+// string in the file to read, and reading the first of four would have let a
+// test selected by no leg pass this guard. E2E_SELECTOR is the input the split
+// is derived from, which is what this guard is about.
+//
+// The enumerator check is why this cannot be one regex: a variable nothing
+// reads decides nothing, and a guard that compiled it would pass while the job
+// ran something else entirely. `-list "$E2E_SELECTOR"` is the line that proves
+// the shard split is computed from this string.
 func e2eSelector() (*regexp.Regexp, error) {
 	b, err := os.ReadFile("../.github/workflows/e2e-cross-language.yml")
 	if err != nil {
 		return nil, err
 	}
-	m := regexp.MustCompile(`-run "([^"]+)"`).FindSubmatch(b)
+	if !bytes.Contains(b, []byte(`-list "$E2E_SELECTOR"`)) {
+		return nil, errNoSelector
+	}
+	m := regexp.MustCompile(`(?m)^\s*E2E_SELECTOR: "([^"]+)"$`).FindSubmatch(b)
 	if m == nil {
 		return nil, errNoSelector
 	}
@@ -304,6 +321,8 @@ func (e constErr) Error() string { return string(e) }
 const (
 	errNoExclusions = constErr("no exclude_tests entries found in tiers.yaml -- " +
 		"an empty list would make this guard pass vacuously for every test")
-	errNoSelector = constErr("no `-run \"...\"` found in e2e-cross-language.yml -- " +
-		"the selector moved, and without it this guard cannot check the second half")
+	errNoSelector = constErr("no `E2E_SELECTOR: \"...\"` fed to `go test -list` in " +
+		"e2e-cross-language.yml -- either the selector moved, or it is no longer what " +
+		"the shard split is computed from, and without it this guard cannot check the " +
+		"second half")
 )
