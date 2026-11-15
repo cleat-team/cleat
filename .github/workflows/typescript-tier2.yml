@@ -171,7 +171,7 @@ jobs:
           # is the number of top-level tests in this package and must be raised when one is added: it was 14 while 15
           # tests existed, which is the drift this line exists to catch.
           # Re-derive: grep -h '^func Test' tests/typescript/*_test.go | grep -c .
-          [ "$top" -ge 21 ] || { echo "only $top top-level tests passed; the twenty-one in tests/typescript must all run" >&2; exit 1; }
+          [ "$top" -ge 22 ] || { echo "only $top top-level tests passed; the twenty-two in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
       - name: "Skip budget (zero, because the toolchain was declared)"

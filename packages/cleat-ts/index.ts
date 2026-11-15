@@ -40,6 +40,10 @@ declare function __cleat_run_id(): string;
 declare function __cleat_poll_cancellation(): string;
 declare function __cleat_get_scope(): string;
 declare function __cleat_set_scope(objectType: string, instanceKey: string): string;
+declare function __cleat_create_promise(name: string): string;
+declare function __cleat_await_promise(id: string, timeoutMs: number): string;
+declare function __cleat_resolve_promise(id: string, value: string): string;
+declare function __cleat_reject_promise(id: string, error: string): string;
 
 export class CleatError extends Error {}
 class SuspendSignal extends Error {}
@@ -81,6 +85,12 @@ export interface Scope {
 export interface Cancellation {
   cancelled: boolean;
   reason: string;
+}
+
+/** The outcome of waiting for a promise. `timedOut` true means the wait expired, not that anything failed. */
+export interface AwaitedPromise<T> {
+  value: T;
+  timedOut: boolean;
 }
 
 export interface Ctx {
@@ -130,6 +140,17 @@ export interface Ctx {
    * it, do not branch on it in a way that changes what you do.
    */
   cancellation(): Cancellation;
+  /**
+   * Create a durable promise and resolve to its id. Knowing the id is the authority to settle it, from any run: that is
+   * how a request/reply pair is built (create + signal the id + await here + resolve there).
+   */
+  createPromise(name: string): Promise<string>;
+  /** Wait for a promise. A rejection is a `CleatError`; an expired timeout resolves with `timedOut: true`. */
+  awaitPromise<T = unknown>(id: string, timeoutMs?: number): Promise<AwaitedPromise<T>>;
+  /** Settle a promise with a value. Rejects if the id is unknown to the host. */
+  resolvePromise(id: string, value: unknown): Promise<void>;
+  /** Settle a promise with an error. Rejects if the id is unknown to the host. */
+  rejectPromise(id: string, error: string): Promise<void>;
 }
 
 const ctx: Ctx = {
@@ -162,6 +183,14 @@ const ctx: Ctx = {
   getScope: () => JSON.parse(__cleat_get_scope()) as Scope,
   setScope: (objectType, instanceKey) => settle<Scope>(__cleat_set_scope(objectType, instanceKey)),
   cancellation: () => JSON.parse(__cleat_poll_cancellation()) as Cancellation,
+  createPromise: (name) => settle<string>(__cleat_create_promise(name)),
+  awaitPromise: <T>(id: string, timeoutMs = 24 * 60 * 60 * 1000) =>
+    settle<{ value: string; timedOut: boolean }>(__cleat_await_promise(id, timeoutMs)).then((r) => ({
+      value: parseJSON(r.value) as T,
+      timedOut: r.timedOut,
+    })),
+  resolvePromise: (id, value) => settle<null>(__cleat_resolve_promise(id, encode(value))).then(() => undefined),
+  rejectPromise: (id, error) => settle<null>(__cleat_reject_promise(id, error)).then(() => undefined),
 };
 
 /**
