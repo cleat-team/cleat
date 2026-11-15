@@ -2117,6 +2117,40 @@ type Worker struct {
 	// on it.
 	storeTenantID string
 
+	// rlsBypassReasons is what main()'s startup check found: empty when this
+	// connection is subject to row-level security (or when that could not be
+	// determined), non-empty when every read on it sees every tenant's rows.
+	//
+	// It exists for the window the startup refusal cannot close. #3772 refuses
+	// to START on such a connection when the database holds more than one
+	// tenant, but a tenant can appear afterwards -- direct SQL, or
+	// `--create-tenant` on an owner DSN, which is the documented provisioning
+	// path -- and a worker already running would keep serving both until it
+	// restarted. The dispatch loop checks at the TOP of every tick, at the cost of
+	// one count query per tick paid only on a connection like this one
+	// (cleat#3773). rlsBypassRole is the role the startup check connected as,
+	// only for that message.
+	//
+	// Both are empty for a worker that never ran the check (non-PostgreSQL
+	// drivers, tests), which is what makes the guard inert there.
+	rlsBypassReasons []engine.RLSBypassReason
+	rlsBypassRole    string
+
+	// exitFunc ends the process when the runtime tenant-isolation failure is
+	// found. It is os.Exit in production; a test substitutes it so the decision
+	// is observable without killing the test binary (cleat#3773).
+	exitFunc func(int)
+
+	// countTenantsForIsolation answers "how many tenants does this database
+	// hold", counting SUSPENDED ones, exactly as the startup refusal does. main()
+	// binds it to engine.CountTenants over the connection the startup check used.
+	//
+	// It is called on every dispatch tick, but ONLY when rlsBypassReasons is
+	// non-empty -- that is, on a connection where serving two tenants is the
+	// failure D82 refuses at startup. A worker subject to the policies never
+	// calls it and pays nothing (cleat#3773).
+	countTenantsForIsolation func(context.Context) (int, error)
+
 	// storeFactory opens a store scoped to a particular tenant. Execution uses
 	// it; the loops above do not.
 	//
@@ -3263,6 +3297,18 @@ func (w *Worker) dispatchLoop() {
 		}
 
 		w.healthTracker.recordRun("dispatch")
+
+		// cleat#3773. HERE, at the top of the tick, and not in a claim path:
+		// the claim loop is only reached when there is free capacity (so a
+		// worker saturated with long runs would never look), and
+		// --claim-across-tenants=false never enters claimRotating at all while
+		// still reading across tenants on a bypassing connection. The guard
+		// returns on its first line unless the startup check recorded a bypass
+		// reason, so a worker subject to the policies pays nothing.
+		if w.checkRuntimeTenantIsolation() {
+			return
+		}
+
 		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
