@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -77,7 +78,7 @@ func (m *memPromises) RejectPromise(_ context.Context, promiseID, errMsg string)
 func TestTypeScriptHostCallBindingsPromises(t *testing.T) {
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/promises.ts"
-	res := build(t, root, src, "promises")
+	res := build(t, root, src, "promises,promise_timeout")
 	if res.exit != 0 {
 		t.Fatalf("building %s failed (exit %d):\n%s", src, res.exit, res.output)
 	}
@@ -99,6 +100,7 @@ func TestTypeScriptHostCallBindingsPromises(t *testing.T) {
 		Value        json.RawMessage `json:"value"`
 		TimedOut     bool            `json:"timedOut"`
 		Rejection    string          `json:"rejection"`
+		MineValue    int             `json:"mineValue"`
 		ResolveError string          `json:"resolveError"`
 		RejectError  string          `json:"rejectError"`
 	}
@@ -120,10 +122,67 @@ func TestTypeScriptHostCallBindingsPromises(t *testing.T) {
 	if !strings.Contains(got.Rejection, "the store refused it") {
 		t.Errorf("awaiting a rejected promise gave %q, want it to carry the store's message", got.Rejection)
 	}
+	// resolvePromise's SUCCESS path: the workflow resolved its own promise and read the value back. Without this the
+	// only resolvePromise exercised anywhere is the one that fails.
+	if got.MineValue != 7 {
+		t.Errorf("a promise resolved by the workflow read back as %d, want 7", got.MineValue)
+	}
+	if got.Rejection == "" {
+		t.Errorf("awaiting a rejected promise resolved instead of rejecting")
+	}
 	// The Rust SDK builds these two messages itself, so their text is deterministic and assertable.
 	for name, msg := range map[string]string{"resolvePromise": got.ResolveError, "rejectPromise": got.RejectError} {
 		if !strings.Contains(msg, "no-such-promise") {
 			t.Errorf("%s on an unknown id gave %q, want a rejection naming the id (the host's error path must not be swallowed)", name, msg)
 		}
+	}
+}
+
+// TestTypeScriptPromiseTimeoutIsReachedOnReplay closes the gap the first version of this file declared as unmeasurable.
+// The host answers a first await with the STOP SENTINEL rather than a timeout-shaped word, so a single Execute cannot
+// report timedOut; but Execute → wait past the deadline → Replay does, and engine's own promise-timeout test proves the
+// same path with a Go guest. So the branch is reachable in-process, and asserting it here also asserts the suspend
+// branch: `susp != nil` with no error is the 3-tuple stop path reaching this binding.
+func TestTypeScriptPromiseTimeoutIsReachedOnReplay(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/workflows/promises.ts"
+	res := build(t, root, src, "promises,promise_timeout")
+	if res.exit != 0 {
+		t.Fatalf("building %s failed (exit %d):\n%s", src, res.exit, res.output)
+	}
+	wasm, err := os.ReadFile(res.module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, closeRT := newEngineWith(t, engine.WithPromiseStore(newMemPromises()))
+	defer closeRT()
+
+	_, history, susp, _, _, err := e.Execute(context.Background(), wasm, "promise_timeout", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("the first pass failed rather than suspending: %v", err)
+	}
+	if susp == nil {
+		t.Fatalf("the first pass did not suspend awaiting a promise nothing will settle")
+	}
+	// Past the fixture's 200ms timeout. AwaitPromise's deadline check uses the real clock (engine/promises.go), so this
+	// is a real wait, not a fake one.
+	time.Sleep(250 * time.Millisecond)
+
+	result, _, susp2, _, _, err := e.Replay(context.Background(), wasm, "promise_timeout", json.RawMessage(`{}`), history)
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if susp2 != nil {
+		t.Fatalf("expected the timeout to fire on replay, got a second suspend (%s)", susp2.Reason)
+	}
+	var got struct {
+		TimedOut bool            `json:"timedOut"`
+		Value    json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("the replay's result is not the object this test expects: %v\n%.400s", err, result)
+	}
+	if !got.TimedOut {
+		t.Fatalf("timedOut = false after the deadline passed; the binding is dropping the host's timeout word")
 	}
 }
