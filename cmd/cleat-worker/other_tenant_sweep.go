@@ -26,7 +26,11 @@ import (
 //
 // The merged reapers (cleat#3570, #3575, #3587) carry their own copies of this and
 // are left alone: how often every worker enumerates every tenant is cleat#3573's.
-func (w *Worker) sweepOtherTenants(loop string, fn func(ctx context.Context, st engine.WorkflowStore) (int64, error)) int64 {
+// The tenant is passed to fn as well as the store: a caller that keeps per-tenant
+// state (compaction's skip set, cleat#3853) has no other way to name it, because
+// engine.WorkflowStore does not expose its own tenant. Callers that do not need it
+// ignore the argument.
+func (w *Worker) sweepOtherTenants(loop string, fn func(ctx context.Context, tenantID string, st engine.WorkflowStore) (int64, error)) int64 {
 	if !w.claimAcrossTenants {
 		return 0
 	}
@@ -34,7 +38,7 @@ func (w *Worker) sweepOtherTenants(loop string, fn func(ctx context.Context, st 
 	var failedTenants int
 	var firstErr error
 	sweep, err := w.forEachOtherTenantStore(func(tenantID string, st engine.WorkflowStore) {
-		n, ferr := fn(w.ctx, st)
+		n, ferr := fn(w.ctx, tenantID, st)
 		total += n
 		if ferr != nil {
 			failedTenants++
