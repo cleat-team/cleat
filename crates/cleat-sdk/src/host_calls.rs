@@ -412,19 +412,24 @@ mod imports {
 
 // set_defer_phase reports the start and end of the guest's defer drain.
 //
-// A free pub(crate) function rather than a HostCalls method: defer::run_deferred
+// A free function rather than a HostCalls method: defer::run_deferred
 // has no HostCalls value in scope, and `imports` is private to this module. It
-// is not part of the public SDK surface because no workflow author should call
-// it -- the generated drain does. cleat#1155.
+// is not a workflow-author API -- a generated drain calls it -- but it is `pub`
+// because a bridge whose drain is not written in Rust needs it: cleat-js-plugin
+// drains a JavaScript registry, and without this a defer body's durable calls
+// would be indistinguishable from the workflow body's in the recorded history,
+// which is the defect cleat#1155 fixed for Rust. cleat#3826.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn set_defer_phase(on: bool) {
+#[doc(hidden)]
+pub fn set_defer_phase(on: bool) {
     unsafe {
         imports::cleat_defer_phase(if on { 1 } else { 0 });
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn set_defer_phase(_on: bool) {}
+#[doc(hidden)]
+pub fn set_defer_phase(_on: bool) {}
 
 /// Options for starting a child workflow with version control.
 /// `version = 0` means default resolution (parent's version or latest).

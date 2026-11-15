@@ -65,3 +65,17 @@ shim's. Measured 2026-11-14 on Node 20.20.2, 24.21.0 and 26.4.0; the last two ag
 by Node version, `new URLSearchParams(null)` and the key order of an iterator's result object, are left out of the corpus.
 
 A control build leaves the shim-less plugin in `packages/cleat-ts/.work/`, and the next ordinary build reuses it (cleat#3897): run the next build with `REBUILD_PLUGIN=1` to put the shipped plugin back.
+
+## Where the guest differs from the other cleat SDKs
+
+The rows above are guest-versus-Node. These are guest-versus-Go-and-Rust, and they matter for a different reason: a cleat
+workflow's behaviour should not depend on which language it was written in. A tier-2 guest is allowed to differ where the
+difference is **recorded here**; what it may not do is differ silently.
+
+| # | Difference | What it means for you | Held by |
+|---|---|---|---|
+| D1 | **A killed workflow's defers do not run.** The other core-module SDKs run their deferred work when the host stops a workflow (the execution fence, the instruction limit, an unrecoverable runtime failure) — Go and Rust, and Java and AssemblyScript, which emit `__cleat_run_deferred` too (`wasm/exports.go`, `tiers.yaml`). This guest does not: the host looks for an export named `__cleat_run_deferred`, and a Javy-linked module exports only `memory` and its entry points, so there is nothing for it to call. | If the host kills a run — for any reason other than the workflow finishing — its deferred cleanup does **not** happen, and whatever that cleanup would have done is lost. The workflow's other durable effects are unaffected. | `TestTypeScriptDeferredRunsAfterCompletionAndNotOnSuspension` covers the two paths that DO work; there is no test for this row because the behaviour is the absence of one. Parity is cleat#3922. |
+
+Defers otherwise behave as in the other SDKs: they run after the workflow returns **or throws**, in reverse registration
+order, each body awaited, and one failing body does not stop the rest. They do **not** run when the workflow suspends — a
+suspended run has not finished, and running cleanup at the first sleep would release work the resumed run still needs.

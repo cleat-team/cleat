@@ -339,6 +339,13 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             }),
         )
         .unwrap();
+        // ---- deferred work (cleat#3826) -----------------------------------------------------------------------------
+        // cleat_defer mints the host's durable ID for a defer segment and records it; the BODY lives in the JavaScript
+        // registry (index.ts), which is why the phase call below is exposed at all. Effectful, so guarded.
+        g.set("__cleat_defer", Func::from(|description: String| -> String { guarded(|| pair(HostCalls.cleat_defer(&description))) })).unwrap();
+        // Brackets the JavaScript drain so the host can tell a defer body's durable calls from the workflow body's
+        // (cleat#1155). Records no event itself; void.
+        g.set("__cleat_defer_phase", Func::from(|on: bool| { cleat_sdk::host_calls::set_defer_phase(on) })).unwrap();
         g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
         ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });
