@@ -161,6 +161,15 @@ func encodeJSONPayload(payload string) string {
 // ',' (so `{"data":"hello"}` round-trips as `{"data": "hello"}`), and a
 // plain, non-JSON string like "payload-1" comes back as the JSON string
 // literal `"payload-1"`, quotes included, rather than the original bytes.
+//
+// A bare JSON `null` reads back as "", not `null`, and that is load-bearing
+// rather than incidental: unmarshalling JSON null into a Go string is a no-op
+// that returns no error, so the string case above answers with the zero value.
+// "" is what a null payload has always been handed back as on the unsealed
+// path -- `payload #>> '{}'` is SQL NULL for it and every reader of that
+// column COALESCEs to "" (cleat#3822) -- and since cleat#3852 this function is
+// also the sealed read's unwrapper, so this behaviour is what keeps the sealed
+// and unsealed paths agreeing for a null update payload.
 func decodeJSONPayload(raw string) string {
 	var s string
 	if err := json.Unmarshal([]byte(raw), &s); err == nil {
