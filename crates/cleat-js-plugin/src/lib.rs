@@ -304,6 +304,41 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             }),
         )
         .unwrap();
+        // ---- durable promises (cleat#3827) ---------------------------------------------------------------------------
+        // All four are effectful (create records the event that asserts the promise exists; settle records the outcome),
+        // so all four are guarded. await_promise is the one that waits, and a suspension reaches TypeScript as a promise
+        // that never settles, as with every other waiting call in this layer.
+        g.set("__cleat_create_promise", Func::from(|name: String| -> String { guarded(|| pair(HostCalls.create_promise(&name))) })).unwrap();
+        g.set(
+            "__cleat_await_promise",
+            Func::from(|promise_id: String, timeout_ms: f64| -> String {
+                guarded(|| match HostCalls.await_promise_ms(&promise_id, timeout_ms as i64) {
+                    (_, _, Some(e)) => json!({ "err": e }),
+                    (value, timed_out, None) => json!({ "ok": { "value": value, "timedOut": timed_out } }),
+                })
+            }),
+        )
+        .unwrap();
+        g.set(
+            "__cleat_resolve_promise",
+            Func::from(|promise_id: String, value: String| -> String {
+                guarded(|| match HostCalls.resolve_promise(&promise_id, &value) {
+                    Ok(()) => json!({ "ok": null }),
+                    Err(e) => json!({ "err": e }),
+                })
+            }),
+        )
+        .unwrap();
+        g.set(
+            "__cleat_reject_promise",
+            Func::from(|promise_id: String, error: String| -> String {
+                guarded(|| match HostCalls.reject_promise(&promise_id, &error) {
+                    Ok(()) => json!({ "ok": null }),
+                    Err(e) => json!({ "err": e }),
+                })
+            }),
+        )
+        .unwrap();
         g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
         ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });

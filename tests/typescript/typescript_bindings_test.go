@@ -54,6 +54,9 @@ type bindingSources struct {
 	installed []string // crates/cleat-js-plugin/src/lib.rs
 	declared  []string // packages/cleat-ts/index.ts
 	inventory bindingInventory
+	// nameExceptions is the pinned, deliberately-odd part of the global -> export naming rule. It is an input rather
+	// than a package-level constant so this value stays a function of everything it reads.
+	nameExceptions map[string]string
 }
 
 // handshakeExports are the two worker handshake calls, which no guest can reach, and the one export ABI deliberately
@@ -62,6 +65,16 @@ type bindingSources struct {
 var handshakeExports = []string{"cleat_poll_work", "cleat_complete", "cleat_register_query_handler"}
 
 var bindingReasonPrefix = regexp.MustCompile(`^(pending|permanent): \S.{15,}$`)
+
+// bindingNameExceptions pins a global whose export name cannot be derived from the global's, and the reason is a fact
+// about the ABI rather than a convenience: three exports carry no cleat_ prefix, and a workflow-callable one is bound.
+// Every OTHER global must map to `cleat_` + its own suffix.
+//
+// This closes the hole cleat-review found on #3908: the mapping's VALUE was checked only for "is a real export", so
+// `__cleat_uuid` -> `cleat_random` with `cleat_uuid` moved to unbound satisfied every other rule while uuid() returned a
+// random float. A naming rule is a proxy for the call site inside the closure; a full check would parse what each
+// `g.set` actually calls, and the Rust SDK's #[link_name] renames are why that parse is not one line.
+var bindingNameExceptions = map[string]string{"__cleat_set_query_state": "set_query_state"}
 
 // reconcileBindings returns one message per violation, in a stable order. Empty means the inventory and the three
 // sources agree.
@@ -94,6 +107,19 @@ func reconcileBindings(s bindingSources) []string {
 		}
 		if _, ok := exported[name]; !ok {
 			v = append(v, fmt.Sprintf("host-calls.json: bound global %s names the export %q, which engine/imports.go does not export", g, name))
+		}
+		want, excepted := s.nameExceptions[g]
+		if !excepted {
+			want = "cleat_" + strings.TrimPrefix(g, "__cleat_")
+		}
+		if name != want {
+			v = append(v, fmt.Sprintf("host-calls.json maps %s to %q, want %q: a swapped mapping satisfies every other rule here", g, name, want))
+		}
+	}
+	// A pin for a global that is no longer bound is stale, and would silently stop guarding anything.
+	for _, g := range sortedKeys(s.nameExceptions) {
+		if _, ok := s.inventory.Bound[g]; !ok {
+			v = append(v, fmt.Sprintf("bindingNameExceptions pins %s, which host-calls.json no longer binds", g))
 		}
 	}
 
@@ -162,10 +188,11 @@ func reconcileBindings(s bindingSources) []string {
 func TestEveryHostCallIsBoundOrListed(t *testing.T) {
 	root := repoRoot(t)
 	s := bindingSources{
-		exported:  engineExports(t, root),
-		installed: pluginGlobals(t, root),
-		declared:  declaredGlobals(t, root),
-		inventory: loadInventory(t, root),
+		exported:       engineExports(t, root),
+		installed:      pluginGlobals(t, root),
+		declared:       declaredGlobals(t, root),
+		inventory:      loadInventory(t, root),
+		nameExceptions: bindingNameExceptions,
 	}
 	if len(s.exported) == 0 || len(s.installed) == 0 {
 		// A scan that returns nothing must not read as agreement: empty sources would satisfy several of the rules above.
@@ -241,6 +268,15 @@ func TestReconcileBindingsSelfTest(t *testing.T) {
 		}},
 		{"an unbound entry with a reason that is not a decision", "does not start", func(s *bindingSources) {
 			s.inventory.Unbound["cleat_later"] = "TODO"
+		}},
+		{"a mapping that names the wrong export", "a swapped mapping satisfies every other rule", func(s *bindingSources) {
+			// cleat-review's reconstruction on #3908: swap uuid's mapping and move cleat_uuid to unbound.
+			s.inventory.Bound["__cleat_uuid"] = "cleat_random"
+			delete(s.inventory.Unbound, "cleat_uuid")
+			s.inventory.Unbound["cleat_uuid"] = "pending: moved here by the swap."
+		}},
+		{"a pin for a global that is no longer bound", "no longer binds", func(s *bindingSources) {
+			s.nameExceptions = map[string]string{"__cleat_now": "cleat_now_renamed"}
 		}},
 		{"a global listed as both plumbing and a binding", "a host call is one or the other", func(s *bindingSources) {
 			s.inventory.Plumbing = append(s.inventory.Plumbing, "__cleat_sleep")

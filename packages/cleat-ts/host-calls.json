@@ -38,7 +38,11 @@
     "__cleat_run_id": "cleat_run_id",
     "__cleat_poll_cancellation": "cleat_poll_cancellation",
     "__cleat_get_scope": "cleat_get_scope",
-    "__cleat_set_scope": "cleat_set_scope"
+    "__cleat_set_scope": "cleat_set_scope",
+    "__cleat_create_promise": "cleat_create_promise",
+    "__cleat_await_promise": "cleat_await_promise",
+    "__cleat_resolve_promise": "cleat_resolve_promise",
+    "__cleat_reject_promise": "cleat_reject_promise"
   },
   "unbound": {
     "cleat_poll_work": "permanent: the worker's work handshake; a workflow does not run the queue.",
@@ -50,10 +54,6 @@
     "cleat_await_any_child": "pending: waits for the first of several child run ids.",
     "cleat_poll_child": "pending: a non-blocking read of one child's state.",
     "cleat_child_workflow_with_options": "pending: start a child with a retry policy and other per-child options.",
-    "cleat_create_promise": "pending: durable promise, the request/reply primitive.",
-    "cleat_await_promise": "pending: waits on a promise id, with a timeout.",
-    "cleat_resolve_promise": "pending: the answering half of cleat_create_promise.",
-    "cleat_reject_promise": "pending: the refusal half of cleat_create_promise.",
     "cleat_signal_workflow": "pending: send a signal to another run.",
     "cleat_poll_signal": "pending: a non-blocking read of a pending signal.",
     "cleat_wait_for_event": "pending: wait for an engine event, distinct from a signal.",
