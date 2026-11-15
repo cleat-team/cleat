@@ -49,6 +49,14 @@ func (nopCaller) Call(context.Context, string, string, string) (string, error) {
 
 func newBenchEngine(t *testing.T) (*engine.Engine, func()) {
 	t.Helper()
+	return newEngineWith(t)
+}
+
+// newEngineWith is newBenchEngine plus options the caller needs. It exists so a test can give the engine state the
+// benchmark harness leaves nil — the host's Version() and MinVersion() both answer 1 without one, which makes a binding
+// that wired the two together indistinguishable from a correct one.
+func newEngineWith(t *testing.T, extra ...engine.EngineOption) (*engine.Engine, func()) {
+	t.Helper()
 	ctx := context.Background()
 	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
@@ -59,12 +67,13 @@ func newBenchEngine(t *testing.T) (*engine.Engine, func()) {
 		_ = rt.Close(ctx)
 		t.Fatalf("engine.NewWasmtimeBackend: %v", err)
 	}
-	e := engine.NewEngine(rt, nopCaller{},
+	opts := append([]engine.EngineOption{
 		engine.WithWorkflowID(benchWF),
 		engine.WithDefName("bench"),
 		engine.WithDefVersion(1),
 		engine.WithBackends(engine.WasmtimeLanguages, wt),
-	)
+	}, extra...)
+	e := engine.NewEngine(rt, nopCaller{}, opts...)
 	return e, func() { _ = rt.Close(ctx) }
 }
 

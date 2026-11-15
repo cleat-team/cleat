@@ -34,6 +34,12 @@ declare function __cleat_json_stringify(text: string): string;
 declare function __cleat_workflow_id(): string;
 declare function __cleat_set_query_state(key: string, value: string): void;
 declare function __cleat_side_effect(computed: string): string;
+declare function __cleat_version(): number;
+declare function __cleat_min_version(): number;
+declare function __cleat_run_id(): string;
+declare function __cleat_poll_cancellation(): string;
+declare function __cleat_get_scope(): string;
+declare function __cleat_set_scope(objectType: string, instanceKey: string): string;
 
 export class CleatError extends Error {}
 class SuspendSignal extends Error {}
@@ -65,6 +71,18 @@ export interface SignalResult {
   timedOut: boolean;
 }
 
+/** A virtual-object scope: what a nested call's durable state is keyed by. Empty strings mean no scope is set. */
+export interface Scope {
+  objectType: string;
+  instanceKey: string;
+}
+
+/** The host's answer to "has this run been asked to cancel", and its reason when it has. */
+export interface Cancellation {
+  cancelled: boolean;
+  reason: string;
+}
+
 export interface Ctx {
   workflowId(): string;
   call<T = unknown>(service: string, operation: string, request?: unknown): Promise<T>;
@@ -83,6 +101,21 @@ export interface Ctx {
   canonical(jsonText: string): string;
   sideEffect<T>(compute: () => T): Promise<T>;
   setQueryState(key: string, value: string): void;
+  /** The run's workflow definition version (Go's Version()). */
+  version(): number;
+  /** The oldest version a worker may run this under (Go's MinVersion()). */
+  minVersion(): number;
+  /** The current run's id. `workflowId()` is the workflow's, which survives continue-as-new; this one does not. */
+  runId(): string;
+  /** The scope this run acts under, empty strings when none is set. */
+  getScope(): Scope;
+  /**
+   * Set the virtual-object scope for subsequent durable state, and resolve to the PREVIOUS one ("" when none was set,
+   * otherwise the host's `vo:<type>:<key>:` form). An empty type and key clears the scope.
+   */
+  setScope(objectType: string, instanceKey: string): Promise<string>;
+  /** A poll: whether this run has been asked to cancel, and the reason when it has. Nothing is waited for. */
+  cancellation(): Cancellation;
 }
 
 const ctx: Ctx = {
@@ -109,6 +142,12 @@ const ctx: Ctx = {
   },
   sideEffect: <T>(compute: () => T) => settle<string>(__cleat_side_effect(encode(compute()))).then((v) => parseJSON(v) as T),
   setQueryState: (key, value) => __cleat_set_query_state(key, value),
+  version: () => __cleat_version(),
+  minVersion: () => __cleat_min_version(),
+  runId: () => __cleat_run_id(),
+  getScope: () => JSON.parse(__cleat_get_scope()) as Scope,
+  setScope: (objectType, instanceKey) => settle<string>(__cleat_set_scope(objectType, instanceKey)),
+  cancellation: () => JSON.parse(__cleat_poll_cancellation()) as Cancellation,
 };
 
 /**

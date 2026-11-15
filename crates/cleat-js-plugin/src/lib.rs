@@ -261,6 +261,37 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             }),
         )
         .unwrap();
+        // ---- workflow metadata, scope and cancellation (cleat#3827) ------------------------------------------------
+        // Reads, so unguarded: they record nothing and cannot fail, and the plugin leaves its other reads (`now`,
+        // `workflow_id`, `uuid`) unguarded for the same reason.
+        g.set("__cleat_version", Func::from(|| -> f64 { HostCalls.version() as f64 })).unwrap();
+        g.set("__cleat_min_version", Func::from(|| -> f64 { HostCalls.min_version() as f64 })).unwrap();
+        g.set("__cleat_run_id", Func::from(|| -> String { HostCalls.run_id() })).unwrap();
+        g.set(
+            "__cleat_poll_cancellation",
+            Func::from(|| -> String {
+                let (cancelled, reason) = HostCalls.poll_cancellation();
+                json!({ "cancelled": cancelled, "reason": reason }).to_string()
+            }),
+        )
+        .unwrap();
+        g.set(
+            "__cleat_get_scope",
+            Func::from(|| -> String {
+                let (object_type, instance_key) = HostCalls.get_scope();
+                json!({ "objectType": object_type, "instanceKey": instance_key }).to_string()
+            }),
+        )
+        .unwrap();
+        // Effectful, and it can SUSPEND: the host suspends when another run already holds the scope key
+        // (engine/scope.go, the contention branch). So it goes through `guarded` like every other effectful call.
+        g.set(
+            "__cleat_set_scope",
+            Func::from(|object_type: String, instance_key: String| -> String {
+                guarded(|| json!({ "ok": HostCalls.set_scope(&object_type, &instance_key) }))
+            }),
+        )
+        .unwrap();
         g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
         ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });
