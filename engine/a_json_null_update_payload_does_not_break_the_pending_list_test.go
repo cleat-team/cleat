@@ -49,9 +49,15 @@ func TestAJSONNullUpdatePayloadDoesNotBreakThePendingList(t *testing.T) {
 					case *PostgresStore:
 						store = s.WithEncryption(enc, true)
 					case *MySQLStore:
-						store = s.WithEncryption(enc, true)
+						// This arm asks for a sealed read on a dialect that cannot
+						// seal. Since cleat#3906 that is refused at construction
+						// rather than half-applied, so the arm asserts the refusal
+						// and stops; the plain arm above covers the read itself.
+						assertEnablingPayloadEncryptionIsRefused(t, "MySQL", func() { s.WithEncryption(enc, true) })
+						return
 					case *MSSQLStore:
-						store = s.WithEncryption(enc, true)
+						assertEnablingPayloadEncryptionIsRefused(t, "SQL Server", func() { s.WithEncryption(enc, true) })
+						return
 					default:
 						t.Fatalf("%T has no WithEncryption; seal it deliberately rather than reporting a pass on a store this test did not exercise", base)
 					}

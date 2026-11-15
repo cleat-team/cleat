@@ -151,14 +151,30 @@ func (s *MySQLStore) WithIdempotencyKeyTTL(ttl time.Duration) *MySQLStore {
 	return &cp
 }
 
-// WithEncryption returns a copy of the store with encryption at rest enabled.
-// NOTE: Encryption at rest is not yet supported on MySQL backends. This method
-// is present for forward compatibility so that StreamEventHistory can contain
-// the same decryption guard as the Postgres variant.
+// WithEncryption returns a copy of the store carrying the given payload
+// encryption, with encryption at rest off.
+//
+// It refuses to enable encryption: MySQL cannot seal payloads, and a store
+// that believes it can is only HALF sealed. StartChildWorkflowAtomic routes
+// its event through encodeEventForStorage with this flag (cleat#3906), so it
+// would seal a child's start event while AppendEventHistoryBatch keeps every
+// ordinary event beside it plaintext -- and MySQL's populateFromPayload reads
+// this column with no decryption at all, so the sealed row comes back as
+// silent field loss rather than an error. See engine/event_storage_encoding.go
+// for why MySQL and SQL Server are deliberately not routed through that
+// encoder.
+//
+// The method is present, and keeps its disabled form, for forward
+// compatibility: StreamEventHistory carries the same decryption guard as the
+// PostgreSQL variant.
 func (s *MySQLStore) WithEncryption(enc *PayloadEncryption, enabled bool) *MySQLStore {
+	if enabled {
+		panic("engine: payload encryption at rest cannot be enabled on MySQL; " +
+			"only PostgreSQL can seal payloads (cleat#3906)")
+	}
 	cp := *s
 	cp.encryption = enc
-	cp.encryptSensitivePayloads = enabled
+	cp.encryptSensitivePayloads = false
 	return &cp
 }
 
@@ -403,11 +419,12 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// The same encoder every other event_history writer calls (cleat#2328;
 	// see PostgresStore.StartChildWorkflowAtomic). MySQL does not support
-	// encryption at rest -- s.encryptSensitivePayloads is always false here,
-	// so this is a no-op transform today -- but routing through it anyway
-	// means there is exactly one place that builds the payload column and
-	// the payload_encoding column, rather than a second hand-rolled copy
-	// that would need to be found again if MySQL ever gains encryption.
+	// encryption at rest: WithEncryption refuses to enable it (cleat#3906),
+	// so s.encryptSensitivePayloads is false here and this is a no-op
+	// transform. Routing through it anyway means there is exactly one place
+	// that builds the payload column and the payload_encoding column, rather
+	// than a second hand-rolled copy that would need to be found again if
+	// MySQL ever gains encryption.
 	// The checksum above is computed BEFORE this call, over the plaintext
 	// event, for the same reason encodeEventForStorage's doc gives: it must
 	// match what VerifyWorkflowEvents recomputes from the decrypted record.

@@ -215,14 +215,30 @@ func (s *MSSQLStore) WithIdempotencyKeyTTL(ttl time.Duration) *MSSQLStore {
 	return &cp
 }
 
-// WithEncryption returns a copy of the store with encryption at rest enabled.
-// NOTE: Encryption at rest is not yet supported on MSSQL backends. This method
-// is present for forward compatibility so that StreamEventHistory can contain
-// the same decryption guard as the Postgres variant.
+// WithEncryption returns a copy of the store carrying the given payload
+// encryption, with encryption at rest off.
+//
+// It refuses to enable encryption: SQL Server cannot seal payloads, and a
+// store that believes it can is only HALF sealed. StartChildWorkflowAtomic
+// routes its event through encodeEventForStorage with this flag (cleat#3906),
+// so it would seal a child's start event while AppendEventHistoryBatch keeps
+// every ordinary event beside it plaintext -- and SQL Server's
+// populateFromPayload reads this column with no decryption at all, so the
+// sealed row comes back as silent field loss rather than an error. See
+// engine/event_storage_encoding.go for why MySQL and SQL Server are
+// deliberately not routed through that encoder.
+//
+// The method is present, and keeps its disabled form, for forward
+// compatibility: StreamEventHistory carries the same decryption guard as the
+// PostgreSQL variant.
 func (s *MSSQLStore) WithEncryption(enc *PayloadEncryption, enabled bool) *MSSQLStore {
+	if enabled {
+		panic("engine: payload encryption at rest cannot be enabled on SQL Server; " +
+			"only PostgreSQL can seal payloads (cleat#3906)")
+	}
 	cp := *s
 	cp.encryption = enc
-	cp.encryptSensitivePayloads = enabled
+	cp.encryptSensitivePayloads = false
 	return &cp
 }
 

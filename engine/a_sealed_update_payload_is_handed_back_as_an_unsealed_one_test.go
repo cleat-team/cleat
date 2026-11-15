@@ -83,22 +83,20 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 			// second database: the comparison has to be same-dialect, same rows'
 			// worth of fixtures, one reader with the key and one without.
 			//
-			// On MySQL and SQL Server WithEncryption seals nothing on this write
-			// path (--encrypt-sensitive-payloads is PostgreSQL-only and refuses
-			// any other driver), so those arms pin that the option accepted there
-			// changes nothing -- the store really does carry encryption enabled,
-			// and if a future path started sealing without a matching unwrap the
-			// two arms would diverge.
+			// MySQL and SQL Server run the UNSEALED arm alone. cleat#3906 made
+			// `WithEncryption(enc, true)` panic on those dialects -- it used to
+			// accept an option that half-sealed a store, and a configuration that
+			// cannot seal is now refused at construction -- so there is no second
+			// store over the same database to compare against. The refusal itself
+			// is pinned in TestEnablingPayloadEncryptionIsRefusedOnADialectThatCannotSeal.
 			var sealed WorkflowStore
 			switch s := base.(type) {
 			case *PostgresStore:
 				sealed = s.WithEncryption(enc, true)
-			case *MySQLStore:
-				sealed = s.WithEncryption(enc, true)
-			case *MSSQLStore:
-				sealed = s.WithEncryption(enc, true)
+			case *MySQLStore, *MSSQLStore:
+				// sealed stays nil; see the comment above.
 			default:
-				t.Fatalf("%T has no WithEncryption; seal it deliberately rather than reporting a pass on a store this test did not exercise", base)
+				t.Fatalf("%T is not a dialect this test knows; seal it deliberately rather than reporting a pass on a store this test did not exercise", base)
 			}
 			plain := base
 
@@ -107,10 +105,14 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 			if err != nil {
 				t.Fatalf("StartNewRun (unsealed): %v", err)
 			}
-			wfSealed, _, err := sealed.StartNewRun(ctx, "", "test-workflow", 1,
-				json.RawMessage(`{}`), "sealed-payload-sealed", DefaultTenantUUID, 0)
-			if err != nil {
-				t.Fatalf("StartNewRun (sealed): %v", err)
+			var wfSealed string
+			if sealed != nil {
+				var serr error
+				wfSealed, _, serr = sealed.StartNewRun(ctx, "", "test-workflow", 1,
+					json.RawMessage(`{}`), "sealed-payload-sealed", DefaultTenantUUID, 0)
+				if serr != nil {
+					t.Fatalf("StartNewRun (sealed): %v", serr)
+				}
 			}
 
 			for i, tc := range payloads {
@@ -118,14 +120,16 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 				if err := plain.CreateUpdateRequest(ctx, wfPlain, name, tc.payload, "promise-"+name); err != nil {
 					t.Fatalf("%s: CreateUpdateRequest on the unsealed store: %v", tc.name, err)
 				}
-				if err := sealed.CreateUpdateRequest(ctx, wfSealed, name, tc.payload, "promise-"+name); err != nil {
-					t.Fatalf("%s: CreateUpdateRequest on the sealed store: %v", tc.name, err)
-				}
 				if err := plain.DeliverSignal(ctx, wfPlain, name, tc.payload); err != nil {
 					t.Fatalf("%s: DeliverSignal on the unsealed store: %v", tc.name, err)
 				}
-				if err := sealed.DeliverSignal(ctx, wfSealed, name, tc.payload); err != nil {
-					t.Fatalf("%s: DeliverSignal on the sealed store: %v", tc.name, err)
+				if sealed != nil {
+					if err := sealed.CreateUpdateRequest(ctx, wfSealed, name, tc.payload, "promise-"+name); err != nil {
+						t.Fatalf("%s: CreateUpdateRequest on the sealed store: %v", tc.name, err)
+					}
+					if err := sealed.DeliverSignal(ctx, wfSealed, name, tc.payload); err != nil {
+						t.Fatalf("%s: DeliverSignal on the sealed store: %v", tc.name, err)
+					}
 				}
 			}
 
@@ -150,12 +154,8 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetPendingUpdateRequests (unsealed): %v", err)
 			}
-			sealedUpdates, err := sealed.GetPendingUpdateRequests(ctx, wfSealed)
-			if err != nil {
-				t.Fatalf("GetPendingUpdateRequests (sealed): %v", err)
-			}
-			if len(plainUpdates) != len(payloads) || len(sealedUpdates) != len(payloads) {
-				t.Fatalf("pending updates: %d unsealed, %d sealed, want %d of each", len(plainUpdates), len(sealedUpdates), len(payloads))
+			if len(plainUpdates) != len(payloads) {
+				t.Fatalf("pending updates (unsealed): %d, want %d", len(plainUpdates), len(payloads))
 			}
 			byName := func(rs []UpdateRequestInfo) map[string]UpdateRequestInfo {
 				m := make(map[string]UpdateRequestInfo, len(rs))
@@ -165,14 +165,42 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 				return m
 			}
 			plainByName := byName(plainUpdates)
-			sealedByName := byName(sealedUpdates)
+
+			var sealedByName map[string]UpdateRequestInfo
+			if sealed != nil {
+				sealedUpdates, serr := sealed.GetPendingUpdateRequests(ctx, wfSealed)
+				if serr != nil {
+					t.Fatalf("GetPendingUpdateRequests (sealed): %v", serr)
+				}
+				if len(sealedUpdates) != len(payloads) {
+					t.Fatalf("pending updates (sealed): %d, want %d", len(sealedUpdates), len(payloads))
+				}
+				sealedByName = byName(sealedUpdates)
+			}
 
 			for i, tc := range payloads {
 				name := fmt.Sprintf("p%d", i)
 				pr, onPlain := plainByName[name]
+				if !onPlain {
+					t.Fatalf("%s: the request is missing from the unsealed pending list", tc.name)
+				}
+				pl, foundPlain, err := plain.PollSignal(ctx, wfPlain, name)
+				if err != nil || !foundPlain {
+					t.Fatalf("%s: PollSignal (unsealed): found=%v err=%v", tc.name, foundPlain, err)
+				}
+				if sealed == nil {
+					// The unsealed arm alone (MySQL and SQL Server, cleat#3906):
+					// the row and its signal are readable and carry no result.
+					if pr.Result != "" || pr.ErrorMsg != "" {
+						t.Errorf("%s: a PENDING update row carries result=%q error_msg=%q; cleat#3852 leaves those columns alone on the assumption they are empty here",
+							tc.name, pr.Result, pr.ErrorMsg)
+					}
+					continue
+				}
+
 				sr, onSealed := sealedByName[name]
-				if !onPlain || !onSealed {
-					t.Fatalf("%s: the request is missing from the pending list (unsealed=%v sealed=%v)", tc.name, onPlain, onSealed)
+				if !onSealed {
+					t.Fatalf("%s: the request is missing from the sealed pending list", tc.name)
 				}
 				if sr.Payload != pr.Payload {
 					t.Errorf("%s: the update payload read back as %q with encryption on, %q with it off", tc.name, sr.Payload, pr.Payload)
@@ -195,10 +223,6 @@ func TestASealedUpdatePayloadIsHandedBackAsAnUnsealedOne(t *testing.T) {
 						tc.name, sr.Result, sr.ErrorMsg, pr.Result, pr.ErrorMsg)
 				}
 
-				pl, foundPlain, err := plain.PollSignal(ctx, wfPlain, name)
-				if err != nil || !foundPlain {
-					t.Fatalf("%s: PollSignal (unsealed): found=%v err=%v", tc.name, foundPlain, err)
-				}
 				sl, foundSealed, err := sealed.PollSignal(ctx, wfSealed, name)
 				if err != nil || !foundSealed {
 					t.Fatalf("%s: PollSignal (sealed): found=%v err=%v", tc.name, foundSealed, err)
