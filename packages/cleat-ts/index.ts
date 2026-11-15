@@ -50,6 +50,14 @@ declare function __cleat_defer_phase(on: boolean): void;
 // The drain that runs before a result is reported. Skipped while the segment is suspended: a suspended workflow has not
 // exited, and its cleanup must not run (the plugin answers the host with the suspend sentinel instead).
 async function finish(): Promise<void> {
+  // Reachable in a SHIPPED build: a body that fires a suspending call without awaiting it returns normally while the
+  // segment is already suspended (`ctx.sleep(...)` with no `await` -- `settle` hands the never-settling promise only to a
+  // caller that awaits it), which is the case crates/cleat-macro/src/entry.rs documents for Rust.
+  //
+  // UNOBSERVABLE today, measured rather than assumed: removing this line leaves the test suite GREEN. Two reasons, and a
+  // future reader needs both -- every effectful binding short-circuits on is_suspended(), and cleat_take_result refuses
+  // a result written while suspended, so a drain that wrongly ran could leave no trace anywhere. Whoever makes this
+  // observable (an effectful binding that does NOT short-circuit) should also make it testable.
   if (__cleat_suspended()) return;
   await drainDefers();
 }

@@ -420,6 +420,7 @@ mod imports {
 // would be indistinguishable from the workflow body's in the recorded history,
 // which is the defect cleat#1155 fixed for Rust. cleat#3826.
 #[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
 pub fn set_defer_phase(on: bool) {
     unsafe {
         imports::cleat_defer_phase(if on { 1 } else { 0 });
@@ -427,6 +428,7 @@ pub fn set_defer_phase(on: bool) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
 pub fn set_defer_phase(_on: bool) {}
 
 /// Options for starting a child workflow with version control.
