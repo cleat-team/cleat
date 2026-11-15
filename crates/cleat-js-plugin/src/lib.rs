@@ -261,6 +261,49 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             }),
         )
         .unwrap();
+        // ---- workflow metadata, scope and cancellation (cleat#3827) ------------------------------------------------
+        // Reads, so unguarded: they record nothing and cannot fail, and the plugin leaves its other reads (`now`,
+        // `workflow_id`, `uuid`) unguarded for the same reason.
+        g.set("__cleat_version", Func::from(|| -> f64 { HostCalls.version() as f64 })).unwrap();
+        g.set("__cleat_min_version", Func::from(|| -> f64 { HostCalls.min_version() as f64 })).unwrap();
+        g.set("__cleat_run_id", Func::from(|| -> String { HostCalls.run_id() })).unwrap();
+        g.set(
+            "__cleat_poll_cancellation",
+            Func::from(|| -> String {
+                let (cancelled, reason) = HostCalls.poll_cancellation();
+                json!({ "cancelled": cancelled, "reason": reason }).to_string()
+            }),
+        )
+        .unwrap();
+        g.set(
+            "__cleat_get_scope",
+            Func::from(|| -> String {
+                let (object_type, instance_key) = HostCalls.get_scope();
+                json!({ "objectType": object_type, "instanceKey": instance_key }).to_string()
+            }),
+        )
+        .unwrap();
+        // Effectful, so it goes through `guarded` like every other effectful call: it records a scope acquisition, and a
+        // segment must record nothing past the call that suspended it. Measured, not assumed (cleat#3827): with this
+        // binding unguarded, a workflow that calls it after a `sleep` gets a scope_acquired event recorded for a scope the
+        // run does not hold.
+        //
+        // The previous scope crosses as a PAIR, not as the host's `vo:<type>:<key>:` string, so this layer's two scope
+        // calls agree with each other. A non-empty answer in a form this does not recognise is an ERROR rather than an
+        // empty scope: silently emptying it would report "I held nothing" for a run that held something.
+        g.set(
+            "__cleat_set_scope",
+            Func::from(|object_type: String, instance_key: String| -> String {
+                guarded(|| match HostCalls.set_scope(&object_type, &instance_key) {
+                    prev if prev.is_empty() => json!({ "ok": { "objectType": "", "instanceKey": "" } }),
+                    prev => match prev.strip_prefix("vo:").and_then(|s| s.strip_suffix(':')).and_then(|s| s.split_once(':')) {
+                        Some((t, k)) => json!({ "ok": { "objectType": t, "instanceKey": k } }),
+                        None => json!({ "err": format!("the host reported a previous scope in a form this binding does not know: {prev}") }),
+                    },
+                })
+            }),
+        )
+        .unwrap();
         g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
         ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });

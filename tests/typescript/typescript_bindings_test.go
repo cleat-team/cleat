@@ -74,6 +74,14 @@ func reconcileBindings(s bindingSources) []string {
 	boundGlobals := sortedKeys(s.inventory.Bound)
 	plumbing := toSet(s.inventory.Plumbing)
 
+	// A global is ABI plumbing or a host call, never both. Without this, listing a binding in `plumbing` would satisfy
+	// the install rule and exempt it from the "declared in index.ts" rule, while it still counted as bound.
+	for _, g := range sortedKeys(plumbing) {
+		if _, ok := s.inventory.Bound[g]; ok {
+			v = append(v, fmt.Sprintf("host-calls.json lists %s as both plumbing and a binding; a host call is one or the other", g))
+		}
+	}
+
 	boundExports := map[string]string{} // export -> the global that binds it
 	for _, g := range boundGlobals {
 		name := s.inventory.Bound[g]
@@ -234,6 +242,9 @@ func TestReconcileBindingsSelfTest(t *testing.T) {
 		{"an unbound entry with a reason that is not a decision", "does not start", func(s *bindingSources) {
 			s.inventory.Unbound["cleat_later"] = "TODO"
 		}},
+		{"a global listed as both plumbing and a binding", "a host call is one or the other", func(s *bindingSources) {
+			s.inventory.Plumbing = append(s.inventory.Plumbing, "__cleat_sleep")
+		}},
 		{"a handshake call no longer marked permanent", "must stay listed", func(s *bindingSources) {
 			s.inventory.Unbound["cleat_poll_work"] = "pending: maybe a workflow could poll its own queue?"
 		}},
@@ -369,6 +380,42 @@ func stripComments(src string) string {
 		}
 	}
 	return string(out)
+}
+
+// TestStripCommentsKeepsCallsAndDropsProse pins the one thing the three scans depend on. Both lib.rs and index.ts are
+// full of prose that names a call (`__cleat_args()`, `__cleat_result(json)`), and a scan that read a comment as code
+// would report a binding that is not there — or worse, hide the one that is behind a line comment on the same line.
+func TestStripCommentsKeepsCallsAndDropsProse(t *testing.T) {
+	cases := []struct {
+		name            string
+		src             string
+		absent, present string // absent must NOT survive; present MUST
+	}{
+		{"a commented-out call is not a call", `// g.set("__cleat_a", x)`, `__cleat_a`, ``},
+		{"a block-commented call is not a call", `/* g.set("__cleat_b", x) */`, `__cleat_b`, ``},
+		{"a real call survives", `g.set("__cleat_c", x)`, ``, `__cleat_c`},
+		{"a call after a line comment survives", "let u = 1; // note\ng.set(\"__cleat_d\", x)", `note`, `__cleat_d`},
+		// The reason a plain `strings.Split(src, "//")` would be wrong: a `//` inside a string is not a comment, and
+		// cutting there would delete the rest of the line, which is where the call is.
+		{"a // inside a string does not start a comment", `let u = "http://x"; g.set("__cleat_e", x)`, ``, `__cleat_e`},
+		// A block comment spanning lines must not join them into one line, or a scan anchored on `^` would move.
+		{"a newline inside a block comment is kept", "a /* x\ny */ b", `x`, ``},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := stripComments(c.src)
+			if c.absent != "" && strings.Contains(got, c.absent) {
+				t.Fatalf("stripComments left the comment text %q in %q", c.absent, got)
+			}
+			if c.present != "" && !strings.Contains(got, c.present) {
+				t.Fatalf("stripComments dropped %q; it kept %q", c.present, got)
+			}
+		})
+	}
+	// The line structure is what a `^`-anchored scan depends on, so it is asserted separately from the text.
+	if n := strings.Count(stripComments("a /* x\ny */ b"), "\n"); n != 1 {
+		t.Fatalf("a newline inside a block comment left %d newlines, want 1: a line-anchored scan would move", n)
+	}
 }
 
 func toSet(xs []string) map[string]bool {

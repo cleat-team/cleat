@@ -166,11 +166,12 @@ jobs:
           echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed (top-level: $top)"
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
           # TestTypeScriptLabelIsRoutedToWasmtime and the two binding-inventory tests need no toolchain; the build tests,
-          # the `cleat build --target ts` test, the conformance tests and the worker smoke tests do (the last also need
-          # PostgreSQL), and the numbers test needs componentize-py where declared. The floor is the number of top-level
-          # tests in this package and must be raised when one is added: it was 14 while 15 tests existed, which is the
-          # drift this line exists to catch. Re-derive: grep -h '^func Test' tests/typescript/*_test.go | grep -c .
-          [ "$top" -ge 17 ] || { echo "only $top top-level tests passed; the seventeen in tests/typescript must all run" >&2; exit 1; }
+          # the `cleat build --target ts` test, the conformance tests, the host-call binding tests and the worker smoke
+          # tests do (the last also need PostgreSQL), and the numbers test needs componentize-py where declared. The floor
+          # is the number of top-level tests in this package and must be raised when one is added: it was 14 while 15
+          # tests existed, which is the drift this line exists to catch.
+          # Re-derive: grep -h '^func Test' tests/typescript/*_test.go | grep -c .
+          [ "$top" -ge 21 ] || { echo "only $top top-level tests passed; the twenty-one in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
       - name: "Skip budget (zero, because the toolchain was declared)"
