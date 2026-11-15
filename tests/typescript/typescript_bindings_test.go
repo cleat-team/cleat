@@ -74,6 +74,14 @@ func reconcileBindings(s bindingSources) []string {
 	boundGlobals := sortedKeys(s.inventory.Bound)
 	plumbing := toSet(s.inventory.Plumbing)
 
+	// A global is ABI plumbing or a host call, never both. Without this, listing a binding in `plumbing` would satisfy
+	// the install rule and exempt it from the "declared in index.ts" rule, while it still counted as bound.
+	for _, g := range sortedKeys(plumbing) {
+		if _, ok := s.inventory.Bound[g]; ok {
+			v = append(v, fmt.Sprintf("host-calls.json lists %s as both plumbing and a binding; a host call is one or the other", g))
+		}
+	}
+
 	boundExports := map[string]string{} // export -> the global that binds it
 	for _, g := range boundGlobals {
 		name := s.inventory.Bound[g]
@@ -233,6 +241,9 @@ func TestReconcileBindingsSelfTest(t *testing.T) {
 		}},
 		{"an unbound entry with a reason that is not a decision", "does not start", func(s *bindingSources) {
 			s.inventory.Unbound["cleat_later"] = "TODO"
+		}},
+		{"a global listed as both plumbing and a binding", "a host call is one or the other", func(s *bindingSources) {
+			s.inventory.Plumbing = append(s.inventory.Plumbing, "__cleat_sleep")
 		}},
 		{"a handshake call no longer marked permanent", "must stay listed", func(s *bindingSources) {
 			s.inventory.Unbound["cleat_poll_work"] = "pending: maybe a workflow could poll its own queue?"
