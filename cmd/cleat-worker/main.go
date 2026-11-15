@@ -1995,15 +1995,24 @@ func main() {
 
 	// Now that the schema (and its policies) exist, check that the *runtime*
 	// connection is actually subject to them. See engine.CheckRLSEnforced:
-	// GetWorkflowByID and ListWorkflows have no application-level tenant
-	// filter, so on a connection that bypasses RLS they return every tenant's
-	// data. Every configuration cleat shipped connected as a superuser.
+	// The plain workflow listing and count are scoped by row-level security
+	// alone, so on a connection that bypasses RLS a plain list returns every
+	// tenant's data. Every configuration cleat shipped connected as a superuser.
 	//
 	// cleat#3772, owner decision D82: a connection that is not subject to the policies and would serve
 	// MORE THAN ONE tenant refuses to start, whatever --require-auth and -rls-check say. The check runs
 	// under -rls-check=off too, because the guard is not the warning that flag silences: it is what stops
 	// two tenants sharing a connection that keeps them apart by nothing (cleat#3740). One tenant is the
 	// single-tenant laptop configuration the tutorial documents, and still starts.
+	// rlsBypassReasons and rlsBypassRole are what the check below found, kept
+	// so the dispatch loop can notice a second tenant appearing AFTER startup --
+	// the window the startup refusal cannot close (cleat#3773). Empty reasons
+	// means this connection is subject to the policies (or that could not be
+	// determined), and nothing below may act on that.
+	var (
+		rlsBypassReasons []engine.RLSBypassReason
+		rlsBypassRole    string
+	)
 	if *driver == "postgres" {
 		reasons, rErr := engine.CheckRLSEnforced(ctx, db)
 		switch {
@@ -2017,6 +2026,10 @@ func main() {
 				logger.InfoContext(context.Background(), "row-level security is enforced on this connection", "worker_id", workerID)
 			}
 		default:
+			rlsBypassReasons = reasons
+			if role, roleErr := engine.CurrentRole(ctx, db); roleErr == nil {
+				rlsBypassRole = role
+			}
 			// FAILS OPEN when the tenants cannot be counted, as the check beside it does when it cannot tell
 			// whether the connection bypasses (above), and for the same reason: refusing on an inconclusive
 			// read makes a database hiccup fatal. It matters only where nothing below would refuse anyway
@@ -2477,12 +2490,18 @@ func main() {
 	}
 
 	w := &Worker{
-		Metrics:                          metricsInstance,
-		id:                               workerID,
-		logger:                           logger,
-		store:                            store,
-		heartbeatStore:                   heartbeatStore,
-		storeTenantID:                    defaultTenantID,
+		Metrics:          metricsInstance,
+		id:               workerID,
+		logger:           logger,
+		store:            store,
+		heartbeatStore:   heartbeatStore,
+		storeTenantID:    defaultTenantID,
+		rlsBypassReasons: rlsBypassReasons,
+		rlsBypassRole:    rlsBypassRole,
+		exitFunc:         os.Exit,
+		countTenantsForIsolation: func(ctx context.Context) (int, error) {
+			return engine.CountTenants(ctx, db)
+		},
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,
 		claimAcrossTenants:               *claimAcrossTenants,

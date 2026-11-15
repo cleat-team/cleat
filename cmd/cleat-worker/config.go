@@ -46,8 +46,8 @@ var (
 	//
 	// The role cleat should run as (cleat_app) owns
 	// nothing and has no DDL rights -- that is what makes it subject to
-	// row-level security, and RLS is the only tenant isolation
-	// GetWorkflowByID and ListWorkflows have. But migrations obviously do need
+	// row-level security, and RLS is the only tenant isolation the plain workflow
+	// listings and counts have. But migrations obviously do need
 	// DDL rights, and workers run them at boot. Two DSNs is the way out:
 	// privileged for the schema, unprivileged for everything after.
 	//
