@@ -781,6 +781,9 @@ func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 			return nil, err
 		}
 		req.Payload = decodeJSONPayload(req.Payload)
+		// cleat#3929: a result is JSON text, compacted on every dialect; SQL
+		// Server was the only reader that handed back the caller's spacing.
+		req.Result = compactJSONString(req.Result)
 		requests = append(requests, req)
 	}
 	return requests, rows.Err()

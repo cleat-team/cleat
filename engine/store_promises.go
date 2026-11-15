@@ -383,7 +383,7 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT workflow_id, COALESCE(request_id, update_name), update_name, COALESCE(payload::text, ''), COALESCE(promise_id, ''), status,
-		       COALESCE(result #>> '{}', ''), COALESCE(error_msg, ''), created_at
+		       COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at
 		FROM workflow_update_requests
 		WHERE workflow_id = $1 AND tenant_id = $2 AND status = 'pending'
 		ORDER BY priority ASC, created_at
@@ -434,8 +434,35 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 		} else {
 			return nil, fmt.Errorf("get pending update requests: %w", derr)
 		}
-		if decrypted, derr := s.decryptTextColumnFromStorage(r.Result, "result"); derr == nil {
-			r.Result = decrypted
+		// cleat#3929: the same defect the payload above had, one column over.
+		// `result #>> '{}'` unwrapped a JSON string scalar and DISCARDED the
+		// fact that it was a string, so the compaction that followed re-parsed
+		// the string's CONTENT -- `"{\"a\": 1}"` came back as `{"a":1}` here
+		// while MySQL and SQL Server returned it with its quotes -- and it also
+		// turned a JSON null result into "" through COALESCE, where the other
+		// two return `null`.
+		//
+		// The value is JSON TEXT handed onward, not the caller's raw bytes the
+		// way a payload is: it is compacted (canonical spacing) and a string
+		// result KEEPS its quotes, which is the convention the promise path
+		// already settles on (GetPromise compacts after exactJSONText,
+		// cleat#3807). So this is compactJSONString over the raw column text,
+		// on every dialect, not decodeJSONPayload -- unwrapping would hand back
+		// `yes` for the result `"yes"`, which no caller can unmarshal.
+		//
+		// Sealing (cleat#2312) is why the value is unwrapped first: a sealed row
+		// holds the ciphertext AS A JSON STRING, so decryptTextColumnFromStorage
+		// needs the ciphertext, and the plaintext it returns is the JSON text
+		// that was sealed. The unchanged-value guard keeps an unsealed row on
+		// the raw-text path.
+		rawResult := r.Result
+		unwrappedResult := decodeJSONPayload(rawResult)
+		if decrypted, derr := s.decryptTextColumnFromStorage(unwrappedResult, "result"); derr == nil {
+			if decrypted != unwrappedResult {
+				r.Result = compactJSONString(decrypted)
+			} else {
+				r.Result = compactJSONString(rawResult)
+			}
 		} else {
 			return nil, fmt.Errorf("get pending update requests: %w", derr)
 		}
@@ -443,12 +470,6 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 			r.ErrorMsg = decrypted
 		} else {
 			return nil, fmt.Errorf("get pending update requests: %w", derr)
-		}
-		if len(r.Result) > 0 {
-			compacted := bytes.NewBuffer(nil)
-			if err := json.Compact(compacted, []byte(r.Result)); err == nil {
-				r.Result = compacted.String()
-			}
 		}
 		requests = append(requests, r)
 	}
