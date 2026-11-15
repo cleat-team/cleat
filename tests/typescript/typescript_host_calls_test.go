@@ -156,9 +156,9 @@ func TestTypeScriptHostCallsMetadataScopeAndCancellation(t *testing.T) {
 		WorkflowID   string            `json:"workflowId"`
 		Cancellation cancellationValue `json:"cancellation"`
 		Before       scopeValue        `json:"before"`
-		PrevFirst    string            `json:"prevFirst"`
+		PrevFirst    scopeValue        `json:"prevFirst"`
 		During       scopeValue        `json:"during"`
-		PrevSecond   string            `json:"prevSecond"`
+		PrevSecond   scopeValue        `json:"prevSecond"`
 		After        scopeValue        `json:"after"`
 	}
 	if err := json.Unmarshal([]byte(raw), &got); err != nil {
@@ -184,19 +184,20 @@ func TestTypeScriptHostCallsMetadataScopeAndCancellation(t *testing.T) {
 		t.Errorf("cancellation() = %+v, want not cancelled with no reason; nothing asked this run to cancel", got.Cancellation)
 	}
 
-	// The scope sequence, asserted as the host's own forms: empty before, "" as the previous scope the first time, then the
-	// `vo:<type>:<key>:` prefix the engine stores (engine/scope.go) as the previous scope on the second call.
+	// The scope sequence. Both scope calls answer a PAIR: empty before and empty as the first previous scope, then
+	// cart/c1 as the previous scope on the second call. The binding unpacks the engine's `vo:<type>:<key>:` string, so
+	// this also fails if that unpacking is wrong.
 	if got.Before != (scopeValue{}) {
 		t.Errorf("getScope() before any set = %+v, want empty", got.Before)
 	}
-	if got.PrevFirst != "" {
-		t.Errorf("the first setScope() reported the previous scope as %q, want empty", got.PrevFirst)
+	if got.PrevFirst != (scopeValue{}) {
+		t.Errorf("the first setScope() reported the previous scope as %+v, want empty", got.PrevFirst)
 	}
 	if got.During != (scopeValue{ObjectType: "cart", InstanceKey: "c1"}) {
 		t.Errorf("getScope() after setScope(cart, c1) = %+v, want cart/c1", got.During)
 	}
-	if got.PrevSecond != "vo:cart:c1:" {
-		t.Errorf("the second setScope() reported the previous scope as %q, want the host's vo:cart:c1: form", got.PrevSecond)
+	if got.PrevSecond != (scopeValue{ObjectType: "cart", InstanceKey: "c1"}) {
+		t.Errorf("the second setScope() reported the previous scope as %+v, want cart/c1", got.PrevSecond)
 	}
 	if got.After != (scopeValue{ObjectType: "order", InstanceKey: "o1"}) {
 		t.Errorf("getScope() after setScope(order, o1) = %+v, want order/o1", got.After)

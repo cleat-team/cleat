@@ -105,16 +105,30 @@ export interface Ctx {
   version(): number;
   /** The oldest version a worker may run this under (Go's MinVersion()). */
   minVersion(): number;
-  /** The current run's id. `workflowId()` is the workflow's, which survives continue-as-new; this one does not. */
+  /**
+   * The current run's id. The engine currently sets both this and `workflowId()` from the same value
+   * (`engine/executor.go`), so they agree today; they are separate ABI fields because a run id identifies ONE execution
+   * and a workflow id survives continue-as-new.
+   */
   runId(): string;
   /** The scope this run acts under, empty strings when none is set. */
   getScope(): Scope;
   /**
-   * Set the virtual-object scope for subsequent durable state, and resolve to the PREVIOUS one ("" when none was set,
-   * otherwise the host's `vo:<type>:<key>:` form). An empty type and key clears the scope.
+   * Set the virtual-object scope for subsequent durable state, and resolve to the PREVIOUS one (both fields empty when
+   * none was set). An empty type and key clears the scope.
+   *
+   * RESOLUTION IS NOT "I HOLD THE SCOPE". When another run holds the key, the host records the refusal and STOPS THE RUN
+   * AT THE END OF THE SEGMENT, but the call itself answers success (cleat#3916) — so code between this call and the end
+   * of the segment runs without the key. Await it, and do not treat it as a lock acquisition.
    */
-  setScope(objectType: string, instanceKey: string): Promise<string>;
-  /** A poll: whether this run has been asked to cancel, and the reason when it has. Nothing is waited for. */
+  setScope(objectType: string, instanceKey: string): Promise<Scope>;
+  /**
+   * A poll: whether this run has been asked to cancel, and the reason when it has. Nothing is waited for.
+   *
+   * The host answers `false` on every REPLAYED segment (`engine/signaller.go`), so this is a constant per mode rather
+   * than a function of recorded state (cleat#3917): code that branches on it can take a different path on replay. Read
+   * it, do not branch on it in a way that changes what you do.
+   */
   cancellation(): Cancellation;
 }
 
@@ -146,7 +160,7 @@ const ctx: Ctx = {
   minVersion: () => __cleat_min_version(),
   runId: () => __cleat_run_id(),
   getScope: () => JSON.parse(__cleat_get_scope()) as Scope,
-  setScope: (objectType, instanceKey) => settle<string>(__cleat_set_scope(objectType, instanceKey)),
+  setScope: (objectType, instanceKey) => settle<Scope>(__cleat_set_scope(objectType, instanceKey)),
   cancellation: () => JSON.parse(__cleat_poll_cancellation()) as Cancellation,
 };
 
