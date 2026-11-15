@@ -409,6 +409,14 @@ jobs:
           # top-level tests only, which is what was assigned.
           ran=$(grep -cE '^=== RUN   [A-Za-z0-9_]+$' e2e-report.txt || true)
           ran=${ran:-0}
+          # ...and an EMPTY assigned count fails rather than passing vacuously.
+          # `[ "$ran" -ne "" ]` is an integer-expression error, which bash
+          # reports on stderr and then treats as false -- so the `if` above
+          # would take its else branch and exit 0 with no tests counted
+          # against anything. Unreachable while the selection step exits 1 on
+          # count=0, but the assertion should not depend on that step staying
+          # the only writer of this value.
+          SHARD_COUNT=${SHARD_COUNT:-0}
           if [ "$ran" -ne "$SHARD_COUNT" ]; then
             echo "::error::this shard entered $ran tests but was assigned $SHARD_COUNT" >&2
             exit 1
