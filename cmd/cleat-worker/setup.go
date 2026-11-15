@@ -2583,8 +2583,16 @@ type Worker struct {
 	internalDefsRefreshed sync.Map
 
 	// Compaction settings.
-	Metrics                 *prometheus.Metrics
-	compactionThreshold     int
+	Metrics             *prometheus.Metrics
+	compactionThreshold int
+	// compactionSkips is the per-worker memory of runs whose sealed compaction
+	// state this worker could not open (cleat#3853). It is built on first use
+	// by compactionSkipSetFor, so every construction path has one.
+	compactionSkips     *compactionSkipSet
+	compactionSkipsOnce sync.Once
+	// nowFunc is the clock compactionSkips uses. Nil means time.Now; tests set
+	// it to advance the skip window without sleeping.
+	nowFunc                 func() time.Time
 	compactionInterval      time.Duration
 	retentionInterval       time.Duration
 	stallThreshold          time.Duration
@@ -7232,15 +7240,15 @@ const compactionCandidatesPerTick = 10
 // tenant's would find nothing.
 func (w *Worker) compactOnce() {
 	compStart := time.Now()
-	candidates, err := w.compactStoreOnce(w.store)
+	candidates, err := w.compactStoreOnce(w.storeTenantID, w.store)
 	if err != nil {
 		w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
 		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "error")
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "compaction", time.Since(compStart).Seconds())
 		return
 	}
-	others := w.sweepOtherTenants("compaction", func(_ context.Context, st engine.WorkflowStore) (int64, error) {
-		n, err := w.compactStoreOnce(st)
+	others := w.sweepOtherTenants("compaction", func(_ context.Context, tenantID string, st engine.WorkflowStore) (int64, error) {
+		n, err := w.compactStoreOnce(tenantID, st)
 		return int64(n), err
 	})
 	w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "ok")
@@ -7251,15 +7259,59 @@ func (w *Worker) compactOnce() {
 // compactStoreOnce finds one store's candidates and compacts each, returning how
 // many it found. A failure to compact one workflow is logged and does not stop the
 // rest; only failing to FIND candidates is returned.
-func (w *Worker) compactStoreOnce(st engine.WorkflowStore) (int, error) {
-	candidates, err := st.GetCompactionCandidates(w.ctx, w.compactionThreshold, compactionCandidatesPerTick)
+//
+// cleat#3853: a run whose sealed compaction state this worker cannot open is
+// remembered and left out of the batch for compactionSkipWindow. The candidate
+// query cannot know which key the worker holds, so it offers such a run on every
+// tick, and enough of them fill the batch and starve every other run. The
+// over-fetch below is what lets the batch be filled from the runs BEHIND the
+// remembered ones; it is capped (compactionSkipBatchCap), so the starvation is
+// reduced rather than eliminated, and a capped pass in which every fetched
+// candidate was skipped is counted separately as the signal that it happened.
+func (w *Worker) compactStoreOnce(tenant string, st engine.WorkflowStore) (int, error) {
+	skips := w.compactionSkipSetFor()
+	skips.prune()
+	want := compactionCandidatesPerTick + skips.size(tenant)
+	limit := want
+	capped := want > compactionSkipBatchCap
+	if capped {
+		limit = compactionSkipBatchCap
+	}
+	candidates, err := st.GetCompactionCandidates(w.ctx, w.compactionThreshold, limit)
 	if err != nil {
 		return 0, err
 	}
+	attempts, skippedHere := 0, 0
 	for _, wfID := range candidates {
-		if err := engine.CompactWorkflowHistory(w.ctx, st, wfID, w.compactionThreshold, w.Metrics); err != nil {
-			w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
+		if attempts >= compactionCandidatesPerTick {
+			break
 		}
+		if skips.skipped(tenant, wfID) {
+			skippedHere++
+			continue
+		}
+		attempts++
+		if err := engine.CompactWorkflowHistory(w.ctx, st, wfID, w.compactionThreshold, w.Metrics); err != nil {
+			// ONLY a decryption failure is remembered. A connection failure or a
+			// stopped worker is transient, and remembering it would park a healthy
+			// run for compactionSkipWindow. The whole error is matched, never a
+			// message: a full key rotation fails at GetWorkflowByID and a mixed row
+			// at LoadCompactionState, and both mean the same thing here.
+			if errors.Is(err, engine.ErrPayloadDecryption) {
+				if skips.remember(tenant, wfID) {
+					w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "sealed_skipped")
+					w.logger.WarnContext(w.ctx, "compaction: this worker cannot open the run's compaction state; leaving it out of the batch until the key is available",
+						"worker_id", w.id, "workflow_id", wfID, "tenant_id", tenant,
+						"skipped_for", compactionSkipWindow.String(), "error", err)
+				}
+			} else {
+				w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
+			}
+		}
+	}
+	w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction_skipped", int64(skips.size(tenant)))
+	if capped && len(candidates) > 0 && skippedHere == len(candidates) {
+		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "skip_cap_hit")
 	}
 	return len(candidates), nil
 }
@@ -7582,7 +7634,7 @@ func (w *Worker) runVersionGCSweep() {
 // --claim-across-tenants like the other cross-tenant loops, and a no-op for MySQL
 // and a sharded store, neither of which can list tenants.
 func (w *Worker) runVersionGCSweepOfOtherTenants(opts engine.GCOptions) {
-	removed := w.sweepOtherTenants("version gc", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+	removed := w.sweepOtherTenants("version gc", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
 		res, err := engine.GarbageCollectVersions(ctx, st, opts)
 		if err != nil {
 			return 0, err
@@ -7891,7 +7943,7 @@ func (w *Worker) runRetentionSweepAt(sweptAt time.Time, retentionDays, completed
 // per-tenant label.
 func (w *Worker) retentionOfOtherTenants(sweptAt time.Time, retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
 	var events, cleared, completed, deadLettered int64
-	w.sweepOtherTenants("retention", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+	w.sweepOtherTenants("retention", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
 		var first error
 		note := func(err error) {
 			if err != nil && first == nil {
@@ -7970,7 +8022,7 @@ func (w *Worker) cleanupMemorySamplesOnce(maxSamples int) {
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "memory_cleanup", time.Since(mcStart).Seconds())
 		return
 	}
-	deleted += w.sweepOtherTenants("memory cleanup", func(ctx context.Context, st engine.WorkflowStore) (int64, error) {
+	deleted += w.sweepOtherTenants("memory cleanup", func(ctx context.Context, _ string, st engine.WorkflowStore) (int64, error) {
 		return st.CleanupMemorySamples(ctx, maxSamples)
 	})
 	if deleted > 0 {
