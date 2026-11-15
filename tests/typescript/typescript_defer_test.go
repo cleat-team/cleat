@@ -12,9 +12,11 @@ package typescript
 //
 // Also not asserted, because it CANNOT be observed today: the drain's `__cleat_suspended()` guard, which mirrors
 // cleat-sdk's own rule (a suspended run has not exited). I wrote a workflow that suspends and then throws, so the error
-// path reaches the drain while suspended, and removing the guard left the suite GREEN — measured, not assumed. The
-// reason is that every effectful binding already short-circuits while suspended (the plugin's `guarded` and its
-// `if !is_suspended()` reads), so a drain that wrongly ran could only do guest-internal work with no effect to check.
+// path reaches the drain while suspended, and removing the guard left the suite GREEN — measured, not assumed, against
+// a build that carried that workflow (removed afterwards: with the guard present and absent both green, it could not
+// discriminate, and a test that cannot fail is worse than none). The reason is that every effectful binding already
+// short-circuits while suspended (the plugin's `guarded` and its `if !is_suspended()` reads), so a drain that wrongly
+// ran could only do guest-internal work with no effect to check.
 // The guard stays, for parity with Rust and for the day a binding is added that is not short-circuited; the test does
 // not claim to cover it.
 
