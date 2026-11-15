@@ -13,7 +13,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
@@ -38,7 +40,21 @@ func (s versionedState) MinVersion() int                 { return s.minVersion }
 func (s versionedState) ChildVersion(string) (int, bool) { return 0, false }
 func (s versionedState) Priority() int                   { return 0 }
 
-func TestTypeScriptHostCallsMetadataScopeAndCancellation(t *testing.T) {
+// acquiringKeys is a concurrency-key store that either grants every key or refuses every one. Refusing is the
+// contention branch in engine/scope.go, which is the only path on which set_scope suspends -- so the two arms below
+// are what distinguishes a binding that suspends from one that hands the workflow back a scope it does not hold.
+type acquiringKeys struct{ grant bool }
+
+func (k acquiringKeys) AcquireConcurrencyKey(context.Context, string, string, time.Duration) (bool, error) {
+	return k.grant, nil
+}
+
+func (acquiringKeys) ReleaseConcurrencyKey(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
+func runMetadataWorkflow(t *testing.T, extra ...engine.EngineOption) (raw string, suspended bool, reason string) {
+	t.Helper()
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/metadata.ts"
 	res := build(t, root, src, "metadata")
@@ -49,15 +65,89 @@ func TestTypeScriptHostCallsMetadataScopeAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, closeRT := newEngineWith(t, engine.WithWorkflowState(versionedState{version: 7, minVersion: 3}))
+	e, closeRT := newEngineWith(t, append([]engine.EngineOption{
+		engine.WithWorkflowState(versionedState{version: 7, minVersion: 3}),
+	}, extra...)...)
 	defer closeRT()
-	raw, _, susp, _, _, err := e.Execute(context.Background(), wasm, "metadata", json.RawMessage(`{}`))
+	out, _, susp, _, _, err := e.Execute(context.Background(), wasm, "metadata", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("running the metadata workflow: %v", err)
+	}
+	if susp != nil {
+		return out, true, susp.Reason
+	}
+	return out, false, ""
+}
+
+// TestTypeScriptSetScopeSuspendsRatherThanProceedingWithoutTheKey is the arm the metadata test cannot reach with no
+// store at all. set_scope is guarded because the host suspends here; if the binding were not, the workflow would come
+// back with a scope it does not hold and run the critical section anyway, which is the mutual-exclusion guarantee the
+// scope exists to provide. The granting arm is the control: it proves the suspension below comes from the refusal and
+// not from any store being present.
+func TestTypeScriptSetScopeSuspendsRatherThanProceedingWithoutTheKey(t *testing.T) {
+	t.Run("granted", func(t *testing.T) {
+		_, suspended, reason := runMetadataWorkflow(t, engine.WithConcurrencyKeyStore(acquiringKeys{grant: true}))
+		if suspended {
+			t.Fatalf("the workflow suspended (%s) with every key granted", reason)
+		}
+	})
+	t.Run("refused", func(t *testing.T) {
+		raw, suspended, reason := runMetadataWorkflow(t, engine.WithConcurrencyKeyStore(acquiringKeys{grant: false}))
+		if !suspended {
+			t.Fatalf("the workflow finished (%s) with the scope key held by another run; set_scope must suspend instead of proceeding", raw)
+		}
+		// The workflow sets two scopes and both are refused, and the engine keeps only the LAST suspend reason, so the key
+		// named here is vo:order:o1 rather than vo:cart:c1. Measured, not assumed: the first version of this assertion pinned
+		// vo:cart:c1 and failed. What is asserted is the contention branch, not a particular key.
+		for _, want := range []string{"virtual object scope vo:", "held by another workflow"} {
+			if !strings.Contains(reason, want) {
+				t.Fatalf("suspended for %q, want it to name %q (the contention branch in engine/scope.go)", reason, want)
+			}
+		}
+	})
+}
+
+// TestTypeScriptACallAfterASuspensionRecordsNothing is what `guarded` on set_scope actually buys, and it is NOT the
+// contention suspension the test above covers: measured by unguarding the binding, that test still passes, because the
+// engine suspends that run at the end of the segment whatever the guest returns. What changes is the HISTORY — a call
+// made after the suspension flag is set must not reach the host, or the segment records a scope the run does not hold.
+func TestTypeScriptACallAfterASuspensionRecordsNothing(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/workflows/late_scope.ts"
+	res := build(t, root, src, "late_scope")
+	if res.exit != 0 {
+		t.Fatalf("building %s failed (exit %d):\n%s", src, res.exit, res.output)
+	}
+	wasm, err := os.ReadFile(res.module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, closeRT := newEngineWith(t)
+	defer closeRT()
+	_, history, susp, _, _, err := e.Execute(context.Background(), wasm, "late_scope", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("running the workflow: %v", err)
 	}
-	if susp != nil {
+	// The precondition: the segment really did suspend at the sleep. Sleep is local and records no event (see
+	// DurableSleep), so the suspend reason is the only evidence that the workflow ran far enough to make the call below.
+	if susp == nil {
+		t.Fatalf("the workflow did not suspend; ctx.sleep(60000) is supposed to suspend the segment")
+	}
+	if !strings.Contains(susp.Reason, "cleat_sleep(60000ms)") {
+		t.Fatalf("suspended for %q, not at the sleep; the ordering below is then unmeasured", susp.Reason)
+	}
+	for _, ev := range history {
+		if ev.EventType == engine.EventTypeScopeAcquired {
+			t.Fatalf("the segment recorded a scope acquisition (%+v) AFTER the call that suspended it; set_scope must be guarded", ev)
+		}
+	}
+}
+
+func TestTypeScriptHostCallsMetadataScopeAndCancellation(t *testing.T) {
+	raw, suspended, reason := runMetadataWorkflow(t)
+	if suspended {
 		// A scope nobody else holds must not suspend; if it does, setScope's binding is being handed the contention answer.
-		t.Fatalf("the workflow suspended (%s); nothing in it waits for anything", susp.Reason)
+		t.Fatalf("the workflow suspended (%s); nothing in it waits for anything", reason)
 	}
 	var got struct {
 		Version      int64             `json:"version"`

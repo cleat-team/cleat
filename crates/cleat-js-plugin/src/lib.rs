@@ -283,8 +283,10 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
             }),
         )
         .unwrap();
-        // Effectful, and it can SUSPEND: the host suspends when another run already holds the scope key
-        // (engine/scope.go, the contention branch). So it goes through `guarded` like every other effectful call.
+        // Effectful, so it goes through `guarded` like every other effectful call: it records a scope acquisition, and a
+        // segment must record nothing past the call that suspended it. Measured, not assumed (cleat#3827): with this
+        // binding unguarded, a workflow that calls it after a `sleep` gets a scope_acquired event recorded for a scope the
+        // run does not hold. The suspension on CONTENTION is the engine's own (engine/scope.go) and happens either way.
         g.set(
             "__cleat_set_scope",
             Func::from(|object_type: String, instance_key: String| -> String {
