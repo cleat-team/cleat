@@ -42,7 +42,9 @@
     "__cleat_create_promise": "cleat_create_promise",
     "__cleat_await_promise": "cleat_await_promise",
     "__cleat_resolve_promise": "cleat_resolve_promise",
-    "__cleat_reject_promise": "cleat_reject_promise"
+    "__cleat_reject_promise": "cleat_reject_promise",
+    "__cleat_defer": "cleat_defer",
+    "__cleat_defer_phase": "cleat_defer_phase"
   },
   "unbound": {
     "cleat_poll_work": "permanent: the worker's work handshake; a workflow does not run the queue.",
@@ -73,8 +75,6 @@
     "cleat_call_retry": "pending: a call with an explicit retry policy; nine parameters, so it needs a request object in the TS API.",
     "cleat_call_heartbeat": "pending: a long call that heartbeats to prove it is alive.",
     "cleat_json_parse": "pending: the host's canonical JSON parse; cleat_json_stringify is bound, so this is its sibling.",
-    "cleat_defer": "pending: register a deferred segment; the TS layer's suspension story has to be settled first (see index.ts).",
-    "cleat_defer_phase": "pending: turns the defer drain on and off; the generated drain calls it, not a workflow.",
     "plugin_call": "pending: call a named plugin function. Unprefixed export, so its global cannot follow the __cleat_ rule.",
     "plugin_call_streaming": "pending: the streaming form of plugin_call. Unprefixed export, same caveat."
   }

@@ -44,6 +44,15 @@ declare function __cleat_create_promise(name: string): string;
 declare function __cleat_await_promise(id: string, timeoutMs: number): string;
 declare function __cleat_resolve_promise(id: string, value: string): string;
 declare function __cleat_reject_promise(id: string, error: string): string;
+declare function __cleat_defer(description: string): string;
+declare function __cleat_defer_phase(on: boolean): void;
+
+// The drain that runs before a result is reported. Skipped while the segment is suspended: a suspended workflow has not
+// exited, and its cleanup must not run (the plugin answers the host with the suspend sentinel instead).
+async function finish(): Promise<void> {
+  if (__cleat_suspended()) return;
+  await drainDefers();
+}
 
 export class CleatError extends Error {}
 class SuspendSignal extends Error {}
@@ -151,6 +160,16 @@ export interface Ctx {
   resolvePromise(id: string, value: unknown): Promise<void>;
   /** Settle a promise with an error. Rejects if the id is unknown to the host. */
   rejectPromise(id: string, error: string): Promise<void>;
+  /**
+   * Register work to run when the workflow finishes — after it returns or throws, in REVERSE registration order, each body
+   * awaited and a failing body not stopping the rest.
+   *
+   * It does NOT run when the workflow suspends: a suspended run has not finished, and running cleanup at the first sleep
+   * would release locks a run that is about to continue still holds. It also does not run when the HOST kills the
+   * workflow — this guest exports no drain for the host to call, so the deferred work is lost (cleat#3922, and stated in
+   * DIVERGENCES.md).
+   */
+  defer(fn: () => unknown | Promise<unknown>, description?: string): Promise<void>;
 }
 
 const ctx: Ctx = {
@@ -191,7 +210,34 @@ const ctx: Ctx = {
     })),
   resolvePromise: (id, value) => settle<null>(__cleat_resolve_promise(id, encode(value))).then(() => undefined),
   rejectPromise: (id, error) => settle<null>(__cleat_reject_promise(id, error)).then(() => undefined),
+  defer: (fn, description = "deferred work") =>
+    settle<string>(__cleat_defer(description)).then((id) => {
+      defers.push({ id: id, fn: fn });
+    }),
 };
+
+// ---- deferred work ------------------------------------------------------------------------------------------------------
+// The bodies live here, in JavaScript, because that is where the closures are; the host's side is only the ID and the
+// phase bracket. Drained in REVERSE order (Go's and Rust's defer order), each body awaited, and one failing body does not
+// stop the rest — the same rules as cleat-sdk's run_deferred, which also DRAINS FIRST and runs after, so a body that
+// suspends cannot leave the registry half run.
+const defers: Array<{ id: string; fn: () => unknown | Promise<unknown> }> = [];
+
+async function drainDefers(): Promise<void> {
+  const taken = defers.splice(0, defers.length);
+  __cleat_defer_phase(true);
+  try {
+    for (let i = taken.length - 1; i >= 0; i--) {
+      try {
+        await taken[i].fn();
+      } catch {
+        // Isolated on purpose (cleat-sdk's run_deferred does the same): the remaining bodies still run.
+      }
+    }
+  } finally {
+    __cleat_defer_phase(false);
+  }
+}
 
 /**
  * Wraps an async workflow function as the zero-argument function Javy exports. It reads the ABI input, runs `fn`, and
@@ -272,6 +318,9 @@ function mapStack(stack: string): string {
 
 export function workflow<I = unknown, O = unknown>(fn: (ctx: Ctx, input: I) => O | Promise<O>): () => void {
   return function entry(): void {
+    // A module instance can serve more than one call, and a body that re-runs on replay re-registers everything it had:
+    // without this the registry would accumulate a duplicate per segment.
+    defers.length = 0;
     let input: I;
     try {
       input = JSON.parse(__cleat_args() || "null") as I;
@@ -282,9 +331,13 @@ export function workflow<I = unknown, O = unknown>(fn: (ctx: Ctx, input: I) => O
     Promise.resolve()
       .then(() => fn(ctx, input))
       .then(
-        (v) => __cleat_result(resultText(v === undefined ? {} : v)),
-        (e) => {
+        async (v) => {
+          await finish();
+          __cleat_result(resultText(v === undefined ? {} : v));
+        },
+        async (e) => {
           if (e instanceof SuspendSignal) return; // the throw-mode control only: a suspension that surfaced as an exception
+          await finish();
           __cleat_fail(e instanceof Error ? `${e.name}: ${e.message}${e.stack ? "\n" + mapStack(e.stack) : ""}` : String(e));
         },
       )
