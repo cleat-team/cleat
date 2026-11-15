@@ -11,10 +11,12 @@ import (
 // Skip-guard audit (fix/audit-conditional-skips, IMPROVEMENT-PLAN.md 1.10):
 //
 // This file holds the tenant-isolation tests that are the *only* proof
-// row-level security actually works for GetWorkflowByID/ListWorkflows --
-// neither carries an application-level tenant_id filter, and cleat
-// historically connected as a superuser, which PostgreSQL exempts from RLS
-// entirely (IMPROVEMENT-PLAN.md 1.10). A skip that fires here when it
+// row-level security actually works for the plain workflow listing and count --
+// those carry no application-level tenant_id filter, and cleat historically
+// connected as a superuser, which PostgreSQL exempts from RLS entirely
+// (IMPROVEMENT-PLAN.md 1.10). GetWorkflowByID also names its tenant in the
+// SQL, and its tests live here because this is where isolation is proved on a
+// connection the policy does not cover. A skip that fires here when it
 // shouldn't means isolation goes unverified while CI stays green, so every
 // guard in this file was re-derived from scratch rather than trusted:
 //

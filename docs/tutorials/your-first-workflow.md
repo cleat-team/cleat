@@ -342,8 +342,10 @@ refusing with the remediation if it is behind.
 
 The worker also refuses to start on a connection row-level security does not
 apply to -- a superuser or a role with `BYPASSRLS` -- because
-`GetWorkflowByID` and `ListWorkflows` have no application-level tenant
-filter and would return every tenant's data on such a connection. So `--db`
+the plain workflow listing and count are scoped by row-level security alone
+and would return every tenant's data on such a connection (`GetWorkflowByID`
+and the published-state filter name their tenant in the SQL; the plain listing
+names none). So `--db`
 has to be the `cleat_app` role from Step 6, not the database's superuser:
 
 ```bash
