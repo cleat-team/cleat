@@ -114,7 +114,7 @@ func (s *compactionSkipSet) prune() {
 }
 
 // size reports how many runs of one tenant are currently being left out. It is
-// what the over-fetch adds to the batch limit and what the gauge reports.
+// what the over-fetch adds to the batch limit.
 func (s *compactionSkipSet) size(tenant string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -125,6 +125,46 @@ func (s *compactionSkipSet) size(tenant string) int {
 			n++
 		}
 	}
+	return n
+}
+
+// sizeAll reports how many runs this worker is leaving out across every tenant it
+// serves.
+//
+// THE GAUGE IS SET FROM THIS, not from one tenant's size. The series carries no
+// tenant label, and compactStoreOnce runs once per tenant per tick, so setting it
+// from size(tenant) would publish whichever tenant was visited last: a worker
+// serving two tenants, one with a full skip set, could report the other's zero.
+func (s *compactionSkipSet) sizeAll() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	n := 0
+	for _, exp := range s.entries {
+		if now.Before(exp) {
+			n++
+		}
+	}
+	return n
+}
+
+// clear forgets every entry, returning how many were live.
+//
+// Called after a key reload: the ring has just changed, and the whole point of
+// reloading it is that a key the worker lacked may now be present, so a run whose
+// state could not be opened a moment ago may be openable now. Waiting out the
+// window would delay that by up to compactionSkipWindow for no reason.
+func (s *compactionSkipSet) clear() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	n := 0
+	for _, exp := range s.entries {
+		if now.Before(exp) {
+			n++
+		}
+	}
+	s.entries = make(map[compactionSkipKey]time.Time)
 	return n
 }
 

@@ -294,6 +294,69 @@ func TestTheSkipIsCountedAndTheSkipSetSizeIsGauged(t *testing.T) {
 	}
 }
 
+// The batch counter reports what was ATTEMPTED, not what the over-fetch returned.
+// On the second tick with ten remembered runs the worker fetches twenty and
+// attempts ten; reporting the fetched count would say the loop processed twice the
+// work it did -- and on a cap-hit pass where every fetched run was skipped it
+// would report thirty while nothing was compacted.
+func TestTheBatchCounterReportsAttemptsNotTheOverFetch(t *testing.T) {
+	fresh := make([]string, compactionCandidatesPerTick)
+	for i := range fresh {
+		fresh[i] = fmt.Sprintf("fresh-%d", i)
+	}
+	p := newBoundedProbe(append(poisonIDs(compactionCandidatesPerTick), fresh...), decryptionFailure)
+	w := newSkipTestWorker(p)
+	defer w.cancel()
+
+	w.compactOnce() // all ten failures are remembered
+	if got := metricValue(t, scrapeMetrics(t, w), `cleat_background_loop_items_processed`, `loop_name="compaction"`); got != compactionCandidatesPerTick {
+		t.Fatalf("after tick 1 items processed = %d, want %d", got, compactionCandidatesPerTick)
+	}
+
+	w.compactOnce() // fetches twenty (batch + ten remembered), attempts ten
+	limits, compacted := p.snapshot()
+	if len(limits) != 2 || limits[1] <= compactionCandidatesPerTick {
+		t.Fatalf("the second tick fetched %v candidates, want more than the batch so the over-fetch is real", limits)
+	}
+	if len(compacted) != compactionCandidatesPerTick {
+		t.Fatalf("the second tick compacted %d runs, want %d", len(compacted), compactionCandidatesPerTick)
+	}
+	if got := metricValue(t, scrapeMetrics(t, w), `cleat_background_loop_items_processed`, `loop_name="compaction"`); got != compactionCandidatesPerTick {
+		t.Errorf("items processed = %d, want %d: the counter must report attempts, not the %d runs the over-fetch returned",
+			got, compactionCandidatesPerTick, limits[1])
+	}
+}
+
+// The skip-set gauge covers every tenant the worker serves. It is one unlabelled
+// series set once per tenant per tick, so setting it from one tenant's size would
+// publish whichever tenant was visited last -- and could read zero while another
+// tenant holds a full skip set.
+func TestTheSkipSetGaugeCoversEveryTenant(t *testing.T) {
+	own := &boundedOwn{
+		boundedProbe: newBoundedProbe(poisonIDs(4), decryptionFailure),
+		tenants:      []string{tenantSelf, tenantOther},
+	}
+	other := newBoundedProbe([]string{"other-poison-0", "other-poison-1", "other-poison-2"},
+		func(string) error { return fmt.Errorf("load compaction state: %w", engine.ErrPayloadDecryption) })
+	f := &perTenantFactory{stores: map[string]engine.WorkflowStore{tenantOther: other}}
+	w := newTestWorkerFromStore(own)
+	w.storeTenantID = tenantSelf
+	w.claimAcrossTenants = true
+	w.storeFactory = f
+	w.compactionThreshold = compactTestThreshold
+	defer w.cancel()
+
+	w.compactOnce()
+
+	body := scrapeMetrics(t, w)
+	if got := metricValue(t, body, `cleat_background_loop_items_processed`, `loop_name="compaction_skipped"`); got != 7 {
+		t.Errorf("the skip-set gauge = %d, want 7 (4 own + 3 other): a per-tenant set would report the last tenant visited", got)
+	}
+	if got := metricValue(t, body, `cleat_background_loops_total`, `status="sealed_skipped"`); got != 7 {
+		t.Errorf("the sealed_skipped counter = %d, want 7 across both tenants", got)
+	}
+}
+
 func scrapeMetrics(t *testing.T, w *Worker) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -323,4 +386,29 @@ func metricValue(t *testing.T, body, metric, wantLabels string) int64 {
 	t.Fatalf("no sample of %s carrying %s in the scrape output; the instrument is missing or its labels changed:\n%s",
 		metric, wantLabels, body)
 	return -1
+}
+
+// A key reload is the moment a run that could not be opened may become openable,
+// so the set is cleared on the reload's SUCCESS path -- and only there: a refused
+// or reverted reload returns before the clear.
+func TestASIGHUPReloadRetriesRunsWhoseCompactionStateCouldNotBeOpened(t *testing.T) {
+	e := newSighupEnv(t, nil)
+	ctx := context.Background()
+	if err := e.reg.Register(ctx, engine.WorkerRegistration{WorkerID: e.id, Hostname: "h", PID: 1}); err != nil {
+		t.Fatalf("registering the worker: %v", err)
+	}
+	skips := e.w.compactionSkipSetFor()
+	skips.remember("tenant-a", "wf-1")
+	skips.remember("tenant-a", "wf-2")
+
+	e.w.reloadKeyRingsOnSIGHUP(ctx)
+
+	for _, id := range []string{"wf-1", "wf-2"} {
+		if skips.skipped("tenant-a", id) {
+			t.Fatalf("%s is still skipped after a successful key reload: a newly available key would not be tried until the window expired", id)
+		}
+	}
+	if !strings.Contains(e.log.String(), "compaction_skips_cleared") {
+		t.Error("the reload cleared the skip set without saying so, so an operator cannot tell the runs were retried")
+	}
 }

@@ -7257,8 +7257,12 @@ func (w *Worker) compactOnce() {
 }
 
 // compactStoreOnce finds one store's candidates and compacts each, returning how
-// many it found. A failure to compact one workflow is logged and does not stop the
-// rest; only failing to FIND candidates is returned.
+// many it ATTEMPTED -- not how many it fetched, and not how many compacted. The
+// caller publishes this as items processed, and a fetched-but-skipped run was not
+// processed: with ten remembered runs the over-fetch returns twenty and attempts
+// ten, and reporting twenty would say the loop did twice the work it did. A
+// failure to compact one workflow is logged and does not stop the rest; only
+// failing to FIND candidates is returned.
 //
 // cleat#3853: a run whose sealed compaction state this worker cannot open is
 // remembered and left out of the batch for compactionSkipWindow. The candidate
@@ -7309,11 +7313,11 @@ func (w *Worker) compactStoreOnce(tenant string, st engine.WorkflowStore) (int, 
 			}
 		}
 	}
-	w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction_skipped", int64(skips.size(tenant)))
+	w.Metrics.SetBackgroundLoopItemsProcessed(w.ctx, "compaction_skipped", int64(skips.sizeAll()))
 	if capped && len(candidates) > 0 && skippedHere == len(candidates) {
 		w.Metrics.RecordBackgroundLoop(w.ctx, "compaction", "skip_cap_hit")
 	}
-	return len(candidates), nil
+	return attempts, nil
 }
 
 func (w *Worker) memoryReloadLoop() {
