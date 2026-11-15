@@ -163,30 +163,27 @@ func TestMSSQLStore_WithIdempotencyKeyTTL(t *testing.T) {
 	}
 }
 
-// TestMSSQLStore_WithEncryption verifies the encryption fields behave correctly.
+// TestMSSQLStore_WithEncryption verifies the disabled form behaves correctly.
+// The enabled form is refused for this dialect; that half is pinned, with
+// PostgreSQL as the positive control, in
+// TestEnablingPayloadEncryptionIsRefusedOnADialectThatCannotSeal (cleat#3906).
 func TestMSSQLStore_WithEncryption(t *testing.T) {
 	store := NewMSSQLStore(nil)
 
 	enc := &PayloadEncryption{}
-	encrypted := store.WithEncryption(enc, true)
+	disabled := store.WithEncryption(enc, false)
 
-	if encrypted.encryption != enc {
+	if disabled.encryption != enc {
 		t.Fatal("encryption reference not stored")
 	}
-	if !encrypted.encryptSensitivePayloads {
-		t.Fatal("encryptSensitivePayloads should be true")
+	if disabled.encryptSensitivePayloads {
+		t.Fatal("encryptSensitivePayloads should be false")
 	}
 	if store.encryptSensitivePayloads {
 		t.Fatal("original store was mutated")
 	}
 	if store.encryption != nil {
 		t.Fatal("original store encryption should be nil")
-	}
-
-	// Verify disabling works.
-	disabled := encrypted.WithEncryption(enc, false)
-	if disabled.encryptSensitivePayloads {
-		t.Fatal("encryptSensitivePayloads should be false after disabling")
 	}
 }
 

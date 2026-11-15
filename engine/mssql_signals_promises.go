@@ -425,11 +425,12 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// The same encoder every other event_history writer calls (cleat#2328;
 	// see PostgresStore.StartChildWorkflowAtomic). MSSQL does not support
-	// encryption at rest -- s.encryptSensitivePayloads is always false here,
-	// so this is a no-op transform today -- but routing through it anyway
-	// means there is exactly one place that builds the payload column and
-	// the payload_encoding column, rather than a second hand-rolled copy
-	// that would need to be found again if MSSQL ever gains encryption.
+	// encryption at rest: WithEncryption refuses to enable it (cleat#3906),
+	// so s.encryptSensitivePayloads is false here and this is a no-op
+	// transform. Routing through it anyway means there is exactly one place
+	// that builds the payload column and the payload_encoding column, rather
+	// than a second hand-rolled copy that would need to be found again if
+	// MSSQL ever gains encryption.
 	// The checksum above is computed BEFORE this call, over the plaintext
 	// event, for the same reason encodeEventForStorage's doc gives: it must
 	// match what VerifyWorkflowEvents recomputes from the decrypted record.
