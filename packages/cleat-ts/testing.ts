@@ -68,6 +68,11 @@ export function runWorkflow(modulePath: string, entry: string, input: unknown = 
       // No process at all: the binary was not found. That is the harness, not the workflow.
       throw new Unmeasured(`could not execute cleat-ts-run (${err.message}); set CLEAT_TS_RUN or put it on PATH`);
     }
+    if (err.status !== 1) {
+      // Only 1 means the WORKFLOW failed. Anything else -- a signal, a crash, an exit code the runner does not document
+      // -- is the harness failing, and reporting it as a workflow failure would send the reader to the wrong file.
+      throw new Unmeasured(`cleat-ts-run exited ${err.status}, which is not one of its documented outcomes (0 ran, 1 workflow failed, 2 unmeasured)`);
+    }
     // Exit 1 is the workflow failing, and the envelope on stdout says how.
     stdout = err.stdout ?? "";
   }
