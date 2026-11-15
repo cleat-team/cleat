@@ -1,0 +1,52 @@
+// The harness's own test (cleat#3828). Both directions, in one file, for the reason #3927's defer test gives: an
+// assertion that something works passes trivially if the thing never runs at all. So one test runs an example's compiled
+// module and asserts what it returned, and another runs a DELIBERATELY BROKEN workflow and asserts that it fails.
+//
+// Every module here is built by packages/cleat-ts/build.sh first: the harness's whole claim is that it runs the deployed
+// artefact, so a fixture compiled any other way would not be testing that claim.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runWorkflow } from "./testing.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(HERE, "../..");
+const WORK = join(HERE, ".work");
+
+function build(relSrc: string, entry: string): string {
+  execFileSync(join(HERE, "build.sh"), [relSrc, entry], { cwd: ROOT, stdio: "pipe" });
+  return join(WORK, `${entry}.wasm`);
+}
+
+// Built once for the whole file; `go build` and build.sh are both cached after the first call.
+process.env.CLEAT_TS_RUN ??= (() => {
+  const bin = join(WORK, "cleat-ts-run");
+  execFileSync("go", ["build", "-o", bin, "./cmd/cleat-ts-run"], { cwd: ROOT, stdio: "pipe" });
+  return bin;
+})();
+
+test("an example workflow runs through the harness and returns its result", () => {
+  const module = build("tests/typescript/testdata/workflows/hello.ts", "hello");
+  const run = runWorkflow(module, "hello");
+  assert.equal(run.ok, true, `the example workflow failed: ${run.error}`);
+  assert.equal(run.suspended, false);
+  assert.deepEqual(run.result, { hello: "ts" });
+});
+
+test("a workflow that suspends is reported as suspended, with the host's reason", () => {
+  const module = build("tests/typescript/testdata/workflows/sleeper.ts", "sleeper");
+  const run = runWorkflow(module, "sleeper", { ms: 60000 });
+  assert.equal(run.ok, true);
+  assert.equal(run.suspended, true);
+  assert.match(run.suspendReason ?? "", /cleat_sleep\(60000ms\)/);
+});
+
+test("a deliberately broken workflow FAILS through the harness", () => {
+  const module = build("tests/typescript/testdata/workflows/broken.ts", "broken");
+  const run = runWorkflow(module, "broken");
+  assert.equal(run.ok, false, "a workflow that throws was reported as successful; the harness cannot detect a failure");
+  assert.match(run.error ?? "", /broken on purpose/);
+});

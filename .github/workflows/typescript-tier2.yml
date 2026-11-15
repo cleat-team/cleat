@@ -152,6 +152,13 @@ jobs:
           set -o pipefail
           go test -count=1 -json ./tests/typescript/... | tee typescript-tier2-report.json > /dev/null
 
+      # The harness's OWN test (cleat#3828), run under node rather than go test because the harness is TypeScript: it
+      # builds an example's module, runs it through cleat-ts-run, and then runs a deliberately broken workflow that MUST
+      # fail. Both directions or neither: a harness that never detected a failure would pass the first assertion alone.
+      # Separate from the Go step because `go test`'s counts below are keyed on Go test names and cannot see these.
+      - name: The test harness runs a built module and fails a broken one
+        run: node --test packages/cleat-ts/testing.test.ts
+
       # The three numbers, not the exit status: a package that did not build contributes nothing to a count keyed
       # on "Test", and `go test` exits 0 for a pattern that matches nothing.
       - name: Read the result (failures, package failures, tests that ran)

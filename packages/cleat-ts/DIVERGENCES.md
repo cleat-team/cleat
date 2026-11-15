@@ -79,3 +79,13 @@ difference is **recorded here**; what it may not do is differ silently.
 Defers otherwise behave as in the other SDKs: they run after the workflow returns **or throws**, in reverse registration
 order, each body awaited, and one failing body does not stop the rest. They do **not** run when the workflow suspends — a
 suspended run has not finished, and running cleanup at the first sleep would release work the resumed run still needs.
+
+## The test harness (cleat#3828)
+
+`packages/cleat-ts/testing.ts` runs the module that gets deployed, so the guest cannot drift from what a worker runs. What
+CAN drift is the host around it: the runner supplies stubbed answers, and a stub that stopped matching the shipped store
+would turn the harness from a detector into a green light. So the stubs are stated here rather than assumed.
+
+| # | Difference | What it means for you | Held by |
+|---|---|---|---|
+| H1 | **The harness stubs the host.** `cleat-ts-run` answers every durable CALL with `{}` and configures no promise, signal, child or update store, so a workflow that needs one fails with the host's own "no promise store configured" rather than running. | A green run is a statement about the workflow's own logic, not about any store's behaviour. A test that needs a call's result or a promise is not possible yet; when scripting is added it gets a row here saying what it does and does not reproduce. | `packages/cleat-ts/testing.test.ts`: an example's module runs and returns, a workflow that suspends reports it, and a deliberately broken workflow MUST fail |
