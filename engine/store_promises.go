@@ -382,7 +382,7 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT workflow_id, COALESCE(request_id, update_name), update_name, COALESCE(payload #>> '{}', ''), COALESCE(promise_id, ''), status,
+		SELECT workflow_id, COALESCE(request_id, update_name), update_name, COALESCE(payload::text, ''), COALESCE(promise_id, ''), status,
 		       COALESCE(result #>> '{}', ''), COALESCE(error_msg, ''), created_at
 		FROM workflow_update_requests
 		WHERE workflow_id = $1 AND tenant_id = $2 AND status = 'pending'
@@ -400,42 +400,36 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 			&r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
 		}
-		// cleat#3822: `payload #>> '{}'` is SQL NULL for a JSON null payload, which Scan refuses to put in a
-		// string, so one `null` update made this whole list unreadable; it is COALESCEd to '', as the result
-		// column already was and as MySQL and SQL Server read a null payload.
+		// cleat#3903: the payload goes through decodeJSONPayload, on the RAW
+		// column text, exactly as the MySQL and SQL Server readers of this same
+		// column do -- not through `payload #>> '{}'` followed by a compaction.
 		//
-		// cleat#2312: decrypt before compaction -- this feeds the guest's
-		// update-dispatch path, not only display. `payload #>> '{}'` and
-		// `result #>> '{}'` in the SELECT above text-extract the jsonb
-		// value, stripping a JSON string scalar's quotes -- see
-		// GetWorkflowByID's identical comment on its own `result #>> '{}'`.
-		if decrypted, derr := s.decryptTextColumnFromStorage(r.Payload, "payload"); derr == nil {
-			// cleat#3852: a sealed row never went through `#>> '{}'`. The column
-			// holds the base64 ciphertext AS A JSON STRING, so `#>>` hands this
-			// code the ciphertext and the decrypt returns the JSON text
-			// encodeJSONPayload wrote -- quotes included. Unsealed, `#>>` is what
-			// unquotes a string payload, so sealed and unsealed disagreed about
-			// every value that is not already an object or an array: `"yes"` came
-			// back as `"yes"` rather than `yes`, `hello` as `"hello"`, `"{\"a\":1}"`
-			// as a JSON-text string rather than a compacted object, and `null` as
-			// the text `null` rather than empty.
-			//
-			// decodeJSONPayload is the contract this column is documented to obey
-			// (and what the MySQL and SQL Server readers of this same column call),
-			// so applying it to the decrypted text is what makes sealing
-			// transparent. It also covers the bare `null` case: unmarshalling JSON
-			// null into a Go string is a no-op that returns no error, so it yields
-			// "", which is what COALESCE gives the unsealed path.
-			//
-			// Guarded on the value having CHANGED, and that guard is load-bearing.
-			// A row written before encryption was turned on -- or any read with it
-			// off -- comes back unchanged and has ALREADY been through `#>>`; the
-			// payload `"null"` (the four-character string) reaches this point as
-			// `null` and must stay `null`, not become "".
-			if decrypted != r.Payload {
+		// Those two steps are not equivalent, and the difference is the defect:
+		// `#>> '{}'` unwraps a JSON string scalar and DISCARDS the fact that it
+		// was a string, so the compaction that followed re-parsed the string's
+		// CONTENT. `"{\"a\": 1}"` -- a JSON string whose content is an object --
+		// therefore arrived as `{"a":1}` here while MySQL, SQL Server and the
+		// signal read handed back `{"a": 1}`. decodeJSONPayload unmarshals a JSON
+		// string into a Go string and returns that content VERBATIM, and only
+		// compacts a value that is not a string, which is what keeps objects
+		// agreeing across dialects while leaving a caller's bytes alone.
+		//
+		// The order matters for sealing (cleat#2312, cleat#3852): a sealed row
+		// holds the base64 ciphertext AS A JSON STRING, so it has to be unwrapped
+		// to the ciphertext before it can be decrypted, and the plaintext it
+		// decrypts to is the JSON text encodeJSONPayload wrote -- quotes included
+		// -- so it is passed through decodeJSONPayload again.
+		//
+		// The unchanged-value guard is load-bearing: a row written before
+		// encryption was turned on, or any read with it off, decrypts to what it
+		// already was, and the payload `"null"` (the four-character string) must
+		// stay `null` rather than become "".
+		unwrapped := decodeJSONPayload(r.Payload)
+		if decrypted, derr := s.decryptTextColumnFromStorage(unwrapped, "payload"); derr == nil {
+			if decrypted != unwrapped {
 				r.Payload = decodeJSONPayload(decrypted)
 			} else {
-				r.Payload = decrypted
+				r.Payload = unwrapped
 			}
 		} else {
 			return nil, fmt.Errorf("get pending update requests: %w", derr)
@@ -449,12 +443,6 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 			r.ErrorMsg = decrypted
 		} else {
 			return nil, fmt.Errorf("get pending update requests: %w", derr)
-		}
-		if len(r.Payload) > 0 {
-			compacted := bytes.NewBuffer(nil)
-			if err := json.Compact(compacted, []byte(r.Payload)); err == nil {
-				r.Payload = compacted.String()
-			}
 		}
 		if len(r.Result) > 0 {
 			compacted := bytes.NewBuffer(nil)
