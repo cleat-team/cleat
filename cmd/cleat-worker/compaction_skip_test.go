@@ -412,3 +412,49 @@ func TestASIGHUPReloadRetriesRunsWhoseCompactionStateCouldNotBeOpened(t *testing
 		t.Error("the reload cleared the skip set without saying so, so an operator cannot tell the runs were retried")
 	}
 }
+
+// The OTHER half of the SIGHUP clear: a reload that is refused must NOT clear the
+// set. The success path clears it so a newly available key is retried at once;
+// the refused path must keep it, or every run this worker cannot open is retried
+// on the next tick, once per failed SIGHUP -- undoing the property the skip set
+// exists for, and doing it only when something is already going wrong.
+//
+// This is the negative half of
+// TestASIGHUPReloadRetriesRunsWhoseCompactionStateCouldNotBeOpened, and it pins
+// control flow that was previously asserted only by reading the function: the
+// clear sits after the early return, not before it.
+func TestARefusedKeyReloadKeepsTheCompactionSkips(t *testing.T) {
+	v1 := engine.VersionedKey{Version: 1, Key: sighupKey(0x11)}
+	v2 := engine.VersionedKey{Version: 2, Key: sighupKey(0x22)}
+	e := newSighupEnv(t, sighupRing(t, v1))
+	ctx := context.Background()
+
+	// A secret still sealed under v1 makes the reload to v2-only REFUSE (the same
+	// fixture as TestReloadKeyRingsOnSIGHUP_SecretsRefusedWhenACandidateCannotOpenAStoredSecret).
+	const refusalSecretName = "cleat-3853-sighup-refusal.key"
+	if err := e.w.deploymentSecrets.PutDeploymentSecret(ctx, refusalSecretName, "value"); err != nil {
+		t.Fatalf("seed a deployment secret under v1: %v", err)
+	}
+	t.Cleanup(func() { _, _ = e.db.Exec(`DELETE FROM deployment_secrets WHERE name = $1`, refusalSecretName) })
+	if err := e.reg.Register(ctx, engine.WorkerRegistration{WorkerID: e.id, Hostname: "h", PID: 1, SecretKeyVersions: []int{1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	skips := e.w.compactionSkipSetFor()
+	skips.remember("tenant-a", "wf-1")
+
+	t.Setenv("CLEAT_SECRET_MASTER_KEY", mustB64(v2.Key))
+	t.Setenv("CLEAT_SECRET_MASTER_KEY_VERSION", "2")
+
+	e.w.reloadKeyRingsOnSIGHUP(ctx)
+
+	// PRECONDITION: the reload really was refused, so the assertion below is not
+	// passing because nothing happened for an unrelated reason.
+	if got := e.w.secretsRing.Load().Current().Version; got != 1 {
+		t.Fatalf("the reload was not refused (secrets ring is on version %d): this test would then be measuring the success path", got)
+	}
+	if !skips.skipped("tenant-a", "wf-1") {
+		t.Fatal("a REFUSED key reload cleared the compaction skip set: every run this worker cannot open would be retried on the next " +
+			"compaction tick, once per failed SIGHUP -- the clear must sit on the success path, after the refused reload returns")
+	}
+}
