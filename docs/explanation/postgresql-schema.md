@@ -844,11 +844,14 @@ The Go store implementations that translate queries for each backend are at:
 **Do not point `--db` at a superuser.** Tenant isolation depends on it.
 
 Every tenant-scoped table has row-level security enabled and `FORCE`d
-(`001_schema.sql`), and for `GetWorkflowByID` and `ListWorkflows` those policies
-are the *only* isolation there is — neither carries an application-level
-`tenant_id` filter. PostgreSQL never applies row-level security to a superuser,
-and there is no setting that changes that. A superuser connection therefore
-returns every tenant's data from those calls, however the policies are written.
+(`001_schema.sql`), and the **plain** workflow listing and count are scoped by
+those policies alone — that is where a connection exempt from them shows it,
+because a plain list returns every tenant's rows. `GetWorkflowByID`
+(`engine/db.go`) and the published-state filter also name their tenant in the
+SQL, so they do not depend on the policy for that boundary. PostgreSQL never
+applies row-level security to a superuser, and there is no setting that changes
+that: a superuser connection returns every tenant's data from the plain listing
+and count, and is exempt from the policies everywhere else too.
 
 The schema baseline creates the role to use instead: `cleat_app`, which owns
 nothing, has no DDL rights, and is `NOSUPERUSER NOBYPASSRLS`. Ownership matters

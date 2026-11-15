@@ -4362,8 +4362,8 @@ jobs:
           # This is the whole point of the deployment: the compose file
           # connects workers as cleat_app rather than the superuser that owns
           # the schema, because PostgreSQL never applies RLS to a superuser and
-          # RLS is the only tenant isolation GetWorkflowByID and ListWorkflows
-          # have (IMPROVEMENT-PLAN 1.10).
+          # the plain workflow listing and count are scoped by RLS alone, so
+          # that is the tenant isolation this check is about (IMPROVEMENT-PLAN 1.10).
           # Retried, because a single `docker logs` read is not a reliable
           # witness. Observed twice on 2026-08-03: the grep below reported
           # cleat-worker-3 had not logged the line at 14:05:53.445, and the
@@ -4391,7 +4391,7 @@ jobs:
             if [ "$RLS_OK" -ne 1 ]; then
               echo "::error title=RLS not enforced::$svc did not report row-level security as enforced."
               echo "The worker is on a connection exempt from the tenant isolation policies,"
-              echo "so GetWorkflowByID and ListWorkflows return every tenant's data."
+              echo "so a plain workflow listing returns every tenant's data."
               echo "Checked 10 times over ~20s, so this is not the log-read race"
               echo "that produced false failures before 2026-08-03."
               docker logs --tail=40 "$svc" 2>&1 || true

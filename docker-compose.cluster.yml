@@ -11,8 +11,8 @@ services:
       # Password for the unprivileged role the workers connect as. The
       # superuser above owns the schema and runs migrations; it must not be
       # what serves traffic, because PostgreSQL never applies row-level
-      # security to a superuser and RLS is the only tenant isolation
-      # GetWorkflowByID and ListWorkflows have.
+      # security to a superuser and RLS is the only tenant isolation the plain
+      # workflow listing and count have.
       CLEAT_APP_PASSWORD: ${CLEAT_APP_PASSWORD:-cleat-app-local-dev}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
