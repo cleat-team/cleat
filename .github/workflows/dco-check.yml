@@ -115,7 +115,10 @@ jobs:
     # TRUE -- the job would run and then read empty BASE/HEAD shas. The
     # merge_group clause keeps the job running (it must, it is required) and
     # the step below short-circuits instead.
-    if: github.event_name == 'merge_group' || github.event.pull_request.base.ref != 'main'
+    if: (github.event_name == 'merge_group' || github.event.pull_request.base.ref != 'main') && github.head_ref != 'fix/scratch-skip-measurement'
+    # SCRATCH MEASUREMENT (fix/scratch-skip-measurement only): skip this required
+    # context so we can observe whether a skipped required check blocks the PR.
+    # Revert with the branch; nothing here merges.
 
     steps:
       # REPORTS rather than skipping. A job that fails to start is
@@ -206,3 +209,47 @@ jobs:
           fi
 
           echo "All commits have Signed-off-by. DCO check passed."
+
+  # ---------------------------------------------------------------------------
+  # SCRATCH PROBE (fix/scratch-skip-measurement only). Deleted with the branch.
+  #
+  # Answers two questions in one run, both of which decide the design of the
+  # body-edit skip (cleat#3958):
+  #
+  #   probe-gate  is SKIPPED (if: false), exactly as an `edit-gate` job would be
+  #               on a non-edited event.
+  #   probe-heavy needs probe-gate and uses the plain `needs.*` output form,
+  #               with no always()/!cancelled().
+  #   probe-heavy-always  the same condition with `!cancelled()` in front.
+  #
+  # If only probe-heavy-always runs, a skipped `needs` dependency cascades and
+  # the gate must either always run or every dependent must spell out both.
+  # ---------------------------------------------------------------------------
+  probe-gate:
+    name: probe-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: false
+    outputs:
+      skip: ${{ steps.decide.outputs.skip }}
+    steps:
+      - id: decide
+        run: echo "skip=true" >> "$GITHUB_OUTPUT"
+
+  probe-heavy:
+    name: probe-heavy
+    needs: [probe-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: needs.probe-gate.outputs.skip != 'true'
+    steps:
+      - run: echo "HEAVY RAN (plain needs form)"
+
+  probe-heavy-always:
+    name: probe-heavy-always
+    needs: [probe-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: ${{ !cancelled() && needs.probe-gate.outputs.skip != 'true' }}
+    steps:
+      - run: echo "HEAVY RAN (not-cancelled form)"
