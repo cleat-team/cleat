@@ -340,11 +340,36 @@ jobs:
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
+  #
+  # SHARDED BY TEST NAME, 2026-11-16. The single job measured **15m31s** in the
+  # merge group on 02708649 (run 43762143686, job 132959101625). 874s of that
+  # was one `go test` step, of which the `engine` package was **802.9s** per its
+  # own `-json` report; every other step including the container totalled 50s.
+  # Once #3934 brought `Test Go (crash)` and `Test Go (commands)` down from ~25m
+  # this was left as the group's second-longest job, above `Cluster Integration
+  # Tests` at 13m45s. cleat#3938 carries the full measurement.
+  #
+  # THE SPLIT IS DERIVED, unlike tests/crash's static list, because this package
+  # has no long pole to mis-assign: its slowest test is `TestMSSQLRetentionSweeps
+  # CauseNoLockEscalation` at 57.6s, 7% of the step, and the top ten are 29%
+  # between them. `go test -list` -> `LC_ALL=C sort -u` -> `(NR-1) % n == s-1`
+  # is therefore enough here, and adding a test needs no re-measurement.
+  #
+  # WHAT IS FIXED AND WHAT DIVIDES. 30s of container, 18s of setup and ~22s of
+  # compile are paid IN FULL by every shard; only the 802.9s of tests divides.
+  # So three shards land near 338s rather than 291s, and a fourth buys about 67s
+  # of wall for another full container and another 70s of fixed cost. That is
+  # the rule cleat#3935 records as `fixed + share`, never `total / n`.
   # -------------------------------------------------------------------------
   test-mssql:
-    name: Test SQL Server
+    name: Test SQL Server shard ${{ matrix.shard }} of 3
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # max 17.8m over 51 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
+    # 45 -> 30, 2026-11-16. A shard's `go test` step is bounded by its ~270s
+    # slice against the single job's 874s, so a hanging shard should not hold a
+    # queue slot for three quarters of an hour. Not tighter than this: the
+    # container's start period is 30s and the slowest shard of the first run is
+    # what the number should be read against.
+    timeout-minutes: 30
     services:
       mssql:
         # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
@@ -376,9 +401,20 @@ jobs:
       # missing row instead of only that it is gone. No-op for every dialect
       # except SQL Server; see engine/testutil/mssql_row_disappearance.go.
       CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
+    strategy:
+      fail-fast: false
+      # A PLAIN LIST, not `include:` -- scripts/check-workflow-guards.py does
+      # not expand an `include` matrix and says so rather than checking nothing.
+      # The list is also the count: the selection step reads
+      # `strategy.job-total`, so a re-shard is this one line.
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
 
+      # Per shard, because each shard gets its OWN container -- that is what
+      # keeps `-p 1`'s isolation true by construction rather than by argument
+      # (the suite in this job touches this `cleat` database directly).
       - name: Create cleat database
         run: |
           docker exec $(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89") /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
@@ -388,10 +424,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The second of the two jobs that sweep ./engine/... unfiltered, so the
-      # same Java toolchain and the same Gradle cache. See the long note in
-      # test-mysql above for why a SQL Server job builds a Java WASM
-      # component at all.
+      # On EVERY shard, not just shard 1: `TestJavaExportsTheDeferRunner` is
+      # one test out of 3994 and the modulo assignment puts it on whichever
+      # shard its position lands. Leaving Java on one shard would turn that
+      # test into a skip on the other two, silently -- the shape this job's
+      # skip budget exists to catch, arriving through a sharding edit.
       - name: Setup Java
         uses: actions/setup-java@v6
         with:
@@ -400,30 +437,14 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # cleat#2438. The generated MSSQL baseline is a claim about the PROCESS
-      # -- "these three files are what the emitter produces" -- and until this
-      # step nothing checked it of the ARTIFACT, so a hand-edit to
-      # 001_schema.sql or 003_procedures.sql would have gone unnoticed while
-      # two guards in engine/ rested on the claim.
-      #
-      # -mode=verify builds a database from the committed migrations,
-      # regenerates the baseline from it, and requires the result to be
-      # byte-identical, naming the first differing line. It regenerates from
-      # the sys.* catalogue, so it needs a live server -- which is why it lives
-      # in this job rather than in the Lint job, and it adds no new service.
-      #
-      # ITS OWN EMPTY DATABASE, and this is not tidiness: verify BUILDS into the
-      # database it is given, so pointing it at `cleat` would compare the
-      # emitter's output for one database against the committed baseline for a
-      # different one and report a difference that means nothing.
-      #
-      # The full acceptance -- A from the pre-compaction chain, B from these
-      # files, catalogdiff plus the known-positive battery -- cannot run here:
-      # its A side exists only in git history and this job checks out at
-      # fetch-depth 1. That stays a documented operator procedure, like
-      # scripts/gen-postgres-baseline.py. This step is the half that can be
-      # enforced on every run.
+      # Shard 1 only: this is a guard, not a share of the work. It builds a
+      # database from the committed migrations and requires the regenerated
+      # baseline to be byte-identical, which is a property of the tree and does
+      # not become three properties because there are three shards. Its own
+      # empty database is per shard, so running it three times would be correct
+      # and merely wasteful.
       - name: Verify the committed MSSQL baseline is a fresh emit
+        if: matrix.shard == 1
         run: |
           CONTAINER=$(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89")
           docker exec "$CONTAINER" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
@@ -435,42 +456,188 @@ jobs:
             -dsn 'sqlserver://sa:CleatTest123!@localhost:1433?database=cleat_baseline_verify' \
             -committed migrations/mssql
 
-      # ./migration/... alongside ./engine/...: this is the only job with a
-      # live SQL Server, and the migration tests that assert the shipped
-      # .sql files can actually be applied (IMPROVEMENT-PLAN 3.10's upgrade
-      # path, 3.13) need a real server to mean anything.
-      #
-      # -p 1 is retained, but NOT for the reason recorded here until
-      # 2026-08-31 -- see the long note in test-mysql above, which applies
-      # unchanged. `engine` is the only package in this invocation that
-      # touches the shared `cleat` database: engine/testutil's DB-backed tests
-      # are all PostgreSQL, and ./migration/'s SQL Server tests each create
-      # and drop a scratch database (newMSSQLScratchDB, and the fixed
-      # cleat_migration_admin_role_test).
-      #
-      # The equivalent of the MySQL sentinel probe was NOT run for SQL Server:
-      # mcr.microsoft.com/mssql/server:2022-latest does not start under QEMU
-      # on an arm64 Mac ("Invalid mapping of address ... in reserved address
-      # space"), and azure-sql-edge, which does, cannot apply the shipped
-      # migrations (011_json_scalar_payloads.sql needs isjson). The claim here
-      # rests on the call sites plus this job, not on a local measurement.
-      # Same treatment as test-mysql above, cleat#2444: this job runs with
-      # exactly one non-PostgreSQL DSN set, so a dialect-gated test flipping
-      # from running to skipping here was invisible until this budget step.
+      # THE SELECTION IS DERIVED AND THEN ASSERTED, not trusted. A `-run` that
+      # matches nothing exits 0, so a shard that ran nothing looks exactly like
+      # a shard that passed -- the count assertion in the step below is the only
+      # thing that separates them, and the listing this step writes is what the
+      # aggregate diffs the union against.
+      - name: Select this shard's tests
+        id: shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARD" -lt 1 ] || [ "$SHARD" -gt "$SHARDS" ]; then
+            echo "::error::matrix.shard=$SHARD is outside 1..$SHARDS" >&2
+            exit 1
+          fi
+          # `go test -list` compiles the package, so a build error fails here
+          # and says so rather than arriving below as an empty slice.
+          listed=$(go test -list '^Test' ./engine)
+          # LC_ALL=C because every shard has to sort identically: two runners
+          # ordering the list differently would drop tests from two shards at
+          # once, silently, which is the exact failure this step prevents.
+          names=$(printf '%s\n' "$listed" \
+            | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' \
+            | LC_ALL=C sort -u || true)
+          total=$(printf '%s\n' "$names" | grep -c . || true)
+          total=${total:-0}
+          if [ "$total" -eq 0 ]; then
+            echo "::error::./engine listed no tests -- the package did not build, which is not this shard's problem to report as an empty slice" >&2
+            exit 1
+          fi
+          printf '%s\n' "$names" > all-tests.txt
+          mine=$(printf '%s\n' "$names" | awk -v n="$SHARDS" -v s="$SHARD" '(NR - 1) % n == s - 1')
+          count=$(printf '%s\n' "$mine" | grep -c . || true)
+          count=${count:-0}
+          if [ "$count" -eq 0 ]; then
+            echo "::error::shard $SHARD of $SHARDS was assigned none of the $total tests in ./engine -- the arithmetic or the matrix is broken" >&2
+            exit 1
+          fi
+          printf '%s\n' "$mine" > shard-tests.txt
+          # A FILE, not a step output. At three shards the pattern is ~52KB of
+          # `^(A|B|...)$`; as a step output it would be a 52KB opaque blob in
+          # the log and in the run's metadata, and it buys nothing.
+          printf '^(%s)$' "$(printf '%s\n' "$mine" | paste -sd'|' -)" > selector.txt
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "shard $SHARD of $SHARDS: $count of $total engine tests"
+
       - name: Run tests
+        shell: bash
+        env:
+          SHARD_COUNT: ${{ steps.shard.outputs.count }}
         run: |
           set -o pipefail
-          # -timeout=1800s, raised from 900s 2026-10-27 (cleat#3458). Six passing runs
-          # that day took 590.6-863.6s in ./engine alone, leaving as little as 36s (4%),
-          # and a docs-only PR's merge group was killed at 900.138s with no failing test
-          # (the cleat#472 shape). 1800s is ~2x the slowest passing run, the same
-          # reasoning as ci.yml's 300s -> 900s note. It does not decide whether this job
-          # should run the whole engine suite; that belongs to whoever owns the job.
-          go test -count=1 -p 1 -timeout=1800s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+          # -timeout stays 1800s rather than dropping with the split: see the
+          # cleat#3458 note this replaced. A shard's own slice is ~270s, but the
+          # timeout is a hang detector, not a budget, and lowering it here would
+          # be a second change riding on this one.
+          status=0
+          go test -count=1 -p 1 -timeout=1800s -json -run "$(cat selector.txt)" ./engine 2>&1 | tee test-report.json || status=$?
+          if [ "$status" -ne 0 ]; then
+            # The test failure IS the report. Naming a count shortfall here too
+            # would blame the split for a test that simply failed.
+            exit "$status"
+          fi
+          # EVERY ASSIGNED TEST RAN. `go test -run` matching nothing exits 0
+          # with no test events, and a `-json` stream is the only record that a
+          # test was entered. A subtest's event name contains "/" and is
+          # excluded, so this counts top-level tests, which is what was assigned.
+          ran=$(grep '"Action":"run"' test-report.json | grep -c '"Test":"[^"/]*"' || true)
+          ran=${ran:-0}
+          SHARD_COUNT=${SHARD_COUNT:-0}
+          if [ "$ran" -ne "$SHARD_COUNT" ]; then
+            echo "::error::this shard entered $ran tests but was assigned $SHARD_COUNT" >&2
+            exit 1
+          fi
 
+      # ./engine/testutil and ./migration/... on ONE shard, because a `-run`
+      # built from engine's test names would filter them to nothing. 48.6s
+      # between them: splitting that further would cost more in fixed overhead
+      # than it divides. `tee -a` so the shard uploads one report and the
+      # aggregate's union stays a single `cat` over one file per shard.
+      - name: Run the testutil and migration suites
+        if: matrix.shard == 1
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=1800s -json \
+            ./engine/testutil ./migration/... 2>&1 | tee -a test-report.json
+
+      - name: Upload this shard's report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mssql-shard-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            test-report.json
+            shard-tests.txt
+            all-tests.txt
+          retention-days: 30
+
+  test-mssql-summary:
+    name: Test SQL Server
+    needs: [test-mssql]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download the shards' reports
+        if: always()
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mssql-shard-*-${{ github.sha }}-${{ github.run_attempt }}
+          merge-multiple: false
+          path: shards
+
+      - name: Every shard succeeded
+        if: always()
+        env:
+          SHARDS_RESULT: ${{ needs.test-mssql.result }}
+        run: |
+          echo "test-mssql (all shards): $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::Test SQL Server: at least one shard did not succeed" >&2
+            exit 1
+          fi
+
+      # The two failures a derived split can have that no green shard can see:
+      # a test on no shard (runs nowhere) and a test on two (runs twice, and its
+      # skip-budget line is charged twice).
+      - name: The three shards together are every test in ./engine
+        if: always()
+        run: |
+          set -euo pipefail
+          if ! ls shards/*/shard-tests.txt >/dev/null 2>&1; then
+            echo "::error::no shard uploaded shard-tests.txt -- a shard died before selecting tests" >&2
+            exit 1
+          fi
+          cat shards/*/shard-tests.txt | LC_ALL=C sort > assigned.txt
+          dupes=$(uniq -d assigned.txt || true)
+          if [ -n "$dupes" ]; then
+            echo "::error::these tests are assigned to MORE THAN ONE shard:" >&2
+            printf '  %s\n' "$dupes" >&2
+            exit 1
+          fi
+          cat shards/*/all-tests.txt | LC_ALL=C sort -u > every.txt
+          if ! diff -u every.txt assigned.txt; then
+            echo "::error::the three shards do not together name every test in ./engine ('-' is a test no shard runs, '+' is a name the package no longer has)" >&2
+            exit 1
+          fi
+          echo "OK: $(grep -c . assigned.txt) engine tests, each run by exactly one shard"
+
+      # The unsharded half, asserted rather than assumed: ./engine/testutil and
+      # ./migration/... are on shard 1 only, and a shard-1 selection that broke
+      # would otherwise report green with those 48.6s simply absent.
+      - name: The union also ran the testutil and migration packages
+        if: always()
+        run: |
+          set -euo pipefail
+          cat shards/*/test-report.json > test-report.json
+          for pkg in engine engine/testutil migration migration/catalogdiff; do
+            want="\"Package\":\"github.com/cleat-team/cleat/$pkg\""
+            if ! grep -qF "$want" test-report.json; then
+              echo "::error::$pkg produced no events in the union report: the shard that should have run it selected nothing, or the package moved" >&2
+              exit 1
+            fi
+          done
+          echo "OK: all four packages reported"
+
+      # Over the union for the same reason #3934 moves the other jobs' budgets:
+      # a ledger line declares how many skips `multi-db/mssql` may see, and each
+      # shard sees only part of them. Line-delimited `go test -json` with
+      # disjoint slices, so `cat` IS the union.
       - name: Skip budget
         if: always()
-        run: scripts/check-skip-budget.sh multi-db/mssql test-report.json
+        run: |
+          set -euo pipefail
+          if [ ! -s test-report.json ]; then
+            cat shards/*/test-report.json > test-report.json
+          fi
+          scripts/check-skip-budget.sh multi-db/mssql test-report.json
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
