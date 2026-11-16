@@ -191,6 +191,16 @@ jobs:
           if [ "$fail" != 0 ]; then
             grep '"Action":"fail"' "$f" | grep '"Test":' \
               | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+            # AND WHAT IT SAID. A name with no message costs another full cycle to interpret -- measured here, three
+            # times: the name alone does not say whether the segment failed to stop, stopped at the wrong place, or
+            # never started. Shell only, no heredoc: a heredoc's terminator must sit at column 0 and a YAML block
+            # scalar requires every line to be indented, so the two cannot both be satisfied.
+            failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
+            for t in $failed_tests; do
+              echo "--- output for $t ---" >&2
+              grep "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/.*"Output":"(.*)"\}$/  | \1/' | head -30 >&2
+            done
           fi
           if [ "$pkgfail" != 0 ]; then
             grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
