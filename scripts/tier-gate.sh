@@ -1371,11 +1371,14 @@ run_json() {
   # the render moved after the run, that same timeout would leave an EMPTY log -- losing
   # exactly the evidence (which test was hanging) the log exists for. tee keeps the
   # report complete and the renderer reads the same stream as it arrives.
-  ( cd "$dir" && go test -json "$@" ) 2>> "$LOG"     | tee -a "$part"     | python3 "$REPO_ROOT/scripts/test2json-text.py" - >> "$LOG"
+  ( cd "$dir" && go test -json "$@" ) 2>> "$LOG"     | tee -a "$part"     | python3 -u "$REPO_ROOT/scripts/test2json-text.py" - >> "$LOG"
   rc=${PIPESTATUS[0]}
   awk 1 "$part" >> "$REPORT"
   rm -f "$part"
-  return $rc
+  # Quoted: SC2086 fires on an unquoted expansion even where word splitting is harmless,
+  # and Lint runs shellcheck at its DEFAULT severity, so `-S warning` locally does not
+  # see it. cleat-review caught this one at line 1378 (cleat#3964).
+  return "$rc"
 }
 
 # -p 1 is required: engine/testutil's CleanupPostgresTestData is an unqualified
