@@ -1366,11 +1366,14 @@ run_json() {
   local dir="$1"; shift
   local part rc
   part="$(mktemp "${TMPDIR:-/tmp}/tiergatejson.XXXXXX")" || { fail "could not create a temp file for the go test -json report"; return 2; }
-  ( cd "$dir" && go test -json "$@" ) > "$part" 2>> "$LOG"
-  rc=$?
+  # STREAMED, not rendered afterwards. The log used to be written live by `go test -v >>
+  # $LOG`, and a job-level timeout killed the step with a partial log still on disk. If
+  # the render moved after the run, that same timeout would leave an EMPTY log -- losing
+  # exactly the evidence (which test was hanging) the log exists for. tee keeps the
+  # report complete and the renderer reads the same stream as it arrives.
+  ( cd "$dir" && go test -json "$@" ) 2>> "$LOG"     | tee -a "$part"     | python3 "$REPO_ROOT/scripts/test2json-text.py" - >> "$LOG"
+  rc=${PIPESTATUS[0]}
   awk 1 "$part" >> "$REPORT"
-  python3 "$REPO_ROOT/scripts/test2json-text.py" "$part" >> "$LOG" ||
-    fail "rendering $part into $LOG failed; the judges below would read an incomplete log"
   rm -f "$part"
   return $rc
 }

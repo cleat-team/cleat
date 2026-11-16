@@ -1052,6 +1052,16 @@ jobs:
       # real failure (a job that did not run cannot have passed its tests),
       # so the acceptance is conditioned on the event, not granted
       # unconditionally to the string "skipped".
+      # cleat#3949 step 1: the step below needs two things this job did not have --
+      # scripts/skip-inventory.py, and a git repository for `gh`. The sparse checkout
+      # pulls only scripts/, which is all it needs; `--repo` in the step is belt and
+      # braces so the command does not depend on the checkout's remotes at all.
+      - name: Checkout scripts/ for the skip inventory
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+
       # cleat#3949 step 1: REPORT ONLY. This supplies the numbers a skip budget needs,
       # from the job that will be gated, because check-skip-budget.sh has no derive mode
       # and its own header says a local run can confirm a line does not error but cannot
@@ -1081,11 +1091,16 @@ jobs:
           set -uo pipefail
           rm -rf tier-gate-json
           mkdir -p tier-gate-json
-          if ! gh run download "$GITHUB_RUN_ID" -p 'tier-gate-json-engine-*' -D tier-gate-json; then
+          if ! gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'tier-gate-json-engine-*' -D tier-gate-json; then
             echo "::warning title=Skip inventory UNMEASURED::could not download the engine shard reports on this run -- a failure of the inventory, not a finding about the suite"
             exit 0
           fi
-          reports=$(find tier-gate-json -maxdepth 1 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          # -mindepth 2: `gh run download -p` extracts EACH matching artifact into its
+          # own directory, even when there is exactly one match -- measured on develop's
+          # run 43874297221, where all the files sat one level deeper than -maxdepth 1
+          # looks. The first version of this step found nothing and reported UNMEASURED on
+          # every run (cleat-review, #3964).
+          reports=$(find tier-gate-json -mindepth 2 -maxdepth 2 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
           if [ -z "$reports" ]; then
             echo "::warning title=Skip inventory UNMEASURED::no tier-gate-json report on this run -- a failure of the inventory, not a finding about the suite"
             exit 0

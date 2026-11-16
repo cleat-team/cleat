@@ -119,8 +119,15 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "--self-test":
         return self_test()
     if len(argv) != 2:
-        print("usage: test2json-text.py <report.json> | --self-test", file=sys.stderr)
+        print("usage: test2json-text.py <report.json|-> | --self-test", file=sys.stderr)
         return 1
+    if argv[1] == "-":
+        # Live mode. scripts/tier-gate.sh streams the JSON through this so the LOG
+        # exists as the run proceeds: rendering after `go test` returns loses the whole
+        # log when a job-level timeout kills the step, which is the case the log is most
+        # wanted for.
+        render(sys.stdin, sys.stdout)
+        return 0
     with open(argv[1], encoding="utf-8", errors="replace") as f:
         render(f, sys.stdout)
     return 0
