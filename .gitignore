@@ -164,6 +164,9 @@ testdata/agentclientjava/build/
 # root by the workflow steps that check skip budgets.
 *-report.json
 tier-gate.log
+# The go test -json report scripts/tier-gate.sh writes by default (cleat#3949), for the
+# same reason: every shard would otherwise leave it untracked at the repo root.
+tier-gate.json
 
 # scripts/tier2-gate.sh output
 tier2-gate.log

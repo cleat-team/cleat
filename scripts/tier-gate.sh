@@ -1336,6 +1336,51 @@ fi
 LOG="${TIER_GATE_LOG:-$REPO_ROOT/tier-gate.log}"
 : > "$LOG"
 
+# The REPORT is `go test -json`, and it exists for scripts/check-skip-budget.sh, whose
+# usage is `<job-key> <test-report.json>` (cleat#3949). Before this, Tier 1's shards
+# produced only the text log below and no budget could read them, which is why the
+# Postgres arm of ./engine/... lost its per-PR skip budget when cleat#3935 removed the
+# cluster job's copy of the run.
+#
+# The suite still runs ONCE. `-json` already carries every line the test binary printed,
+# in an `Output` field, so scripts/test2json-text.py renders that stream back into $LOG
+# and every judge below -- the four greps, the named-skip check against
+# tier1.exclude_tests, the dialect-skip listing -- reads the same log it always has.
+REPORT="${TIER_GATE_REPORT:-$REPO_ROOT/tier-gate.json}"
+: > "$REPORT"
+command -v python3 >/dev/null || { fail "python3 is required to render the go test -json report into $LOG (cleat#3949)"; exit 1; }
+
+# run_json DIR ARGS...: run the suite in DIR, append the JSON stream to $REPORT, and
+# render THIS invocation's events into $LOG.
+#
+# Per invocation, not once at the end: the root module and each tier-1 module run
+# sequentially into the same two files, and rendering later would put every module's
+# text after every root-module line. The temp file also keeps the report append atomic
+# with respect to the render.
+#
+# `awk 1`, not `cat`, for the append: the next invocation's first record would otherwise
+# weld onto a file whose last line arrived without a newline, and a JSONL reader would
+# see one malformed line and one lost record. Same reason check-skip-budget.sh:95 gives
+# for its own reader.
+run_json() {
+  local dir="$1"; shift
+  local part rc
+  part="$(mktemp "${TMPDIR:-/tmp}/tiergatejson.XXXXXX")" || { fail "could not create a temp file for the go test -json report"; return 2; }
+  # STREAMED, not rendered afterwards. The log used to be written live by `go test -v >>
+  # $LOG`, and a job-level timeout killed the step with a partial log still on disk. If
+  # the render moved after the run, that same timeout would leave an EMPTY log -- losing
+  # exactly the evidence (which test was hanging) the log exists for. tee keeps the
+  # report complete and the renderer reads the same stream as it arrives.
+  ( cd "$dir" && go test -json "$@" ) 2>> "$LOG"     | tee -a "$part"     | python3 -u "$REPO_ROOT/scripts/test2json-text.py" - >> "$LOG"
+  rc=${PIPESTATUS[0]}
+  awk 1 "$part" >> "$REPORT"
+  rm -f "$part"
+  # Quoted: SC2086 fires on an unquoted expansion even where word splitting is harmless,
+  # and Lint runs shellcheck at its DEFAULT severity, so `-S warning` locally does not
+  # see it. cleat-review caught this one at line 1378 (cleat#3964).
+  return "$rc"
+}
+
 # -p 1 is required: engine/testutil's CleanupPostgresTestData is an unqualified
 # DELETE FROM across eleven tables, so packages run concurrently against one database
 # delete each other's fixtures mid-test.
@@ -1366,7 +1411,7 @@ SKIP_ARGS=""
 RUN_ARGS=""
 [ -n "$SHARD_PATTERN" ] && RUN_ARGS="-run $SHARD_PATTERN"
 # shellcheck disable=SC2086
-(cd "$REPO_ROOT" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $RUN_ARGS $SKIP_ARGS $ACTIVE_PKGS) >> "$LOG" 2>&1
+run_json "$REPO_ROOT" -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" $RUN_ARGS $SKIP_ARGS $ACTIVE_PKGS
 TEST_RC=$?
 
 # Separate Go modules must be tested from inside their own directory; `go test
@@ -1378,7 +1423,7 @@ if [ "$RUN_MOD_DIRS" = "1" ]; then
     [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names module '$md' but $md/go.mod does not exist"; continue; }
     note "running module: $md"
     # shellcheck disable=SC2086
-    (cd "$REPO_ROOT/$md" && go test -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" -v $SKIP_ARGS ./...) >> "$LOG" 2>&1
+    run_json "$REPO_ROOT/$md" -count=1 -p 1 -timeout "$GO_TEST_TIMEOUT" $SKIP_ARGS ./...
     rc=$?
     [ "$rc" = "0" ] || TEST_RC=$rc
   done

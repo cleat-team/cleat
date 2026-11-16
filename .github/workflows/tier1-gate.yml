@@ -741,6 +741,10 @@ jobs:
           # writing "tier-gate.log" collided there, so only one shard's
           # failures ever reached the notifier (cleat#2877).
           TIER_GATE_LOG: tier-gate-engine-${{ matrix.shard }}.log
+          # cleat#3949: the machine-readable report, named per shard for the same
+          # reason the log is -- the artifact names already differ, but a
+          # merge-multiple download merges by the file name INSIDE the artifact.
+          TIER_GATE_REPORT: tier-gate-engine-${{ matrix.shard }}.json
         run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/4 --engine-buckets 2
 
       # The log on failure, because the gate deliberately keeps it rather than
@@ -769,6 +773,20 @@ jobs:
         with:
           name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: tier-gate-engine-${{ matrix.shard }}.log
+          retention-days: 30
+
+      # cleat#3949 step 1. The `go test -json` report the skip budget will read, once
+      # this job has a ledger key of its own -- see the inventory step in `tier1` for
+      # why the existing key cannot be reused. Same if:/continue-on-error reasoning as
+      # the log above: it is evidence, not a result, and losing it to an upload hiccup
+      # must not fail the authoritative push check.
+      - name: Upload the go test -json report
+        if: always() && github.event_name != 'merge_group'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: tier-gate-json-engine-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: tier-gate-engine-${{ matrix.shard }}.json
           retention-days: 30
 
   tier1-rest:
@@ -1063,6 +1081,94 @@ jobs:
       # real failure (a job that did not run cannot have passed its tests),
       # so the acceptance is conditioned on the event, not granted
       # unconditionally to the string "skipped".
+      # cleat#3949 step 1: the step below needs two things this job did not have --
+      # scripts/skip-inventory.py, and a git repository for `gh`. The sparse checkout
+      # pulls only scripts/, which is all it needs; `--repo` in the step is belt and
+      # braces so the command does not depend on the checkout's remotes at all.
+      - name: Checkout scripts/ for the skip inventory
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+
+      # cleat#3949 step 1: REPORT ONLY. This supplies the numbers a skip budget needs,
+      # from the job that will be gated, because check-skip-budget.sh has no derive mode
+      # and its own header says a local run can confirm a line does not error but cannot
+      # vouch for the file.
+      #
+      # IT CANNOT FAIL THE JOB, and that is deliberate rather than convenient: it is a
+      # diagnostic, and the owner's direction (cleat#3958) is to spend no runner
+      # assignment on one. So there is no `continue-on-error` here -- the guard in
+      # scripts/check-workflow-guards.py refuses that in a required job, and it is right
+      # that a step which cannot fail cannot be part of the check -- and no separate job
+      # either, which would cost a runner assignment on every PR to print a notice.
+      # Instead every failure path below reports UNMEASURED and exits 0: a missing
+      # artifact, a failed download, a crash in the inventory script. The step still
+      # carries a real exit status for anything UNEXPECTED, so it is not a swallowed
+      # step; when step 2 turns this into a gate it becomes a check with 0/1/2.
+      #
+      # pull_request only: on merge_group the shards are skipped at the job level, so
+      # there are no reports to download.
+      #
+      # `gh run download`, not actions/download-artifact: the action fails the step when
+      # nothing matches, which is exactly the case this must survive.
+      - name: Skip inventory across the engine shards (report only)
+        if: github.event_name == 'pull_request' && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          rm -rf tier-gate-json
+          mkdir -p tier-gate-json
+          if ! gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'tier-gate-json-engine-*' -D tier-gate-json; then
+            echo "::warning title=Skip inventory UNMEASURED::could not download the engine shard reports on this run -- a failure of the inventory, not a finding about the suite"
+            exit 0
+          fi
+          # -mindepth 2: `gh run download -p` extracts EACH matching artifact into its
+          # own directory, even when there is exactly one match -- measured on develop's
+          # run 43874297221, where all the files sat one level deeper than -maxdepth 1
+          # looks. The first version of this step found nothing and reported UNMEASURED on
+          # every run (cleat-review, #3964).
+          reports=$(find tier-gate-json -mindepth 2 -maxdepth 2 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          if [ -z "$reports" ]; then
+            echo "::warning title=Skip inventory UNMEASURED::no tier-gate-json report on this run -- a failure of the inventory, not a finding about the suite"
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          if ! python3 scripts/skip-inventory.py $reports > skip-inventory.txt; then
+            echo "::warning title=Skip inventory UNMEASURED::the inventory script exited non-zero; its output follows"
+            cat skip-inventory.txt || true
+            exit 0
+          fi
+          cat skip-inventory.txt
+          echo "::notice title=Skip inventory (report only)::$(head -1 skip-inventory.txt)"
+
+      # cleat#3949 step 2, and the reason step 1 exists. The engine shards run
+      # ./engine/... with all three DSNs set, and measured ZERO skips in all 15 runs
+      # sampled before this step existed -- 13 develop pushes and 2 PR runs, 2026-11-16.
+      # So the budget is 0, not a derived set:
+      # any engine test that starts skipping on a PR is red here.
+      #
+      # rc 2 for UNMEASURED, deliberately distinct from rc 1 (a skip finding): 1 says go
+      # and look at the tree, 2 says the check is broken and the tree may be fine. It
+      # cannot be checked into a corner where a missing artifact reads as a pass.
+      - name: Skip budget across the engine shards
+        if: github.event_name == 'pull_request' && always()
+        run: |
+          set -uo pipefail
+          list=$(find tier-gate-json -mindepth 2 -maxdepth 2 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          if [ -z "$list" ]; then
+            echo "::error title=Skip budget UNMEASURED::no engine report to check a budget against -- this is a failure of the check, not a finding about the tree"
+            exit 2
+          fi
+          # shellcheck disable=SC2086
+          awk 1 $list > tier-gate-union.json
+          if [ ! -s tier-gate-union.json ]; then
+            echo "::error title=Skip budget UNMEASURED::the union report is empty -- this is a failure of the check, not a finding about the tree"
+            exit 2
+          fi
+          scripts/check-skip-budget.sh test-go/engine-tier1 tier-gate-union.json
+
       - name: Aggregate shard results
         env:
           EVENT: ${{ github.event_name }}
