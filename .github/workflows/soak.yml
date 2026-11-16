@@ -120,7 +120,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: soak-report-${{ github.sha }}-${{ github.run_attempt }}
+          # No run_attempt (cleat#3955). The notifier below is re-runnable on
+          # its own -- it only runs when the soak FAILED, so the recovery path
+          # is "the report never filed, re-run it" -- and a re-run notifier
+          # looks for its own attempt while the soak job's artifact is still
+          # attempt 1. Its download has continue-on-error, so that does not go
+          # red: it files a tracking issue saying "no artifact" about an
+          # artifact that exists.
+          name: soak-report-${{ github.sha }}
+          overwrite: true
           path: soak-report.json
           retention-days: 30
 
@@ -163,7 +171,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          name: soak-report-${{ github.sha }}-${{ github.run_attempt }}
+          name: soak-report-${{ github.sha }}
           path: soak-report
 
       - name: Render the issue text
