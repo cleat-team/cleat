@@ -1364,7 +1364,7 @@ command -v python3 >/dev/null || { fail "python3 is required to render the go te
 # for its own reader.
 run_json() {
   local dir="$1"; shift
-  local part rc
+  local part rc rcs
   part="$(mktemp "${TMPDIR:-/tmp}/tiergatejson.XXXXXX")" || { fail "could not create a temp file for the go test -json report"; return 2; }
   # STREAMED, not rendered afterwards. The log used to be written live by `go test -v >>
   # $LOG`, and a job-level timeout killed the step with a partial log still on disk. If
@@ -1372,9 +1372,29 @@ run_json() {
   # exactly the evidence (which test was hanging) the log exists for. tee keeps the
   # report complete and the renderer reads the same stream as it arrives.
   ( cd "$dir" && go test -json "$@" ) 2>> "$LOG"     | tee -a "$part"     | python3 -u "$REPO_ROOT/scripts/test2json-text.py" - >> "$LOG"
-  rc=${PIPESTATUS[0]}
+  # One array assignment, because ANY other command resets PIPESTATUS -- reading it twice
+  # in two commands would return the first element and then that command's own status.
+  #
+  # All three stages are checked, not just go test's (cleat#3969). The streaming rewrite
+  # kept `PIPESTATUS[0]` -- correctly, that is the suite's verdict -- and silently dropped
+  # the other two, so a crash in the renderer left $LOG short and nothing said so. That
+  # direction is the dangerous one: every judge below greps $LOG for `^=== RUN` and
+  # `--- PASS/FAIL/SKIP`, so a partial render UNDERCOUNTS instead of failing, and an
+  # undercount flatters the run. The pre-streaming version carried an explicit
+  # `|| fail "rendering ... failed"`; this restores it.
+  #
+  # tee is checked for the same reason one step further out: it feeds $REPORT, which
+  # check-skip-budget.sh reads. A truncated report loses skip events, and a budget that
+  # cannot see a skip reports it inside the budget.
+  rcs=("${PIPESTATUS[@]}")
+  rc=${rcs[0]}
   awk 1 "$part" >> "$REPORT"
   rm -f "$part"
+  if [ "${rcs[2]:-0}" -ne 0 ]; then
+    fail "rendering the go test -json stream into $LOG failed (renderer rc=${rcs[2]}) -- the log is short, so the judges that grep it undercount rather than fail"
+  elif [ "${rcs[1]:-0}" -ne 0 ]; then
+    fail "appending the go test -json stream to $REPORT failed (tee rc=${rcs[1]}) -- the report is short, so the skip budget would not see those events"
+  fi
   # Quoted: SC2086 fires on an unquoted expansion even where word splitting is harmless,
   # and Lint runs shellcheck at its DEFAULT severity, so `-S warning` locally does not
   # see it. cleat-review caught this one at line 1378 (cleat#3964).
