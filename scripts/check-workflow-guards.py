@@ -80,8 +80,10 @@ a session to find one instance of by hand:
      start period is the only health option that stops boot-time failures
      counting at all; retries merely lengthen the window a boot must finish
      inside.  `mysql:8.4` starts a server twice (initialize, then run) and took
-     68s to be ready on a loaded runner against the shared block's 50s budget,
-     which failed a required Tier-1 job in "Initialize containers" with no test
+     55s to be ready AFTER ITS CONTAINER STARTED -- 68s from creation, which is
+     the number a job log shows first -- against a 50s budget counted from that
+     same start, which failed a required Tier-1 job in "Initialize containers"
+     with no test
      run (cleat#3936).  The guard requires the start period and a 60s floor; it
      does not police the retry count, because 60s plus the existing retries
      already exceeds the measured boot.
@@ -101,6 +103,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import itertools
 import json
@@ -449,9 +452,12 @@ MYSQL_IMAGE = re.compile(r"(^|/)mysql(:|@|$)")
 HEALTH_START_PERIOD = re.compile(r"--health-start-period(?:=|\s+)(\S+)")
 DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
 DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
-# mysql:8.4's measured boot, 2026-11-16: 68s from container creation to "ready
-# for connections" on a loaded runner. A start period shorter than the boot it
-# is meant to cover is a decoration.
+# mysql:8.4's measured boot, 2026-11-16: 55s from container START to "ready for
+# connections" on a loaded runner -- 68s from creation, the number the job log
+# shows first and the wrong one to compare this against, because Docker's health
+# clock starts at container start. 60s covers the measured boot with a few
+# seconds of margin; a boot slower than that is caught by the retries, not here.
+# A start period shorter than the boot it is meant to cover is a decoration.
 MYSQL_MIN_START_PERIOD_SECONDS = 60.0
 
 
@@ -497,8 +503,9 @@ def mysql_health_start_period_violation(path: str, job_id: str, service_id: str,
     if match is None:
         return (
             f"{where} sets no --health-start-period, so every health failure counts "
-            f"from container start. mysql:8.4 starts a server twice and took 68s to be "
-            f"ready on a loaded runner (cleat#3936). Add `--health-start-period 60s` "
+            f"from container start. mysql:8.4 starts a server twice and took 55s to be "
+            f"ready after its container started (cleat#3936). Add "
+            f"`--health-start-period 60s` "
             f"beside --health-retries, as multi-db-ci.yml does."
         )
     seconds = parse_docker_duration(match.group(1))
@@ -522,11 +529,18 @@ def guard_mysql_health_start_period(errors) -> None:
 
     Measured 2026-11-16 (cleat#3936). The shared block set
     `--health-interval 10s --health-retries 5` and no start period, so the budget
-    was 50s counted from container creation. mysql:8.4's entrypoint runs
+    was 50s counted from CONTAINER START. mysql:8.4's entrypoint runs
     `mysqld --initialize-insecure`, shuts that server down, and starts a second
     one; on a loaded runner `Tier 1 Gate -- rest shard 3/4` reached "ready for
-    connections" 68s in and was declared unhealthy 0.34s later. The job failed
-    in "Initialize containers" and no test ran.
+    connections" 55s after start and was declared unhealthy 0.34s later. The
+    job failed in "Initialize containers" and no test ran.
+
+    TWO CLOCKS, and mixing them makes these numbers look inconsistent: creation
+    to ready was 68s, start to ready was 55s, and the 50s budget is measured on
+    the second. An earlier draft of this comment anchored the budget to creation
+    and cleat-review caught it in review of #3937 -- 5 x 10s from creation would
+    have expired 18s BEFORE the server was ready, yet nothing was declared
+    unhealthy then.
 
     Retries alone do not fix this -- they lengthen the window the boot must
     finish inside while every failure still counts. The start period is the
@@ -1842,6 +1856,34 @@ def self_test() -> int:
     check_mysql("KNOWN-NEGATIVE: unprefixed mysql image with a start period",
                 mysql_job("--health-start-period 60s",
                           image="mysql:8.4.11@sha256:" + "0" * 64), 0)
+
+    # WIRING. Every case above calls the finder helpers directly, so deleting a
+    # guard's call from main() leaves this self-test green AND the real-tree run
+    # clean with a violation planted -- "a mechanism wired to nothing reads as
+    # done", applied to the guard list itself. Measured by cleat-review on #3937:
+    # removing guard 10's call passed both checks, and removing guard 7's did
+    # too, so it is the harness's property rather than one guard's defect.
+    cases += 1
+    module = ast.parse(open(__file__, encoding="utf-8").read())
+    defined_guards = {
+        node.name for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("guard_")
+    }
+    main_fn = next(
+        node for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    called_from_main = {
+        node.func.id for node in ast.walk(main_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    unwired = sorted(defined_guards - called_from_main)
+    if unwired:
+        failures.append(
+            f"guards defined but never called from main(): {unwired}. A guard "
+            f"nobody calls passes every case above and reports nothing on the "
+            f"real tree."
+        )
 
     if failures:
         for f in failures:
