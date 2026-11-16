@@ -1493,10 +1493,30 @@ jobs:
       #     linter would break the service.
       - name: Workflow schema (actionlint)
         if: always()
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          # From the release's own checksums file, not computed from whatever
+          # the download happened to return:
+          #   curl -sSL .../v1.7.12/actionlint_1.7.12_checksums.txt | grep linux_amd64
+          # Pinned by CONTENT as well as by version, so a re-published tag or a
+          # substituted asset fails here rather than linting with unknown code.
+          ACTIONLINT_SHA256: '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Workflow schema (actionlint)" >> "$LINT_FAILURES_FILE"
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-          "$(go env GOPATH)/bin/actionlint" -shellcheck= \
+          set -euo pipefail
+          # The release TARBALL, not `go install`: this step runs in the
+          # required Lint job on every PR, and `go install` would compile
+          # actionlint from source there -- a Go build plus a module fetch on
+          # top of every Lint wall, to produce a binary the project publishes
+          # precompiled. The tarball is also pinned by content, which a module
+          # version is not.
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          curl -fsSL -o "$tmp/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $tmp/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$tmp/actionlint.tgz" -C "$tmp" actionlint
+          "$tmp/actionlint" -shellcheck= \
             -ignore 'label "ubuntu-26.04" is unknown' \
             -ignore 'unexpected key "command" for "services"' \
             .github/workflows/*.yml
