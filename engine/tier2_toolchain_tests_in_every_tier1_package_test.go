@@ -474,14 +474,49 @@ func tierTwoLanguagesReached(fn string, calls map[string][]string, roots map[str
 // flagsFilter matches a -run or -skip, in a go test line or in a matrix entry's flags.
 var flagsFilter = regexp.MustCompile(`\s-(run|skip)[\s=]`)
 
-// testGoLegFacts is what one ci.yml test-go matrix entry provides.
+// testGoLegFacts is what one ci.yml leg provides: either an entry in the
+// `test-go` matrix (the original shape) or a sharded job group, in which a job
+// `test-go-<leg>` splits the leg across several runners and
+// `test-go-<leg>-summary` carries the required context name and fails unless
+// the union of what the legs selected is the whole leg.
 type testGoLegFacts struct {
 	leg             testGoLeg
-	legFound        bool     // a test-go matrix entry with the leg's name exists
-	pathIsRight     bool     // ... and its path is the leg's package path
-	setup           []string // `uses:` of steps conditioned on the leg
-	filteredRunStep string   // the Run tests step's go test line, if it filters
+	legFound        bool     // the leg exists in one of the two shapes
+	pathIsRight     bool     // ... and selects the leg's package path
+	setup           []string // `uses:` of the steps that provision a toolchain
+	filteredRunStep string   // a go test line that filters with -run or -skip
 	runStepFound    bool
+	sharded         bool
+	// unionGuarded is the sharded shape's licence to filter at all: a job
+	// carrying the required context name that diffs the union of the legs'
+	// selections against the package's own listing. Without it a `-run`
+	// selector is exactly the failure this guard exists for -- a test that
+	// matches nothing and leaves every job green.
+	unionGuarded bool
+	// contextNamed says the summary job's display name is the required context.
+	// Unchecked in the matrix shape, which reports its own name through ci.yml's
+	// matrix and predates this field.
+	contextNamed bool
+}
+
+type ciStep struct {
+	Name string `yaml:"name"`
+	If   string `yaml:"if"`
+	Uses string `yaml:"uses"`
+	Run  string `yaml:"run"`
+	With struct {
+		Path string `yaml:"path"`
+	} `yaml:"with"`
+}
+
+type ciJob struct {
+	Name     string `yaml:"name"`
+	Strategy struct {
+		Matrix struct {
+			Package []map[string]any `yaml:"package"`
+		} `yaml:"matrix"`
+	} `yaml:"strategy"`
+	Steps []ciStep `yaml:"steps"`
 }
 
 func readTestGoLeg(leg testGoLeg) (*testGoLegFacts, error) {
@@ -490,35 +525,27 @@ func readTestGoLeg(leg testGoLeg) (*testGoLegFacts, error) {
 		return nil, err
 	}
 	var wf struct {
-		Jobs map[string]struct {
-			Strategy struct {
-				Matrix struct {
-					Package []map[string]any `yaml:"package"`
-				} `yaml:"matrix"`
-			} `yaml:"strategy"`
-			Steps []struct {
-				Name string `yaml:"name"`
-				If   string `yaml:"if"`
-				Uses string `yaml:"uses"`
-				Run  string `yaml:"run"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
+		Jobs map[string]ciJob `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(b, &wf); err != nil {
 		return nil, err
 	}
+
+	// SHAPE 1, the original: an entry in the `test-go` matrix whose toolchain
+	// steps are conditioned on `matrix.package.name == '<leg>'`.
 	facts := &testGoLegFacts{leg: leg}
 	for _, job := range wf.Jobs {
 		isLeg := false
 		for _, p := range job.Strategy.Matrix.Package {
-			if p["name"] == leg.name {
-				isLeg = true
-				facts.legFound = true
-				facts.pathIsRight = p["path"] == leg.path
-				// The leg's flags go onto the same go test line as ${{ matrix.package.flags }}.
-				if fl, ok := p["flags"].(string); ok && flagsFilter.MatchString(" "+fl+" ") {
-					facts.filteredRunStep = "matrix flags: " + fl
-				}
+			if p["name"] != leg.name {
+				continue
+			}
+			isLeg = true
+			facts.legFound = true
+			facts.pathIsRight = p["path"] == leg.path
+			// The leg's flags go onto the same go test line as ${{ matrix.package.flags }}.
+			if fl, ok := p["flags"].(string); ok && flagsFilter.MatchString(" "+fl+" ") {
+				facts.filteredRunStep = "matrix flags: " + fl
 			}
 		}
 		if !isLeg {
@@ -539,9 +566,80 @@ func readTestGoLeg(leg testGoLeg) (*testGoLegFacts, error) {
 			}
 		}
 	}
-	if !facts.legFound {
-		return nil, constErr("found no test-go matrix entry named \"" + leg.name + "\" in ci.yml -- " +
-			"the leg was renamed or removed, and the second half of this guard has nothing to check")
+	if facts.legFound {
+		facts.contextNamed = true
+		return facts, nil
+	}
+
+	// SHAPE 2, the sharded group. The properties this guard needs survive the
+	// split: every leg of the group provisions the toolchain, each has a "Run
+	// tests" step, the group selects the leg's package path, and a job whose
+	// display name IS the required context fails unless the union covers the
+	// package. That last one is what makes a shard's `-run` selector acceptable
+	// where the matrix shape would not be.
+	shards, ok := wf.Jobs["test-go-"+leg.name]
+	if !ok {
+		return nil, constErr("found neither a test-go matrix entry nor a job named \"test-go-" + leg.name +
+			"\" in ci.yml -- the leg was renamed or removed, and the second half of this guard has nothing to check")
+	}
+	summary, ok := wf.Jobs["test-go-"+leg.name+"-summary"]
+	if !ok {
+		return nil, constErr("found ci.yml's \"test-go-" + leg.name + "\" job but no \"test-go-" +
+			leg.name + "-summary\" job beside it -- the required context name would then be reported by nobody, " +
+			"and nothing would check that the legs together are the whole leg")
+	}
+	facts = &testGoLegFacts{leg: leg, legFound: true, sharded: true}
+
+	var listing []string // the package's OWN listing -- the denominator the summary diffs against
+	// The path must be selected by an INVOCATION, not by a mention. A scan of the
+	// steps' whole text is satisfied by prose: the comments here name
+	// `./cmd/...` and the selection step runs `go list ./cmd/...` as its
+	// DENOMINATOR, so a doctored tree that deleted the leg's own `PATHS=` arm
+	// stayed green when this asked `strings.Contains(text, path)`.
+	selected := false
+	for _, s := range shards.Steps {
+		if strings.Contains(s.Run, "PATHS='"+leg.path+"'") {
+			selected = true
+		}
+		if s.Uses != "" {
+			facts.setup = append(facts.setup, s.Uses)
+		}
+		for _, line := range strings.Split(s.With.Path, "\n") {
+			if f := strings.TrimSpace(line); strings.HasPrefix(f, "all-") && strings.HasSuffix(f, ".txt") {
+				listing = append(listing, f)
+			}
+		}
+		if s.Name == "Run tests" {
+			facts.runStepFound = true
+			for _, line := range strings.Split(s.Run, "\n") {
+				if !strings.HasPrefix(strings.TrimSpace(line), "go test") {
+					continue
+				}
+				// The crash group selects by test name over the whole package, so
+				// its path is on the go test line rather than in a PATHS arm.
+				if strings.Contains(line, leg.path) {
+					selected = true
+				}
+				if flagsFilter.MatchString(line) {
+					facts.filteredRunStep = strings.TrimSpace(line)
+				}
+			}
+		}
+	}
+	// The summary's diff is what makes this a claim rather than a string match:
+	// a path narrowed here and the listing re-derived there disagree.
+	facts.pathIsRight = selected
+
+	facts.contextNamed = strings.HasPrefix(summary.Name, "Test Go ("+leg.name+")")
+	for _, s := range summary.Steps {
+		if !strings.Contains(s.Run, "diff") {
+			continue
+		}
+		for _, f := range listing {
+			if strings.Contains(s.Run, f) {
+				facts.unionGuarded = true
+			}
+		}
 	}
 	return facts, nil
 }
@@ -550,13 +648,18 @@ func readTestGoLeg(leg testGoLeg) (*testGoLegFacts, error) {
 func (f *testGoLegFacts) problemsFor(lang string) []string {
 	var out []string
 	if !f.pathIsRight {
-		out = append(out, "the leg's matrix path is no longer "+f.leg.path)
+		out = append(out, "the leg no longer selects "+f.leg.path)
 	}
 	if !f.runStepFound {
 		out = append(out, "the leg has no step named \"Run tests\"")
 	}
-	if f.filteredRunStep != "" {
-		out = append(out, "the leg's go test line carries -run or -skip ("+f.filteredRunStep+")")
+	if f.filteredRunStep != "" && !f.unionGuarded {
+		out = append(out, "the leg's go test line carries -run or -skip ("+f.filteredRunStep+
+			") and no summary job diffs the legs' union against the package's listing")
+	}
+	if f.sharded && !f.contextNamed {
+		out = append(out, "the summary job's display name is not the required context \"Test Go ("+
+			f.leg.name+") ...\", so the split leg reports a context nothing requires")
 	}
 	want := map[string]string{
 		"java":           "actions/setup-java",
