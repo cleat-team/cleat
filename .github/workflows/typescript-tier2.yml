@@ -170,7 +170,12 @@ jobs:
 
       # The three numbers, not the exit status: a package that did not build contributes nothing to a count keyed
       # on "Test", and `go test` exits 0 for a pattern that matches nothing.
+      # `if: always()`, because without it a FAILING test hides its own name: the step above pipes -json into a report
+      # and sends stdout to /dev/null, so this step is the only thing that ever prints which test failed -- and it was
+      # skipped exactly when that mattered (cleat#3826: the first run of a new test failed, and the log showed only
+      # "Process completed with exit code 1").
       - name: Read the result (failures, package failures, tests that ran)
+        if: always()
         run: |
           f=typescript-tier2-report.json
           fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
