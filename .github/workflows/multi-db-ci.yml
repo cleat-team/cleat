@@ -197,11 +197,71 @@ env:
 # true.
 permissions:
   contents: read
+  # The PR-edit gate below reads this workflow's own runs and jobs for the head
+  # to decide whether they already passed.
+  actions: read
 
 # ===========================================================================
 # JOBS
 # ===========================================================================
 jobs:
+  # ---------------------------------------------------------------------------
+  # A title/body edit re-runs every required context on a head this workflow
+  # has already tested. cleat#3958's inventory found exactly one job in the
+  # repository that reads `pull_request.body` (closing-reference-check.yml) and
+  # none that reads `.title` for anything but a display name, so a body-edit run
+  # here measures a tree that has not changed.
+  #
+  # `edit-gate` decides whether skipping is SAFE, which is not the same question
+  # as whether it is cheap. A skipped job reports as Success and does not block
+  # a required check (GitHub docs, "Using conditions to control job execution"),
+  # so skipping unconditionally would launder a RED head into a green one: edit
+  # the body of a failing PR and its red check-runs become green skips. The gate
+  # therefore says `skip=true` only when every job's latest NON-skipped
+  # conclusion on this head is `success` -- see scripts/pr-edit-already-green.py,
+  # whose --self-test covers the failure-then-skip sequence by name.
+  #
+  # It runs ONLY for an `edited` whose base did not change. Every other event
+  # leaves it skipped, and `needs.edit-gate.outputs.skip` is then the empty
+  # string, which is not 'true', so every job below runs exactly as before.
+  # That is why their conditions carry `!cancelled()` or `always()`: a job whose
+  # `needs` dependency was skipped is itself skipped unless its `if` uses a
+  # status function. Measured on cleat#3959 -- the plain `needs.*` form stayed
+  # skipped, the `!cancelled()` form ran.
+  # ---------------------------------------------------------------------------
+  edit-gate:
+    name: PR edit gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Has this head already passed this workflow?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          out=$(python3 scripts/pr-edit-already-green.py \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow multi-db-ci.yml \
+                  --sha "${{ github.event.pull_request.head.sha }}" \
+                  --exclude-run "${{ github.run_id }}")
+          rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # UNMEASURED: a gate that could not look must not skip.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$out" in
+            skip=true*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
   # -------------------------------------------------------------------------
   # Test MySQL backend
   #
@@ -234,6 +294,8 @@ jobs:
   # -------------------------------------------------------------------------
   test-mysql:
     name: Test MySQL shard ${{ matrix.shard }} of 3
+    if: ${{ !cancelled() && needs.edit-gate.outputs.skip != 'true' }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     # 40 -> 30, 2026-11-16. A shard's `go test` step is bounded by its ~200s
     # slice against the single job's 600s, so a hanging shard should not hold a
@@ -404,15 +466,22 @@ jobs:
     # THE REQUIRED CONTEXT NAME. `Test MySQL` is the branch-protection entry, so
     # it stays on the aggregate and the shards are named `Test MySQL shard N of 3`.
     name: Test MySQL
-    needs: [test-mysql]
-    if: always()
+    needs: [test-mysql, edit-gate]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Download the shards' reports
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         uses: actions/download-artifact@v8
         with:
           pattern: mysql-shard-*-${{ github.sha }}
@@ -420,7 +489,7 @@ jobs:
           path: shards
 
       - name: Every shard succeeded
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
           SHARDS_RESULT: ${{ needs.test-mysql.result }}
         run: |
@@ -434,7 +503,7 @@ jobs:
       # test on no shard (runs nowhere) and a test on two (runs twice, and its
       # skip-budget line is charged twice).
       - name: The three shards together are every test in ./engine
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           # LAYOUT-INDEPENDENT, identity from a FILE (cleat#3955): one artifact
@@ -474,7 +543,7 @@ jobs:
       # ./migration/... are on shard 1 only, and a shard-1 selection that broke
       # would otherwise report green with those packages simply absent.
       - name: The union also ran the testutil and migration packages
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           find shards -name test-report.json -exec cat {} + > test-report.json
@@ -492,7 +561,7 @@ jobs:
       # shard sees only part of them. Line-delimited `go test -json` with disjoint
       # slices, so `cat` IS the union.
       - name: Skip budget
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           if [ ! -s test-report.json ]; then
@@ -525,6 +594,8 @@ jobs:
   # -------------------------------------------------------------------------
   test-mssql:
     name: Test SQL Server shard ${{ matrix.shard }} of 3
+    if: ${{ !cancelled() && needs.edit-gate.outputs.skip != 'true' }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     # 45 -> 30, 2026-11-16. A shard's `go test` step is bounded by its ~270s
     # slice against the single job's 874s, so a hanging shard should not hold a
@@ -728,15 +799,22 @@ jobs:
 
   test-mssql-summary:
     name: Test SQL Server
-    needs: [test-mssql]
-    if: always()
+    needs: [test-mssql, edit-gate]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Download the shards' reports
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         uses: actions/download-artifact@v8
         with:
           pattern: mssql-shard-*-${{ github.sha }}
@@ -744,7 +822,7 @@ jobs:
           path: shards
 
       - name: Every shard succeeded
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
           SHARDS_RESULT: ${{ needs.test-mssql.result }}
         run: |
@@ -758,7 +836,7 @@ jobs:
       # a test on no shard (runs nowhere) and a test on two (runs twice, and its
       # skip-budget line is charged twice).
       - name: The three shards together are every test in ./engine
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           # LAYOUT-INDEPENDENT, identity from a FILE (cleat#3955): one artifact
@@ -798,7 +876,7 @@ jobs:
       # ./migration/... are on shard 1 only, and a shard-1 selection that broke
       # would otherwise report green with those 48.6s simply absent.
       - name: The union also ran the testutil and migration packages
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           find shards -name test-report.json -exec cat {} + > test-report.json
@@ -816,7 +894,7 @@ jobs:
       # shard sees only part of them. Line-delimited `go test -json` with
       # disjoint slices, so `cat` IS the union.
       - name: Skip budget
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           if [ ! -s test-report.json ]; then
@@ -851,6 +929,8 @@ jobs:
   # -------------------------------------------------------------------------
   test-plugin-migrations:
     name: Plugin Migrations
+    if: ${{ !cancelled() && needs.edit-gate.outputs.skip != 'true' }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 25  # max 6.3m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 15m, 2026-10-27; cleat#3479
     services:
@@ -1106,6 +1186,8 @@ jobs:
   # included. Bump them together with the other sites or `Lint` fails the PR.
   crash-shutdown-dialects:
     name: Crash Shutdown Scenarios (MySQL, SQL Server)
+    if: ${{ !cancelled() && needs.edit-gate.outputs.skip != 'true' }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 25  # max 3.5m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 15m, 2026-10-27; cleat#3479
     services:

@@ -288,6 +288,63 @@ env:
   WASM_TOOLS_SHA256: "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # A title/body edit re-runs every required context on a head this workflow
+  # has already tested. cleat#3958's inventory found exactly one job in the
+  # repository that reads `pull_request.body` (closing-reference-check.yml) and
+  # none that reads `.title` for anything but a display name, so a body-edit run
+  # here measures a tree that has not changed.
+  #
+  # `edit-gate` decides whether skipping is SAFE, which is not the same question
+  # as whether it is cheap. A skipped job reports as Success and does not block
+  # a required check (GitHub docs, "Using conditions to control job execution"),
+  # so skipping unconditionally would launder a RED head into a green one: edit
+  # the body of a failing PR and its red check-runs become green skips. The gate
+  # therefore says `skip=true` only when every job's latest NON-skipped
+  # conclusion on this head is `success` -- see scripts/pr-edit-already-green.py,
+  # whose --self-test covers the failure-then-skip sequence by name.
+  #
+  # It runs ONLY for an `edited` whose base did not change. Every other event
+  # leaves it skipped, and `needs.edit-gate.outputs.skip` is then the empty
+  # string, which is not 'true', so every job below runs exactly as before.
+  # That is why their conditions carry `!cancelled()` or `always()`: a job whose
+  # `needs` dependency was skipped is itself skipped unless its `if` uses a
+  # status function. Measured on cleat#3959 -- the plain `needs.*` form stayed
+  # skipped, the `!cancelled()` form ran.
+  # ---------------------------------------------------------------------------
+  edit-gate:
+    name: PR edit gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Has this head already passed this workflow?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          out=$(python3 scripts/pr-edit-already-green.py \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow tier1-gate.yml \
+                  --sha "${{ github.event.pull_request.head.sha }}" \
+                  --exclude-run "${{ github.run_id }}")
+          rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # UNMEASURED: a gate that could not look must not skip.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$out" in
+            skip=true*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
   # cleat#3958: THE CUT'S OWN GUARD.
   #
   # The develop push no longer runs the jobs the merge group already ran on
@@ -381,12 +438,13 @@ jobs:
   # a shard split that was wrong from the start.
   tier1-coverage:
     name: Tier 1 Shard Coverage
+    needs: [edit-gate]
     # On merge_group this shard's own steps already reduce to one report-only
     # echo (below) -- this makes it skip ENTIRELY instead, so merge_group
     # costs one runner assignment across all three shards rather than three.
     # See tier1's own "Aggregate shard results" step for why a job SKIPPED
     # here does not fail the gate on merge_group.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -404,13 +462,13 @@ jobs:
 
   tier1-engine:
     name: Tier 1 Engine Shard ${{ matrix.shard }}/4
-    needs: [tier1-coverage]
+    needs: [tier1-coverage, edit-gate]
     # On merge_group every step below already reduces to one report-only
     # echo (see the per-step `if:` guards further down) -- this skips the
     # job ENTIRELY instead, so the matrix's two runner assignments are not
     # spent just to run that echo. See tier1's "Aggregate shard results"
     # step for why a SKIPPED job here does not fail the gate on merge_group.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && needs.tier1-coverage.result == 'success' && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -744,11 +802,11 @@ jobs:
 
   tier1-rest:
     name: Tier 1 Gate -- rest shard ${{ matrix.shard }}/4
-    needs: [tier1-coverage]
+    needs: [tier1-coverage, edit-gate]
     # Same reasoning as tier1-engine's job-level `if:` above: on merge_group
     # every step below already reduces to one report-only echo, so skip the
     # job entirely rather than spend a runner assignment on it.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && needs.tier1-coverage.result == 'success' && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # cleat#3301: matrix of 2, same shape as tier1-engine's. The matrix
     # value IS the overall --shard numerator (3 and 4 here, not a separate
     # 0-based bucket index) -- tier-gate.sh itself derives the rest-bucket
@@ -1019,8 +1077,8 @@ jobs:
   # states which dependency, if any, was not a success.
   tier1:
     name: Tier 1 Gate
-    needs: [tier1-coverage, tier1-engine, tier1-rest]
-    if: always()
+    needs: [tier1-coverage, tier1-engine, tier1-rest, edit-gate]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1034,7 +1092,14 @@ jobs:
       # real failure (a job that did not run cannot have passed its tests),
       # so the acceptance is conditioned on the event, not granted
       # unconditionally to the string "skipped".
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - name: Aggregate shard results
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         env:
           EVENT: ${{ github.event_name }}
           COVERAGE: ${{ needs.tier1-coverage.result }}

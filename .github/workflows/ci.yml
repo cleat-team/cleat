@@ -147,6 +147,9 @@ concurrency:
 # ---------------------------------------------------------------------------
 permissions:
   contents: read
+  # The PR-edit gate below reads this workflow's own runs and jobs for the head
+  # to decide whether they already passed.
+  actions: read
   pull-requests: write
 
 # ===========================================================================
@@ -196,12 +199,70 @@ permissions:
 # turns into a tracking issue.
 # ---------------------------------------------------------------------------
 jobs:
+  # ---------------------------------------------------------------------------
+  # A title/body edit re-runs every required context on a head this workflow
+  # has already tested. cleat#3958's inventory found exactly one job in the
+  # repository that reads `pull_request.body` (closing-reference-check.yml) and
+  # none that reads `.title` for anything but a display name, so a body-edit run
+  # here measures a tree that has not changed.
+  #
+  # `edit-gate` decides whether skipping is SAFE, which is not the same question
+  # as whether it is cheap. A skipped job reports as Success and does not block
+  # a required check (GitHub docs, "Using conditions to control job execution"),
+  # so skipping unconditionally would launder a RED head into a green one: edit
+  # the body of a failing PR and its red check-runs become green skips. The gate
+  # therefore says `skip=true` only when every job's latest NON-skipped
+  # conclusion on this head is `success` -- see scripts/pr-edit-already-green.py,
+  # whose --self-test covers the failure-then-skip sequence by name.
+  #
+  # It runs ONLY for an `edited` whose base did not change. Every other event
+  # leaves it skipped, and `needs.edit-gate.outputs.skip` is then the empty
+  # string, which is not 'true', so every job below runs exactly as before.
+  # That is why their conditions carry `!cancelled()` or `always()`: a job whose
+  # `needs` dependency was skipped is itself skipped unless its `if` uses a
+  # status function. Measured on cleat#3959 -- the plain `needs.*` form stayed
+  # skipped, the `!cancelled()` form ran.
+  # ---------------------------------------------------------------------------
+  edit-gate:
+    name: PR edit gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request' && github.event.action == 'edited' && !github.event.changes.base
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+      - name: Has this head already passed this workflow?
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          out=$(python3 scripts/pr-edit-already-green.py \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow ci.yml \
+                  --sha "${{ github.event.pull_request.head.sha }}" \
+                  --exclude-run "${{ github.run_id }}")
+          rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # UNMEASURED: a gate that could not look must not skip.
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$out" in
+            skip=true*) echo "skip=true" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "skip=false" >> "$GITHUB_OUTPUT" ;;
+          esac
   # -------------------------------------------------------------------------
   # Lint
   # -------------------------------------------------------------------------
   lint:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Lint
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 25  # max 8.3m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # cleat#2895: every guard step's own failure is captured into this file
@@ -214,10 +275,20 @@ jobs:
     env:
       LINT_FAILURES_FILE: /tmp/lint-failures.txt
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: always() && (needs.edit-gate.outputs.skip == 'true')
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Nothing to do -- this head already passed" >> "$LINT_FAILURES_FILE"
+          echo "the PR head already passed this workflow; nothing to re-run"
+          LINT_GUARD_EOF
       - uses: actions/checkout@v7
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
 
       - name: CI package-coverage guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "CI package-coverage guard" >> "$LINT_FAILURES_FILE"
           scripts/check-ci-package-coverage.sh
@@ -234,7 +305,7 @@ jobs:
       #
       # Pure text, no Go needed, so it belongs here rather than in a test job.
       - name: Migration version-number guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         # --self-test FIRST, and it is not ceremony. On a clean tree with no
         # exemptions, "no new collisions" is the same output a check that does
         # nothing would print, so passing proves only that the guard did not
@@ -259,7 +330,7 @@ jobs:
       # `Test Go (...)` contexts. A guard that cannot see the state it looks
       # for prints a confident green.
       - name: Required-context guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Required-context guard" >> "$LINT_FAILURES_FILE"
           scripts/check-required-contexts.py --self-test
@@ -279,7 +350,7 @@ jobs:
       # rather than 0, so a use block this script cannot read is reported
       # instead of being read as a clean workspace.
       - name: go.work floor guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "go.work floor guard" >> "$LINT_FAILURES_FILE"
           scripts/check-go-work-floor.sh --self-test
@@ -293,7 +364,7 @@ jobs:
       # a minor version behind go.mod before anyone noticed (cleat#2070).
       # Neither drift breaks a build, so nothing else catches it.
       - name: Onboarding Go version guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Onboarding Go version guard" >> "$LINT_FAILURES_FILE"
           scripts/check-onboarding-go-version.sh --self-test
@@ -309,7 +380,7 @@ jobs:
       # needs no network beyond loopback and takes about fifteen seconds. Exit 2
       # is "could not run", and fails this step like exit 1.
       - name: wasm-tools fetch self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "wasm-tools fetch self-test" >> "$LINT_FAILURES_FILE"
           scripts/fetch-wasm-tools.sh --self-test
@@ -329,7 +400,7 @@ jobs:
       # the moment it was written, but only because WS-1 happened to run it by
       # hand during an unrelated version bump.
       - name: SDK version agreement guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "SDK version agreement guard" >> "$LINT_FAILURES_FILE"
           scripts/check-sdk-version-agreement.py --self-test
@@ -340,7 +411,7 @@ jobs:
       # it; a script that renders the report is only worth having if it is wired to something that runs, so
       # its --self-test is here, against three real soak logs (scripts/testdata/soak-failure-report/).
       - name: Soak failure report self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Soak failure report self-test" >> "$LINT_FAILURES_FILE"
           python3 scripts/soak-failure-report.py --self-test
@@ -352,7 +423,7 @@ jobs:
       # reads go-version-file, and every `FROM golang:` is the exact toolchain. Exit 2 (UNMEASURED) is a
       # failure of the check and fails the job just the same.
       - name: Go toolchain pins guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Go toolchain pins guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-go-toolchain-pins.py --self-test
@@ -365,7 +436,7 @@ jobs:
       # refusal, not only the exit status: a refusal and an UNMEASURED (exit 2)
       # must not be able to stand in for each other.
       - name: RC landed-sha guard self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "RC landed-sha guard self-test" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-rc-sha-landed.py --self-test
@@ -385,7 +456,7 @@ jobs:
       # Pinned, like golangci-lint in lint-go, so a new upstream rule cannot turn
       # this red on a commit that changed nothing.
       - name: Secret scan (gitleaks)
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Secret scan (gitleaks)" >> "$LINT_FAILURES_FILE"
           set -euo pipefail
@@ -450,7 +521,7 @@ jobs:
       # crash-looping while the job reported success. The baseline records
       # every skip that exists today; a new one, or a growing one, fails here.
       - name: Conditional-skip guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         # --self-test FIRST, and it is not ceremony here -- it is the thing
         # whose absence let cleat#1740 live in the committed baseline. This
         # guard compares its own scan against a baseline generated from that
@@ -497,7 +568,7 @@ jobs:
       # the dual form DELIBERATELY, and a guard that flagged them would push the
       # next author into deleting coverage rather than moving a preference.
       - name: Bare @cleat_entry guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Bare @cleat_entry guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-bare-entry-decorator.py --self-test
@@ -518,7 +589,7 @@ jobs:
       # step nothing invokes scripts/gh-job-log.py at all. Asked of WS-3 directly
       # (cleat#3134); the step comes out if they would rather.
       - name: Job-log helper self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Job-log helper self-test" >> "$LINT_FAILURES_FILE"
           python3 scripts/gh-job-log.py --self-test
@@ -537,7 +608,7 @@ jobs:
       # rather than the parameter, so it does not replace sabotaging the read
       # and running the suite. CONTRIBUTING.md carries that procedure.
       - name: Blind test-double guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         # --self-test FIRST, same as the guards below. Nothing asserted what
         # findblinddoubles.go attributes until cleat#1764: the baseline is
         # regenerated from its own scan, so a rule that silently stopped
@@ -561,7 +632,7 @@ jobs:
       # and how the Python end-to-end test's coverage stayed one method wide
       # (3.205). The baseline can only shrink; a rise is reported, not failed.
       - name: SDK host-call coverage guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "SDK host-call coverage guard" >> "$LINT_FAILURES_FILE"
           scripts/sdk-host-call-coverage.py --check
@@ -585,7 +656,7 @@ jobs:
       # Same file-ownership note as above: this is WS-3's file, and the guard
       # is unwired without the step.
       - name: SDK host-call EXECUTED coverage guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         # The negative control runs in CI, every time, deliberately.
         #
         # This step names a mode in a YAML file nobody re-reads. Until
@@ -606,7 +677,7 @@ jobs:
           LINT_GUARD_EOF
 
       - name: ABI doc/code consistency guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "ABI doc/code consistency guard" >> "$LINT_FAILURES_FILE"
           scripts/check-doc-consistency.sh
@@ -618,7 +689,7 @@ jobs:
       # this catches the next one, not just the 43 fixed in the PR that
       # added it.
       - name: Postgres migration citation guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Postgres migration citation guard" >> "$LINT_FAILURES_FILE"
           scripts/check-postgres-migration-citations.py --self-test
@@ -632,7 +703,7 @@ jobs:
       # correct tree "every number agrees" and "the extractor matched nothing"
       # print the same kind of success.
       - name: Python SDK surface guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Python SDK surface guard" >> "$LINT_FAILURES_FILE"
           scripts/check-python-sdk-surface.py --self-test
@@ -646,7 +717,7 @@ jobs:
       # --self-test first: on a clean tree "no collisions" and "the scan is
       # broken" print the same kind of success.
       - name: Plugin table namespace guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Plugin table namespace guard" >> "$LINT_FAILURES_FILE"
           scripts/check-plugin-table-namespace.py --self-test
@@ -660,7 +731,7 @@ jobs:
       # first: on a clean tree "no unguarded LIMIT" and "the scan matched
       # nothing" print the same kind of success.
       - name: Plugin SQL LIMIT portability guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Plugin SQL LIMIT portability guard" >> "$LINT_FAILURES_FILE"
           scripts/check-plugin-sql-limit-portability.py --self-test
@@ -678,7 +749,7 @@ jobs:
       # with exactly that shape as the known-positive, so this guard cannot
       # repeat the mistake it exists to prevent.
       - name: No raw plugin.Rebind guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "No raw plugin.Rebind guard" >> "$LINT_FAILURES_FILE"
           scripts/check-no-raw-rebind.py --self-test
@@ -693,7 +764,7 @@ jobs:
       # identifier that is not `err`, a statement split across lines, the
       # writeJSON map form, and an allow marker with no reason or too far above) so a pass means the scan could see the shape.
       - name: No error text in a 500 guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "No error text in a 500 guard" >> "$LINT_FAILURES_FILE"
           scripts/check-no-error-text-in-500.py --self-test
@@ -707,7 +778,7 @@ jobs:
       # (cleat#2210). Structural rather than a one-time count, so a future
       # method with this shape fails here too, not just the ones fixed today.
       - name: MSSQL WithTenant plain-read guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "MSSQL WithTenant plain-read guard" >> "$LINT_FAILURES_FILE"
           scripts/check-mssql-tenant-scoped-reads.py --self-test
@@ -722,7 +793,7 @@ jobs:
       # the first attempt at enumerating it (in the issue) undercounted by
       # four, which is the argument for a guard over a fixed list.
       - name: MSSQL MERGE HOLDLOCK guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "MSSQL MERGE HOLDLOCK guard" >> "$LINT_FAILURES_FILE"
           scripts/check-mssql-merge-holdlock.py --self-test
@@ -741,7 +812,7 @@ jobs:
       # block check is a classifier, and a classifier that returned "fine" for
       # every input would pass the real check silently forever.
       - name: Plan section-number guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Plan section-number guard" >> "$LINT_FAILURES_FILE"
           scripts/check-section-numbers.sh --self-test
@@ -764,7 +835,7 @@ jobs:
       # is reverted rather than being rescued by the other, plus a check that the
       # copy of the scan published in CLAUDE.md still agrees with the script.
       - name: Plan status-marker guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Plan status-marker guard" >> "$LINT_FAILURES_FILE"
           scripts/check-plan-markers.py --self-test
@@ -783,7 +854,7 @@ jobs:
       # tree "nothing drifted" and "the scan matched nothing" print the same
       # kind of success.
       - name: Local package lockfile mirror guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Local package lockfile mirror guard" >> "$LINT_FAILURES_FILE"
           scripts/check-local-package-mirrors.py --self-test
@@ -820,7 +891,7 @@ jobs:
       # self-test ran here, so a NEW dangling reference went unreported by the
       # job whose whole subject is references that resolve to nothing.
       - name: Plan cross-reference guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Plan cross-reference guard" >> "$LINT_FAILURES_FILE"
           scripts/check-plan-references.py --self-test
@@ -840,7 +911,7 @@ jobs:
       # not work" are the same output, so this needs a KNOWN-POSITIVE rather
       # than only a negative control.
       - name: Migration version guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Migration version guard" >> "$LINT_FAILURES_FILE"
           scripts/check-migration-versions.sh --self-test
@@ -857,7 +928,7 @@ jobs:
       # #1858), admits this repo's two deliberate 19.3MB fixtures and would
       # have refused the accident by more than 2x. cleat#1859.
       - name: Tracked blob size guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Tracked blob size guard" >> "$LINT_FAILURES_FILE"
           scripts/check-tracked-blob-size.sh --self-test
@@ -887,7 +958,7 @@ jobs:
       # shallow (depth 1, the merge commit), so `origin/develop` does not exist
       # here and the guard would report UNMEASURED for every PR.
       - name: Doc-comment reattachment guard
-        if: always() && (github.event_name == 'pull_request')
+        if: always() && (needs.edit-gate.outputs.skip != 'true') && (github.event_name == 'pull_request')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Doc-comment reattachment guard" >> "$LINT_FAILURES_FILE"
           # --self-test first, and it is the half that matters. On a tree where
@@ -940,7 +1011,7 @@ jobs:
       # work. One case pins the scope decision the other way: a .go file full of
       # curly quotes has to pass.
       - name: Curly-quote guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Curly-quote guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-curly-quotes.py --self-test
@@ -959,7 +1030,7 @@ jobs:
       # and a link whose text and target disagree -- and to stay quiet on the
       # rows that are correct.
       - name: Readiness scorecard agrees with the tracker
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -996,7 +1067,7 @@ jobs:
       # defect class CLAUDE.md names -- "a mechanism that exists and is wired to
       # nothing reads as done".
       - name: Playbook interface, build and body-claim checks
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -1030,7 +1101,7 @@ jobs:
       # defect class CLAUDE.md names -- "a mechanism that exists and is wired
       # to nothing reads as done".
       - name: ROUTED comment names the current head
-        if: always() && github.event_name == 'pull_request'
+        if: always() && (needs.edit-gate.outputs.skip != 'true') && (github.event_name == 'pull_request')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -1057,7 +1128,7 @@ jobs:
       #
       # No network: the modes come from the checkout's own index.
       - name: Workflow by-path invocations are executable
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Workflow by-path invocations are executable" >> "$LINT_FAILURES_FILE"
           scripts/check-workflow-invoked-executables.py --self-test
@@ -1074,7 +1145,7 @@ jobs:
       # change to the push-trigger detection is caught here rather than by a
       # workflow silently losing its concurrency coverage.
       - name: Workflow concurrency guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Workflow concurrency guard" >> "$LINT_FAILURES_FILE"
           scripts/check-workflow-concurrency.sh --self-test
@@ -1088,14 +1159,14 @@ jobs:
       # the unfiltered workflows' checks. Checks that never registered are not
       # pending, so no downstream count can see it.
       - name: Workflow PR-trigger guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Workflow PR-trigger guard" >> "$LINT_FAILURES_FILE"
           scripts/check-workflow-pr-triggers.sh
           LINT_GUARD_EOF
 
       - name: Setup Go
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -1103,7 +1174,7 @@ jobs:
       # Must run after Setup Go (it shells out to `go mod tidy -diff`), unlike
       # the package-coverage guard above, which is pure bash.
       - name: Cross-module go.mod tidiness guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Cross-module go.mod tidiness guard" >> "$LINT_FAILURES_FILE"
           scripts/check-go-mod-tidy.sh
@@ -1121,7 +1192,7 @@ jobs:
       # the known-positive that separates "no drift" from "this check
       # compares nothing".
       - name: Generated plugin-client freshness guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Generated plugin-client freshness guard" >> "$LINT_FAILURES_FILE"
           scripts/check-generated-plugin-clients.sh --self-test
@@ -1146,7 +1217,7 @@ jobs:
       # self-test builds a synthetic entity that breaks each clause separately
       # and requires a separate red for each.
       - name: Entity contract guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Entity contract guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-entity-contract.py --self-test
@@ -1161,7 +1232,7 @@ jobs:
       # "69" from 2026-08-30 and was 60 when checked on 2026-09-16:
       #   grep -c . scripts/deadcode-baseline.txt
       - name: Test-only code guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         # --self-test FIRST, same as the guards above, and for the reason this
         # step itself demonstrated: until cleat#1707 this guard printed
         #   ERROR: could not install honnef.co/go/tools/cmd/staticcheck@...
@@ -1189,7 +1260,7 @@ jobs:
       # production, ever spells. Baseline records the existing backlog (20
       # entries, all verified by hand -- see the commit that added it).
       - name: Dead-export code guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Dead-export code guard" >> "$LINT_FAILURES_FILE"
           scripts/check-dead-exports.sh
@@ -1202,7 +1273,7 @@ jobs:
       # explains is suppressed. Removing the suppression, or turning max() into min(), fails it (verified
       # by hand when it was written). The image is pinned: the rule language moves.
       - name: Alert rules (promtool check and unit tests)
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Alert rules (promtool check and unit tests)" >> "$LINT_FAILURES_FILE"
           set -euo pipefail
@@ -1231,7 +1302,7 @@ jobs:
       # into it. Baseline is 14 entries -- findings in cmd/'s OWN files only; the
       # whole-program set is ~400 and is the other two guards' ground.
       - name: Unreachable-from-main guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Unreachable-from-main guard" >> "$LINT_FAILURES_FILE"
           scripts/check-unreachable-main.sh
@@ -1254,14 +1325,14 @@ jobs:
       #   clean                                      -> OK, 63 host functions, exit 0
       #   one raw linker.FuncWrap in wasmtime_wasi.go -> FAIL naming the line, exit 1
       - name: Host-function epoch-budget guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Host-function epoch-budget guard" >> "$LINT_FAILURES_FILE"
           scripts/check-hostfunc-budget.sh
           LINT_GUARD_EOF
 
       - name: Setup Python
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -1283,7 +1354,7 @@ jobs:
       # behind it, so making a workflow parse is where the investigation
       # starts, not where it ends.)
       - name: Workflow files parse
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Workflow files parse" >> "$LINT_FAILURES_FILE"
           set -euo pipefail
@@ -1371,7 +1442,7 @@ jobs:
       # pyyaml comes from the "Workflow files parse" step above; this step must
       # stay after it.
       - name: Workflow integrity guards
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Workflow integrity guards" >> "$LINT_FAILURES_FILE"
           scripts/check-workflow-guards.py --self-test
@@ -1389,7 +1460,7 @@ jobs:
       # one, a completed rerun of that same fixture, and unparsable input),
       # not a restatement of the happy path.
       - name: Develop-push-was-queued guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Develop-push-was-queued guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-develop-push-was-queued.py --self-test
@@ -1402,7 +1473,7 @@ jobs:
       # the known-positives are shown to be refused in CI every time; pyyaml comes from the
       # "Workflow files parse" step above, so this step stays after it.
       - name: TypeScript tier-2 scaffolding guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "TypeScript tier-2 scaffolding guard" >> "$LINT_FAILURES_FILE"
           scripts/check-typescript-tier.py --self-test
@@ -1414,7 +1485,7 @@ jobs:
       # v0.5.0 had -- and checks UNMEASURED is a different exit status from a
       # finding.
       - name: Image label script self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Image label script self-test" >> "$LINT_FAILURES_FILE"
           python3 scripts/oci_image_labels.py --self-test
@@ -1430,7 +1501,7 @@ jobs:
       # and an empty range is UNMEASURED. A copy would certify the copy; this
       # runs the shipped text.
       - name: Stream trailer check self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Stream trailer check self-test" >> "$LINT_FAILURES_FILE"
           scripts/test-stream-trailer-check.sh
@@ -1445,7 +1516,7 @@ jobs:
       # the retry notice as well as the status: with the retry disabled a
       # transient case still ends in SOME status.
       - name: Transient-fetch retry self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Transient-fetch retry self-test" >> "$LINT_FAILURES_FILE"
           scripts/lib/retry-transient.sh --self-test
@@ -1462,7 +1533,7 @@ jobs:
       # reading of the same files that must agree with the parser. Placed after
       # "Workflow files parse", which installs pyyaml.
       - name: Workflow job timeout guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Workflow job timeout guard" >> "$LINT_FAILURES_FILE"
           scripts/check-workflow-job-timeouts.py --self-test
@@ -1487,7 +1558,7 @@ jobs:
       # run: doctored configs the guard must report. A guard that passes a good
       # tree has demonstrated nothing, because every broken version does that.
       - name: Dependabot coverage guard
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Dependabot coverage guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check_dependabot_coverage.py --self-test
@@ -1500,7 +1571,7 @@ jobs:
       # shortfall -- so that a change breaking either is caught here rather
       # than by a confusing message on someone else's PR (cleat#1388).
       - name: Skip budget guard self-test
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Skip budget guard self-test" >> "$LINT_FAILURES_FILE"
           scripts/check-skip-budget.sh --self-test
@@ -1523,21 +1594,21 @@ jobs:
       # above now fails this job if anyone adds one to a required job or any of
       # its steps.
       - name: Install ruff
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Install ruff" >> "$LINT_FAILURES_FILE"
           pip install ruff==0.16.2
           LINT_GUARD_EOF
 
       - name: Ruff check
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Ruff check" >> "$LINT_FAILURES_FILE"
           ruff check python-sdk/
           LINT_GUARD_EOF
 
       - name: Setup Rust
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -1555,7 +1626,7 @@ jobs:
       # Bump deliberately, reading the release notes for new checks, rather than
       # inheriting one from an image refresh.
       - name: Install lint tools
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
           SHELLCHECK_VERSION: v0.11.0
         run: |
@@ -1613,7 +1684,7 @@ jobs:
       # dependency fails loudly, which is the good case; the bad case is the
       # one this file is otherwise about.
       - name: ShellCheck
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         # .githooks/* included since 2026-09-04: the pre-commit hook shipped in
         # #706 with a defect and nothing linted it. It sources
         # scripts/section-blocks.sh, which is an input here, so SC1091 resolves.
@@ -1653,14 +1724,14 @@ jobs:
       # reported it. Vet is clean across ./... with CGO on, so this costs
       # nothing to switch on.
       - name: Go vet
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Go vet" >> "$LINT_FAILURES_FILE"
           CGO_ENABLED=1 go vet ./...
           LINT_GUARD_EOF
 
       - name: Clippy (cleat-macro)
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         working-directory: crates/cleat-macro
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Clippy (cleat-macro)" >> "$LINT_FAILURES_FILE"
@@ -1668,7 +1739,7 @@ jobs:
           LINT_GUARD_EOF
 
       - name: Clippy (cleat-sdk)
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         working-directory: crates/cleat-sdk
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Clippy (cleat-sdk)" >> "$LINT_FAILURES_FILE"
@@ -1676,7 +1747,7 @@ jobs:
           LINT_GUARD_EOF
 
       - name: Clippy (cleat-test)
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         working-directory: crates/cleat-test
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "Clippy (cleat-test)" >> "$LINT_FAILURES_FILE"
@@ -1717,7 +1788,7 @@ jobs:
       # only thing that can still fail the job, by design -- without it, every
       # guard above could break and Lint would read green.
       - name: Aggregate guard results
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           if [ -s "$LINT_FAILURES_FILE" ]; then
             echo "ERROR: the following guard(s) failed:" >&2
@@ -1726,7 +1797,8 @@ jobs:
           fi
           echo "OK: every guard step ran, and none failed."
   lint-go:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    needs: [edit-gate]
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15  # max 3.4m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 5m, 2026-10-27; cleat#3479
     env:
@@ -1737,8 +1809,16 @@ jobs:
       # does not ship.
       CGO_ENABLED: "1"
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
       - uses: actions/setup-go@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         with:
           # Derived from go.work rather than pinned to a literal. This job was
           # the last place asserting a 1.25 floor -- eleven required contexts
@@ -1762,6 +1842,7 @@ jobs:
       # leave the majority of the repo's Go files outside the check that is
       # being added to catch exactly this.
       - name: gofmt
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           unformatted=$(gofmt -l . | grep -v '/testdata/' || true)
           if [ -n "$unformatted" ]; then
@@ -1782,6 +1863,7 @@ jobs:
       # statuses, including `2` for an unset DSN. Lives in this job because it
       # needs Go and this is the lint job that has it.
       - name: test-all-dbs self-test
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: scripts/test-all-dbs.sh --self-test
 
       # --timeout, because golangci-lint's default is one minute and this job
@@ -1849,6 +1931,7 @@ jobs:
       # root module's 764 files. The --timeout is per-invocation, so the loop
       # does not eat into the root module's budget.
       - name: golangci-lint (all first-party modules)
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           set -uo pipefail
           # v2, built for the Go 1.27 toolchain this job runs (cleat#2216). v1.64.7 could not read 1.27's
@@ -1906,8 +1989,9 @@ jobs:
   # Vulnerability check (govulncheck)
   # -------------------------------------------------------------------------
   build-documented-examples:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') && needs.edit-gate.outputs.skip != 'true' }}
     name: Documented example builds
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 2.5m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # Every `cleat build` an example README documents is run, and must succeed.
@@ -2002,6 +2086,7 @@ jobs:
     # One entry per dialect: the same scenario, the same assertions, three
     # databases. cleat#2560.
     name: Order lifecycle scenario (${{ matrix.dialect }})
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 15  # max 4.2m over 167 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # `fail-fast: false` because the arms are independent, and a red PostgreSQL
@@ -2035,7 +2120,7 @@ jobs:
     # never reports in merge_group wedges the queue with nothing red on it: the
     # queue waits for a status that cannot arrive, and no check fails to say so.
     # Nine workflow files here carry that warning; this is the tenth.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # The example in examples/order-lifecycle, RUN rather than only built.
     # cleat#2512, and on three dialects since cleat#2560.
     #
@@ -2096,6 +2181,7 @@ jobs:
     # One entry per dialect: the same scenario, the same assertions, three
     # databases. cleat#2560.
     name: Integration hub scenario (${{ matrix.dialect }})
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 15  # max 5.2m over 167 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # `fail-fast: false` so a red arm does not cancel the others -- the whole
@@ -2114,7 +2200,7 @@ jobs:
     # required context, so a merge_group run would add a docker build to the
     # critical path of every queue entry while gating nothing. The `if:` and any
     # future promotion to a required context go together, never one alone.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # The example in examples/integration-hub, RUN rather than only built.
     # cleat#2533.
     #
@@ -2168,6 +2254,7 @@ jobs:
 
   integration-hub-tenant-sandbox-scenario:
     name: Integration hub tenant sandbox scenario
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 2.7m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling scenario jobs
@@ -2175,7 +2262,7 @@ jobs:
     # line. Not a required context (.github/required-checks.txt), so a
     # merge_group run would add a build to the critical path of every queue
     # entry while gating nothing.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # scripts/run-integration-hub-tenant-sandbox-scenario.sh, cleat#2597. The
     # sibling job above (integration-hub-scenario) proves the tenant-uploaded-
     # step MECHANISM works: a tenant's own WASM, uploaded through
@@ -2250,6 +2337,7 @@ jobs:
 
   order-lifecycle-dbos-pair-scenario:
     name: Order lifecycle DBOS pair scenario
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 2.4m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the two jobs above --
@@ -2257,7 +2345,7 @@ jobs:
     # a required context (.github/required-checks.txt), so a merge_group run
     # would add an npm install/build to the critical path of every queue
     # entry while gating nothing.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # examples/order-lifecycle-dbos-port, RUN rather than only built --
     # cleat#2597. The pair's own README states the claim this job exists to
     # back: a genuinely executed, equally-scoped DBOS counterpart of
@@ -2333,6 +2421,7 @@ jobs:
 
   integration-hub-dbos-pair-scenario:
     name: Integration hub DBOS pair scenario
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 3.2m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling scenario
@@ -2340,7 +2429,7 @@ jobs:
     # line. Not a required context (.github/required-checks.txt), so a
     # merge_group run would add an npm install/build to the critical path of
     # every queue entry while gating nothing.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # examples/integration-hub-dbos-port, cleat#2597's SECOND cleat-vs-DBOS
     # pair -- unlike its sibling above (the CONTROL, an honest equally-scoped
     # comparison), this pair exists to locate a specific structural boundary:
@@ -2420,6 +2509,7 @@ jobs:
 
   b2b-saas-control-plane-dbos-pair-scenario:
     name: B2B SaaS control plane DBOS pair scenario
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 4.0m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling jobs above --
@@ -2427,7 +2517,7 @@ jobs:
     # required context (.github/required-checks.txt), so a merge_group run
     # would add an npm install/build to the critical path of every queue entry
     # while gating nothing.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # examples/b2b-saas-control-plane-dbos-port, RUN rather than only built --
     # cleat#2597/#2681. The pair's README states the claim this job exists to
     # back: an equally-scoped DBOS counterpart of the b2b-saas-control-plane
@@ -2512,6 +2602,7 @@ jobs:
 
   ai-agent-platform-scenario:
     name: AI agent platform scenario
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 15  # max 4.3m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the two jobs above -- read
@@ -2519,7 +2610,7 @@ jobs:
     # form: this is not a required context, so a merge_group run would add a
     # docker build to the critical path of every queue entry while gating
     # nothing.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # The example in examples/ai-agent-platform, RUN rather than only built.
     # cleat#2535.
     #
@@ -2576,12 +2667,13 @@ jobs:
 
   b2b-saas-control-plane-scenario:
     name: B2B SaaS control plane scenario
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 3.6m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # merge_group is excluded for the same reason as the sibling scenario jobs
     # above -- read integration-hub-scenario's comment before removing this
     # line.
-    if: github.event_name != 'merge_group'
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && needs.edit-gate.outputs.skip != 'true' }}
     # The example in examples/b2b-saas-control-plane, RUN rather than only
     # built. cleat#2534/#2681.
     #
@@ -2618,14 +2710,23 @@ jobs:
         run: scripts/run-b2b-saas-control-plane-scenario.sh
 
   vulncheck:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Vulnerability Check
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 1.0m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Go
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -2667,9 +2768,11 @@ jobs:
       # --self-test first, same reason as the guards above: a gate that has
       # lost its refusal reads green on the tree it was written to catch.
       - name: govulncheck gate self-test
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: scripts/govulncheck-gate.sh --self-test
 
       - name: govulncheck (all first-party modules)
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         env:
           CGO_ENABLED: "1"
         run: |
@@ -2721,8 +2824,9 @@ jobs:
   # Test Go (matrix: Go version x package group)
   # -------------------------------------------------------------------------
   test-go:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     # cleat#2862: three jobs (two of them this matrix's commands/crash legs)
     # hung with no timeout, each stopping dead mid-post-run-cleanup --
@@ -2947,15 +3051,23 @@ jobs:
             dir: cleat/backendkit
             path: ./...
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Go
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Setup Rust + wasm32-wasip1 (Rust WASM tests)
-        if: matrix.package.name == 'internal'
+        if: (needs.edit-gate.outputs.skip != 'true') && (matrix.package.name == 'internal')
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
@@ -2988,6 +3100,7 @@ jobs:
       # at all, because a test step that died before producing output has
       # skipped everything, which is the strongest form of the same bug.
       - name: Run tests
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         shell: bash
         working-directory: ${{ matrix.package.dir || '.' }}
         run: |
@@ -3006,7 +3119,7 @@ jobs:
           go test -race -count=1 -timeout 30m ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
 
       - name: Skip budget
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         working-directory: ${{ matrix.package.dir || '.' }}
         run: ${{ github.workspace }}/scripts/check-skip-budget.sh 'test-go/${{ matrix.package.name }}' test-report.json
 
@@ -3046,8 +3159,9 @@ jobs:
   # reports blocks every PR. Same shape as e2e-cross-language.yml's summary job
   # (cleat#3925), which is where this pattern was first used here.
   test-go-commands:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') && needs.edit-gate.outputs.skip != 'true' }}
     name: Test Go (commands ${{ matrix.leg }} ${{ matrix.shard }} of 2) on 1.26
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     # 45 is arithmetic, not a measurement: a package that hangs hits its own
     # `go test -timeout 30m` and dumps goroutines at t+30, and setup plus a
@@ -3369,19 +3483,26 @@ jobs:
   # part of them.
   test-go-commands-summary:
     name: Test Go (commands) on 1.26
-    needs: [test-go-commands]
+    needs: [test-go-commands, edit-gate]
     # `if: always()` plus an explicit result check, rather than leaving this
     # job to be skipped when a leg fails: a SKIPPED job does not read as
     # "success", but spelling out the check costs five lines and removes any
     # reliance on GitHub's semantics for a required check.
-    if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/develop')
+    if: ${{ (always() && (github.event_name != 'push' || github.ref != 'refs/heads/develop')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Download the legs' reports
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         uses: actions/download-artifact@v8
         with:
           # No run_attempt: a partial re-run leaves the passing shards' attempt-1
@@ -3394,7 +3515,7 @@ jobs:
           path: legs
 
       - name: Every leg succeeded
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         env:
           LEGS_RESULT: ${{ needs.test-go-commands.result }}
         run: |
@@ -3415,7 +3536,7 @@ jobs:
       # the duplicate check is scoped to everything except those two rather than
       # dropped. The next step is what makes the exception safe.
       - name: The shards together are ./cmd/...
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           # find, NOT `legs/*/`: one artifact extracts flat (cleat#3955).
@@ -3447,7 +3568,7 @@ jobs:
       # listing it selected them from, so the denominator is the package's own
       # `go test -list`, not a copy of the selector.
       - name: Every name-split test ran exactly once
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           for leg in cleat rest; do
@@ -3502,7 +3623,7 @@ jobs:
       # reports are line-delimited JSON from `go test -json` and the legs'
       # tests are disjoint by construction, so concatenation IS the union.
       - name: Skip budget
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
           if ! find legs -name test-report.json | grep -q .; then
@@ -3534,8 +3655,9 @@ jobs:
   # ran, and the aggregate job below re-lists the package and fails when the
   # union is not every test, or when a test appears on two shards.
   test-go-crash:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') && needs.edit-gate.outputs.skip != 'true' }}
     name: Test Go (crash shard ${{ matrix.shard }} of 3) on 1.26
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -3702,8 +3824,8 @@ jobs:
 
   test-go-crash-summary:
     name: Test Go (crash) on 1.26
-    needs: [test-go-crash]
-    if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/develop')
+    needs: [test-go-crash, edit-gate]
+    if: ${{ (always() && (github.event_name != 'push' || github.ref != 'refs/heads/develop')) && needs.edit-gate.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -3789,8 +3911,9 @@ jobs:
   # Test Python (matrix: 3.10 / 3.11 / 3.12 / 3.13)
   # -------------------------------------------------------------------------
   test-python:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Test Python ${{ matrix.python-version }}
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 0.6m over 228 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # No continue-on-error. With it, this job could not fail the build, so the
@@ -3832,14 +3955,23 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Python
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python SDK
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: python-sdk
         run: |
           pip install --upgrade pip
@@ -3847,6 +3979,7 @@ jobs:
           pip install "componentize-py>=0.12.0"
 
       - name: Run tests
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: python-sdk
         run: python -m pytest -v
 
@@ -3854,8 +3987,9 @@ jobs:
   # Test Java
   # -------------------------------------------------------------------------
   test-java:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Java Tests
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 1.9m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # No continue-on-error. It was here, so this job could not fail the build,
@@ -3866,18 +4000,28 @@ jobs:
     #   grep -ho 'tests="[0-9]*"' build/test-results/test/*.xml |
     #     awk -F'"' '{s+=$2} END{print s}'
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Java
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Gradle
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: gradle/actions/setup-gradle@v6
 
       - name: Run Java tests
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: crates/cleat-java
         run: gradle test
 
@@ -3885,8 +4029,9 @@ jobs:
   # Test AssemblyScript
   # -------------------------------------------------------------------------
   test-assemblyscript:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: AssemblyScript Tests
+    needs: [edit-gate]
     # No continue-on-error. Measured 2026-08-06 on a clean checkout, `npm test`
     # in packages/cleat-as runs 106 assertions across three spec files, 106
     # passing -- so the exemption was protecting nothing, and meanwhile the one
@@ -3897,18 +4042,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 0.4m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Node
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-node@v7
         with:
           node-version: "20"
 
       - name: Install dependencies
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: packages/cleat-as
         run: npm ci
 
       - name: Run tests
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: packages/cleat-as
         run: npm test
 
@@ -3953,14 +4108,23 @@ jobs:
   #     errors, not warnings, so those do not gate. They are real and unfixed.
   # -------------------------------------------------------------------------
   test-web:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Web Dashboard
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 0.7m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Node
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-node@v7
         with:
           # Node 22, not 20: the web toolchain's own engines require it.
@@ -3979,16 +4143,19 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: web
         run: npm ci
 
       # Before build and test, because it is the one that found a real defect
       # and its failures are the most specific.
       - name: Type check (svelte-check)
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: web
         run: npm run check
 
       - name: Test
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: web
         run: npm test
 
@@ -3996,12 +4163,14 @@ jobs:
       # the worker embeds, so the step after this one can ask whether what is
       # committed is what the source produces.
       - name: Build
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: web
         run: npm run build
 
       # A build that emits nothing exits 0. Cheapest possible guard against
       # this job going green on an empty output.
       - name: Build produced something
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           set -euo pipefail
           test -f cmd/cleat-worker/web/dist/index.html \
@@ -4015,6 +4184,7 @@ jobs:
       # stale. `git status --porcelain` is used and not `git diff` so a NEW
       # hashed asset (untracked) and a REMOVED one (deleted) both count.
       - name: Committed bundle matches its source
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           set -euo pipefail
           if [ -n "$(git status --porcelain cmd/cleat-worker/web/dist/)" ]; then
@@ -4033,23 +4203,34 @@ jobs:
   # Test Rust
   # -------------------------------------------------------------------------
   test-rust:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Test Rust
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 1.1m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Rust
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
 
       - name: Test cleat-macro
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: crates/cleat-macro
         run: cargo test
 
       - name: Test cleat-sdk
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: crates/cleat-sdk
         run: cargo test
 
@@ -4060,10 +4241,12 @@ jobs:
       #
       #   grep -rn "cleat-test" .github/workflows/
       - name: Test cleat-test
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: crates/cleat-test
         run: cargo test
 
       - name: Verify WASM compilation
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: crates/cleat-sdk
         run: cargo build --target wasm32-wasip1 --release
 
@@ -4071,8 +4254,9 @@ jobs:
   # Test AssemblyScript WASM compilation
   # -------------------------------------------------------------------------
   test-assemblyscript-wasm:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') && needs.edit-gate.outputs.skip != 'true' }}
     name: AssemblyScript WASM Build
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 0.4m over 58 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # continue-on-error removed 2026-08-07. It was protecting nothing: measured on
@@ -4136,19 +4320,29 @@ jobs:
   # Fuzz tests (WASM boundary)
   # -------------------------------------------------------------------------
   fuzz:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Fuzz Tests
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 3.5m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Go
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Run fuzz tests
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           go test -fuzz=FuzzWASMMetadata -fuzztime=30s -run=^$ ./wasm/...
           go test -fuzz=FuzzULEB128 -fuzztime=30s -run=^$ ./wasm/...
@@ -4163,11 +4357,11 @@ jobs:
       # them lets `if: always()` guarantee the budget is evaluated either way,
       # without `|| true` throwing away the exit status.
       - name: Collect wasm test report
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: go test -json -count=1 ./wasm/... > fuzz-report.json 2>&1
 
       - name: Skip budget
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: scripts/check-skip-budget.sh fuzz fuzz-report.json
 
   # -------------------------------------------------------------------------
@@ -4282,8 +4476,9 @@ jobs:
   # and adding a line there without changing the repository setting would be a
   # doc that lies. Making this blocking is a settings change for a maintainer.
   release-dryrun:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') && needs.edit-gate.outputs.skip != 'true' }}
     name: Release Dry Run
+    needs: [edit-gate]
     # ubuntu-26.04, matching release.yml (cleat#2069) -- the .deb-install
     # step below needs to run on the same base the real release job pins to,
     # not whatever ubuntu-latest happens to mean this week.
@@ -4553,54 +4748,71 @@ jobs:
         run: docker rm -f helm-dryrun-registry
 
   build:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Build
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 3.3m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Go
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Setup Python
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Setup Node
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-node@v7
         with:
           node-version: "20"
 
       - name: Setup Rust
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
 
       - name: Setup Java
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Gradle
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: gradle/actions/setup-gradle@v6
 
       - name: Build Go binaries
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           CGO_ENABLED=0 go build ./cmd/...
           echo "[+] Go binaries built successfully"
 
       - name: Build Rust crates
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: |
           cd crates/cleat-macro && cargo build --all-targets
           cd ../cleat-sdk && cargo build --all-targets
           cargo build --target wasm32-wasip1 --release
 
       - name: Build AssemblyScript
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: packages/cleat-as
         run: |
           npm ci
@@ -4611,10 +4823,12 @@ jobs:
       # build is not flaky -- it is the same `gradle build` the Java Tests job
       # runs green -- so the escape hatch only served to hide a real break.
       - name: Build Java
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: crates/cleat-java
         run: gradle build
 
       - name: Install Python SDK
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: python-sdk
         run: |
           pip install --upgrade pip
@@ -4631,6 +4845,7 @@ jobs:
       # already builds Go/Rust/AS/Java regardless of what changed, rather
       # than adding path-filtering this job has never had.
       - name: Build and check the Python SDK's PyPI artifacts
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         working-directory: python-sdk
         run: |
           pip install build twine
@@ -4642,6 +4857,7 @@ jobs:
   # -------------------------------------------------------------------------
   coverage:
     name: Coverage
+    needs: [edit-gate]
     # Runs where the number is actionable. This was main-push-only, so the
     # floors were compared exactly once per commit -- after the work had
     # already landed, on a tree nobody was about to change. A PR could move
@@ -4659,7 +4875,7 @@ jobs:
     # pay for it and gain nothing. `refs/heads/main` is false for a merge-group
     # ref (`refs/heads/gh-readonly-queue/...`), so the second clause excludes it
     # rather than needing a third.
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && needs.edit-gate.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # cleat#2862/cleat#2876: this was the third job stuck in the same hang,
     # and it needs its OWN number rather than reusing test-go's 45 --
@@ -4790,16 +5006,25 @@ jobs:
   # Cluster integration tests (requires Docker)
   # -------------------------------------------------------------------------
   cluster-tests:
-    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref != 'refs/heads/develop') }}
     name: Cluster Integration Tests
+    needs: [edit-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 40  # max 15.3m over 49 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     # No job-wide env: this job used to set CLEAT_TEST_DB to a dedicated server it kept for ./engine/... (cleat#3935
     # removed that run). Both remaining suites set their own DSN on the step that needs it.
     steps:
+      # A required context must still report SUCCESS on a body edit: a
+      # `skipped` one beside its `success` twin leaves the PR un-mergeable
+      # (cleat#3958, measured on #3960). So the job runs and does nothing.
+      - name: Nothing to do -- this head already passed
+        if: ${{ needs.edit-gate.outputs.skip == 'true' }}
+        run: echo "the PR head already passed this workflow; nothing to re-run"
       - uses: actions/checkout@v7
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
 
       - name: Setup Go
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -4810,12 +5035,15 @@ jobs:
       # though CGO_ENABLED=0 were the shipped configuration, which is the
       # belief that let 2.28 survive. The image build below is the real one.
       - name: Build Docker image
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: docker build -t cleat-worker:latest .
 
       - name: Start Postgres and apply the schema
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         run: docker compose -f docker-compose.cluster.yml up -d postgres
 
       - name: Wait for cluster readiness
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         shell: bash
         run: |
           # pg_isready alone is not a readiness signal for this job. During
@@ -5007,6 +5235,7 @@ jobs:
       # (cleat_db_probe_duration_seconds is observed at startup). A scrape without one cannot exercise the
       # defect, so it is reported as unmeasured (exit 2) rather than as a pass.
       - name: /metrics from every booted worker parses (promtool check metrics)
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         shell: bash
         run: |
           set -uo pipefail
@@ -5064,6 +5293,7 @@ jobs:
       # is 0, and a skip appearing under it means the DSN above stopped taking
       # effect.
       - name: Resource exhaustion — runaway workflow is terminated
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         shell: bash
         env:
           CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
@@ -5072,7 +5302,7 @@ jobs:
           go test -count=1 -timeout=300s -json ./tests/exhaustion/... 2>&1 | tee exhaustion-report.json
 
       - name: Skip budget — resource exhaustion
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: scripts/check-skip-budget.sh cluster/exhaustion exhaustion-report.json
 
       # After the exhaustion step, not before: TestKillPostgresAndRestart stops
@@ -5084,6 +5314,7 @@ jobs:
       # docker-compose.cluster.yml serves, so it does not race the live workers
       # for the rows it inserts.
       - name: Cluster suite — claiming, failover and replay against the live cluster
+        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
         # The cluster's OWN database.
         #
         # This suite restarts the postgres container, kills workers and asserts
@@ -5111,15 +5342,15 @@ jobs:
       # go test runs the files in name order -- so five tests after it open a
       # database against a server that was just restarted.
       - name: Skip budget — cluster suite
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: scripts/check-skip-budget.sh cluster/suite cluster-report.json
 
       - name: Cluster logs (on failure)
-        if: failure()
+        if: (needs.edit-gate.outputs.skip != 'true') && (failure())
         run: |
           docker compose -f docker-compose.cluster.yml logs --tail=100
 
       - name: Tear down cluster
-        if: always()
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           docker compose -f docker-compose.cluster.yml down -v
