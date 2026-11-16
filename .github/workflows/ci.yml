@@ -3124,9 +3124,7 @@ jobs:
             echo "::error::leg '${{ matrix.leg }}' selected no packages from $PATHS (excluding ${EXCLUDE:-nothing})" >&2
             exit 1
           fi
-          printf '%s\n' "$mine" | LC_ALL=C sort -u > packages.txt
-          echo "leg '${{ matrix.leg }}': $count package(s)"
-          cat packages.txt
+          echo "leg '${{ matrix.leg }}': $count package(s) before sharding"
           # ONE LINE, because GITHUB_OUTPUT needs `name=value` unless the
           # heredoc form is used -- and the heredoc form inside a step whose
           # value is a package list is a second thing to get wrong.
@@ -3185,7 +3183,19 @@ jobs:
           printf 'selector=%s\n' "$SELECTOR" >> "$GITHUB_OUTPUT"
           printf 'filtered=%s\n' "$FILTERED" >> "$GITHUB_OUTPUT"
           printf 'unfiltered=%s\n' "$UNFILTERED" >> "$GITHUB_OUTPUT"
-          echo "leg '${{ matrix.leg }}' shard ${{ matrix.shard }} of 2: $test_count of $total tests in $SPLIT"
+
+          # packages.txt IS WHAT THIS SHARD RUNS, not what its leg covers. The
+          # aggregate diffs the union of these against `go list ./cmd/...`, and
+          # duplicates are permitted ONLY for the two name-split packages -- so a
+          # shard writing its whole leg's list would make every small package on
+          # the rest leg look double-run. (Found in review by the coordinator
+          # before the first run; the aggregate was right and the data was not.)
+          go list $FILTERED | LC_ALL=C sort -u > packages.txt
+          if [ -n "$UNFILTERED" ]; then
+            printf '%s\n' "$UNFILTERED" | tr ' ' '\n' | LC_ALL=C sort -u >> packages.txt
+          fi
+          echo "leg '${{ matrix.leg }}' shard ${{ matrix.shard }} of 2: $test_count of $total tests in $SPLIT, $(grep -c . packages.txt) package(s)"
+          cat packages.txt
 
       - name: Run tests
         shell: bash
