@@ -2825,13 +2825,10 @@ jobs:
             # advisory lock is what covers that, and cleat#1666 is the half of it
             # that ./migration/ was missing. Both layers, or neither works.
             flags: -p 1
-          - name: commands
-            path: ./cmd/...
-            # -p 1 for the same reason as the plugins entry above (cleat#2063).
-            # Three of the nine packages under cmd/ are database-backed --
-            # cleat, cleat-worker and cleatctl -- and this job provides one
-            # PostgreSQL service they'd all share in parallel otherwise.
-            flags: -p 1
+          # commands has its own job group -- test-go-commands, two legs by
+          # package, plus the aggregate that reports the required context. It
+          # was 25m01s here and is one of the two jobs that set the merge
+          # queue's wall; see the comment above that job for the measurement.
           # tests/ is otherwise not in this matrix -- cluster/scale/soak need
           # infrastructure and plugin-harness and cross-language have their own
           # workflows. manifests needs nothing but a Go toolchain, and it is the
@@ -2861,20 +2858,12 @@ jobs:
           # a slow runner.
           - name: scale
             path: ./tests/scale/...
-          # crash is §2.4. It needs the same PostgreSQL service, plus the
-          # ability to CREATE/ALTER a role: it runs a real cleat-worker
-          # subprocess on the shipped two-DSN configuration (--db as the
-          # unprivileged cleat_app, --migrate-db as the owner) and SIGKILLs it
-          # mid-DurableCall. Running it as the owner instead would silently
-          # disable RLS, which is the class of defect it exists to catch.
-          #
-          # NOTE (WS-2 -> WS-3): .github/workflows/ is WS-3's under
-          # WORKSTREAM.md's shared-files table. Added here rather than left unwired,
-          # because check-ci-package-coverage.sh correctly refuses a suite no
-          # job runs and UNWIRED_SUITES is how the last set of dead suites
-          # accumulated. Move or restructure it freely.
-          - name: crash
-            path: ./tests/crash/...
+          # crash has its own job group -- test-go-crash, three shards by test
+          # name, plus the aggregate that reports the required context. It is
+          # ONE package, so it could not be split by path, and it was 25m40s
+          # here: the longer of the two jobs that set the merge queue's wall.
+          # See the comment above that job for the measurement and for why the
+          # split is a static list rather than a derived one.
           # NOTE (cleat-review -> WS-3): .github/workflows/ is WS-3's under
           # WORKSTREAM.md's shared-files table. Added here rather than left
           # unwired for the same reason the crash entry above gives -- a suite
@@ -2919,195 +2908,21 @@ jobs:
         with:
           targets: wasm32-wasip1
 
-      # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
-      # compiles for the former (cmd/cleat/build_rust.go), same as
-      # plugin-harness-ci.yml's identically-named step. Without it,
-      # TestRustExampleEntryPointResolutionLive and
-      # TestRustEntryPointsSurviveARenamedMacroImport skip in this job --
-      # cleat#2146. Node and Java below cover the AssemblyScript and Java
-      # counterparts added by cleat#2145: TestAssemblyScriptExampleEntryPointResolutionLive,
-      # TestJavaExampleEntryPointResolutionLive, and the staleness guards in
-      # entry_point_manifest_staleness_test.go. All four are scoped to the
-      # 'commands' entry (./cmd/...), the only one that builds these examples.
-      - name: Setup Rust + wasm32-unknown-unknown
-        if: matrix.package.name == 'commands'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # The toolchains these two entries used to install here are now on the
+      # jobs that own them: `Setup Rust/Node/Java/Gradle` for the
+      # entry-point-resolution tests moved to test-go-commands (the leg that
+      # carries cmd/cleat, where all four of those tests live), and the
+      # `for the crash agent client` pair moved to test-go-crash. Keeping them
+      # here behind `if: matrix.package.name == 'commands'` would have left six
+      # steps that can never run and a condition nothing satisfies.
 
-      - name: Setup Node (AssemblyScript build path)
-        if: matrix.package.name == 'commands'
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
-      - name: Setup Java (Java build path)
-        if: matrix.package.name == 'commands'
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Setup Gradle (Java build path)
-        if: matrix.package.name == 'commands'
-        uses: gradle/actions/setup-gradle@v6
-
-      # The Rust, Java and AssemblyScript agent clients, for cleat#2978's
-      # extension of cleat#1983's acceptance to those three SDKs (it already
-      # ran Go and Python). Same reasoning as the Python toolchain below, and
-      # the same reason the 'commands' steps above cannot be reused: those
-      # are scoped to cleat#2146/#2145's entry-point-resolution tests under
-      # ./cmd/..., a different matrix leg, and widening their condition would
-      # conflate two independent reasons a toolchain is needed. A skip here
-      # is not a pass wearing a different colour -- see the Python comment
-      # below, which applies identically to these three.
-      #
-      # NOTE (WS-1 -> WS-3): .github/workflows/ is WS-3's under WORKSTREAM.md's
-      # shared-files table. Added here rather than left unwired, for the same
-      # reason the Python steps below give. Move or restructure it freely.
-      #
-      # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
-      # compiles for the former (cmd/cleat/build_rust.go), same as the
-      # 'commands' leg's identically-targeted step above.
-      - name: Setup Rust + wasm32-unknown-unknown for the crash agent client
-        if: matrix.package.name == 'crash'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Setup Node for the crash agent client (AssemblyScript build path)
-        if: matrix.package.name == 'crash'
-        uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-
-      - name: Setup Java for the crash agent client
-        if: matrix.package.name == 'crash'
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Setup Gradle for the crash agent client
-        if: matrix.package.name == 'crash'
-        uses: gradle/actions/setup-gradle@v6
-
-      # The Python agent client, for cleat#1983's acceptance. That test runs the
-      # shipped agent workflow from BOTH SDKs, and a Python workflow is a
-      # Component Model binary, which only `componentize-py` produces -- so
-      # without this the Python subtest SKIPS.
-      #
-      # A skip here is not a pass wearing a different colour: ./tests/crash/...
-      # is a tier-1 package (tiers.yaml), and the skip budget for this leg
-      # would count it. It is also the exact skip-that-hides-a-regression shape
-      # -- a missing toolchain and a broken build would both read as green.
-      # So the toolchain is installed rather than tolerated, exactly as
-      # plugin-harness-ci.yml does for the same reason.
-      #
-      # NOTE (WS-1 -> WS-3): .github/workflows/ is WS-3's under WORKSTREAM.md's
-      # shared-files table. Added here rather than leaving the mechanism
-      # unwired, for the same reason the crash matrix entry above gives. Move
-      # or restructure it freely.
-      #
-      # Both halves are load-bearing. The console script is what
-      # `cleat build --target python` shells out to
-      # (cmd/cleat/build_python.go), and componentize-py can import perfectly
-      # well while having no script on PATH -- a pip --user install puts it in
-      # a bin directory nothing searches. And the interpreter has to be >= 3.10:
-      # the SDK uses PEP 604 unions at module scope, so importing it on 3.9 is
-      # a TypeError rather than a version warning.
-      #
-      # The SDK is deliberately NOT pip-installed. The test points PYTHONPATH
-      # at this checkout's python-sdk, so the SDK under test is always the one
-      # in the diff rather than whatever PyPI last published.
-      - name: Setup Python for the crash agent client
-        if: matrix.package.name == 'crash'
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - name: Install componentize-py for the crash agent client
-        if: matrix.package.name == 'crash'
-        run: pip install componentize-py
-
-      # GAP2 from cleat#2005's third review round: the real-Postgres
-      # docker-pause reproduction
-      # (TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun,
-      # cmd/cleat-worker) was manual-only, gated behind
-      # CLEAT_TEST_DOCKER_PAUSE_CONTAINER because pausing a container by name
-      # only makes sense against one this job actually controls. This job
-      # runs directly on the runner (no job-level `container:` wrapping these
-      # steps), so the Postgres service above is a sibling container the
-      # Docker daemon here can see and pause -- matched by the exact pinned
-      # image ref rather than a guessed name, since GitHub Actions assigns
-      # service containers a name this workflow does not choose.
-      #
-      # A STEP OUTPUT, not $GITHUB_ENV: the earlier version of this exported
-      # CLEAT_TEST_DOCKER_PAUSE_CONTAINER as a job-wide env var here, before
-      # "Run tests" -- which meant the docker-pause test ran SOMEWHERE inside
-      # that step's one `go test ./cmd/... ` invocation, sharing the paused
-      # Postgres service with whatever else that invocation had in flight.
-      # -p 1 (below) and cmd/cleat-worker carrying no t.Parallel already made
-      # that safe in practice, but a peer review of this wiring (cleat#2005)
-      # asked for the stronger property that needs no such argument: the
-      # reproduction now runs in its OWN step, after "Run tests" has already
-      # finished, so nothing else can be mid-query against this job's
-      # Postgres when it gets paused.
-      #
-      # Best-effort, not a gate: the reproduction step below already skips
-      # cleanly (see the test's own t.Skip) when this output is empty, so a
-      # failure to locate the container here degrades to "the reproduction
-      # skips this run," not to a broken job.
-      - name: Locate the Postgres service container for the docker-pause reproduction
-        id: locate-pg
-        if: matrix.package.name == 'commands'
-        run: |
-          id=$(docker ps -q --filter "ancestor=mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
-          count=$(echo "$id" | wc -w)
-          if [ "$count" -eq 1 ]; then
-            echo "container_id=$id" >> "$GITHUB_OUTPUT"
-            echo "found the Postgres service container: $id"
-          else
-            echo "::warning::expected exactly one Postgres service container matching the pinned image, found $count -- the docker-pause reproduction will skip this run"
-          fi
-
-      - name: Run tests
-        shell: bash
-        working-directory: ${{ matrix.package.dir || '.' }}
-        run: |
-          # pipefail is required: without it `tee` supplies the exit status and
-          # a failing `go test` is silently reported as a green step.
-          set -o pipefail
-          # Unquoted on purpose: some matrix entries list several package patterns
-          # and rely on word splitting. Values are controlled by this file only.
-          # -timeout 30m, not Go's 10-minute default. The Tier 1 Gate hit that
-          # default on 2026-09-03 -- ran=6546 pass=6543 fail=0, then "panic:
-          # test timed out after 10m0s" -- because it configures all three
-          # DSNs. This job configures PostgreSQL only and still finishes well
-          # inside 10m, so this is insurance rather than a fix: the number that
-          # matters is the one the suite grows into, and -race makes this job
-          # the slower of the two per test.
-          go test -race -count=1 -timeout 30m ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
-
-      # Runs AFTER "Run tests" has already finished -- see this step's own
-      # comment above, on why the container id is a step output rather than
-      # a job-wide env var. Not `-race`: it drives two real Workers'
-      # background goroutines against a real database on its own, and
-      # nothing about GAP2 is about a data race. `if:` requires the
-      # discovery step to have actually found something, so an empty output
-      # (the container-count warning above) skips this step outright rather
-      # than running `go test` with an empty CLEAT_TEST_DOCKER_PAUSE_CONTAINER
-      # -- which the test would itself treat as "unset" and skip anyway, but
-      # doing it here makes that visible as a skipped STEP rather than a
-      # passing one that quietly ran nothing.
-      - name: Run the docker-pause reproduction (GAP2)
-        if: matrix.package.name == 'commands' && steps.locate-pg.outputs.container_id != ''
-        env:
-          CLEAT_TEST_DOCKER_PAUSE_CONTAINER: ${{ steps.locate-pg.outputs.container_id }}
-        run: |
-          set -o pipefail
-          go test -count=1 -timeout 120s -v \
-            -run '^TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun$' \
-            ./cmd/cleat-worker/... 2>&1 | tee docker-pause-report.txt
+      # GAP2 from cleat#2005's third review round -- the real-Postgres
+      # docker-pause reproduction -- moved to test-go-commands with the
+      # `commands` entry. The test lives in cmd/cleat-worker, which that job
+      # runs on its `rest` leg, and it keeps its own step after "Run tests"
+      # there: nothing else can be mid-query against that job's Postgres when
+      # it gets paused. A step left here would be gated on a matrix entry that
+      # no longer exists, for the same reason the toolchains above moved.
 
       # A warning here was not enough. This job spun up a Postgres service it
       # could not reach, skipped every Postgres-backed test, emitted exactly
@@ -3124,6 +2939,571 @@ jobs:
         if: always()
         working-directory: ${{ matrix.package.dir || '.' }}
         run: ${{ github.workspace }}/scripts/check-skip-budget.sh 'test-go/${{ matrix.package.name }}' test-report.json
+
+  # -------------------------------------------------------------------------
+  # Test Go (commands) -- the same ./cmd/... tree, split across two runners
+  # -------------------------------------------------------------------------
+  # WHY THIS EXISTS. On the merge-group run for 02708649 (run 43762143798, job
+  # 132959102447) `Test Go (commands) on 1.26` took 25m01s and `Test Go (crash)`
+  # 25m40s. Those two were the ONLY jobs still running when the rest of the
+  # suite had finished -- everything else was done inside 5m36s -- so they, and
+  # nothing else, set how long a batch of PRs sits in the merge queue.
+  #
+  # The step breakdown of that run: 58s of setup, then 1338s inside ONE
+  # `go test` step, then 103s for the GAP2 reproduction. Per package, from the
+  # -json events: cmd/cleat 598s, cmd/cleat-worker 504s, cmd/cleatctl 28s, and
+  # the six others 38s between them. `-p 1` makes those serial, and it has to
+  # stay: three of the nine packages that carry tests are database-backed and
+  # share the one
+  # PostgreSQL service this job provides.
+  #
+  # That is why the split is across RUNNERS rather than across packages in one
+  # invocation. Each leg gets its own PostgreSQL service, so nothing is shared
+  # and nothing runs concurrently against one database -- the property `-p 1`
+  # exists for is preserved by construction instead of by argument. 598s
+  # against 504+103s: the legs finish together, and the wall becomes ~13m with
+  # the slower package's own compile.
+  #
+  # The required status context stays exactly `Test Go (commands) on 1.26` and
+  # is reported by the aggregate job below, because a matrix leg reports ONE
+  # check per leg under a DIFFERENT name -- and a required context nothing
+  # reports blocks every PR. Same shape as e2e-cross-language.yml's summary job
+  # (cleat#3925), which is where this pattern was first used here.
+  test-go-commands:
+    name: Test Go (commands ${{ matrix.leg }}) on 1.26
+    runs-on: ubuntu-latest
+    # 45 is arithmetic, not a measurement: a package that hangs hits its own
+    # `go test -timeout 30m` and dumps goroutines at t+30, and setup plus a
+    # leg's compile is ~2-3m on top of that. Lower than test-go's 70 because
+    # no single leg here starts late behind another package's 10 minutes.
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # Required, and for the reason recorded on test-go's copy of this
+        # block: a job-level service is a sibling container, and without a host
+        # port mapping it is simply unreachable from the runner.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 127.0.0.1, NOT localhost: on GitHub runners localhost resolves to ::1
+      # first and the service publishes IPv4 only. See test-go's longer note.
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      CLEAT_CRASH_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+    strategy:
+      # One leg's failure must not cancel its sibling: the aggregate job below
+      # names which leg did not succeed, and a sibling killed by `fail-fast`
+      # reads as "cancelled" -- not a success, but with nothing saying whether
+      # THAT leg passed.
+      fail-fast: false
+      # A PLAIN LIST, not `include:`, because scripts/check-workflow-guards.py
+      # does not expand an `include` matrix and says so rather than checking
+      # nothing -- and a guard that cannot see these legs cannot tell whether
+      # the job names a required context resolves to still exist. What each leg
+      # runs is a `case` in the selection step below; this list is the legs.
+      matrix:
+        leg: [cleat, rest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The Rust, Java and AssemblyScript agent clients, for cleat#2978's
+      # extension of cleat#1983's acceptance to those three SDKs. These tests
+      # are `cmd/cleat`'s -- TestRustExampleEntryPointResolutionLive and its
+      # AssemblyScript and Java counterparts all live in that package -- so
+      # they follow the leg that carries cmd/cleat and no other. Each is a
+      # toolchain a skip would hide: the test SKIPS without it and the job goes
+      # green having run nothing.
+      - name: Setup Rust + wasm32-unknown-unknown
+        if: matrix.leg == 'cleat'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node (AssemblyScript build path)
+        if: matrix.leg == 'cleat'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Setup Java (Java build path)
+        if: matrix.leg == 'cleat'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle (Java build path)
+        if: matrix.leg == 'cleat'
+        uses: gradle/actions/setup-gradle@v6
+
+      # THE PACKAGE LIST IS DERIVED, NOT LISTED. `path` minus `exclude`, both
+      # through `go list`, so this leg runs what the matrix entry claims it
+      # runs. The aggregate job repeats this arithmetic and refuses a union
+      # that is not `./cmd/...`, which is what makes a hand-written leg list
+      # safe: a package named in no leg would otherwise run nowhere while every
+      # job stayed green -- the failure scripts/check-ci-package-coverage.sh
+      # exists for, one level finer than it can see.
+      #
+      # Both ends are asserted. An empty selection is a typo or a moved
+      # package, and `go test` with no packages exits 0.
+      - name: Select this leg's packages
+        id: pkgs
+        run: |
+          set -euo pipefail
+          # `path` and `exclude`: the two together must equal `go list
+          # ./cmd/...`. That is CHECKED, not trusted -- the aggregate job
+          # re-derives both and diffs them, because
+          # scripts/check-ci-package-coverage.sh only sees top-level
+          # directories (`./cmd/...` keeps `cmd` covered) and would not notice
+          # a package dropped from a leg's list.
+          case "${{ matrix.leg }}" in
+            cleat) PATHS='./cmd/cleat/...'; EXCLUDE='' ;;
+            rest)  PATHS='./cmd/...';       EXCLUDE='./cmd/cleat/...' ;;
+            *) echo "::error::unknown leg '${{ matrix.leg }}'" >&2; exit 1 ;;
+          esac
+          all="$(go list $PATHS)"
+          go list ./cmd/... | LC_ALL=C sort -u > all-cmd-packages.txt
+          if [ -n "$EXCLUDE" ]; then
+            # A file, not a process substitution fed through a pipe: this
+            # script is `set -euo pipefail`, and a filter that fails inside a
+            # pipeline takes the assignment with it only sometimes.
+            go list $EXCLUDE > excluded-packages.txt
+            mine="$(printf '%s\n' "$all" | grep -vxF -f excluded-packages.txt || true)"
+          else
+            mine="$all"
+          fi
+          count=$(printf '%s\n' "$mine" | grep -c . || true)
+          count=${count:-0}
+          if [ "$count" -eq 0 ]; then
+            echo "::error::leg '${{ matrix.leg }}' selected no packages from $PATHS (excluding ${EXCLUDE:-nothing})" >&2
+            exit 1
+          fi
+          printf '%s\n' "$mine" | LC_ALL=C sort -u > packages.txt
+          echo "leg '${{ matrix.leg }}': $count package(s)"
+          cat packages.txt
+          # ONE LINE, because GITHUB_OUTPUT needs `name=value` unless the
+          # heredoc form is used -- and the heredoc form inside a step whose
+          # value is a package list is a second thing to get wrong.
+          printf 'pkgs=%s\n' "$(printf '%s\n' "$mine" | paste -sd' ' -)" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # -p 1 for the reason recorded on test-go's `commands` entry
+          # (cleat#2063): cmd/cleat, cmd/cleatctl and cmd/cleat-worker are
+          # database-backed and would otherwise overlap against this leg's one
+          # PostgreSQL service.
+          #
+          # Unquoted on purpose: PKGS is a space-separated package list built
+          # by the step above, from this file's own matrix values.
+          PKGS='${{ steps.pkgs.outputs.pkgs }}'
+          go test -race -count=1 -timeout 30m -p 1 -json $PKGS 2>&1 | tee test-report.json
+
+      # GAP2 from cleat#2005's third review round, moved here verbatim in
+      # substance from test-go's `commands` entry -- the reproduction was
+      # manual-only, gated behind CLEAT_TEST_DOCKER_PAUSE_CONTAINER because
+      # pausing a container by name only makes sense against one this job
+      # actually controls. This job runs directly on the runner (no job-level
+      # `container:` wrapping these steps), so the Postgres service above is a
+      # sibling container the Docker daemon here can see and pause -- matched by
+      # the exact pinned image ref rather than a guessed name, since GitHub
+      # Actions assigns service containers a name this workflow does not choose.
+      #
+      # A STEP OUTPUT, not $GITHUB_ENV: exporting this job-wide would run the
+      # test SOMEWHERE inside "Run tests", sharing the paused Postgres service
+      # with whatever else that invocation had in flight. `-p 1` and
+      # cmd/cleat-worker carrying no t.Parallel already made that safe in
+      # practice; the separate step is the stronger property that needs no such
+      # argument.
+      #
+      # Best-effort, not a gate: the reproduction skips cleanly (see the test's
+      # own t.Skip) when this output is empty, so a failure to locate the
+      # container degrades to "the reproduction skips this run," not to a
+      # broken job. It is on the `rest` leg because cmd/cleat-worker is.
+      - name: Locate the Postgres service container for the docker-pause reproduction
+        id: locate-pg
+        if: matrix.leg == 'rest'
+        run: |
+          id=$(docker ps -q --filter "ancestor=mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
+          count=$(echo "$id" | wc -w)
+          if [ "$count" -eq 1 ]; then
+            echo "container_id=$id" >> "$GITHUB_OUTPUT"
+            echo "found the Postgres service container: $id"
+          else
+            echo "::warning::expected exactly one Postgres service container matching the pinned image, found $count -- the docker-pause reproduction will skip this run"
+          fi
+
+      - name: Run the docker-pause reproduction (GAP2)
+        if: matrix.leg == 'rest' && steps.locate-pg.outputs.container_id != ''
+        env:
+          CLEAT_TEST_DOCKER_PAUSE_CONTAINER: ${{ steps.locate-pg.outputs.container_id }}
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 120s -v \
+            -run '^TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun$' \
+            ./cmd/cleat-worker/... 2>&1 | tee docker-pause-report.txt
+
+      # The artifact is how the aggregate job sees this leg at all, so it
+      # uploads on failure too. `packages.txt` is not diagnostic -- it is the
+      # claim the aggregate checks, so a leg that died before writing it must
+      # fail the union check rather than pass it vacuously.
+      - name: Upload this leg's report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: commands-leg-${{ matrix.leg }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            test-report.json
+            packages.txt
+            all-cmd-packages.txt
+          retention-days: 30
+
+  # THE REQUIRED STATUS CONTEXT. `Test Go (commands) on 1.26` is in
+  # .github/required-checks.txt, and a required context is a plain string
+  # matched against a check's name -- so this job exists because of that, not
+  # because anything needs summarising. It does four things the legs cannot do
+  # for themselves: it fails if a leg failed, it proves the legs together are
+  # `./cmd/...`, and it runs the skip budget over the UNION report, because a
+  # budget line declares how many skips a job may see and each leg sees only
+  # part of them.
+  test-go-commands-summary:
+    name: Test Go (commands) on 1.26
+    needs: [test-go-commands]
+    # `if: always()` plus an explicit result check, rather than leaving this
+    # job to be skipped when a leg fails: a SKIPPED job does not read as
+    # "success", but spelling out the check costs five lines and removes any
+    # reliance on GitHub's semantics for a required check.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download the legs' reports
+        if: always()
+        uses: actions/download-artifact@v8
+        with:
+          pattern: commands-leg-*-${{ github.sha }}-${{ github.run_attempt }}
+          # One directory per leg: both legs upload `test-report.json`, and
+          # merge-multiple would have them overwrite each other.
+          merge-multiple: false
+          path: legs
+
+      - name: Every leg succeeded
+        if: always()
+        env:
+          LEGS_RESULT: ${{ needs.test-go-commands.result }}
+        run: |
+          echo "test-go-commands (all legs): $LEGS_RESULT"
+          if [ "$LEGS_RESULT" != "success" ]; then
+            echo "::error::Test Go (commands): at least one leg did not succeed" >&2
+            exit 1
+          fi
+
+      # THE UNION IS THE JOB. Neither leg's list is trusted on its own, and the
+      # denominator is not typed here either -- it is the same `go list
+      # ./cmd/...` both legs computed, so this compares two independent
+      # derivations rather than a derivation against a copy of itself.
+      - name: The two legs together are ./cmd/...
+        if: always()
+        run: |
+          set -euo pipefail
+          if ! ls legs/*/packages.txt >/dev/null 2>&1; then
+            echo "::error::no leg uploaded packages.txt -- a leg died before selecting packages" >&2
+            exit 1
+          fi
+          cat legs/*/packages.txt | LC_ALL=C sort > covered.txt
+          dupes=$(uniq -d covered.txt || true)
+          if [ -n "$dupes" ]; then
+            echo "::error::these packages are run by BOTH legs, so -p 1 no longer protects them:" >&2
+            printf '  %s\n' "$dupes" >&2
+            exit 1
+          fi
+          cat legs/*/all-cmd-packages.txt | LC_ALL=C sort -u > all.txt
+          if ! diff -u all.txt covered.txt; then
+            echo "::error::the commands legs do not together cover ./cmd/... (lines above: '-' is a package no leg runs)" >&2
+            exit 1
+          fi
+          echo "OK: $(grep -c . covered.txt) package(s), each run by exactly one leg"
+
+      # The budget is the job's, not a leg's: scripts/skip-ledger.tsv declares
+      # how many skips `test-go/commands` may see, and each leg sees only part
+      # of them -- checked per leg, every line whose test lives on the other leg
+      # reads "got 0" and the guard fails a job that did nothing wrong. The
+      # reports are line-delimited JSON from `go test -json` and the legs'
+      # tests are disjoint by construction, so concatenation IS the union.
+      - name: Skip budget
+        if: always()
+        run: |
+          set -euo pipefail
+          if ! ls legs/*/test-report.json >/dev/null 2>&1; then
+            echo "::error::no leg uploaded test-report.json" >&2
+            exit 1
+          fi
+          cat legs/*/test-report.json > test-report.json
+          scripts/check-skip-budget.sh test-go/commands test-report.json
+
+  # -------------------------------------------------------------------------
+  # Test Go (crash) -- one package, sharded by TEST NAME across three runners
+  # -------------------------------------------------------------------------
+  # WHY THIS EXISTS, and why it is not a path split like `commands` above:
+  # tests/crash is ONE package, so `go list` gives one line and there is nothing
+  # to divide by directory. Measured on the same merge-group run (job
+  # 132959102453): 66s of setup and 1472s inside one `go test` step, of which
+  # 1416s was 28 top-level tests running serially and ~56s was the compile. The
+  # five longest are 251.7 / 207.8 / 143.9 / 118.5 / 109.6s against 3.6s for the
+  # shortest -- a 70x spread, which is why the split below is a static,
+  # time-balanced list rather than the `(NR-1) % n` derivation
+  # e2e-cross-language.yml uses: modulo over alphabetically sorted names would
+  # put the long pole on a shard by luck, and there is nothing to gain from
+  # deriving an assignment whose only requirement is that it is even.
+  #
+  # A static list has the failure the derivation was written to avoid: a test
+  # added to the package and named in no shard runs NOWHERE, and every job stays
+  # green. That is not assumed away -- each shard uploads the names it actually
+  # ran, and the aggregate job below re-lists the package and fails when the
+  # union is not every test, or when a test appears on two shards.
+  test-go-crash:
+    name: Test Go (crash shard ${{ matrix.shard }} of 3) on 1.26
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      # The owner DSN, and the role needs CREATEDB as well as CREATE/ALTER ROLE:
+      # the suite creates `cleat_crash` beside this database. Each shard is its
+      # own job with its own service, so the scratch database is not shared
+      # across shards. See test-go's longer note on this variable.
+      CLEAT_CRASH_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+    strategy:
+      fail-fast: false
+      # A PLAIN LIST, not `include:`, for the reason the commands job above
+      # gives (scripts/check-workflow-guards.py does not expand an `include`
+      # matrix). The three assignments live in the selection step below, in one
+      # place, so a re-balance is one edit rather than a matrix and a step that
+      # can disagree.
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The agent clients, unchanged from test-go's `for the crash agent client`
+      # steps: cleat#1983's acceptance runs the shipped agent workflow from BOTH
+      # SDKs, and the Python one is a Component Model binary only
+      # `componentize-py` produces. A skip here is not a pass wearing a
+      # different colour -- ./tests/crash/... is a tier-1 package, and a missing
+      # toolchain would read as green.
+      - name: Setup Rust + wasm32-unknown-unknown
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Node (AssemblyScript build path)
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install componentize-py
+        run: pip install componentize-py
+
+      # THE SELECTOR IS ASSERTED AGAINST THE PACKAGE, not trusted. A renamed
+      # test makes a shard's pattern match one fewer name and the run still
+      # passes -- so the assigned names are written out and shipped to the
+      # aggregate, and the count is checked against the `run` events the test
+      # step actually emits.
+      - name: Select this shard's tests
+        id: shard
+        run: |
+          set -euo pipefail
+          # THE THREE ASSIGNMENTS. Durations are the measured test times from
+          # the merge-group run in the job comment above, assigned longest
+          # first to the least-loaded shard; they sum to 471 / 471 / 474s.
+          # RE-MEASURE rather than assume when a test moves between shards or a
+          # new one is added -- being even is the only thing this list buys, and
+          # an unre-measured edit throws it away.
+          case "${{ matrix.shard }}" in
+            1) SELECTOR='^(TestChecksumChainSurvivesAwaitChild|TestEnablingEncryptionMidRunDoesNotStrandTheRun|TestPayloadEncryptionKeyRotationWiresIntoARealWorker|TestSIGTERMKeepsHeartbeatingSoTheRunIsNotReclaimedWhileItDrains|TestSIGTERM_g_ARunWithADeferDoesNotRunItsCleanupOnTheWorkerThatIsLeaving|TestSIGTERM_h_AGenuineFailureDuringTheDrainIsStillRecorded|TestWorkerMigratesTheDatabaseItServes)$' ;;
+            2) SELECTOR='^(TestCleanRunCallsEachOperationOnce|TestCrashMidAgentLoopInATierTwoLanguageResumesWithoutReaskingTheModel|TestCrashWithIdempotencyKeysDoesNotDuplicate|TestCrashWithWriteAheadIntentDoesNotRepeatTheCall|TestEventsArePersistedDuringExecution|TestSIGTERM_b_ReleasesARunThatOutlastsTheGraceInsteadOfFailingIt|TestSIGTERM_d_AFinalizeInFlightWhenTheGraceEndsIsReleasedNotFailed|TestSIGTERM_j_ADrainThenSIGTERMStillLetsTheRunFinish|TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsCleanup|TestShutdownScenariosOnMySQLAndMSSQL)$' ;;
+            3) SELECTOR='^(TestAWorkerThatCannotDecryptAReplayReleasesTheRun|TestCrashMidAgentLoopResumesWithoutReaskingTheModel|TestCrashMidDurableCallReplaysOnlyTheUnrecordedStep|TestEncryptionKeyFilePreviousWithoutCurrentIsRefusedByARealWorker|TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext|TestPayloadEncryptionWiringKnownPositive|TestSIGHUPReloadsWithNoKeysConfiguredAndKeepsServing|TestSIGTERM_a_LetsAnInFlightRunFinishInsideTheGrace|TestSIGTERM_b2_ACatchingGuestIsReleasedNotCompleted|TestSIGTERM_c_ACompensatingRunIsNotToldItsCallFailed|TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun)$' ;;
+            *) echo "::error::unknown shard '${{ matrix.shard }}'" >&2; exit 1 ;;
+          esac
+          listed=$(go test -list '^Test' ./tests/crash/... | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | LC_ALL=C sort)
+          total=$(printf '%s\n' "$listed" | grep -c . || true)
+          total=${total:-0}
+          if [ "$total" -eq 0 ]; then
+            echo "::error::./tests/crash/... listed no tests -- the package did not build, which is not this shard's problem to report as an empty slice" >&2
+            exit 1
+          fi
+          printf '%s\n' "$listed" > all-tests.txt
+          mine=$(printf '%s\n' "$listed" | grep -E "$SELECTOR" || true)
+          count=$(printf '%s\n' "$mine" | grep -c . || true)
+          count=${count:-0}
+          if [ "$count" -eq 0 ]; then
+            echo "::error::shard ${{ matrix.shard }} was assigned none of the $total tests in ./tests/crash/... -- the selector no longer matches anything" >&2
+            exit 1
+          fi
+          printf '%s\n' "$mine" > shard-tests.txt
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          # The selector is an OUTPUT, not a shell variable: each `run:` block
+          # is its own shell, so a variable set here is gone by the next step
+          # and `-run "$SELECTOR"` would run the WHOLE package on every shard.
+          printf 'selector=%s\n' "$SELECTOR" >> "$GITHUB_OUTPUT"
+          echo "shard ${{ matrix.shard }} of 3: $count of $total tests"
+          cat shard-tests.txt
+
+      - name: Run tests
+        shell: bash
+        env:
+          SHARD_COUNT: ${{ steps.shard.outputs.count }}
+          SELECTOR: ${{ steps.shard.outputs.selector }}
+        run: |
+          set -o pipefail
+          status=0
+          go test -race -count=1 -timeout 30m -json -run "$SELECTOR" ./tests/crash/... 2>&1 | tee test-report.json || status=$?
+          if [ "$status" -ne 0 ]; then
+            # The test failure IS the report. Naming a count shortfall here too
+            # would blame the split for a test that simply failed.
+            exit "$status"
+          fi
+          # EVERY ASSIGNED TEST RAN. `go test -run` that matches nothing exits 0
+          # with no test events, and a `-json` stream is the only record that a
+          # test was entered -- so this distinguishes "the shard ran its slice"
+          # from "the shard ran, green, and did nothing". A subtest's event name
+          # contains "/" and is excluded, so the count is top-level tests only,
+          # which is what was assigned.
+          ran=$(grep '"Action":"run"' test-report.json | grep -c '"Test":"[^"/]*"' || true)
+          ran=${ran:-0}
+          SHARD_COUNT=${SHARD_COUNT:-0}
+          if [ "$ran" -ne "$SHARD_COUNT" ]; then
+            echo "::error::this shard entered $ran tests but was assigned $SHARD_COUNT" >&2
+            exit 1
+          fi
+
+      - name: Upload this shard's report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-shard-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            test-report.json
+            shard-tests.txt
+            all-tests.txt
+          retention-days: 30
+
+  test-go-crash-summary:
+    name: Test Go (crash) on 1.26
+    needs: [test-go-crash]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download the shards' reports
+        if: always()
+        uses: actions/download-artifact@v8
+        with:
+          pattern: crash-shard-*-${{ github.sha }}-${{ github.run_attempt }}
+          merge-multiple: false
+          path: shards
+
+      - name: Every shard succeeded
+        if: always()
+        env:
+          SHARDS_RESULT: ${{ needs.test-go-crash.result }}
+        run: |
+          echo "test-go-crash (all shards): $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::Test Go (crash): at least one shard did not succeed" >&2
+            exit 1
+          fi
+
+      # THE TWO FAILURES A STATIC SHARD LIST CAN HAVE, neither of which any
+      # green shard can see: a test on no shard (runs nowhere) and a test on two
+      # (runs twice, and its budget line is charged twice).
+      - name: The three shards together are every test in the package
+        if: always()
+        run: |
+          set -euo pipefail
+          if ! ls shards/*/shard-tests.txt >/dev/null 2>&1; then
+            echo "::error::no shard uploaded shard-tests.txt -- a shard died before selecting tests" >&2
+            exit 1
+          fi
+          cat shards/*/shard-tests.txt | LC_ALL=C sort > assigned.txt
+          dupes=$(uniq -d assigned.txt || true)
+          if [ -n "$dupes" ]; then
+            echo "::error::these tests are assigned to MORE THAN ONE shard:" >&2
+            printf '  %s\n' "$dupes" >&2
+            exit 1
+          fi
+          cat shards/*/all-tests.txt | LC_ALL=C sort -u > every.txt
+          if ! diff -u every.txt assigned.txt; then
+            echo "::error::the three shards do not together name every test in ./tests/crash/... ('-' is a test no shard runs, '+' is a name the package no longer has)" >&2
+            exit 1
+          fi
+          echo "OK: $(grep -c . assigned.txt) tests, each run by exactly one shard"
+
+      # Over the union for the same reason the commands aggregate gives: a
+      # ledger line declares how many skips `test-go/crash` may see, and each
+      # shard sees only its own.
+      - name: Skip budget
+        if: always()
+        run: |
+          set -euo pipefail
+          if ! ls shards/*/test-report.json >/dev/null 2>&1; then
+            echo "::error::no shard uploaded test-report.json" >&2
+            exit 1
+          fi
+          cat shards/*/test-report.json > test-report.json
+          scripts/check-skip-budget.sh test-go/crash test-report.json
+
 
   # -------------------------------------------------------------------------
   # Test Python (matrix: 3.10 / 3.11 / 3.12 / 3.13)

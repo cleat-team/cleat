@@ -58,14 +58,26 @@ go_dirs="$(find . -mindepth 2 -name '*.go' -not -path './node_modules/*' \
              -not -path '*/node_modules/*' -not -path './.claude/*' 2>/dev/null |
   sed 's|^\./||' | cut -d/ -f1 | sort -u)"
 
-# The set of directories covered by the matrix. Two forms count:
+# The set of directories covered by the matrix. Three forms count:
 #   path: ./engine/...   -> engine
 #   dir: cleat           -> cleat   (a separate Go module, tested from inside
 #                                    it with `path: ./...`; see ci.yml)
+#   PATHS='./cmd/...'    -> cmd      (a leg of a sharded job that derives its
+#                                    package list in a `case` rather than from a
+#                                    matrix entry -- see test-go-commands, whose
+#                                    two legs must together be ./cmd/... and
+#                                    prove it in the aggregate job). The
+#                                    `PATHS=` prefix is part of the pattern on
+#                                    purpose: EXCLUDE='./cmd/cleat/...' sits on
+#                                    the same line and names what that leg does
+#                                    NOT run, so a bare `./x/...` census would
+#                                    read an exclusion as coverage.
 matrix_dirs="$( {
   grep -oE 'path: .*' "$CI_FILE" |
     grep -oE '\./[A-Za-z0-9_-]+/\.\.\.' |
     sed 's|^\./||; s|/\.\.\.$||'
+  grep -oE "PATHS='\./[A-Za-z0-9_-]+/\.\.\.'" "$CI_FILE" |
+    sed "s|^PATHS='\./||; s|/\.\.\.'$||"
   grep -oE '^[[:space:]]*dir: [A-Za-z0-9_/-]+' "$CI_FILE" |
     sed 's|.*dir: ||'
 } | sort -u)"
