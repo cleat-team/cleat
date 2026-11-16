@@ -520,14 +520,14 @@ jobs:
           # LAYOUT-INDEPENDENT, identity from a FILE (cleat#3955): one artifact
           # extracts flat into shards/, so `shards/*/x` matches nothing and the
           # old guard blamed a shard that had passed.
-          ids=$(find shards -name shard-id.txt -exec cat {} +)
+          ids=$(find shards -name shard-id.txt -exec cat {} + 2>/dev/null || true)
           if [ -z "$ids" ]; then
             echo "::error::no shard uploaded shard-id.txt -- no shard report was downloaded at all" >&2
             exit 1
           fi
           of=$(printf '%s\n' "$ids" | awk '{print $3}' | LC_ALL=C sort -u)
           if [ "$(printf '%s\n' "$of" | grep -c .)" -ne 1 ]; then
-            echo "::error::the shards disagree about how many there should be: $(printf '%s' "$of")" >&2
+            echo "::error::the shards disagree about how many there should be: $(printf '%s\n' "$of" | paste -sd, -)" >&2
             exit 1
           fi
           got=$(printf '%s\n' "$ids" | awk '{print $2}' | LC_ALL=C sort -n | paste -sd, -)
@@ -742,7 +742,8 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$mine" > shard-tests.txt
-          printf 'mssql %s 3 %s\n' "$SHARD" '${{ github.run_attempt }}' > shard-id.txt
+          # `job-total` rather than a literal 3 -- one-dimension matrix, so it cannot drift (cleat#3957).
+          printf 'mssql %s %s %s\n' "$SHARD" '${{ strategy.job-total }}' '${{ github.run_attempt }}' > shard-id.txt
           # A FILE, not a step output. At three shards the pattern is ~52KB of
           # `^(A|B|...)$`; as a step output it would be a 52KB opaque blob in
           # the log and in the run's metadata, and it buys nothing.
@@ -853,14 +854,14 @@ jobs:
           # LAYOUT-INDEPENDENT, identity from a FILE (cleat#3955): one artifact
           # extracts flat into shards/, so `shards/*/x` matches nothing and the
           # old guard blamed a shard that had passed.
-          ids=$(find shards -name shard-id.txt -exec cat {} +)
+          ids=$(find shards -name shard-id.txt -exec cat {} + 2>/dev/null || true)
           if [ -z "$ids" ]; then
             echo "::error::no shard uploaded shard-id.txt -- no shard report was downloaded at all" >&2
             exit 1
           fi
           of=$(printf '%s\n' "$ids" | awk '{print $3}' | LC_ALL=C sort -u)
           if [ "$(printf '%s\n' "$of" | grep -c .)" -ne 1 ]; then
-            echo "::error::the shards disagree about how many there should be: $(printf '%s' "$of")" >&2
+            echo "::error::the shards disagree about how many there should be: $(printf '%s\n' "$of" | paste -sd, -)" >&2
             exit 1
           fi
           got=$(printf '%s\n' "$ids" | awk '{print $2}' | LC_ALL=C sort -n | paste -sd, -)
