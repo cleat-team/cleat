@@ -3551,14 +3551,21 @@ jobs:
         run: |
           set -euo pipefail
           # find, NOT `legs/*/`: one artifact extracts flat (cleat#3955).
-          # Assigned, then tested. The piped form (`find | grep -q .`) takes the ERROR branch when grep exits at its
-          # first match and find then dies of SIGPIPE under pipefail -- measured 10/10 at 1,000 files (cleat#3957).
-          covered_raw=$(find legs -name packages.txt 2>/dev/null || true)
-          if [ -z "$covered_raw" ]; then
+          # The EXISTENCE TEST and the CONTENT READ are separate statements, deliberately.
+          #
+          # This guard used to be `find ... | grep -q .`, which asks only "did anything match"; the next line reads the
+          # files' CONTENTS. A first version of this fix captured the paths into one variable and sorted that, which
+          # leaves covered.txt holding `legs/.../packages.txt` lines where package names belong -- the diff below then
+          # reports every package as missing, on every run. cleat-review measured exactly that: develop exits 0 with
+          # "OK: 3 package(s) covered", the broken version exits 1 printing `+legs/commands-a/packages.txt`.
+          #
+          # So: `-print -quit` for the existence test (and it stops at the first match), `-exec cat` for the read.
+          found=$(find legs -name packages.txt -print -quit 2>/dev/null || true)
+          if [ -z "$found" ]; then
             echo "::error::no shard uploaded packages.txt -- no shard report was downloaded at all" >&2
             exit 1
           fi
-          printf '%s\n' "$covered_raw" | LC_ALL=C sort > covered.txt
+          find legs -name packages.txt -exec cat {} + | LC_ALL=C sort > covered.txt
           go list ./cmd/cleat/... ./cmd/cleat-worker/... | LC_ALL=C sort > split-packages.txt
           dupes=$(uniq -d covered.txt | grep -vxF -f split-packages.txt || true)
           if [ -n "$dupes" ]; then
