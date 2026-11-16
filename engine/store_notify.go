@@ -15,3 +15,7 @@ func pgNotify(ctx context.Context, tx *sql.Tx, channel string) {
 	}
 	_, _ = tx.ExecContext(ctx, "SELECT pg_notify($1, '')", channel)
 }
+
+// case (b) falsification for cleat#3958: this identifier does not exist, so
+// package engine does not compile and every leg fails fast.
+var _ = thisIdentifierDoesNotExistCaseB
