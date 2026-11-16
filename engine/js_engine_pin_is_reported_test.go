@@ -131,8 +131,15 @@ func TestJSEnginePinIsSilentWhenThereIsNothingToReport(t *testing.T) {
 		},
 		{
 			// Present but unreadable: the reader reports an error and this
-			// check stays quiet, because a parse failure is the metadata
-			// path's business and it already fails with a better message.
+			// check stays quiet.
+			//
+			// NOTHING ELSE REPORTS IT -- cleat.js-engine has exactly one reader,
+			// this one, so a module whose pin is corrupt gets no signal at all.
+			// That is the price of warn-only, and it is stated rather than
+			// justified: the alternative, warning on an unparseable pin, would
+			// fire on every module built by a future toolchain whose payload
+			// this worker cannot decode -- the exact case pin_version exists to
+			// report deliberately, with the version the reader CAN see.
 			name: "a pin section that is not JSON",
 			mod: func(t *testing.T) []byte {
 				name := []byte("cleat.js-engine")
