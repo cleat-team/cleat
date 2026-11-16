@@ -1035,48 +1035,6 @@ jobs:
   # after relying on it silently. Spelling out the check here costs six lines
   # and removes that assumption entirely: this job always runs and always
   # states which dependency, if any, was not a success.
-  # cleat#3949 step 1: REPORT ONLY, and deliberately its own job rather than a step in
-  # `Tier 1 Gate`. The step it replaces carried continue-on-error, which
-  # scripts/check-workflow-guards.py refuses in a required job -- correctly, since such a
-  # step cannot fail the check it appears to be part of. Here that is the point: this
-  # supplies the numbers a skip budget needs and decides nothing, the aggregate step in
-  # `Tier 1 Gate` is what decides whether a shard ran, and a missing artifact must not
-  # become a second failure reported against the authoritative check.
-  #
-  # pull_request only: on merge_group the shards are skipped at the job level, so there
-  # is nothing to download. (The condition names pull_request, which is also what keeps
-  # TestAConditionalJobStatesWhatItCannotSee's job-level scan from reading this as an
-  # unjustified exclusion.)
-  tier1-skip-inventory:
-    name: Tier 1 skip inventory (report only)
-    needs: [tier1-engine]
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download the engine shard reports
-        continue-on-error: true
-        uses: actions/download-artifact@v7
-        with:
-          pattern: tier-gate-json-engine-*
-          path: tier-gate-json
-          merge-multiple: true
-
-      - name: Skip inventory across the engine shards
-        run: |
-          set -uo pipefail
-          reports=$(find tier-gate-json -maxdepth 1 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
-          if [ -z "$reports" ]; then
-            # UNMEASURED: neither a pass nor a finding about the tree.
-            echo "::notice title=Skip inventory UNMEASURED::no tier-gate-json artifacts on this run -- a failure of the inventory, not of the suite"
-            exit 0
-          fi
-          # shellcheck disable=SC2086
-          python3 scripts/skip-inventory.py $reports | tee skip-inventory.txt
-          echo "::notice title=Skip inventory (report only)::$(head -1 skip-inventory.txt)"
-
   tier1:
     name: Tier 1 Gate
     needs: [tier1-coverage, tier1-engine, tier1-rest]
@@ -1094,6 +1052,53 @@ jobs:
       # real failure (a job that did not run cannot have passed its tests),
       # so the acceptance is conditioned on the event, not granted
       # unconditionally to the string "skipped".
+      # cleat#3949 step 1: REPORT ONLY. This supplies the numbers a skip budget needs,
+      # from the job that will be gated, because check-skip-budget.sh has no derive mode
+      # and its own header says a local run can confirm a line does not error but cannot
+      # vouch for the file.
+      #
+      # IT CANNOT FAIL THE JOB, and that is deliberate rather than convenient: it is a
+      # diagnostic, and the owner's direction (cleat#3958) is to spend no runner
+      # assignment on one. So there is no `continue-on-error` here -- the guard in
+      # scripts/check-workflow-guards.py refuses that in a required job, and it is right
+      # that a step which cannot fail cannot be part of the check -- and no separate job
+      # either, which would cost a runner assignment on every PR to print a notice.
+      # Instead every failure path below reports UNMEASURED and exits 0: a missing
+      # artifact, a failed download, a crash in the inventory script. The step still
+      # carries a real exit status for anything UNEXPECTED, so it is not a swallowed
+      # step; when step 2 turns this into a gate it becomes a check with 0/1/2.
+      #
+      # pull_request only: on merge_group the shards are skipped at the job level, so
+      # there are no reports to download.
+      #
+      # `gh run download`, not actions/download-artifact: the action fails the step when
+      # nothing matches, which is exactly the case this must survive.
+      - name: Skip inventory across the engine shards (report only)
+        if: github.event_name == 'pull_request' && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          rm -rf tier-gate-json
+          mkdir -p tier-gate-json
+          if ! gh run download "$GITHUB_RUN_ID" -p 'tier-gate-json-engine-*' -D tier-gate-json; then
+            echo "::warning title=Skip inventory UNMEASURED::could not download the engine shard reports on this run -- a failure of the inventory, not a finding about the suite"
+            exit 0
+          fi
+          reports=$(find tier-gate-json -maxdepth 1 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          if [ -z "$reports" ]; then
+            echo "::warning title=Skip inventory UNMEASURED::no tier-gate-json report on this run -- a failure of the inventory, not a finding about the suite"
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          if ! python3 scripts/skip-inventory.py $reports > skip-inventory.txt; then
+            echo "::warning title=Skip inventory UNMEASURED::the inventory script exited non-zero; its output follows"
+            cat skip-inventory.txt || true
+            exit 0
+          fi
+          cat skip-inventory.txt
+          echo "::notice title=Skip inventory (report only)::$(head -1 skip-inventory.txt)"
+
       - name: Aggregate shard results
         env:
           EVENT: ${{ github.event_name }}
