@@ -4531,38 +4531,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40  # max 15.3m over 49 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
     env:
-      # A database of the tests' own -- and, as of cleat#2012, a SERVER of its
-      # own too.
-      #
-      # This job's purpose is to prove the cluster comes up and stays up. It
-      # was also pointing `go test ./engine/...` at the cluster's own
-      # database, so the store tests -- which create rows and then assert on
-      # exactly those rows -- shared a table with four live workers claiming
-      # from it. TestClaimWorkflow found its ready workflow already `running`;
-      # TestListWorkflows_ByStatus found nothing ready; TestClaimSkipLocked
-      # asked for 3 and got 10. Those tests are correct and the setup was not:
-      # they assume exclusive ownership of the table, which no test sharing a
-      # database with a running cluster can have.
-      #
-      # Giving it a separate DATABASE on cleat-postgres (below, historically)
-      # fixed that, but not a sibling bug of the same shape one level up:
-      # PostgreSQL's max_connections is a SERVER-wide ceiling, not a
-      # per-database one, so TestForeignSessionsAnswersUnderPostgresConnectionExhaustion
-      # -- which deliberately exhausts that ceiling to test a connection-
-      # reservation fallback -- was exhausting a budget the live cluster's own
-      # workers were also drawing from. cleat#2012: the cluster's pools set
-      # SetConnMaxLifetime(5*time.Minute), so database/sql closes and reopens
-      # worker connections in the background throughout a run this long,
-      # independent of load; whenever that happened to land inside this
-      # test's exhaust-then-probe window, a slot the test was relying on
-      # staying occupied came free and its assertion that a fresh connection
-      # must fail went straight through instead. The dedicated "Test Go"
-      # matrix job never sees this: it gets its own service container with no
-      # cluster anywhere near it. This job needs the same exclusivity, and a
-      # second database on a shared server cannot give it that -- only a
-      # second server can. See the "Start a dedicated Postgres for
-      # ./engine/..." step below.
-      CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5433/cleat_tests?sslmode=disable
     steps:
       - uses: actions/checkout@v7
 
@@ -4570,24 +4538,6 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-
-      # The third job that sweeps ./engine/... unfiltered -- see "Run
-      # integration tests" below -- and therefore the third that builds a Java
-      # WASM component it has no interest in. The other two are multi-db-ci's
-      # test-mysql and test-mssql, where the reasoning is written out in full.
-      #
-      # Worth stating for this one specifically: it is a required check whose
-      # name is Cluster Integration Tests, so a Maven Central 429 fails the
-      # branch on something with no relationship to clusters, integration, or
-      # the diff. That is what makes the cache worth adding rather than
-      # shrugging at.
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
 
       # No host-binary build step here. It produced ./cleat-worker with
       # CGO_ENABLED=0 and nothing in this job ever ran it -- the cluster runs
@@ -4599,43 +4549,6 @@ jobs:
 
       - name: Start Postgres and apply the schema
         run: docker compose -f docker-compose.cluster.yml up -d postgres
-
-      # cleat#2012. A plain, throwaway server -- not a service on
-      # docker-compose.cluster.yml, and not a second database on
-      # cleat-postgres -- solely so `go test ./engine/...` (the "Run
-      # integration tests" step below) has a max_connections ceiling nothing
-      # else on this runner can move. schema and rows are handled by
-      # engine/testutil itself on first use, so this needs no volume mount and
-      # no migrations.
-      - name: Start a dedicated Postgres for ./engine/... (isolated from the cluster's connection budget)
-        run: |
-          docker run -d --name cleat-test-postgres \
-            -e POSTGRES_USER=cleat \
-            -e POSTGRES_PASSWORD=cleat \
-            -e POSTGRES_DB=cleat_tests \
-            -p 5433:5432 \
-            mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
-
-      - name: Wait for the dedicated Postgres to be ready
-        shell: bash
-        run: |
-          # The official postgres image starts twice (initdb, then the real
-          # server); pg_isready can answer success during the first instance.
-          # Measured and fixed the same way for the fullstack-template sandbox
-          # in cleat#1969 -- wait for the "ready" log line twice, not once.
-          deadline=$((SECONDS + 60))
-          ready_count=0
-          while [ "$SECONDS" -lt "$deadline" ]; do
-            ready_count=$(docker logs cleat-test-postgres 2>&1 | grep -c "database system is ready to accept connections" || true)
-            if [ "$ready_count" -ge 2 ] && docker exec cleat-test-postgres pg_isready -U cleat >/dev/null 2>&1; then
-              echo "Dedicated test Postgres is ready."
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error title=Dedicated test Postgres not ready::cleat-test-postgres did not become ready within 60s (ready_count=$ready_count)."
-          docker logs --tail=80 cleat-test-postgres 2>&1 || true
-          exit 1
 
       - name: Wait for cluster readiness
         shell: bash
@@ -4724,12 +4637,12 @@ jobs:
           # for every one of them to reach "healthy" rather than assuming a
           # fixed delay is enough.
           #
-          # No cleat_tests creation step here any more (cleat#2012): the test
-          # database now lives on its own dedicated server (see CLEAT_TEST_DB
-          # and "Start a dedicated Postgres for ./engine/..." above), created
-          # there via POSTGRES_DB at container start. Left empty otherwise:
-          # engine/testutil builds the schema from migrations/postgres/ on
-          # first use.
+          # No cleat_tests creation step here: until cleat#3935 this job kept a
+          # separate database (and later a separate server) for ./engine/...,
+          # which has been dropped. The steps below still SET CLEAT_TEST_DB,
+          # because clusterDB() in tests/exhaustion and tests/cluster read it --
+          # they just point at the cluster's own database, which is the only one
+          # this job has now.
 
           echo "Waiting for workers to become healthy..."
           SERVICES="cleat-worker-1 cleat-worker-2 cleat-worker-3 cleat-dashboard"
@@ -4871,14 +4784,13 @@ jobs:
       # job that puts real work through the running containers -- everything
       # else proves the cluster comes up, not that it executes anything.
       #
-      # CLEAT_TEST_DB, overriding the job-wide value, for the same reason the
-      # "Cluster suite" step below overrides it: clusterDB() in
-      # exhaustion_test.go now reads CLEAT_TEST_POSTGRES / CLEAT_TEST_DB with
-      # the same precedence as engine/testutil.TestDB, so without this
-      # override it would inherit the job-wide cleat_tests database -- a
-      # database with no worker consuming its queue, against which the test
-      # would just time out. It has to point at the database the cluster's
-      # own workers actually serve.
+      # CLEAT_TEST_DB, for the same reason the "Cluster suite" step below sets
+      # it: clusterDB() in exhaustion_test.go reads CLEAT_TEST_POSTGRES /
+      # CLEAT_TEST_DB with the same precedence as engine/testutil.TestDB. It has
+      # to point at the database the cluster's own workers actually serve --
+      # against any other database the test would just time out. (There is no
+      # job-wide default any more: cleat#3935 removed the ./engine/... run and
+      # the separate server it needed.)
       #
       # -json, teed to its own report: this suite gets its own skip-budget
       # check below, separate from the ./engine/... one. Because a DSN is
@@ -4906,118 +4818,24 @@ jobs:
       # docker-compose.cluster.yml serves, so it does not race the live workers
       # for the rows it inserts.
       - name: Cluster suite — claiming, failover and replay against the live cluster
-        # The cluster's OWN database, overriding the job-wide CLEAT_TEST_DB.
+        # The cluster's OWN database.
         #
-        # That variable points at cleat_tests, a separate database this job
-        # keeps for ./engine/... precisely so those tests do not share a table
-        # with four live workers. This suite wants the opposite: it restarts the
-        # postgres container, kills workers and asserts on failover, so it has
-        # to be looking at the database the cluster actually runs on. Against
-        # cleat_tests every test failed with `relation "workflow_defs" does not
-        # exist` -- nothing builds a schema there until engine/testutil does,
-        # and this package does not use it.
+        # This suite restarts the postgres container, kills workers and asserts
+        # on failover, so it has to be looking at the database the cluster
+        # actually runs on. It used to say "overriding the job-wide value"
+        # because a separate cleat_tests database, kept for ./engine/..., was
+        # the default; cleat#3935 removed that run and that database, so this
+        # step now sets the only DSN the job has.
         env:
           CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
         run: go test -count=1 -timeout=300s ./tests/cluster/...
-
-      - name: Run integration tests
-        shell: bash
-        run: |
-          # pipefail is required: without it `tee` supplies the exit status and
-          # a failing `go test` is silently reported as a green step.
-          set -o pipefail
-          # -p 1: ./engine/... is two packages, engine and engine/testutil,
-          # and `go test` runs packages in parallel by default. Both build
-          # their schema in, and wipe rows from, the one database this job
-          # gives them -- so in parallel they race on the DDL in
-          # 001_schema.sql (observed: a duplicate key on pg_extension_name_index,
-          # and a deadlock) and delete each other's fixtures mid-test. That
-          # was invisible while they shared the cluster's already-migrated
-          # database and only appeared once this job got one of its own.
-          #
-          # 300s, raised from 180s on 2026-08-30. Measured on three runs of the
-          # same package that day:
-          #
-          #   #468   99.754s   pass
-          #   #470  107.664s   pass
-          #   #472  180.017s   KILLED by the old budget, four CI runs concurrent
-          #
-          # ~100s typical against a 180s ceiling is 1.8x headroom, and one slow
-          # runner spent it. 300s is ~3x, and matches the two other Postgres
-          # steps in this file (./tests/exhaustion/... and ./tests/cluster/...),
-          # which makes 180s the outlier rather than this the exception.
-          #
-          # Raising it is worth more than it looks, because of HOW this fails.
-          # A timeout kills the test binary, so no individual test ever reports
-          # failure: `go test -json` emits every test passing, no FAIL line and
-          # no ::error, and the only evidence is a package-level
-          # `FAIL github.com/cleat-team/cleat/engine 180.017s` whose elapsed
-          # time equals the budget. On #472 that read like a defect in an
-          # unrelated actions/github-script bump and cost a full diagnosis.
-          #
-          # So if this ever goes red again with no named failing test, check the
-          # elapsed time against the number below before looking for a bug:
-          #
-          #   gh run view --job <id> --log | grep -E '^FAIL\s+.*/engine'
-          #
-          # Re-derive the typical duration from a passing run's JSON:
-          #
-          #   jq -r 'select(.Action=="pass" and .Test==null and
-          #          (.Package|endswith("/engine"))) | .Elapsed' test-report.json
-          #
-          # 2026-09-03: 300s ran out, and the paragraphs above are the reason
-          # this took a diagnosis rather than a glance. Measured across the
-          # Cluster Integration Tests job's own runs on the same day, all
-          # PostgreSQL-only, oldest first:
-          #
-          #   241.891s  pass
-          #   250.137s  pass
-          #   286.239s  pass
-          #   291.460s  pass
-          #   287.100s  pass
-          #   300.034s  KILLED
-          #
-          # Fifty seconds of growth in about two and a half hours of merges,
-          # which left 9-14s of margin, and then none. Note what the failure
-          # looked like: it landed on a PR that touched IMPROVEMENT-PLAN.md and
-          # some comment text, and the log had no failing test in it at all --
-          # exactly the shape the #472 paragraph above warns about, arriving
-          # again because the ceiling moved into range rather than because a
-          # runner was slow.
-          #
-          # 900s, which is ~3x the current typical duration -- the same
-          # multiple the 180s -> 300s note reasoned to, applied to the number
-          # the suite now actually takes. This is deliberately not matched to
-          # the other two Postgres steps in this file (./tests/exhaustion/...
-          # and ./tests/cluster/...): they still have their headroom, and
-          # raising a ceiling nothing is pressing against buys nothing.
-          #
-          # What this does NOT decide: whether the cluster job should be
-          # running the whole engine suite at all. It exists here to exercise
-          # the engine against a real four-worker cluster, and 290 seconds of
-          # it is mostly tests that do not need one. Narrowing the package set
-          # would cut the job rather than just survive it, but it is a change
-          # to what this job covers and belongs to whoever owns that decision.
-          go test -p 1 -count=1 -timeout=900s -json ./engine/... 2>&1 | tee test-report.json
-
-      # This job brings up a real four-worker cluster and a real database, so
-      # it has asked for everything its tests need: any skip here means
-      # something it provisioned did not arrive. That is a failure, not a
-      # warning -- this job previously reported success while every worker in
-      # the compose file was crash-looping.
-      - name: Skip budget
-        if: always()
-        run: scripts/check-skip-budget.sh cluster test-report.json
 
       - name: Cluster logs (on failure)
         if: failure()
         run: |
           docker compose -f docker-compose.cluster.yml logs --tail=100
-          echo "--- cleat-test-postgres ---"
-          docker logs --tail=100 cleat-test-postgres 2>&1 || true
 
       - name: Tear down cluster
         if: always()
         run: |
           docker compose -f docker-compose.cluster.yml down -v
-          docker rm -f cleat-test-postgres 2>/dev/null || true
