@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -180,11 +181,83 @@ func EnsureDef(t *testing.T, db *sql.DB, name string, version int) {
 // talks to the compose stack, which runs as `cleat`. The tag is what is wanted
 // here; the fallback is not.
 func ClusterDSN() string {
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" //nolint:gosec // G101: a localhost default DSN for the local compose stack, used only when CLEAT_TEST_DB is unset.
+	dsn, _ := clusterDSNWithConfigured()
+	return dsn
+}
+
+// clusterDSNWithConfigured is ClusterDSN plus the distinction this suite was
+// missing (cleat#3952): whether ANYBODY ASKED for a database.
+//
+// tests/exhaustion has had this split since it was written -- configured and
+// unreachable is a t.Fatalf, only "nobody configured one" is a skip -- and its
+// budget is 0 for exactly that reason. This suite skipped on a ping failure
+// whatever the environment said, so in CI (where CLEAT_TEST_DB is always set)
+// a cluster that was down read as "nothing to test here" and the required job
+// stayed green. The window is not hypothetical: the step before this one runs
+// TestKillPostgresAndRestart, so the entry state is a container that was just
+// stopped and restarted.
+func clusterDSNWithConfigured() (dsn string, configured bool) {
+	if v := os.Getenv("CLEAT_TEST_DB"); v != "" {
+		return testutil.TagPostgresDSN(v), true
 	}
-	return testutil.TagPostgresDSN(dsn)
+	return testutil.TagPostgresDSN("postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"), false //nolint:gosec // G101: a localhost default DSN for the local compose stack, used only when CLEAT_TEST_DB is unset.
+}
+
+// openClusterDB is the single place this suite opens and pings its database.
+//
+// ONE FUNCTION BECAUSE THERE WERE FOUR COPIES: testStore, requireDB,
+// replayStoreDB and scaleStore each had the same open-then-ping-then-skip block.
+// Consolidating them is what makes the configured/unconfigured split a single
+// decision rather than four that can drift -- and the split is the substance of
+// cleat#3952, not a tidy-up riding along with it.
+func openClusterDB(t *testing.T) *sql.DB {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("Skipping cluster test in short mode")
+	}
+	dsn, configured := clusterDSNWithConfigured()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		if configured {
+			t.Fatalf("configured cluster database at %s cannot be opened: %v -- "+
+				"CLEAT_TEST_DB was set, so this is a failure of the configuration "+
+				"rather than a missing prerequisite", redactDSN(dsn), err)
+		}
+		t.Skipf("no cluster database configured (CLEAT_TEST_DB not set); default "+
+			"DSN %s cannot be opened: %v -- this suite needs "+
+			"docker-compose.cluster.yml up, so it skips rather than failing when "+
+			"nobody asked for it", redactDSN(dsn), err)
+	}
+	if err := db.Ping(); err != nil {
+		if configured {
+			// The arm this suite did not have. In CI CLEAT_TEST_DB is always
+			// set, so this branch is the only one reachable there, and skipping
+			// it would report a dead cluster as an empty test run.
+			t.Fatalf("configured cluster database at %s is unreachable: %v -- this "+
+				"suite requires docker-compose.cluster.yml to be up, and "+
+				"CLEAT_TEST_DB was set explicitly, so this is a failure of the "+
+				"configuration and not an absent prerequisite", redactDSN(dsn), err)
+		}
+		t.Skipf("no cluster database configured (CLEAT_TEST_DB not set); default "+
+			"DSN %s is unreachable: %v -- this suite needs "+
+			"docker-compose.cluster.yml up, so it skips rather than failing when "+
+			"nobody asked for it", redactDSN(dsn), err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// redactDSN strips the password from a DSN so it can appear in test output.
+// Mirrors tests/exhaustion's redact and engine/testutil's redactDSN; kept local
+// rather than exported because consolidating the three is a change to a public
+// package's surface and does not belong in a fix about skip budgets.
+func redactDSN(dsn string) string {
+	if i := strings.Index(dsn, "@"); i >= 0 {
+		if j := strings.Index(dsn, "://"); j >= 0 && j+3 < i {
+			return dsn[:j+3] + "***" + dsn[i:]
+		}
+	}
+	return dsn
 }
 
 // GetDB returns a *sql.DB connected to the cluster's PostgreSQL instance.

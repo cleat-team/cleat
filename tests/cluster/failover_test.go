@@ -20,17 +20,7 @@ import (
 // requireDB is like testStore but skips if CLEAT_TEST_DB is unavailable.
 func requireDB(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping in short mode")
-	}
-	db, err := sql.Open("postgres", ClusterDSN())
-	if err != nil {
-		t.Skipf("Skipping: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping: cannot ping database: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openClusterDB(t)
 	return db, engine.NewPostgresStore(db, TestQueue1, TestQueue2, TestQueue3)
 }
 
@@ -218,7 +208,17 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	// Kill postgres container.
 	killCmd := exec.Command("docker", "stop", "cleat-postgres")
 	if out, err := killCmd.CombinedOutput(); err != nil {
-		t.Skipf("Skipping: cannot stop postgres container: %v\n%s", err, string(out))
+		// A FAILURE, not a skip (cleat#3952). The test's entire subject is what
+		// happens when postgres goes away; if the container cannot be stopped,
+		// the premise is broken and the run measured nothing. The sibling
+		// `docker start` below has always been a Fatalf, so the skip here also
+		// meant a failed stop and a failed start reported differently.
+		//
+		// "docker not available" is still a skip, and it is checked above: that
+		// is a genuinely absent toolchain, which is the one thing a skip is
+		// allowed to mean.
+		t.Fatalf("cannot stop the postgres container, so this test cannot test "+
+			"what it is for: %v\n%s", err, string(out))
 	}
 
 	// Wait briefly, then restart.

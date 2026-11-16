@@ -16,17 +16,7 @@ import (
 // It follows the same pattern as internal/host/fault_test.go's testDB().
 func testStore(t *testing.T, taskQueues ...string) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping cluster test in short mode")
-	}
-	db, err := sql.Open("postgres", ClusterDSN())
-	if err != nil {
-		t.Skipf("Skipping cluster test: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping cluster test: cannot ping database: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openClusterDB(t)
 	return db, engine.NewPostgresStore(db, taskQueues...)
 }
 
