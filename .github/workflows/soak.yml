@@ -208,6 +208,14 @@ jobs:
               echo "::warning::this job is attempt $attempt and fetched the report written by attempt $marker_attempt -- the re-run produced none, so the older artifact survived; labelling it by the attempt that wrote it" >&2
             fi
             attempt="$marker_attempt"
+          elif [ -f soak-report/soak-report.json ]; then
+            # A REPORT WITH NO MARKER. The step exists to tell "written by
+            # attempt N" from "I cannot tell", and falling through would record
+            # the second as the first, silently -- the permissive branch in a
+            # check that is meant to be able to disagree. Reachable only if the
+            # marker step failed or the marker was lost between steps; rare, and
+            # exactly the kind of branch nobody would see fire.
+            echo "::warning::a report was fetched with no attempt marker; labelling it by attempt $attempt, which may not be the one that wrote it" >&2
           fi
           echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
 
