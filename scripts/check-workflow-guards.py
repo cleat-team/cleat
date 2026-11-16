@@ -1923,6 +1923,121 @@ def verify_against_api() -> int:
     return 0
 
 
+def guard_edit_gate_dependents(errors) -> None:
+    """A workflow's jobs must implement the PR-edit gate the same way twice.
+
+    cleat#3958 gave the six workflows that run on `edited` an `edit-gate` job.
+    Two shapes, and which one a job needs is decided by ONE thing: whether its
+    name is a required context.
+
+    * A NON-required job skips at job level (`needs.edit-gate.outputs.skip`).
+      Nothing evaluates its check-run, so `skipped` is fine and free.
+
+    * A REQUIRED context must **run and report success** on a body edit. It may
+      not gate at job level: measured on #3960, the same sha read CLEAN at
+      14:27 and BLOCKED at 14:28 once the edited run registered 20 required
+      contexts as `skipped` beside their `success` twins. So its steps are
+      guarded instead, with one step that runs only when the gate says skip, to
+      say so out loud.
+
+    Both shapes need a status function in the job's `if:`: a job whose `needs`
+    dependency was SKIPPED is itself skipped unless its `if` uses one --
+    measured on cleat#3959, and the bug that made Tier 1 red on #3960's first
+    run. A job using one other than `always()` must also check every non-gate
+    dependency for success, or it starts when that dependency failed.
+    """
+    status_functions = ("!cancelled()", "cancelled()", "always()", "success()", "failure()")
+    required = read_required()
+    sentinel = "ZZMATRIXZZ"
+
+    def name_regex(name):
+        s = re.sub(r"\$\{\{[^}]*\}\}", sentinel, str(name))
+        return re.compile("^" + re.escape(s).replace(sentinel, ".+") + "$")
+
+    def is_required(name):
+        rx = name_regex(name)
+        return any(rx.fullmatch(r) for r in required)
+
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by another guard
+        jobs = doc.get("jobs") or {}
+        if "edit-gate" not in jobs:
+            continue
+        for job_id, job in jobs.items():
+            if job_id == "edit-gate" or not isinstance(job, dict):
+                continue
+            needs = job.get("needs") or []
+            if isinstance(needs, str):
+                needs = [needs]
+            # A push-only job can never be woken by a pull_request edit, so the
+            # gate has nothing to say about it: tier1-gate.yml's canary and
+            # ci.yml's benchmarks are both exempt for that reason.
+            if "github.event_name == 'push'" in str(job.get("if") or "") and "pull_request" not in str(job.get("if") or ""):
+                continue
+            if "edit-gate" not in needs:
+                errors.append(
+                    f"{path}: job {job_id!r} does not depend on `edit-gate`, so it "
+                    f"re-runs in full on every PR body edit (cleat#3958)."
+                )
+                continue
+            cond = str(job.get("if") or "")
+            if not any(fn in cond for fn in status_functions):
+                errors.append(
+                    f"{path}: job {job_id!r} has no status function in its `if:`. A "
+                    f"job whose `needs` dependency was skipped is skipped too unless "
+                    f"its `if` uses one, so this job silently skips on every event "
+                    f"(cleat#3958)."
+                )
+            if "always()" not in cond:
+                for need in needs:
+                    if need == "edit-gate":
+                        continue
+                    if f"needs.{need}.result == 'success'" not in cond:
+                        errors.append(
+                            f"{path}: job {job_id!r} depends on {need!r} and its "
+                            f"`if:` uses a status function that is not `always()`, "
+                            f"so it now runs when {need!r} FAILS -- where it used "
+                            f"to be skipped. Add `needs.{need}.result == 'success'` "
+                            f"or use `always()` deliberately (cleat#3958)."
+                        )
+            required_name = is_required(job.get("name", job_id))
+            gated_at_job = "needs.edit-gate.outputs.skip" in cond
+            if required_name:
+                if gated_at_job:
+                    errors.append(
+                        f"{path}: job {job_id!r} carries a REQUIRED context and gates "
+                        f"at job level. A `skipped` required context beside its "
+                        f"`success` twin leaves the PR un-mergeable (measured on "
+                        f"#3960). Guard its steps instead (cleat#3958)."
+                    )
+                steps = job.get("steps") or []
+                if not steps or "needs.edit-gate.outputs.skip == 'true'" not in str(steps[0].get("if") if isinstance(steps[0], dict) else ""):
+                    errors.append(
+                        f"{path}: required job {job_id!r} has no first step that runs "
+                        f"only when the gate says skip, so an edited run reads as a "
+                        f"job that mysteriously did nothing (cleat#3958)."
+                    )
+                for n, step in enumerate(steps[1:], 1):
+                    if not isinstance(step, dict):
+                        continue
+                    if "needs.edit-gate.outputs.skip != 'true'" not in str(step.get("if") or ""):
+                        errors.append(
+                            f"{path}: job {job_id!r} is a required context but step "
+                            f"{n} is not guarded on `needs.edit-gate.outputs.skip != "
+                            f"'true'`, so a body edit would run it (cleat#3958)."
+                        )
+            else:
+                if not gated_at_job:
+                    errors.append(
+                        f"{path}: job {job_id!r} is not a required context and does "
+                        f"not skip at job level, so it re-runs in full on every body "
+                        f"edit (cleat#3958)."
+                    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1971,6 +2086,7 @@ def main() -> int:
     guard_lint_step_wrapper(errors)
     guard_image_labels_come_from_the_shared_script(errors)
     guard_mysql_health_start_period(errors)
+    guard_edit_gate_dependents(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")

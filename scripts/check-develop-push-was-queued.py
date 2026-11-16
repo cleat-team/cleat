@@ -144,6 +144,21 @@ def _attempt_order(run):
     return (created, attempt, rid)
 
 
+def pull_request_only(cond: str) -> bool:
+    """True when `cond` provably cannot be true on a push.
+
+    `github.event_name == 'pull_request'` ANDed with anything, and no `||`
+    anywhere. A substring test would also exempt
+    `github.event_name == 'pull_request' || github.ref == 'refs/heads/develop'`,
+    which runs on a develop push -- a guard hole rather than a classification.
+    """
+    c = " ".join(str(cond).split())
+    if not c or "||" in c:
+        return False
+    return any(part.strip() == "github.event_name == 'pull_request'"
+               for part in c.split("&&"))
+
+
 def check_cut_list(root):
     """The cut and the canary must list the same workflows (cleat#3958).
 
@@ -199,6 +214,13 @@ def check_cut_list(root):
                 cond = str(job.get("if") or "")
                 if "merge_group" in cond:
                     continue  # a scenario: never runs in the group, keeps push
+                # A job restricted to pull_request cannot run on a develop push
+                # either, so it is outside the cut rather than missing from it.
+                # The test is a PROOF, not a substring: `X == 'pull_request' ||
+                # github.ref == 'refs/heads/develop'` contains the clause and
+                # still runs on a push (cleat#3958, cleat-review's finding).
+                if pull_request_only(cond):
+                    continue
                 if "refs/heads/develop" not in cond:
                     errors.append(
                         f"{wf}: job {jn!r} still runs on a develop push and is not "
@@ -224,6 +246,57 @@ def check_cut_list(root):
     return 0
 
 
+def self_test_cut_list():
+    """Known-positive/negative pairs for --check-cut-list.
+
+    The `||` fixture is the one that matters: the first version of the
+    pull_request exemption was a substring test, so a job conditioned
+    `github.event_name == 'pull_request' || github.ref == 'refs/heads/develop'`
+    -- which DOES run on a develop push -- was exempted. Reverting
+    pull_request_only() to a substring check must turn this red.
+    """
+    import os
+    import tempfile
+
+    other = ("on:\n  push:\n    branches: [main]\njobs:\n  x:\n"
+             "    runs-on: ubuntu-latest\n    steps: [{run: echo}]\n")
+
+    def tree(ci_jobs: str) -> str:
+        root = tempfile.mkdtemp(prefix="cutlist-")
+        wf = os.path.join(root, ".github", "workflows")
+        os.makedirs(wf)
+        open(os.path.join(wf, "ci.yml"), "w", encoding="utf-8").write(
+            "on:\n  push:\n    branches: [develop]\njobs:\n" + ci_jobs)
+        for name in DEFAULT_WORKFLOWS[1:]:
+            open(os.path.join(root, name), "w", encoding="utf-8").write(other)
+        return root
+
+    non_pr = "    runs-on: ubuntu-latest\n    steps: [{run: echo}]\n"
+    cases = [
+        ("an edit-gate-shaped job is outside the cut",
+         "  edit-gate:\n    if: github.event_name == 'pull_request' && "
+         "github.event.action == 'edited'\n" + non_pr, 0),
+        ("a scenario keeps the push",
+         "  scenario:\n    if: github.event_name != 'merge_group'\n" + non_pr, 0),
+        ("a pull_request clause ORed with the develop ref still runs on a push",
+         "  sneaky:\n    if: github.event_name == 'pull_request' || "
+         "github.ref == 'refs/heads/develop'\n" + non_pr, 1),
+        ("an unclassified job still runs on a push",
+         "  bare:\n" + non_pr, 1),
+    ]
+    failures = 0
+    for name, jobs, want in cases:
+        rc = check_cut_list(tree(jobs))
+        ok = rc == want
+        if not ok:
+            failures += 1
+            print(f"  FAIL {name}: rc={rc} want={want}")
+        else:
+            print(f"  ok   {name}: rc={rc}")
+    print(f"{len(cases) - failures}/{len(cases)} cut-list cases passed")
+    return 1 if failures else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--runs", required=False,
@@ -247,7 +320,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.self_test:
-        return self_test()
+        rc = self_test()
+        return rc or self_test_cut_list()
     if args.check_cut_list:
         return check_cut_list(args.root)
 
