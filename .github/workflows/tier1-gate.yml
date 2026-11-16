@@ -1114,6 +1114,32 @@ jobs:
           cat skip-inventory.txt
           echo "::notice title=Skip inventory (report only)::$(head -1 skip-inventory.txt)"
 
+      # cleat#3949 step 2, and the reason step 1 exists. The engine shards run
+      # ./engine/... with all three DSNs set, and measured ZERO skips in all 15 runs
+      # sampled before this step existed -- 13 develop pushes and 2 PR runs, 2026-11-16.
+      # So the budget is 0, not a derived set:
+      # any engine test that starts skipping on a PR is red here.
+      #
+      # rc 2 for UNMEASURED, deliberately distinct from rc 1 (a skip finding): 1 says go
+      # and look at the tree, 2 says the check is broken and the tree may be fine. It
+      # cannot be checked into a corner where a missing artifact reads as a pass.
+      - name: Skip budget across the engine shards
+        if: github.event_name == 'pull_request' && always()
+        run: |
+          set -uo pipefail
+          list=$(find tier-gate-json -mindepth 2 -maxdepth 2 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          if [ -z "$list" ]; then
+            echo "::error title=Skip budget UNMEASURED::no engine report to check a budget against -- this is a failure of the check, not a finding about the tree"
+            exit 2
+          fi
+          # shellcheck disable=SC2086
+          awk 1 $list > tier-gate-union.json
+          if [ ! -s tier-gate-union.json ]; then
+            echo "::error title=Skip budget UNMEASURED::the union report is empty -- this is a failure of the check, not a finding about the tree"
+            exit 2
+          fi
+          scripts/check-skip-budget.sh test-go/engine-tier1 tier-gate-union.json
+
       - name: Aggregate shard results
         env:
           EVENT: ${{ github.event_name }}
