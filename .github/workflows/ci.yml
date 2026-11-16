@@ -4530,7 +4530,8 @@ jobs:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 40  # max 15.3m over 49 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
-    env:
+    # No job-wide env: this job used to set CLEAT_TEST_DB to a dedicated server it kept for ./engine/... (cleat#3935
+    # removed that run). Both remaining suites set their own DSN on the step that needs it.
     steps:
       - uses: actions/checkout@v7
 
@@ -4793,10 +4794,11 @@ jobs:
       # the separate server it needed.)
       #
       # -json, teed to its own report: this suite gets its own skip-budget
-      # check below, separate from the ./engine/... one. Because a DSN is
-      # always configured here, clusterDB() can only Fatal on an unreachable
-      # database, never skip -- so the budget is 0, and a skip appearing
-      # under it means the override above stopped taking effect.
+      # check below, the only one this job has since cleat#3935 removed the
+      # ./engine/... run. Because a DSN is always configured here, clusterDB()
+      # can only Fatal on an unreachable database, never skip -- so the budget
+      # is 0, and a skip appearing under it means the DSN above stopped taking
+      # effect.
       - name: Resource exhaustion — runaway workflow is terminated
         shell: bash
         env:
