@@ -119,7 +119,12 @@ fi
 # duplicate name, not a partition bug; dedupe once here rather than at every
 # caller.
 engine_all_tests() {
-  (cd "$REPO_ROOT" && go test ./engine/... -list '.*' 2>/dev/null) | grep -E '^Test' | LC_ALL=C sort -u
+  # `^(Test|Fuzz)`, not `^Test`: FuzzCompactionEquivalence is a fuzz target that
+  # runs its seed corpus as an ordinary test and costs 0.55s, and Test MySQL was
+  # the only per-PR job running it (cleat#3940 review). With that job sharded the
+  # listing has to carry it here too, or the engine shards would be the place it
+  # disappears to.
+  (cd "$REPO_ROOT" && go test ./engine/... -list '.*' 2>/dev/null) | grep -E '^(Test|Fuzz)' | LC_ALL=C sort -u
 }
 
 # REST_PACKAGES (cleat#3301): tiers.yaml's tier1.packages minus ./engine/..., today.
