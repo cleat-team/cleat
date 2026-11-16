@@ -712,6 +712,10 @@ jobs:
           # writing "tier-gate.log" collided there, so only one shard's
           # failures ever reached the notifier (cleat#2877).
           TIER_GATE_LOG: tier-gate-engine-${{ matrix.shard }}.log
+          # cleat#3949: the machine-readable report, named per shard for the same
+          # reason the log is -- the artifact names already differ, but a
+          # merge-multiple download merges by the file name INSIDE the artifact.
+          TIER_GATE_REPORT: tier-gate-engine-${{ matrix.shard }}.json
         run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/4 --engine-buckets 2
 
       # The log on failure, because the gate deliberately keeps it rather than
@@ -740,6 +744,20 @@ jobs:
         with:
           name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: tier-gate-engine-${{ matrix.shard }}.log
+          retention-days: 30
+
+      # cleat#3949 step 1. The `go test -json` report the skip budget will read, once
+      # this job has a ledger key of its own -- see the inventory step in `tier1` for
+      # why the existing key cannot be reused. Same if:/continue-on-error reasoning as
+      # the log above: it is evidence, not a result, and losing it to an upload hiccup
+      # must not fail the authoritative push check.
+      - name: Upload the go test -json report
+        if: always() && github.event_name != 'merge_group'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: tier-gate-json-engine-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: tier-gate-engine-${{ matrix.shard }}.json
           retention-days: 30
 
   tier1-rest:
@@ -1017,6 +1035,48 @@ jobs:
   # after relying on it silently. Spelling out the check here costs six lines
   # and removes that assumption entirely: this job always runs and always
   # states which dependency, if any, was not a success.
+  # cleat#3949 step 1: REPORT ONLY, and deliberately its own job rather than a step in
+  # `Tier 1 Gate`. The step it replaces carried continue-on-error, which
+  # scripts/check-workflow-guards.py refuses in a required job -- correctly, since such a
+  # step cannot fail the check it appears to be part of. Here that is the point: this
+  # supplies the numbers a skip budget needs and decides nothing, the aggregate step in
+  # `Tier 1 Gate` is what decides whether a shard ran, and a missing artifact must not
+  # become a second failure reported against the authoritative check.
+  #
+  # pull_request only: on merge_group the shards are skipped at the job level, so there
+  # is nothing to download. (The condition names pull_request, which is also what keeps
+  # TestAConditionalJobStatesWhatItCannotSee's job-level scan from reading this as an
+  # unjustified exclusion.)
+  tier1-skip-inventory:
+    name: Tier 1 skip inventory (report only)
+    needs: [tier1-engine]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download the engine shard reports
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          pattern: tier-gate-json-engine-*
+          path: tier-gate-json
+          merge-multiple: true
+
+      - name: Skip inventory across the engine shards
+        run: |
+          set -uo pipefail
+          reports=$(find tier-gate-json -maxdepth 1 -name '*.json' 2>/dev/null | sort | tr '\n' ' ')
+          if [ -z "$reports" ]; then
+            # UNMEASURED: neither a pass nor a finding about the tree.
+            echo "::notice title=Skip inventory UNMEASURED::no tier-gate-json artifacts on this run -- a failure of the inventory, not of the suite"
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          python3 scripts/skip-inventory.py $reports | tee skip-inventory.txt
+          echo "::notice title=Skip inventory (report only)::$(head -1 skip-inventory.txt)"
+
   tier1:
     name: Tier 1 Gate
     needs: [tier1-coverage, tier1-engine, tier1-rest]
