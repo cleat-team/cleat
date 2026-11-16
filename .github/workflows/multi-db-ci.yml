@@ -75,7 +75,18 @@ run-name: >-
 
 on:
   push:
-    branches: [main, develop]
+    # develop is NOT here (cleat#3958): every job in this workflow ran,
+    # and passed, in a merge_group run on the same commit before it landed
+    # -- the queue's merge commit IS the develop commit, so the develop
+    # push was a second full pass over an identical tree (905/339/190/142
+    # runner-minutes a day across the four workflows).
+    #
+    # main stays: it has no merge queue behind it, so a push there is the
+    # only run that tree will get. tier1-gate.yml's
+    # `develop-push-was-queued` job asserts the merge_group run actually
+    # exists for every develop commit and fails the Tier 1 run when it
+    # does not.
+    branches: [main]
   pull_request:
     # cleat#2483: `branches` filters on the PR's BASE branch, and a
     # release branch was absent -- so every PR targeting one ran none of

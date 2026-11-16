@@ -288,6 +288,63 @@ env:
   WASM_TOOLS_SHA256: "a62237f4731c45f665f1115cad39acaeec02963cbc848c9473ab033eed837072"
 
 jobs:
+  # cleat#3958: THE CUT'S OWN GUARD.
+  #
+  # The develop push no longer runs the jobs the merge group already ran on
+  # this exact commit -- the queue's merge commit IS the develop commit -- so
+  # that coverage now depends on a merge_group run existing on this sha AND
+  # having passed. Nothing enforced that before this job, and its absence
+  # would be SILENT: a push run whose heavy jobs are skipped concludes
+  # `success`, because they are absent rather than failing.
+  #
+  # A direct admin push, or a queue regroup that cancels a group run, is
+  # exactly what this catches. It fails the Tier 1 run rather than re-running
+  # the suites: the commit is already on develop, and the operator needs to
+  # know it was never gated, not to wait 40 minutes for a run that should not
+  # have been necessary. The failure reaches a person through
+  # tier1-push-failure-notifier, which already watches this workflow's develop
+  # push runs and opens or refreshes a tracking issue.
+  #
+  # Deliberately NOT a `needs:` dependency of the shards below. A skipped
+  # dependency skips its dependents unless they carry `always()`, and giving
+  # them `always()` would also make them run after this job FAILED -- the
+  # opposite of fail-fast. Running the shards anyway is the right fallback:
+  # this commit was never gated, so the develop push is the only place it can
+  # be tested.
+  develop-push-was-queued:
+    name: Develop push was queued
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout the guard only
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/check-develop-push-was-queued.py
+          sparse-checkout-cone-mode: false
+
+      - name: Fetch this commit's merge_group runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # An empty result is a legitimate ANSWER -- the commit did not go
+          # through the queue -- and must reach the script, which reports it as
+          # a finding. Only a failed REQUEST aborts here, as UNMEASURED.
+          gh api --paginate \
+            "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&event=merge_group&per_page=100" \
+            --jq '.workflow_runs[]' | jq -s '.' > merge-group-runs.json
+
+      - name: Judge
+        run: |
+          set -euo pipefail
+          python3 scripts/check-develop-push-was-queued.py \
+            --runs merge-group-runs.json --sha "${GITHUB_SHA}"
+
   # No DB, no Python, no wasm-tools: `go test -list` compiles the package and
   # enumerates Test funcs, it never runs one. Gates the three expensive jobs
   # below so a broken partition (a bucket that lost a test, or double-counted

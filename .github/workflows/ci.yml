@@ -167,11 +167,38 @@ permissions:
 # container pull) and re-run that one job. Well below the cap means something
 # else cancelled it. A cap that is too tight is raised from fresh durations,
 # not re-run until it passes.
+# ---------------------------------------------------------------------------
+# THE DEVELOP PUSH RUNS ONLY WHAT THE QUEUE DID NOT (cleat#3958).
+#
+# Every job below carrying
+#
+#     if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
+#
+# ran, and passed, in a merge_group run on the same commit before that commit
+# landed. That is exact rather than analogous: the queue's merge commit IS the
+# develop commit (25 of 25 develop push commits in the 24h census are the
+# head_sha of their own merge_group run), so the develop push was a second
+# full pass over a byte-identical tree -- 3,105 runner-minutes a day of it in
+# this workflow alone, against a pool pinned at the 60-job hosted cap.
+#
+# What still runs on a develop push here: every `*-scenario` job (they carry
+# `github.event_name != 'merge_group'`, so they have no group coverage at all);
+# `coverage`, which is not in the group either (its own cut is #3958's step 2,
+# item 3); and `benchmarks`, which is main-only already.
+#
+# THE GUARD, which is what makes dropping them safe: an absent job does not
+# fail a run, so a commit that never went through the queue would lose this
+# coverage SILENTLY. tier1-gate.yml's `develop-push-was-queued` job asserts a
+# successful merge_group run of this workflow exists on the push's own sha and
+# fails the Tier 1 run when it does not, which tier1-push-failure-notifier
+# turns into a tracking issue.
+# ---------------------------------------------------------------------------
 jobs:
   # -------------------------------------------------------------------------
   # Lint
   # -------------------------------------------------------------------------
   lint:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 25  # max 8.3m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -1349,6 +1376,22 @@ jobs:
           scripts/check-workflow-guards.py
           LINT_GUARD_EOF
 
+      # cleat#3958. The guard itself runs on the develop push (tier1-gate.yml's
+      # `develop-push-was-queued`), and the case it exists for -- a commit with
+      # no merge_group run -- cannot be produced on demand there. So its
+      # judgment is asserted here against fixtures: six cases, each one a way
+      # the guard could be WRONG (a missing workflow, a cancelled one, a
+      # cancelled attempt that a later attempt then passed, no group run at
+      # all, runs belonging to a different sha, and unparsable input), not a
+      # restatement of the happy path.
+      - name: Develop-push-was-queued guard
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Develop-push-was-queued guard" >> "$LINT_FAILURES_FILE"
+          python3 scripts/check-develop-push-was-queued.py --self-test
+          python3 scripts/check-develop-push-was-queued.py --check-cut-list
+          LINT_GUARD_EOF
+
       # cleat#3825. Two rules, neither checked by anything else: LANGUAGE_SUPPORT.md may not
       # claim more for a language than tiers.yaml grants, and the TypeScript tests live only
       # in tests/typescript/, a tier-2 package in no tier-1 pattern. --self-test first, so
@@ -1679,6 +1722,7 @@ jobs:
           fi
           echo "OK: every guard step ran, and none failed."
   lint-go:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     runs-on: ubuntu-latest
     timeout-minutes: 15  # max 3.4m over 56 successful runs (develop push + pull_request samples); internal go test -timeout 5m, 2026-10-27; cleat#3479
     env:
@@ -1858,6 +1902,7 @@ jobs:
   # Vulnerability check (govulncheck)
   # -------------------------------------------------------------------------
   build-documented-examples:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Documented example builds
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 2.5m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -2569,6 +2614,7 @@ jobs:
         run: scripts/run-b2b-saas-control-plane-scenario.sh
 
   vulncheck:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Vulnerability Check
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 1.0m over 56 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -2671,6 +2717,7 @@ jobs:
   # Test Go (matrix: Go version x package group)
   # -------------------------------------------------------------------------
   test-go:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
     runs-on: ubuntu-latest
     # cleat#2862: three jobs (two of them this matrix's commands/crash legs)
@@ -2995,6 +3042,7 @@ jobs:
   # reports blocks every PR. Same shape as e2e-cross-language.yml's summary job
   # (cleat#3925), which is where this pattern was first used here.
   test-go-commands:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Test Go (commands ${{ matrix.leg }} ${{ matrix.shard }} of 2) on 1.26
     runs-on: ubuntu-latest
     # 45 is arithmetic, not a measurement: a package that hangs hits its own
@@ -3322,7 +3370,7 @@ jobs:
     # job to be skipped when a leg fails: a SKIPPED job does not read as
     # "success", but spelling out the check costs five lines and removes any
     # reliance on GitHub's semantics for a required check.
-    if: always()
+    if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/develop')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -3482,6 +3530,7 @@ jobs:
   # ran, and the aggregate job below re-lists the package and fails when the
   # union is not every test, or when a test appears on two shards.
   test-go-crash:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Test Go (crash shard ${{ matrix.shard }} of 3) on 1.26
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -3650,7 +3699,7 @@ jobs:
   test-go-crash-summary:
     name: Test Go (crash) on 1.26
     needs: [test-go-crash]
-    if: always()
+    if: always() && (github.event_name != 'push' || github.ref != 'refs/heads/develop')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -3736,6 +3785,7 @@ jobs:
   # Test Python (matrix: 3.10 / 3.11 / 3.12 / 3.13)
   # -------------------------------------------------------------------------
   test-python:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Test Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 0.6m over 228 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -3800,6 +3850,7 @@ jobs:
   # Test Java
   # -------------------------------------------------------------------------
   test-java:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Java Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 1.9m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -3830,6 +3881,7 @@ jobs:
   # Test AssemblyScript
   # -------------------------------------------------------------------------
   test-assemblyscript:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: AssemblyScript Tests
     # No continue-on-error. Measured 2026-08-06 on a clean checkout, `npm test`
     # in packages/cleat-as runs 106 assertions across three spec files, 106
@@ -3897,6 +3949,7 @@ jobs:
   #     errors, not warnings, so those do not gate. They are real and unfixed.
   # -------------------------------------------------------------------------
   test-web:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Web Dashboard
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 0.7m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -3976,6 +4029,7 @@ jobs:
   # Test Rust
   # -------------------------------------------------------------------------
   test-rust:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Test Rust
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 1.1m over 57 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -4013,6 +4067,7 @@ jobs:
   # Test AssemblyScript WASM compilation
   # -------------------------------------------------------------------------
   test-assemblyscript-wasm:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: AssemblyScript WASM Build
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 0.4m over 58 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -4077,6 +4132,7 @@ jobs:
   # Fuzz tests (WASM boundary)
   # -------------------------------------------------------------------------
   fuzz:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Fuzz Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 3.5m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -4222,6 +4278,7 @@ jobs:
   # and adding a line there without changing the repository setting would be a
   # doc that lies. Making this blocking is a settings change for a maintainer.
   release-dryrun:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Release Dry Run
     # ubuntu-26.04, matching release.yml (cleat#2069) -- the .deb-install
     # step below needs to run on the same base the real release job pins to,
@@ -4492,6 +4549,7 @@ jobs:
         run: docker rm -f helm-dryrun-registry
 
   build:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10  # max 3.3m over 55 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
@@ -4728,6 +4786,7 @@ jobs:
   # Cluster integration tests (requires Docker)
   # -------------------------------------------------------------------------
   cluster-tests:
+    if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 40  # max 15.3m over 49 successful runs (develop push + pull_request samples), 2026-10-27; cleat#3479
