@@ -29,10 +29,12 @@ import (
 // the background every 5 minutes by database/sql's ConnMaxLifetime,
 // independent of load -- could free a slot in that shared, server-wide
 // ceiling at exactly the moment this test relied on it staying occupied.
-// That job now starts a dedicated, throwaway Postgres container for
-// ./engine/... (see .github/workflows/ci.yml, "Start a dedicated Postgres
-// for ./engine/..."), restoring the exclusivity this comment used to assert
-// without CI actually providing it.
+// That job gave itself a dedicated, throwaway Postgres container for
+// ./engine/... (cleat#2012), which restored the exclusivity this comment
+// used to assert without CI actually providing it. cleat#3935 then removed
+// that run as redundant -- 87% of its engine time was tests other jobs also
+// run -- so this test now executes only where its own suite does, against
+// servers nothing else on the runner draws from.
 func TestForeignSessionsAnswersUnderPostgresConnectionExhaustion(t *testing.T) {
 	// Establishes a reservation the same way a real suite does -- at the
 	// first TestDB call -- rather than calling reserveProbeConnection
