@@ -94,6 +94,35 @@ README_NEGATION = re.compile(r"not supported|in development|not built|unsupporte
 NAME_PREFIX = re.compile(r"^func (Test(?:TypeScript|JavaScript|Javy|QuickJS)\w*)\(", re.M)
 TOOLCHAIN = re.compile(r"\bjavy\b|esbuild|quickjs", re.I)
 
+# Paths allowed to name the TypeScript toolchain outside tests/typescript/, with the
+# reason. A path->reason map rather than a looser regex, for the same reason
+# wasmAPIAllowedInLongRunning exists: it makes a person state why, once, where the next
+# reader can find it. Loosening the pattern would also stop it catching the cases it
+# exists for, and splitting strings inside a test to dodge a text scan hides the fact
+# that the test is about the toolchain's name.
+TOOLCHAIN_EXEMPT = {
+    "engine/js_engine_pin_is_reported_test.go":
+        "asserts the warning a worker logs when a module's cleat.js-engine pin is newer; it "
+        "names the pin's own JSON keys (javy, rquickjs_core) and the log key, runs no JS "
+        "toolchain, and cannot live in tests/typescript/ because the behaviour under test is "
+        "the engine's, not the TypeScript package's (cleat#3830)",
+}
+
+
+def check_exemptions(test_files, exempt):
+    """Raise when an exemption names a path the scan did not see.
+
+    An exemption whose path has been renamed is worse than none: the reason stays behind,
+    the new path is refused, and the next reader finds a rule with a stale exception and
+    no file.
+    """
+    missing = [q for q in exempt if q not in test_files]
+    if missing:
+        raise Unmeasured("TOOLCHAIN_EXEMPT names path(s) the scan did not see: "
+                         + ", ".join(sorted(missing))
+                         + " -- the exemption's premise cannot be checked")
+
+
 
 class Unmeasured(Exception):
     pass
@@ -175,7 +204,7 @@ def check_docs(tiers, doc_text, readme_text=""):
     return findings
 
 
-def check_placement(tiers, test_files, resolve, ts_pkg_path):
+def check_placement(tiers, test_files, resolve, ts_pkg_path, exempt=None):
     """test_files: {path: source text} for every tracked *_test.go.
     resolve(patterns) -> set of package import paths, as `go list` would answer.
     ts_pkg_path: the import path of tests/typescript."""
@@ -207,7 +236,7 @@ def check_placement(tiers, test_files, resolve, ts_pkg_path):
             else:
                 findings.append(f"{path}: {m.group(1)} is outside {TS_PKG}/ (a TypeScript test in another "
                                 f"package can run in Tier 1, where a skip is a failure)")
-        if not in_pkg and TOOLCHAIN.search(src):
+        if not in_pkg and TOOLCHAIN.search(src) and path not in (TOOLCHAIN_EXEMPT if exempt is None else exempt):
             findings.append(f"{path} names the TypeScript toolchain (javy, esbuild or quickjs) but is outside "
                             f"{TS_PKG}/; a test that needs it cannot run in Tier 1")
     if inside == 0:
@@ -257,6 +286,7 @@ def repo_inputs(root):
 
 
 def run(tiers, doc, readme, files, resolve, ts_pkg_path):
+    check_exemptions(files, TOOLCHAIN_EXEMPT)
     return check_docs(tiers, doc, readme) + check_placement(tiers, files, resolve, ts_pkg_path)
 
 
@@ -380,6 +410,17 @@ def self_test():
         expect(f"known-positive: {nm} outside tests/typescript/", place(f=f), "engine/zz_test.go")
     f = dict(_TESTS); f["engine/zz_test.go"] = "package engine\n// builds with esbuild\nfunc TestBuilds(t *testing.T) {}\n"
     expect("known-positive: an unprefixed test that names the toolchain", place(f=f), "names the TypeScript toolchain")
+    exempted = "engine/js_engine_pin_is_reported_test.go"
+    f = dict(_TESTS); f[exempted] = "package engine\n// names javy and rquickjs_core\nfunc TestPin(t *testing.T) {}\n"
+    expect("negative control: the exempted path may name the toolchain", place(f=f), None)
+    f = dict(_TESTS); f["engine/unexempted_test.go"] = "package engine\n// names javy and rquickjs_core\nfunc TestPin(t *testing.T) {}\n"
+    expect("known-positive: the SAME text at a path with no exemption is still refused", place(f=f),
+           "names the TypeScript toolchain")
+    expect_unmeasured("UNMEASURED: an exemption names a path the scan did not see",
+                      lambda: check_exemptions(_TESTS, {"engine/gone_test.go": "stale"}))
+    f = dict(_TESTS); f[exempted] = "package engine\n"
+    check_exemptions(f, TOOLCHAIN_EXEMPT)
+    print("  ok    negative control: a present exemption path does not raise")
     f = dict(_TESTS); f["internal/plugingen/typescript_test.go"] = "package plugingen\nfunc TestGenerateTypeScript_Simple(t *testing.T) {}\n"
     expect("negative control: TestGenerateTypeScript_* (the client generator) is not a guest test", place(f=f), None)
     t = copy.deepcopy(_TIERS); t["tier2"]["packages"].remove(TS_PATTERN)

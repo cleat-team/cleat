@@ -85,14 +85,16 @@ var buildPathPrefixes = []string{"Build", "Prepare"}
 // functions passes by default for anything added later, which is the failure
 // mode the whole test is about.
 var wasmAPIAllowedInLongRunning = map[string]string{
-	"DetectLanguage":         "reads the guest's own cleat.metadata section; no filesystem access",
-	"NeededEnvImports":       "inspects a module's import section in memory",
-	"ReadMetadata":           "parses a custom section out of a []byte",
-	"ReadMemoryInitialPages": "reads the memory section out of a []byte",
-	"Metadata":               "the metadata struct type",
-	"HasWasiImports":         "inspects a module's import section in memory",
-	"WitToEnvImport":         "string mapping, no I/O",
-	"CurrentABIVersion":      "an untyped integer constant; nothing to pass a path to (cleat#1054)",
+	"DetectLanguage":            "reads the guest's own cleat.metadata section; no filesystem access",
+	"NeededEnvImports":          "inspects a module's import section in memory",
+	"ReadMetadata":              "parses a custom section out of a []byte",
+	"ReadMemoryInitialPages":    "reads the memory section out of a []byte",
+	"Metadata":                  "the metadata struct type",
+	"HasWasiImports":            "inspects a module's import section in memory",
+	"WitToEnvImport":            "string mapping, no I/O",
+	"CurrentABIVersion":         "an untyped integer constant; nothing to pass a path to (cleat#1054)",
+	"ReadJSEnginePin":           "parses the cleat.js-engine custom section out of a []byte; no filesystem access (cleat#3830)",
+	"CurrentJSEnginePinVersion": "an untyped integer constant; nothing to pass a path to (cleat#3830)",
 }
 
 // longRunningDirs are the components that run unattended and see
