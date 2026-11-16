@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Structural guards over .github/workflows/, run by the Lint job.
 
-Nine checks, each catching a *class* of defect that has already cost this repo
+Ten checks, each catching a *class* of defect that has already cost this repo
 a session to find one instance of by hand:
 
   1. Every context in .github/required-checks.txt resolves to a job that
@@ -76,6 +76,17 @@ a session to find one instance of by hand:
      >> "$LINT_FAILURES_FILE"`, where `<name>` must equal that step's own
      `name:` verbatim -- a mismatched name would misattribute which guard
      failed to the next reader.
+  10. Every MySQL `services:` container declares a `--health-start-period`.  A
+     start period is the only health option that stops boot-time failures
+     counting at all; retries merely lengthen the window a boot must finish
+     inside.  `mysql:8.4` starts a server twice (initialize, then run) and took
+     55s to be ready AFTER ITS CONTAINER STARTED -- 68s from creation, which is
+     the number a job log shows first -- against a 50s budget counted from that
+     same start, which failed a required Tier-1 job in "Initialize containers"
+     with no test
+     run (cleat#3936).  The guard requires the start period and a 60s floor; it
+     does not police the retry count, because 60s plus the existing retries
+     already exceeds the measured boot.
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -84,7 +95,7 @@ guard that quietly skips the case it does not understand is the thing it was
 written to prevent.
 
 Usage:
-    scripts/check-workflow-guards.py                       # all nine guards
+    scripts/check-workflow-guards.py                       # all ten guards
     scripts/check-workflow-guards.py --verify-against-api  # needs an admin token
     scripts/check-workflow-guards.py --self-test            # known-positive/negative pairs
 """
@@ -92,6 +103,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import itertools
 import json
@@ -434,6 +446,130 @@ def guard_ancestor_filters_match_images(errors) -> None:
                     f"the pull reference, so the lookup will find nothing and "
                     f"`docker exec` will get an empty container ID."
                 )
+
+
+MYSQL_IMAGE = re.compile(r"(^|/)mysql(:|@|$)")
+HEALTH_START_PERIOD = re.compile(r"--health-start-period(?:=|\s+)(\S+)")
+DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|s|m|h)")
+DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+# mysql:8.4's measured boot, 2026-11-16: 55s from container START to "ready for
+# connections" on a loaded runner -- 68s from creation, the number the job log
+# shows first and the wrong one to compare this against, because Docker's health
+# clock starts at container start. 60s covers the measured boot with a few
+# seconds of margin; a boot slower than that is caught by the retries, not here.
+# A start period shorter than the boot it is meant to cover is a decoration.
+MYSQL_MIN_START_PERIOD_SECONDS = 60.0
+
+
+def parse_docker_duration(text: str) -> float | None:
+    """Seconds in a Docker/Go duration such as `60s` or `1m30s`; None if unreadable."""
+    position = 0
+    total = 0.0
+    for match in DURATION_PART.finditer(text):
+        if match.start() != position:
+            return None
+        total += float(match.group(1)) * DURATION_UNITS[match.group(2)]
+        position = match.end()
+    if position != len(text) or position == 0:
+        return None
+    return total
+
+
+def mysql_services(path: str, doc: dict):
+    """(job id, service id, image, options) for every MySQL service in one workflow.
+
+    Matches on the repository name, so `mirror.gcr.io/library/mysql:8.4.11@sha256:...`
+    and `mysql:8.4` are both recognised -- the digest suffix is stripped before matching.
+    """
+    for job_id, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for service_id, service in (job.get("services") or {}).items():
+            if not isinstance(service, dict):
+                continue
+            image = service.get("image")
+            if not isinstance(image, str):
+                continue
+            if MYSQL_IMAGE.search(image.split("@", 1)[0]):
+                yield job_id, service_id, image, service.get("options")
+
+
+def mysql_health_start_period_violation(path: str, job_id: str, service_id: str,
+                                        image: str, options) -> str | None:
+    """Why this MySQL service is not protected from boot-time health failures, or None."""
+    where = f"{path}: job {job_id!r} service {service_id!r} ({image})"
+    text = options if isinstance(options, str) else ""
+    match = HEALTH_START_PERIOD.search(text)
+    if match is None:
+        return (
+            f"{where} sets no --health-start-period, so every health failure counts "
+            f"from container start. mysql:8.4 starts a server twice and took 55s to be "
+            f"ready after its container started (cleat#3936). Add "
+            f"`--health-start-period 60s` "
+            f"beside --health-retries, as multi-db-ci.yml does."
+        )
+    seconds = parse_docker_duration(match.group(1))
+    if seconds is None:
+        return (
+            f"{where} has --health-start-period {match.group(1)!r}, which this guard "
+            f"cannot read as a duration. It fails closed rather than assuming the value "
+            f"is long enough: write `60s` or `1m`."
+        )
+    if seconds < MYSQL_MIN_START_PERIOD_SECONDS:
+        return (
+            f"{where} has --health-start-period {match.group(1)!r}, under the "
+            f"{MYSQL_MIN_START_PERIOD_SECONDS:.0f}s required for mysql:8.4's two-phase "
+            f"boot (cleat#3936)."
+        )
+    return None
+
+
+def guard_mysql_health_start_period(errors) -> None:
+    """Every MySQL service must let its boot finish before health failures count.
+
+    Measured 2026-11-16 (cleat#3936). The shared block set
+    `--health-interval 10s --health-retries 5` and no start period, so the budget
+    was 50s counted from CONTAINER START. mysql:8.4's entrypoint runs
+    `mysqld --initialize-insecure`, shuts that server down, and starts a second
+    one; on a loaded runner `Tier 1 Gate -- rest shard 3/4` reached "ready for
+    connections" 55s after start and was declared unhealthy 0.34s later. The
+    job failed in "Initialize containers" and no test ran.
+
+    TWO CLOCKS, and mixing them makes these numbers look inconsistent: creation
+    to ready was 68s, start to ready was 55s, and the 50s budget is measured on
+    the second. An earlier draft of this comment anchored the budget to creation
+    and cleat-review caught it in review of #3937 -- 5 x 10s from creation would
+    have expired 18s BEFORE the server was ready, yet nothing was declared
+    unhealthy then.
+
+    Retries alone do not fix this -- they lengthen the window the boot must
+    finish inside while every failure still counts. The start period is the
+    load-bearing half: failures during it are not counted at all. That is why
+    this guard requires a start period and does not police the retry count.
+
+    Scoped to MySQL deliberately. PostgreSQL was healthy in the same window on
+    the same runner, and the SQL Server sites that gate required contexts already
+    carry a start period; a guard over every image would flag services with no
+    measured defect.
+    """
+    found = 0
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        for job_id, service_id, image, options in mysql_services(path, doc):
+            found += 1
+            violation = mysql_health_start_period_violation(
+                path, job_id, service_id, image, options)
+            if violation:
+                errors.append(violation)
+    if found == 0:
+        errors.append(
+            "no MySQL service container was found in .github/workflows/, so the "
+            "health-start-period guard would pass vacuously. If MySQL was really "
+            "removed, delete the guard; if not, this parser is broken."
+        )
 
 
 MSSQL_IMAGE_MARKER = "mssql/server"
@@ -1665,6 +1801,90 @@ def self_test() -> int:
     # A workflow with no build at all examines nothing; the real-tree wrapper reports that.
     check_labels("no build at all examines nothing", "jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: true\n", 0, [], 0)
 
+
+    # Guard 10 -- MySQL health start period (cleat#3936). Synthetic pairs for the
+    # rule; the real tree is the known-positive that shipped without them.
+    MYSQL_DIGEST = ("mirror.gcr.io/library/mysql:8.4.11@sha256:"
+                    "b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb")
+
+    def mysql_job(options: str, service: str = "mysql", image: str = MYSQL_DIGEST) -> str:
+        body = "".join(f"          {line}\n" for line in options.split("\n") if line)
+        return ("jobs:\n  t:\n    runs-on: ubuntu-latest\n    services:\n"
+                f"      {service}:\n        image: {image}\n        options: >-\n" + body)
+
+    def check_mysql(label: str, yaml_text: str, want: int, phrase: str = ""):
+        nonlocal cases
+        cases += 1
+        doc = yaml.safe_load(yaml_text)
+        got = []
+        for job_id, service_id, image, options in mysql_services("workflow.yml", doc):
+            violation = mysql_health_start_period_violation(
+                "workflow.yml", job_id, service_id, image, options)
+            if violation:
+                got.append(violation)
+        if len(got) != want:
+            failures.append(f"{label}: got {got}, want {want} problem(s)")
+        elif phrase and phrase not in got[0]:
+            failures.append(f"{label}: got {got[0]!r}, want it to name {phrase!r}")
+
+    # KNOWN-POSITIVE: the shape that failed a required job on 2026-11-16.
+    check_mysql("KNOWN-POSITIVE: mysql with no start period",
+                mysql_job("--health-interval 10s\n--health-retries 5"), 1,
+                "sets no --health-start-period")
+    # KNOWN-NEGATIVE: the fix, exactly as multi-db-ci.yml already had it.
+    check_mysql("KNOWN-NEGATIVE: mysql with 60s start period and 15 retries",
+                mysql_job("--health-interval 10s\n--health-retries 15\n"
+                          "--health-start-period 60s"), 0)
+    # KNOWN-POSITIVE: present but shorter than the measured boot -- a decoration.
+    check_mysql("KNOWN-POSITIVE: 30s start period is under the 60s floor",
+                mysql_job("--health-retries 15\n--health-start-period 30s"), 1,
+                "under the 60s")
+    # KNOWN-NEGATIVE: the `=` form and a duration written in minutes.
+    check_mysql("KNOWN-NEGATIVE: --health-start-period=1m",
+                mysql_job("--health-start-period=1m"), 0)
+    # KNOWN-POSITIVE: a value this guard cannot read fails closed, not open.
+    check_mysql("KNOWN-POSITIVE: unreadable start period",
+                mysql_job("--health-start-period boot"), 1,
+                "cannot read as a duration")
+    # KNOWN-NEGATIVE: scope -- a postgres service with no start period is not
+    # this guard's business, and the matcher must not fire on it.
+    check_mysql("KNOWN-NEGATIVE: postgres is out of scope",
+                mysql_job("--health-interval 10s", service="postgres",
+                          image="postgres:16@sha256:" + "0" * 64), 0)
+    # KNOWN-NEGATIVE: an unprefixed image is still MySQL -- proves the matcher
+    # keys on the repository name rather than on the mirror.gcr.io prefix.
+    check_mysql("KNOWN-NEGATIVE: unprefixed mysql image with a start period",
+                mysql_job("--health-start-period 60s",
+                          image="mysql:8.4.11@sha256:" + "0" * 64), 0)
+
+    # WIRING. Every case above calls the finder helpers directly, so deleting a
+    # guard's call from main() leaves this self-test green AND the real-tree run
+    # clean with a violation planted -- "a mechanism wired to nothing reads as
+    # done", applied to the guard list itself. Measured by cleat-review on #3937:
+    # removing guard 10's call passed both checks, and removing guard 7's did
+    # too, so it is the harness's property rather than one guard's defect.
+    cases += 1
+    module = ast.parse(open(__file__, encoding="utf-8").read())
+    defined_guards = {
+        node.name for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("guard_")
+    }
+    main_fn = next(
+        node for node in ast.walk(module)
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    called_from_main = {
+        node.func.id for node in ast.walk(main_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    unwired = sorted(defined_guards - called_from_main)
+    if unwired:
+        failures.append(
+            f"guards defined but never called from main(): {unwired}. A guard "
+            f"nobody calls passes every case above and reports nothing on the "
+            f"real tree."
+        )
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAILED: {f}")
@@ -1713,7 +1933,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="run known-positive/known-negative cases for guards 6, 7, 8 and 9 against synthetic YAML, not the real tree",
+        help="run known-positive/known-negative cases for guards 6-10 against synthetic YAML, not the real tree",
     )
     args = parser.parse_args()
 
@@ -1750,6 +1970,7 @@ def main() -> int:
     guard_publish_approval_order(errors)
     guard_lint_step_wrapper(errors)
     guard_image_labels_come_from_the_shared_script(errors)
+    guard_mysql_health_start_period(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")

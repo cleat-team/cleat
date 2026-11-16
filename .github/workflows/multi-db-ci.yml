@@ -762,11 +762,14 @@ jobs:
         env:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
+        # `--health-start-period` is load-bearing: mysql:8.4 starts a server twice
+        # and a loaded runner can exceed the 5x10s budget without it (cleat#3936).
         options: >-
           --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 15
+          --health-start-period 60s
           --publish 3306:3306
       mssql:
         image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89

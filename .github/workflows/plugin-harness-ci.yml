@@ -401,6 +401,10 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # `--health-start-period` is load-bearing: mysql:8.4 starts a server twice
+      # (initialize, then run) and a loaded runner can take over 50s to boot, which
+      # is the whole budget without it (cleat#3936). Guarded by
+      # scripts/check-workflow-guards.py.
       mysql:
         image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
         env:
@@ -412,7 +416,8 @@ jobs:
           --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 15
+          --health-start-period 60s
       mssql:
         # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
         # a required check. Full rationale, the re-derive commands, and why the
