@@ -238,6 +238,9 @@ def main(argv=None):
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--verdict-file", help="write the verdict here for the "
                     "failure notifier to quote (cleat#3962)")
+    ap.add_argument("--attempt", type=int, default=1,
+                    help="github.run_attempt, recorded inside the verdict file "
+                         "so a flat artifact extraction can still be ordered")
     ap.add_argument("--check-cut-list", action="store_true",
                     help="assert the tree's cut matches the canary's workflow list")
     ap.add_argument("--root", default=".", help="repository root for --check-cut-list")
@@ -268,12 +271,15 @@ def main(argv=None):
             "the heavy jobs. Re-run them for this commit by hand.",
         ])
     if findings:
-        lines = [f"{wf}: no successful merge_group run on {args.sha} -- {why}"
-                 for wf, why in findings]
+        # NOT "no successful run": an older attempt may well have succeeded and
+        # the NEWEST still be cancelled or failed (cleat-review on #3967). The
+        # reason carries the verdict; the prefix does not assert a second one.
+        lines = [f"{wf}: {why} (on {args.sha})" for wf, why in findings]
         lines.append("The develop push skips these workflows because the merge "
-                     "group is supposed to have run them on this exact commit. It "
-                     "did not, so this commit is ungated and the skipped jobs must "
-                     "be run by hand on this sha.")
+                     "group is supposed to have run them on this exact commit. "
+                     "The newest attempt for each did not pass, so treat this "
+                     "commit as ungated until it does: re-run the skipped jobs by "
+                     "hand on this sha.")
         return _verdict(args, 1, lines)
     if running:
         # NOT a finding. The queue merges once the REQUIRED contexts pass, and
@@ -303,7 +309,12 @@ def _verdict(args, rc, lines):
             with open(args.verdict_file, "w", encoding="utf-8") as fh:
                 status = {0: "ok", 1: "finding", 2: "UNMEASURED",
                                3: "still running"}.get(rc, str(rc))
+                # THE ATTEMPT IS INSIDE THE FILE ON PURPOSE. download-artifact
+                # extracts a single match FLAT, with no per-artifact directory,
+                # so a reader cannot take the attempt from a directory name --
+                # and a single failing push is exactly the common case.
                 fh.write(f"canary: {status}\n")
+                fh.write(f"attempt: {getattr(args, 'attempt', 1) or 1}\n")
                 fh.write("\n".join(lines) + "\n")
         except OSError as exc:  # a write failure must not change the verdict
             print(f"::warning::could not write {args.verdict_file}: {exc}",

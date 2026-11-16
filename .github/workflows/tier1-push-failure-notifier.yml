@@ -276,25 +276,30 @@ jobs:
             let canaryLines = [];
             const canaryDir = 'canary';
             if (fs.existsSync(canaryDir)) {
-              // One directory per artifact (no merge-multiple). The name ends
-              // in `-<attempt>`, and the attempt is parsed NUMERICALLY for the
-              // same reason the tier-gate-log block above does: a lexicographic
-              // sort puts attempt 10 before attempt 9.
-              let bestAttempt = -1;
-              let bestDir = null;
-              for (const e of fs.readdirSync(canaryDir, { withFileTypes: true })) {
-                if (!e.isDirectory()) continue;
-                const m = e.name.match(/-(\d+)$/);
-                if (!m) continue;
-                const attempt = Number(m[1]);
-                if (attempt > bestAttempt) { bestAttempt = attempt; bestDir = e.name; }
-              }
-              if (bestDir) {
-                const f = path.join(canaryDir, bestDir, 'canary-verdict.txt');
-                if (fs.existsSync(f)) {
-                  canaryLines = fs.readFileSync(f, 'utf8').trim().split('\n');
+              // FIND THE FILE AT ANY DEPTH, and take the attempt from INSIDE it.
+              // download-artifact extracts a SINGLE match FLAT into `path` --
+              // no per-artifact directory -- so a one-failure push gives
+              // `canary/canary-verdict.txt`, while two attempts give
+              // `canary/<artifact>/canary-verdict.txt`. A directory-name parse
+              // (this block's first version) therefore saw nothing in the
+              // common case and silently dropped the verdict.
+              const files = [];
+              const walk = (dir) => {
+                for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                  const p = path.join(dir, e.name);
+                  if (e.isDirectory()) walk(p);
+                  else if (e.name === 'canary-verdict.txt') files.push(p);
                 }
+              };
+              walk(canaryDir);
+              let best = null; let bestAttempt = -1;
+              for (const f of files) {
+                const text = fs.readFileSync(f, 'utf8');
+                const m = text.match(/^attempt:\s*(\d+)\s*$/m);
+                const attempt = m ? Number(m[1]) : 1;
+                if (attempt > bestAttempt) { bestAttempt = attempt; best = text; }
               }
+              if (best !== null) canaryLines = best.trim().split('\n');
             }
 
             const title = '[tier1] develop push run is failing';

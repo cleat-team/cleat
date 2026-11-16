@@ -346,20 +346,33 @@ jobs:
           INTERVAL: "30"
         run: |
           set -euo pipefail
+          # Every exit from this loop must leave a verdict behind, or the
+          # notifier quotes a stale one -- or none, and falls back to the job
+          # name that cannot tell UNKNOWN from ungated (cleat#3962).
+          write_unmeasured() {
+            { echo "canary: UNMEASURED"
+              echo "attempt: ${GITHUB_RUN_ATTEMPT}"
+              echo "$1"; } > canary-verdict.txt
+          }
           deadline=$(( SECONDS + BOUND ))
           while :; do
             # An empty result is a legitimate ANSWER -- the commit did not go
             # through the queue -- and reaches the script as a finding. Only a
             # failed REQUEST is UNMEASURED.
+            # A STALE VERDICT IS WORSE THAN NONE: the loop re-runs the script,
+            # so a verdict left from an earlier poll would be quoted by the
+            # notifier if this poll dies before writing a new one.
+            rm -f canary-verdict.txt
             if ! gh api --paginate \
               "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&event=merge_group&per_page=100" \
               --jq '.workflow_runs[]' | jq -s '.' > merge-group-runs.json; then
-              echo "::error::could not list the merge_group runs for ${SHA}. UNMEASURED -- this is a failure of the check, not a finding about the commit." >&2
+              write_unmeasured "could not list the merge_group runs for ${SHA}; whether this commit was gated is unknown"
               exit 2
             fi
             rc=0
             python3 scripts/check-develop-push-was-queued.py \
               --runs merge-group-runs.json --sha "$SHA" \
+              --attempt "${GITHUB_RUN_ATTEMPT}" \
               --verdict-file canary-verdict.txt || rc=$?
             case "$rc" in
               0) exit 0 ;;
@@ -369,6 +382,7 @@ jobs:
               *) echo "::error::the guard exited $rc, which is not one of its statuses (0/1/2/3). UNMEASURED." >&2; exit 2 ;;
             esac
             if [ "$SECONDS" -ge "$deadline" ]; then
+              write_unmeasured "still running after ${BOUND}s, so whether this commit was gated is unknown"
               echo "::error::UNMEASURED: the merge_group runs for ${SHA} were still running after ${BOUND}s, so whether this commit was gated is UNKNOWN -- this is a failure of the check, not a finding about the commit. The longest lag observed was 828s, so something is stuck: look at this sha's merge_group runs before concluding anything about the push." >&2
               exit 2
             fi
