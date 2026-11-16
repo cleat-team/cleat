@@ -74,6 +74,7 @@ func (e *Engine) backendForWasm(wasmBytes []byte) WasmBackend {
 // can only reject what was never claimed to work.
 func (e *Engine) resolveBackend(wasmBytes []byte) (WasmBackend, error) {
 	e.warnIfModuleWantsANewerABI(wasmBytes)
+	e.warnIfModuleCarriesAnUnknownJSEnginePin(wasmBytes)
 	if backend := e.backendForWasm(wasmBytes); backend != nil {
 		return backend, nil
 	}
@@ -128,6 +129,51 @@ func (e *Engine) warnIfModuleWantsANewerABI(wasmBytes []byte) {
 		"workflow_name", meta.WorkflowName,
 		"workflow_version", meta.WorkflowVersion,
 		"language", meta.Language,
+	)
+}
+
+// warnIfModuleCarriesAnUnknownJSEnginePin reports a TypeScript module whose
+// cleat.js-engine pin schema is newer than this worker parses. cleat#3830.
+//
+// WARNS, AND DELIBERATELY DOES NOT REFUSE, for the reason its ABI sibling
+// gives: CurrentJSEnginePinVersion is 1, no module can declare a higher one
+// today, and a rejection path would ship having never run. A warning exercises
+// the comparison on every execution and cannot break a guest that works.
+//
+// ONLY pin_version IS COMPARED, and that is the finding rather than a
+// shortcut. The other fields describe the module's own embedded runtime (Javy
+// and rquickjs are linked INTO the module) and hash artefacts the worker does
+// not carry (the JS plugin and the TypeScript SDK). The worker therefore has
+// no value to compare any of them against, and pretending otherwise would mean
+// embedding a second copy of build-time facts in the binary just to make a
+// comparison possible -- a mechanism that would exist to satisfy a warning.
+// They are still reported below, because they are what a person needs in order
+// to understand a mismatch once one is real.
+//
+// Checked at the worker rather than at deployment for the same reason as the
+// ABI check: the question is a property of a PAIR, and only the worker knows
+// its own side.
+//
+// A module with no pin section is silent. That covers every non-TypeScript
+// module and every TypeScript module built before the pin existed; neither is
+// a defect, and warning on them would make the one case that matters
+// unreadable.
+func (e *Engine) warnIfModuleCarriesAnUnknownJSEnginePin(wasmBytes []byte) {
+	pin, found, err := wasm.ReadJSEnginePin(wasmBytes)
+	if err != nil || !found {
+		return
+	}
+	if pin.PinVersion <= wasm.CurrentJSEnginePinVersion {
+		return
+	}
+	e.log().Warn(
+		"this module was built against a newer cleat.js-engine pin than this worker parses; "+
+			"it is being executed anyway, and a field it carries may be ignored",
+		"module_pin_version", pin.PinVersion,
+		"worker_pin_version", wasm.CurrentJSEnginePinVersion,
+		"module_javy", pin.Javy,
+		"module_rquickjs_core", pin.RQuickJSCore,
+		"language", wasm.DetectLanguage(wasmBytes),
 	)
 }
 
