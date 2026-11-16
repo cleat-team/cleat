@@ -11,7 +11,7 @@ import (
 // These tests exercise the SCRIPT, not a workflow: the answers file's parsing and the caller's decision are the parts
 // that can be wrong without a guest, and they are the parts a broken fixture would blame on the workflow (cleat#3828).
 // The end-to-end half -- a real module built by build.sh consuming a scripted answer -- runs in the tier-2 CI job,
-// which has the pinned Javy toolchain; this package cannot build one locally and does not pretend to.
+// which has the pinned toolchain; this package cannot build one locally and does not pretend to.
 
 func writeAnswers(t *testing.T, body string) string {
 	t.Helper()

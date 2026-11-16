@@ -47,11 +47,23 @@ test("a durable call is answered from the test's script", () => {
   assert.equal(run.stubbedCalls, undefined, "the envelope says the calls were stubbed, but a script was supplied");
 });
 
-test("a durable call the script does not name is refused, naming the key", () => {
+test("a call the SUPPLIED script does not name is refused, naming the key", () => {
+  // A script must be supplied for this state to exist at all: with no -answers the harness stubs every call with `{}`
+  // and the workflow succeeds. My first version of this test passed NO options and asserted both `ok: false` and
+  // `stubbedCalls: true`, which cannot both hold -- cleat-review caught it in CI, where the positive half passed.
+  const module = build("tests/typescript/testdata/workflows/answer.ts", "answer");
+  const run = runWorkflow(module, "answer", {}, { answers: { "inventory/reserve": JSON.stringify({ ok: true }) } });
+  assert.equal(run.ok, false, "a call the script omitted was answered instead of refused");
+  assert.match(run.error ?? "", /payments\/charge/);
+  assert.equal(run.stubbedCalls, undefined, "a script was supplied, so the run is not a stubbed one");
+});
+
+test("with no script at all every call is stubbed, and the envelope says so", () => {
+  // The documented default, pinned: the workflow passes because the stub answers `{}`, and `stubbedCalls` is what stops
+  // that green being read as "the calls were tested".
   const module = build("tests/typescript/testdata/workflows/answer.ts", "answer");
   const run = runWorkflow(module, "answer", {});
-  assert.equal(run.ok, false, "an unscripted call was answered instead of refused");
-  assert.match(run.error ?? "", /payments\/charge/);
+  assert.equal(run.ok, true, `the stubbed run failed: ${run.error}`);
   assert.equal(run.stubbedCalls, true);
 });
 
