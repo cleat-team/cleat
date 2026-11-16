@@ -5094,7 +5094,25 @@ jobs:
         # step now sets the only DSN the job has.
         env:
           CLEAT_TEST_DB: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
-        run: go test -count=1 -timeout=300s ./tests/cluster/...
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout=300s -json ./tests/cluster/... 2>&1 | tee cluster-report.json
+
+      # cleat#3952. Until this step existed the suite ran with no `-json` and no
+      # budget, so the log said `ok 4.6s` whether eleven tests had executed or
+      # all eleven had skipped: all 11 reach a DB helper, and every one of those
+      # helpers skipped on a ping failure whatever the environment said.
+      #
+      # CLEAT_TEST_DB is always set for this step, so `openClusterDB` can only
+      # Fatal on an unreachable database and never skip -- the budget is 0, and
+      # a skip appearing under it means the DSN above stopped taking effect.
+      # That window is real here rather than theoretical: the suite itself runs
+      # TestKillPostgresAndRestart, which stops and restarts the container, and
+      # go test runs the files in name order -- so five tests after it open a
+      # database against a server that was just restarted.
+      - name: Skip budget — cluster suite
+        if: always()
+        run: scripts/check-skip-budget.sh cluster/suite cluster-report.json
 
       - name: Cluster logs (on failure)
         if: failure()

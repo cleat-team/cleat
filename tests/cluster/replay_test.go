@@ -16,17 +16,7 @@ import (
 // replayStoreDB is a test helper that returns both a *sql.DB and a PostgresStore.
 func replayStoreDB(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping replay test in short mode")
-	}
-	db, err := sql.Open("postgres", ClusterDSN())
-	if err != nil {
-		t.Skipf("Skipping: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping: cannot ping database: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	db := openClusterDB(t)
 	return db, engine.NewPostgresStore(db)
 }
 
