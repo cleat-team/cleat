@@ -1470,14 +1470,23 @@ jobs:
       # being invalid because it never ran; the "Workflow files parse" step
       # above is yaml.safe_load, which accepts a null `env:`.
       #
-      # The second shape, from cleat#3960: a job reading
+      # The second shape is the one YAML cannot see at all: a job reading
       # `needs.<job>.outputs.*` without declaring `needs:` on it. GitHub
-      # silently evaluates that as empty; actionlint reports the reference.
+      # evaluates that reference as empty and reports nothing. Demonstrated on
+      # this head by deleting one `needs: [edit-gate]` from multi-db-ci.yml --
+      # the plant confirmed applied by diffing before it was linted:
+      #   multi-db-ci.yml:308:29: property "edit-gate" is not defined in object
+      #   type {} [expression]
       #
       # PINNED like golangci-lint above: `go install ...@vX` selected the
       # version, and a new upstream rule cannot turn develop red on its own.
-      # -shellcheck= because this step is about the workflow SCHEMA. Develop
-      # has 28 pre-existing shellcheck findings; folding a shell linter in
+      # -shellcheck= because this step is about the workflow SCHEMA. Develop at
+      # 4bb2833d carries 28 pre-existing [shellcheck] findings -- a count, so
+      # here is the date and the command, because it will move:
+      #   actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+      #     -ignore 'unexpected key "command" for "services"' \
+      #     .github/workflows/*.yml | grep -c '\[shellcheck\]$'
+      # measured 2026-11-16 with shellcheck 0.11.0. Folding a shell linter in
       # would make the first green need 28 decisions, which is a different
       # change and a different reviewer.
       #
@@ -1512,7 +1521,13 @@ jobs:
           # version is not.
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
-          curl -fsSL -o "$tmp/actionlint.tgz" \
+          # --retry, because this fetches a GitHub release asset from inside
+          # the required Lint job: a transient 5xx or a rate limit would redden
+          # every PR for a download. scripts/fetch-wasm-tools.sh exists because
+          # exactly that happened to a required check (cleat#3693); this is the
+          # same exposure with the cheap half of the same remedy.
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 \
+            -o "$tmp/actionlint.tgz" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           echo "${ACTIONLINT_SHA256}  $tmp/actionlint.tgz" | sha256sum -c -
           tar -xzf "$tmp/actionlint.tgz" -C "$tmp" actionlint
