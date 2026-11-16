@@ -579,6 +579,20 @@ rest_pins_present() {
   # depends on the pins.
   n0=${#REST_PIN_0[@]}
   n1=${#REST_PIN_1[@]}
+  # TWO duplicate shapes, and they are not the same finding. A name twice in ONE
+  # list is harmless to the split (same bucket) but means the pair was edited by
+  # hand; a name in BOTH lists is the dangerous one, because the python's dict is
+  # last-wins. Counting `sort -u` over the concatenation cannot tell them apart,
+  # and the first version reported the cross-list message for both -- naming
+  # nothing, because `comm -12` has nothing to print for an intra-list duplicate.
+  n0u=$(printf '%s\n' "${REST_PIN_0[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  n1u=$(printf '%s\n' "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  if [ "$n0u" != "$n0" ] || [ "$n1u" != "$n1" ]; then
+    echo "tier-gate: a pin is listed TWICE IN THE SAME list (REST_PIN_0: $n0 entries, $n0u distinct; REST_PIN_1: $n1 entries, $n1u distinct). The split is unaffected -- both copies are the same bucket -- but the pair was edited by hand and should be re-derived:" >&2
+    printf '%s\n' "${REST_PIN_0[@]}" | LC_ALL=C sort | uniq -d | sed 's/^/  REST_PIN_0: /' >&2
+    printf '%s\n' "${REST_PIN_1[@]}" | LC_ALL=C sort | uniq -d | sed 's/^/  REST_PIN_1: /' >&2
+    return 1
+  fi
   nuniq=$(printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
   if [ "$nuniq" != "$((n0 + n1))" ]; then
     echo "tier-gate: REST_PIN_0 and REST_PIN_1 share a name ($nuniq distinct across both lists, want $((n0 + n1))). The name would silently land in bucket 1 only:" >&2
@@ -781,7 +795,7 @@ $part"
   RS_N0=${#REST_PIN_0[@]}
   RS_N1=${#REST_PIN_1[@]}
   RS_NU=$(printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
-  [ "$RS_NU" = "$((RS_N0 + RS_N1))" ] || st_fail "REST_PIN_0 and REST_PIN_1 share $((RS_N0 + RS_N1 - RS_NU)) name(s); the python is last-wins, so the split would not be the one measured"
+  [ "$RS_NU" = "$((RS_N0 + RS_N1))" ] || st_fail "the pin lists hold $((RS_N0 + RS_N1 - RS_NU)) duplicate entr(y/ies) -- a name twice in one list or in both; rest_pins_present names which"
   rm -f /tmp/vbc-out.$$
 
   # Known positive, same names, deduplicated: must pass, proving the failure
