@@ -234,7 +234,19 @@ jobs:
   # -------------------------------------------------------------------------
   test-mysql:
     name: Test MySQL shard ${{ matrix.shard }} of 3
-    runs-on: ubuntu-latest
+    # cleat#3958: the merge queue is bound by the 60-job hosted concurrency
+    # cap, not by any job's length, so the heavy shards move to the self-hosted
+    # box when it is online. See cleat-internal's runner runbook (2026-11-16).
+    #
+    # THREE CONDITIONS, AND EACH IS LOAD-BEARING:
+    #   vars.CLEAT_SELF_HOSTED  -- the scheduled probe's answer. UNSET MEANS
+    #     HOSTED, which is also the whole no-op path: this expression changes
+    #     nothing until an owner creates that variable.
+    #   merge_group / develop push / same-repo PR -- FORK PRs NEVER come here.
+    #     A fork PR's code with /var/run/docker.sock mounted is root on the box.
+    #   the label list is an array, so `fromJSON` is required; `a && b || c`
+    #     is GitHub's idiom because it has no ternaries.
+    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci"]') || 'ubuntu-latest' }}
     # 40 -> 30, 2026-11-16. A shard's `go test` step is bounded by its ~200s
     # slice against the single job's 600s, so a hanging shard should not hold a
     # queue slot for two thirds of an hour. Not tighter: the container's start
@@ -525,7 +537,19 @@ jobs:
   # -------------------------------------------------------------------------
   test-mssql:
     name: Test SQL Server shard ${{ matrix.shard }} of 3
-    runs-on: ubuntu-latest
+    # cleat#3958: the merge queue is bound by the 60-job hosted concurrency
+    # cap, not by any job's length, so the heavy shards move to the self-hosted
+    # box when it is online. See cleat-internal's runner runbook (2026-11-16).
+    #
+    # THREE CONDITIONS, AND EACH IS LOAD-BEARING:
+    #   vars.CLEAT_SELF_HOSTED  -- the scheduled probe's answer. UNSET MEANS
+    #     HOSTED, which is also the whole no-op path: this expression changes
+    #     nothing until an owner creates that variable.
+    #   merge_group / develop push / same-repo PR -- FORK PRs NEVER come here.
+    #     A fork PR's code with /var/run/docker.sock mounted is root on the box.
+    #   the label list is an array, so `fromJSON` is required; `a && b || c`
+    #     is GitHub's idiom because it has no ternaries.
+    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci"]') || 'ubuntu-latest' }}
     # 45 -> 30, 2026-11-16. A shard's `go test` step is bounded by its ~270s
     # slice against the single job's 874s, so a hanging shard should not hold a
     # queue slot for three quarters of an hour. Not tighter than this: the

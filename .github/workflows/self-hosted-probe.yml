@@ -1,0 +1,52 @@
+# cleat#3958 — a one-job workflow that proves a self-hosted runner is reachable.
+#
+# Its whole purpose is verification: "does a job actually land on the box" is
+# answered by dispatching this and reading the runner_name off the job, not by
+# inferring it from a green merge. See cleat-internal's runner runbook §8.
+#
+# It is deliberately tiny and deliberately NOT a required check. It is not in
+# any protection rule, no job `needs:` it, and it never runs on its own.
+name: Self-Hosted Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: 'Why this probe was dispatched'
+        required: false
+        default: 'runner bring-up check'
+
+run-name: >-
+  Self-Hosted Probe${{ inputs.note && format(' — {0}', inputs.note) || '' }}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    # NO FALLBACK ON PURPOSE. This job's question is "is the box reachable",
+    # so falling back to a hosted runner would answer a different question and
+    # always succeed. If nothing picks it up, that IS the result: the run stays
+    # queued, which the operator sees immediately in the UI.
+    runs-on: [self-hosted, linux, x64, cleat-ci]
+    timeout-minutes: 5
+    steps:
+      - name: Report where this job landed
+        run: |
+          set -euo pipefail
+          echo "runner name : ${RUNNER_NAME:-<unset>}"
+          echo "runner os   : ${RUNNER_OS:-<unset>}"
+          echo "arch        : $(uname -m)"
+          echo "nproc       : $(nproc)"
+          echo "memory      : $(free -h | awk '/^Mem:/ {print $2}')"
+          echo "docker      : $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'UNAVAILABLE -- services: jobs cannot run here')"
+          echo "workspace   : $GITHUB_WORKSPACE"
+          # The box must be able to reach GitHub but not the LAN. This is the
+          # box-side companion to the runbook's egress verification: if it
+          # fails here, jobs on this runner must not be trusted with a socket.
+          if curl -sS --max-time 10 -o /dev/null -w '%{http_code}' https://api.github.com/rate_limit | grep -q 200; then
+            echo "github      : reachable"
+          else
+            echo "::error::this runner cannot reach api.github.com"
+            exit 1
+          fi

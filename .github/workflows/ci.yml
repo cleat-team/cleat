@@ -3048,7 +3048,19 @@ jobs:
   test-go-commands:
     if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Test Go (commands ${{ matrix.leg }} ${{ matrix.shard }} of 2) on 1.26
-    runs-on: ubuntu-latest
+    # cleat#3958: the merge queue is bound by the 60-job hosted concurrency
+    # cap, not by any job's length, so the heavy shards move to the self-hosted
+    # box when it is online. See cleat-internal's runner runbook (2026-11-16).
+    #
+    # THREE CONDITIONS, AND EACH IS LOAD-BEARING:
+    #   vars.CLEAT_SELF_HOSTED  -- the scheduled probe's answer. UNSET MEANS
+    #     HOSTED, which is also the whole no-op path: this expression changes
+    #     nothing until an owner creates that variable.
+    #   merge_group / develop push / same-repo PR -- FORK PRs NEVER come here.
+    #     A fork PR's code with /var/run/docker.sock mounted is root on the box.
+    #   the label list is an array, so `fromJSON` is required; `a && b || c`
+    #     is GitHub's idiom because it has no ternaries.
+    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci"]') || 'ubuntu-latest' }}
     # 45 is arithmetic, not a measurement: a package that hangs hits its own
     # `go test -timeout 30m` and dumps goroutines at t+30, and setup plus a
     # leg's compile is ~2-3m on top of that. Lower than test-go's 70 because
@@ -3536,7 +3548,19 @@ jobs:
   test-go-crash:
     if: github.event_name != 'push' || github.ref != 'refs/heads/develop'
     name: Test Go (crash shard ${{ matrix.shard }} of 3) on 1.26
-    runs-on: ubuntu-latest
+    # cleat#3958: the merge queue is bound by the 60-job hosted concurrency
+    # cap, not by any job's length, so the heavy shards move to the self-hosted
+    # box when it is online. See cleat-internal's runner runbook (2026-11-16).
+    #
+    # THREE CONDITIONS, AND EACH IS LOAD-BEARING:
+    #   vars.CLEAT_SELF_HOSTED  -- the scheduled probe's answer. UNSET MEANS
+    #     HOSTED, which is also the whole no-op path: this expression changes
+    #     nothing until an owner creates that variable.
+    #   merge_group / develop push / same-repo PR -- FORK PRs NEVER come here.
+    #     A fork PR's code with /var/run/docker.sock mounted is root on the box.
+    #   the label list is an array, so `fromJSON` is required; `a && b || c`
+    #     is GitHub's idiom because it has no ternaries.
+    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     services:
       postgres:

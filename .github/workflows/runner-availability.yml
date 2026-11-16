@@ -1,0 +1,84 @@
+# cleat#3958 — keeps `vars.CLEAT_SELF_HOSTED` honest.
+#
+# WHY THIS EXISTS. A job asking for a label that no runner carries queues
+# FOREVER: `timeout-minutes` does not apply until a job starts, so an offline
+# box would silently strand every heavy job of every merge. This is the one
+# failure mode a `runs-on` expression cannot defend against by itself, because
+# the expression is evaluated once, at queue time, against whatever the variable
+# said then.
+#
+# So a scheduled run on a HOSTED runner asks the org API whether any runner
+# carries the `cleat-ci` label and is `online`, and writes the answer to a
+# repository variable that every moved job reads. Unset or any error means
+# HOSTED -- the safe direction, and also the no-op direction.
+#
+# KNOWN WINDOW, stated rather than implied: if the box dies between two runs of
+# this probe, jobs queue for up to the interval before the variable flips. Jobs
+# already dispatched in that window stay queued. Taking the box down
+# deliberately should be: stop the units, then dispatch this workflow, then
+# re-run anything that queued.
+#
+# TOKEN: listing org runners needs `admin:org` (read); writing a repository
+# variable needs repository Administration:write. GITHUB_TOKEN can do neither,
+# so this workflow uses the `CLEAT_RUNNER_PROBE_TOKEN` secret. Absent token is
+# UNMEASURED, not "offline": it exits non-zero without touching the variable,
+# so a missing secret cannot silently demote the box forever.
+name: Runner Availability
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+run-name: >-
+  Runner Availability${{ github.event.schedule && format(' — scheduled {0}', github.event.schedule) || ' — manual' }}
+
+permissions:
+  contents: read
+
+concurrency:
+  # One at a time, never cancelled: two probes racing could each read a
+  # different runner list and write the variable twice in the wrong order.
+  group: runner-availability
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Is the self-hosted runner online?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve runner state
+        id: state
+        env:
+          GH_TOKEN: ${{ secrets.CLEAT_RUNNER_PROBE_TOKEN }}
+          ORG: cleat-team
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CLEAT_RUNNER_PROBE_TOKEN is not set. UNMEASURED -- this is a failure of the probe, not a fact about the box. Leaving vars.CLEAT_SELF_HOSTED unchanged."
+            exit 2
+          fi
+          # Any runner carrying the label and reporting `online` means the pool
+          # can take a job right now. `busy` is deliberately NOT enough: a busy
+          # runner still accepts a queued job at the next slot. `offline` is.
+          online=$(gh api "orgs/${ORG}/actions/runners?per_page=100" \
+                     --jq '[.runners[] | select(.status=="online") | select([.labels[].name] | index("cleat-ci"))] | length')
+          echo "online runners with the cleat-ci label: ${online}"
+          if [ "${online}" -gt 0 ]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record the answer
+        if: steps.state.outputs.value != ''
+        env:
+          GH_TOKEN: ${{ secrets.CLEAT_RUNNER_PROBE_TOKEN }}
+          VALUE: ${{ steps.state.outputs.value }}
+        run: |
+          set -euo pipefail
+          # `gh variable set` is idempotent; it creates on first use and updates
+          # after. Only written when the probe actually measured something.
+          gh variable set CLEAT_SELF_HOSTED --body "$VALUE"
+          echo "vars.CLEAT_SELF_HOSTED=$VALUE"
