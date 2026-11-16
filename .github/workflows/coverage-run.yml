@@ -1,0 +1,233 @@
+# ---------------------------------------------------------------------------
+# Coverage (informational, non-blocking)
+#
+# cleat#3958 cut #3. This job used to run on every pull_request: 1,800
+# runner-minutes a day (census over 67 PR runs, median 28 min; two sampled runs
+# took 30m44s and 34m06s, two re-measured 2026-11-16 at 30m26s and 34m54s on
+# the Go step alone, of a 31 min and a 35 min job) to produce a table that
+# gated nothing. `make coverage-check` failed on most PRs against a GREEN job
+# (the step is continue-on-error off main), and BOTH artifacts it uploads are
+# read by nothing -- no download-artifact, no workflow_run consumer, no badge,
+# no Codecov or coveralls, re-checked 2026-11-16.
+#
+# So it moved here, with two triggers that answer two different questions:
+#
+#   push -> main     THE RATCHET. Unchanged in force: this is the case that
+#                    was always fatal, and it still is.
+#   schedule         THE REPORT, against develop's tip, 4x a day.
+#
+# WHY A SCHEDULE RATHER THAN A DEVELOP PUSH, which is the second half of the
+# cut. Running per merge was measured first and rejected: 100 develop pushes
+# between 2026-11-13T01:34Z and 2026-11-16T21:05Z is 26 a day at ~31 min each,
+# ~800 runner-minutes a day -- and develop pushes cluster exactly when the pool
+# is busiest, so a 31-minute job per merge competes for the 60 hosted slots at
+# the worst possible moment. Crippled to 4 runs a day it is ~124 minutes.
+#
+# WHAT THAT COSTS, stated rather than implied: a coverage drop is attributed to
+# a ~6-hour window (about six merges at the current rate) instead of to the
+# merge that caused it, and a drop that a later merge repairs is never seen at
+# all. On develop the step is non-fatal and nobody is gated by it, so that
+# attribution bought little; `main` is unaffected.
+#
+# THE FILENAME IS NOT `coverage.yml` ON PURPOSE. `.gitignore` line 29 is
+# `coverage.*`, under "Code coverage profiles and other test artifacts"; it is
+# unanchored, so it matches `.github/workflows/coverage.yml` too and the file is
+# silently untracked. Measured: `git add` refuses it and `git check-ignore -v`
+# names the rule. Do not rename it back.
+#
+# WHY NOT IN ci.yml: `schedule` is a workflow-level trigger, and 22 of ci.yml's
+# 29 jobs skip a develop push through `event_name != 'push'`. Adding `schedule`
+# there would have made every one of them true -- a full CI run on every tick --
+# unless all 22 conditions were rewritten in this same PR. One file, one job,
+# one reason.
+# ---------------------------------------------------------------------------
+name: Coverage
+
+on:
+  push:
+    # THE RATCHET, and the only case that is fatal. A PR cannot reach it.
+    branches: [main]
+  schedule:
+    # 4x a day. Runs against the DEFAULT BRANCH, which is develop; GitHub always
+    # uses the default branch's copy of this file.
+    #
+    # :17 past, and hours 1/7/13/19, chosen against the schedules already here
+    # rather than picked round: engine-race.yml fires `0 */4` (00,04,08,12,16,
+    # 20), so every one of these lands exactly 1h17m after a slot starts, and
+    # only the 01:17 run is anywhere near stale.yml's 01:30. The top of the hour
+    # is also when the rest of the pool is busiest, which is the same argument
+    # that moved this job off the develop push.
+    - cron: '17 1,7,13,19 * * *'
+  # For measuring a branch, or a one-off after changing the floors.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # KEYED ON THE COMMIT, not on a fixed name, and scripts/check-workflow-
+  # concurrency.sh enforces it. A fixed group spanning pushes is a hazard the
+  # flag below does not cover: GitHub keeps at most ONE PENDING run per group,
+  # so the next arrival cancels the queued one BEFORE IT STARTS -- zero jobs,
+  # and `cancelled` is not `success`. A main ratchet waiting behind a 31-minute
+  # scheduled run would disappear exactly that way.
+  #
+  # What this block buys is small, and it is stated as small on purpose: two
+  # runs on the SAME commit (a dispatch landing on a schedule tick) are
+  # serialised instead of both spending ~31 minutes. It is NOT a correctness
+  # requirement.
+  #
+  # An earlier version of this comment claimed it prevented an artifact-name
+  # collision, on the reasoning that both artifacts are named
+  # `...-<sha>-<run_attempt>` and `run_attempt` is per-run. That was WRONG and
+  # cleat-review caught it: actions/upload-artifact has scoped artifacts to the
+  # workflow run since v4 ("Artifacts are scoped to a workflow run"; name
+  # uniqueness applies "among jobs in that run"), so two runs on one commit do
+  # not share a namespace. Withdrawn rather than reworded into something
+  # weaker -- if the group ever stops being worth the two lines, delete it.
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    name: Coverage
+    # STATED AT THE JOB LEVEL AS WELL AS IN `on:`, deliberately. `on:` is what
+    # actually decides, but a job-level condition is the only thing the
+    # cmd/cleat audit can see -- it reads job `if:`s and cannot see a workflow
+    # trigger -- so without this the exclusion is invisible to the guard that
+    # exists to require it. It is also a real safeguard rather than a duplicate:
+    # a later `pull_request:` added to this file's `on:` would otherwise
+    # re-introduce the per-PR run silently.
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # cleat#2862/cleat#2876: this was the third job stuck in the same hang,
+    # and it needs its OWN number rather than reusing test-go's 45 --
+    # measured directly (gh run view --json jobs on a clean run), "Run Go
+    # coverage check" alone takes ~22 minutes, so 45 would leave this job
+    # barely 2x headroom where test-go's slowest leg gets ~2.8x. 60 keeps
+    # the margin comparable (~2.7x) without inventing a third timeout value
+    # alongside tier1-gate.yml's.
+    #
+    # CAVEAT (cleat-review, #2876), restated in PER-PACKAGE terms --
+    # `-timeout` resets for each test binary, not once per `go test`
+    # invocation (`go help testflag`: "If a test binary runs longer than
+    # duration d, panic", counted from that binary's own start). `make
+    # coverage-go` runs `go test -p 1 -timeout 40m ./internal/...
+    # ./plugins/... ./cmd/... ./engine/... ./plugin/... ./wasm/... ./auth/...`
+    # sequentially, THEN the same shape again for the cleat module. ANY
+    # package in either call -- not just the first package of each -- gets
+    # its own fresh 40m from when it personally starts. A package that
+    # happens to start around job-elapsed minute 20 and then hangs is
+    # killed by this 60m job cap, not by Go's own timeout, with no
+    # goroutine dump. Flagged rather than resolved: changing the number,
+    # or restructuring these two sequential `go test` calls, is a call for
+    # whoever owns this job next.
+    # Raised from 60 to 85, cleat#3482: 60 was 1.87x the longest successful run
+    # (32.0m). The sample was 22 pull_request runs, because the job did not run
+    # on a develop push; re-measured 2026-11-16 at 31 min and 35 min total, so
+    # the figure still holds and 85 is still ~2.4x the slowest of them.
+    timeout-minutes: 85  # max 35.0m over runs sampled 2026-11-16; internal go test -timeout 40m; cleat#3482
+    # WHY THIS JOB HAS A DATABASE.
+    #
+    # The floors were calibrated on 2026-06-10 with backends configured -- the
+    # Makefile's own comment records `engine/ 70% (actual 70.0% PG-only; 77.6%
+    # with all backends)` and `auth/ 90% (actual 90.9%)`. This job ran with NO
+    # database at all, so it compared a no-backend measurement against a
+    # with-backend threshold (cleat#2487).
+    #
+    # The size of that gap is NOT uniform, which is why the thresholds are
+    # re-derived per package rather than shifted together. Measured: `auth`
+    # moves only +2.9 points when a DSN is supplied, so the database is not
+    # what its 28-point shortfall is about; `pgclusterlock`'s whole 31-point
+    # gap IS the lock path, which needs a live server and two contending
+    # connections. Same job, opposite conclusions per package.
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # Required: this job runs on the runner rather than in a container, so
+        # without an explicit host port mapping the service is unreachable. The
+        # full reasoning is at ci.yml's `test-go` job, which is where the
+        # failure was measured; this block came from there.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 127.0.0.1, NOT localhost -- runners resolve localhost to ::1 first and
+      # a service container publishes IPv4 only. The hostname form reproduces
+      # the failure documented at ci.yml's `test-go` job: a service declared,
+      # never once connected to, reporting green.
+      #
+      # And because this variable is SET, testutil.TestDB treats an
+      # unreachable server as a FAILURE rather than a skip. That is exactly
+      # the property this job needs: a database that stops answering must fail
+      # rather than silently empty the measurement, or the table reads clean
+      # while measuring nothing -- which is the defect this whole change is
+      # about.
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+    # Job-level, and it stops the RUN failing. It does NOT stop the job's check
+    # run reporting `failure` -- see the step-level flag below, which is the one
+    # that makes the scheduled run honest.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Python SDK
+        working-directory: python-sdk
+        run: |
+          pip install --upgrade pip
+          pip install ".[dev]"
+
+      # On a PUSH TO MAIN the floor is fatal: that is the ratchet, and it is why
+      # this target exits non-zero at all.
+      #
+      # On the SCHEDULE it is a REPORT, and the step is non-fatal. Ten packages
+      # sit below their floors (cleat#2487) and no merge can be expected to
+      # clear them, so failing here would make this red 4x a day forever and
+      # train readers past it -- the "trains people to ignore red" problem.
+      #
+      # STEP-level, and conditional, because the job-level `continue-on-error`
+      # above is not enough on its own: it stops the RUN failing but the job
+      # and its check run still report `failure`. Measured on cleat#2494, where
+      # the run stayed green while `gh pr checks` read `Coverage  fail`.
+      #
+      # Note what "fatal on main" means HERE: the job-level flag is still set,
+      # so the CHECK RUN reports `failure` while the workflow run stays green.
+      # That was already true before this file existed, and Coverage is not a
+      # required context, so nothing blocks either way.
+      - name: Run Go coverage check
+        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        run: make coverage-check
+
+      - name: Run Python coverage
+        run: make coverage-python
+
+      - name: Upload Go coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-coverage-${{ github.sha }}-${{ github.run_attempt }}
+          path: coverage.out
+          retention-days: 30
+
+      - name: Upload Python coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-coverage-${{ github.sha }}-${{ github.run_attempt }}
+          path: python-sdk/tests/coverage
+          retention-days: 30

@@ -177,10 +177,16 @@ def check_cut_list(root):
               "check, not a finding", file=sys.stderr)
         return 2
 
-    # Jobs in ci.yml that legitimately still run on a develop push: the nine
-    # scenarios (event-conditioned), `coverage` (not in the merge group at all;
-    # cut #3 owns it) and `benchmarks` (main-only).
-    CI_KEEP = {"benchmarks", "coverage"}
+    # Jobs in ci.yml that legitimately carry no develop-push condition:
+    # `benchmarks`, which is main-only. The scenarios are detected by their
+    # `merge_group` condition instead of being listed here.
+    #
+    # `coverage` was in this set while cleat#3958 cut #3 had it running on every
+    # develop push. It has since moved to `coverage-run.yml` -- main push plus a
+    # 4x/day schedule, no push trigger on develop at all -- so there is no
+    # ci.yml job left for this set to exempt, and a member naming a job that no
+    # longer exists would read as a live exemption.
+    CI_KEEP = {"benchmarks"}
 
     errors = []
     for wf in DEFAULT_WORKFLOWS:

@@ -19,6 +19,7 @@ import (
 // silent by construction, because the job does not run and nothing goes red.
 var auditedTriggerExclusions = map[string]string{
 	"ci.yml|benchmarks":                      "Main-and-push only, on purpose: a benchmark run per pull request is not worth the runner cost. THE EXPOSURE IS REAL AND IS NOT CLAIMED AWAY -- a PR can move performance and nothing measures it, which is the condition excluding the changes the job exists to measure (cleat#2487). Widening it is a separate decision about runner cost, and this entry is where that decision is recorded rather than implied.",
+	"coverage-run.yml|coverage":              "MAIN-PUSH AND SCHEDULE ONLY, by design, after cleat#3958 cut #3 -- and this is the file that cut created. On a pull request this job spent ~30 runner-minutes producing a table that gated nothing: `make coverage-check` fails on most PRs today (two sampled PR runs read 'Coverage check FAILED' against a green job), the step carries continue-on-error off main, and BOTH artifacts it uploads are read by nothing -- no download-artifact, no workflow_run consumer, no badge, no Codecov or coveralls, re-checked 2026-11-16. What it could still gate was `main`, and it still does: a push to main is fatal. Develop is covered by a 4x/day schedule instead of by every push, because per-merge came to ~800 runner-minutes a day (100 develop pushes in 3.8 days, ~31 min each) and develop pushes cluster when the pool is busiest. THE EXPOSURE, STATED: a coverage drop is attributed to a ~6-hour window rather than to the merge that caused it, and a drop a later merge repairs is never seen. On develop the step is non-fatal and nobody is gated by it, so that attribution bought little. If per-PR coverage is wanted back, the shape to want is a path-filtered or diff-scoped check, not a 30-minute full-tree run.",
 	"tier1-gate.yml|develop-push-was-queued": "PUSH-ONLY AND PULL-REQUEST-BLIND BY SUBJECT, not by cost (cleat#3958). The job asserts that a merge_group run of each of the five workflows that the develop push no longer runs exists on THIS commit and passed. On a pull request that question has no answer to report -- the commit has not been queued yet -- so widening the trigger would make the job fail on every PR for a condition that does not apply there. THE PR-SIDE EXPOSURE IS COVERED ELSEWHERE, and that is the argument rather than an absence: the judgment it applies is asserted on every PR by the Lint job, which runs `scripts/check-develop-push-was-queued.py --self-test` (12 cases, each a way the guard could be wrong) and `--check-cut-list` (the tree's cut and the guard's workflow list have not drifted). What a PR cannot exercise is the live API call; that is the same shape as every other workflow guard here, and this entry is where that is recorded rather than implied.",
 }
 
@@ -43,11 +44,18 @@ var restrictsToNonPR = regexp.MustCompile(`refs/heads/main|event_name == 'push'|
 // excluding the case the job was written for. Instances are SILENT BY CONSTRUCTION —
 // the job does not run, so nothing goes red, and the absence looks like a pass.
 //
-// THE ONE LIVE INSTANCE. `benchmarks` (`ci.yml:1991`) runs on
+// THE LIVE INSTANCES. `benchmarks` runs on
 // `github.ref == 'refs/heads/main' && github.event_name == 'push'`, so it cannot
 // measure what a pull request changes. Its header comment says what it does and where
 // the numbers go; it does not say why the PR case is excluded, so the exclusion is
 // unstated rather than decided. That is what this guard changes -- not the trigger.
+// `coverage-run.yml`'s `coverage` is the second, added by cleat#3958 cut #3.
+//
+// A JOB RESTRICTED BY ITS WORKFLOW'S `on:` ALONE IS INVISIBLE HERE, and that is why
+// coverage-run.yml states the restriction at job level too rather than relying on `on:`.
+// This scan reads job `if:`s; it cannot see a trigger block, so a job that excludes
+// pull requests only through `on:` would pass unrecorded -- the same class of silent
+// absence this whole test exists for, one level up.
 //
 // WHY THIS ROW IS GUARDED AT ALL, GIVEN ITS N IS SMALL. The census's measured N here
 // is 4, and WS-1's prior -- *if the invariant has to hold at N call sites, it is in
