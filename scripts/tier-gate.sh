@@ -569,8 +569,22 @@ for name in sorted(l.strip() for l in sys.stdin if l.strip()):
 # deleted otherwise just stops being pinned -- the split silently reverts toward
 # the imbalance the pins exist to remove, and nothing says so.
 rest_pins_present() {
-  local all missing=() t
+  local all missing=() t n0 n1 nuniq
   all=$(cat)
+  # (cleat#3940 review) The two lists must be DISJOINT. The python below builds
+  # a dict from them, so a name in both is last-wins -- it silently lands in
+  # bucket 1 and is absent from bucket 0. The split is still a partition, so
+  # every other check passes; it is simply not the balanced one any more, and
+  # nothing said so. Checked here because this function runs on every path that
+  # depends on the pins.
+  n0=${#REST_PIN_0[@]}
+  n1=${#REST_PIN_1[@]}
+  nuniq=$(printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  if [ "$nuniq" != "$((n0 + n1))" ]; then
+    echo "tier-gate: REST_PIN_0 and REST_PIN_1 share a name ($nuniq distinct across both lists, want $((n0 + n1))). The name would silently land in bucket 1 only:" >&2
+    comm -12 <(printf '%s\n' "${REST_PIN_0[@]}" | LC_ALL=C sort -u) <(printf '%s\n' "${REST_PIN_1[@]}" | LC_ALL=C sort -u) | sed 's/^/  /' >&2
+    return 1
+  fi
   # Pure-shell matching, NOT `printf ... | grep -qxF "$t"`. Under `pipefail`,
   # `grep -q` exits as soon as it matches, printf takes SIGPIPE, and the
   # PIPELINE is non-zero exactly when the grep SUCCEEDED -- so the check
@@ -761,6 +775,13 @@ $part"
     st_fail "rest_pins_present failed for the wrong reason -- expected its own message naming the pins"
   fi
   printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | rest_pins_present || st_fail "rest_pins_present rejected a list made of the pins themselves"
+
+  # cleat#3940 review: the two SHIPPED lists must be disjoint. rest_pins_present
+  # enforces it at runtime; this catches a duplicate that ships, before a run.
+  RS_N0=${#REST_PIN_0[@]}
+  RS_N1=${#REST_PIN_1[@]}
+  RS_NU=$(printf '%s\n' "${REST_PIN_0[@]}" "${REST_PIN_1[@]}" | LC_ALL=C sort -u | grep -c . || true)
+  [ "$RS_NU" = "$((RS_N0 + RS_N1))" ] || st_fail "REST_PIN_0 and REST_PIN_1 share $((RS_N0 + RS_N1 - RS_NU)) name(s); the python is last-wins, so the split would not be the one measured"
   rm -f /tmp/vbc-out.$$
 
   # Known positive, same names, deduplicated: must pass, proving the failure
@@ -797,7 +818,14 @@ if [ -n "$VERIFY_N" ]; then
   # the real run asks. A check that partitions differently from the run it
   # vouches for is the "two readings nobody compares" failure this file's own
   # header records.
-  REST_ALL=$(rest_all_tests)
+  # (cleat#3940 review) A `go test -list` that FAILED returns a partial list. Sharding
+  # on it would look like "some pins were renamed" (the next check's message) when the
+  # real news is that the pool could not be listed at all -- the UNMEASURED case, which
+  # gets its own exit status and its own words.
+  REST_ALL=$(rest_all_tests) || {
+    echo "tier-gate --verify-shard-coverage: could not list the rest pool -- go test -list failed (a pinned package that does not build?). This is a failure of the check, not a finding about the split." >&2
+    exit 2
+  }
   r=0
   printf '%s\n' "$REST_ALL" | verify_bucket_coverage "rest (${#REST_PACKAGES[@]} non-engine tier1 packages)" "$RBUCKETS" rest_shard_names || r=$?
   # A pin that names nothing is not a coverage hole -- it is a split that is no
@@ -850,7 +878,10 @@ if [ -n "$LIST_SHARD_SPEC" ]; then
     # pinned by name and only the tail is hashed. The pins are checked here too:
     # a listing is what a reader uses to answer "does this shard run X", and a
     # stale pin makes that answer quietly wrong rather than obviously broken.
-    REST_ALL=$(rest_all_tests)
+    REST_ALL=$(rest_all_tests) || {
+      echo "tier-gate: could not list the rest pool -- go test -list failed (a pinned package that does not build?). Refusing to list a shard from a partial pool." >&2
+      exit 2
+    }
     printf '%s\n' "$REST_ALL" | rest_pins_present || exit 2
     printf '%s\n' "$REST_ALL" | rest_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern
   else
@@ -1195,7 +1226,10 @@ case "$RUN_MODE" in
       REST_BUCKET=$((SHARD_I_NUM - EBUCKETS - 1))
       # cleat#3940: the same sharder --list-shard prints, so what a shard is
       # listed as and what it runs cannot drift apart.
-      REST_ALL=$(rest_all_tests)
+      REST_ALL=$(rest_all_tests) || {
+        echo "tier-gate: could not list the rest pool -- go test -list failed (a pinned package that does not build?). Refusing to shard on a partial pool." >&2
+        exit 2
+      }
       printf '%s\n' "$REST_ALL" | rest_pins_present || exit 2
       SHARD_PATTERN=$(printf '%s\n' "$REST_ALL" | rest_shard_names "$REST_BUCKET" "$RBUCKETS" | names_to_run_pattern)
       note "  rest shard $SHARD_I_NUM/$SHARD_N_NUM (bucket $REST_BUCKET/$RBUCKETS): $(echo "$ACTIVE_PKGS" | tr '\n' ' ')"
