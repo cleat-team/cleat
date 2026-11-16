@@ -185,6 +185,16 @@ jobs:
           # had not run at all (cleat-review, on #3888).
           top=$(grep '"Action":"pass"' "$f" | grep '"Test":' | grep -vc '"Test":"[^"]*/' || true)
           echo "tests failed: $fail, package failures: $pkgfail, tests passed: $passed (top-level: $top)"
+          # NAME the failures. The counts above say something broke; without this line the reader still has to re-run
+          # the job to find out WHICH test, because the report itself is on a runner that is already gone and nothing
+          # uploads it (cleat#3826: "tests failed: 1" with no name, twice).
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' \
+              | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+          fi
+          if [ "$pkgfail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
+          fi
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
           # TestTypeScriptLabelIsRoutedToWasmtime and the two binding-inventory tests need no toolchain; the build tests,
           # the `cleat build --target ts` test, the conformance tests, the host-call binding tests and the worker smoke
