@@ -116,11 +116,32 @@ func TestADeployReadsTheRealPluginRegistryAndAuditsItsOverride(t *testing.T) {
 					return "?"
 				}
 			}
-			t.Cleanup(func() {
-				_, _ = be.DB.Exec(`DELETE FROM `+regTable+` WHERE plugin_name IN (`+ph(1)+`, `+ph(2)+`)`, registered, missing)
-				_, _ = be.DB.Exec(`DELETE FROM `+ovTable+` WHERE definition_name LIKE `+ph(1), "%"+suffix)
-				_ = (&engine.WorkerRegistry{DB: be.DB, Dialect: d}).Deregister(context.Background(), workerID)
-			})
+			// Cleanup, not t.Cleanup: registered AFTER `defer be.Cleanup()` above
+			// so LIFO runs it FIRST, while be.DB is still open. A t.Cleanup callback
+			// runs after the function body returns -- after the deferred
+			// be.Cleanup() has closed that pool -- so every statement below would
+			// fail on a dead connection, silently, since each discards its error.
+			// The worker row this leaves behind stays live for
+			// engine.SecretKeyLiveWindow and fails the reseal test in cmd/cleatctl
+			// on a runner fast enough to reach it inside five minutes (cleat#3942).
+			// Same shape as a_purged_awaiter_unregisters_across_dialects_test.go.
+			// The errors are REPORTED, not discarded. Discarding them is how this
+			// cleanup's defect stayed invisible: every statement ran against a
+			// closed pool, every one failed, and nothing said so -- the row then
+			// surfaced minutes later in another package (cleat#3942, cleat#3945).
+			// With them reported, reintroducing the ordering bug fails THIS test
+			// rather than leaking a live worker into someone else's.
+			defer func() {
+				if _, err := be.DB.Exec(`DELETE FROM `+regTable+` WHERE plugin_name IN (`+ph(1)+`, `+ph(2)+`)`, registered, missing); err != nil {
+					t.Errorf("cleanup: delete registered plugin rows: %v", err)
+				}
+				if _, err := be.DB.Exec(`DELETE FROM `+ovTable+` WHERE definition_name LIKE `+ph(1), "%"+suffix); err != nil {
+					t.Errorf("cleanup: delete override rows: %v", err)
+				}
+				if err := (&engine.WorkerRegistry{DB: be.DB, Dialect: d}).Deregister(context.Background(), workerID); err != nil {
+					t.Errorf("cleanup: deregister %s: %v", workerID, err)
+				}
+			}()
 
 			// A real registration, the call a worker makes at startup, records the plugin.
 			if err := (&engine.WorkerRegistry{DB: be.DB, Dialect: d}).Register(ctx,
