@@ -1245,8 +1245,22 @@ jobs:
           scripts/check-skip-budget.sh test-go/engine-tier1 tier-gate-union.json
 
 
+      # `always()` is load-bearing, and its absence was a defect (cleat#3969): with no
+      # `if:` a step defaults to `success()`, so any earlier failure -- notably the skip
+      # budget immediately above, which exits non-zero when the engine shards skipped
+      # anything -- SKIPPED this step entirely. The job then reported only the budget's
+      # own error and never printed `tier1-engine: <result>`, so the reader could not tell
+      # which shard failed, or whether any had. Measured on run 43903650094 (budget step
+      # present): no per-shard lines. On run 43902888453 (no budget step yet): the
+      # per-shard verdict printed. Both were cancelled by a later push, so the
+      # cancellation is not the difference -- the budget step is.
+      #
+      # This is the same reasoning the step's own body gives -- "this job always runs and
+      # always states which dependency, if any, was not a success" -- which was false in
+      # exactly the case that matters until this line existed. The gate clause is kept so
+      # a gated body edit still reports `success` without running this.
       - name: Aggregate shard results
-        if: ${{ needs.edit-gate.outputs.skip != 'true' }}
+        if: ${{ always() && needs.edit-gate.outputs.skip != 'true' }}
         env:
           EVENT: ${{ github.event_name }}
           COVERAGE: ${{ needs.tier1-coverage.result }}
