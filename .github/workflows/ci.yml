@@ -3386,14 +3386,18 @@ jobs:
               echo "::error::no shard of the $leg leg uploaded a report" >&2
               exit 1
             fi
-            cat $dirs/selected-tests.txt | LC_ALL=C sort > sel.txt
+            # A LOOP, not `cat $dirs/selected-tests.txt`: unquoted `$dirs` is
+            # word-split, so the suffix binds to the LAST word only and cat is
+            # handed the first shard's DIRECTORY -- "Is a directory", on every
+            # input including a correct partition (cleat-review on cleat#3942).
+            for d in $dirs; do cat "$d/selected-tests.txt"; done | LC_ALL=C sort > sel.txt
             dupes=$(uniq -d sel.txt || true)
             if [ -n "$dupes" ]; then
               echo "::error::$leg: these tests are assigned to MORE THAN ONE shard:" >&2
               printf '  %s\n' "$dupes" >&2
               exit 1
             fi
-            cat $dirs/all-tests.txt | LC_ALL=C sort -u > listed.txt
+            for d in $dirs; do cat "$d/all-tests.txt"; done | LC_ALL=C sort -u > listed.txt
             if ! diff -u listed.txt sel.txt; then
               echo "::error::$leg: the shards do not together run every test in the split package (lines above: '-' is a test NO shard runs)" >&2
               exit 1
