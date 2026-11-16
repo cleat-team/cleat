@@ -5106,9 +5106,10 @@ jobs:
       # CLEAT_TEST_DB is always set for this step, so `openClusterDB` can only
       # Fatal on an unreachable database and never skip -- the budget is 0, and
       # a skip appearing under it means the DSN above stopped taking effect.
-      # That window is real here rather than theoretical: the step before this
-      # one runs TestKillPostgresAndRestart, so the suite is entered against a
-      # container that was just stopped and started.
+      # That window is real here rather than theoretical: the suite itself runs
+      # TestKillPostgresAndRestart, which stops and restarts the container, and
+      # go test runs the files in name order -- so five tests after it open a
+      # database against a server that was just restarted.
       - name: Skip budget — cluster suite
         if: always()
         run: scripts/check-skip-budget.sh cluster/suite cluster-report.json

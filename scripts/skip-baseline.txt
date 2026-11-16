@@ -423,6 +423,7 @@ plugins/webhookingest	TestV1IndexesAreIdempotentOnMySQL	1
 plugins/webhookingest	TestV3V4V7MigrationsAreIdempotentOnMySQL	1
 plugins/webhookingest	TestWebhookSourcesDeletedAtMigrationIsIdempotentOnMySQL	1
 plugins/webhookingest	freshMySQLDatabase	1
+tests/cluster	SetupCluster	1
 tests/cluster	TestAddRemoveWorkers	1
 tests/cluster	TestClusterBasicWorkflowExecution	1
 tests/cluster	TestClusterSpreadWorkflows	1
@@ -434,6 +435,8 @@ tests/cluster	TestKillWorkerMidExecution	1
 tests/cluster	TestNewWASMVersionUsesNewCode	1
 tests/cluster	TestReplayProducesSameHistory	1
 tests/cluster	TestScaleUpWorkers	1
+tests/cluster	openClusterDB	2
+tests/cluster	stopPostgresContainer	1
 tests/crash	missingAssemblyScriptToolchain	1
 tests/crash	missingJavaToolchain	1
 tests/crash	missingPythonToolchain	1

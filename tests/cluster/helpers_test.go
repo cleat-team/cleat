@@ -193,9 +193,11 @@ func ClusterDSN() string {
 // budget is 0 for exactly that reason. This suite skipped on a ping failure
 // whatever the environment said, so in CI (where CLEAT_TEST_DB is always set)
 // a cluster that was down read as "nothing to test here" and the required job
-// stayed green. The window is not hypothetical: the step before this one runs
-// TestKillPostgresAndRestart, so the entry state is a container that was just
-// stopped and restarted.
+// stayed green. The window is not hypothetical: this suite runs
+// TestKillPostgresAndRestart itself, which stops and restarts the container,
+// and go test runs the files in name order -- so five tests after it
+// (TestFullClusterRestart, then replay_test.go and scale_test.go) open a
+// database against a server that was just restarted.
 func clusterDSNWithConfigured() (dsn string, configured bool) {
 	if v := os.Getenv("CLEAT_TEST_DB"); v != "" {
 		return testutil.TagPostgresDSN(v), true
@@ -236,15 +238,12 @@ func openClusterDB(t *testing.T) *sql.DB {
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		if configured {
-			t.Fatalf("configured cluster database at %s cannot be opened: %v -- "+
-				"CLEAT_TEST_DB was set, so this is a failure of the configuration "+
-				"rather than a missing prerequisite", redactDSN(dsn), err)
-		}
-		t.Skipf("no cluster database configured (CLEAT_TEST_DB not set); default "+
-			"DSN %s cannot be opened: %v -- this suite needs "+
-			"docker-compose.cluster.yml up, so it skips rather than failing when "+
-			"nobody asked for it", redactDSN(dsn), err)
+		// Unreachable while the skip above stands: configured is always true
+		// here. Kept as a Fatalf rather than deleted so a future edit that
+		// relaxes the skip cannot turn an open failure into a silent skip.
+		t.Fatalf("configured cluster database at %s cannot be opened: %v -- "+
+			"CLEAT_TEST_DB was set, so this is a failure of the configuration "+
+			"rather than a missing prerequisite", redactDSN(dsn), err)
 	}
 	// A CONFIGURED DSN IS RETRIED BEFORE IT IS CALLED DEAD, because this suite
 	// manufactures the window a retry exists for: TestKillPostgresAndRestart
@@ -259,38 +258,59 @@ func openClusterDB(t *testing.T) *sql.DB {
 	// UNCONFIGURED does not wait: nobody asked for a database, and making a
 	// local `go test` sit for 30s before skipping would be a cost with no
 	// failure to catch.
-	if err := pingWithRetry(db, dsn, configured); err != nil {
-		if configured {
-			t.Fatalf("configured cluster database at %s is still unreachable after "+
-				"%s: %v -- this suite requires docker-compose.cluster.yml to be up, "+
-				"and CLEAT_TEST_DB was set explicitly, so this is a failure of the "+
-				"configuration and not an absent prerequisite",
-				redactDSN(dsn), clusterPingTimeout, err)
-		}
-		t.Skipf("no cluster database configured (CLEAT_TEST_DB not set); default "+
-			"DSN %s is unreachable: %v -- this suite needs "+
-			"docker-compose.cluster.yml up, so it skips rather than failing when "+
-			"nobody asked for it", redactDSN(dsn), err)
+	if err := pingWithRetry(db); err != nil {
+		t.Fatalf("configured cluster database at %s is still unreachable after "+
+			"%s: %v -- this suite requires docker-compose.cluster.yml to be up, "+
+			"and CLEAT_TEST_DB was set explicitly, so this is a failure of the "+
+			"configuration and not an absent prerequisite",
+			redactDSN(dsn), clusterPingTimeout, err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
 }
 
+// stopPostgresContainer stops the cluster's postgres container, and says which
+// of three situations it is in (cleat#3952):
+//
+//   - the container does not exist: SKIP, naming the environment. tests/cluster
+//     is in tier2.packages, and Tier 2 runs with docker but no compose stack,
+//     so this is the ordinary case there rather than a broken run.
+//   - it exists and stops: return, so the test can restart it.
+//   - it exists and will not stop: FATAL. The test's subject is what happens
+//     when Postgres goes away; if it cannot be stopped, the run measured
+//     nothing. The cluster job always has this container, and its
+//     `cluster/suite` budget is 0, so a skip there is still caught.
+func stopPostgresContainer(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("docker", "inspect", "--format", "{{.State.Running}}",
+		"cleat-postgres").Run(); err != nil {
+		t.Skipf("no cleat-postgres container: this job does not run the cluster "+
+			"stack (docker-compose.cluster.yml), so there is nothing to stop: %v", err)
+	}
+	if out, err := exec.Command("docker", "stop", "cleat-postgres").CombinedOutput(); err != nil {
+		t.Fatalf("cannot stop the postgres container, so this test cannot test "+
+			"what it is for: %v\n%s", err, string(out))
+	}
+}
+
 // clusterPingTimeout bounds how long a CONFIGURED DSN may be unreachable
-// before the test fails. It is the restart window, not a tolerance for a dead
-// database: 30s is what the restart test itself allows postgres to recover.
-const clusterPingTimeout = 30 * time.Second
+// before the test fails. It covers the restart window, not a dead database.
+//
+// FIVE SECONDS, not thirty, because ELEVEN TESTS OPEN A DATABASE and each pays
+// the bound: 11 x 30s is 330s against the package's 300s `go test -timeout`,
+// so a genuinely dead DSN would burn the whole timeout before reporting
+// anything -- measured on #3963 at rc 1 after 302s. At 5s the worst case is
+// ~55s, and the window this exists for is short: TestKillPostgresAndRestart
+// waits for its own ping to recover (up to ~29s) before returning.
+const clusterPingTimeout = 5 * time.Second
 
 // pingWithRetry returns nil once the database answers, the last ping error if
 // a CONFIGURED one never does within clusterPingTimeout, or the first error
 // immediately when nobody configured a DSN.
-func pingWithRetry(db *sql.DB, dsn string, configured bool) error {
+func pingWithRetry(db *sql.DB) error {
 	err := db.Ping()
 	if err == nil {
 		return nil
-	}
-	if !configured {
-		return err
 	}
 	deadline := time.Now().Add(clusterPingTimeout)
 	for time.Now().Before(deadline) {

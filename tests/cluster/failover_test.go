@@ -206,20 +206,12 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Kill postgres container.
-	killCmd := exec.Command("docker", "stop", "cleat-postgres")
-	if out, err := killCmd.CombinedOutput(); err != nil {
-		// A FAILURE, not a skip (cleat#3952). The test's entire subject is what
-		// happens when postgres goes away; if the container cannot be stopped,
-		// the premise is broken and the run measured nothing. The sibling
-		// `docker start` below has always been a Fatalf, so the skip here also
-		// meant a failed stop and a failed start reported differently.
-		//
-		// "docker not available" is still a skip, and it is checked above: that
-		// is a genuinely absent toolchain, which is the one thing a skip is
-		// allowed to mean.
-		t.Fatalf("cannot stop the postgres container, so this test cannot test "+
-			"what it is for: %v\n%s", err, string(out))
-	}
+	// Three states, and they are different questions (cleat#3952): no
+	// container at all means this job does not run the cluster stack (Tier 2
+	// has docker and no compose stack, and tests/cluster is in tier2.packages),
+	// which is a skip naming the environment; a container that exists but will
+	// not stop means the test's premise is broken, which is a failure.
+	stopPostgresContainer(t)
 
 	// Wait briefly, then restart.
 	time.Sleep(2 * time.Second)
