@@ -2827,7 +2827,7 @@ jobs:
             flags: -p 1
           # commands has its own job group -- test-go-commands, two legs by
           # package, plus the aggregate that reports the required context. It
-          # was 25m01s here and is one of the two jobs that set the merge
+          # was 25m05s here and is one of the two jobs that set the merge
           # queue's wall; see the comment above that job for the measurement.
           # tests/ is otherwise not in this matrix -- cluster/scale/soak need
           # infrastructure and plugin-harness and cross-language have their own
@@ -2860,8 +2860,9 @@ jobs:
             path: ./tests/scale/...
           # crash has its own job group -- test-go-crash, three shards by test
           # name, plus the aggregate that reports the required context. It is
-          # ONE package, so it could not be split by path, and it was 25m40s
-          # here: the longer of the two jobs that set the merge queue's wall.
+          # ONE package, so it could not be split by path, and it was 25m43s
+          # here: the longest job in the run and the one that set the merge
+          # queue's wall.
           # See the comment above that job for the measurement and for why the
           # split is a static list rather than a derived one.
           # NOTE (cleat-review -> WS-3): .github/workflows/ is WS-3's under
@@ -2935,6 +2936,24 @@ jobs:
       # check also fails when the report is missing or contains no test results
       # at all, because a test step that died before producing output has
       # skipped everything, which is the strongest form of the same bug.
+      - name: Run tests
+        shell: bash
+        working-directory: ${{ matrix.package.dir || '.' }}
+        run: |
+          # pipefail is required: without it `tee` supplies the exit status and
+          # a failing `go test` is silently reported as a green step.
+          set -o pipefail
+          # Unquoted on purpose: some matrix entries list several package patterns
+          # and rely on word splitting. Values are controlled by this file only.
+          # -timeout 30m, not Go's 10-minute default. The Tier 1 Gate hit that
+          # default on 2026-09-03 -- ran=6546 pass=6543 fail=0, then "panic:
+          # test timed out after 10m0s" -- because it configures all three
+          # DSNs. This job configures PostgreSQL only and still finishes well
+          # inside 10m, so this is insurance rather than a fix: the number that
+          # matters is the one the suite grows into, and -race makes this job
+          # the slower of the two per test.
+          go test -race -count=1 -timeout 30m ${{ matrix.package.flags }} -json ${{ matrix.package.path }} 2>&1 | tee test-report.json
+
       - name: Skip budget
         if: always()
         working-directory: ${{ matrix.package.dir || '.' }}
@@ -2943,26 +2962,32 @@ jobs:
   # -------------------------------------------------------------------------
   # Test Go (commands) -- the same ./cmd/... tree, split across two runners
   # -------------------------------------------------------------------------
-  # WHY THIS EXISTS. On the merge-group run for 02708649 (run 43762143798, job
-  # 132959102447) `Test Go (commands) on 1.26` took 25m01s and `Test Go (crash)`
-  # 25m40s. Those two were the ONLY jobs still running when the rest of the
-  # suite had finished -- everything else was done inside 5m36s -- so they, and
-  # nothing else, set how long a batch of PRs sits in the merge queue.
+  # WHY THIS EXISTS. On the merge-group run for 02708649 (run 43762143798) `Test
+  # Go (crash) on 1.26` ran 25m43s (21:12:33Z -> 21:38:16Z) and `Test Go
+  # (commands)` 25m05s (21:14:09Z -> 21:39:14Z). Those were the last two jobs
+  # running, and they were not close to anything else: the next longest was
+  # `Cluster Integration Tests` at 13m45s, then `Lint` at 6m53s, and everything
+  # else finished under 5m30s. So these two jobs, and nothing else, set how long
+  # a batch of PRs sits in the merge queue -- and once both are sharded the wall
+  # becomes cluster's 13m45s, which is the next thing to shard.
   #
-  # The step breakdown of that run: 58s of setup, then 1338s inside ONE
+  # The step breakdown of the commands job: 58s of setup, then 1338s inside ONE
   # `go test` step, then 103s for the GAP2 reproduction. Per package, from the
-  # -json events: cmd/cleat 598s, cmd/cleat-worker 504s, cmd/cleatctl 28s, and
-  # the six others 38s between them. `-p 1` makes those serial, and it has to
-  # stay: three of the nine packages that carry tests are database-backed and
-  # share the one
-  # PostgreSQL service this job provides.
+  # -json events: cmd/cleat 625.1s, cmd/cleat-worker 506.6s, cmd/cleatctl
+  # 29.1s, and the six others 44.3s between them. `-p 1` makes those serial, and
+  # it has to stay: three of the nine packages that carry tests are
+  # database-backed and share the one PostgreSQL service this job provides.
   #
   # That is why the split is across RUNNERS rather than across packages in one
   # invocation. Each leg gets its own PostgreSQL service, so nothing is shared
   # and nothing runs concurrently against one database -- the property `-p 1`
-  # exists for is preserved by construction instead of by argument. 598s
-  # against 504+103s: the legs finish together, and the wall becomes ~13m with
-  # the slower package's own compile.
+  # exists for is preserved by construction instead of by argument. The cleat
+  # leg carries 625.1s; the rest leg carries 579.9s of package tests plus the
+  # 103s GAP2 reproduction, so it is the longer leg by about a minute. That gap
+  # is inside run-to-run variance and does not move the wall: both legs land
+  # near 13m once their own compile is added (the whole tree's serial compile
+  # was the 133s difference between that 1338s step and the 1205s the packages
+  # account for), which is level with cluster's 13m45s rather than clearing it.
   #
   # The required status context stays exactly `Test Go (commands) on 1.26` and
   # is reported by the aggregate job below, because a matrix leg reports ONE
@@ -3266,7 +3291,8 @@ jobs:
   # tests/crash is ONE package, so `go list` gives one line and there is nothing
   # to divide by directory. Measured on the same merge-group run (job
   # 132959102453): 66s of setup and 1472s inside one `go test` step, of which
-  # 1416s was 28 top-level tests running serially and ~56s was the compile. The
+  # the package accounts for 1417.2s and 1416.1s of that is 28 top-level tests
+  # running serially (no overlap to exploit), leaving 55s of compile. The
   # five longest are 251.7 / 207.8 / 143.9 / 118.5 / 109.6s against 3.6s for the
   # shortest -- a 70x spread, which is why the split below is a static,
   # time-balanced list rather than the `(NR-1) % n` derivation
