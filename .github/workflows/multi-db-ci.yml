@@ -246,7 +246,7 @@ jobs:
     #     A fork PR's code with /var/run/docker.sock mounted is root on the box.
     #   the label list is an array, so `fromJSON` is required; `a && b || c`
     #     is GitHub's idiom because it has no ternaries.
-    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci","cleat-ci-heavy"]') || 'ubuntu-latest' }}
     # 40 -> 30, 2026-11-16. A shard's `go test` step is bounded by its ~200s
     # slice against the single job's 600s, so a hanging shard should not hold a
     # queue slot for two thirds of an hour. Not tighter: the container's start
@@ -549,7 +549,7 @@ jobs:
     #     A fork PR's code with /var/run/docker.sock mounted is root on the box.
     #   the label list is an array, so `fromJSON` is required; `a && b || c`
     #     is GitHub's idiom because it has no ternaries.
-    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.CLEAT_SELF_HOSTED == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/develop') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","cleat-ci","cleat-ci-heavy"]') || 'ubuntu-latest' }}
     # 45 -> 30, 2026-11-16. A shard's `go test` step is bounded by its ~270s
     # slice against the single job's 874s, so a hanging shard should not hold a
     # queue slot for three quarters of an hour. Not tighter than this: the

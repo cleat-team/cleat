@@ -4,6 +4,9 @@
 # answered by dispatching this and reading the runner_name off the job, not by
 # inferring it from a green merge. See cleat-internal's runner runbook §8.
 #
+# It names the HEAVY pool: the pool the router PR sends work to, and the one
+# whose memory caps and concurrency the calibration in the runbook measures.
+#
 # It is deliberately tiny and deliberately NOT a required check. It is not in
 # any protection rule, no job `needs:` it, and it never runs on its own.
 name: Self-Hosted Probe
@@ -28,7 +31,7 @@ jobs:
     # so falling back to a hosted runner would answer a different question and
     # always succeed. If nothing picks it up, that IS the result: the run stays
     # queued, which the operator sees immediately in the UI.
-    runs-on: [self-hosted, linux, x64, cleat-ci]
+    runs-on: [self-hosted, linux, x64, cleat-ci, cleat-ci-heavy]
     timeout-minutes: 5
     steps:
       - name: Report where this job landed
