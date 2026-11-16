@@ -116,6 +116,17 @@ jobs:
         if: always()
         run: scripts/check-skip-budget.sh soak soak-report.json
 
+      # WHICH ATTEMPT WROTE THE REPORT, written only when there IS a report.
+      # The upload below is `if: always()` and defaults to if-no-files-found:
+      # warn, so a re-run that dies before the test writes soak-report.json
+      # uploads nothing and leaves the PREVIOUS attempt's artifact under the
+      # stable name. `hashFiles` keeps this step out of that case -- without it
+      # the run would upload a marker-only artifact and overwrite would destroy
+      # the report it is meant to describe (cleat#3955).
+      - name: Record which attempt wrote this report
+        if: always() && hashFiles('soak-report.json') != ''
+        run: printf '%s %s\n' '${{ github.run_id }}' '${{ github.run_attempt }}' > soak-run.txt
+
       - name: Upload soak report
         if: always()
         uses: actions/upload-artifact@v7
@@ -129,7 +140,9 @@ jobs:
           # artifact that exists.
           name: soak-report-${{ github.sha }}
           overwrite: true
-          path: soak-report.json
+          path: |
+            soak-report.json
+            soak-run.txt
           retention-days: 30
 
   # A failed soak must say so (cleat#3736). The weekly run failed on 2026-11-02 and 2026-11-09 and was
@@ -168,16 +181,40 @@ jobs:
       # continue-on-error is what lets the report say "no artifact" instead of this step failing and
       # the report never being filed.
       - name: Fetch the soak report
+        id: fetch
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
           name: soak-report-${{ github.sha }}
           path: soak-report
 
+      # THE LABEL FOLLOWS THE DATA, not the job's own attempt (cleat#3955).
+      # The artifact name is stable across attempts so a re-run can find it;
+      # the marker says which attempt actually wrote it. Rendering attempt 1's
+      # report under an attempt 2 header is the failure this prevents.
+      - name: Which attempt the report is from
+        id: attribution
+        if: always()
+        run: |
+          set -euo pipefail
+          attempt='${{ github.run_attempt }}'
+          if [ -f soak-report/soak-run.txt ]; then
+            read -r marker_run marker_attempt < soak-report/soak-run.txt
+            if [ "$marker_run" != '${{ github.run_id }}' ]; then
+              echo "::error::the fetched report is from run $marker_run, not this run ${{ github.run_id }}" >&2
+              exit 1
+            fi
+            if [ "$marker_attempt" != "$attempt" ]; then
+              echo "::warning::this job is attempt $attempt and fetched the report written by attempt $marker_attempt -- the re-run produced none, so the older artifact survived; labelling it by the attempt that wrote it" >&2
+            fi
+            attempt="$marker_attempt"
+          fi
+          echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+
       - name: Render the issue text
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ATTEMPT: ${{ steps.attribution.outputs.attempt }}
           HEAD_SHA: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
           DURATION: ${{ inputs.duration || '1h' }}
@@ -193,7 +230,7 @@ jobs:
         uses: actions/github-script@v9
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ATTEMPT: ${{ steps.attribution.outputs.attempt }}
         with:
           script: |
             const fs = require('fs');
