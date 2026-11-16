@@ -181,10 +181,12 @@ permissions:
 # full pass over a byte-identical tree -- 3,105 runner-minutes a day of it in
 # this workflow alone, against a pool pinned at the 60-job hosted cap.
 #
-# What still runs on a develop push here: every `*-scenario` job (they carry
-# `github.event_name != 'merge_group'`, so they have no group coverage at all);
-# `coverage`, which is not in the group either (its own cut is #3958's step 2,
-# item 3); and `benchmarks`, which is main-only already.
+# What still runs on a develop push here: every `*-scenario` job, which carry
+# `github.event_name != 'merge_group'` and so have no group coverage at all.
+# `coverage` and `benchmarks` carry conditions of their own that already
+# exclude a develop push (`pull_request || refs/heads/main`, and main-only), so
+# they are untouched by this cut -- coverage's own cost is #3958's step 2,
+# item 3, a separate decision.
 #
 # THE GUARD, which is what makes dropping them safe: an absent job does not
 # fail a run, so a commit that never went through the queue would lose this
@@ -1379,11 +1381,13 @@ jobs:
       # cleat#3958. The guard itself runs on the develop push (tier1-gate.yml's
       # `develop-push-was-queued`), and the case it exists for -- a commit with
       # no merge_group run -- cannot be produced on demand there. So its
-      # judgment is asserted here against fixtures: six cases, each one a way
-      # the guard could be WRONG (a missing workflow, a cancelled one, a
+      # judgment is asserted here against fixtures: eleven cases, each one a
+      # way the guard could be WRONG (a missing workflow, a cancelled one, a
       # cancelled attempt that a later attempt then passed, no group run at
-      # all, runs belonging to a different sha, and unparsable input), not a
-      # restatement of the happy path.
+      # all, runs belonging to a different sha, a run still in progress or
+      # still queued, the 343c1cca replay, a finding outranking a transient
+      # one, a completed rerun of that same fixture, and unparsable input),
+      # not a restatement of the happy path.
       - name: Develop-push-was-queued guard
         if: always()
         run: |

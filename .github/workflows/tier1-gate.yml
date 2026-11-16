@@ -315,7 +315,9 @@ jobs:
     name: Develop push was queued
     if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The bound in the polling step is 1500s; this is the outer cap that
+    # backstops a hung `gh` call, not the decision the job normally makes.
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -326,24 +328,51 @@ jobs:
           sparse-checkout: scripts/check-develop-push-was-queued.py
           sparse-checkout-cone-mode: false
 
-      - name: Fetch this commit's merge_group runs
+      # POLLS, because a run that exists but has not finished is not a finding
+      # (cleat-review on #3961). The queue merges once the 35 REQUIRED contexts
+      # pass, and the crash shards are not required, so ci.yml's merge_group run
+      # is routinely still going when the develop push fires -- on 343c1cca it
+      # completed at 13:19:45Z against a push created at 13:17:05Z. Judging that
+      # as "ungated" would have paged on a normal merge.
+      - name: Wait for this commit's merge_group runs, then judge
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
+          # Longest observed lag 828s (cleat-review, 40 pushes); this census
+          # measured 516s over 25. 1500s is headroom for a slow runner queue,
+          # and it is a BOUND, not a deadline the normal path approaches: only
+          # 6 of the 25 pushes in the census needed any wait at all.
+          BOUND: "1500"
+          INTERVAL: "30"
         run: |
           set -euo pipefail
-          # An empty result is a legitimate ANSWER -- the commit did not go
-          # through the queue -- and must reach the script, which reports it as
-          # a finding. Only a failed REQUEST aborts here, as UNMEASURED.
-          gh api --paginate \
-            "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&event=merge_group&per_page=100" \
-            --jq '.workflow_runs[]' | jq -s '.' > merge-group-runs.json
-
-      - name: Judge
-        run: |
-          set -euo pipefail
-          python3 scripts/check-develop-push-was-queued.py \
-            --runs merge-group-runs.json --sha "${GITHUB_SHA}"
+          deadline=$(( SECONDS + BOUND ))
+          while :; do
+            # An empty result is a legitimate ANSWER -- the commit did not go
+            # through the queue -- and reaches the script as a finding. Only a
+            # failed REQUEST is UNMEASURED.
+            if ! gh api --paginate \
+              "repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&event=merge_group&per_page=100" \
+              --jq '.workflow_runs[]' | jq -s '.' > merge-group-runs.json; then
+              echo "::error::could not list the merge_group runs for ${SHA}. UNMEASURED -- this is a failure of the check, not a finding about the commit." >&2
+              exit 2
+            fi
+            rc=0
+            python3 scripts/check-develop-push-was-queued.py \
+              --runs merge-group-runs.json --sha "$SHA" || rc=$?
+            case "$rc" in
+              0) exit 0 ;;
+              1) exit 1 ;;   # a finding waiting cannot fix: absent, or failed
+              2) exit 2 ;;   # the check itself could not measure
+              3) ;;          # still running: ask again
+              *) echo "::error::the guard exited $rc, which is not one of its statuses (0/1/2/3). UNMEASURED." >&2; exit 2 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::UNMEASURED: the merge_group runs for ${SHA} were still running after ${BOUND}s, so whether this commit was gated is UNKNOWN -- this is a failure of the check, not a finding about the commit. The longest lag observed was 828s, so something is stuck: look at this sha's merge_group runs before concluding anything about the push." >&2
+              exit 2
+            fi
+            sleep "$INTERVAL"
+          done
 
   # No DB, no Python, no wasm-tools: `go test -list` compiles the package and
   # enumerates Test funcs, it never runs one. Gates the three expensive jobs

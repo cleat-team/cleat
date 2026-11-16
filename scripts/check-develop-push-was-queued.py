@@ -16,10 +16,23 @@ silence into a red Tier 1 Gate run, which the existing
 
 KEYED ON THE WORKFLOW PATH, not on the run's `name`. Measured 2026-11-16 over
 the 24h census: a merge_group run's `name` is the queue ref --
-`gh-readonly-queue/develop/pr-3942-f0e717ac… [checks_requested]` -- not the
-workflow's name, because these workflows carry no top-level `name:`. A guard
+`gh-readonly-queue/develop/pr-3942-f0e717ac… [checks_requested]` -- because
+each of these workflows sets `run-name:`, whose value the API returns in that
+field (they DO have top-level `name:` keys; that is not the reason). A guard
 keyed on the display name finds nothing and would report every develop push as
 ungated; keyed on the path it matches 125 of 125 known-good (25 commits x 5).
+
+A RUN STILL IN PROGRESS IS NOT A FINDING (cleat-review on #3961). The queue
+merges once the 35 REQUIRED contexts pass, and the crash shards are not
+required, so `ci.yml`'s merge_group run was still running when the develop push
+fired on 6 of the 25 pushes in that census, by up to 516s (cleat-review
+measured 828s over 40 pushes). Judging that state as "ungated" would have
+paged on every one of them. So this script reports THREE states and lets the
+caller poll: 0 all five passed; 1 a finding that waiting cannot fix (a
+workflow is absent, or completed with a non-success conclusion); 3 still
+running. The caller -- tier1-gate.yml's `develop-push-was-queued` job -- polls
+on 3 and converts a bound expiry into UNMEASURED (2), which is a different
+statement from "ungated".
 
 WHAT IT DOES NOT DO. It does not read check runs. A check run's presence on a
 commit can come from a re-run, from a different attempt, or from a workflow
@@ -73,19 +86,44 @@ def load_runs(path):
     raise ValueError(f"{path} holds {type(data).__name__}, want an object or array")
 
 
+# A run in one of these states has not finished; its conclusion is null.
+RUNNING = {"queued", "in_progress", "waiting", "pending", "requested"}
+
+
 def judge(runs, sha, workflows):
-    """Return (missing, saw_any): missing is a list of (workflow, why)."""
+    """Classify each workflow.
+
+    Returns (findings, running, saw_any):
+      findings -- [(workflow, why)] that waiting cannot fix (absent, or a
+                  completed run whose conclusion is not `success`);
+      running  -- [workflow] whose newest run exists but has not completed;
+      saw_any  -- whether any run for this commit exists at all.
+    """
     mine = [r for r in runs if r.get("head_sha") == sha]
-    missing = []
+    findings, running = [], []
     for wf in workflows:
         candidates = [r for r in mine if r.get("path") == wf]
         if not candidates:
-            missing.append((wf, "no merge_group run on this commit"))
+            findings.append((wf, "no merge_group run on this commit"))
             continue
-        conclusions = sorted({str(r.get("conclusion")) for r in candidates})
-        if "success" not in conclusions:
-            missing.append((wf, "merge_group run concluded " + ", ".join(conclusions)))
-    return missing, bool(mine)
+        if any(str(r.get("conclusion")) == "success" for r in candidates):
+            continue
+        # No success yet. A completed run that did not pass is final; any
+        # run still going means the answer is not in yet.
+        completed = [r for r in candidates
+                     if str(r.get("status") or "").lower() not in RUNNING
+                     and r.get("conclusion") is not None]
+        unfinished = [r for r in candidates
+                      if str(r.get("status") or "").lower() in RUNNING
+                      or r.get("conclusion") is None]
+        if completed:
+            conclusions = sorted({str(r.get("conclusion")) for r in completed})
+            findings.append((wf, "merge_group run concluded " + ", ".join(conclusions)))
+        elif unfinished:
+            running.append(wf)
+        else:  # a record with neither a conclusion nor a running status
+            findings.append((wf, "merge_group run has no usable status"))
+    return findings, running, bool(mine)
 
 
 def check_cut_list(root):
@@ -202,7 +240,7 @@ def main(argv=None):
               f"finding about the commit", file=sys.stderr)
         return 2
 
-    missing, saw_any = judge(runs, args.sha, workflows)
+    findings, running, saw_any = judge(runs, args.sha, workflows)
     if not saw_any:
         print(f"::error::no merge_group run exists for {args.sha}. This commit "
               f"did not go through the merge queue, so the develop push is the "
@@ -210,8 +248,8 @@ def main(argv=None):
               f"runs the heavy jobs. Re-run them for this commit by hand.",
               file=sys.stderr)
         return 1
-    if missing:
-        for wf, why in missing:
+    if findings:
+        for wf, why in findings:
             print(f"::error::{wf} has no successful merge_group run on "
                   f"{args.sha}: {why}", file=sys.stderr)
         print("::error::the develop push skips these workflows because the merge "
@@ -219,6 +257,14 @@ def main(argv=None):
               "not, so this commit is ungated and the skipped jobs must be run "
               "by hand on this sha.", file=sys.stderr)
         return 1
+    if running:
+        # NOT a finding. The queue merges once the REQUIRED contexts pass, and
+        # these workflows finish later than that: judging "still running" as
+        # "ungated" would page on every develop push that overtakes a crash
+        # shard. Exit 3 means "ask again"; the caller polls and turns a bound
+        # expiry into UNMEASURED.
+        print("STILL RUNNING: " + ", ".join(running), file=sys.stderr)
+        return 3
     print(f"OK: all {len(workflows)} workflow(s) passed in a merge_group run on "
           f"{args.sha}")
     return 0
@@ -249,6 +295,33 @@ def self_test():
     case("no merge_group run at all", [], 1, "did not go through the merge queue")
     case("runs belong to a DIFFERENT sha", [dict(r, head_sha="b" * 40) for r in good],
          1, "did not go through the merge queue")
+
+    # cleat-review on #3961: a run that EXISTS but has not finished is WAIT,
+    # never a finding. This is the case that shipped broken -- on 343c1cca the
+    # ci.yml group run completed at 13:19:45Z against a push run created at
+    # 13:17:05Z, so the first version reported "ungated" on a normal merge.
+    def running(wf, status="in_progress"):
+        return [r if r["path"] != wf else
+                {"head_sha": "a" * 40, "path": wf, "conclusion": None, "status": status}
+                for r in good]
+
+    case("a workflow still in progress", running(DEFAULT_WORKFLOWS[0]), 3,
+         "STILL RUNNING")
+    case("a workflow still QUEUED", running(DEFAULT_WORKFLOWS[3], "queued"), 3,
+         "STILL RUNNING")
+    # The replay: 343c1cca at 13:17:05Z, ci.yml the one still going.
+    case("343c1cca as of 13:17:05Z (ci.yml in progress, the rest passed)",
+         running(".github/workflows/ci.yml"), 3, "STILL RUNNING")
+    # Precedence: a definite finding outranks a transient one. Polling a
+    # failure would just wait 25 minutes to report the same thing.
+    case("one failed and one still running -> the finding wins",
+         [dict(r, conclusion="failure", status="completed")
+          if r["path"] == DEFAULT_WORKFLOWS[2] else
+          ({"head_sha": "a" * 40, "path": r["path"], "conclusion": None,
+            "status": "in_progress"} if r["path"] == DEFAULT_WORKFLOWS[0] else r)
+          for r in good], 1, "concluded failure")
+    # And the transition itself: once the last one completes, it is a pass.
+    case("the same fixture once every run completed", good, 0)
 
     failed = 0
     for name, runs, want_rc, want_msg, sha, wfs in cases:
