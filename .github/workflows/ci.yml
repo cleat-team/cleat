@@ -1460,6 +1460,83 @@ jobs:
           scripts/check-workflow-guards.py
           LINT_GUARD_EOF
 
+      # cleat#3965. Whether the workflow files are VALID, which nothing checked.
+      #
+      # THE DEFECT THIS EXISTS FOR, cleat#3948: deleting a job's only `env:`
+      # entry left a bare `env:` at ci.yml:4533 -- YAML-valid, GitHub-invalid.
+      # ci.yml then ran ZERO jobs, and the PR read 31 pass / 4 pending / 0 fail
+      # while 22 of 35 required contexts had never registered. Every guard for
+      # ci.yml lives in ci.yml's own Lint job, which could not report the file
+      # being invalid because it never ran; the "Workflow files parse" step
+      # above is yaml.safe_load, which accepts a null `env:`.
+      #
+      # The second shape is the one YAML cannot see at all: a job reading
+      # `needs.<job>.outputs.*` without declaring `needs:` on it. GitHub
+      # evaluates that reference as empty and reports nothing. Demonstrated on
+      # this head by deleting one `needs: [edit-gate]` from multi-db-ci.yml --
+      # the plant confirmed applied by diffing before it was linted:
+      #   multi-db-ci.yml:308:29: property "edit-gate" is not defined in object
+      #   type {} [expression]
+      #
+      # PINNED like golangci-lint above: `go install ...@vX` selected the
+      # version, and a new upstream rule cannot turn develop red on its own.
+      # -shellcheck= because this step is about the workflow SCHEMA. Develop at
+      # 4bb2833d carries 28 pre-existing [shellcheck] findings -- a count, so
+      # here is the date and the command, because it will move:
+      #   actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+      #     -ignore 'unexpected key "command" for "services"' \
+      #     .github/workflows/*.yml | grep -c '\[shellcheck\]$'
+      # measured 2026-11-16 with shellcheck 0.11.0. Folding a shell linter in
+      # would make the first green need 28 decisions, which is a different
+      # change and a different reviewer.
+      #
+      # TWO IGNORES, each with the measurement behind it rather than a shrug:
+      #   ubuntu-26.04 -- the label EXISTS on our runners. actionlint's list
+      #     lags GitHub's (it also predates ubuntu-24.04-arm).
+      #   services `command:` -- GitHub ACCEPTS it; actionlint's schema omits
+      #     it. Measured 2026-11-16: cgr.dev/chainguard/minio has Entrypoint
+      #     /usr/bin/minio and Cmd=null; run with no arguments it prints usage
+      #     and exits 0, run with `server /data` it serves, and the S3 job in
+      #     plugin-harness-ci passes all ten of its steps -- so GitHub IS
+      #     passing that command through. Deleting the key to silence the
+      #     linter would break the service.
+      - name: Workflow schema (actionlint)
+        if: always() && (needs.edit-gate.outputs.skip != 'true')
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          # From the release's own checksums file, not computed from whatever
+          # the download happened to return:
+          #   curl -sSL .../v1.7.12/actionlint_1.7.12_checksums.txt | grep linux_amd64
+          # Pinned by CONTENT as well as by version, so a re-published tag or a
+          # substituted asset fails here rather than linting with unknown code.
+          ACTIONLINT_SHA256: '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Workflow schema (actionlint)" >> "$LINT_FAILURES_FILE"
+          set -euo pipefail
+          # The release TARBALL, not `go install`: this step runs in the
+          # required Lint job on every PR, and `go install` would compile
+          # actionlint from source there -- a Go build plus a module fetch on
+          # top of every Lint wall, to produce a binary the project publishes
+          # precompiled. The tarball is also pinned by content, which a module
+          # version is not.
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          # --retry, because this fetches a GitHub release asset from inside
+          # the required Lint job: a transient 5xx or a rate limit would redden
+          # every PR for a download. scripts/fetch-wasm-tools.sh exists because
+          # exactly that happened to a required check (cleat#3693); this is the
+          # same exposure with the cheap half of the same remedy.
+          curl -fsSL --retry 3 --retry-connrefused --retry-delay 2 \
+            -o "$tmp/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $tmp/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$tmp/actionlint.tgz" -C "$tmp" actionlint
+          "$tmp/actionlint" -shellcheck= \
+            -ignore 'label "ubuntu-26.04" is unknown' \
+            -ignore 'unexpected key "command" for "services"' \
+            .github/workflows/*.yml
+          LINT_GUARD_EOF
+
       # cleat#3958. The guard itself runs on the develop push (tier1-gate.yml's
       # `develop-push-was-queued`), and the case it exists for -- a commit with
       # no merge_group run -- cannot be produced on demand there. So its
