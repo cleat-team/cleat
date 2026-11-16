@@ -970,13 +970,30 @@ cancelled** —
 
     gh run list --branch <branch> --json databaseId,createdAt,status,conclusion,name
 
-What survives is **cost, not breakage**: a body edit still starts a full run of every required
-context, because skipping them would need each one to keep reporting while skipped, and cleat's
-contexts have no aggregating gate in front of them to do that (`ci.yml`'s own comment, "WHY THE
-JOBS STILL RUN"). That residual cost is cleat#2767's subject, not a cancellation. The **practical
-rule below is now cheap, not necessary** — timing an edit around checks no longer prevents a
-destroyed run, because there is no longer a run it would destroy; it only avoids one extra no-op
-run appearing alongside the real ones in a `gh pr checks` watcher.
+What survived was **cost, not breakage**: a body edit still started a full run of every required
+context, because skipping them was thought to need each one to keep reporting while skipped, and
+cleat's contexts have no aggregating gate in front of them to do that (`ci.yml`'s own comment,
+"WHY THE JOBS STILL RUN"). That residual cost was cleat#2767's subject, not a cancellation. The
+**practical rule below is now cheap, not necessary** — timing an edit around checks no longer
+prevents a destroyed run, because there is no longer a run it would destroy; it only avoided one
+extra no-op run appearing alongside the real ones in a `gh pr checks` watcher.
+
+**SUPERSEDED 2026-11-16 (cleat#3958): a body edit no longer re-runs the heavy work at all.** The
+six workflows that carry it grew an `edit-gate` job that runs only for an `edited` whose base did
+not change, and answers one question of the head's own run history: has every job's latest
+non-skipped conclusion been `success`? Only then does the run collapse — and what collapses depends
+on one property, whether the job's name is a required context. The non-required jobs skip at job
+level. The required ones still run, with every step guarded, and report `success`. That is not the
+"aggregating gate" the paragraph above imagined — it is the other half of the same fact, that a
+skipped job reports as **Success**, which is exactly why an unconditional skip would let a body edit
+launder a red head into a green one: a required context may report `success` on a body edit, but it
+may not report `skipped`, because a skipped twin beside its success leaves the PR un-mergeable.
+Measured on `d1eec185`, an edited run registered **20 of 35** required contexts as `skipped` and
+`mergeStateStatus` went `CLEAN` → `BLOCKED` while the rollup still read SUCCESS. Measured at
+6,973 runner-minutes a day over 154 runs (18.2% of the pool) in the census on that issue. After it,
+a body edit on an already-green head costs about **8.5 runner-minutes across 41 runner assignments**
+with **0 of 35** required contexts reading `skipped`, and the practical rule below is about the
+watcher, not the wall.
 
 The measurement below is kept, dated, as the reason the fix exists — not as current behavior.
 
