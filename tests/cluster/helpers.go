@@ -228,15 +228,26 @@ func openClusterDB(t *testing.T) *sql.DB {
 			"docker-compose.cluster.yml up, so it skips rather than failing when "+
 			"nobody asked for it", redactDSN(dsn), err)
 	}
-	if err := db.Ping(); err != nil {
+	// A CONFIGURED DSN IS RETRIED BEFORE IT IS CALLED DEAD, because this suite
+	// manufactures the window a retry exists for: TestKillPostgresAndRestart
+	// stops and restarts Postgres, and five tests after it open a database
+	// (TestFullClusterRestart, then all three of replay_test.go and both of
+	// scale_test.go -- go test runs the files in name order). It waits for its
+	// own ping to recover before returning, so the usual case never reaches
+	// here, but "the next test opened the pool while the server was still
+	// coming back" must be a pass 30s later rather than a red required job. A
+	// dead DSN is still red; it is just red 30s later.
+	//
+	// UNCONFIGURED does not wait: nobody asked for a database, and making a
+	// local `go test` sit for 30s before skipping would be a cost with no
+	// failure to catch.
+	if err := pingWithRetry(db, dsn, configured); err != nil {
 		if configured {
-			// The arm this suite did not have. In CI CLEAT_TEST_DB is always
-			// set, so this branch is the only one reachable there, and skipping
-			// it would report a dead cluster as an empty test run.
-			t.Fatalf("configured cluster database at %s is unreachable: %v -- this "+
-				"suite requires docker-compose.cluster.yml to be up, and "+
-				"CLEAT_TEST_DB was set explicitly, so this is a failure of the "+
-				"configuration and not an absent prerequisite", redactDSN(dsn), err)
+			t.Fatalf("configured cluster database at %s is still unreachable after "+
+				"%s: %v -- this suite requires docker-compose.cluster.yml to be up, "+
+				"and CLEAT_TEST_DB was set explicitly, so this is a failure of the "+
+				"configuration and not an absent prerequisite",
+				redactDSN(dsn), clusterPingTimeout, err)
 		}
 		t.Skipf("no cluster database configured (CLEAT_TEST_DB not set); default "+
 			"DSN %s is unreachable: %v -- this suite needs "+
@@ -245,6 +256,32 @@ func openClusterDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
+}
+
+// clusterPingTimeout bounds how long a CONFIGURED DSN may be unreachable
+// before the test fails. It is the restart window, not a tolerance for a dead
+// database: 30s is what the restart test itself allows postgres to recover.
+const clusterPingTimeout = 30 * time.Second
+
+// pingWithRetry returns nil once the database answers, the last ping error if
+// a CONFIGURED one never does within clusterPingTimeout, or the first error
+// immediately when nobody configured a DSN.
+func pingWithRetry(db *sql.DB, dsn string, configured bool) error {
+	err := db.Ping()
+	if err == nil {
+		return nil
+	}
+	if !configured {
+		return err
+	}
+	deadline := time.Now().Add(clusterPingTimeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+		if err = db.Ping(); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // redactDSN strips the password from a DSN so it can appear in test output.
