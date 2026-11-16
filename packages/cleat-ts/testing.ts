@@ -7,13 +7,17 @@
 //
 // WHAT KEEPS THIS HONEST. The module is the built artefact, so it cannot drift. The STORES can: `cleat-ts-run` gives the
 // engine stubbed answers, and where a stub cannot match the shipped store the difference has to be recorded the way
-// packages/cleat-ts/DIVERGENCES.md records a language difference. Today that means durable CALLS answer `{}` and nothing
-// else is stubbed, so a workflow that needs a scripted answer needs the next increment -- not a workaround here.
+// packages/cleat-ts/DIVERGENCES.md records a language difference. Durable CALLS are scripted by the test through
+// `options.answers`; a call the script does not name is REFUSED rather than answered with `{}`, and a run with no script
+// at all says so in `stubbedCalls` (cleat#3828).
 //
 // UNMEASURED is the third outcome and it is not a failure of the workflow: a missing binary or an unreadable module
 // throws an `Unmeasured` error so a broken harness cannot read as a passing test.
 
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export interface WorkflowEvent {
   step: number;
@@ -37,6 +41,25 @@ export interface WorkflowRun {
   queryState?: Record<string, string>;
   events: WorkflowEvent[];
   error?: string;
+  /**
+   * True when the run supplied no scripted answers, so every durable call returned ``{}`` unread. A test that cares
+   * whether the calls were exercised should assert this is absent (cleat#3828).
+   */
+  stubbedCalls?: boolean;
+}
+
+/** What a durable call returns, keyed by `"<service>/<operation>"`. A value is the JSON text the guest receives. */
+export type HostAnswers = Record<string, string>;
+
+export interface RunOptions {
+  /**
+   * Scripted answers for durable calls.
+   *
+   * WITHOUT THIS, EVERY CALL RETURNS ``{}`` AND NOBODY SEES IT. With it, a call the script does not name refuses with
+   * an error that quotes the missing key, because a workflow passing on an empty object it never chose is the failure
+   * this option exists to prevent.
+   */
+  answers?: HostAnswers;
 }
 
 /** A failure of the HARNESS, not of the workflow under test. Never assert on this as if it were a result. */
@@ -54,8 +77,16 @@ function runnerPath(): string {
  * Throws `Unmeasured` when the runner could not look (exit 2, or no binary): that is the harness failing, and a test
  * that treated it as a workflow failure would be reporting the wrong cause.
  */
-export function runWorkflow(modulePath: string, entry: string, input: unknown = {}): WorkflowRun {
+export function runWorkflow(modulePath: string, entry: string, input: unknown = {}, options: RunOptions = {}): WorkflowRun {
   const args = ["-module", modulePath, "-entry", entry, "-input", JSON.stringify(input)];
+  if (options.answers) {
+    // A temp file rather than a flag value: the script is JSON, and quoting arbitrary JSON through argv on every
+    // platform is a class of bug this does not need to have.
+    const dir = mkdtempSync(join(tmpdir(), "cleat-ts-answers-"));
+    const answersPath = join(dir, "answers.json");
+    writeFileSync(answersPath, JSON.stringify(options.answers), "utf8");
+    args.push("-answers", answersPath);
+  }
   let stdout: string;
   try {
     stdout = execFileSync(runnerPath(), args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -97,8 +128,8 @@ export function runWorkflow(modulePath: string, entry: string, input: unknown = 
  * `runWorkflow` plus the assertion that it ran at all: returns the run when `ok`, throws with the workflow's own error
  * when not, and never swallows an Unmeasured. A test that wants to assert a FAILING workflow calls `runWorkflow`.
  */
-export function runWorkflowOrFail(modulePath: string, entry: string, input: unknown = {}): WorkflowRun {
-  const run = runWorkflow(modulePath, entry, input);
+export function runWorkflowOrFail(modulePath: string, entry: string, input: unknown = {}, options: RunOptions = {}): WorkflowRun {
+  const run = runWorkflow(modulePath, entry, input, options);
   if (!run.ok) throw new Error(`the workflow failed: ${run.error ?? "(no error text)"}`);
   return run;
 }

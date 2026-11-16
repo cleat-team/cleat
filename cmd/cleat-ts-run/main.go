@@ -24,15 +24,68 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/cleat-team/cleat/engine"
 )
 
-// stubbedCaller answers every durable call with an empty JSON object. A workflow under test that needs a scripted answer
-// needs more than this, and that is the next increment: naming it here so a green run is not read as "calls were tested".
+// stubbedCaller answers every durable call with an empty JSON object.
+//
+// It is what a run gets when the test supplied no -answers file. A workflow that depends on a call's RESULT cannot be
+// tested this way, and gets `{}` silently -- which is why the envelope carries stubbedCalls, so a green run is not read
+// as "the calls were tested" (cleat#3828).
 type stubbedCaller struct{}
 
 func (stubbedCaller) Call(context.Context, string, string, string) (string, error) { return `{}`, nil }
+
+// scriptedCaller answers durable calls from a test-supplied script (cleat#3828).
+//
+// AN UNSCRIPTED CALL IS AN ERROR, NOT `{}`. The point of the script is that the test said what each call returns; a
+// call it forgot would otherwise get an empty object and the workflow could pass on an answer nobody chose. The error
+// travels through the engine as a workflow failure, and the envelope's error names the key to add.
+type scriptedCaller struct {
+	answers map[string]string
+	asked   []string
+}
+
+func answerKey(service, operation string) string { return service + "/" + operation }
+
+func (c *scriptedCaller) Call(_ context.Context, service, operation, _ string) (string, error) {
+	key := answerKey(service, operation)
+	out, ok := c.answers[key]
+	if !ok {
+		return "", fmt.Errorf("the test scripted no answer for %q: add it to the answers file "+
+			"(this is the test's setup, not a workflow failure)", key)
+	}
+	c.asked = append(c.asked, key)
+	return out, nil
+}
+
+// loadAnswers reads the -answers file: a JSON object whose keys are "service/operation" and whose values are the JSON
+// text the call returns.
+//
+// Each value is validated as JSON here rather than at the call site, because the engine hands the string straight to
+// the guest: `{not json}` would surface as a guest-side parse error inside the workflow, which reads like a workflow
+// bug rather than a malformed fixture.
+func loadAnswers(path string) (map[string]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading the answers file: %w", err)
+	}
+	var answers map[string]string
+	if err := json.Unmarshal(b, &answers); err != nil {
+		return nil, fmt.Errorf("the answers file is not a JSON object of strings: %w", err)
+	}
+	for key, value := range answers {
+		if !json.Valid([]byte(value)) {
+			return nil, fmt.Errorf("the answer for %q is not valid JSON: %s", key, value)
+		}
+		if !strings.Contains(key, "/") {
+			return nil, fmt.Errorf("the answer key %q must be \"<service>/<operation>\"", key)
+		}
+	}
+	return answers, nil
+}
 
 type eventOut struct {
 	Step     int    `json:"step"`
@@ -52,6 +105,10 @@ type envelope struct {
 	QueryState    map[string]string `json:"queryState,omitempty"`
 	Events        []eventOut        `json:"events"`
 	Error         string            `json:"error,omitempty"`
+	// StubbedCalls is true when the run had NO -answers file, so every durable call returned `{}` unread. It is in
+	// the envelope so a test (and a reader) can tell "the workflow used a call and nobody scripted it" from "the
+	// workflow was actually exercised against answers" (cleat#3828).
+	StubbedCalls bool `json:"stubbedCalls,omitempty"`
 }
 
 func unmeasured(format string, args ...any) {
@@ -68,10 +125,11 @@ func main() {
 	entry := flag.String("entry", "", "the ABI entry point to run (snake_case, as build.sh named it)")
 	input := flag.String("input", "{}", "the workflow input, as JSON")
 	workflowID := flag.String("workflow-id", "00000000-0000-0000-0000-0000000c1ea7", "workflow id (the engine derives its random stream from it)")
+	answersPath := flag.String("answers", "", "optional JSON file: {\"<service>/<operation>\": <JSON text the call returns>}; without it every durable call returns {} unread")
 	flag.Parse()
 
 	if *module == "" || *entry == "" {
-		unmeasured("usage: cleat-ts-run -module <file.wasm> -entry <name> [-input <json>] [-workflow-id <id>]")
+		unmeasured("usage: cleat-ts-run -module <file.wasm> -entry <name> [-input <json>] [-workflow-id <id>] [-answers <file.json>]")
 	}
 	if !json.Valid([]byte(*input)) {
 		unmeasured("-input is not valid JSON: %s", *input)
@@ -91,7 +149,17 @@ func main() {
 	if err != nil {
 		unmeasured("engine.NewWasmtimeBackend (is this built with CGO?): %v", err)
 	}
-	e := engine.NewEngine(rt, stubbedCaller{},
+	var caller engine.ServiceCaller
+	if *answersPath != "" {
+		answers, err := loadAnswers(*answersPath)
+		if err != nil {
+			unmeasured("%v", err)
+		}
+		caller = &scriptedCaller{answers: answers}
+	} else {
+		caller = stubbedCaller{}
+	}
+	e := engine.NewEngine(rt, caller,
 		engine.WithWorkflowID(*workflowID),
 		engine.WithDefName(*entry),
 		engine.WithDefVersion(1),
@@ -99,7 +167,7 @@ func main() {
 	)
 
 	result, history, susp, _, queryState, err := e.Execute(ctx, wasm, *entry, json.RawMessage(*input))
-	out := envelope{Entry: *entry, QueryState: queryState, Events: make([]eventOut, 0, len(history))}
+	out := envelope{Entry: *entry, QueryState: queryState, Events: make([]eventOut, 0, len(history)), StubbedCalls: *answersPath == ""}
 	for _, ev := range history {
 		out.Events = append(out.Events, eventOut{
 			Step: ev.Step, Type: string(ev.EventType),

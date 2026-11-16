@@ -36,6 +36,25 @@ test("an example workflow runs through the harness and returns its result", () =
   assert.deepEqual(run.result, { hello: "ts" });
 });
 
+// cleat#3828: the scripted-answer path, both directions. The first test would pass with NO scripting at all if the
+// workflow ignored its answer, which is why the fixture returns the value instead of discarding it; the second pins
+// that a forgotten stub is a REFUSAL naming the key rather than a silent `{}`.
+test("a durable call is answered from the test's script", () => {
+  const module = build("tests/typescript/testdata/workflows/answer.ts", "answer");
+  const run = runWorkflow(module, "answer", {}, { answers: { "payments/charge": JSON.stringify({ id: "ch_1" }) } });
+  assert.equal(run.ok, true, `the workflow failed despite a scripted answer: ${run.error}`);
+  assert.deepEqual(run.result, { charged: { id: "ch_1" } });
+  assert.equal(run.stubbedCalls, undefined, "the envelope says the calls were stubbed, but a script was supplied");
+});
+
+test("a durable call the script does not name is refused, naming the key", () => {
+  const module = build("tests/typescript/testdata/workflows/answer.ts", "answer");
+  const run = runWorkflow(module, "answer", {});
+  assert.equal(run.ok, false, "an unscripted call was answered instead of refused");
+  assert.match(run.error ?? "", /payments\/charge/);
+  assert.equal(run.stubbedCalls, true);
+});
+
 test("a workflow that suspends is reported as suspended, with the host's reason", () => {
   const module = build("tests/typescript/testdata/workflows/sleeper.ts", "sleeper");
   const run = runWorkflow(module, "sleeper", { ms: 60000 });
