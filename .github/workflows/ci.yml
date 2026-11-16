@@ -3175,6 +3175,11 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$mine_tests" > selected-tests.txt
+          # WHICH SHARD THIS IS, in a file rather than in the directory name:
+          # download-artifact extracts a SINGLE artifact flat into the download
+          # path, so the directory name is gone in exactly the case a re-run
+          # produces (cleat#3955).
+          printf '%s %s %s %s\n' '${{ matrix.leg }}' '${{ matrix.shard }}' 2 '${{ github.run_attempt }}' > shard-id.txt
           SELECTOR="^($(printf '%s\n' "$mine_tests" | paste -sd'|' -))$"
           echo "count=$test_count" >> "$GITHUB_OUTPUT"
           # The selector is an OUTPUT, not a shell variable: each `run:` block is
@@ -3284,13 +3289,22 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: commands-leg-${{ matrix.leg }}-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          # NO run_attempt IN THE NAME, and overwrite (cleat#3955). A partial
+          # re-run -- "Re-run failed jobs" or `gh run rerun --job` -- bumps
+          # run_attempt for the re-run shard and its aggregate ONLY; the shards
+          # that passed keep attempt-1 artifacts, so an aggregate filtering on
+          # the current attempt fetched one shard's report on a tree where all
+          # had passed. The sha is in the name, so every attempt is the same
+          # tree and an overwrite cannot mix two.
+          name: commands-leg-${{ matrix.leg }}-${{ matrix.shard }}-${{ github.sha }}
+          overwrite: true
           path: |
             test-report.json
             packages.txt
             all-cmd-packages.txt
             selected-tests.txt
             all-tests.txt
+            shard-id.txt
           retention-days: 30
 
   # THE REQUIRED STATUS CONTEXT. `Test Go (commands) on 1.26` is in
@@ -3318,7 +3332,10 @@ jobs:
         if: always()
         uses: actions/download-artifact@v8
         with:
-          pattern: commands-leg-*-${{ github.sha }}-${{ github.run_attempt }}
+          # No run_attempt: a partial re-run leaves the passing shards' attempt-1
+          # artifacts in place, so filtering on the current one fetches only the
+          # shard that re-ran (cleat#3955).
+          pattern: commands-leg-*-${{ github.sha }}
           # One directory per leg-shard: every shard uploads `test-report.json`,
           # and merge-multiple would have them overwrite each other.
           merge-multiple: false
@@ -3349,11 +3366,12 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if ! ls legs/*/packages.txt >/dev/null 2>&1; then
-            echo "::error::no shard uploaded packages.txt -- a shard died before selecting packages" >&2
+          # find, NOT `legs/*/`: one artifact extracts flat (cleat#3955).
+          if ! find legs -name packages.txt | grep -q .; then
+            echo "::error::no shard uploaded packages.txt -- no shard report was downloaded at all" >&2
             exit 1
           fi
-          cat legs/*/packages.txt | LC_ALL=C sort > covered.txt
+          find legs -name packages.txt -exec cat {} + | LC_ALL=C sort > covered.txt
           go list ./cmd/cleat/... ./cmd/cleat-worker/... | LC_ALL=C sort > split-packages.txt
           dupes=$(uniq -d covered.txt | grep -vxF -f split-packages.txt || true)
           if [ -n "$dupes" ]; then
@@ -3362,7 +3380,7 @@ jobs:
             exit 1
           fi
           LC_ALL=C sort -u covered.txt > covered-unique.txt
-          cat legs/*/all-cmd-packages.txt | LC_ALL=C sort -u > all.txt
+          find legs -name all-cmd-packages.txt -exec cat {} + | LC_ALL=C sort -u > all.txt
           if ! diff -u all.txt covered-unique.txt; then
             echo "::error::the commands shards do not together cover ./cmd/... (lines above: '-' is a package no shard runs)" >&2
             exit 1
@@ -3381,28 +3399,48 @@ jobs:
         run: |
           set -euo pipefail
           for leg in cleat rest; do
-            dirs=$(ls -d legs/commands-leg-${leg}-* 2>/dev/null || true)
-            if [ -z "$dirs" ]; then
-              echo "::error::no shard of the $leg leg uploaded a report" >&2
+            # Identity and expected count come from shard-id.txt, not from a
+            # directory name and not from a literal here: one artifact extracts
+            # FLAT (cleat#3955), so there is no directory name to read, and a
+            # matrix that grows should fail at this line rather than keep
+            # expecting a number that no longer exists.
+            ids=$(find legs -name shard-id.txt -exec cat {} + | awk -v l="$leg" '$1==l')
+            of=$(printf '%s\n' "$ids" | awk '{print $3}' | LC_ALL=C sort -u)
+            if [ -z "$ids" ]; then
+              echo "::error::$leg: no shard of this leg uploaded shard-id.txt -- no report was downloaded" >&2
               exit 1
             fi
-            # A LOOP, not `cat $dirs/selected-tests.txt`: unquoted `$dirs` is
-            # word-split, so the suffix binds to the LAST word only and cat is
-            # handed the first shard's DIRECTORY -- "Is a directory", on every
-            # input including a correct partition (cleat-review on cleat#3942).
-            for d in $dirs; do cat "$d/selected-tests.txt"; done | LC_ALL=C sort > sel.txt
+            if [ "$(printf '%s\n' "$of" | grep -c .)" -ne 1 ]; then
+              echo "::error::$leg: the shards disagree about how many there should be: $(printf '%s' "$of")" >&2
+              exit 1
+            fi
+            got=$(printf '%s\n' "$ids" | awk '{print $2}' | LC_ALL=C sort -n | paste -sd, -)
+            want=$(awk -v n="$of" 'BEGIN { for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? "," : ""), i }')
+            if [ "$got" != "$want" ]; then
+              echo "::error::$leg: found shards {$got}, expected {$want} -- a shard's report is missing (or was never uploaded)" >&2
+              exit 1
+            fi
+            for idf in $(find legs -name shard-id.txt); do
+              d=$(dirname "$idf"); read -r n s a < "$idf"
+              [ "$n" = "$leg" ] || continue
+              cat "$d/selected-tests.txt"
+            done | LC_ALL=C sort > sel.txt
             dupes=$(uniq -d sel.txt || true)
             if [ -n "$dupes" ]; then
               echo "::error::$leg: these tests are assigned to MORE THAN ONE shard:" >&2
               printf '  %s\n' "$dupes" >&2
               exit 1
             fi
-            for d in $dirs; do cat "$d/all-tests.txt"; done | LC_ALL=C sort -u > listed.txt
+            for idf in $(find legs -name shard-id.txt); do
+              d=$(dirname "$idf"); read -r n s a < "$idf"
+              [ "$n" = "$leg" ] || continue
+              cat "$d/all-tests.txt"
+            done | LC_ALL=C sort -u > listed.txt
             if ! diff -u listed.txt sel.txt; then
               echo "::error::$leg: the shards do not together run every test in the split package (lines above: '-' is a test NO shard runs)" >&2
               exit 1
             fi
-            echo "OK: $leg, $(grep -c . sel.txt) test(s) across $(echo $dirs | wc -w | tr -d ' ') shard(s)"
+            echo "OK: $leg, $(grep -c . sel.txt) test(s) across $of shard(s)"
           done
 
       # The budget is the job's, not a leg's: scripts/skip-ledger.tsv declares
@@ -3415,11 +3453,11 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if ! ls legs/*/test-report.json >/dev/null 2>&1; then
-            echo "::error::no leg uploaded test-report.json" >&2
+          if ! find legs -name test-report.json | grep -q .; then
+            echo "::error::no shard uploaded test-report.json -- no report was downloaded" >&2
             exit 1
           fi
-          cat legs/*/test-report.json > test-report.json
+          find legs -name test-report.json -exec cat {} + > test-report.json
           scripts/check-skip-budget.sh test-go/commands test-report.json
 
   # -------------------------------------------------------------------------
@@ -3554,6 +3592,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$mine" > shard-tests.txt
+          printf 'crash %s 3 %s\n' '${{ matrix.shard }}' '${{ github.run_attempt }}' > shard-id.txt
           echo "count=$count" >> "$GITHUB_OUTPUT"
           # The selector is an OUTPUT, not a shell variable: each `run:` block
           # is its own shell, so a variable set here is gone by the next step
@@ -3594,11 +3633,18 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: crash-shard-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
+          # No run_attempt in the name; see the commands upload for why, and
+          # publish-pypi.yml:112-138, which reached the same conclusion for its
+          # own re-run path and flags overwrite:true as an unverified platform
+          # claim -- this job runs on every PR, so it is the first place that
+          # claim can actually be measured (cleat#3955).
+          name: crash-shard-${{ matrix.shard }}-${{ github.sha }}
+          overwrite: true
           path: |
             test-report.json
             shard-tests.txt
             all-tests.txt
+            shard-id.txt
           retention-days: 30
 
   test-go-crash-summary:
@@ -3614,7 +3660,7 @@ jobs:
         if: always()
         uses: actions/download-artifact@v8
         with:
-          pattern: crash-shard-*-${{ github.sha }}-${{ github.run_attempt }}
+          pattern: crash-shard-*-${{ github.sha }}
           merge-multiple: false
           path: shards
 
@@ -3636,18 +3682,35 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if ! ls shards/*/shard-tests.txt >/dev/null 2>&1; then
-            echo "::error::no shard uploaded shard-tests.txt -- a shard died before selecting tests" >&2
+          # LAYOUT-INDEPENDENT, and identity from a FILE (cleat#3955): one
+          # artifact extracts flat into shards/, so `shards/*/x` matches nothing
+          # and the old guard blamed a shard that had passed. The expected count
+          # comes from shard-id.txt rather than a literal, so a matrix that
+          # grows fails here instead of silently expecting the old number.
+          ids=$(find shards -name shard-id.txt -exec cat {} +)
+          if [ -z "$ids" ]; then
+            echo "::error::no shard uploaded shard-id.txt -- no shard report was downloaded at all" >&2
             exit 1
           fi
-          cat shards/*/shard-tests.txt | LC_ALL=C sort > assigned.txt
+          of=$(printf '%s\n' "$ids" | awk '{print $3}' | LC_ALL=C sort -u)
+          if [ "$(printf '%s\n' "$of" | grep -c .)" -ne 1 ]; then
+            echo "::error::the shards disagree about how many there should be: $(printf '%s' "$of")" >&2
+            exit 1
+          fi
+          got=$(printf '%s\n' "$ids" | awk '{print $2}' | LC_ALL=C sort -n | paste -sd, -)
+          want=$(awk -v n="$of" 'BEGIN { for (i = 1; i <= n; i++) printf "%s%d", (i > 1 ? "," : ""), i }')
+          if [ "$got" != "$want" ]; then
+            echo "::error::found shards {$got}, expected {$want} -- a shard's report is missing (or was never uploaded)" >&2
+            exit 1
+          fi
+          find shards -name shard-tests.txt -exec cat {} + | LC_ALL=C sort > assigned.txt
           dupes=$(uniq -d assigned.txt || true)
           if [ -n "$dupes" ]; then
             echo "::error::these tests are assigned to MORE THAN ONE shard:" >&2
             printf '  %s\n' "$dupes" >&2
             exit 1
           fi
-          cat shards/*/all-tests.txt | LC_ALL=C sort -u > every.txt
+          find shards -name all-tests.txt -exec cat {} + | LC_ALL=C sort -u > every.txt
           if ! diff -u every.txt assigned.txt; then
             echo "::error::the three shards do not together name every test in ./tests/crash/... ('-' is a test no shard runs, '+' is a name the package no longer has)" >&2
             exit 1
@@ -3661,11 +3724,11 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if ! ls shards/*/test-report.json >/dev/null 2>&1; then
-            echo "::error::no shard uploaded test-report.json" >&2
+          if ! find shards -name test-report.json | grep -q .; then
+            echo "::error::no shard uploaded test-report.json -- no shard report was downloaded" >&2
             exit 1
           fi
-          cat shards/*/test-report.json > test-report.json
+          find shards -name test-report.json -exec cat {} + > test-report.json
           scripts/check-skip-budget.sh test-go/crash test-report.json
 
 
