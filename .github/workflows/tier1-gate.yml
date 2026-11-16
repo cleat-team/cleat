@@ -359,7 +359,8 @@ jobs:
             fi
             rc=0
             python3 scripts/check-develop-push-was-queued.py \
-              --runs merge-group-runs.json --sha "$SHA" || rc=$?
+              --runs merge-group-runs.json --sha "$SHA" \
+              --verdict-file canary-verdict.txt || rc=$?
             case "$rc" in
               0) exit 0 ;;
               1) exit 1 ;;   # a finding waiting cannot fix: absent, or failed
@@ -373,6 +374,20 @@ jobs:
             fi
             sleep "$INTERVAL"
           done
+
+      # cleat#3962. The tracking issue used to quote only the failing JOB's name,
+      # so "still running at the bound" (UNKNOWN) and "no merge_group run exists"
+      # (ungated) looked identical in the issue body unless someone opened the
+      # log. The canary writes its own reason to this file; the notifier quotes
+      # it. `if: failure()` because there is nothing to deliver on a pass.
+      - name: Upload the canary's verdict
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tier-gate-canary-${{ github.sha }}-${{ github.run_attempt }}
+          path: canary-verdict.txt
+          if-no-files-found: warn
+          retention-days: 30
 
   # No DB, no Python, no wasm-tools: `go test -list` compiles the package and
   # enumerates Test funcs, it never runs one. Gates the three expensive jobs

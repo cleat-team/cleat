@@ -106,24 +106,42 @@ def judge(runs, sha, workflows):
         if not candidates:
             findings.append((wf, "no merge_group run on this commit"))
             continue
-        if any(str(r.get("conclusion")) == "success" for r in candidates):
+        # THE NEWEST ATTEMPT DECIDES (cleat#3962). Same workflow, same commit,
+        # more than one run record happens whenever the run was re-triggered: a
+        # cancelled run followed by a fresh one. Judging the SET made a newer
+        # in-progress run read as "ungated" because an older cancelled one was
+        # in it, and -- the mirror case -- let an older SUCCESS mask a newer
+        # failure. So order first, then judge one record.
+        newest = max(candidates, key=_attempt_order)
+        conclusion = str(newest.get("conclusion"))
+        if conclusion == "success":
             continue
-        # No success yet. A completed run that did not pass is final; any
-        # run still going means the answer is not in yet.
-        completed = [r for r in candidates
-                     if str(r.get("status") or "").lower() not in RUNNING
-                     and r.get("conclusion") is not None]
-        unfinished = [r for r in candidates
-                      if str(r.get("status") or "").lower() in RUNNING
-                      or r.get("conclusion") is None]
-        if completed:
-            conclusions = sorted({str(r.get("conclusion")) for r in completed})
-            findings.append((wf, "merge_group run concluded " + ", ".join(conclusions)))
-        elif unfinished:
+        if str(newest.get("status") or "").lower() in RUNNING or newest.get("conclusion") is None:
             running.append(wf)
-        else:  # a record with neither a conclusion nor a running status
+        elif conclusion in ("None", "null", ""):
             findings.append((wf, "merge_group run has no usable status"))
+        else:
+            findings.append((wf, "newest merge_group run concluded " + conclusion))
     return findings, running, bool(mine)
+
+
+def _attempt_order(run):
+    """Sort key for "which of these is the current attempt".
+
+    created_at first -- a re-triggered run is a new record with a later
+    timestamp -- then run_attempt, then a monotonic tiebreak on the id so the
+    order is total even for fixtures that carry none of these fields.
+    """
+    created = str(run.get("created_at") or "")
+    try:
+        attempt = int(run.get("run_attempt") or 0)
+    except (TypeError, ValueError):
+        attempt = 0
+    try:
+        rid = int(run.get("id") or 0)
+    except (TypeError, ValueError):
+        rid = 0
+    return (created, attempt, rid)
 
 
 def check_cut_list(root):
@@ -218,6 +236,8 @@ def main(argv=None):
                     help="workflow path that must have a successful merge_group "
                          "run (repeatable; defaults to the cut list)")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--verdict-file", help="write the verdict here for the "
+                    "failure notifier to quote (cleat#3962)")
     ap.add_argument("--check-cut-list", action="store_true",
                     help="assert the tree's cut matches the canary's workflow list")
     ap.add_argument("--root", default=".", help="repository root for --check-cut-list")
@@ -230,44 +250,65 @@ def main(argv=None):
 
     workflows = args.workflows or DEFAULT_WORKFLOWS
     if not args.sha or not args.runs:
-        print("UNMEASURED: --sha and --runs are both required (this is a failure "
-              "of the check, not a finding about the commit)", file=sys.stderr)
-        return 2
+        return _verdict(args, 2, ["UNMEASURED: --sha and --runs are both required "
+                                  "(this is a failure of the check, not a finding "
+                                  "about the commit)"])
     try:
         runs = load_runs(args.runs)
     except ValueError as exc:
-        print(f"UNMEASURED: {exc} -- this is a failure of the check, not a "
-              f"finding about the commit", file=sys.stderr)
-        return 2
+        return _verdict(args, 2, [f"UNMEASURED: {exc} -- this is a failure of the "
+                                  f"check, not a finding about the commit"])
 
     findings, running, saw_any = judge(runs, args.sha, workflows)
     if not saw_any:
-        print(f"::error::no merge_group run exists for {args.sha}. This commit "
-              f"did not go through the merge queue, so the develop push is the "
-              f"only place its code can be tested -- and this push no longer "
-              f"runs the heavy jobs. Re-run them for this commit by hand.",
-              file=sys.stderr)
-        return 1
+        return _verdict(args, 1, [
+            f"no merge_group run exists for {args.sha}",
+            "This commit did not go through the merge queue, so the develop push is "
+            "the only place its code can be tested -- and this push no longer runs "
+            "the heavy jobs. Re-run them for this commit by hand.",
+        ])
     if findings:
-        for wf, why in findings:
-            print(f"::error::{wf} has no successful merge_group run on "
-                  f"{args.sha}: {why}", file=sys.stderr)
-        print("::error::the develop push skips these workflows because the merge "
-              "group is supposed to have run them on this exact commit. It did "
-              "not, so this commit is ungated and the skipped jobs must be run "
-              "by hand on this sha.", file=sys.stderr)
-        return 1
+        lines = [f"{wf}: no successful merge_group run on {args.sha} -- {why}"
+                 for wf, why in findings]
+        lines.append("The develop push skips these workflows because the merge "
+                     "group is supposed to have run them on this exact commit. It "
+                     "did not, so this commit is ungated and the skipped jobs must "
+                     "be run by hand on this sha.")
+        return _verdict(args, 1, lines)
     if running:
         # NOT a finding. The queue merges once the REQUIRED contexts pass, and
         # these workflows finish later than that: judging "still running" as
         # "ungated" would page on every develop push that overtakes a crash
         # shard. Exit 3 means "ask again"; the caller polls and turns a bound
         # expiry into UNMEASURED.
-        print("STILL RUNNING: " + ", ".join(running), file=sys.stderr)
-        return 3
-    print(f"OK: all {len(workflows)} workflow(s) passed in a merge_group run on "
-          f"{args.sha}")
-    return 0
+        return _verdict(args, 3, ["STILL RUNNING: " + ", ".join(running)])
+    return _verdict(args, 0, [f"OK: all {len(workflows)} workflow(s) passed in a "
+                              f"merge_group run on {args.sha}"])
+
+
+def _verdict(args, rc, lines):
+    """Print the verdict, and write it where the notifier can quote it.
+
+    cleat#3962: the tracking issue used to say only `Failed jobs: Develop push
+    was queued`, so "still running at the bound" (UNKNOWN) and "no run exists"
+    (ungated) looked identical unless someone opened the log. The reason is
+    the message THIS function carries, so it is written to a file the notifier
+    reads -- not re-derived there from a job name.
+    """
+    for line in lines:
+        prefix = "::error::" if rc == 1 else ""
+        print(prefix + line, file=sys.stderr)
+    if getattr(args, "verdict_file", None):
+        try:
+            with open(args.verdict_file, "w", encoding="utf-8") as fh:
+                status = {0: "ok", 1: "finding", 2: "UNMEASURED",
+                               3: "still running"}.get(rc, str(rc))
+                fh.write(f"canary: {status}\n")
+                fh.write("\n".join(lines) + "\n")
+        except OSError as exc:  # a write failure must not change the verdict
+            print(f"::warning::could not write {args.verdict_file}: {exc}",
+                  file=sys.stderr)
+    return rc
 
 
 # --------------------------------------------------------------------------
@@ -295,6 +336,46 @@ def self_test():
     case("no merge_group run at all", [], 1, "did not go through the merge queue")
     case("runs belong to a DIFFERENT sha", [dict(r, head_sha="b" * 40) for r in good],
          1, "did not go through the merge queue")
+
+    # cleat#3962: WITHIN ONE WORKFLOW, the NEWEST attempt decides -- in both
+    # directions. Before this, the set was judged: an older cancelled attempt
+    # plus a newer in-progress run read as "ungated", and, the mirror, an older
+    # success could mask a newer failure. Every case below differs ONLY in the
+    # ordering fields, so each one fails if _attempt_order stops being used.
+    T1, T2 = "2026-11-16T10:00:00Z", "2026-11-16T10:10:00Z"
+    WF = DEFAULT_WORKFLOWS[1]
+
+    def others(ts):
+        return [dict(r, created_at=ts, run_attempt=1)
+                for r in good if r["path"] != WF]
+
+    def two(older, newer):
+        return others(T1) + [older, newer]
+
+    case("cancelled attempt, then a NEWER run still in progress -> wait",
+         two({"head_sha": "a" * 40, "path": WF, "conclusion": "cancelled",
+              "status": "completed", "created_at": T1, "run_attempt": 1},
+             {"head_sha": "a" * 40, "path": WF, "conclusion": None,
+              "status": "in_progress", "created_at": T2, "run_attempt": 2}),
+         3, "STILL RUNNING")
+    case("cancelled attempt, then a NEWER run that failed -> a finding",
+         two({"head_sha": "a" * 40, "path": WF, "conclusion": "cancelled",
+              "status": "completed", "created_at": T1, "run_attempt": 1},
+             {"head_sha": "a" * 40, "path": WF, "conclusion": "failure",
+              "status": "completed", "created_at": T2, "run_attempt": 2}),
+         1, "newest merge_group run concluded failure")
+    case("an OLDER success does not mask a NEWER failure",
+         two({"head_sha": "a" * 40, "path": WF, "conclusion": "success",
+              "status": "completed", "created_at": T1, "run_attempt": 1},
+             {"head_sha": "a" * 40, "path": WF, "conclusion": "failure",
+              "status": "completed", "created_at": T2, "run_attempt": 2}),
+         1, "newest merge_group run concluded failure")
+    case("a NEWER success wins over an older failure",
+         two({"head_sha": "a" * 40, "path": WF, "conclusion": "failure",
+              "status": "completed", "created_at": T1, "run_attempt": 1},
+             {"head_sha": "a" * 40, "path": WF, "conclusion": "success",
+              "status": "completed", "created_at": T2, "run_attempt": 2}),
+         0)
 
     # cleat-review on #3961: a run that EXISTS but has not finished is WAIT,
     # never a finding. This is the case that shipped broken -- on 343c1cca the

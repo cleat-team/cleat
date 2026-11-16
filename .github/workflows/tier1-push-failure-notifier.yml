@@ -162,6 +162,21 @@ jobs:
           pattern: tier-gate-log-*
           path: tier-gate-logs
 
+      # cleat#3962: the canary's own verdict. It is a SEPARATE artifact because
+      # it is not a test log -- it is the one sentence that separates "the queue
+      # has not finished with this commit" from "this commit never went through
+      # the queue", and job names cannot carry that distinction.
+      - name: Download the canary's verdict
+        if: steps.resolve.outputs.relevant == 'true'
+        id: canary
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.resolve.outputs.run_id }}
+          pattern: tier-gate-canary-*
+          path: canary
+
       - name: Open or update the tracking issue
         if: steps.resolve.outputs.relevant == 'true'
         uses: actions/github-script@v9
@@ -254,6 +269,34 @@ jobs:
             }
             failingTests = [...new Set(failingTests)];
 
+            // cleat#3962: the canary's verdict, quoted as written. "Still
+            // running at the bound" and "no merge_group run exists" are the two
+            // outcomes the canary exists to tell apart, and the issue body used
+            // to show only the failing job's name -- identical for both.
+            let canaryLines = [];
+            const canaryDir = 'canary';
+            if (fs.existsSync(canaryDir)) {
+              // One directory per artifact (no merge-multiple). The name ends
+              // in `-<attempt>`, and the attempt is parsed NUMERICALLY for the
+              // same reason the tier-gate-log block above does: a lexicographic
+              // sort puts attempt 10 before attempt 9.
+              let bestAttempt = -1;
+              let bestDir = null;
+              for (const e of fs.readdirSync(canaryDir, { withFileTypes: true })) {
+                if (!e.isDirectory()) continue;
+                const m = e.name.match(/-(\d+)$/);
+                if (!m) continue;
+                const attempt = Number(m[1]);
+                if (attempt > bestAttempt) { bestAttempt = attempt; bestDir = e.name; }
+              }
+              if (bestDir) {
+                const f = path.join(canaryDir, bestDir, 'canary-verdict.txt');
+                if (fs.existsSync(f)) {
+                  canaryLines = fs.readFileSync(f, 'utf8').trim().split('\n');
+                }
+              }
+            }
+
             const title = '[tier1] develop push run is failing';
             const bodyLines = [
               `Run: ${reportKey}`,
@@ -262,6 +305,13 @@ jobs:
               `Failed jobs: ${failedJobs.map(j => j.name).join(', ') || '(none reported failure -- check the run directly)'}`,
               '',
             ];
+            if (canaryLines.length > 0) {
+              bodyLines.push('Canary verdict:');
+              bodyLines.push('```');
+              bodyLines.push(...canaryLines);
+              bodyLines.push('```');
+              bodyLines.push('');
+            }
             if (failingTests.length > 0) {
               bodyLines.push('Failing tests:');
               bodyLines.push('```');
