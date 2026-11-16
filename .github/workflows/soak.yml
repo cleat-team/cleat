@@ -198,11 +198,16 @@ jobs:
         run: |
           set -euo pipefail
           attempt='${{ github.run_attempt }}'
+          run_label='${{ github.run_id }}'
           if [ -f soak-report/soak-run.txt ]; then
             read -r marker_run marker_attempt < soak-report/soak-run.txt
             if [ "$marker_run" != '${{ github.run_id }}' ]; then
-              echo "::error::the fetched report is from run $marker_run, not this run ${{ github.run_id }}" >&2
-              exit 1
+              # NOT exit 1. The two steps below file the tracking issue, and refusing here means a soak failure goes
+              # unreported -- which is exactly the failure cleat#3736 records (eleven days unnoticed). This guard exists
+              # to make the report HONEST about where it came from, not to withhold it, so the label follows the run
+              # that actually wrote the file (cleat#3957).
+              echo "::warning::the fetched report is from run $marker_run, not this run ${{ github.run_id }}; filing it labelled with the run that wrote it" >&2
+              run_label="$marker_run"
             fi
             if [ "$marker_attempt" != "$attempt" ]; then
               echo "::warning::this job is attempt $attempt and fetched the report written by attempt $marker_attempt -- the re-run produced none, so the older artifact survived; labelling it by the attempt that wrote it" >&2
@@ -218,10 +223,11 @@ jobs:
             echo "::warning::a report was fetched with no attempt marker; labelling it by attempt $attempt, which may not be the one that wrote it" >&2
           fi
           echo "attempt=$attempt" >> "$GITHUB_OUTPUT"
+          echo "run=$run_label" >> "$GITHUB_OUTPUT"
 
       - name: Render the issue text
         env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.attribution.outputs.run }}
           RUN_ATTEMPT: ${{ steps.attribution.outputs.attempt }}
           HEAD_SHA: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
@@ -237,7 +243,7 @@ jobs:
       - name: Open or update the tracking issue
         uses: actions/github-script@v9
         env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.attribution.outputs.run }}
           RUN_ATTEMPT: ${{ steps.attribution.outputs.attempt }}
         with:
           script: |

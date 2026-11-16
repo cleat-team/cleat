@@ -3551,11 +3551,14 @@ jobs:
         run: |
           set -euo pipefail
           # find, NOT `legs/*/`: one artifact extracts flat (cleat#3955).
-          if ! find legs -name packages.txt | grep -q .; then
+          # Assigned, then tested. The piped form (`find | grep -q .`) takes the ERROR branch when grep exits at its
+          # first match and find then dies of SIGPIPE under pipefail -- measured 10/10 at 1,000 files (cleat#3957).
+          covered_raw=$(find legs -name packages.txt 2>/dev/null || true)
+          if [ -z "$covered_raw" ]; then
             echo "::error::no shard uploaded packages.txt -- no shard report was downloaded at all" >&2
             exit 1
           fi
-          find legs -name packages.txt -exec cat {} + | LC_ALL=C sort > covered.txt
+          printf '%s\n' "$covered_raw" | LC_ALL=C sort > covered.txt
           go list ./cmd/cleat/... ./cmd/cleat-worker/... | LC_ALL=C sort > split-packages.txt
           dupes=$(uniq -d covered.txt | grep -vxF -f split-packages.txt || true)
           if [ -n "$dupes" ]; then
@@ -3588,14 +3591,14 @@ jobs:
             # FLAT (cleat#3955), so there is no directory name to read, and a
             # matrix that grows should fail at this line rather than keep
             # expecting a number that no longer exists.
-            ids=$(find legs -name shard-id.txt -exec cat {} + | awk -v l="$leg" '$1==l')
+            ids=$(find legs -name shard-id.txt -exec cat {} + 2>/dev/null | awk -v l="$leg" '$1==l' || true)
             of=$(printf '%s\n' "$ids" | awk '{print $3}' | LC_ALL=C sort -u)
             if [ -z "$ids" ]; then
               echo "::error::$leg: no shard of this leg uploaded shard-id.txt -- no report was downloaded" >&2
               exit 1
             fi
             if [ "$(printf '%s\n' "$of" | grep -c .)" -ne 1 ]; then
-              echo "::error::$leg: the shards disagree about how many there should be: $(printf '%s' "$of")" >&2
+              echo "::error::$leg: the shards disagree about how many there should be: $(printf '%s\n' "$of" | paste -sd, -)" >&2
               exit 1
             fi
             got=$(printf '%s\n' "$ids" | awk '{print $2}' | LC_ALL=C sort -n | paste -sd, -)
@@ -3637,7 +3640,8 @@ jobs:
         if: always() && (needs.edit-gate.outputs.skip != 'true')
         run: |
           set -euo pipefail
-          if ! find legs -name test-report.json | grep -q .; then
+          reports=$(find legs -name test-report.json 2>/dev/null || true)
+          if [ -z "$reports" ]; then
             echo "::error::no shard uploaded test-report.json -- no report was downloaded" >&2
             exit 1
           fi
@@ -3778,7 +3782,10 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$mine" > shard-tests.txt
-          printf 'crash %s 3 %s\n' '${{ matrix.shard }}' '${{ github.run_attempt }}' > shard-id.txt
+          # `job-total`, not a literal 3: this matrix is one dimension (shard), so the total IS the shard count and
+          # cannot drift from the matrix. The commands legs below keep their literal 2 -- their matrix is leg x shard,
+          # where job-total is 4 and each leg has 2 (cleat#3957).
+          printf 'crash %s %s %s\n' '${{ matrix.shard }}' '${{ strategy.job-total }}' '${{ github.run_attempt }}' > shard-id.txt
           echo "count=$count" >> "$GITHUB_OUTPUT"
           # The selector is an OUTPUT, not a shell variable: each `run:` block
           # is its own shell, so a variable set here is gone by the next step
@@ -3873,14 +3880,14 @@ jobs:
           # and the old guard blamed a shard that had passed. The expected count
           # comes from shard-id.txt rather than a literal, so a matrix that
           # grows fails here instead of silently expecting the old number.
-          ids=$(find shards -name shard-id.txt -exec cat {} +)
+          ids=$(find shards -name shard-id.txt -exec cat {} + 2>/dev/null || true)
           if [ -z "$ids" ]; then
             echo "::error::no shard uploaded shard-id.txt -- no shard report was downloaded at all" >&2
             exit 1
           fi
           of=$(printf '%s\n' "$ids" | awk '{print $3}' | LC_ALL=C sort -u)
           if [ "$(printf '%s\n' "$of" | grep -c .)" -ne 1 ]; then
-            echo "::error::the shards disagree about how many there should be: $(printf '%s' "$of")" >&2
+            echo "::error::the shards disagree about how many there should be: $(printf '%s\n' "$of" | paste -sd, -)" >&2
             exit 1
           fi
           got=$(printf '%s\n' "$ids" | awk '{print $2}' | LC_ALL=C sort -n | paste -sd, -)
@@ -3910,7 +3917,10 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          if ! find shards -name test-report.json | grep -q .; then
+          # Assigned, then tested -- `find | grep -q .` mis-fires in the ERROR direction once there are enough files
+          # (cleat#3957): grep exits at its first match, find takes SIGPIPE, and pipefail makes the pipeline non-zero.
+          reports=$(find shards -name test-report.json 2>/dev/null || true)
+          if [ -z "$reports" ]; then
             echo "::error::no shard uploaded test-report.json -- no shard report was downloaded" >&2
             exit 1
           fi
