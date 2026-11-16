@@ -2995,7 +2995,7 @@ jobs:
   # reports blocks every PR. Same shape as e2e-cross-language.yml's summary job
   # (cleat#3925), which is where this pattern was first used here.
   test-go-commands:
-    name: Test Go (commands ${{ matrix.leg }}) on 1.26
+    name: Test Go (commands ${{ matrix.leg }} ${{ matrix.shard }} of 2) on 1.26
     runs-on: ubuntu-latest
     # 45 is arithmetic, not a measurement: a package that hangs hits its own
     # `go test -timeout 30m` and dumps goroutines at t+30, and setup plus a
@@ -3034,8 +3034,16 @@ jobs:
       # nothing -- and a guard that cannot see these legs cannot tell whether
       # the job names a required context resolves to still exist. What each leg
       # runs is a `case` in the selection step below; this list is the legs.
+      #
+      # TWO SHARDS PER LEG (cleat#3941). Each leg is dominated by ONE package --
+      # cmd/cleat is 715s of the cleat leg's 752s of tests, and cmd/cleat-worker
+      # is 503s of the rest leg's 583s -- so the shard dimension splits those two
+      # packages by TEST NAME. The eleven small packages on the rest leg are not
+      # split; they ride on shard 1, because running them on both would run them
+      # twice and charge the skip budget twice.
       matrix:
         leg: [cleat, rest]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
 
@@ -3116,13 +3124,78 @@ jobs:
             echo "::error::leg '${{ matrix.leg }}' selected no packages from $PATHS (excluding ${EXCLUDE:-nothing})" >&2
             exit 1
           fi
-          printf '%s\n' "$mine" | LC_ALL=C sort -u > packages.txt
-          echo "leg '${{ matrix.leg }}': $count package(s)"
-          cat packages.txt
+          echo "leg '${{ matrix.leg }}': $count package(s) before sharding"
           # ONE LINE, because GITHUB_OUTPUT needs `name=value` unless the
           # heredoc form is used -- and the heredoc form inside a step whose
           # value is a package list is a second thing to get wrong.
           printf 'pkgs=%s\n' "$(printf '%s\n' "$mine" | paste -sd' ' -)" >> "$GITHUB_OUTPUT"
+
+          # THIS SHARD'S SLICE OF THE PACKAGE THAT CARRIES THE LEG'S TIME.
+          # `-run` applies to every package on a `go test` line, so the small
+          # packages cannot share an invocation with a filtered worker shard --
+          # they would be filtered to nothing. They are run whole, on shard 1.
+          case "${{ matrix.leg }}" in
+            cleat) SPLIT='./cmd/cleat/...' ;;
+            rest)  SPLIT='./cmd/cleat-worker/...' ;;
+          esac
+          FILTERED="$SPLIT"
+          UNFILTERED=''
+          if [ "${{ matrix.leg }}" = 'rest' ] && [ "${{ matrix.shard }}" = '1' ]; then
+            go list $SPLIT > split-packages.txt
+            UNFILTERED="$(printf '%s\n' "$mine" | grep -vxF -f split-packages.txt | paste -sd' ' -)"
+          fi
+
+          # ROUND-ROBIN OVER THE PACKAGE'S OWN LISTING, not a checked-in list.
+          # `go test -list` is the package's own answer, so a test added tomorrow
+          # lands on exactly one shard with no list to re-measure and no way to
+          # be silently omitted. Measured 2026-11-16 on 94379c11: this splits
+          # cmd/cleat's 715s into 310/405s and cmd/cleat-worker's 501s into
+          # 282/219s -- about 13% imbalance, which is the price of not carrying a
+          # 1200-name list; a time-balanced list is worth ~45s of wall and can be
+          # added later if this job becomes the wall again.
+          #
+          # `-race` MATCHES THE RUN STEP, and that is not cosmetic: `go test
+          # -list` builds the test binary, and a binary built WITHOUT -race is a
+          # different build than the one `-race` needs -- so omitting it here
+          # would pay the compile twice, once in this step and once in the run
+          # step, instead of once.
+          listed=$(go test -race -list '^Test' $SPLIT | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | LC_ALL=C sort)
+          total=$(printf '%s\n' "$listed" | grep -c . || true)
+          total=${total:-0}
+          if [ "$total" -eq 0 ]; then
+            echo "::error::$SPLIT listed no tests -- the package did not build, which is not this shard's problem to report as an empty slice" >&2
+            exit 1
+          fi
+          printf '%s\n' "$listed" > all-tests.txt
+          mine_tests=$(printf '%s\n' "$listed" | awk -v k="$(( ${{ matrix.shard }} - 1 ))" 'NR % 2 == k')
+          test_count=$(printf '%s\n' "$mine_tests" | grep -c . || true)
+          test_count=${test_count:-0}
+          if [ "$test_count" -eq 0 ]; then
+            echo "::error::shard ${{ matrix.shard }} was assigned none of the $total tests in $SPLIT -- the split matches nothing" >&2
+            exit 1
+          fi
+          printf '%s\n' "$mine_tests" > selected-tests.txt
+          SELECTOR="^($(printf '%s\n' "$mine_tests" | paste -sd'|' -))$"
+          echo "count=$test_count" >> "$GITHUB_OUTPUT"
+          # The selector is an OUTPUT, not a shell variable: each `run:` block is
+          # its own shell, so a variable set here is gone by the next step and
+          # `-run "$SELECTOR"` would run the WHOLE package on every shard.
+          printf 'selector=%s\n' "$SELECTOR" >> "$GITHUB_OUTPUT"
+          printf 'filtered=%s\n' "$FILTERED" >> "$GITHUB_OUTPUT"
+          printf 'unfiltered=%s\n' "$UNFILTERED" >> "$GITHUB_OUTPUT"
+
+          # packages.txt IS WHAT THIS SHARD RUNS, not what its leg covers. The
+          # aggregate diffs the union of these against `go list ./cmd/...`, and
+          # duplicates are permitted ONLY for the two name-split packages -- so a
+          # shard writing its whole leg's list would make every small package on
+          # the rest leg look double-run. (Found in review by the coordinator
+          # before the first run; the aggregate was right and the data was not.)
+          go list $FILTERED | LC_ALL=C sort -u > packages.txt
+          if [ -n "$UNFILTERED" ]; then
+            printf '%s\n' "$UNFILTERED" | tr ' ' '\n' | LC_ALL=C sort -u >> packages.txt
+          fi
+          echo "leg '${{ matrix.leg }}' shard ${{ matrix.shard }} of 2: $test_count of $total tests in $SPLIT, $(grep -c . packages.txt) package(s)"
+          cat packages.txt
 
       - name: Run tests
         shell: bash
@@ -3135,10 +3208,29 @@ jobs:
           # database-backed and would otherwise overlap against this leg's one
           # PostgreSQL service.
           #
-          # Unquoted on purpose: PKGS is a space-separated package list built
+          # Unquoted on purpose: these are space-separated package lists built
           # by the step above, from this file's own matrix values.
-          PKGS='${{ steps.pkgs.outputs.pkgs }}'
-          go test -race -count=1 -timeout 30m -p 1 -json $PKGS 2>&1 | tee test-report.json
+          FILTERED='${{ steps.pkgs.outputs.filtered }}'
+          UNFILTERED='${{ steps.pkgs.outputs.unfiltered }}'
+          SELECTOR='${{ steps.pkgs.outputs.selector }}'
+          SHARD_COUNT='${{ steps.pkgs.outputs.count }}'
+          : > test-report.json
+          if [ -n "$FILTERED" ]; then
+            go test -race -count=1 -timeout 30m -p 1 -json -run "$SELECTOR" $FILTERED 2>&1 | tee -a test-report.json
+            # EVERY ASSIGNED TEST RAN. `go test -run` that matches nothing exits 0
+            # with no test events, so a selector that stopped matching would be a
+            # green shard that did nothing. A subtest's event name contains "/"
+            # and is excluded, so this counts top-level tests -- what was assigned.
+            ran=$(grep '"Action":"run"' test-report.json | grep -c '"Test":"[^"/]*"' || true)
+            ran=${ran:-0}
+            if [ "$ran" -ne "${SHARD_COUNT:-0}" ]; then
+              echo "::error::this shard entered $ran tests but was assigned $SHARD_COUNT" >&2
+              exit 1
+            fi
+          fi
+          if [ -n "$UNFILTERED" ]; then
+            go test -race -count=1 -timeout 30m -p 1 -json $UNFILTERED 2>&1 | tee -a test-report.json
+          fi
 
       # GAP2 from cleat#2005's third review round, moved here verbatim in
       # substance from test-go's `commands` entry -- the reproduction was
@@ -3163,7 +3255,7 @@ jobs:
       # broken job. It is on the `rest` leg because cmd/cleat-worker is.
       - name: Locate the Postgres service container for the docker-pause reproduction
         id: locate-pg
-        if: matrix.leg == 'rest'
+        if: matrix.leg == 'rest' && matrix.shard == 2
         run: |
           id=$(docker ps -q --filter "ancestor=mirror.gcr.io/library/postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b")
           count=$(echo "$id" | wc -w)
@@ -3175,7 +3267,7 @@ jobs:
           fi
 
       - name: Run the docker-pause reproduction (GAP2)
-        if: matrix.leg == 'rest' && steps.locate-pg.outputs.container_id != ''
+        if: matrix.leg == 'rest' && matrix.shard == 2 && steps.locate-pg.outputs.container_id != ''
         env:
           CLEAT_TEST_DOCKER_PAUSE_CONTAINER: ${{ steps.locate-pg.outputs.container_id }}
         run: |
@@ -3192,11 +3284,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: commands-leg-${{ matrix.leg }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: commands-leg-${{ matrix.leg }}-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             test-report.json
             packages.txt
             all-cmd-packages.txt
+            selected-tests.txt
+            all-tests.txt
           retention-days: 30
 
   # THE REQUIRED STATUS CONTEXT. `Test Go (commands) on 1.26` is in
@@ -3225,8 +3319,8 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           pattern: commands-leg-*-${{ github.sha }}-${{ github.run_attempt }}
-          # One directory per leg: both legs upload `test-report.json`, and
-          # merge-multiple would have them overwrite each other.
+          # One directory per leg-shard: every shard uploads `test-report.json`,
+          # and merge-multiple would have them overwrite each other.
           merge-multiple: false
           path: legs
 
@@ -3241,31 +3335,75 @@ jobs:
             exit 1
           fi
 
-      # THE UNION IS THE JOB. Neither leg's list is trusted on its own, and the
+      # THE UNION IS THE JOB. Neither shard's list is trusted on its own, and the
       # denominator is not typed here either -- it is the same `go list
-      # ./cmd/...` both legs computed, so this compares two independent
+      # ./cmd/...` the shards computed, so this compares two independent
       # derivations rather than a derivation against a copy of itself.
-      - name: The two legs together are ./cmd/...
+      #
+      # cmd/cleat and cmd/cleat-worker each appear on TWO shards, because those
+      # are the packages split by test name (cleat#3941). Any OTHER package on
+      # two shards would run twice and break the -p 1 protection, which is why
+      # the duplicate check is scoped to everything except those two rather than
+      # dropped. The next step is what makes the exception safe.
+      - name: The shards together are ./cmd/...
         if: always()
         run: |
           set -euo pipefail
           if ! ls legs/*/packages.txt >/dev/null 2>&1; then
-            echo "::error::no leg uploaded packages.txt -- a leg died before selecting packages" >&2
+            echo "::error::no shard uploaded packages.txt -- a shard died before selecting packages" >&2
             exit 1
           fi
           cat legs/*/packages.txt | LC_ALL=C sort > covered.txt
-          dupes=$(uniq -d covered.txt || true)
+          go list ./cmd/cleat/... ./cmd/cleat-worker/... | LC_ALL=C sort > split-packages.txt
+          dupes=$(uniq -d covered.txt | grep -vxF -f split-packages.txt || true)
           if [ -n "$dupes" ]; then
-            echo "::error::these packages are run by BOTH legs, so -p 1 no longer protects them:" >&2
+            echo "::error::these packages are run by more than one shard and are not name-split, so -p 1 no longer protects them:" >&2
             printf '  %s\n' "$dupes" >&2
             exit 1
           fi
+          LC_ALL=C sort -u covered.txt > covered-unique.txt
           cat legs/*/all-cmd-packages.txt | LC_ALL=C sort -u > all.txt
-          if ! diff -u all.txt covered.txt; then
-            echo "::error::the commands legs do not together cover ./cmd/... (lines above: '-' is a package no leg runs)" >&2
+          if ! diff -u all.txt covered-unique.txt; then
+            echo "::error::the commands shards do not together cover ./cmd/... (lines above: '-' is a package no shard runs)" >&2
             exit 1
           fi
-          echo "OK: $(grep -c . covered.txt) package(s), each run by exactly one leg"
+          echo "OK: $(grep -c . covered-unique.txt) package(s) covered; $(grep -c . split-packages.txt) of them name-split across shards"
+
+      # EVERY TEST IN EACH NAME-SPLIT PACKAGE RAN EXACTLY ONCE. This is what
+      # makes the duplicate exception above safe, and it is the same property the
+      # crash group checks: a test on no shard runs NOWHERE while every job stays
+      # green, and a test on two shards runs twice and is charged to the skip
+      # budget twice. Each shard uploads the names it selected and the package
+      # listing it selected them from, so the denominator is the package's own
+      # `go test -list`, not a copy of the selector.
+      - name: Every name-split test ran exactly once
+        if: always()
+        run: |
+          set -euo pipefail
+          for leg in cleat rest; do
+            dirs=$(ls -d legs/commands-leg-${leg}-* 2>/dev/null || true)
+            if [ -z "$dirs" ]; then
+              echo "::error::no shard of the $leg leg uploaded a report" >&2
+              exit 1
+            fi
+            # A LOOP, not `cat $dirs/selected-tests.txt`: unquoted `$dirs` is
+            # word-split, so the suffix binds to the LAST word only and cat is
+            # handed the first shard's DIRECTORY -- "Is a directory", on every
+            # input including a correct partition (cleat-review on cleat#3942).
+            for d in $dirs; do cat "$d/selected-tests.txt"; done | LC_ALL=C sort > sel.txt
+            dupes=$(uniq -d sel.txt || true)
+            if [ -n "$dupes" ]; then
+              echo "::error::$leg: these tests are assigned to MORE THAN ONE shard:" >&2
+              printf '  %s\n' "$dupes" >&2
+              exit 1
+            fi
+            for d in $dirs; do cat "$d/all-tests.txt"; done | LC_ALL=C sort -u > listed.txt
+            if ! diff -u listed.txt sel.txt; then
+              echo "::error::$leg: the shards do not together run every test in the split package (lines above: '-' is a test NO shard runs)" >&2
+              exit 1
+            fi
+            echo "OK: $leg, $(grep -c . sel.txt) test(s) across $(echo $dirs | wc -w | tr -d ' ') shard(s)"
+          done
 
       # The budget is the job's, not a leg's: scripts/skip-ledger.tsv declares
       # how many skips `test-go/commands` may see, and each leg sees only part
