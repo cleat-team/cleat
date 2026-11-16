@@ -200,7 +200,17 @@ func clusterDSNWithConfigured() (dsn string, configured bool) {
 	if v := os.Getenv("CLEAT_TEST_DB"); v != "" {
 		return testutil.TagPostgresDSN(v), true
 	}
-	return testutil.TagPostgresDSN("postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"), false //nolint:gosec // G101: a localhost default DSN for the local compose stack, used only when CLEAT_TEST_DB is unset.
+	// NO FALLBACK DSN (cleat#3952). There used to be a `localhost:5432`
+	// default, and it made an unconfigured run CONNECT to whatever answered
+	// there -- on a developer machine that can be an unrelated PostgreSQL, and
+	// this suite's cleanup deletes `test-cluster-%` rows. "Nobody asked for a
+	// database" and "a database we did not ask about" must not be the same
+	// outcome, so the unconfigured arm now names the variable and skips.
+	//
+	// CI is unaffected: both test steps in the cluster job set CLEAT_TEST_DB
+	// explicitly, and the skip budget below would catch it as one skip against
+	// a budget of 0 if that ever stopped being true.
+	return "", false
 }
 
 // openClusterDB is the single place this suite opens and pings its database.
@@ -216,6 +226,14 @@ func openClusterDB(t *testing.T) *sql.DB {
 		t.Skip("Skipping cluster test in short mode")
 	}
 	dsn, configured := clusterDSNWithConfigured()
+	if !configured {
+		// BEFORE sql.Open, so an unconfigured run opens no connection at all.
+		t.Skipf("no cluster database configured: set CLEAT_TEST_DB to the " +
+			"database docker-compose.cluster.yml serves. This suite has no " +
+			"default DSN on purpose -- a localhost fallback made an unconfigured " +
+			"run delete test-cluster-%% rows from whatever answered on 5432 " +
+			"(cleat#3952)")
+	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		if configured {
@@ -298,14 +316,11 @@ func redactDSN(dsn string) string {
 }
 
 // GetDB returns a *sql.DB connected to the cluster's PostgreSQL instance.
+//
+// Routed through openClusterDB so it inherits the configured/unconfigured
+// split and the no-fallback rule (cleat#3952): a second opener that Fatals on
+// an empty DSN would be a way around both.
 func GetDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("postgres", ClusterDSN())
-	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Fatalf("failed to ping database: %v", err)
-	}
-	return db
+	return openClusterDB(t)
 }
