@@ -143,33 +143,44 @@ func TestTypeScriptCallRetryRetriesOnTheHost(t *testing.T) {
 	}
 }
 
-// TestTypeScriptCallRetryReportsARefusedPolicy: a policy too long for the tenant's host-retry budget is REFUSED, nothing is
-// called, and the rejection says the policy is the problem rather than the service.
+// TestTypeScriptCallRetryRefusedPolicyRunsInTheSDK is the fallback path, and it is the reason cleat#4032 exists.
 //
-// The fallback Go and Rust take from here is deliberately NOT taken: it is broken on replay (cleat#4032), and the measurement
-// that found it is this test's neighbour. `cleat.WithHostRetryBudget` is the only way to reach the refusal.
-func TestTypeScriptCallRetryReportsARefusedPolicy(t *testing.T) {
+// The tenant budget is far below the policy's worst-case backoff, so the host REFUSES it before making any call and the SDK
+// runs it: one attempt, a sleep (which suspends), and the next attempt in a later segment. Until #4032 recorded the refusal,
+// the replay answered from history with the first attempt's error and this path could not work in any language.
+//
+// The sleep may or may not suspend depending on how long the machine takes to get from recording the failed call to
+// evaluating the deadline (`tenant_retry_budget_test.go` pins a clock to decide that on purpose); this test reaches the
+// terminal answer on either side of that race rather than asserting which side it lands on.
+func TestTypeScriptCallRetryRefusedPolicyRunsInTheSDK(t *testing.T) {
 	wasm := buildCalls(t)
 	caller := newScriptedCaller()
-	// The fixture's policy backs off once, by 1ms, so any budget below 1ms refuses it. `retryPolicyFitsBudget` sums the backoffs
-	// and answers false as soon as the total exceeds the budget, so a budget of 1ms would FIT this policy and the refusal would
-	// never be reached -- measured, then corrected here.
-	raw, _ := runCalls(t, wasm, "calls_retry_exhausted", caller, engine.WithHostRetryBudget(time.Microsecond))
+	// The fixture's policy backs off 1ms then 2ms; any budget below that refuses it.
+	e, closeRT := newCallsEngine(t, caller, engine.WithHostRetryBudget(time.Microsecond))
+	defer closeRT()
+
+	raw, history, susp, _, _, err := e.Execute(context.Background(), wasm, "calls_retry", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("the first segment failed rather than retrying in the SDK: %v", err)
+	}
+	result := raw
+	if susp != nil {
+		result = replayUntilDone(t, e, wasm, "calls_retry", history)
+	}
 
 	var got struct {
-		Message string `json:"message"`
+		Out struct {
+			ID string `json:"id"`
+		} `json:"out"`
 	}
-	if err := json.Unmarshal([]byte(raw), &got); err != nil {
-		t.Fatalf("the result is not the object this test expects: %v\n%.400s", err, raw)
+	if err := json.Unmarshal([]byte(result), &got); err != nil {
+		t.Fatalf("the result is not the object this test expects: %v\n%.400s", err, result)
 	}
-	if !strings.Contains(got.Message, "exceeds the host-retry budget") {
-		t.Errorf("the rejection read %q, want it to name the policy as the reason", got.Message)
+	if got.Out.ID != "ch_1" {
+		t.Errorf("the SDK-level retry resolved with %q, want the second attempt's ch_1", got.Out.ID)
 	}
-	if !strings.Contains(got.Message, "cleat#4032") {
-		t.Errorf("the rejection read %q, want it to name the missing fallback so a caller knows why this differs from Go", got.Message)
-	}
-	if n := caller.count("payments/always-fails"); n != 0 {
-		t.Errorf("the service was called %d time(s) for a policy the host refused; a refusal consumes no attempt", n)
+	if n := caller.count("payments/charge"); n != 2 {
+		t.Errorf("the service was called %d time(s) in total, want 2: the first attempt fails and the SDK loop retries it", n)
 	}
 }
 

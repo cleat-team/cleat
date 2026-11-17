@@ -22,10 +22,10 @@ declare function __cleat_schedule_invoke(service: string, operation: string, req
  * that names none of them behaves as one written in Go would.
  *
  * The host decides whether the WHOLE policy runs inside one segment, holding the worker slot, and it runs it only while the
- * worst-case backoff fits the tenant's host-retry budget. A longer policy is REFUSED before any call is made -- and in TypeScript
- * that refusal is reported, not retried here: Go and Rust fall back to a loop of their own, but that fallback is broken on
- * replay (cleat#4032), so this binding uses the host-only entry point and rejects with a message naming the policy. A workflow
- * that needs a long backoff should use its own `sleep` between ordinary `call`s.
+ * worst-case backoff fits the tenant's host-retry budget. A longer policy is refused before any call is made, and the SDK then
+ * runs it itself: ONE ATTEMPT PER SEGMENT, sleeping (and therefore suspending) between attempts, which costs a replay per
+ * backoff but keeps no worker waiting. Which path a policy takes is the host's decision -- it knows the tenant's budget and this
+ * layer does not -- so the same `callRetry` may finish in one segment or suspend several times.
  */
 export interface RetryPolicy {
   /** Total attempts INCLUDING the first call. Default 3. */
@@ -65,9 +65,9 @@ export interface CallsCtx {
    * error -- the prefix the worker dead-letters on. An error the policy marks non-retryable is rejected WITHOUT that prefix and
    * without further attempts, because the engine decided not to retry it, and reporting it as exhausted would say it had tried.
    *
-   * A policy whose worst-case backoff exceeds the host-retry budget is REFUSED, nothing is called, and the rejection says so:
-   * TypeScript does not fall back to an SDK-level loop (cleat#4032). Use a shorter policy, or a loop of your own with `sleep`
-   * between attempts.
+   * A policy whose worst-case backoff exceeds the host-retry budget is refused by the host and then run BY THE SDK, sleeping
+   * between attempts -- so a long policy costs one segment and one replay per backoff rather than a held worker, exactly as in
+   * Go and Rust.
    *
    * Prefer this to a retry loop of your own when the policy is short: a loop in the workflow records an event per attempt and is
    * replayed attempt by attempt, while the host's loop records one.
