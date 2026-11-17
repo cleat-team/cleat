@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -106,6 +107,8 @@ func (f *scriptedFetcher) scriptedKeys() []string {
 	for k := range f.script {
 		keys = append(keys, k)
 	}
+	// Sorted: map order is random, and this list is the body of the error a test author reads, so it must read the same every run.
+	sort.Strings(keys)
 	return keys
 }
 

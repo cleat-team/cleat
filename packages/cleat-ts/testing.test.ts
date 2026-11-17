@@ -117,6 +117,31 @@ test("with no script the same workflow PARKS, which is what makes the case above
   assert.equal(run.suspended, true, "an unscripted promise was settled by something; the store invented an answer");
 });
 
+// cleat#3827, group J: the scripted Fetcher. WITHOUT a `fetch` script the engine has no Fetcher and REFUSES every fetch ("cleat_fetch
+// is disabled"), which is also the default on a cleat-worker (fetch is opt-in), so a test that configures none is testing the
+// refusal whether it meant to or not. `extras.fetchRequests` is what the Fetcher was asked, so a test can tell a fetch that was
+// answered from one that never reached it.
+const UTILITY_ENTRIES = ["utilities", "utilities_refused", "utilities_late", "utilities_big", "utilities_bad_json", "utilities_once"];
+
+test("a scripted fetch is answered, and extras.fetchRequests says what the Fetcher was asked", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/utilities.ts", UTILITY_ENTRIES);
+  const run = runWorkflow(module, "utilities", {}, {
+    scripts: { fetch: { "POST https://example.test/a": { status: 201, headers: { "x-seen": "1" }, body: "pong" } } },
+  });
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  const r = run.result as { answer: { status: number; headers: Record<string, string>; body: string } };
+  assert.deepEqual(r.answer, { status: 201, headers: { "x-seen": "1" }, body: "pong" });
+  assert.deepEqual(run.extras?.fetchRequests, ["POST https://example.test/a"], "the Fetcher was not asked the request the workflow made");
+});
+
+test("with no fetch script a fetch is refused by name, which is not a 403", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/utilities.ts", UTILITY_ENTRIES);
+  const run = runWorkflow(module, "utilities_refused");
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  assert.match((run.result as { message: string }).message, /no Fetcher|disabled/i, "an unscripted fetch was not refused by the engine");
+  assert.equal(run.extras?.fetchRequests, undefined, "a store nobody scripted reported something");
+});
+
 // The signal half. Scripted, the wait is answered on the first poll; unscripted, the same wait parks. DeliveredAtMs is
 // left zero by the store deliberately: the engine treats a zero as "a double did not populate it" and answers that the
 // delivery is visible, which is the right reading for a signal queued before the run.
