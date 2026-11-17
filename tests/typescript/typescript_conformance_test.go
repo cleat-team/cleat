@@ -432,3 +432,38 @@ func TestTypeScriptURLIDNAContextRules(t *testing.T) {
 		}
 	}
 }
+
+// TestTypeScriptTextCodecAgreesWithNode is DIVERGENCES row 3 (cleat#3829): the guest had no TextEncoder or TextDecoder at
+// all, so a library that used one failed with a ReferenceError. With the shim, every value is compared against Node's --
+// byte sequences, lone surrogates encoded as U+FFFD, BOM handling, fatal, streaming across a split sequence, and encodeInto's
+// read/written counts -- because the failure mode once the globals exist is a plausible wrong STRING, not an error.
+func TestTypeScriptTextCodecAgreesWithNode(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/conformance/textcodec.ts"
+	compareLines(t, "TextEncoder/TextDecoder", guestResult(t, root, src, "textcodec"), nodeOracle(t, root, src, "textcodec"))
+}
+
+// TestTypeScriptTextCodecKeepsStreamsAbsentAndNamesItsRefusals is the guest-only half: Node defines the Streams classes and
+// words a bad label its own way, so neither can be an oracle here. Both facts are asserted as literals.
+func TestTypeScriptTextCodecKeepsStreamsAbsentAndNamesItsRefusals(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/conformance/textcodec_guest.ts"
+	lines := guestResult(t, root, src, "textcodec_guest")
+	if len(lines) == 0 {
+		t.Fatalf("the guest printed no cases, so nothing was checked")
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"typeof TextDecoderStream = undefined",
+		"typeof TextEncoderStream = undefined",
+		// A valid WHATWG label for an encoding this guest does not implement says so, and names the issue.
+		"utf-16le -> RangeError: cleat: the encoding label 'utf-16le' names an encoding this guest does not implement (cleat#3829)",
+		"windows-1252 -> RangeError: cleat: the encoding label 'windows-1252' names an encoding this guest does not implement (cleat#3829)",
+		// A label WHATWG does not have at all is a typo, worded like Node's own refusal.
+		"bogus -> RangeError: The encoding label provided ('bogus') is invalid.",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the guest did not report %q; it printed:\n%s", want, joined)
+		}
+	}
+}
