@@ -218,7 +218,7 @@ jobs:
           # is the number of top-level tests in this package and must be raised when one is added: it was 14 while 15
           # tests existed, which is the drift this line exists to catch.
           # Re-derive: grep -h '^func Test' tests/typescript/*_test.go | grep -c .
-          [ "$top" -ge 28 ] || { echo "only $top top-level tests passed; the twenty-eight in tests/typescript must all run" >&2; exit 1; }
+          [ "$top" -ge 30 ] || { echo "only $top top-level tests passed; the thirty in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
       - name: "Skip budget (zero, because the toolchain was declared)"
@@ -249,7 +249,7 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ------------------------------------------------------------------------------------------------------------------
-  # MySQL: the two worker tests that need a database, on mysql (cleat#3988, part b).
+  # MySQL: the worker tests that need a database, on mysql (cleat#3988, part b).
   #
   # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, MySQL)
   # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
@@ -259,7 +259,7 @@ jobs:
   # `image:` would route around every one of those checks. The service block below is copied VERBATIM from multi-db-ci.yml.
   # The jobs run in parallel with the one above, so the wall time is the slowest of them and not their sum.
   #
-  # ONLY the two tests that touch the database run here. The other tests are not dialect-dependent, and running them three
+  # ONLY the tests that touch the database run here, and tests/typescript/typescript_dialect_jobs_test.go fails if one is missing from the lists below. The other tests are not dialect-dependent, and running them three
   # times would triple the cost and prove nothing new. The CLEAT_TS_DIALECT selection is tests/typescript/typescript_dialect_test.go.
   # ------------------------------------------------------------------------------------------------------------------
   typescript-tier2-mysql:
@@ -310,7 +310,7 @@ jobs:
       - name: "Tests (the worker tests, on mysql)"
         run: |
           set -o pipefail
-          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution)$' ./tests/typescript/ | tee typescript-tier2-mysql-report.json > /dev/null
+          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker)$' ./tests/typescript/ | tee typescript-tier2-mysql-report.json > /dev/null
 
       # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
       # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
@@ -340,7 +340,7 @@ jobs:
             grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
           fi
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
-          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution; do
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker; do
             grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mysql" >&2; exit 1; }
           done
 
@@ -348,7 +348,7 @@ jobs:
         run: scripts/check-skip-budget.sh typescript-tier2-mysql typescript-tier2-mysql-report.json
 
   # ------------------------------------------------------------------------------------------------------------------
-  # SQL Server: the two worker tests that need a database, on mssql (cleat#3988, part b).
+  # SQL Server: the worker tests that need a database, on mssql (cleat#3988, part b).
   #
   # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, SQL Server)
   # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
@@ -358,7 +358,7 @@ jobs:
   # `image:` would route around every one of those checks. The service block below is copied VERBATIM from multi-db-ci.yml.
   # The jobs run in parallel with the one above, so the wall time is the slowest of them and not their sum.
   #
-  # ONLY the two tests that touch the database run here. The other tests are not dialect-dependent, and running them three
+  # ONLY the tests that touch the database run here, and tests/typescript/typescript_dialect_jobs_test.go fails if one is missing from the lists below. The other tests are not dialect-dependent, and running them three
   # times would triple the cost and prove nothing new. The CLEAT_TS_DIALECT selection is tests/typescript/typescript_dialect_test.go.
   # ------------------------------------------------------------------------------------------------------------------
   typescript-tier2-mssql:
@@ -420,7 +420,7 @@ jobs:
       - name: "Tests (the worker tests, on mssql)"
         run: |
           set -o pipefail
-          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution)$' ./tests/typescript/ | tee typescript-tier2-mssql-report.json > /dev/null
+          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker)$' ./tests/typescript/ | tee typescript-tier2-mssql-report.json > /dev/null
 
       # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
       # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
@@ -450,7 +450,7 @@ jobs:
             grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
           fi
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
-          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution; do
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker; do
             grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mssql" >&2; exit 1; }
           done
 
