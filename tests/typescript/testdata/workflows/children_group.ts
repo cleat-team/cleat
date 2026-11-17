@@ -1,4 +1,4 @@
-import { workflow } from "@cleat/ts";
+import { CleatError, workflow } from "@cleat/ts";
 
 // The children-group bindings (cleat#3827, group C): start with options, await all, await any, and poll.
 //
@@ -55,9 +55,11 @@ export const childrenPoll = workflow(async (ctx) => {
   const alpha = await ctx.startChildWithOptions<{ v: number }>("alpha", {});
   const bad = await ctx.startChildWithOptions("bad", {});
   const held = await ctx.startChildWithOptions("held", {});
-  const done = ctx.pollChild<{ v: number }>(alpha);
-  const failed = ctx.pollChild(bad);
-  const running = ctx.pollChild(held);
+  // pollChild returns a promise (so a refused id arrives as a CleatError) even though it never waits: the promise settles at
+  // once.
+  const done = await ctx.pollChild<{ v: number }>(alpha);
+  const failed = await ctx.pollChild(bad);
+  const running = await ctx.pollChild(held);
   return {
     done,
     // A thrown host error would fail the workflow, so a snapshot here is also the assertion that a failed child is reported
@@ -86,4 +88,15 @@ export const childrenWithoutHandler = workflow(async (ctx) => {
   const alpha = await ctx.startChildWithOptions("alpha", {});
   const outcomes = await ctx.awaitAll([alpha]);
   return { outcomes: outcomes.length };
+});
+
+// A host error, which is NOT a failed child (cleat#3387): the store cannot answer for a run id it never minted, and
+// pollChild must reject with a CleatError rather than resolve with a snapshot of some status.
+export const childrenPollUnknown = workflow(async (ctx) => {
+  try {
+    const snapshot = await ctx.pollChild("no-such-run");
+    return { status: snapshot.status, message: "", isCleatError: false };
+  } catch (e) {
+    return { status: "", message: (e as Error).message, isCleatError: e instanceof CleatError };
+  }
 });

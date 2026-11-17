@@ -20,7 +20,9 @@
 // time rather than as of the moment it is called.
 //
 // THE DISPATCH IS index.ts's JOB, and these two waits go through it because they can block for as long as it takes other runs to
-// finish -- the same points at which the Rust and Go SDKs dispatch pending updates. `pollChild` does not: it never waits.
+// finish -- the same points at which the Rust and Go SDKs dispatch pending updates. `pollChild` does not: it never waits, and
+// its promise settles at once. It is a promise anyway so that a host error is a `CleatError` like every other call's, which is
+// the pattern group B's `pollSignal` set.
 
 import type { Helpers } from "./helpers";
 import { dispatchThen } from "./updates";
@@ -74,12 +76,6 @@ interface HostPoll {
   error?: string;
 }
 
-interface Envelope<T> {
-  ok?: T;
-  err?: string;
-  suspended?: true;
-}
-
 const POLICIES = ["ABANDON", "TERMINATE", "REQUEST_CANCEL"] as const;
 
 /**
@@ -113,7 +109,11 @@ export interface ChildrenCtx {
    */
   startChildWithOptions<T = unknown>(name: string, input?: unknown, options?: ChildOptions): Promise<string>;
   /**
-   * Wait until every named child is finished, and answer their outcomes in the order the ids were given.
+   * Wait until every named child is finished, and answer their outcomes IN THE ORDER THE IDS WERE GIVEN.
+   *
+   * That order is the host's, not this layer's: `await_all_children` writes each child's answer at the position of its id in
+   * the request and does not sort, so `outcomes[i]` is always `runIds[i]` and nothing here reorders them. Await a different
+   * order than you started them in and the answers follow the ids, not the start order.
    *
    * Shaped like `Promise.allSettled`: it resolves even when children failed, each failure in its entry's `reason`, so one
    * broken child does not cost the caller the results of its siblings. It SUSPENDS the workflow until the last child is done,
@@ -125,8 +125,12 @@ export interface ChildrenCtx {
    *
    * A child that FINISHED BY FAILING also ends the wait, and rejects with a `CleatError` carrying that child's message and a
    * `childRunId` property naming it -- the host does not go on to a sibling, and pretending otherwise here would wait for a child
-   * the caller believes is still relevant. When several are already finished the winner is the lowest-sorting run id (the host
-   * sorts before polling, so replay picks the same one).
+   * the caller believes is still relevant.
+   *
+   * WHEN SEVERAL ARE ALREADY FINISHED THE WINNER IS THE LOWEST-SORTING RUN ID, NOT THE FIRST ONE YOU NAMED. The host sorts the
+   * ids before polling so that a replay agrees with the original execution when more than one child is done; the cost is that
+   * the array order you pass carries no precedence. An author who expects "first named wins" will be wrong here, and only when
+   * two children have both finished -- which is why it is stated rather than left to the implementation.
    *
    * An empty list is refused: nothing could ever finish, so the wait would suspend forever.
    *
@@ -136,15 +140,19 @@ export interface ChildrenCtx {
   /**
    * Read one child's state now, without waiting: `"pending"`, or a value, or a rejection.
    *
-   * Synchronous, because the host answers it without suspending, and replayable: the host compares the child's completion
-   * instant against this run's durable clock, so a replay answers what the first execution saw rather than what is true now.
+   * It returns a PROMISE even though nothing is waited for, for the same reason `pollSignal` does (group B): a host error --
+   * an unknown run id, or a store that could not answer -- then arrives as a `CleatError` through the same channel as every
+   * other call's failure. Two non-waiting reads in one SDK must not have two error channels. The promise settles at once and
+   * the call never suspends.
    *
-   * A HOST error -- an unknown run id, or a store that could not answer -- is THROWN rather than reported as a failed child,
-   * because those are different facts (cleat#3387). It is thrown as a plain `Error` and not a `CleatError`: this call has no
-   * promise through which to reject, and the class is constructed in `index.ts`, which a group may not import. The host's own
-   * message is preserved either way.
+   * A host error is NOT a failed child: cleat#3387 distinguishes them because "the database blinked" and "your child failed"
+   * send a parent to different places, and answering "failed" for the first told callers their child had failed when it had
+   * not. A failed child is a `"rejected"` snapshot; a store that could not answer rejects this promise.
+   *
+   * Replayable: the host compares the child's completion instant against this run's durable clock, so a replay answers what the
+   * first execution saw rather than what is true now.
    */
-  pollChild<T = unknown>(runId: string): ChildSnapshot<T>;
+  pollChild<T = unknown>(runId: string): Promise<ChildSnapshot<T>>;
 }
 
 export function makeChildren(h: Helpers): ChildrenCtx {
@@ -190,25 +198,26 @@ export function makeChildren(h: Helpers): ChildrenCtx {
       );
     },
 
-    pollChild: <T>(runId: string): ChildSnapshot<T> => {
-      const r = JSON.parse(__cleat_poll_child(runId)) as Envelope<HostPoll>;
-      if (r.suspended) throw new Error("pollChild: this segment has suspended, so the host has no answer");
-      if (r.err !== undefined) throw new Error(r.err);
-      const p = r.ok;
-      // Neither ok nor err nor suspended is a host that answered nothing; treating it as "pending" would wait forever.
-      if (p === undefined) throw new Error("pollChild: the host answered neither a status nor an error");
-      switch (p.status) {
-        case "running":
-          return { runId, status: "pending" };
-        case "completed":
-          return { runId, status: "fulfilled", value: h.parseJSON(p.result ?? "") as T };
-        case "failed":
-          return { runId, status: "rejected", reason: new Error(p.error ?? "") };
-        default:
-          // A status this layer does not know is a host that changed shape under it; saying "pending" would wait forever.
-          throw new Error(`pollChild: the host answered with an unknown status "${(p as { status: string }).status}"`);
-      }
-    },
+    pollChild: <T>(runId: string): Promise<ChildSnapshot<T>> =>
+      h.settle<HostPoll>(__cleat_poll_child(runId)).then(async (p) => {
+        if (p === undefined || p === null) {
+          // Neither a status nor an error: a host that answered nothing. Treating it as "pending" would wait forever.
+          throw new Error("pollChild: the host answered neither a status nor an error");
+        }
+        switch (p.status) {
+          case "running":
+            return { runId, status: "pending" } as ChildSnapshot<T>;
+          case "completed":
+            return { runId, status: "fulfilled", value: h.parseJSON(p.result ?? "") as T } as ChildSnapshot<T>;
+          case "failed":
+            // A failed child, so the snapshot carries the reason -- and it is the same `CleatError` `settle` would have given
+            // for this message, so a caller matching on the error type sees one type whichever way a child failed.
+            return { runId, status: "rejected", reason: await rejection(h, p.error ?? "").catch((e) => e as Error) } as ChildSnapshot<T>;
+          default:
+            // A status this layer does not know is a host that changed shape under it; saying "pending" would wait forever.
+            throw new Error(`pollChild: the host answered with an unknown status "${(p as { status: string }).status}"`);
+        }
+      }),
   };
 }
 

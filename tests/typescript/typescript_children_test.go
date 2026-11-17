@@ -107,6 +107,19 @@ func (c *memChildren) startedList() []string {
 	return append([]string(nil), c.started...)
 }
 
+// complete finishes every run started under `defName`, standing in for the child run doing its work between the parent's
+// segments. It is the only lever a single-process test has on the replay path: a row minted while the name was unscripted
+// stays running until this is called.
+func (c *memChildren) complete(defName, result string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, row := range c.byID {
+		if row.defName == defName {
+			row.outcome = engine.ChildOutcome{Completed: true, Result: result}
+		}
+	}
+}
+
 // childScript is the script every test here runs against: a child that succeeds, one that fails, and no entry at all for a
 // name that must stay running ("held").
 func childScript() map[string]engine.ChildOutcome {
@@ -123,7 +136,7 @@ func buildChildren(t *testing.T) []byte {
 	src := "tests/typescript/testdata/workflows/children_group.ts"
 	res := build(t, root, src, strings.Join([]string{
 		"children_all", "children_all_suspends", "children_any", "children_any_fails",
-		"children_poll", "children_with_update", "children_without_handler",
+		"children_poll", "children_poll_unknown", "children_with_update", "children_without_handler",
 	}, ","))
 	if res.exit != 0 {
 		t.Fatalf("building %s failed (exit %d):\n%s", src, res.exit, res.output)
@@ -398,5 +411,73 @@ func TestTypeScriptAChildCallAfterASuspensionRecordsNothing(t *testing.T) {
 		case engine.EventTypeChildWorkflow, engine.EventTypeAwaitAnyChild, engine.EventTypeAwaitAllChildren:
 			t.Fatalf("the segment recorded a %s event (%+v) after the call that suspended it", ev.EventType, ev)
 		}
+	}
+}
+
+// TestTypeScriptAwaitAllResumesWhenTheChildFinishes is the half the suspend test cannot reach: the FIRST segment records an
+// empty await_all event and stops, and the next segment must find the now-finished child and return its value. It is what
+// separates a durable binding from a wrapper that happens to suspend correctly: without the replay path, every workflow
+// holding a real child would suspend forever.
+func TestTypeScriptAwaitAllResumesWhenTheChildFinishes(t *testing.T) {
+	wasm := buildChildren(t)
+	store := newMemChildren(childScript())
+	e, closeRT := newEngineWith(t, engine.WithChildWorkflowStore(store))
+	defer closeRT()
+
+	_, history, susp, _, _, err := e.Execute(context.Background(), wasm, "children_all_suspends", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("the first pass failed rather than suspending: %v", err)
+	}
+	if susp == nil {
+		t.Fatalf("the first pass did not suspend although one child is running")
+	}
+	// The precondition the replay depends on: the store really is holding that child as running, so the completion below is
+	// a change and not a value the first pass already had.
+	if _, running := store.byID["child-2"]; !running || store.byID["child-2"].outcome.Completed {
+		t.Fatalf("child-2 is not held running after the first pass; the replay below would measure nothing")
+	}
+
+	store.complete("held", `{"v":2}`)
+
+	raw, _, susp2, _, _, err := e.Replay(context.Background(), wasm, "children_all_suspends", json.RawMessage(`{}`), history)
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if susp2 != nil {
+		t.Fatalf("the replay suspended again (%s); both children are finished", susp2.Reason)
+	}
+	var got struct {
+		Outcomes int `json:"outcomes"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("the replay's result is not the object this test expects: %v\n%.400s", err, raw)
+	}
+	if got.Outcomes != 2 {
+		t.Errorf("the replay reported %d outcomes, want 2: a resumed awaitAll must answer for every child", got.Outcomes)
+	}
+}
+
+// TestTypeScriptPollChildRejectsOnAHostError is the error channel the coordinator asked to match pollSignal's: a store that
+// cannot answer is not a child that failed, and the two must be distinguishable. Without the promise this would have had to be
+// a thrown plain Error, which no `instanceof CleatError` in a caller could catch.
+func TestTypeScriptPollChildRejectsOnAHostError(t *testing.T) {
+	wasm := buildChildren(t)
+	raw := runChildren(t, wasm, "children_poll_unknown", engine.WithChildWorkflowStore(newMemChildren(childScript())))
+	var got struct {
+		Status       string `json:"status"`
+		Message      string `json:"message"`
+		IsCleatError bool   `json:"isCleatError"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("the result is not the object this test expects: %v\n%.400s", err, raw)
+	}
+	if got.Status != "" {
+		t.Fatalf("polling an id the store never minted RESOLVED with status %q; a host error must reject", got.Status)
+	}
+	if !strings.Contains(got.Message, "no-such-run") {
+		t.Errorf("the rejection carried %q, want the host's message naming the id", got.Message)
+	}
+	if !got.IsCleatError {
+		t.Error("the rejection is not a CleatError; a caller cannot tell a host error from its own bug")
 	}
 }
