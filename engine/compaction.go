@@ -95,6 +95,9 @@ const (
 	EventCodeUpdateReceived        = 34
 	EventCodeCallAttemptFailed     = 36
 	EventCodeUpdateCompleted       = 35
+	// 37, because 36 is CallAttemptFailed and the numbers are a stored format:
+	// a code that already means something must never be reused.
+	EventCodeCallRetryRefused = 37
 )
 
 // EventCodeSleep (1) is defined above but has no corresponding EventType
@@ -104,6 +107,7 @@ const (
 var eventTypeToCode = map[EventType]int{
 	EventTypeCall:                  EventCodeCall,
 	EventTypeCallAttemptFailed:     EventCodeCallAttemptFailed,
+	EventTypeCallRetryRefused:      EventCodeCallRetryRefused,
 	EventTypeAwaitSignals:          EventCodeAwaitSignals,
 	EventTypeSignalReceived:        EventCodeSignalReceived,
 	EventTypeDefer:                 EventCodeDefer,
@@ -142,6 +146,7 @@ var eventTypeToCode = map[EventType]int{
 var codeToEventType = map[int]EventType{
 	EventCodeCall:                  EventTypeCall,
 	EventCodeCallAttemptFailed:     EventTypeCallAttemptFailed,
+	EventCodeCallRetryRefused:      EventTypeCallRetryRefused,
 	EventCodeAwaitSignals:          EventTypeAwaitSignals,
 	EventCodeSignalReceived:        EventTypeSignalReceived,
 	EventCodeDefer:                 EventTypeDefer,
@@ -567,6 +572,11 @@ func extractCompactionStateFrom(prev *CompactionState, events []EventRecord) (*C
 			ce.ErrCode = ev.ErrCode
 			ce.RetriesExhausted = ev.RetriesExhausted
 			ce.ResolvedBy = ev.ResolvedBy
+		case EventTypeCallRetryRefused:
+			// Kept so a compacted history can still say WHICH call was refused; replay matches on the type, and the
+			// two fields are what a divergence report needs to name the call.
+			ce.Service = ev.Service
+			ce.Op = ev.Op
 		case EventTypeAwaitSignals:
 			ce.SignalNames = ev.SignalNames
 			ce.TimeoutMs = ev.TimeoutMs
@@ -770,6 +780,9 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.ErrCode = ce.ErrCode
 			rec.RetriesExhausted = ce.RetriesExhausted
 			rec.ResolvedBy = ce.ResolvedBy
+		case EventCodeCallRetryRefused:
+			rec.Service = ce.Service
+			rec.Op = ce.Op
 		case EventCodeAwaitSignals:
 			rec.SignalNames = ce.SignalNames
 			rec.TimeoutMs = ce.TimeoutMs

@@ -255,6 +255,21 @@ func DeferOnLongRetryPolicy(h cleat.HostCalls, input string) (string, error) {
 	return "", err
 }
 
+// RetryOnHostFirstAttemptSucceeds calls the LOW-LEVEL retry entry directly, which the Go SDK documents as having NO
+// fallback: a refusal comes back as a CallError with CallErrorRetryPolicyTooLong and the caller must handle it.
+//
+// It exists for cleat#4032's regression test, and for the SDKs that behave the same way -- AssemblyScript, Java and
+// Python have no code-6 fallback at all. A refused policy is a hard failure for them, so a replay that refuses a call
+// the host actually ran is a regression on shipped code rather than a retry.
+func RetryOnHostFirstAttemptSucceeds(h cleat.HostCalls, input string) (string, error) {
+	return h.DurableCallWithRetry("succeeds", "op", `{}`, cleat.RetryPolicy{
+		MaxAttempts:        3,
+		InitialInterval:    time.Millisecond,
+		BackoffCoefficient: 2.0,
+		MaxInterval:        time.Millisecond,
+	})
+}
+
 // TwoSequentialCalls has no defer at all -- it is cleat#2008's fixture, not
 // 3.112's. It makes two plain DurableCalls back to back, so a test can put an
 // external side effect (the first call reaching the service) between them and

@@ -253,7 +253,37 @@ func TestDurableSleep_ZeroDuration(t *testing.T) {
 // DurableCallWithRetry tests.
 // ---------------------------------------------------------------------------
 
-func TestDurableCallWithRetry_Replay(t *testing.T) {
+// TestDurableCallWithRetry_ReplayRefusesARecordedRefusal pins the marker cleat#4032 adds: a refusing segment writes
+// EventTypeCallRetryRefused, and a replay that finds one refuses again.
+//
+// That record is the ONLY thing that can distinguish the two situations a replay can be in. A plain `call` record is
+// written both by a guest's own fallback loop (after a refusal) and by a host-run policy whose first attempt succeeded,
+// and the tenant's budget -- the other candidate -- is writable while a run is in flight.
+func TestDurableCallWithRetry_ReplayRefusesARecordedRefusal(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step: 0, EventType: EventTypeCallRetryRefused,
+		Service: "my-svc", Op: "my-op", Request: `{"key":"val"}`,
+	}}
+
+	result := s.DurableCallWithRetry(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
+
+	// The CALL error code is bits 8-15; bits 0-7 are the write error code.
+	if got := byte(result >> 8); got != callErrorRetryPolicyTooLong {
+		t.Errorf("callErrorCode = %d, want callErrorRetryPolicyTooLong (%d): a recorded refusal means the policy was "+
+			"refused when this call was recorded", got, callErrorRetryPolicyTooLong)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1: the refusal record is consumed", s.stepCount)
+	}
+}
+
+// TestDurableCallWithRetry_ReplayReplaysAPlainCall is the case a shape-only rule broke: a plain `call` record is what a
+// host-run policy writes when its FIRST attempt succeeds, and the AssemblyScript, Java and Python SDKs have no fallback
+// to catch a refusal here.
+func TestDurableCallWithRetry_ReplayReplaysAPlainCall(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
@@ -265,12 +295,37 @@ func TestDurableCallWithRetry_Replay(t *testing.T) {
 	result := s.DurableCallWithRetry(context.Background(), nil,
 		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
 
-	errCode := byte(result & 0xFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
+	if got := byte(result & 0xFF); got != 0 {
+		t.Errorf("write errCode = %d, want 0: the recorded call is replayed, not refused", got)
 	}
 	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+		t.Errorf("stepCount = %d, want 1: the recorded call is consumed", s.stepCount)
+	}
+}
+
+// TestDurableCallWithRetry_ReplayResumesAHostLoopRecord is the other side of that decision: `call_attempt_failed`
+// is written only by the host loop, so a replay that finds one resumes the policy rather than refusing it.
+func TestDurableCallWithRetry_ReplayResumesAHostLoopRecord(t *testing.T) {
+	s := newTestExecSession()
+	// The resume path runs the remaining attempts itself, so the session needs a service caller.
+	s.engine.caller = &mockCaller{}
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step: 0, EventType: EventTypeCallAttemptFailed,
+		Service: "my-svc", Op: "my-op",
+		Request: `{"key":"val"}`, Err: "boom", Attempt: 1,
+	}}
+
+	result := s.DurableCallWithRetry(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
+
+	if got := byte(result >> 8); got == callErrorRetryPolicyTooLong {
+		t.Errorf("the replay REFUSED a policy the host had already run: a call_attempt_failed record means the host "+
+			"loop wrote it, so the policy fits this budget (callErrorCode %d)", got)
+	}
+	// Two steps: the recorded attempt is consumed, and the attempt that now runs and succeeds records its own call event.
+	if s.stepCount != 2 {
+		t.Errorf("stepCount = %d, want 2: the recorded attempt consumed, then the resumed attempt recorded", s.stepCount)
 	}
 }
 

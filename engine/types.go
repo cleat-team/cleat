@@ -29,20 +29,33 @@ const (
 	// Always followed by a terminal EventTypeCall for the same step unless the
 	// run was interrupted -- which is exactly the case replay has to read.
 	EventTypeCallAttemptFailed EventType = "call_attempt_failed"
-	EventTypeAwaitSignals      EventType = "await_signals"
-	EventTypeSignalReceived    EventType = "signal_received"
-	EventTypeDefer             EventType = "defer"
-	EventTypeChildWorkflow     EventType = "child_workflow"
-	EventTypeAwaitChild        EventType = "await_child"
-	EventTypeContinueAsNew     EventType = "continue_as_new"
-	EventTypeHeartbeat         EventType = "heartbeat"
-	EventTypeAwaitAllChildren  EventType = "await_all_children"
-	EventTypePluginCall        EventType = "plugin_call"
-	EventTypeCreatePromise     EventType = "create_promise"
-	EventTypeAwaitPromise      EventType = "await_promise"
-	EventTypePromiseResolved   EventType = "promise_resolved"
-	EventTypePromiseRejected   EventType = "promise_rejected"
-	EventTypeUpdateHandler     EventType = "update_handler"
+	// EventTypeCallRetryRefused records that the host DECLINED a retry policy
+	// as too long for one segment, before making any call. It exists so a
+	// replay can tell "the guest made this call itself, because we refused"
+	// from "the host ran the policy and this is its result": the first is
+	// followed by the guest's own EventTypeCall records, and without a marker
+	// of its own the refusal was indistinguishable from a host-run policy
+	// whose FIRST attempt succeeded. cleat#4032.
+	//
+	// Recording it costs one step, and it buys the property the refusals rely
+	// on: the answer a replay gives is the one the recording segment gave,
+	// even though the tenant's budget is writable in between. Histories
+	// written before it carry no such record and keep the older behaviour.
+	EventTypeCallRetryRefused EventType = "call_retry_refused"
+	EventTypeAwaitSignals     EventType = "await_signals"
+	EventTypeSignalReceived   EventType = "signal_received"
+	EventTypeDefer            EventType = "defer"
+	EventTypeChildWorkflow    EventType = "child_workflow"
+	EventTypeAwaitChild       EventType = "await_child"
+	EventTypeContinueAsNew    EventType = "continue_as_new"
+	EventTypeHeartbeat        EventType = "heartbeat"
+	EventTypeAwaitAllChildren EventType = "await_all_children"
+	EventTypePluginCall       EventType = "plugin_call"
+	EventTypeCreatePromise    EventType = "create_promise"
+	EventTypeAwaitPromise     EventType = "await_promise"
+	EventTypePromiseResolved  EventType = "promise_resolved"
+	EventTypePromiseRejected  EventType = "promise_rejected"
+	EventTypeUpdateHandler    EventType = "update_handler"
 	// EventTypeUpdateReceived records that a pending update request was
 	// delivered to the guest at this step. It is what makes an update
 	// replayable: on replay the poll reads this event rather than the
