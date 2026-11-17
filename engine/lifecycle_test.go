@@ -253,18 +253,37 @@ func TestDurableSleep_ZeroDuration(t *testing.T) {
 // DurableCallWithRetry tests.
 // ---------------------------------------------------------------------------
 
-// TestDurableCallWithRetry_Replay pins WHICH RECORDED SHAPE MEANS WHAT. cleat#4032.
+// TestDurableCallWithRetry_ReplayRefusesARecordedRefusal pins the marker cleat#4032 adds: a refusing segment writes
+// EventTypeCallRetryRefused, and a replay that finds one refuses again.
 //
-// A plain `call` record at this step is written by the guest's own loop, which is what runs after a refusal -- the
-// host loop writes `call_attempt_failed` for each attempt it makes. So a replay that finds one is replaying a
-// segment that was REFUSED, and must refuse again: answering from history instead is the defect (the recorded first
-// attempt becomes the answer, and the guest's loop never runs).
-//
-// This test used to assert that the plain `call` was replayed and consumed (errCode 0, stepCount 1). That held only
-// while the replay decision came from history, which is the behaviour #4032 removes. The cost is one extra hop for a
-// host-run policy whose FIRST attempt succeeded -- that also leaves a lone `call` record -- where the guest now
-// replays it through its own loop and gets the same value back.
-func TestDurableCallWithRetry_ReplayRefusesAPlainCallRecord(t *testing.T) {
+// That record is the ONLY thing that can distinguish the two situations a replay can be in. A plain `call` record is
+// written both by a guest's own fallback loop (after a refusal) and by a host-run policy whose first attempt succeeded,
+// and the tenant's budget -- the other candidate -- is writable while a run is in flight.
+func TestDurableCallWithRetry_ReplayRefusesARecordedRefusal(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step: 0, EventType: EventTypeCallRetryRefused,
+		Service: "my-svc", Op: "my-op", Request: `{"key":"val"}`,
+	}}
+
+	result := s.DurableCallWithRetry(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
+
+	// The CALL error code is bits 8-15; bits 0-7 are the write error code.
+	if got := byte(result >> 8); got != callErrorRetryPolicyTooLong {
+		t.Errorf("callErrorCode = %d, want callErrorRetryPolicyTooLong (%d): a recorded refusal means the policy was "+
+			"refused when this call was recorded", got, callErrorRetryPolicyTooLong)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1: the refusal record is consumed", s.stepCount)
+	}
+}
+
+// TestDurableCallWithRetry_ReplayReplaysAPlainCall is the case a shape-only rule broke: a plain `call` record is what a
+// host-run policy writes when its FIRST attempt succeeds, and the AssemblyScript, Java and Python SDKs have no fallback
+// to catch a refusal here.
+func TestDurableCallWithRetry_ReplayReplaysAPlainCall(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
@@ -276,15 +295,11 @@ func TestDurableCallWithRetry_ReplayRefusesAPlainCallRecord(t *testing.T) {
 	result := s.DurableCallWithRetry(context.Background(), nil,
 		"my-svc", "my-op", `{"key":"val"}`, 3, 100, 200, 1000, "", 0, 0)
 
-	// The CALL error code is bits 8-15; bits 0-7 are the write error code, which is what the older assertion below
-	// reads. `packDurableCallResult` is the authority: `responseLen<<40 | callErrorCode<<8 | errCode`.
-	if got := byte(result >> 8); got != callErrorRetryPolicyTooLong {
-		t.Errorf("callErrorCode = %d, want callErrorRetryPolicyTooLong (%d): a plain call record means the guest made it, "+
-			"so the policy was refused then and is refused now", got, callErrorRetryPolicyTooLong)
+	if got := byte(result & 0xFF); got != 0 {
+		t.Errorf("write errCode = %d, want 0: the recorded call is replayed, not refused", got)
 	}
-	// The refusal consumed nothing: the guest's loop replays the event itself on the next host call.
-	if s.stepCount != 0 {
-		t.Errorf("stepCount = %d, want 0: a refusal records and consumes nothing", s.stepCount)
+	if s.stepCount != 1 {
+		t.Errorf("stepCount = %d, want 1: the recorded call is consumed", s.stepCount)
 	}
 }
 

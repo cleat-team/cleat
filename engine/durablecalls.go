@@ -456,42 +456,56 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	if maxAttempts > int64(ceiling) {
 		maxAttempts = int64(ceiling)
 	}
-	// REFUSE A POLICY TOO LONG TO RUN IN ONE SEGMENT -- and decide it the same way on a replay as on a fresh
-	// execution, which is what cleat#4032 is about.
+	// REFUSE A POLICY TOO LONG TO RUN IN ONE SEGMENT, AND RECORD THE REFUSAL. cleat#4032.
 	//
-	// This check used to sit AFTER the replay return, on the reasoning that "a refusal records no event, so replay
-	// must never reach this and find nothing". The premise is right and the conclusion was wrong: a guest that is
-	// refused does not stop. Both SDKs fall back to their own loop of ordinary DurableCalls, which DO record events,
-	// and on the next segment the guest asks this same question again. Answering from history instead of from the
-	// refusal handed `replayCall` the guest's first FAILED attempt -- the error its own loop was in the middle of
-	// retrying -- because replayRetryAttempts only resumes on call_attempt_failed records and an ordinary call event
-	// stops the walk. The workflow then died on the very error the policy existed to retry.
+	// This check used to sit AFTER the replay return, on the reasoning that "a refusal records no event, so
+	// replay must never reach this and find nothing". The premise was right and the conclusion was wrong: a guest
+	// that is refused does not stop. Both SDKs fall back to their own loop of ordinary DurableCalls, which DO
+	// record events, and on the next segment the guest asks this same question again. Answering from history gave
+	// `replayCall` the guest's first FAILED attempt -- the error its own loop was in the middle of retrying --
+	// because replayRetryAttempts only resumes on call_attempt_failed records and an ordinary call event stops the
+	// walk. The workflow died on the very error the policy existed to retry.
 	//
-	// ON A REPLAY THE RECORDED SHAPE DECIDES, not the budget, because the budget is TENANT STATE and can change
-	// between two segments of one run (TenantSettings.HostRetryBudget is writable through the worker API). Hoisting
-	// the budget check above the replay branch was the first fix and it is not enough: measured, a policy refused at
-	// 1ns and replayed at 1h fits on the replay, so the host takes the history path and reproduces the original
-	// defect in the other direction.
+	// THE REFUSAL IS NOW AN EVENT, and that is what makes the replay answerable. The two obvious alternatives both
+	// fail:
 	//
-	// The shape is unambiguous. `call_attempt_failed` is written only by the host loop, so seeing one means the host
-	// ran the policy and should resume it. A plain `call` event at this step means the GUEST made that call itself --
-	// either because it was refused here, or because the host's very first attempt succeeded -- and either way
-	// answering "refused" sends it down its own loop, which replays that same recorded call and returns its value.
+	//   - asking the BUDGET again does not work, because the budget is TENANT STATE and is writable while a run is
+	//     in flight (TenantSettings.HostRetryBudget). Measured: a policy refused at 1ns and replayed at 1h fits on
+	//     the replay, which then takes the history path and reproduces the defect in the other direction.
+	//   - reading the SHAPE alone does not work either, because a host-run policy whose FIRST attempt succeeded also
+	//     leaves a lone plain call record. Refusing that one is wrong for every guest without a code-6 fallback --
+	//     the AssemblyScript, Java and Python SDKs have none -- and they get a hard failure on the replay of a call
+	//     that succeeded.
+	//
+	// So the refusing segment writes EventTypeCallRetryRefused, and only a replay that FINDS one refuses again. A
+	// history written before this change carries no such record: it keeps the old behaviour, which is #4032 itself
+	// and cannot be told apart after the fact. New histories are unambiguous in both directions.
+	//
+	// No attempt is consumed by the refusal itself: the guest's own loop makes the attempts, and recording them is
+	// what a replay of them replays.
 	//
 	// Skipped when the segment is being stopped, because ABI.md requires bit 31 to win over any field and a refusal
 	// IS a field: the stop paths below return the sentinel unchanged.
 	if !s.stopBeforeNewWork() {
 		if s.isReplay {
-			// The budget asked for at the top is the ACCEPT/REFUSE question for the recorded shape; the recorded
-			// attempt tells us which answer the recording segment got.
-			if s.stepCount < len(s.history) && s.history[s.stepCount].EventType == EventTypeCall {
+			if s.stepCount < len(s.history) && s.history[s.stepCount].EventType == EventTypeCallRetryRefused {
+				rec := s.history[s.stepCount]
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				return s.refuseRetryPolicy(ctx, m, responsePtr, responseMaxLen,
-					"retry policy rejected: this policy was refused on the segment that recorded this call, as its "+
-						"worst-case backoff exceeds the host-retry budget; run the policy in the guest, suspending "+
-						"between attempts")
+					"retry policy rejected: this policy was refused when this call was recorded, as its worst-case "+
+						"backoff exceeds the host-retry budget; run the policy in the guest, suspending between attempts")
 			}
 		} else if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
 			requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
+			s.recordEvent(EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeCallRetryRefused,
+				Service:   service,
+				Op:        operation,
+				Request:   requestJSON,
+			})
 			return s.refuseRetryPolicy(ctx, m, responsePtr, responseMaxLen,
 				fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
 					"run the policy in the guest, suspending between attempts", budget))

@@ -173,3 +173,69 @@ func TestARefusedRetryPolicyResumesWithItsNextAttempt(t *testing.T) {
 		})
 	}
 }
+
+// TestAReplayOfASuccessfulHostRetryDoesNotRefuseIt never gets a refusal to replay, because the policy fits -- and that is
+// the point: a replay must answer the way the recording segment did, for the commonest case there is, a host-run policy whose
+// FIRST attempt succeeded.
+//
+// It goes through the LOW-LEVEL entry (`DurableCallWithRetry`), which the Go SDK documents as having no fallback, and which is
+// what the AssemblyScript, Java and Python SDKs have: for them a refusal is a hard failure. So this is the test that a
+// shape-only rule breaks -- a lone plain `call` record is exactly what this success leaves behind, and refusing it turns a
+// successful call into a failed workflow on replay.
+func TestAReplayOfASuccessfulHostRetryDoesNotRefuseIt(t *testing.T) {
+	ctx := context.Background()
+	wasmBytes, err := os.ReadFile(buildFixtureWasm(t, "deferfunc"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	t.Cleanup(func() { rt.Close(ctx) })
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+	caller := &alwaysSucceedsCaller{}
+	eng := NewEngine(rt, caller, WithBackends(WasmtimeLanguages, wt), WithWorkflowID("wf-4032-success-replay"))
+
+	result, history, susp, _, _, err := eng.Execute(ctx, wasmBytes, "retry_on_host_first_attempt_succeeds", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("the first segment failed: %v", err)
+	}
+	if susp != nil {
+		t.Fatalf("the first segment suspended (%s); the policy fits the default budget and the first attempt succeeds", susp.Reason)
+	}
+	if len(history) != 1 || history[0].EventType != EventTypeCall {
+		t.Fatalf("history is %v, want exactly one call record: a host-run policy whose first attempt succeeded writes nothing else", history)
+	}
+	if got := caller.calls.Load(); got != 1 {
+		t.Fatalf("%d attempt(s) on the first segment, want 1", got)
+	}
+
+	replayed, _, susp2, _, _, err := eng.Replay(ctx, wasmBytes, "retry_on_host_first_attempt_succeeds", json.RawMessage(`{}`), history)
+	if err != nil {
+		t.Fatalf("the replay FAILED with %v.\n\n"+
+			"A plain call record is what this success leaves behind. Refusing it on replay turns a successful call into a "+
+			"hard failure for every guest without a code-6 fallback -- AssemblyScript, Java and Python have none.", err)
+	}
+	if susp2 != nil {
+		t.Fatalf("the replay suspended (%s); the recorded call answers it", susp2.Reason)
+	}
+	if string(replayed) != string(result) {
+		t.Errorf("the replay answered %q, want the first execution's %q", replayed, result)
+	}
+	if got := caller.calls.Load(); got != 1 {
+		t.Errorf("the service was called %d time(s) across both segments, want 1: the recorded call must be replayed", got)
+	}
+}
+
+// alwaysSucceedsCaller answers every call.
+type alwaysSucceedsCaller struct{ calls atomic.Int32 }
+
+func (c *alwaysSucceedsCaller) Call(context.Context, string, string, string) (string, error) {
+	c.calls.Add(1)
+	return `{"ok":true}`, nil
+}
