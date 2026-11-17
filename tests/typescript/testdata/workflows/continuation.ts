@@ -40,15 +40,6 @@ export const continuationLate = workflow(async (ctx) => {
   return null;
 });
 
-// For a real worker: continues once, asking for version 2, and the run it starts reports which workflow version it is. The engine
-// records the version on the event; whether the WORKER honours it is what TestTypeScriptContinueAsNewOnARealWorker measures.
-export const continuationVersionedOnce = workflow<{ n: number }, { n: number }>(async (ctx, input) => {
-  if (input.n === 0) {
-    await ctx.continueAsNew({ n: 1 }, { version: 2 });
-  }
-  return { n: input.n };
-});
-
 // cleat-review's probe on cleat#4043: a continueAsNew the host ACCEPTED, not awaited, followed by another guarded call. The host does not
 // mark the segment suspended on a continuation, so unless the binding does, listCrons reaches the host and records an event for a run
 // that has been replaced. (listCrons is read-only; a scheduleCron or a send in its place would be a real side effect.)

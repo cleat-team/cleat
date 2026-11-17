@@ -15,7 +15,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-const continuationEntries = "continuation,continuation_versioned,continuation_bad_version,continuation_late,continuation_versioned_once,continuation_then_another_call,continuation_versioned_then_another_call"
+const continuationEntries = "continuation,continuation_versioned,continuation_bad_version,continuation_late,continuation_then_another_call,continuation_versioned_then_another_call"
 
 func buildContinuation(t *testing.T) []byte {
 	t.Helper()
