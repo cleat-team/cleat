@@ -118,7 +118,7 @@ cleatctl -driver mysql -db "$CLEAT_DATABASE_URL" deploy workflow <name> <module.
 That works on PostgreSQL, MySQL and SQL Server. `-driver` and `-db` are global flags and go before the subcommand; `-driver` is
 inferred from the shape of the database URL when you leave it out, and passing it is clearer. `deploy-workflow --driver
 postgres|mysql|mssql --db <dsn> <name> <module.wasm>` is the standalone equivalent. Only `cleatctl deploy plugin` is still
-PostgreSQL-only (cleat#3994). The full how-to, including the version and plugin checks, is
+PostgreSQL-only (cleat#4005). The full how-to, including the version and plugin checks, is
 [deploy-workflows](../how-to/deploy-workflows.md).
 
 `TestTypeScriptRunsAllThreeSuspensionsOnARealWorker`, `TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution` and
