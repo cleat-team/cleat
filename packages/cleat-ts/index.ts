@@ -9,6 +9,18 @@
 // Build-time switch for the red control: `SUSPEND_MODE === "throw"` makes a suspended call THROW instead, the
 // "throw Suspend" design the plan rejects. It exists only so a test can show a `finally` running under it.
 
+import { type UpdatesCtx, makeUpdates } from "./groups/updates";
+import { type SignalsCtx, makeSignals } from "./groups/signals";
+import { type ChildrenCtx, makeChildren } from "./groups/children";
+import { type DetachedCtx, makeDetached } from "./groups/detached";
+import { type LocksCtx, makeLocks } from "./groups/locks";
+import { type SchedulesCtx, makeSchedules } from "./groups/schedules";
+import { type ContinuationCtx, makeContinuation } from "./groups/continuation";
+import { type CallsCtx, makeCalls } from "./groups/calls";
+import { type PluginsCtx, makePlugins } from "./groups/plugins";
+import { type UtilitiesCtx, makeUtilities } from "./groups/utilities";
+import type { Helpers } from "./groups/helpers";
+
 declare const SUSPEND_MODE: string | undefined;
 // Build-time switch for the Q4 red control: RESULT_CANONICAL=false sends the result as raw JSON.stringify, so a test can show a
 // multi-key result is NOT byte-identical to its Go twin without the host's canonical form (ABI 6.3, "SHOULD").
@@ -111,7 +123,8 @@ export interface AwaitedPromise<T> {
   timedOut: boolean;
 }
 
-export interface Ctx {
+// The calls cleat#3827 adds live in groups/<group>.ts, one file per group, and arrive here as these interfaces.
+export interface Ctx extends UpdatesCtx, SignalsCtx, ChildrenCtx, DetachedCtx, LocksCtx, SchedulesCtx, ContinuationCtx, CallsCtx, PluginsCtx, UtilitiesCtx {
   workflowId(): string;
   call<T = unknown>(service: string, operation: string, request?: unknown): Promise<T>;
   sleep(ms: number): Promise<void>;
@@ -181,6 +194,10 @@ export interface Ctx {
   defer(fn: () => unknown | Promise<unknown>, description?: string): Promise<void>;
 }
 
+// What a group module is handed instead of importing this file. `settle`, `encode` and `parseJSON` are function declarations, so
+// they are available here although they are written above and below.
+const helpers: Helpers = { settle, encode, parseJSON };
+
 const ctx: Ctx = {
   workflowId: () => __cleat_workflow_id(),
   call: (service, operation, request) => settle(__cleat_call(service, operation, encode(request ?? null))).then(parseJSON) as Promise<never>,
@@ -223,6 +240,18 @@ const ctx: Ctx = {
     settle<string>(__cleat_defer(description)).then((id) => {
       defers.push({ id: id, fn: fn });
     }),
+
+  // ---- the groups (cleat#3827) ----
+  ...makeUpdates(helpers),
+  ...makeSignals(helpers),
+  ...makeChildren(helpers),
+  ...makeDetached(helpers),
+  ...makeLocks(helpers),
+  ...makeSchedules(helpers),
+  ...makeContinuation(helpers),
+  ...makeCalls(helpers),
+  ...makePlugins(helpers),
+  ...makeUtilities(helpers),
 };
 
 // ---- deferred work ------------------------------------------------------------------------------------------------------
