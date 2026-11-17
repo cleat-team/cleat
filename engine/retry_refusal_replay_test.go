@@ -13,10 +13,12 @@ package engine
 //     arithmetic and consults no clock, so this half is exact);
 //   - a caller that fails ONE call and then succeeds, because a caller that always fails makes "the second attempt ran"
 //     unobservable;
-//   - a replay LOOP rather than one call, because a 1ms backoff suspends or not depending on how long the machine takes between
-//     recording the failed call and evaluating the deadline (`tenant_retry_budget_test.go` pins a clock to decide that question
-//     deliberately; here it is not the question -- the question is what the replay ANSWERS, and the loop reaches it on either
-//     side of the race);
+//   - a PINNED, ADVANCEABLE CLOCK, because "did the 1ms backoff suspend?" is a race against how long the machine takes between
+//     recording the failed call and evaluating the deadline (cleat#4047). Left to race, a fast machine runs attempt 2 inside
+//     the first segment, the replay never happens, and the test stops measuring the thing #4032 fixed. The clock is frozen at
+//     the workflow's start instant for the first segment, so the deadline is always ahead of it and the sleep ALWAYS suspends;
+//     it is advanced past that deadline for the replay, so the replayed sleep is satisfied. `WithWorkflowStartTime` is what
+//     makes the replay session anchor at the same instant instead of at the wall clock;
 //   - and the replay run twice, once at the budget that refused and once at a budget under which the policy FITS. The second is
 //     the case that decides the design: the tenant's budget is writable while a run is in flight, so a fix that re-asks the
 //     budget instead of reading the recorded shape reproduces the original defect in the other direction. Measured on the
@@ -126,13 +128,26 @@ func TestARefusedRetryPolicyResumesWithItsNextAttempt(t *testing.T) {
 			// replaced between segments is therefore the only way a replay can observe a changed budget -- which is
 			// also what a real replay is, and why the budget is tenant state rather than a property of the run.
 			caller := &failFirstCallThenSucceed{failService: "always-fails", err: errors.New("the service was briefly unavailable")}
+			// The clock the engine is told it is running at, offset from REAL time because a recorded event is stamped with
+			// `time.Now()` (`recordEvent`, lifecycle.go) and that stamp is a sleep's anchor. A fake clock pinned at an
+			// arbitrary past instant therefore cannot satisfy a replayed sleep: `DurableSleep` takes max(seed, last event
+			// time) and the event time is real, so the deadline stays a year ahead of the fake clock. The offsets below are
+			// larger than anything this test spends between recording and replaying, so the FIRST segment is before the
+			// deadline (always suspends) and the replay is after it (always satisfied).
+			base := time.Now().UnixMilli()
+			var now atomic.Int64
+			now.Store(base - 60_000)
 			newEngine := func(budget time.Duration) *Engine {
 				settings := &mutableBudgetStore{}
 				settings.budgetNS.Store(int64(budget))
 				return NewEngine(rt, caller,
 					WithBackends(WasmtimeLanguages, wt),
 					WithWorkflowID("wf-4032-refused-replay"),
-					WithWorkflowStore(settings))
+					WithWorkflowStore(settings),
+					// The session's clock anchor, identical on both segments -- `seedNowMs` takes it in preference to the wall
+					// clock and to the first history event, which is what created_at is for in production.
+					WithWorkflowStartTime(base),
+					WithClock(func() int64 { return now.Load() }))
 			}
 			eng := newEngine(time.Nanosecond)
 
@@ -141,17 +156,23 @@ func TestARefusedRetryPolicyResumesWithItsNextAttempt(t *testing.T) {
 				t.Fatalf("the first segment failed rather than suspending: %v", err)
 			}
 			// The precondition, and the reason the replay measures anything: the host refused, so the SDK's loop ran and
-			// recorded an ordinary call. Without this the replay below is not a fallback replay at all.
+			// recorded an ordinary call. With the clock pinned this is deterministic -- if it ever stops suspending, the pin
+			// has been lost and the replay below would be measuring nothing.
 			if susp == nil {
-				t.Logf("the first segment did not suspend: the 1ms backoff was already past its deadline. The replay below is "+
-					"still the measurement; the SDK loop ran either way, because the budget refused the policy (attempts: %d)",
-					caller.attempts())
-			} else if !strings.Contains(susp.Reason, "cleat_sleep") {
+				t.Fatalf("the first segment did not suspend although the clock is frozen at the workflow's start: the sleep's "+
+					"deadline cannot have passed. Attempts: %d. Without this suspension the replay is not a fallback replay at "+
+					"all, and the test would report a green having exercised the in-segment path instead.", caller.attempts())
+			}
+			if !strings.Contains(susp.Reason, "cleat_sleep") {
 				t.Fatalf("suspension reason is %q, want one naming cleat_sleep -- the SDK loop's backoff", susp.Reason)
 			}
-			if got := caller.attempts(); got > 1 {
-				t.Fatalf("%d attempt(s) in the first segment, want at most 1: more would mean the HOST ran the policy", got)
+			if got := caller.attempts(); got != 1 {
+				t.Fatalf("%d attempt(s) in the first segment, want exactly 1: the second must wait for the replay", got)
 			}
+
+			// Past the SDK loop's 1ms backoff and past the recorded event's real timestamp, so the replayed sleep is satisfied
+			// and the loop reaches attempt 2.
+			now.Store(base + 60_000)
 
 			// The replay happens on a worker that resolves a different budget, measured rather than assumed:
 			resumed := newEngine(tc.replay)
