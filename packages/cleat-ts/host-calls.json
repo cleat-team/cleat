@@ -17,7 +17,8 @@
     "__cleat_result",
     "__cleat_fail",
     "__cleat_suspended",
-    "__cleat_shims_off"
+    "__cleat_shims_off",
+    "__cleat_drain_done"
   ],
   "bound": {
     "__cleat_call": "cleat_call",

@@ -12,6 +12,11 @@
 //! Nothing is thrown, so a user's `try`/`catch` cannot swallow a suspension and no `finally` runs. After the entry's
 //! microtasks drain, `cleat_take_result` returns SUSPEND_SENTINEL if the flag is set. Once the flag is set, further
 //! bindings short-circuit without calling the host, so a segment records nothing past the call that suspended it.
+//!
+//! DEFER SEGMENTS (cleat#3826). A segment that suspends does not drain its own defers: the host calls the module's
+//! `__cleat_run_deferred` export itself, with `inDeferDrain` set. For this guest that export is `cleat_run_drain` below,
+//! republished under that name by `cleat-js-link`. Before it existed the host found no such export and silently ran
+//! nothing: a defer segment suspended correctly and recorded no defer calls at all.
 
 use std::cell::RefCell;
 
@@ -97,6 +102,47 @@ pub extern "C" fn cleat_take_result() -> i64 {
         io.written = None;
         ((len as i64) << 32) | (code as i64)
     })
+}
+
+thread_local! {
+    /// How many defer bodies the JavaScript drain ran, reported by `__cleat_drain_done` and read back by `cleat_run_drain`.
+    static DRAINED: RefCell<i64> = const { RefCell::new(0) };
+}
+
+/// The module `cleat_run_drain` evaluates: it calls the drain the entry point registered on `globalThis`. A module of
+/// its own rather than a Javy export, because a Javy export can run only ONCE per instance -- its wrapper copies the
+/// bytecode out of a passive data segment and drops the segment -- and the entry point has already used it.
+const DRAIN_SRC: &[u8] =
+    b"if (typeof globalThis.__cleat_drain === 'function') { globalThis.__cleat_drain(); }";
+
+/// The host-driven defer drain (cleat#3826), which `cleat-js-link` publishes as `__cleat_run_deferred`, the name the host
+/// looks up. A defer segment that suspends does not drain its own table, so the host calls this itself, with
+/// `inDeferDrain` set, and the calls the bodies make are the segment's real work. It returns the number of bodies run.
+///
+/// The suspended flag is cleared on the way in as well as on the way out, because `guarded` refuses every binding while
+/// it is set, which would refuse the very calls this exists to make. NOT exercised by the defer-segment test, and
+/// measured so: removing the clear at the start leaves it green, because `cleat_take_result` has already cleared the flag
+/// of a segment that suspended normally. It is here for a drain that follows a kill, where an entry point trapped with the
+/// flag up and `cleat_take_result` never ran. That case has no test yet. The clear on the way out is for the reason
+/// `cleat-sdk`'s own `__cleat_run_deferred` gives: the workflow is already decided, so there is no segment left to
+/// suspend, and a flag left set would make the next call on this instance look suspended.
+///
+/// A body that suspends sets the flag again, and `guarded` then refuses the later bodies' calls, so a suspended segment
+/// records nothing past the call that suspended it. That differs from Rust, whose bodies keep calling the host.
+#[unsafe(export_name = "cleat_run_drain")]
+pub extern "C" fn cleat_run_drain() -> i64 {
+    cleat_sdk::clear_suspended();
+    DRAINED.with(|d| *d.borrow_mut() = 0);
+    let drained =
+        javy_plugin_api::compile_src(DRAIN_SRC).and_then(|bc| javy_plugin_api::invoke(&bc, None));
+    match drained {
+        Ok(()) => {}
+        // Not an abort, unlike Javy's own `invoke` export: the host treats a trap here as "defers could not be run", and a
+        // body that threw must not stop the rest of the cleanup. The count simply stays at what was reported.
+        Err(e) => eprintln!("cleat-js: the defer drain failed: {e}"),
+    }
+    cleat_sdk::clear_suspended();
+    DRAINED.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
 
 fn json_string(message: &str) -> String {
@@ -346,6 +392,7 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
         // Brackets the JavaScript drain so the host can tell a defer body's durable calls from the workflow body's
         // (cleat#1155). Records no event itself; void.
         g.set("__cleat_defer_phase", Func::from(|on: bool| { cleat_sdk::host_calls::set_defer_phase(on) })).unwrap();
+        g.set("__cleat_drain_done", Func::from(|n: i32| { DRAINED.with(|d| *d.borrow_mut() = n as i64) })).unwrap();
         g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
         ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });
