@@ -5,6 +5,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // portedOn records, per subcommand, which dialects its SQL has actually been
@@ -151,8 +153,20 @@ var portedOn = map[string][]string{
 	"allow-public-exposure":  {"postgres", "mssql"},
 	"revoke-public-exposure": {"postgres", "mssql"},
 	"set-tenant-setting":     {"postgres"},
-	"deploy":                 {"postgres"},
-	"versions":               {"postgres"},
+
+	// deploy and versions (cleat#3994). MEASURED 2026-11-17 against real MySQL 8.4 and SQL Server
+	// 2022 databases: `deploy workflow` and every `versions` subcommand succeed, and deploy.go
+	// issues no SQL of its own -- it goes through the store interface and engine.PluginNameRegistry,
+	// both of which take a dialect. The entry said postgres before because nothing had exercised it,
+	// not because anything refused it.
+	//
+	// The other half of `deploy` is NOT covered by this line and must not be read as if it were:
+	// `deploy plugin` goes to engine.PluginLoader, whose `ON CONFLICT` is PostgreSQL-shaped, and it
+	// failed on MySQL with `Error 1064 (42000)` at that clause. Its restriction lives beside this map
+	// (deployPluginOn) because this one is keyed by DISPATCHED subcommands, and
+	// TestEverySubcommandDeclaresItsDialects refuses a key main.go does not dispatch.
+	"deploy":   {"postgres", "mysql", "mssql"},
+	"versions": {"postgres", "mysql", "mssql"},
 
 	// slack, cleat#2230: all three, from the start. slack_workspace carries
 	// no admin.-qualified SQL of its own (unlike drop-tenant) and no
@@ -215,5 +229,50 @@ func requirePortedFor(cmd string, d dialect) {
 			"database in a state no one asked for. `replay`, `debug` and `check-db`\n"+
 			"do work on %s -- those are the post-incident tools (cleat#1316).\n",
 		cmd, d.name, strings.Join(sorted, ", "), cmd, d.name)
+	osExit(1)
+}
+
+// deployPluginOn is the dialects `cleatctl deploy plugin` is written for.
+//
+// It is NOT an entry in portedOn, and that is a structural choice rather than an oversight: portedOn
+// is keyed by the subcommands main.go dispatches, and TestEverySubcommandDeclaresItsDialects refuses
+// a key the switch does not contain -- correctly, because such an entry reads as coverage for a
+// command that does not exist. `deploy` dispatches TWO commands whose portability differs, so the
+// finer restriction lives here, next to the map it cannot join, instead of quietly widening that map.
+//
+// MEASURED 2026-11-17, which is what separates the two: `deploy workflow` and `versions` succeed on
+// MySQL 8.4 and SQL Server 2022 with only this table changed. `deploy plugin` fails on MySQL at once,
+// in engine.PluginLoader's `ON CONFLICT (name, version) DO NOTHING` (Error 1064 (42000)), because
+// that loader's statements are PostgreSQL-shaped and its own comment says a caller reaching it on
+// another dialect needs a Rebind pass first. Porting it is its own job with its own tests.
+var deployPluginOn = []string{"postgres"}
+
+// requireDeployPluginPorted refuses `cleatctl deploy plugin` on a dialect the plugin loader is not
+// written for, and names the half of `deploy` that DOES work there.
+//
+// The naming is the point. Before this, the refusal came from requirePortedFor("deploy") and said the
+// whole command was unported, which sent a MySQL user away from `deploy workflow` -- a command that
+// works, and is what the how-to now tells them to run (cleat#3994).
+func requireDeployPluginPorted(d engine.Dialect) {
+	name := string(d)
+	if name == "" {
+		// Not resolved: a test or a path that did not go through main. The loader will fail loudly
+		// rather than silently, which is the same reason deployPluginSource returns no source here.
+		return
+	}
+	for _, s := range deployPluginOn {
+		if s == name {
+			return
+		}
+	}
+	fmt.Fprintf(os.Stderr,
+		"error: `cleatctl deploy plugin` has not been ported to %s.\n\n"+
+			"It is written for: %s.\n\n"+
+			"The plugin loader it uses issues SQL that is not re-bound or upserted for %s\n"+
+			"(`ON CONFLICT (name, version)`), so failing partway through would leave the database\n"+
+			"in a state no one asked for.\n\n"+
+			"`cleatctl deploy workflow` and `cleatctl versions` DO work on %s -- deploy the module\n"+
+			"with those, or run this command against PostgreSQL.\n",
+		name, strings.Join(deployPluginOn, ", "), name, name)
 	osExit(1)
 }
