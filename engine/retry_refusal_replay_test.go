@@ -75,7 +75,7 @@ func replayUntilFinished(t *testing.T, eng *Engine, ctx context.Context, wasm []
 			return "", err
 		}
 		if susp == nil {
-			return string(result), nil
+			return result, nil
 		}
 		history = next
 		lastErr = fmt.Errorf("still suspending after %d replays: %s", i+1, susp.Reason)
@@ -224,7 +224,7 @@ func TestAReplayOfASuccessfulHostRetryDoesNotRefuseIt(t *testing.T) {
 	if susp2 != nil {
 		t.Fatalf("the replay suspended (%s); the recorded call answers it", susp2.Reason)
 	}
-	if string(replayed) != string(result) {
+	if replayed != result {
 		t.Errorf("the replay answered %q, want the first execution's %q", replayed, result)
 	}
 	if got := caller.calls.Load(); got != 1 {
