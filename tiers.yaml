@@ -827,7 +827,7 @@ tier2:
            job's CLEAT_REQUIRE_TOOLCHAINS declaration, under which an unset DSN fails.
            On MySQL and SQL Server those jobs deploy through deploy-workflow; cleatctl deploy
            workflow works there too since cleat#4004, and only cleatctl deploy plugin stays
-           PostgreSQL-only (cleat#3994)"
+           PostgreSQL-only (cleat#4005)"
         - "not delivered as of 2026-11-17: the remaining host-call bindings, which include
            workflow updates, so no TypeScript workflow can issue one (cleat#3827), and a
            killed workflow's defers, which still do not run (cleat#3922). Delivered since the
