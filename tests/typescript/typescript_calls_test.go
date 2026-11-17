@@ -113,7 +113,7 @@ func runCalls(t *testing.T, wasm []byte, entry string, caller *scriptedCaller, e
 	if susp != nil {
 		t.Fatalf("%s: the workflow suspended (%s) although the policy fits one segment", entry, susp.Reason)
 	}
-	return string(raw), history
+	return raw, history
 }
 
 // TestTypeScriptCallRetryRetriesOnTheHost: the host path. The first attempt fails, the second answers, and the workflow sees the
@@ -305,7 +305,7 @@ func replayUntilDone(t *testing.T, e *engine.Engine, wasm []byte, entry string, 
 			t.Fatalf("Replay %d: %v", i+1, err)
 		}
 		if susp == nil {
-			return string(result)
+			return result
 		}
 		history = next
 	}
