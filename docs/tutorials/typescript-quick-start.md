@@ -111,15 +111,17 @@ Each is recorded, with the test that holds it, in [`packages/cleat-ts/DIVERGENCE
 
 A worker runs the built `.wasm` like any other workflow module. Put the module where the worker will find it:
 
-| Database | Deploy command |
-|---|---|
-| PostgreSQL | `cleatctl deploy workflow <name> <module.wasm>` |
-| MySQL, SQL Server | `deploy-workflow --driver mysql\|mssql --db <dsn> <name> <module.wasm>` |
+```bash
+cleatctl -driver mysql -db "$CLEAT_DATABASE_URL" deploy workflow <name> <module.wasm>   # or postgres, or mssql
+```
 
-**`cleatctl deploy` is PostgreSQL-only**: on MySQL and SQL Server it refuses with "has not been ported" before it touches the
-database (cleat#3994). `deploy-workflow` is the command there.
+That works on PostgreSQL, MySQL and SQL Server. `-driver` and `-db` are global flags and go before the subcommand; `-driver` is
+inferred from the shape of the database URL when you leave it out, and passing it is clearer. `deploy-workflow --driver
+postgres|mysql|mssql --db <dsn> <name> <module.wasm>` is the standalone equivalent. Only `cleatctl deploy plugin` is still
+PostgreSQL-only (cleat#3994). The full how-to, including the version and plugin checks, is
+[deploy-workflows](../how-to/deploy-workflows.md).
 
 `TestTypeScriptRunsAllThreeSuspensionsOnARealWorker`, `TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution` and
 `TestTypeScriptDeferSegmentRunsOnARealWorker` in `tests/typescript/` do this on a real worker, and the tier-2 CI jobs run them
-against PostgreSQL, MySQL and SQL Server. On MySQL and SQL Server they deploy through `deploy-workflow`, so the second row above is
-exercised by CI, not only by a local run. `CLEAT_TS_DIALECT` (cleat#3992) selects the database when you run them yourself.
+against PostgreSQL, MySQL and SQL Server. On MySQL and SQL Server they deploy through `deploy-workflow`, so that command is exercised by CI
+on those databases. `cleatctl deploy workflow` on them was measured by cleat#4004's own tests, not by these jobs. `CLEAT_TS_DIALECT` (cleat#3992) selects the database when you run them yourself.
