@@ -9,9 +9,22 @@ package typescript
 // cleat#3998 added TestTypeScriptDeferSegmentRunsOnARealWorker, which is database-backed through newWorkerEnv, and neither
 // job listed it (cleat-review found it, not a test).
 //
-// So the list is derived and compared, not trusted. A test is database-backed if it reaches needDatabase through any chain
-// of calls to functions in this package, which is read from the SOURCE with go/parser rather than guessed from names. The
-// workflow's two lists, the `-run` pattern and the loop that asserts each test passed, must each equal that set.
+// So the list is derived and compared, not trusted. A test is database-backed if it reaches needDatabase through a chain of
+// REFERENCES, read from the SOURCE with go/parser: any identifier mentioned inside a top-level function or inside a
+// package-level var's value is an edge, so a helper that is called, passed as a value (`t.Run("x", helper)`) or placed in a
+// table of func literals is followed. The workflow's two lists, the `-run` pattern and the loop that asserts each test
+// passed, must each equal that set.
+//
+// WHAT IT CANNOT FOLLOW, AND WHAT IT DOES ABOUT THAT. A method is reached through a selector (`x.env(t)`), and without type
+// information a bare name cannot say which method that is: keying methods by name matched 21 unrelated tests on a method
+// called `env`, because every test has a local variable of that name. So methods are not followed. Rather than pass over
+// them silently, the guard FAILS CLOSED: if a method body, or a package-level var named `_`, mentions a database-backed
+// function, the test fails and says it cannot attribute that, so the author lists the test explicitly or restructures.
+// Over-matching in the followed direction is loud (a spurious name appears as "missing" from the jobs); under-matching is the
+// silent failure, and the tripwire exists for the one place this approach would under-match.
+//
+// The four shapes that were planted against it (cleat-review on cleat#4006) are fixtures below and must each be caught: a
+// direct call, a function passed as a value, a table of func literals, and a method helper.
 //
 // Adding a database-backed test therefore fails this until it is added to both lists in both jobs, and the failure says so.
 // Check that it passes on that dialect first: this guard proves the test is SELECTED, not that it passes.
@@ -31,65 +44,129 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// databaseBackedTests returns the names of the top-level Test functions in dir that reach needDatabase.
-func databaseBackedTests(t *testing.T, dir string) []string {
-	t.Helper()
+// derivation is what databaseBackedTests found in one directory.
+type derivation struct {
+	Tests      []string // top-level Test functions that reach needDatabase, sorted
+	Unattribut []string // places the guard cannot follow that mention a database-backed function
+}
+
+// deriveDatabaseBacked reads every *_test.go in dir and returns the database-backed tests plus the tripwire findings.
+func deriveDatabaseBacked(dir string) (derivation, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
 	if err != nil || len(files) == 0 {
-		t.Fatalf("no test files in %s: %v", dir, err)
+		return derivation{}, fmt.Errorf("no test files in %s: %v", dir, err)
 	}
 	fset := token.NewFileSet()
-	calls := map[string]map[string]bool{} // function name -> names it calls
+	refs := map[string]map[string]bool{} // top-level function or var name -> identifiers it mentions
 	var tests []string
+	type opaque struct {
+		where string
+		refs  map[string]bool
+	}
+	var opaques []opaque // methods and blank vars: not followed, but checked
+
+	mentions := func(n ast.Node) map[string]bool {
+		set := map[string]bool{}
+		ast.Inspect(n, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok {
+				set[id.Name] = true
+			}
+			return true
+		})
+		return set
+	}
 	for _, f := range files {
 		file, err := parser.ParseFile(fset, f, nil, 0)
 		if err != nil {
-			t.Fatalf("parsing %s: %v", f, err)
+			return derivation{}, fmt.Errorf("parsing %s: %v", f, err)
 		}
 		for _, d := range file.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Recv != nil || fn.Body == nil {
-				continue
-			}
-			set := map[string]bool{}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if c, ok := n.(*ast.CallExpr); ok {
-					if id, ok := c.Fun.(*ast.Ident); ok {
-						set[id.Name] = true
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue
+				}
+				m := mentions(d.Body)
+				if d.Recv != nil {
+					opaques = append(opaques, opaque{fmt.Sprintf("method %s in %s", d.Name.Name, filepath.Base(f)), m})
+					continue
+				}
+				refs[d.Name.Name] = m
+				if strings.HasPrefix(d.Name.Name, "Test") {
+					tests = append(tests, d.Name.Name)
+				}
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, sp := range d.Specs {
+					vs := sp.(*ast.ValueSpec)
+					m := map[string]bool{}
+					for _, v := range vs.Values {
+						for k := range mentions(v) {
+							m[k] = true
+						}
+					}
+					for _, name := range vs.Names {
+						if name.Name == "_" {
+							opaques = append(opaques, opaque{fmt.Sprintf("blank var in %s", filepath.Base(f)), m})
+						} else {
+							refs[name.Name] = m
+						}
 					}
 				}
-				return true
-			})
-			calls[fn.Name.Name] = set
-			if strings.HasPrefix(fn.Name.Name, "Test") {
-				tests = append(tests, fn.Name.Name)
 			}
 		}
 	}
-	// A function is database-backed if it calls needDatabase or calls a database-backed function: a fixed point.
+	// A name is database-backed if it is needDatabase or mentions a database-backed name: a fixed point.
 	backed := map[string]bool{"needDatabase": true}
 	for changed := true; changed; {
 		changed = false
-		for fn, callees := range calls {
-			if backed[fn] {
+		for name, m := range refs {
+			if backed[name] {
 				continue
 			}
-			for c := range callees {
-				if backed[c] {
-					backed[fn], changed = true, true
+			for r := range m {
+				if backed[r] {
+					backed[name], changed = true, true
 					break
 				}
 			}
 		}
 	}
-	var out []string
+	var out derivation
 	for _, name := range tests {
 		if backed[name] {
-			out = append(out, name)
+			out.Tests = append(out.Tests, name)
 		}
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(out.Tests)
+	for _, o := range opaques {
+		for r := range o.refs {
+			if backed[r] {
+				out.Unattribut = append(out.Unattribut, fmt.Sprintf("%s mentions %s", o.where, r))
+				break
+			}
+		}
+	}
+	sort.Strings(out.Unattribut)
+	return out, nil
+}
+
+// databaseBackedTests is deriveDatabaseBacked for the real tree; a tripwire finding fails the test.
+func databaseBackedTests(t *testing.T, dir string) []string {
+	t.Helper()
+	d, err := deriveDatabaseBacked(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Unattribut) > 0 {
+		t.Fatalf("the guard cannot attribute a database-backed function reached from a method or a blank var, so a test behind "+
+			"it could be missing from the dialect jobs without this noticing:\n  - %s\n"+
+			"List the test explicitly in both dialect jobs and keep the database call out of methods and blank vars.",
+			strings.Join(d.Unattribut, "\n  - "))
+	}
+	return d.Tests
 }
 
 // diffSets names what is in want and not in got, and the reverse.
@@ -202,5 +279,78 @@ func TestTypeScriptEveryDatabaseBackedTestRunsInBothDialectJobs(t *testing.T) {
 			"Fix the workflow in BOTH jobs and in BOTH places (the -run pattern and the loop that asserts each test passed). "+
 			"First run the test on that dialect: this guard proves it is selected, not that it passes.",
 			derived, strings.Join(problems, "\n  - "))
+	}
+}
+
+// TestTypeScriptDialectGuardSeesEveryPlantedShape holds the derivation to the shapes cleat-review planted against it on
+// cleat#4006. Each is a new test that reaches needDatabase through the same entry the real worker tests use (newWorkerEnv),
+// in a throwaway directory with stand-ins for needDatabase and newWorkerEnv, so nothing here depends on the real tests.
+//
+// A guard that has only ever been run on a tree where it passes has not been shown to be able to fail. The first version of
+// this one followed direct calls only and passed on three of these four shapes.
+func TestTypeScriptDialectGuardSeesEveryPlantedShape(t *testing.T) {
+	const base = `package typescript
+
+import "testing"
+
+func needDatabase(t *testing.T) {}
+
+type workerEnv struct{}
+
+func newWorkerEnv(t *testing.T) *workerEnv { needDatabase(t); return &workerEnv{} }
+`
+	cases := []struct {
+		name       string
+		plant      string
+		wantTests  []string // must be derived
+		wantTrip   bool     // must trip the fail-closed check
+		wantAbsent []string // must NOT be derived
+	}{
+		{"direct call", `func TestPlant(t *testing.T) { newWorkerEnv(t) }`, []string{"TestPlant"}, false, nil},
+		{"a function passed as a value", `
+func runPlant(t *testing.T) { newWorkerEnv(t) }
+func TestPlant(t *testing.T) { t.Run("x", runPlant) }`, []string{"TestPlant"}, false, nil},
+		{"a table of func literals", `
+var plantCases = []struct{ f func(*testing.T) }{{f: func(t *testing.T) { newWorkerEnv(t) }}}
+func TestPlant(t *testing.T) { for _, c := range plantCases { c.f(t) } }`, []string{"TestPlant"}, false, nil},
+		{"a method helper", `
+type plantSuite struct{}
+func (plantSuite) env(t *testing.T) *workerEnv { return newWorkerEnv(t) }
+func TestPlant(t *testing.T) { plantSuite{}.env(t) }`, nil, true, nil},
+		{"a blank var that reaches the database", `var _ = func(t *testing.T) { newWorkerEnv(t) }`, nil, true, nil},
+		// NEGATIVE CONTROLS: the guard must not pay for catching the above by flagging what is not database-backed.
+		{"a test that never touches a database", `func TestPlain(t *testing.T) { t.Log("x") }`, nil, false, []string{"TestPlain"}},
+		{"a method named env beside tests that have a local env", `
+type other struct{}
+func (other) env(t *testing.T) int { return 1 }
+func TestPlain(t *testing.T) { env := 1; _ = env }`, nil, false, []string{"TestPlain"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "base_test.go"), []byte(base), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "plant_test.go"), []byte("package typescript\n\nimport \"testing\"\n"+c.plant+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d, err := deriveDatabaseBacked(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if missing, _ := diffSets(c.wantTests, d.Tests); len(missing) > 0 {
+				t.Errorf("the derivation did not find %v (found %v): a test like this would be missing from the jobs and nothing would say so", missing, d.Tests)
+			}
+			for _, absent := range c.wantAbsent {
+				for _, got := range d.Tests {
+					if got == absent {
+						t.Errorf("%s was derived as database-backed but never touches a database", absent)
+					}
+				}
+			}
+			if c.wantTrip != (len(d.Unattribut) > 0) {
+				t.Errorf("fail-closed check: want tripped=%v, got findings %v", c.wantTrip, d.Unattribut)
+			}
+		})
 	}
 }
