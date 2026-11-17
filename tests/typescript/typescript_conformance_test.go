@@ -155,7 +155,7 @@ func TestTypeScriptURLRefusesWhatItCannotAnswer(t *testing.T) {
 		t.Fatal("no cases ran, so nothing was checked")
 	}
 	for _, l := range lines {
-		if l != "loud" {
+		if !strings.HasPrefix(l, "loud: ") {
 			t.Errorf("%s", l)
 		}
 	}
@@ -187,6 +187,241 @@ func TestTypeScriptURLFileSpecShortening(t *testing.T) {
 		"file:///a:/.. -> file:///a:/",
 		"file:///C:/.. -> file:///C:/",
 		"file:///C:/a/.. -> file:///C:/",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the guest answered %d cases, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("case %d: guest %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// parseRanges reads the sweep's compact range list ("9-a,d,21-24") into pairs.
+func parseRanges(t *testing.T, s string) [][2]int {
+	t.Helper()
+	if s == "" {
+		return nil
+	}
+	var out [][2]int
+	for _, r := range strings.Split(s, ",") {
+		a, b, ok := strings.Cut(r, "-")
+		if !ok {
+			b = a
+		}
+		lo, err := strconv.ParseInt(a, 16, 32)
+		if err != nil {
+			t.Fatalf("range %q: %v", r, err)
+		}
+		hi, err := strconv.ParseInt(b, 16, 32)
+		if err != nil {
+			t.Fatalf("range %q: %v", r, err)
+		}
+		out = append(out, [2]int{int(lo), int(hi)})
+	}
+	return out
+}
+
+func inRanges(rs [][2]int, c int) bool {
+	lo, hi := 0, len(rs)-1
+	for lo <= hi {
+		m := (lo + hi) / 2
+		if c < rs[m][0] {
+			hi = m - 1
+		} else if c > rs[m][1] {
+			lo = m + 1
+		} else {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepSamples is the code-point set urls_sweep.ts measures: the BMP, then every 61st code point above it. Above the BMP
+// only a sample is measured, because the whole range takes longer than one guest execution is allowed.
+func sweepSamples() []int {
+	var cp []int
+	for c := 0; c <= 0xffff; c++ {
+		cp = append(cp, c)
+	}
+	for c := 0x10000; c < 0x110000; c += 61 {
+		cp = append(cp, c)
+	}
+	return cp
+}
+
+// TestTypeScriptURLHostCodePointSweep holds the IDNA claim of DIVERGENCES.md row 2 at code-point level. It asks, for every
+// sampled code point placed in a host label (raw and already Punycode-encoded), whether the guest and Node accept it. A
+// code point the guest ACCEPTS where Node refuses is a silent divergence and fails, because a catch-all such as zod's
+// z.url() would report an invalid URL as valid. A code point the guest REFUSES where Node accepts is loud: it is reported,
+// with a ceiling, but it does not fail.
+func TestTypeScriptURLHostCodePointSweep(t *testing.T) {
+	root := needToolchain(t)
+	needNodeAtLeast(t, 24)
+	src := "tests/typescript/testdata/conformance/urls_sweep.ts"
+	guest := guestResult(t, root, src, "urls_sweep")
+	node := nodeOracle(t, root, src, "urlsSweep")
+	if len(guest) != 4 || len(node) != 4 {
+		t.Fatalf("expected four elements (raw, xn--, count, values), got %d and %d", len(guest), len(node))
+	}
+	samples := sweepSamples()
+	if guest[2] != node[2] {
+		t.Fatalf("the two runs swept different sets: guest %s code points, Node %s", guest[2], node[2])
+	}
+	if guest[2] != strconv.Itoa(len(samples)) {
+		t.Fatalf("the fixture swept %s code points and this test expects %d", guest[2], len(samples))
+	}
+	// A sanity bound, not an expectation. The loud count is a function of the Node version: the guest refuses a Punycode
+	// label Node accepts, and Node 26.4.0 accepts far fewer of them than Node 24. Measured 2026-11-17: 23 code points on
+	// 26.4.0 and 28,179 on 24.22.3 (the version CI pins, which accepts malformed `xn--` payloads). A census here would
+	// encode one runner's Node, so the bound only catches the degenerate case where the guest refuses nearly everything;
+	// the blocking assertion is silent == 0 below.
+	const loudCeiling = 40000
+	var gv, nv []string
+	if err := json.Unmarshal([]byte(guest[3]), &gv); err != nil {
+		t.Fatalf("guest value sample is not a JSON array: %v", err)
+	}
+	if err := json.Unmarshal([]byte(node[3]), &nv); err != nil {
+		t.Fatalf("Node value sample is not a JSON array: %v", err)
+	}
+	if len(gv) != len(nv) || len(gv) == 0 {
+		t.Fatalf("the value sample has %d guest entries and %d Node entries", len(gv), len(nv))
+	}
+	// Each entry is `cp:innerHost:initialHost`, with "!" for a refusal. A host BOTH sides accept and encode DIFFERENTLY is
+	// a silent divergence -- the accept/refuse sweep cannot see it. The guest refusing where Node accepts is loud.
+	var valSilent, valLoud []string
+	for i := range nv {
+		gp, np := strings.SplitN(gv[i], ":", 3), strings.SplitN(nv[i], ":", 3)
+		if len(gp) != 3 || len(np) != 3 {
+			t.Fatalf("malformed value entry: guest %q node %q", gv[i], nv[i])
+		}
+		for f := 1; f <= 2; f++ {
+			gh, nh := gp[f], np[f]
+			switch {
+			case gh != "!" && nh != "!" && gh != nh:
+				if len(valSilent) < 400 {
+					valSilent = append(valSilent, gp[0]+" "+[]string{"inner", "initial"}[f-1]+": guest "+gh+", Node "+nh)
+				}
+			case gh == "!" && nh != "!":
+				if len(valLoud) < 20 {
+					valLoud = append(valLoud, gp[0]+" "+[]string{"inner", "initial"}[f-1])
+				}
+			}
+		}
+	}
+	if len(valSilent) > 0 {
+		t.Errorf("host values differ where both sides accept (%d shown): %v", len(valSilent), valSilent)
+	}
+	t.Logf("value sample: %d code points, %d silent value differences, %d loud refusals", len(nv), len(valSilent), len(valLoud))
+	for i, form := range []string{"raw", "xn--"} {
+		gr, nr := parseRanges(t, guest[i]), parseRanges(t, node[i])
+		var silent, loud []int
+		for _, cp := range samples {
+			if cp >= 0xd800 && cp <= 0xdfff {
+				continue
+			}
+			a, b := inRanges(gr, cp), inRanges(nr, cp)
+			if a && !b {
+				if len(silent) < 20 {
+					silent = append(silent, cp)
+				}
+			} else if b && !a {
+				loud = append(loud, cp)
+			}
+		}
+		if len(silent) > 0 {
+			t.Errorf("%s: the guest accepts %d code point(s) Node refuses (showing up to 20): %v -- a silent divergence", form, len(silent), silent)
+		}
+		if len(loud) > loudCeiling {
+			t.Errorf("%s: the guest refuses %d code points Node accepts, over the ceiling of %d: %v", form, len(loud), loudCeiling, loud[:20])
+		}
+		t.Logf("%s: %d silent, %d loud (ceiling %d): %v", form, len(silent), len(loud), loudCeiling, loud)
+	}
+}
+
+// TestTypeScriptURLContextualRules covers what a single-code-point sweep cannot see: UTS46's CheckJoiners and CheckBidi.
+// Each case is a whole host, answered by both sides, so the comparison is about the rule. The guest refusing a host Node
+// accepts is loud and is reported; the guest ACCEPTING one Node refuses is a silent divergence and fails.
+func TestTypeScriptURLContextualRules(t *testing.T) {
+	root := needToolchain(t)
+	needNodeAtLeast(t, 24)
+	src := "tests/typescript/testdata/conformance/urls_context.ts"
+	guest := guestResult(t, root, src, "urls_context")
+	node := nodeOracle(t, root, src, "urlsContext")
+	if len(guest) != len(node) {
+		t.Fatalf("the guest answered %d cases and Node %d", len(guest), len(node))
+	}
+	if len(guest) == 0 {
+		t.Fatal("no cases ran, so nothing was compared")
+	}
+	var silent, loud []string
+	for i := range guest {
+		g, n := strings.HasSuffix(guest[i], "accept"), strings.HasSuffix(node[i], "accept")
+		if g && !n {
+			silent = append(silent, guest[i])
+		} else if n && !g {
+			loud = append(loud, guest[i])
+		}
+	}
+	if len(silent) > 0 {
+		t.Errorf("the guest accepts %d host(s) Node refuses: %v -- a silent divergence", len(silent), silent)
+	}
+	t.Logf("%d contextual probes: %d silent, %d loud: %v", len(guest), len(silent), len(loud), loud)
+}
+
+// TestTypeScriptURLIDNASpecRefusesMalformedLabels pins the IDNA rule where Node's own versions disagree: a malformed
+// `xn--` label. Node 26 refuses it and Node 24 accepts it, so the corpus excludes these inputs and the expected answers
+// are literals here. Refusing is the stricter of the two -- exact against Node 26, loud against Node 24 -- and is what
+// the flip's no-silent-divergence condition asks for (DIVERGENCES.md row 2, cleat#3898).
+func TestTypeScriptURLIDNASpecRefusesMalformedLabels(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/conformance/urls_idna_spec.ts"
+	got := guestResult(t, root, src, "urls_idna_spec")
+	want := []string{
+		"http://a.xn--/ -> refuse", "http://xn--a.com/ -> refuse", "http://xn--0.com/ -> refuse",
+		"http://xn--.com/ -> refuse", "http://xn----.com/ -> refuse", "http://xn---.com/ -> refuse",
+		"http://xn--a-.com/ -> refuse", "http://xn--ab-.com/ -> refuse", "http://xn--1ug.com/ -> refuse",
+		"http://xn---a.com/ -> refuse", "http://xn--a-xbb.com/ -> refuse", "http://xn--kkg.com/ -> refuse",
+		"http://xn--kba.com/ -> refuse", "http://xn--ab-1ca.com/ -> refuse", "http://xn--ab-l13a.com/ -> refuse",
+		"http://xn--tvg.com/ -> refuse", "http://xn--ib9b.com/ -> refuse",
+		"http://xn--mnchen-3ya.de/ -> accept", "http://xn--zca/ -> accept", "http://xn--fa-hia.de/ -> accept",
+		"http://münchen.de/ -> accept", "http://例え.テスト/ -> accept",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the guest answered %d cases, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("case %d: guest %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestTypeScriptURLIDNAContextRules pins the rules that need a preceding code point: the capital-sigma fold, the
+// combining-mark order after lowercasing, and the Arabic-Indic digit class Node's versions disagree about. Found by
+// cleat-review's pairs probe, which the single-code-point sweep cannot replace (cleat#3898).
+func TestTypeScriptURLIDNAContextRules(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/conformance/urls_idna_context.ts"
+	got := guestResult(t, root, src, "urls_idna_context")
+	want := []string{
+		"http://ΕΛΛΑΣ.gr/ -> host xn--mxahsa5b.gr",
+		"http://ΑΘΗΝΑΣ.gr/ -> host xn--mxaard0a1b.gr",
+		"http://ΒΌΛΟΣ.com/ -> host xn--nxasmq6b.com",
+		"http://Σ.gr/ -> host xn--4xa.gr",
+		"http://ΣΣ.gr/ -> host xn--4xaa.gr",
+		"http://ασ.gr/ -> host xn--mxa0b.gr",
+		"http://ά.gr/ -> host xn--hxa.gr",
+		"http://İ़.com/ -> host xn--i-9bb088b.com",
+		"http://İ.com/ -> host xn--i-9bb.com",
+		"http://١.com/ -> refuse",
+		"http://٠١.com/ -> refuse",
+		"http://a١b.com/ -> refuse",
+		"http://١٢٣.gr/ -> refuse",
+		"http://\U00010D30.com/ -> refuse",
+		"http://\U00010E60.com/ -> refuse",
+		"http://a\U00010D30b.com/ -> refuse",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("the guest answered %d cases, want %d: %v", len(got), len(want), got)

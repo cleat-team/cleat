@@ -25,19 +25,71 @@ lodash-es 4.18.1, uuid 14.0.3) unmodified; there may be more.
 It is the WHATWG URL algorithm for the part that can be done exactly: the special schemes (`http`, `https`, `ws`, `wss`, `ftp`,
 `file`) and generic ones, relative resolution against a base, percent-encoding, IPv4 hosts (including the hex, octal and short
 forms), IPv6 hosts in brackets (including the embedded-IPv4 form, written back as hex pairs as the specification does),
-`file:` URLs (the empty host, `localhost` folded to it, and a Windows drive letter kept in the path), `URLSearchParams` in full,
-`URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
+`file:` URLs (the empty host, `localhost` folded to it, and a Windows drive letter kept in the path), internationalised hosts,
+`URLSearchParams` in full, `URL.canParse` and `URL.parse`, and the `search` and `hash` setters (which update `searchParams`).
 
-It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for: a host that is not ASCII or
-that contains an `xn--` label (both need IDNA processing), and setting `href`, `protocol`, `username`, `password`, `host`,
-`hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one, and Node accepts or silently
-no-ops all eight setters, so each is loud in the guest and quiet in Node.
+IDNA is NFKC folding (fullwidth and compatibility forms), the three non-ASCII dot characters becoming `.`, lowercasing,
+percent-encoded UTF-8 decoded first (so `m%C3%BCnchen.de` is `münchen.de`), and RFC 3492 Punycode. Validity is **measured, not
+tabulated by hand**: a table of the code points Node 26.4.0 accepts in a label, plus RFC 5893's bidi rule approximated with the
+measured right-to-left class. A label already in `xn--` form is **checked, not trusted**: it must decode, its decoded form must
+be what UTS46 would have emitted (NFKC, case-folded — with the two measured exceptions, SHARP S and Cherokee — and free of
+default-ignorable code points), it must contain a non-ASCII code point and satisfy the same validity and bidi rules, and its
+re-encoding must be the same payload.
+
+**The exhaustive check, measured 2026-11-17:** every code point U+0000-U+10FFFF (1,112,064, surrogates excluded), in a raw
+label and in an already-Punycode-encoded one, compared with Node 26.4.0. **Zero code points are silently accepted in either
+form.** In the `xn--` form the guest refuses some code points Node accepts; that count is a property of the **Node version**,
+not of the shim — **23** on 26.4.0 and **28,179** on 24.22.3, which accepts malformed `xn--` payloads that 26 refuses — and
+all of them are **loud**: the shim throws where Node answers.
+
+Because an accept/refuse comparison cannot see a host both sides accept and encode DIFFERENTLY, the resulting host VALUE is
+compared too, over every seventh BMP code point and a stride of the supplementary planes, in the between-letters and
+label-initial positions. That found three real encoding faults the accept/refuse sweep could not: default-ignorable code
+points were kept instead of removed (`a­b` was `xn--ab-5da` where Node says `ab`), a label could start with a combining
+mark, and UTS46 case folding is not `toLowerCase`. The first two are fixed; the third — Cherokee, Cyrillic Extended-C, Greek
+Extended's ypogegrammeni forms, U+0345, U+03F2/U+03F9 and the Greek mathematical alphanumerics — is **refused** rather than
+mis-encoded, because reproducing it needs the UTS46 table. cleat-review's exhaustive value probe on this shim reads
+**0 silent accepts, 0 silent value differences, 1,409 loud**.
+
+**Rules that need context are probed with pairs**, which a single-code-point sweep cannot replace (cleat-review's pairs
+probe, 57,600 hosts: 0 silent accepts, 0 silent value differences, 11,538 loud; a second probe over 50,880 hosts: 0 silent).
+Three were found this way and each is pinned in `urls_idna_context.ts`:
+- **capital sigma**: UTS46 folds it to sigma ALWAYS, while JavaScript's `toLowerCase` applies Final_Sigma and turns a
+  label-final capital sigma into final sigma, so `ΕΛΛΑΣ.gr` was `xn--mxahsa0b.gr` instead of `xn--mxahsa5b.gr`. The shim folds
+  U+03A3 before lowercasing;
+- **combining-mark order**: lowercasing can move a mark out of canonical order (U+0130 + a mark), so NFC runs again after it;
+- **bidi class AN labels**: Node 26 accepts a label of Arabic-Indic digits and of the other bidi-class-AN code points, and
+  Node 24, the version CI pins, refuses them. The shim refuses the whole class — U+0600-U+0605, U+0660-U+0669, U+066B-U+066C,
+  U+06DD, U+0890-U+0891, U+08E2, U+10D30-U+10D39, U+10E60-U+10E7E — which is loud against 26, exact against 24, the same
+  version-split rule as the malformed `xn--` labels. cleat-review's digit probe reads 0 lone-label and 0 in-context silent.
+
+`TestTypeScriptURLHostCodePointSweep` re-runs the code-point sweep (BMP in full plus a stride of the supplementary planes; the
+whole range is longer than one guest execution is allowed), fails on any silently accepted code point or any host value that
+differs where both sides accept, and reports the loud set against a sanity bound rather than a census.
+`TestTypeScriptURLContextualRules` holds the joiner and bidi probes, `TestTypeScriptURLIDNAContextRules` the sigma, ordering
+and digit rules, and `TestTypeScriptURLIDNASpecRefusesMalformedLabels` the malformed `xn--` labels.
+
+**The contextual rules a single-code-point sweep cannot see** are covered by 48 probes in
+`tests/typescript/testdata/conformance/urls_context.ts`, each in raw and `xn--` form, answered by both sides and held by
+`TestTypeScriptURLContextualRules`: ZWNJ/ZWJ after a Devanagari and a Malayalam virama, ZWNJ between Arabic dual-joining
+letters, the same joiners with no joining context, an all-RTL label, an RTL label ending in a European digit, an Arabic digit
+and a combining mark, EN and AN in one RTL label, an RTL label starting with a digit, RTL beside a Latin label, an RTL letter
+with a Latin one, and three Hebrew/Catalan context checks. Result, measured 2026-11-17: **0 silent, 12 loud** — the 12 are the
+six valid joiner labels in their raw and `xn--` forms, which the guest refuses because `CheckJoiners` is not implemented. That
+direction is loud. `CONTEXTO` is not applied by Node either, which the probe records: `l·x`, a middle dot with no Catalan
+context, is accepted by both.
+
+
+
+It **throws** `cleat: URL: <what> is not supported in the guest`, and never returns a guess, for setting `href`, `protocol`,
+`username`, `password`, `host`, `hostname`, `port` or `pathname`. `TestTypeScriptURLRefusesWhatItCannotAnswer` holds each one, and
+Node accepts or silently no-ops all eight setters, so each is loud in the guest and quiet in Node.
 
 **That is loud to code that lets the error out, and not to code that catches everything.** zod's `z.url()` wraps `new URL` in a
 `try`/`catch`, which is how the `ReferenceError` was swallowed in the first place: for an input in the list above `z.url()` still
 reports "invalid" where Node says valid, and for a setter the error escapes `z.url()` entirely. So row 2 is fixed for every input
-the shim answers and **remains silent through a catch-all for the ones it refuses** (an internationalised host, and the eight
-setters). It is not a support claim for those. The remaining inputs are cleat#3898; the setters are cleat#4016.
+the shim answers and **remains silent through a catch-all for the ones it refuses** (the eight setters). It is not a support
+claim for those; cleat#4016 holds them.
 
 **Where Node itself departs from the specification** (measured on Node 26.4.0, not in the guest): a relative input that carries a
 fragment is accepted against a base with an opaque path (`new URL("x#y", "foo:bar")` is `foo:bar/x#y`, while `new URL("x",
@@ -73,6 +125,13 @@ place is known: shortening a `file:` path whose only segment starts with a drive
 The specification pops `C:x` (`file:///C:x/..` is `file:///`), Node 24 does the same, and Node 26 keeps it. The URL corpus is
 compared against the Node CI pins (24), so that shape is excluded from the comparison and pinned guest-side by
 `TestTypeScriptURLFileSpecShortening` -- neither version can quietly change the answer.
+
+A second place, in the same family: **a malformed `xn--` label**. Node 26 refuses an empty payload (`http://a.xn--/`), one
+that decodes to a control character (`xn--a`, `xn--1ug`, `xn--kba`), one that is not NFC or not lowercase (`xn--a-xbb`,
+`xn--kkg`), and the Cherokee small letters; Node 24 accepts them. The shim takes the stricter answer and refuses, which is
+exact against Node 26 and **loud** against Node 24 -- the direction the flip's condition allows. Those inputs are excluded
+from the comparison (they would test whichever Node the runner has) and pinned guest-side by
+`TestTypeScriptURLIDNASpecRefusesMalformedLabels`, together with five valid labels that must still be accepted.
 
 A control build leaves the shim-less plugin in `packages/cleat-ts/.work/`, and the next ordinary build reuses it (cleat#3897): run the next build with `REBUILD_PLUGIN=1` to put the shipped plugin back.
 

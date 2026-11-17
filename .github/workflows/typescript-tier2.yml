@@ -221,9 +221,10 @@ jobs:
           # the `cleat build --target ts` test, the conformance tests, the host-call binding tests and the worker smoke
           # tests do (the last also need PostgreSQL), and the numbers test needs componentize-py where declared. The floor
           # is the number of top-level tests in this package and must be raised when one is added: it was 14 while 15
-          # tests existed, which is the drift this line exists to catch.
+          # tests existed, which is the drift this line exists to catch, and 30 while 36 existed after cleat#3898 added
+          # four (cleat-review caught that one before it shipped a floor two tests short of the evidence).
           # Re-derive: go test ./tests/typescript/ -list '^Test' | grep -c '^Test'  (NOT grep for '^func Test': the dialect guard's fixtures contain such lines in raw strings, so it over-counts)
-          [ "$top" -ge 30 ] || { echo "only $top top-level tests passed; the thirty in tests/typescript must all run" >&2; exit 1; }
+          [ "$top" -ge 36 ] || { echo "only $top top-level tests passed; the thirty-six in tests/typescript must all run" >&2; exit 1; }
           [ -s "$TS_NUMBERS_OUT" ] || { echo "the numbers test passed but wrote no $TS_NUMBERS_OUT" >&2; exit 1; }
 
       - name: "Skip budget (zero, because the toolchain was declared)"
