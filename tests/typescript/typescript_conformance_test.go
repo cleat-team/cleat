@@ -160,3 +160,14 @@ func TestTypeScriptURLRefusesWhatItCannotAnswer(t *testing.T) {
 		}
 	}
 }
+
+// TestTypeScriptURLFileURLsAgreeWithNode holds the file: rules: the empty host and localhost folding, a Windows drive letter
+// kept in the path and normalised from "|" to ":", ".." never removing it, a relative path inheriting a file base's drive
+// letter, and backslash separators. cleat-review's probe on the first version of the handler found nineteen silent wrong
+// answers, every one of them a shape in this matrix (cleat#3898).
+func TestTypeScriptURLFileURLsAgreeWithNode(t *testing.T) {
+	root := needToolchain(t)
+	needNodeAtLeast(t, 24)
+	src := "tests/typescript/testdata/conformance/urls_file.ts"
+	compareLines(t, "file: URLs", guestResult(t, root, src, "urls_file"), nodeOracle(t, root, src, "urlsFile"))
+}
