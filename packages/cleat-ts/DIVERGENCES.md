@@ -76,7 +76,7 @@ letters, the same joiners with no joining context, an all-RTL label, an RTL labe
 and a combining mark, EN and AN in one RTL label, an RTL label starting with a digit, RTL beside a Latin label, an RTL letter
 with a Latin one, and three Hebrew/Catalan context checks. Result, measured 2026-11-17: **0 silent, 12 loud** — the 12 are the
 six valid joiner labels in their raw and `xn--` forms, which the guest refuses because `CheckJoiners` is not implemented. That
-direction is loud. `CONTEXTO` is not applied by Node either, which the probe records: `l·x`, a middle dot with no Catalan
+direction is loud, and it is cleat#4020. `CONTEXTO` is not applied by Node either, which the probe records: `l·x`, a middle dot with no Catalan
 context, is accepted by both.
 
 

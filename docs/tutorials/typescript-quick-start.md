@@ -1,7 +1,7 @@
 # TypeScript quick start
 
-> **Status: tier 2, in development, NOT supported.** (`tiers.yaml`, cleat#3825.) This page describes what exists and was
-> measured. It is not a support commitment, and the limits below are not a complete list.
+> **Status: tier 2.** (`tiers.yaml`.) This page describes what exists and was measured. The known differences from Node are
+> listed in `packages/cleat-ts/DIVERGENCES.md`, and the limits below are not a complete list.
 
 Cleat runs a TypeScript workflow as a WASM module: your code runs on QuickJS (through Javy, in static mode) inside the
 same engine that runs Go, Rust, Python, Java and AssemblyScript workflows. The module is about 1.45 MB, almost all of it
