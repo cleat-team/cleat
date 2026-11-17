@@ -77,10 +77,7 @@ func TestDeployWorkflowAndVersionsOnEveryDialect(t *testing.T) {
 	} {
 		t.Run(string(tc.dialect), func(t *testing.T) {
 			db := testutil.TestDB(t, tc.dialect)
-			dsn, ok := dsnFor(t, db, tc.dialect)
-			if !ok {
-				t.Skipf("no %s DSN configured for this process", tc.dialect)
-			}
+			dsn := dsnFor(t, db, tc.dialect)
 			factory, err := tc.ctl.openStoreFactory(db, dsn, "public")
 			if err != nil {
 				t.Fatalf("openStoreFactory: %v", err)
@@ -142,28 +139,31 @@ func TestDeployWorkflowAndVersionsOnEveryDialect(t *testing.T) {
 // dsnFor reconstructs a DSN for the SCRATCH database testutil.TestDB handed us, reading its name back
 // from the connection rather than parsing it out of the environment: TestDB creates a new database
 // per run and the env DSN still names the shared one.
-func dsnFor(t *testing.T, db *sql.DB, d testutil.Dialect) (string, bool) {
+func dsnFor(t *testing.T, db *sql.DB, d testutil.Dialect) string {
 	t.Helper()
 	var name string
 	var query string
 	switch d {
 	case testutil.DialectPostgres:
 		if testutil.PostgresTestDSN() == "" {
-			return "", false
+			// NOT a skip: testutil.TestDB already skipped when no DSN was configured, so reaching
+			// here with an empty one means the two disagree about where the DSN comes from -- a
+			// defect in this test, and a skip would hide it (scripts/check-skips.sh's case (c)).
+			t.Fatalf("testutil.TestDB returned a PostgreSQL database but PostgresTestDSN() is empty")
 		}
 		if err := db.QueryRow("SELECT current_database()").Scan(&name); err != nil {
 			t.Fatalf("current_database: %v", err)
 		}
 	case testutil.DialectMySQL:
 		if os.Getenv("CLEAT_TEST_MYSQL") == "" {
-			return "", false
+			t.Fatalf("testutil.TestDB returned a MySQL database but CLEAT_TEST_MYSQL is empty")
 		}
 		if err := db.QueryRow("SELECT DATABASE()").Scan(&name); err != nil {
 			t.Fatalf("SELECT DATABASE(): %v", err)
 		}
 	case testutil.DialectMSSQL:
 		if os.Getenv("CLEAT_TEST_MSSQL") == "" {
-			return "", false
+			t.Fatalf("testutil.TestDB returned a SQL Server database but CLEAT_TEST_MSSQL is empty")
 		}
 		query = "SELECT DB_NAME()"
 		if err := db.QueryRow(query).Scan(&name); err != nil {
@@ -180,7 +180,7 @@ func dsnFor(t *testing.T, db *sql.DB, d testutil.Dialect) (string, bool) {
 	case testutil.DialectMSSQL:
 		base = os.Getenv("CLEAT_TEST_MSSQL")
 	}
-	return swapDSNDatabase(t, base, name), true
+	return swapDSNDatabase(t, base, name)
 }
 
 // swapDSNDatabase replaces the database a DSN names, in the shape each one uses: a path segment for
