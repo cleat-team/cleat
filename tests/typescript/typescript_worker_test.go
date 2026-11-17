@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -39,25 +38,6 @@ const (
 	defaultTenant = "00000000-0000-0000-0000-000000000000"
 )
 
-// needPostgres returns the admin DSN. Unset: a SKIP, unless CLEAT_REQUIRE_TOOLCHAINS names "postgres", in which case it is a
-// failure. "postgres" there means the DSN, and the tier-2 job that provides a PostgreSQL service declares it, so a service
-// that stopped starting cannot turn these tests into skips.
-func needPostgres(t *testing.T) string {
-	t.Helper()
-	dsn := os.Getenv(postgresEnv)
-	if dsn == "" {
-		dsn = os.Getenv(postgresEnvFall)
-	}
-	if dsn == "" {
-		if toolchainRequired("postgres") {
-			t.Fatalf("%s names postgres, but neither %s nor %s is set: the job's PostgreSQL service is broken, not the test",
-				requireToolchainEnv, postgresEnv, postgresEnvFall)
-		}
-		t.Skip(postgresEnv + " is not set; only the TypeScript tier-2 job provides a PostgreSQL for these tests")
-	}
-	return dsn
-}
-
 func goBuild(t *testing.T, root, out, pkg string) {
 	t.Helper()
 	cmd := exec.Command("go", "build", "-o", out, pkg)
@@ -71,6 +51,12 @@ func goBuild(t *testing.T, root, out, pkg string) {
 // backends, which PostgreSQL requires) when the test ends.
 func scratchDB(t *testing.T, admin string) string {
 	t.Helper()
+	switch d := activeDialect(t); d.name {
+	case "mysql":
+		return scratchMySQL(t, d, admin)
+	case "mssql":
+		return scratchMSSQL(t, d, admin)
+	}
 	adb, err := sql.Open("postgres", admin)
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +93,12 @@ func scratchDB(t *testing.T, admin string) string {
 // as that role, which is subject to row-level security, and migrates as the owner.
 func appRoleDSN(t *testing.T, ownerDSN string) string {
 	t.Helper()
+	switch d := activeDialect(t); d.name {
+	case "mysql":
+		return mysqlAppRoleDSN(t, d, ownerDSN)
+	case "mssql":
+		return mssqlAppRoleDSN(t, d, ownerDSN)
+	}
 	owner, err := sql.Open("postgres", ownerDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +154,7 @@ type worker struct {
 // slack in the test.
 func startWorker(t *testing.T, bin, appDSN, ownerDSN string) *worker {
 	t.Helper()
-	cmd := exec.Command(bin, "--driver=postgres", "--db="+appDSN, "--migrate-db="+ownerDSN, "--api-addr=127.0.0.1:0",
+	cmd := exec.Command(bin, "--driver="+activeDialect(t).name, "--db="+appDSN, "--migrate-db="+ownerDSN, "--api-addr=127.0.0.1:0",
 		"--poll=100ms", "--heartbeat=500ms")
 	w := &worker{cmd: cmd, out: &syncBuffer{}, exited: make(chan struct{})}
 	cmd.Stdout, cmd.Stderr = w.out, w.out
@@ -204,7 +196,7 @@ func (w *worker) kill() {
 
 func generateAPIKey(t *testing.T, bin, appDSN string) string {
 	t.Helper()
-	out, err := exec.Command(bin, "--driver=postgres", "--db="+appDSN, "--generate-api-key="+defaultTenant).CombinedOutput()
+	out, err := exec.Command(bin, "--driver="+activeDialect(t).name, "--db="+appDSN, "--generate-api-key="+defaultTenant).CombinedOutput()
 	if err != nil {
 		t.Fatalf("--generate-api-key: %v\n%s", err, out)
 	}
@@ -219,9 +211,17 @@ func generateAPIKey(t *testing.T, bin, appDSN string) string {
 	return ""
 }
 
+// deployWorkflow puts a built module where the worker will find it. PostgreSQL is `cleatctl deploy`, exactly as it always was.
+// MySQL and SQL Server cannot use it: `cleatctl deploy` is Postgres-only by design and REFUSES elsewhere ("has not been ported",
+// cmd/cleatctl/ported.go) rather than fail partway. cmd/deploy-workflow supports all three through the engine's own store, with
+// the same version and plugin checks, so that is what they use; ctl is whichever binary newWorkerEnv built for the dialect.
 func deployWorkflow(t *testing.T, ctl, ownerDSN, name, wasmPath string) {
 	t.Helper()
-	out, err := exec.Command(ctl, "-db", ownerDSN, "deploy", "workflow", name, wasmPath).CombinedOutput()
+	args := []string{"-db", ownerDSN, "deploy", "workflow", name, wasmPath}
+	if d := activeDialect(t); d.name != "postgres" {
+		args = []string{"--driver", d.name, "--db", ownerDSN, name, wasmPath}
+	}
+	out, err := exec.Command(ctl, args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("cleatctl deploy workflow %s: %v\n%s", name, err, out)
 	}
@@ -326,16 +326,21 @@ type workerEnv struct {
 func newWorkerEnv(t *testing.T, modules map[string]string) *workerEnv {
 	t.Helper()
 	root := needToolchain(t)
-	admin := needPostgres(t)
+	admin := needDatabase(t)
 
 	bin := t.TempDir()
 	e := &workerEnv{root: root, workerBin: filepath.Join(bin, "cleat-worker")}
 	goBuild(t, root, e.workerBin, "./cmd/cleat-worker")
-	ctl := filepath.Join(bin, "cleatctl")
-	goBuild(t, root, ctl, "./cmd/cleatctl")
+	// The deploy tool for this dialect (see deployWorkflow).
+	ctlName, ctlPkg := "cleatctl", "./cmd/cleatctl"
+	if activeDialect(t).name != "postgres" {
+		ctlName, ctlPkg = "deploy-workflow", "./cmd/deploy-workflow"
+	}
+	ctl := filepath.Join(bin, ctlName)
+	goBuild(t, root, ctl, ctlPkg)
 
 	e.ownerDSN = scratchDB(t, admin)
-	if out, err := exec.Command(e.workerBin, "--driver=postgres", "--db="+e.ownerDSN, "--migrate-only").CombinedOutput(); err != nil {
+	if out, err := exec.Command(e.workerBin, "--driver="+activeDialect(t).name, "--db="+e.ownerDSN, "--migrate-only").CombinedOutput(); err != nil {
 		t.Fatalf("--migrate-only: %v\n%s", err, out)
 	}
 	e.appDSN = appRoleDSN(t, e.ownerDSN)
@@ -433,15 +438,7 @@ func TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution(t *testing.T) {
 			"machine and a kill now would land outside execution; raise iters", s)
 	}
 
-	owner, err := sql.Open("postgres", e.ownerDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer owner.Close()
-	var rows int
-	if err := owner.QueryRow(`SELECT count(*) FROM event_history WHERE workflow_id = $1`, id).Scan(&rows); err != nil {
-		t.Fatalf("reading the run's history: %v", err)
-	}
+	rows := historyRows(t, e.ownerDSN, id)
 	if rows == 0 {
 		t.Fatalf("UNMEASURED: the run has no persisted history row before the burn, so there is nothing for a replay to resume from")
 	}
