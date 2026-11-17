@@ -291,6 +291,20 @@ test("a -script name that no store registered is refused, not ignored", () => {
   );
 });
 
+// cleat#3827, group G: there is no store, because the engine needs none. A run that continues as new ENDS ITS SEGMENT with the reason
+// continue_as_new and the new input, and the harness (which starts no next run) reports that as a suspension. The real behaviour,
+// the next run starting, is the three-dialect worker test, TestTypeScriptContinueAsNewOnARealWorker.
+test("continueAsNew ends the run as a continue_as_new suspension, and nothing after it runs", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/continuation.ts", [
+    "continuation", "continuation_versioned", "continuation_bad_version", "continuation_late", "continuation_versioned_once",
+  ]);
+  const run = runWorkflow(module, "continuation", { n: 1, limit: 5 });
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  assert.equal(run.suspended, true, "a run that continued as new was reported as finished");
+  assert.match(run.suspendReason ?? "", /continue_as_new/);
+  assert.deepEqual(run.events.map((e) => e.type), ["continue_as_new"], "the guest ran on past a continuation");
+});
+
 test("a deliberately broken workflow FAILS through the harness", () => {
   const module = build("tests/typescript/testdata/workflows/broken.ts", "broken");
   const run = runWorkflow(module, "broken");
