@@ -109,6 +109,11 @@ type envelope struct {
 	// the envelope so a test (and a reader) can tell "the workflow used a call and nobody scripted it" from "the
 	// workflow was actually exercised against answers" (cleat#3828).
 	StubbedCalls bool `json:"stubbedCalls,omitempty"`
+	// Promises and Signals are what the STORES saw, not what the workflow returned: the promise names it created, in
+	// order, and the signal names it consumed. A test that asserted only on the workflow's result could pass without
+	// the store ever being touched -- the same reason StubbedCalls exists (cleat#3828).
+	Promises []string `json:"promises,omitempty"`
+	Signals  []string `json:"signalsConsumed,omitempty"`
 }
 
 func unmeasured(format string, args ...any) {
@@ -120,16 +125,53 @@ func unmeasured(format string, args ...any) {
 	os.Exit(2)
 }
 
+// buildStores turns the three fixture flags into the stores the engine is given (cleat#3828).
+//
+// EXTRACTED SO THE WIRING IS TESTABLE, which a review note earned: the loaders have their own tests, but nothing
+// asserted that `-promise-rejects` reaches loadMessageMap rather than loadStringMap. Putting the original wrong loader
+// back left `go test ./cmd/cleat-ts-run/` green, because every test called the loaders directly. A wiring test is the
+// only thing that can fail on that.
+//
+// The stores are ALWAYS returned, even when nothing was scripted: leaving them nil would make a workflow that touches a
+// promise fail with errNoPromiseStore rather than suspend, so a test could not tell "this workflow uses no store" from
+// "I forgot to script it" -- and the second is the mistake a harness should make loud.
+func buildStores(promisesPath, rejectsPath, signalsPath string) (*memoryPromises, *memorySignals, error) {
+	var resolves, rejects map[string]string
+	var payloads map[string][]string
+	var err error
+	if promisesPath != "" {
+		if resolves, err = loadStringMap(promisesPath, "promises"); err != nil {
+			return nil, nil, err
+		}
+	}
+	if rejectsPath != "" {
+		// loadMessageMap, NOT loadStringMap: a rejection is an error message, not JSON the guest parses.
+		if rejects, err = loadMessageMap(rejectsPath, "promise-rejects"); err != nil {
+			return nil, nil, err
+		}
+	}
+	if signalsPath != "" {
+		if payloads, err = loadSignalScript(signalsPath); err != nil {
+			return nil, nil, err
+		}
+	}
+	return newMemoryPromises(resolves, rejects), newMemorySignals(payloads), nil
+}
+
 func main() {
 	module := flag.String("module", "", "path to a .wasm built by packages/cleat-ts/build.sh")
 	entry := flag.String("entry", "", "the ABI entry point to run (snake_case, as build.sh named it)")
 	input := flag.String("input", "{}", "the workflow input, as JSON")
 	workflowID := flag.String("workflow-id", "00000000-0000-0000-0000-0000000c1ea7", "workflow id (the engine derives its random stream from it)")
 	answersPath := flag.String("answers", "", "optional JSON file: {\"<service>/<operation>\": <JSON text the call returns>}; without it every durable call returns {} unread")
+	promisesPath := flag.String("promises", "", "optional JSON file: {\"<promise name>\": <JSON text it resolves with>}; a promise created under another name stays pending and the workflow suspends")
+	promiseRejectsPath := flag.String("promise-rejects", "", "optional JSON file: {\"<promise name>\": <rejection message>}")
+	signalsPath := flag.String("signals", "", "optional JSON file: {\"<signal name>\": [<payload JSON>, ...]}, delivered before the run starts")
 	flag.Parse()
 
 	if *module == "" || *entry == "" {
-		unmeasured("usage: cleat-ts-run -module <file.wasm> -entry <name> [-input <json>] [-workflow-id <id>] [-answers <file.json>]")
+		unmeasured("usage: cleat-ts-run -module <file.wasm> -entry <name> [-input <json>] [-workflow-id <id>] " +
+			"[-answers <file.json>] [-promises <file.json>] [-promise-rejects <file.json>] [-signals <file.json>]")
 	}
 	if !json.Valid([]byte(*input)) {
 		unmeasured("-input is not valid JSON: %s", *input)
@@ -159,15 +201,26 @@ func main() {
 	} else {
 		caller = stubbedCaller{}
 	}
+	promises, signals, err := buildStores(*promisesPath, *promiseRejectsPath, *signalsPath)
+	if err != nil {
+		unmeasured("%v", err)
+	}
 	e := engine.NewEngine(rt, caller,
 		engine.WithWorkflowID(*workflowID),
 		engine.WithDefName(*entry),
 		engine.WithDefVersion(1),
 		engine.WithBackends(engine.WasmtimeLanguages, wt),
+		engine.WithPromiseStore(promises),
+		engine.WithSignalStore(signals),
 	)
 
 	result, history, susp, _, queryState, err := e.Execute(ctx, wasm, *entry, json.RawMessage(*input))
-	out := envelope{Entry: *entry, QueryState: queryState, Events: make([]eventOut, 0, len(history)), StubbedCalls: *answersPath == ""}
+	out := envelope{
+		Entry: *entry, QueryState: queryState, Events: make([]eventOut, 0, len(history)),
+		StubbedCalls: *answersPath == "",
+		Promises:     promises.nameList(),
+		Signals:      signals.consumedList(),
+	}
 	for _, ev := range history {
 		out.Events = append(out.Events, eventOut{
 			Step: ev.Step, Type: string(ev.EventType),

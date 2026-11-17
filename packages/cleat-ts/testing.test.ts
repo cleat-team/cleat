@@ -75,6 +75,59 @@ test("a workflow that suspends is reported as suspended, with the host's reason"
   assert.match(run.suspendReason ?? "", /cleat_sleep\(60000ms\)/);
 });
 
+// cleat#3828, store support. The pair below is the point of the option: with the outlet scripted the workflow
+// COMPLETES, and with the identical fixture and no script it PARKS. One of those alone would not show that the store
+// decided anything -- a workflow that ignored its promise would pass the first, and one that failed on any promise
+// would look like a passing second.
+test("a promise the test scripts is settled, so the workflow finishes", () => {
+  const module = build("tests/typescript/testdata/workflows/promises.ts", "promises");
+  const run = runWorkflow(module, "promises", {}, {
+    promises: { answered: { greeting: "pong" } },
+    promiseRejects: { refused: "not today" },
+  });
+  assert.equal(run.ok, true, `the workflow failed despite a scripted promise: ${run.error}`);
+  assert.equal(run.suspended, false, "the workflow parked although every promise it waits on was settled");
+
+  const result = run.result as Record<string, unknown>;
+  assert.deepEqual(result.value, { greeting: "pong" }, "the awaited value is not the scripted one");
+  assert.match(String(result.rejection), /not today/, "the scripted rejection did not reach the workflow");
+  // A promise the workflow settles ITSELF still works with a store present, which is the difference between
+  // "the store settles things" and "the store intercepts things".
+  assert.equal(result.mineValue, 7);
+
+  // Asserted on the STORE's record, not the workflow's output: the workflow's own return value cannot show that a
+  // promise was created.
+  assert.deepEqual(run.promises, ["answered", "refused", "pending"]);
+});
+
+test("with no script the same workflow PARKS, which is what makes the case above evidence", () => {
+  const module = build("tests/typescript/testdata/workflows/promises.ts", "promises");
+  const run = runWorkflow(module, "promises", {});
+  assert.equal(run.ok, true, `an unscripted promise made the run fail rather than park: ${run.error}`);
+  assert.equal(run.suspended, true, "an unscripted promise was settled by something; the store invented an answer");
+});
+
+// The signal half. Scripted, the wait is answered on the first poll; unscripted, the same wait parks. DeliveredAtMs is
+// left zero by the store deliberately: the engine treats a zero as "a double did not populate it" and answers that the
+// delivery is visible, which is the right reading for a signal queued before the run.
+test("a signal the test queues before the run is seen by waitForSignal", () => {
+  const module = build("tests/typescript/testdata/workflows/signal_store.ts", "signal_store");
+  const run = runWorkflow(module, "signal_store", {}, { signals: { approve: [{ ok: true }] } });
+  assert.equal(run.ok, true, `the workflow failed despite a queued signal: ${run.error}`);
+  assert.equal(run.suspended, false, "the workflow parked although the signal was already queued");
+  const result = run.result as Record<string, unknown>;
+  assert.deepEqual(result.payload, { ok: true });
+  assert.equal(result.timedOut, false);
+  assert.deepEqual(run.signalsConsumed, ["approve"], "the store did not record the signal as consumed");
+});
+
+test("with no queued signal the same workflow PARKS", () => {
+  const module = build("tests/typescript/testdata/workflows/signal_store.ts", "signal_store");
+  const run = runWorkflow(module, "signal_store", {});
+  assert.equal(run.ok, true, `an unqueued signal made the run fail rather than park: ${run.error}`);
+  assert.equal(run.suspended, true, "a signal appeared from nowhere; the store invented a delivery");
+});
+
 test("a deliberately broken workflow FAILS through the harness", () => {
   const module = build("tests/typescript/testdata/workflows/broken.ts", "broken");
   const run = runWorkflow(module, "broken");
