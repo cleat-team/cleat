@@ -927,6 +927,13 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 // cannot be stopped in. Do not delete it for being full.
 var deferSegmentLanguages = map[string]bool{
 	"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
+	// javascript (cleat#3826): the Javy plugin's bindings are cleat-sdk's HostCalls -- the same ones `rust` uses --
+	// so they decode the sentinel and the defer-phase stop bit. What they did NOT do was let the drain through:
+	// `guarded` short-circuited on is_suspended() alone, so the segment suspended correctly and recorded no defer
+	// calls at all. The plugin now exempts the drain (in_defer_phase), which is the analogue of the host's own
+	// bracketing. Verified end to end by tests/typescript/typescript_defer_segment_test.go, which builds a real
+	// module and asserts the segment records only the defers, with a control on the same entry point.
+	"javascript": true,
 }
 
 // RunsOnWasmtime reports whether a detected guest language is served by the

@@ -364,7 +364,16 @@ func TestADeferSegmentPastTheFrontierRunsOnlyTheDefers(t *testing.T) {
 // here first, and the failure says what has to accompany it.
 func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 	want := map[string]bool{
-		"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
+		// javascript (cleat#3826) is here because typescript_defer_segment_test.go crosses the boundary: it builds a
+		// real Javy module, runs it as a defer segment, and asserts the segment records only its defers -- with a
+		// control, on the SAME entry point, that records the body's call when the defer phase is off. Its SDK half is
+		// cleat-sdk's HostCalls through the Javy plugin, the same decode `rust` relies on.
+		"javascript":     true,
+		"go":             true,
+		"java":           true,
+		"assemblyscript": true,
+		"rust":           true,
+		"python":         true,
 	}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+

@@ -105,12 +105,31 @@ fn json_string(message: &str) -> String {
 
 /// A binding's JSON envelope: `{"suspended":true}`, `{"err":"..."}`, or `{"ok":<value>}`. Short-circuits (the host is
 /// not called) once this segment has suspended.
+/// True when a binding call must be refused because the segment is suspended.
+///
+/// The defer drain is exempt, and that exemption is the whole of cleat#3826's
+/// fix. `run_deferred` deliberately keeps running the remaining bodies after a
+/// suspending one — stopping would leave them in a table that has ALREADY been
+/// drained, so their cleanup would be dropped — and it marks the drain with
+/// `cleat_sdk::defer::in_defer_phase()`. Short-circuiting on `is_suspended()`
+/// alone therefore refused the very cleanup the drain exists to perform: the
+/// segment suspended correctly and recorded NO defer calls at all, which is
+/// silent, because a refused call returns the sentinel rather than erroring.
+///
+/// What this does NOT relax: outside the drain, a suspended guest still has
+/// every binding refused, so a workflow BODY cannot make a call after the stop.
+/// The drain is the only window in which `in_defer_phase()` is true, and the
+/// bodies are the only code running in it.
+fn refused_while_suspended() -> bool {
+    cleat_sdk::is_suspended() && !cleat_sdk::defer::in_defer_phase()
+}
+
 fn guarded(f: impl FnOnce() -> Value) -> String {
-    if cleat_sdk::is_suspended() {
+    if refused_while_suspended() {
         return SUSPENDED.to_string();
     }
     let v = f();
-    if cleat_sdk::is_suspended() {
+    if refused_while_suspended() {
         return SUSPENDED.to_string();
     }
     v.to_string()
