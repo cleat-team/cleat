@@ -24,6 +24,16 @@ export interface WaitForEventOptions {
   timeoutMs?: number;
 }
 
+/** One chunk of a streamed plugin answer, as the host emits it. */
+export interface StreamChunk {
+  /** Position in the stream, from 0. */
+  i: number;
+  /** The chunk's content. */
+  c: string;
+  /** Whether this is the last chunk. */
+  f: boolean;
+}
+
 export interface PluginsCtx {
   /**
    * Call a named plugin function and resolve with its JSON answer.
@@ -34,11 +44,15 @@ export interface PluginsCtx {
   pluginCall<T = unknown>(plugin: string, func: string, input?: unknown): Promise<T>;
 
   /**
-   * The streaming form of {@link pluginCall}. Resolves with the streamed answer; the host assembles the chunks.
+   * The streaming form of {@link pluginCall}.
    *
-   * On replay, as `pluginCall`: the recorded answer is used.
+   * Resolves with the CHUNK ARRAY as the host emits it — `[{ i: 0, c: "a", f: false }, …]` — not a joined string. `i` is
+   * the chunk's index, `c` its content, `f` whether it is the last one. Reading it as a joined answer is the mistake this
+   * signature exists to make impossible: an earlier draft of the docs said the host assembled the chunks, and it does not.
+   *
+   * On replay, as `pluginCall`: the recorded chunks are used.
    */
-  pluginCallStreaming<T = unknown>(plugin: string, func: string, input?: unknown): Promise<T>;
+  pluginCallStreaming(plugin: string, func: string, input?: unknown): Promise<StreamChunk[]>;
 
   /**
    * Wait for an external event, claimed by `plugin.func` and woken by any of `signalNames`.
@@ -76,14 +90,25 @@ export function makePlugins(h: Helpers): PluginsCtx {
       h.settle(__cleat_plugin_call(plugin, func, h.encode(input ?? null))).then(h.parseJSON) as Promise<never>,
 
     pluginCallStreaming: (plugin, func, input) =>
-      h.settle(__cleat_plugin_call_streaming(plugin, func, h.encode(input ?? null))).then(h.parseJSON) as Promise<never>,
+      h
+        .settle<StreamChunk[]>(__cleat_plugin_call_streaming(plugin, func, h.encode(input ?? null)))
+        .then(h.parseJSON) as Promise<StreamChunk[]>,
 
     // WRAPPED IN dispatchThen, as `sleep`, `waitForSignal`, the wait inside `child` and `awaitPromise` all are. A wait is
     // one of the fixed program positions an update can be delivered at (groups/updates.ts): without the wrapper a workflow
     // blocked here answers "no update handler registered" for an update that was waiting the whole time. It is also the
     // position with the most to lose from missing it -- nothing else is going to ask while the workflow sits in a wait.
-    waitForEvent: (plugin, func, signalNames, opts) =>
-      dispatchThen(() =>
+    waitForEvent: (plugin, func, signalNames, opts) => {
+      // A budget the host cannot honour is refused here rather than passed through: NaN becomes 0 in the ABI's f64 ->
+      // i64 conversion and a negative value makes the first `remaining <= 0` test fire, so both silently mean "no wait at
+      // all" -- a timeout reported for a workflow that asked to wait.
+      const timeoutMs = opts?.timeoutMs ?? DEFAULT_EVENT_TIMEOUT_MS;
+      if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+        return Promise.reject(
+          new Error(`waitForEvent: timeoutMs must be a finite, non-negative number, got ${String(opts?.timeoutMs)}`),
+        );
+      }
+      return dispatchThen(() =>
         h
           .settle(
             __cleat_wait_for_event(
@@ -91,10 +116,11 @@ export function makePlugins(h: Helpers): PluginsCtx {
               func,
               h.encode(opts?.input ?? null),
               JSON.stringify(Array.isArray(signalNames) ? signalNames : [signalNames]),
-              opts?.timeoutMs ?? DEFAULT_EVENT_TIMEOUT_MS,
+              timeoutMs,
             ),
           )
           .then(h.parseJSON),
-      ) as Promise<never>,
+      ) as Promise<never>;
+    },
   };
 }

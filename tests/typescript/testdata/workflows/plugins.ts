@@ -12,7 +12,9 @@ import { workflow } from "@cleat/ts";
 
 export const pluginCalls = workflow(async (ctx) => {
   const echo = await ctx.pluginCall<{ said: string }>("demo", "echo", { n: 1 });
-  const streamed = await ctx.pluginCallStreaming<{ joined: string }>("demo", "stream", {});
+  // The chunk array the host emits, typed as such: an earlier draft of these bindings documented a joined string, and the
+  // type is what stops that mistake coming back.
+  const streamed = await ctx.pluginCallStreaming("demo", "stream", {});
   return { echo, streamed };
 });
 
@@ -62,4 +64,20 @@ export const pluginWaitUpdate = workflow(async (ctx) => {
   // happen at the dispatch point in front of it.
   await ctx.waitForEvent("demo", "claim", ["evt"], { timeoutMs: 60_000 });
   return { total };
+});
+
+// A budget the host cannot honour must be refused rather than passed through: NaN becomes 0 across the ABI's f64 -> i64
+// conversion and a negative value makes the first `remaining <= 0` test fire, so both silently mean "no wait at all" --
+// a timeout reported for a workflow that asked to wait.
+export const pluginWaitBadTimeout = workflow(async (ctx) => {
+  const messages: string[] = [];
+  for (const timeoutMs of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+    try {
+      await ctx.waitForEvent("demo", "claim", ["evt"], { timeoutMs });
+      messages.push("ACCEPTED " + String(timeoutMs));
+    } catch (e) {
+      messages.push((e as Error).message);
+    }
+  }
+  return { messages };
 });

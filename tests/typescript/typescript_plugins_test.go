@@ -213,3 +213,41 @@ func TestTypeScriptAnUpdateIsDeliveredWhileBlockedInWaitForEvent(t *testing.T) {
 		t.Fatalf("%d update(s) still pending: the dispatch point in front of waitForEvent did not run", n)
 	}
 }
+
+// A budget the host cannot honour is refused in the binding, not passed through. The two values that matter are the ones
+// that CONVERT: NaN becomes 0 across f64 -> i64, and a negative number makes the host's first `remaining <= 0` test fire,
+// so each would report a timeout for a workflow that asked to wait rather than fail where the mistake was made.
+func TestTypeScriptWaitForEventRefusesAnImpossibleTimeout(t *testing.T) {
+	root := needToolchain(t)
+	src := "tests/typescript/testdata/workflows/plugins.ts"
+	res := build(t, root, src, "plugin_wait_bad_timeout")
+	if res.exit != 0 {
+		t.Fatalf("building for plugin_wait_bad_timeout failed (exit %d):\n%s", res.exit, res.output)
+	}
+	wasm, err := os.ReadFile(res.module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// claimFound=true, so an ACCEPTED budget would return an event immediately and the workflow would record "ACCEPTED"
+	// rather than a message -- the difference between a value the binding refused and a wait that happened to end.
+	scripts := &pluginScripts{claimFound: true}
+	e, closeRT := newEngineWith(t, scripts.options(t))
+	defer closeRT()
+
+	out, _, _, _, _, err := e.Execute(context.Background(), wasm, "plugin_wait_bad_timeout", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("running plugin_wait_bad_timeout: %v", err)
+	}
+	var got struct{ Messages []string }
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("the workflow returned %s: %v", out, err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("messages = %v, want one per bad budget", got.Messages)
+	}
+	for i, m := range got.Messages {
+		if !strings.Contains(m, "timeoutMs must be a finite, non-negative number") {
+			t.Errorf("budget %d: message = %q, want the binding's refusal", i, m)
+		}
+	}
+}
