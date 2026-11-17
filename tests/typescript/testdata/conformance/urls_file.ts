@@ -24,10 +24,15 @@ const absolute: string[] = [
   "file:///C:/a/b/../../..", "file:///C:/../a", "file:///C:/|", "file:///|:/x",
 ];
 
-const bases: string[] = ["file:///C:/a/b", "file:///C:/a/", "file:///a/b/", "file://host/a/b", "file:///", "file:/C:/", "file://localhost/C:/a/b"];
+const bases: string[] = ["file:///C:/a/b", "file:///C:/a/", "file:///a/b/", "file://host/a/b", "file:///", "file:/C:/", "file://localhost/C:/a/b",
+  "file:///C:", "file:///C:/dir/file", "file://host/C:/d/f", "file://C:/x", "file:///c:/", "file:///[::1]/a"];
+// An input that carries its own scheme still resolves against a base when it does not name one of its own.
+const withBase: string[] = ["file:/x", "file:///x", "file://", "file:///", "file://host/y", "file:x", "file:..", "file:.",
+  "file:/C:/x", "file://h/p", "file:?q", "file:#f", "file:/x/y", "file:///C:/x"];
 const rels: string[] = [
   "", "x", "/x", "//h/p", "//localhost/p", "//C:/x", "//C|/x", "D|/y", "D:/y", "D:", "x/../y", "../x", "..", ".",
   "?q", "#f", "\\x", "\\\\srv\\s\\x", "C:/x", "C|/x", "/C:/x", "/C|/x", "%2e%2e/x", "./x/./y", "x y", "x?q", "x#f",
+  "//", "/", "\\\\", "./D:/y", "..\\D:\\y", "..\\x", "../..", "x", "D", "D|x", "C:x", "/x/y",
 ];
 
 export function urlsFile(): void {
@@ -38,6 +43,9 @@ export function urlsFile(): void {
   }
   for (const b of bases) {
     for (const r of rels) {
+      out.push(`new URL(${JSON.stringify(r)}, ${JSON.stringify(b)}) -> ${show(() => describe(new URL(r, b)))}`);
+    }
+    for (const r of withBase) {
       out.push(`new URL(${JSON.stringify(r)}, ${JSON.stringify(b)}) -> ${show(() => describe(new URL(r, b)))}`);
     }
   }

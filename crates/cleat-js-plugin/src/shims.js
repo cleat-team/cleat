@@ -358,6 +358,7 @@
           let i = 0;
           while (i < after.length && after[i] !== "/" && after[i] !== "\\") i++;
           const authority = after.slice(0, i), tail = after.slice(i);
+          if (authority === "") return done("", pathState([], "", true, true));
           if (isDriveLetter(authority)) return done("", pathState([], authority + tail, true, true));
           let host = "";
           if (authority !== "" && authority.toLowerCase() !== "localhost") {
@@ -375,7 +376,11 @@
           return done(host, startPath([], tail));
         }
         if (rest[0] === "/" || rest[0] === "\\") {
-          return done(baseFile ? baseFile.host : "", pathState([], rest.slice(1), true, true));
+          // A single leading separator keeps the base's authority -- and, for a drive-letter base, its drive, unless the
+          // input names one itself. `file:/x` against `file:///C:/a/b` is `file:///C:/x`, as a bare `/x` is.
+          const body = rest.slice(1);
+          return done(baseFile ? baseFile.host : "",
+            pathState([], drive && !isDriveLetter(body.slice(0, 2)) ? drive + "/" + body : body, true, true));
         }
         if (rest === "" && baseFile) {
           return { scheme: "file", user: "", pass: "", host: baseFile.host, port: null, path: baseFile.path.slice(), query: query !== null ? encQuery(true) : baseFile.query, frag };
@@ -388,7 +393,7 @@
             return done(baseFile.host, pathState([], rest, true, true));
           }
           const path = baseFile.path.slice();
-          if (path.length) path.pop();
+          if (path.length > 1 || (path.length === 1 && !isDriveLetter(path[0]))) path.pop();
           return done(baseFile.host, pathState(path, rest, true, true));
         }
         return done("", pathState([], rest, true, true));
