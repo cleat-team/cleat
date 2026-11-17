@@ -933,7 +933,7 @@ var deferSegmentLanguages = map[string]bool{
 	// calls at all. The plugin now exempts the drain (in_defer_phase), which is the analogue of the host's own
 	// bracketing. Verified end to end by tests/typescript/typescript_defer_segment_test.go, which builds a real
 	// module and asserts the segment records only the defers, with a control on the same entry point.
-	"javascript": true,
+
 }
 
 // RunsOnWasmtime reports whether a detected guest language is served by the
