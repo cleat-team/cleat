@@ -46,6 +46,7 @@ declare function __cleat_resolve_promise(id: string, value: string): string;
 declare function __cleat_reject_promise(id: string, error: string): string;
 declare function __cleat_defer(description: string): string;
 declare function __cleat_defer_phase(on: boolean): void;
+declare function __cleat_drain_done(n: number): void;
 
 // The drain that runs before a result is reported. Skipped while the segment is suspended: a suspended workflow has not
 // exited, and its cleanup must not run (the plugin answers the host with the suspend sentinel instead).
@@ -231,11 +232,13 @@ const ctx: Ctx = {
 // suspends cannot leave the registry half run.
 const defers: Array<{ id: string; fn: () => unknown | Promise<unknown> }> = [];
 
-async function drainDefers(): Promise<void> {
+async function drainDefers(): Promise<number> {
   const taken = defers.splice(0, defers.length);
+  let ran = 0;
   __cleat_defer_phase(true);
   try {
     for (let i = taken.length - 1; i >= 0; i--) {
+      ran++;
       try {
         await taken[i].fn();
       } catch {
@@ -245,6 +248,19 @@ async function drainDefers(): Promise<void> {
   } finally {
     __cleat_defer_phase(false);
   }
+  return ran;
+}
+
+// The host-driven drain (cleat#3826). A defer segment suspends at the first new call, and a suspended segment does not drain
+// its own table (`finish` returns early), so the HOST calls the module's `__cleat_run_deferred` export, which is the plugin's
+// `cleat_run_drain`. That evaluates a small module of its own which calls THIS, by way of `globalThis`: the registry lives in
+// this module's scope, and Javy evaluates the bundle afresh on every call, so only the context's globals survive from the
+// entry point's call to the host's. Registered by `entry` below -- the evaluation that ran the workflow is the one whose
+// `defers` the bodies were pushed to. It reports how many bodies ran, and never a result: the outcome was already decided.
+function registerDrain(): void {
+  (globalThis as { __cleat_drain?: () => void }).__cleat_drain = () => {
+    drainDefers().then(__cleat_drain_done, () => __cleat_drain_done(0));
+  };
 }
 
 /**
@@ -329,6 +345,7 @@ export function workflow<I = unknown, O = unknown>(fn: (ctx: Ctx, input: I) => O
     // A module instance can serve more than one call, and a body that re-runs on replay re-registers everything it had:
     // without this the registry would accumulate a duplicate per segment.
     defers.length = 0;
+    registerDrain();
     let input: I;
     try {
       input = JSON.parse(__cleat_args() || "null") as I;

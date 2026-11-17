@@ -8,10 +8,14 @@
 //!     cleat_set_io(a, b, c, d);  javy_export();  return cleat_take_result();
 //!
 //! The plugin's own exports (cleat_set_io, cleat_take_result), Javy's (`cabi_realloc`, `config-schema`, `_start`) are
-//! then removed, so the module exports `memory` and the entry points and nothing else.
+//! then removed, so the module exports `memory`, the entry points and `__cleat_run_deferred` (the plugin's
+//! `cleat_run_drain`, which the host calls to run a defer segment's cleanup) and nothing else.
 
 use anyhow::{Context, Result, bail};
 use walrus::{ExportItem, FunctionBuilder, Module, ValType};
+
+/// The name the host calls to drain a defer segment (engine/defer_runner_export.go: `deferRunnerExport`).
+const DRAIN_EXPORT: &str = "__cleat_run_deferred";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -60,8 +64,22 @@ fn main() -> Result<()> {
         module.exports.add(name, id);
     }
 
-    // Everything but memory and the entry points goes: the ABI's exports are entry points.
-    let keep: std::collections::HashSet<&str> = pairs.iter().map(|(a, _)| a.as_str()).chain(["memory"]).collect();
+    // The host-driven defer drain (cleat#3826). cleat-sdk, linked into the plugin, already exports `__cleat_run_deferred`;
+    // it drains the RUST defer table, which is always empty here because the bodies are JavaScript closures, and it would
+    // otherwise be dropped below with everything else. The plugin's `cleat_run_drain` is the one that can reach them, so
+    // it takes the name the host looks up (engine/defer_runner_export.go: `deferRunnerExport`).
+    let drain = module
+        .exports
+        .get_func("cleat_run_drain")
+        .context("the module has no cleat_run_drain export: was it built with the cleat-js plugin?")?;
+    if module.exports.get_func(DRAIN_EXPORT).is_ok() {
+        module.exports.remove(DRAIN_EXPORT)?;
+    }
+    module.exports.add(DRAIN_EXPORT, drain);
+
+    // Everything but memory, the entry points and the drain goes: the ABI's exports are entry points.
+    let keep: std::collections::HashSet<&str> =
+        pairs.iter().map(|(a, _)| a.as_str()).chain(["memory", DRAIN_EXPORT]).collect();
     let drop: Vec<_> = module
         .exports
         .iter()

@@ -364,7 +364,17 @@ func TestADeferSegmentPastTheFrontierRunsOnlyTheDefers(t *testing.T) {
 // here first, and the failure says what has to accompany it.
 func TestDeferSegmentLanguagesIsExactlyWhatHasBeenVerified(t *testing.T) {
 	want := map[string]bool{
-		"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
+		// javascript (cleat#3826) is here because typescript_defer_segment_test.go crosses the boundary: it builds a
+		// real TypeScript guest module, runs it as a defer segment, and asserts the segment records only its defers -- with a
+		// control, on the SAME entry point, that records the body's call when the defer phase is off. The segment only
+		// records the defers because the module exports __cleat_run_deferred for the host to call; without it the segment
+		// suspends correctly and records nothing.
+		"javascript":     true,
+		"go":             true,
+		"java":           true,
+		"assemblyscript": true,
+		"rust":           true,
+		"python":         true,
 	}
 	if len(deferSegmentLanguages) != len(want) {
 		t.Fatalf("deferSegmentLanguages = %v, want %v.\n\n"+

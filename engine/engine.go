@@ -834,13 +834,13 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 //
 // "javascript" is the TypeScript/JavaScript guest built on Javy (cleat#3825), and it is a
 // LABEL ahead of the build chain: it selects the wasmtime backend's direct-export path
-// (the one assemblyscript and rust take) and nothing else. Nothing on this branch can
-// build such a module yet, and the language is IN DEVELOPMENT and NOT SUPPORTED in
-// tiers.yaml; the label is here first so that the module's own declaration is true,
-// instead of a TypeScript module having to call itself "rust" to be routed. The
-// prototype measured that routing on its own branch (its Phase 0), not here. It is
-// deliberately NOT in deferSegmentLanguages below, so a defer segment for a
-// "javascript" guest fails closed until its SDK decodes the sentinel (cleat#3826).
+// (the one assemblyscript and rust take) and nothing else. The language is IN DEVELOPMENT,
+// and tiers.yaml grants it no support claim; the label was here first so that the module's
+// own declaration would be true, instead of a TypeScript module having to call itself "rust"
+// to be routed. The prototype measured that routing on its own branch (its Phase 0), not
+// here. It was deliberately kept OUT of deferSegmentLanguages below until the guest
+// decoded the sentinel and the plugin exported something to drain; cleat#3826 added it there,
+// and the verification is recorded beside that entry.
 var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python", "javascript"}
 
 // deferSegmentLanguages are the guest languages whose SDK decodes
@@ -927,6 +927,14 @@ var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python
 // cannot be stopped in. Do not delete it for being full.
 var deferSegmentLanguages = map[string]bool{
 	"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
+	// javascript (cleat#3826): the Javy plugin's bindings are cleat-sdk's HostCalls, so they decode the sentinel and
+	// the stop bit, and a defer segment suspends correctly. What made it NOT work until now was not the decode: the host
+	// drains a suspended segment by calling the module's __cleat_run_deferred export, and a JavaScript module exported
+	// none, so runGuestDefersAfterSuspend found nothing to call and the segment recorded no defer calls at all. The
+	// plugin's cleat_run_drain, republished under that name by cmd cleat-js-link, is that export. Verified end to end by
+	// tests/typescript/typescript_defer_segment_test.go, which builds a real module and asserts the segment records only
+	// the defers on the same entry point whose control records the body's call.
+	"javascript": true,
 }
 
 // RunsOnWasmtime reports whether a detected guest language is served by the
