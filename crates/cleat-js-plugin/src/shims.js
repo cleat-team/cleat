@@ -51,13 +51,16 @@
 
   // URL and URLSearchParams (cleat#3829). QuickJS has neither, so `new URL(x)` was a ReferenceError; zod's z.url() calls it
   // inside a try/catch, which turned that into "invalid" for every URL: a plausible, silent, wrong answer. This is the WHATWG
-  // algorithm for the part of it that can be done exactly: the special schemes (http, https, ws, wss, ftp) and generic ones,
-  // relative resolution against a base, percent-encoding, IPv4 hosts, URLSearchParams in full, and the `search` and `hash`
-  // setters. Everything else THROWS rather than guess (file: URLs, IPv6 and internationalised hosts, and the other setters),
-  // because a value that is plausible and wrong is the failure this exists to remove. typescript_conformance_test.go runs a
+  // algorithm for the part of it that can be done exactly: the special schemes (http, https, ws, wss, ftp, file) and generic
+  // ones, relative resolution against a base, percent-encoding, IPv4 and IPv6 hosts, URLSearchParams in full, and the `search`
+  // and `hash` setters. Everything else THROWS rather than guess (internationalised hosts, and the other setters), because a
+  // value that is plausible and wrong is the failure this exists to remove. typescript_conformance_test.go runs a
   // corpus through this and through Node and compares every getter.
   if (on("url") && typeof g.URL === "undefined") {
-    const DEFAULT_PORT = Object.assign(Object.create(null), { ftp: 21, http: 80, https: 443, ws: 80, wss: 443 });
+    // Membership is what makes a scheme "special" (backslash is a separator, the host is parsed, the query uses the special
+    // encode set), so file: belongs here even though it has no default port -- the value is never compared against a port
+    // because a file: URL has none.
+    const DEFAULT_PORT = Object.assign(Object.create(null), { ftp: 21, file: null, http: 80, https: 443, ws: 80, wss: 443 });
     const unsupported = (what) => new Error("cleat: URL: " + what + " is not supported in the guest");
     const usv = (v) => `${v}`.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "�");
     const HEX = "0123456789ABCDEF";
@@ -136,6 +139,92 @@
       if (s === "") return 0;
       return (r === 16 ? /^[0-9a-fA-F]+$/ : r === 8 ? /^[0-7]+$/ : /^[0-9]+$/).test(s) ? parseInt(s, r) : NaN;
     };
+    // The IPv6 parser and serialiser of the URL specification. `ipv6` returns the eight 16-bit pieces, or null; `ipv6Str`
+    // writes them back the way the specification does (lowercase hex, the longest run of two or more zero pieces compressed,
+    // no leading zeros) -- and, because the same routine writes an embedded IPv4 tail back as hex pairs, `[::ffff:1.2.3.4]`
+    // becomes `[::ffff:102:304]`, which is what Node prints.
+    const ipv6 = (input) => {
+      const address = [0, 0, 0, 0, 0, 0, 0, 0];
+      let pieceIndex = 0, compress = null, pointer = 0;
+      const n = input.length;
+      if (input[pointer] === ":") {
+        if (input[pointer + 1] !== ":") return null;
+        pointer += 2; pieceIndex++; compress = pieceIndex;
+      }
+      while (pointer < n) {
+        if (pieceIndex === 8) return null;
+        if (input[pointer] === ":") {
+          if (compress !== null) return null;
+          pointer++; pieceIndex++; compress = pieceIndex; continue;
+        }
+        let value = 0, length = 0;
+        while (length < 4 && pointer < n && /[0-9A-Fa-f]/.test(input[pointer])) { value = value * 16 + parseInt(input[pointer], 16); pointer++; length++; }
+        if (pointer < n && input[pointer] === ".") {
+          if (length === 0) return null;
+          pointer -= length;
+          if (pieceIndex > 6) return null;
+          let numbersSeen = 0;
+          while (pointer < n) {
+            let ipv4Piece = null;
+            if (numbersSeen > 0) {
+              if (input[pointer] === "." && numbersSeen < 4) pointer++;
+              else return null;
+            }
+            if (pointer >= n || !/[0-9]/.test(input[pointer])) return null;
+            while (pointer < n && /[0-9]/.test(input[pointer])) {
+              const number = parseInt(input[pointer], 10);
+              if (ipv4Piece === null) ipv4Piece = number;
+              else if (ipv4Piece === 0) return null;
+              else ipv4Piece = ipv4Piece * 10 + number;
+              if (ipv4Piece > 255) return null;
+              pointer++;
+            }
+            address[pieceIndex] = address[pieceIndex] * 256 + ipv4Piece;
+            numbersSeen++;
+            if (numbersSeen === 2 || numbersSeen === 4) pieceIndex++;
+          }
+          if (numbersSeen !== 4) return null;
+          break;
+        } else if (pointer < n && input[pointer] === ":") {
+          pointer++;
+          if (pointer >= n) return null;
+        } else if (pointer < n) return null;
+        address[pieceIndex] = value;
+        pieceIndex++;
+      }
+      if (compress !== null) {
+        // Move the pieces after the compressed run to the end of the address.
+        let swaps = pieceIndex - compress;
+        pieceIndex = 7;
+        while (pieceIndex !== 0 && swaps > 0) {
+          const t = address[pieceIndex];
+          address[pieceIndex] = address[compress + swaps - 1];
+          address[compress + swaps - 1] = t;
+          pieceIndex--; swaps--;
+        }
+      } else if (pieceIndex !== 8) return null;
+      return address;
+    };
+    const ipv6Str = (address) => {
+      let idx = null, longest = 1;
+      for (let i = 0; i < 8;) {
+        if (address[i] !== 0) { i++; continue; }
+        let j = i;
+        while (j < 8 && address[j] === 0) j++;
+        if (j - i > longest) { longest = j - i; idx = i; }
+        i = j;
+      }
+      let out = "", ignore0 = false;
+      for (let i = 0; i < 8; i++) {
+        if (ignore0 && address[i] === 0) continue;
+        else if (ignore0) ignore0 = false;
+        if (idx === i) { out += i === 0 ? "::" : ":"; ignore0 = true; continue; }
+        out += address[i].toString(16);
+        if (i !== 7) out += ":";
+      }
+      return out;
+    };
+
     const parseHost = (str, special) => {
       if (!special) return /[\x00\t\n\r #\/:<>?@[\\\]^|]/.test(str) ? null : pct(str, C0);
       let d = str.replace(/%([0-9A-Fa-f]{2})/g, (_, h) => {
@@ -162,9 +251,9 @@
       return [ip / 16777216 | 0, ip / 65536 & 255, ip / 256 & 255, ip & 255].join(".");
     };
 
-    // Applies the segments of `str` to `path` (an array, changed in place). A leading separator is not a segment.
-    const applyPath = (path, str, special) => {
-      if (str.length && (str[0] === "/" || (special && str[0] === "\\"))) str = str.slice(1);
+    // The path state: every separator ends a segment, so a leading separator leaves an empty first segment. `applyPath` is the
+    // path-START state -- it consumes one leading separator first -- and is what every caller but a file: URL wants.
+    const pathState = (path, str, special) => {
       const segs = str.split(special ? /[\/\\]/ : "/");
       for (let i = 0; i < segs.length; i++) {
         const last = i === segs.length - 1, lc = segs[i].toLowerCase();
@@ -174,6 +263,7 @@
       }
       return path;
     };
+    const applyPath = (path, str, special) => pathState(path, str.length && (str[0] === "/" || (special && str[0] === "\\")) ? str.slice(1) : str, special);
     const pathFrom = (rest, special) => rest === "" ? (special ? [""] : []) : applyPath([], rest, special);
 
     // The authority: [user[:pass]@]host[:port]. Returns null on failure.
@@ -187,18 +277,37 @@
         pass = colon < 0 ? "" : pct(cred.slice(colon + 1), USERINFO);
         if (hostport === "") return null;
       }
-      if (hostport[0] === "[") throw unsupported("an IPv6 host");
-      const ci = hostport.indexOf(":"), hostStr = ci < 0 ? hostport : hostport.slice(0, ci), portStr = ci < 0 ? "" : hostport.slice(ci + 1);
-      if (ci >= 0 && hostStr === "") return null;
-      if (special && hostStr === "") return null;
-      const host = parseHost(hostStr, special);
-      if (host === null) return null;
-      let port = null;
-      if (portStr !== "") {
-        if (!/^[0-9]+$/.test(portStr)) return null;
-        port = parseInt(portStr, 10);
-        if (port > 65535) return null;
-        if (port === DEFAULT_PORT[scheme]) port = null;
+      let host, port = null;
+      if (hostport[0] === "[") {
+        // A bracketed host is an IPv6 literal for every scheme, special or not; the colon inside the brackets does not
+        // start the port, so the authority is split here rather than below.
+        const close = hostport.indexOf("]");
+        if (close < 0) return null;
+        const addr = ipv6(hostport.slice(1, close));
+        if (addr === null) return null;
+        host = "[" + ipv6Str(addr) + "]";
+        const after = hostport.slice(close + 1);
+        if (after !== "") {
+          const portStr = after[0] === ":" ? after.slice(1) : null;
+          if (portStr === null || !/^[0-9]*$/.test(portStr)) return null;
+          if (portStr !== "") {
+            port = parseInt(portStr, 10);
+            if (port > 65535) return null;
+            if (port === DEFAULT_PORT[scheme]) port = null;
+          }
+        }
+      } else {
+        const ci = hostport.indexOf(":"), hostStr = ci < 0 ? hostport : hostport.slice(0, ci), portStr = ci < 0 ? "" : hostport.slice(ci + 1);
+        if (ci >= 0 && hostStr === "") return null;
+        if (special && hostStr === "") return null;
+        host = parseHost(hostStr, special);
+        if (host === null) return null;
+        if (portStr !== "") {
+          if (!/^[0-9]+$/.test(portStr)) return null;
+          port = parseInt(portStr, 10);
+          if (port > 65535) return null;
+          if (port === DEFAULT_PORT[scheme]) port = null;
+        }
       }
       return { user, pass, host, port };
     };
@@ -219,11 +328,46 @@
         return { scheme, user: a.user, pass: a.pass, host: a.host, port: a.port, path: pathFrom(afterSlashes.slice(i), special), query: encQuery(special), frag };
       };
 
+      // file: URLs. The host is the empty string unless there is an authority naming something other than "localhost", and the
+      // path is in the path state, so `file:///a` and `file:////a` differ in the first segment being empty (`/a` against `//a`).
+      // A Windows drive letter in the authority is part of the path, not a host.
+      const fileURL = (rest, base) => {
+        const baseFile = base && base.scheme === "file" ? base : null;
+        let host = "", path;
+        if (rest.slice(0, 2) === "//") {
+          const after = rest.slice(2);
+          let i = 0;
+          while (i < after.length && after[i] !== "/" && after[i] !== "\\") i++;
+          const authority = after.slice(0, i), tail = after.slice(i);
+          if (/^[A-Za-z][:|]$/.test(authority)) { host = ""; path = pathState([], authority + tail, true); }
+          else {
+            if (authority !== "" && authority.toLowerCase() !== "localhost") {
+              host = parseHost(authority, true);
+              if (host === null) return null;
+            }
+            path = pathState([], tail.length && (tail[0] === "/" || tail[0] === "\\") ? tail.slice(1) : tail, true);
+          }
+        } else if (rest[0] === "/" || rest[0] === "\\") {
+          host = baseFile ? baseFile.host : "";
+          path = pathState([], rest.slice(1), true);
+        } else if (rest === "" && baseFile) {
+          return { scheme: "file", user: "", pass: "", host: baseFile.host, port: null, path: baseFile.path.slice(), query: query !== null ? encQuery(true) : baseFile.query, frag };
+        } else if (baseFile) {
+          host = baseFile.host;
+          path = baseFile.path.slice();
+          path.pop();
+          pathState(path, rest, true);
+        } else {
+          path = pathState([], rest, true);
+        }
+        return { scheme: "file", user: "", pass: "", host, port: null, path, query: encQuery(true), frag };
+      };
+
       const sm = /^([A-Za-z][A-Za-z0-9+.\-]*):/.exec(s);
       if (sm) {
         const scheme = sm[1].toLowerCase(), special = scheme in DEFAULT_PORT;
         let rest = s.slice(sm[0].length);
-        if (scheme === "file") throw unsupported("a file: URL");
+        if (scheme === "file") return fileURL(rest, base);
         if (special) {
           if (base && base.scheme === scheme && rest.slice(0, 2) !== "//") return relative(rest);
           return authorityAndPath(rest.replace(/^[\/\\]*/, ""), scheme, true);
@@ -386,7 +530,7 @@
       get href() { return serialize(rec(this)); }
       get origin() {
         const r = rec(this);
-        if (r.scheme in DEFAULT_PORT) return r.scheme + "://" + r.host + (r.port !== null ? ":" + r.port : "");
+        if (r.scheme in DEFAULT_PORT) return r.scheme === "file" ? "null" : r.scheme + "://" + r.host + (r.port !== null ? ":" + r.port : "");
         if (r.scheme === "blob") { const inner = parse(pathname(r), null); if (inner && (inner.scheme === "http" || inner.scheme === "https")) return inner.scheme + "://" + inner.host + (inner.port !== null ? ":" + inner.port : ""); }
         return "null";
       }
