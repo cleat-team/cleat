@@ -934,7 +934,6 @@ var deferSegmentLanguages = map[string]bool{
 	// plugin's cleat_run_drain, republished under that name by cmd cleat-js-link, is that export. Verified end to end by
 	// tests/typescript/typescript_defer_segment_test.go, which builds a real module and asserts the segment records only
 	// the defers on the same entry point whose control records the body's call.
-	"javascript": true,
 }
 
 // RunsOnWasmtime reports whether a detected guest language is served by the
