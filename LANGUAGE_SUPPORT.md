@@ -292,8 +292,29 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 | **AssemblyScript** | asc (mature) | Shipped | 10-50 KB (design estimate) | 2 |
 | **C** | clang (mature) | Not built | 10-50 KB (design estimate) | — |
 | **Zig** | zig build-exe (mature) | Not built | 5-30 KB (design estimate) | — |
-| **TypeScript** (real) | Javy/QuickJS | In development, not supported (see `tiers.yaml`, cleat#3825) | ~1.1 MB (prototype, macOS arm64 only) | — |
+| **TypeScript** (real) | Javy/QuickJS | In development, not supported (see `tiers.yaml`, cleat#3825) | ~1.45 MB (measured 2026-11-17, the example module; see below) | — |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | Not built | 1-5 MB (design estimate) | — |
+
+### TypeScript (real): in development, not supported
+
+`tiers.yaml` lists TypeScript under tier 2, marked IN DEVELOPMENT -- NOT SUPPORTED, so that the work has a tier from its first commit
+without being read as a support claim. This table's Tier column means a *supported* tier, so the cell above is a dash for that reason, and
+`scripts/check-typescript-tier.py` refuses any other value while the status is not "supported". Nothing in this section is a support claim. It can be built,
+tested and run, and [the getting-started page](docs/tutorials/typescript-quick-start.md) is where to start. What it cannot do or
+has not been shown to do, each with its issue:
+
+- **Updates are unsupported** (cleat#3827): the update host calls are not bound, so no TypeScript workflow can issue or serve one.
+- **A killed workflow's `ctx.defer` cleanup does not run** (cleat#3922); a *cancelled* workflow's does.
+- **A silent divergence from Node remains**: the `URL` shim still throws on an IPv6 host, an internationalised host or a `file:`
+  URL, which a catch-all such as zod's `z.url()` reads as "invalid" where Node says valid (cleat#3898). The list of divergences
+  covers what was looked at, not everything.
+- **No timers, no `crypto`, no `TextEncoder`/`TextDecoder`; local time is UTC.**
+- **Dialects:** the database-backed worker tests run on PostgreSQL, MySQL and SQL Server in tier-2 CI jobs (they must run, they
+  gate no merge), and only those tests run on MySQL and SQL Server.
+
+The binary-size cell is one measurement: the example module in `examples/ts-workflow` is 1,446,426 bytes and the Javy plugin it
+embeds is 1,296,266 bytes (2026-11-17, macOS arm64; `cleat build --target ts -o <dir> examples/ts-workflow/workflow.ts:greet`).
+The condition for a support claim, and the open items behind it, are in `tiers.yaml` under `sdk-typescript`.
 
 ---
 
