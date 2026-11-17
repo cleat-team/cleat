@@ -120,7 +120,7 @@ export interface RunOptions {
    * ONE LINE PER GROUP, so ten groups can add their name in parallel without touching the same line:
    *   updates    group A   in-memory UpdateStore. Fixture: [{ name, payload? }], pending from the start, delivered oldest first.
    *                         Reported in `extras.updates`: { completed: [{ name, requestId, result?, error? }], pending, settled }
-   *   signals    group B
+   *   signals    group B   the existing -signals queue; `extras.signalsSent` is what the run sent (`signalWorkflow`)
    *   children   group C   child handles, waits
    *   detached   group D
    *   locks      group E   ConcurrencyKeyStore
