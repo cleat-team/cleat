@@ -36,6 +36,18 @@ const absolute: string[] = [
   "http://[::ffff:0:1.2.3.4]/", "http://[0:0:0:0:0:ffff:102:304]/", "http://[::1.2.3.4]/", "http://[1:2:3:4:5:6:1.2.3.4]/",
   "http://[1:2:3:4:5:6:7:1.2.3.4]/", "http://[fe80::1%25eth0]/", "http://[]/", "http://[::1]:99999/", "http://u@[::1]:81/",
   "HTTP://[::FFFF:1.2.3.4]:8080/X?q#f", "http://[::1]:00080/",
+  // Internationalised hosts: NFKC folding (fullwidth, combining marks), the three non-ASCII dots, Punycode, percent-encoded
+  // UTF-8, and the "xn--" labels Node rejects -- each of which must be a failed URL rather than an accepted one
+  "http://münchen.de/", "http://xn--mnchen-3ya.de/", "http://XN--MNCHEN-3YA.DE/", "http://faß.de/", "http://例え.テスト/",
+  "http://ＥＸＡＭＰＬＥ。ＣＯＭ/", "http://a。b/", "http://a．b/", "http://bücher.example/", "http://%C3%BC.com/",
+  "http://m%C3%BCnchen.de/", "http://é.com/", "http://é.com/", "http://ü/", "http://-.ü/", "http://ü..de/",
+  "http://a bücher.de/", "http://a.xn--/", "http://xn--a.com/", "http://xn--0.com/", "http://xn--.com/", "http://xn----.com/",
+  "http://xn---.com/", "http://xn--a-.com/", "http://xn--ab-.com/", "http://xn--1ug.com/", "http://xn---a.com/",
+  "http://xn--zca/", "http://xn--n3h.com/", "http://xn--p1ai/", "http://xn--55qx5d.cn/", "http://xn--e1afmkfd.xn--p1ai/",
+  "http://😀.com/", "http://xn--a-xbb.com/", "http://xn--kkg.com/", "http://xn--kba.com/", "http://xn--ab-1ca.com/",
+  "http://xn--ab-l13a.com/", "http://xn--tvg.com/", "http://xn--ib9b.com/", "http://xn--17b.com/", "http://xn--n3h.com/",
+  "http://a\u0301.com/", "http://ẞ.com/", "http://\u00a0.com/",
+  "file://ü/x", "file:///ü/x",
   // file: URLs: no authority, localhost folded to the empty host, a drive letter kept in the path
   "file:///tmp/a.txt", "file://localhost/tmp/a", "file:///C:/x", "file:/tmp/a", "file:x", "file:a/b", "file://", "file://localhost",
   "file://host/x", "file://EXAMPLE.COM/x", "file://C:/x", "file:///a\\b", "file:////a", "file:?q", "file:#f", "file:///tmp/a b",
