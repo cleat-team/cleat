@@ -835,8 +835,12 @@ tier2:
            (cleat#3828) and defer segments, so javascript is in engine.deferSegmentLanguages
            (cleat#3826). The getting-started page and the LANGUAGE_SUPPORT.md row are
            cleat#3831"
-        - "a deployed module is about 1.1 MB (the Javy plugin is about 1.07 MB); the 100 KB
-           line applies to dynamic mode only, which is out of scope"
+        - "module size, measured 2026-11-17 on macOS arm64: the example module is 1,446,426
+           bytes and the Javy plugin it embeds is 1,296,266 (re-derive: cleat build --target
+           ts -o <dir> examples/ts-workflow/workflow.ts:greet, then packages/cleat-ts/.work/
+           cleat-plugin.wasm). An earlier revision said about 1.1 MB and 1.07 MB, a
+           prototype-era figure the plugin has since outgrown. The 100 KB line applies to
+           dynamic mode only, which is out of scope"
 
     - id: plugins
       why: 22 built-in, all with unit tests; 10 covered by the integration harness.
