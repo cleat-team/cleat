@@ -316,12 +316,12 @@ func replayUntilDone(t *testing.T, e *engine.Engine, wasm []byte, entry string, 
 // TestTypeScriptACallVariantAfterASuspensionRecordsNothing is the group's late-call guard (groups/README.md convention 3),
 // and it pins ALL FOUR bindings: unguarding any one of them records an event after the suspension and turns this red.
 //
-// Measured one binding at a time, with REBUILD_PLUGIN=1:
+// Measured one binding at a time, with REBUILD_PLUGIN=1 (the first three here, `send` by review):
 //
-//   __cleat_call_retry        -> call event, payments/charge
-//   __cleat_call_heartbeat    -> call event, payments/slow
-//   __cleat_send              -> durable_send event
-//   __cleat_schedule_invoke   -> durable_schedule_invoke event, email/digest
+//	__cleat_call_retry        -> call event, payments/charge
+//	__cleat_call_heartbeat    -> call event, payments/slow
+//	__cleat_send              -> durable_send event
+//	__cleat_schedule_invoke   -> durable_schedule_invoke event, email/digest
 //
 // THE FIRST VERSION OF THIS COMMENT SAID THE OPPOSITE -- that the engine refused `send`, `callHeartbeat` and `scheduleInvoke`
 // after a suspension and their guards were unobservable -- and it was wrong twice over. `stopBeforeNewWork` is a DEFER-PHASE
