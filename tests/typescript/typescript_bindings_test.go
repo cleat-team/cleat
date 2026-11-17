@@ -10,9 +10,15 @@ package typescript
 // FOUR SOURCES, DELIBERATELY INDEPENDENT. The point is not that each is checked, it is that they can disagree:
 //
 //	engine/imports.go                        what the engine exports (55 today)
-//	crates/cleat-js-plugin/src/lib.rs        what the plugin actually installs (g.set("__cleat_…"))
-//	packages/cleat-ts/index.ts               what TypeScript is told exists (declare function __cleat_…)
-//	packages/cleat-ts/host-calls.json        the decided mapping, plus every unbound call with its reason
+//	crates/cleat-js-plugin/src/**/*.rs       what the plugin actually installs (g.set("__cleat_…")): lib.rs and src/groups/
+//	packages/cleat-ts/index.ts, groups/*.ts  what TypeScript is told exists (declare function __cleat_…)
+//	packages/cleat-ts/host-calls.json and host-calls.d/*.json
+//	                                         the decided mapping, plus every unbound call with its reason
+//
+// THE INVENTORY AND THE TWO SOURCES THAT DESCRIBE THE GUEST ARE SPLIT BY GROUP (cleat#3827), so that binding calls in two
+// groups edits different files. The reconciler below still sees ONE inventory, the union, and the union is where a mistake
+// the split could introduce is caught: a call listed in two files, a group with a file missing, a file for a group nobody
+// pinned. See packages/cleat-ts/groups/README.md.
 //
 // A single source reconciled against itself cannot report what it does not mention. Each pair below catches a different
 // mistake: an export missing from the inventory (forgotten), a global installed but unmapped (undocumented), a mapping
@@ -44,6 +50,72 @@ type bindingInventory struct {
 	Plumbing []string          `json:"plumbing"` // __cleat_* globals that are ABI bridge, not host calls
 	Bound    map[string]string `json:"bound"`    // __cleat_* global -> ABI export name
 	Unbound  map[string]string `json:"unbound"`  // ABI export name -> "pending: …" or "permanent: …"
+
+	// Problems are what building the union found wrong with the FILES, before any rule about their contents: a call
+	// listed in two of them, a group with a file missing, a file for a group that is not pinned. They are carried here,
+	// not returned as an error, so reconcileBindings reports them beside every other violation and the self-test below
+	// can feed it a case.
+	Problems []string `json:"-"`
+}
+
+// bindingGroups are the groups packages/cleat-ts/groups/README.md names, pinned so that a file that goes missing, or a
+// misspelt one that would otherwise read as a new group, fails instead of being skipped. Adding a group means adding its
+// four files and its name here.
+var bindingGroups = []string{"updates", "signals", "children", "detached", "locks", "schedules", "continuation", "calls", "plugins", "utilities"}
+
+// groupInventory is one packages/cleat-ts/host-calls.d/<group>.json.
+type groupInventory struct {
+	Doc     []string          `json:"doc"`
+	Bound   map[string]string `json:"bound"`
+	Unbound map[string]string `json:"unbound"`
+}
+
+// inventoryPart is one parsed group file and the name it is reported under.
+type inventoryPart struct {
+	name string
+	inv  groupInventory
+}
+
+// mergeInventories builds the union of the main inventory and the group files. A call that appears in two files is a
+// PROBLEM, recorded rather than resolved: merging two maps would otherwise collapse a duplicate into one key and report
+// nothing, which is exactly the mistake the split makes possible (two groups each deciding they own a call). The main
+// file is not modified.
+func mergeInventories(main bindingInventory, parts []inventoryPart) bindingInventory {
+	out := bindingInventory{
+		Doc:      main.Doc,
+		Plumbing: main.Plumbing,
+		Bound:    map[string]string{},
+		Unbound:  map[string]string{},
+		Problems: append([]string(nil), main.Problems...),
+	}
+	boundIn := map[string]string{}   // global -> the file that binds it
+	unboundIn := map[string]string{} // export -> the file that lists it
+	const mainName = "host-calls.json"
+	for g, e := range main.Bound {
+		out.Bound[g], boundIn[g] = e, mainName
+	}
+	for e, r := range main.Unbound {
+		out.Unbound[e], unboundIn[e] = r, mainName
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].name < parts[j].name })
+	for _, p := range parts {
+		file := "host-calls.d/" + p.name + ".json"
+		for _, g := range sortedKeys(p.inv.Bound) {
+			if prev, dup := boundIn[g]; dup {
+				out.Problems = append(out.Problems, fmt.Sprintf("%s and %s both bind %s: a call belongs to one group, and one file lists it", prev, file, g))
+				continue
+			}
+			out.Bound[g], boundIn[g] = p.inv.Bound[g], file
+		}
+		for _, e := range sortedKeys(p.inv.Unbound) {
+			if prev, dup := unboundIn[e]; dup {
+				out.Problems = append(out.Problems, fmt.Sprintf("%s and %s both list %s as unbound: a call belongs to one group, and one file lists it", prev, file, e))
+				continue
+			}
+			out.Unbound[e], unboundIn[e] = p.inv.Unbound[e], file
+		}
+	}
+	return out
 }
 
 // bindingSources is everything reconcileBindings compares. It is a value so the self-test below can feed it synthetic
@@ -79,7 +151,7 @@ var bindingNameExceptions = map[string]string{"__cleat_set_query_state": "set_qu
 // reconcileBindings returns one message per violation, in a stable order. Empty means the inventory and the three
 // sources agree.
 func reconcileBindings(s bindingSources) []string {
-	var v []string
+	v := append([]string(nil), s.inventory.Problems...)
 	exported := toSet(s.exported)
 	installed := toSet(s.installed)
 	declared := toSet(s.declared)
@@ -132,11 +204,11 @@ func reconcileBindings(s bindingSources) []string {
 		if _, ok := s.inventory.Bound[g]; ok {
 			continue
 		}
-		v = append(v, fmt.Sprintf("crates/cleat-js-plugin/src/lib.rs installs %s, but host-calls.json lists it as neither plumbing nor bound", g))
+		v = append(v, fmt.Sprintf("crates/cleat-js-plugin/src installs %s, but host-calls.json and host-calls.d/ list it as neither plumbing nor bound", g))
 	}
 	for _, g := range append(sortedKeys(plumbing), boundGlobals...) {
 		if _, ok := installed[g]; !ok {
-			v = append(v, fmt.Sprintf("host-calls.json lists %s, but the plugin never installs it (no g.set(\"%s\", …) in lib.rs)", g, g))
+			v = append(v, fmt.Sprintf("host-calls.json lists %s, but the plugin never installs it (no g.set(\"%s\", …) under crates/cleat-js-plugin/src)", g, g))
 		}
 	}
 
@@ -145,12 +217,12 @@ func reconcileBindings(s bindingSources) []string {
 	// __cleat_args/result/fail/suspended, while __cleat_shims_off is read by shims.js, not by the SDK.
 	for _, g := range boundGlobals {
 		if _, ok := declared[g]; !ok {
-			v = append(v, fmt.Sprintf("%s is bound but packages/cleat-ts/index.ts does not declare it, so no TypeScript signature exists", g))
+			v = append(v, fmt.Sprintf("%s is bound but packages/cleat-ts (index.ts or groups/) does not declare it, so no TypeScript signature exists", g))
 		}
 	}
 	for _, g := range sortedKeys(declared) {
 		if _, ok := installed[g]; !ok {
-			v = append(v, fmt.Sprintf("packages/cleat-ts/index.ts declares %s, which the plugin never installs: a call to it fails with \"not a function\"", g))
+			v = append(v, fmt.Sprintf("packages/cleat-ts declares %s, which the plugin never installs: a call to it fails with \"not a function\"", g))
 		}
 	}
 
@@ -164,9 +236,9 @@ func reconcileBindings(s bindingSources) []string {
 		case !bound && !listed:
 			v = append(v, fmt.Sprintf("engine/imports.go exports %s, which host-calls.json neither binds nor lists as unbound: decide which and say why", name))
 		case listed && reason == "":
-			v = append(v, fmt.Sprintf("host-calls.json lists %s as unbound with no reason", name))
+			v = append(v, fmt.Sprintf("the inventory lists %s as unbound with no reason", name))
 		case listed && !bindingReasonPrefix.MatchString(reason):
-			v = append(v, fmt.Sprintf("host-calls.json's reason for %s does not start \"pending: \" or \"permanent: \" with an explanation: %q", name, reason))
+			v = append(v, fmt.Sprintf("the inventory's reason for %s does not start \"pending: \" or \"permanent: \" with an explanation: %q", name, reason))
 		}
 	}
 	for _, name := range sortedKeys(s.inventory.Unbound) {
@@ -249,7 +321,7 @@ func TestReconcileBindingsSelfTest(t *testing.T) {
 			s.installed = append(s.installed, "__cleat_ghost")
 			s.declared = append(s.declared, "__cleat_ghost")
 		}},
-		{"a global installed but unmapped", "lists it as neither plumbing nor bound", func(s *bindingSources) {
+		{"a global installed but unmapped", "list it as neither plumbing nor bound", func(s *bindingSources) {
 			s.installed = append(s.installed, "__cleat_extra")
 		}},
 		{"a mapping the plugin never installs", "the plugin never installs it", func(s *bindingSources) {
@@ -284,6 +356,31 @@ func TestReconcileBindingsSelfTest(t *testing.T) {
 		{"a handshake call no longer marked permanent", "must stay listed", func(s *bindingSources) {
 			s.inventory.Unbound["cleat_poll_work"] = "pending: maybe a workflow could poll its own queue?"
 		}},
+		// The split's own failure modes. These go through mergeInventories, because a duplicate that has been merged into one
+		// map key is invisible to every rule above.
+		{"a call listed unbound in two group files", "both list cleat_later as unbound", func(s *bindingSources) {
+			s.inventory = mergeInventories(bindingInventory{Bound: s.inventory.Bound, Plumbing: s.inventory.Plumbing, Unbound: map[string]string{
+				"cleat_poll_work":              s.inventory.Unbound["cleat_poll_work"],
+				"cleat_complete":               s.inventory.Unbound["cleat_complete"],
+				"cleat_register_query_handler": s.inventory.Unbound["cleat_register_query_handler"],
+			}}, []inventoryPart{
+				{"locks", groupInventory{Unbound: map[string]string{"cleat_later": "pending: listed by the locks group."}}},
+				{"signals", groupInventory{Unbound: map[string]string{"cleat_later": "pending: and also by the signals group."}}},
+			})
+		}},
+		{"a call bound by two group files", "both bind __cleat_sleep", func(s *bindingSources) {
+			s.inventory = mergeInventories(s.inventory, []inventoryPart{
+				{"locks", groupInventory{Bound: map[string]string{"__cleat_sleep": "cleat_sleep"}}},
+			})
+		}},
+		{"a call bound in one file and listed unbound in another", "both bound", func(s *bindingSources) {
+			s.inventory = mergeInventories(s.inventory, []inventoryPart{
+				{"locks", groupInventory{Unbound: map[string]string{"cleat_sleep": "pending: this group forgot it was bound in the main file."}}},
+			})
+		}},
+		{"a group file that is missing", "has no host-calls.d/ghost.json", func(s *bindingSources) {
+			s.inventory.Problems = append(s.inventory.Problems, groupFileProblems("ghost", false, true, true)...)
+		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -305,9 +402,12 @@ func TestReconcileBindingsSelfTest(t *testing.T) {
 
 // ---- the four sources -------------------------------------------------------------------------------------------------
 
+// loadInventory reads packages/cleat-ts/host-calls.json and every packages/cleat-ts/host-calls.d/<group>.json and returns
+// their union. Structural problems with the files are carried in Problems (see mergeInventories).
 func loadInventory(t *testing.T, root string) bindingInventory {
 	t.Helper()
-	path := filepath.Join(root, "packages", "cleat-ts", "host-calls.json")
+	dir := filepath.Join(root, "packages", "cleat-ts")
+	path := filepath.Join(dir, "host-calls.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the binding inventory: %v", err)
@@ -318,7 +418,61 @@ func loadInventory(t *testing.T, root string) bindingInventory {
 	if err := dec.Decode(&inv); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
-	return inv
+
+	known := toSet(bindingGroups)
+	var parts []inventoryPart
+	entries, err := os.ReadDir(filepath.Join(dir, "host-calls.d"))
+	if err != nil {
+		// Not a skip: with the directory gone the union is the main file alone, which would read as "every pending call
+		// was bound" and pass the set-equality rule only if the engine's exports also disappeared. Say what is wrong.
+		t.Fatalf("reading packages/cleat-ts/host-calls.d: %v", err)
+	}
+	present := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+			inv.Problems = append(inv.Problems, fmt.Sprintf("packages/cleat-ts/host-calls.d/%s is not a <group>.json inventory file", name))
+			continue
+		}
+		group := strings.TrimSuffix(name, ".json")
+		present[group] = true
+		if !known[group] {
+			inv.Problems = append(inv.Problems, fmt.Sprintf("packages/cleat-ts/host-calls.d/%s is a file for %q, which is not one of the pinned groups: add it to bindingGroups and give it groups/%s.ts and src/groups/%s.rs, or fix the name", name, group, group, group))
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "host-calls.d", name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		var g groupInventory
+		d := json.NewDecoder(strings.NewReader(string(raw)))
+		d.DisallowUnknownFields()
+		if err := d.Decode(&g); err != nil {
+			t.Fatalf("parsing host-calls.d/%s: %v", name, err)
+		}
+		parts = append(parts, inventoryPart{name: group, inv: g})
+	}
+	for _, g := range bindingGroups {
+		_, tsErr := os.Stat(filepath.Join(dir, "groups", g+".ts"))
+		_, rsErr := os.Stat(filepath.Join(root, "crates", "cleat-js-plugin", "src", "groups", g+".rs"))
+		inv.Problems = append(inv.Problems, groupFileProblems(g, present[g], tsErr == nil, rsErr == nil)...)
+	}
+	return mergeInventories(inv, parts)
+}
+
+// groupFileProblems names each of a group's three files that is missing. A group with a file gone would otherwise lose its
+// stub silently: the inventory would still reconcile, and the group's author would find out when their PR did not build.
+func groupFileProblems(group string, hasJSON, hasTS, hasRS bool) []string {
+	var v []string
+	if !hasJSON {
+		v = append(v, fmt.Sprintf("group %q has no host-calls.d/%s.json", group, group))
+	}
+	if !hasTS {
+		v = append(v, fmt.Sprintf("group %q has no packages/cleat-ts/groups/%s.ts", group, group))
+	}
+	if !hasRS {
+		v = append(v, fmt.Sprintf("group %q has no crates/cleat-js-plugin/src/groups/%s.rs", group, group))
+	}
+	return v
 }
 
 var (
@@ -332,14 +486,59 @@ func engineExports(t *testing.T, root string) []string {
 	return scanFile(t, filepath.Join(root, "engine", "imports.go"), exportCallRE)
 }
 
+// pluginGlobals scans every .rs file under the plugin's src/, not lib.rs alone: the calls bound by cleat#3827 are installed
+// from src/groups/. A scan of lib.rs only would report every one of them as a phantom binding.
 func pluginGlobals(t *testing.T, root string) []string {
 	t.Helper()
-	return scanFile(t, filepath.Join(root, "crates", "cleat-js-plugin", "src", "lib.rs"), pluginSetRE)
+	return scanFiles(t, walkFiles(t, filepath.Join(root, "crates", "cleat-js-plugin", "src"), ".rs"), pluginSetRE)
 }
 
+// declaredGlobals scans index.ts and every packages/cleat-ts/groups/*.ts, for the same reason.
 func declaredGlobals(t *testing.T, root string) []string {
 	t.Helper()
-	return scanFile(t, filepath.Join(root, "packages", "cleat-ts", "index.ts"), tsDeclarationRE)
+	files := append([]string{filepath.Join(root, "packages", "cleat-ts", "index.ts")}, walkFiles(t, filepath.Join(root, "packages", "cleat-ts", "groups"), ".ts")...)
+	return scanFiles(t, files, tsDeclarationRE)
+}
+
+// walkFiles returns every file under dir with the given suffix, sorted. A directory that holds none is a failure, not an
+// empty answer: "no bindings found" would satisfy several of the reconciler's rules.
+func walkFiles(t *testing.T, dir, suffix string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, suffix) {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", dir, err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("no %s files under %s: the scan is looking in the wrong place", suffix, dir)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// scanFiles is scanFile over several files, with one result set.
+func scanFiles(t *testing.T, paths []string, re *regexp.Regexp) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range paths {
+		for _, name := range scanFile(t, p, re) {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func scanFile(t *testing.T, path string, re *regexp.Regexp) []string {
@@ -451,6 +650,173 @@ func TestStripCommentsKeepsCallsAndDropsProse(t *testing.T) {
 	// The line structure is what a `^`-anchored scan depends on, so it is asserted separately from the text.
 	if n := strings.Count(stripComments("a /* x\ny */ b"), "\n"); n != 1 {
 		t.Fatalf("a newline inside a block comment left %d newlines, want 1: a line-anchored scan would move", n)
+	}
+}
+
+// TestBindingScanReadsEveryGroupFile is the known-positive for the split: a call installed from a group's Rust file, and
+// one declared in a group's TypeScript file, must be FOUND, and a mention in a comment there must not be. Without it a scan
+// that quietly went back to reading lib.rs and index.ts alone would still pass on a tree with no group bound, and would
+// report every call a group binds as a phantom the day the first one does.
+func TestBindingScanReadsEveryGroupFile(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("crates/cleat-js-plugin/src/lib.rs", `g.set("__cleat_in_lib", f)`)
+	write("crates/cleat-js-plugin/src/groups/locks.rs", "// g.set(\"__cleat_only_in_a_comment\", f)\ng.set(\"__cleat_in_a_group\", f)\n")
+	write("packages/cleat-ts/index.ts", `declare function __cleat_ts_in_index(a: string): string;`)
+	write("packages/cleat-ts/groups/locks.ts", "// declare function __cleat_ts_only_in_a_comment(a: string): string;\ndeclare function __cleat_ts_in_a_group(a: string): string;\n")
+
+	got := pluginGlobals(t, root)
+	if strings.Join(got, ",") != "__cleat_in_a_group,__cleat_in_lib" {
+		t.Fatalf("pluginGlobals read %v, want exactly the two installed globals (one from lib.rs, one from src/groups/)", got)
+	}
+	got = declaredGlobals(t, root)
+	if strings.Join(got, ",") != "__cleat_ts_in_a_group,__cleat_ts_in_index" {
+		t.Fatalf("declaredGlobals read %v, want exactly the two declarations (one from index.ts, one from groups/)", got)
+	}
+}
+
+// ---- two groups must not add the same Ctx method -----------------------------------------------------------------------
+//
+// Nothing runs tsc on packages/cleat-ts, and `ctx` is built by spreading each group's object into one literal, so two groups
+// that each add `ctx.foo` would not fail to build: the later spread would silently win, and one group's method would answer
+// with the other's behaviour. This is the check that stands in for the compiler's "duplicate identifier".
+
+var (
+	ctxInterfaceRE = regexp.MustCompile(`(?m)^export interface (Ctx|[A-Z][A-Za-z]*Ctx)\b[^{\n]*\{[ \t]*$`)
+	ctxMemberRE    = regexp.MustCompile(`^  (?:readonly\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*[(<:?]`)
+)
+
+// ctxMembers returns the member names declared at the top level (two-space indent) of every `export interface Ctx` and
+// `export interface <Group>Ctx` in src, comments stripped first so a method named in prose is not a method.
+func ctxMembers(src string) []string {
+	lines := strings.Split(stripComments(src), "\n")
+	var out []string
+	in := false
+	for _, l := range lines {
+		switch {
+		case !in && ctxInterfaceRE.MatchString(l):
+			in = true
+		case in && l == "}":
+			in = false
+		case in:
+			if m := ctxMemberRE.FindStringSubmatch(l); m != nil {
+				out = append(out, m[1])
+			}
+		}
+	}
+	return out
+}
+
+// ctxCollisions reports every member name that more than one file declares. The map is file name -> that file's source.
+func ctxCollisions(sources map[string]string) []string {
+	owners := map[string][]string{}
+	for _, file := range sortedKeys(sources) {
+		seen := map[string]bool{}
+		for _, name := range ctxMembers(sources[file]) {
+			if !seen[name] {
+				seen[name] = true
+				owners[name] = append(owners[name], file)
+			}
+		}
+	}
+	var v []string
+	for _, name := range sortedKeys(owners) {
+		if len(owners[name]) > 1 {
+			v = append(v, fmt.Sprintf("the Ctx method %q is declared by %s: the later spread in index.ts would silently replace the earlier, so rename one", name, strings.Join(owners[name], " and ")))
+		}
+	}
+	return v
+}
+
+func TestNoTwoGroupsAddTheSameCtxMethod(t *testing.T) {
+	root := repoRoot(t)
+	dir := filepath.Join(root, "packages", "cleat-ts")
+	sources := map[string]string{}
+	files := append([]string{filepath.Join(dir, "index.ts")}, walkFiles(t, filepath.Join(dir, "groups"), ".ts")...)
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, _ := filepath.Rel(dir, f)
+		sources[filepath.ToSlash(rel)] = string(b)
+	}
+	// Not vacuous: index.ts declares the whole pre-split surface, so a scan that read none of it is broken, not clean.
+	if n := len(ctxMembers(sources["index.ts"])); n < 20 {
+		t.Fatalf("read %d members of Ctx in index.ts, want the 30-odd it declares: the interface scan is broken", n)
+	}
+	if v := ctxCollisions(sources); len(v) > 0 {
+		t.Fatalf("%s", strings.Join(v, "\n"))
+	}
+}
+
+// TestCtxCollisionScanSeesPlantedShapes holds the scan to cases already known to collide, and to ones that must not.
+func TestCtxCollisionScanSeesPlantedShapes(t *testing.T) {
+	iface := func(name string, members ...string) string {
+		return "export interface " + name + " {\n" + strings.Join(members, "\n") + "\n}\n"
+	}
+	cases := []struct {
+		name    string
+		sources map[string]string
+		want    string // a substring of a reported collision; empty means none may be reported
+	}{
+		{"two groups, one method name", map[string]string{
+			"groups/locks.ts":   iface("LocksCtx", "  tryLock(key: string): Promise<boolean>;"),
+			"groups/signals.ts": iface("SignalsCtx", "  tryLock(key: string): Promise<boolean>;"),
+		}, `"tryLock"`},
+		{"a group method that shadows a core one", map[string]string{
+			"index.ts":        iface("Ctx extends LocksCtx", "  sleep(ms: number): Promise<void>;"),
+			"groups/locks.ts": iface("LocksCtx", "  sleep<T>(ms: number): Promise<T>;"),
+		}, `"sleep"`},
+		{"a property and a method of one name", map[string]string{
+			"groups/a.ts": iface("ACtx", "  now: () => number;"),
+			"groups/b.ts": iface("BCtx", "  now(): number;"),
+		}, `"now"`},
+		{"a readonly property shadows a core method", map[string]string{
+			"index.ts":        iface("Ctx extends LocksCtx", "  sleep(ms: number): Promise<void>;"),
+			"groups/locks.ts": iface("LocksCtx", "  readonly sleep: (ms: number) => Promise<void>;"),
+		}, `"sleep"`},
+		{"distinct names do not collide", map[string]string{
+			"groups/a.ts": iface("ACtx", "  one(): void;"),
+			"groups/b.ts": iface("BCtx", "  two(): void;"),
+		}, ""},
+		{"a name in a comment is not a member", map[string]string{
+			"groups/a.ts": iface("ACtx", "  // tryLock(key) is the second spelling", "  one(): void;"),
+			"groups/b.ts": iface("BCtx", "  tryLock(key: string): void;"),
+		}, ""},
+		{"a nested object type's keys are not members", map[string]string{
+			"groups/a.ts": iface("ACtx", "  one(): {", "    two: number;", "  };"),
+			"groups/b.ts": iface("BCtx", "  two(): void;"),
+		}, ""},
+		{"a non-Ctx interface is ignored", map[string]string{
+			"groups/a.ts": iface("ACtx", "  one(): void;") + iface("Scope", "  one: string;"),
+		}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := ctxCollisions(c.sources)
+			if c.want == "" {
+				if len(v) > 0 {
+					t.Fatalf("reported a collision where there is none: %v", v)
+				}
+				return
+			}
+			for _, msg := range v {
+				if strings.Contains(msg, c.want) {
+					return
+				}
+			}
+			t.Fatalf("did not report the planted collision %s; got %v", c.want, v)
+		})
 	}
 }
 

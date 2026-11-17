@@ -20,6 +20,8 @@
 
 use std::cell::RefCell;
 
+mod groups;
+
 use cleat_sdk::HostCalls;
 use javy_plugin_api::{
     Config, import_namespace,
@@ -151,7 +153,7 @@ fn json_string(message: &str) -> String {
 
 /// A binding's JSON envelope: `{"suspended":true}`, `{"err":"..."}`, or `{"ok":<value>}`. Short-circuits (the host is
 /// not called) once this segment has suspended.
-fn guarded(f: impl FnOnce() -> Value) -> String {
+pub(crate) fn guarded(f: impl FnOnce() -> Value) -> String {
     if cleat_sdk::is_suspended() {
         return SUSPENDED.to_string();
     }
@@ -162,7 +164,7 @@ fn guarded(f: impl FnOnce() -> Value) -> String {
     v.to_string()
 }
 
-fn pair(r: (String, Option<String>)) -> Value {
+pub(crate) fn pair(r: (String, Option<String>)) -> Value {
     match r {
         (_, Some(e)) => json!({ "err": e }),
         (v, None) => json!({ "ok": v }),
@@ -393,6 +395,8 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
         // (cleat#1155). Records no event itself; void.
         g.set("__cleat_defer_phase", Func::from(|on: bool| { cleat_sdk::host_calls::set_defer_phase(on) })).unwrap();
         g.set("__cleat_drain_done", Func::from(|n: i32| { DRAINED.with(|d| *d.borrow_mut() = n as i64) })).unwrap();
+        // ---- the host calls cleat#3827 adds, one module per group (src/groups/) ----------------------------------------
+        groups::install_all(&g);
         g.set("__cleat_shims_off", SHIMS_OFF).unwrap();
         ctx.eval::<(), _>(include_str!("shims.js")).unwrap();
     });

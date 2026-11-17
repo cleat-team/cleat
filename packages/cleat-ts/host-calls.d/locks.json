@@ -1,0 +1,10 @@
+{
+  "doc": [
+    "The 'locks' group of host calls (cleat#3827). Each call is listed here as unbound ('pending: ...') until its binding lands; the PR that binds a call moves its entry from 'unbound' to 'bound' in THIS file and touches no other inventory file. See packages/cleat-ts/groups/README.md."
+  ],
+  "bound": {},
+  "unbound": {
+    "cleat_acquire_lock": "pending: a durable lock with a TTL; needs a TS API that distinguishes 'acquired' from 'not acquired' rather than throwing.",
+    "cleat_release_lock": "pending: the pair of cleat_acquire_lock."
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "doc": [
+    "The 'continuation' group of host calls (cleat#3827). Each call is listed here as unbound ('pending: ...') until its binding lands; the PR that binds a call moves its entry from 'unbound' to 'bound' in THIS file and touches no other inventory file. See packages/cleat-ts/groups/README.md."
+  ],
+  "bound": {},
+  "unbound": {
+    "cleat_continue_as_new": "pending: end this run and start a fresh one with a new input.",
+    "cleat_continue_as_new_versioned": "pending: the same, carrying a workflow version forward."
+  }
+}
