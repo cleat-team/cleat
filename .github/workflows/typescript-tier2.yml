@@ -349,7 +349,7 @@ jobs:
       - name: "Tests (the worker tests, on mysql)"
         run: |
           set -o pipefail
-          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker)$' ./tests/typescript/ | tee typescript-tier2-mysql-report.json > /dev/null
+          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker|TestTypeScriptLocksOnARealWorker)$' ./tests/typescript/ | tee typescript-tier2-mysql-report.json > /dev/null
 
       # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
       # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
@@ -379,7 +379,7 @@ jobs:
             grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
           fi
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
-          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker; do
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker TestTypeScriptLocksOnARealWorker; do
             grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mysql" >&2; exit 1; }
           done
 
@@ -459,7 +459,7 @@ jobs:
       - name: "Tests (the worker tests, on mssql)"
         run: |
           set -o pipefail
-          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker)$' ./tests/typescript/ | tee typescript-tier2-mssql-report.json > /dev/null
+          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution|TestTypeScriptDeferSegmentRunsOnARealWorker|TestTypeScriptLocksOnARealWorker)$' ./tests/typescript/ | tee typescript-tier2-mssql-report.json > /dev/null
 
       # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
       # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
@@ -489,7 +489,7 @@ jobs:
             grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
           fi
           [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
-          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker; do
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution TestTypeScriptDeferSegmentRunsOnARealWorker TestTypeScriptLocksOnARealWorker; do
             grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mssql" >&2; exit 1; }
           done
 

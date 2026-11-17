@@ -166,6 +166,37 @@ test("with no script the same child call PARKS", () => {
   assert.equal(run.suspended, true, "an unscripted child was reported finished; the store invented an outcome");
 });
 
+// cleat#3827, group E: the lock store. WITHOUT a `locks` script the engine has no ConcurrencyKeyStore and answers EVERY acquire
+// "not acquired" while recording the events as if a store had been asked, so a workflow that takes a lock runs its did-not-get-it
+// branch and passes having exercised nothing. The second test pins that trap; the first is the store doing its job.
+const LOCK_ENTRIES = ["locks_round_trip", "locks_holder", "locks_contender", "locks_expiry", "locks_bad_ttl", "locks_late"];
+
+test("with a locks script, acquire and release behave as a store would, and extras.locks says what it saw", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/locks.ts", LOCK_ENTRIES);
+  const run = runWorkflow(module, "locks_round_trip", { key: "mine", other: "theirs" }, {
+    scripts: { locks: { held: [{ key: "theirs", holder: "some-other-run" }] } },
+  });
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  assert.deepEqual(run.result, { first: true, again: false, afterRelease: true, heldElsewhere: false, stillHeldElsewhere: true });
+  const l = run.extras?.locks as { acquires: { key: string; ttlMs: number; acquired: boolean }[]; releases: { key: string; released: boolean }[]; held: { key: string; holder: string }[] } | undefined;
+  assert.ok(l, `the envelope carries no extras.locks: ${JSON.stringify(run.extras)}`);
+  assert.deepEqual(l.acquires.map((a) => [a.key, a.ttlMs, a.acquired]), [
+    ["mine", 60000, true], ["mine", 60000, false], ["mine", 60000, true], ["theirs", 60000, false], ["theirs", 60000, false],
+  ]);
+  // The release of a key this run never held freed nothing, and the key this run took last is still held by it.
+  assert.deepEqual(l.releases.map((r) => [r.key, r.released]), [["mine", true], ["theirs", false]]);
+  assert.deepEqual(l.held.map((h) => h.key), ["mine", "theirs"]);
+  assert.equal(l.held.find((h) => h.key === "theirs")?.holder, "some-other-run", "a release by another run freed the key");
+});
+
+test("with NO locks script every acquire is answered not-acquired, which is the engine's behaviour and not the workflow's", () => {
+  const module = buildEntries("tests/typescript/testdata/workflows/locks.ts", LOCK_ENTRIES);
+  const run = runWorkflow(module, "locks_round_trip", { key: "mine" });
+  assert.equal(run.ok, true, `the workflow failed: ${run.error}`);
+  assert.deepEqual(run.result, { first: false, again: false, afterRelease: false }, "an unscripted run acquired a lock from nowhere");
+  assert.equal(run.extras?.locks, undefined, "a store nobody scripted reported something");
+});
+
 // cleat#3827 F1: the generic script path. No store group has registered yet, so the only assertion that
 // means anything today is the REFUSAL -- and it is the one that matters, because a typo in a store name
 // that was silently ignored would configure nothing and leave the run looking fine.
