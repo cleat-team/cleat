@@ -381,8 +381,7 @@ func TestTypeScriptAwaitAnswersAnUpdateWithNoHandler(t *testing.T) {
 // green. `awaitAll` and `awaitAny` sit behind `dispatchThen`, whose poll is itself guarded, so a suspended segment never
 // reaches the binding; and `pollChild` records no event even when it runs, which is the property `engine/children.go` states
 // and relies on (pollChildIsDeterministic). Their `guarded` wrappers stay as defence in depth, and this comment is here so the
-// next reader does not take the green as evidence they are unnecessary. The same limit is recorded on group H's late-call
-// test, where three of four bindings are observable and one is not.
+// next reader does not take the green as evidence they are unnecessary.
 func TestTypeScriptAChildCallAfterASuspensionRecordsNothing(t *testing.T) {
 	root := needToolchain(t)
 	src := "tests/typescript/testdata/workflows/late_children.ts"
