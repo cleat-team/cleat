@@ -123,6 +123,15 @@ export function textcodec(): void {
     out.push(`stream(bom-split) = ${shown(a)} | ${shown(b)} | ${shown(c)}`);
   }
   {
+    // The BOM decision belongs to the first CODE POINT, not to the first three bytes: an ASCII first chunk has already produced
+    // output, so a later EF BB BF is data. The mirror case -- a single 0xEF first -- is decided the other way, above.
+    const d = new TextDecoder();
+    const a = d.decode(bytes(0x41), { stream: true });
+    const b = d.decode(bytes(0xef, 0xbb, 0xbf, 0x42), { stream: true });
+    const c = d.decode();
+    out.push(`stream(bom-after-output) = ${shown(a)} | ${shown(b)} | ${shown(c)}`);
+  }
+  {
     // Not streamed: a truncated sequence is an error (or one U+FFFD), and the decoder is non-fatal by default.
     const d = new TextDecoder();
     const a = d.decode(bytes(0xe2, 0x82));

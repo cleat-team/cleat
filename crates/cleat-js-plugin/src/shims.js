@@ -1107,20 +1107,17 @@
           bytes = joined;
         }
         let i = 0;
-        // The BOM is skipped only at the very start of a stream, and only when ignoreBOM is false. The DECISION waits for three
-        // bytes: a stream whose first chunk is just 0xEF cannot tell a BOM from the start of a three-byte sequence, and Node
-        // holds the decision too (measured: chunking "EF" then "BB BF 41" strips the BOM and yields "A"). Those bytes stay in
-        // `pending` as a partial sequence until the next call decides.
-        if (!this.#bomDecided && bytes.length >= 3) {
-          if (!this.#ignoreBOM && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) i = 3;
-          this.#bomDecided = true;
-        } else if (!this.#bomDecided && !stream) {
-          // Fewer than three bytes and nothing more is coming: it cannot have been a BOM, and the stream is over.
-          this.#bomDecided = true;
-        }
         const out = [];
         let need = 0, cp = 0, seen = 0, lower = 0x80, upper = 0xbf;
+        // The BOM is decided on the FIRST CODE POINT, not on the first three bytes, and that is the whole subtlety: a stream
+        // whose first chunk is a single 0xEF has produced no code point yet, so the decision is still open and the next chunk
+        // can complete a BOM to strip -- while a fist chunk of 0x41 has already produced "A", so a later EF BB BF is DATA and
+        // its U+FEFF stays. Both cases are Node's behaviour and both are in the corpus (cleat#4049 review).
         const emit = (code) => {
+          if (!this.#bomDecided) {
+            this.#bomDecided = true;
+            if (code === 0xfeff && !this.#ignoreBOM) return;
+          }
           if (code <= 0xffff) out.push(String.fromCharCode(code));
           else {
             const v = code - 0x10000;
