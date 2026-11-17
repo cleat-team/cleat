@@ -347,7 +347,7 @@ mod tests {
         (done.into_inner(), polls.get())
     }
 
-    fn register(name: &str, handler: impl Fn(&str) -> Result<String, String> + 'static, validator: Option<Box<dyn Fn(&str) -> Result<(), String>>>) {
+    fn register(name: &str, handler: impl Fn(&str) -> Result<String, String> + 'static, validator: Option<BoxedValidator>) {
         HANDLERS.with(|h| {
             h.borrow_mut().insert(name.to_string(), UpdateEntry { handler: Box::new(handler), validator });
         });
