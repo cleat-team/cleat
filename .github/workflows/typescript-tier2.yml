@@ -241,3 +241,208 @@ jobs:
             cat "$TS_NUMBERS_OUT"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------------------------------------------------------
+  # MySQL: the two worker tests that need a database, on mysql (cleat#3988, part b).
+  #
+  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, MySQL)
+  # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
+  #
+  # ONE JOB PER DIALECT, not a matrix, deliberately: scripts/check-workflow-guards.py inspects literal `services:` blocks
+  # (floating image tags, MSSQL_MEMORY_LIMIT_MB, the MySQL health start period of cleat#3936), and a matrix that templated
+  # `image:` would route around every one of those checks. The service block below is copied VERBATIM from multi-db-ci.yml.
+  # The jobs run in parallel with the one above, so the wall time is the slowest of them and not their sum.
+  #
+  # ONLY the two tests that touch the database run here. The other tests are not dialect-dependent, and running them three
+  # times would triple the cost and prove nothing new. The CLEAT_TS_DIALECT selection is tests/typescript/typescript_dialect_test.go.
+  # ------------------------------------------------------------------------------------------------------------------
+  typescript-tier2-mysql:
+    name: TypeScript Tier 2 (Linux x86_64, MySQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Overrides the workflow-level list: this job declares ITS database, so an unset or unreachable DSN is a failure here.
+      CLEAT_REQUIRE_TOOLCHAINS: typescript,mysql
+      CLEAT_TS_DIALECT: mysql
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
+
+    services:
+      mysql:
+        image: mirror.gcr.io/library/mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 60s
+          --publish 3306:3306
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Rust + wasm32-wasip1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # Verifies javy against toolchain.lock BEFORE running it, and exits 2 (UNMEASURED) on a mismatch.
+      - name: Install the pinned toolchain
+        run: packages/cleat-ts/bootstrap.sh
+
+      - name: "Tests (the worker tests, on mysql)"
+        run: |
+          set -o pipefail
+          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution)$' ./tests/typescript/ | tee typescript-tier2-mysql-report.json > /dev/null
+
+      # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
+      # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
+      # `if: always()`, for the reason the job above gives (cleat#3980): the step before sends stdout to /dev/null, so this
+      # step is the only thing that ever prints WHICH test failed, and it must not be skipped exactly when that matters.
+      - name: Read the result (failures, package failures, both tests passed)
+        if: always()
+        run: |
+          f=typescript-tier2-mysql-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          echo "tests failed: $fail, package failures: $pkgfail"
+          # NAME the failures, and print what each said: the report is on a runner that is already gone.
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' \
+              | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+            failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
+            for t in $failed_tests; do
+              echo "--- output for $t ---" >&2
+              grep "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/.*"Output":"(.*)"\}$/  | \1/' | head -30 >&2
+            done
+          fi
+          if [ "$pkgfail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
+          fi
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution; do
+            grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mysql" >&2; exit 1; }
+          done
+
+      - name: "Skip budget (zero, because the database was declared)"
+        run: scripts/check-skip-budget.sh typescript-tier2-mysql typescript-tier2-mysql-report.json
+
+  # ------------------------------------------------------------------------------------------------------------------
+  # SQL Server: the two worker tests that need a database, on mssql (cleat#3988, part b).
+  #
+  # NOT A REQUIRED CHECK: TypeScript Tier 2 (Linux x86_64, SQL Server)
+  # (the same reason as the job above: tier 2 must run and may fail, so it gates no merge)
+  #
+  # ONE JOB PER DIALECT, not a matrix, deliberately: scripts/check-workflow-guards.py inspects literal `services:` blocks
+  # (floating image tags, MSSQL_MEMORY_LIMIT_MB, the MySQL health start period of cleat#3936), and a matrix that templated
+  # `image:` would route around every one of those checks. The service block below is copied VERBATIM from multi-db-ci.yml.
+  # The jobs run in parallel with the one above, so the wall time is the slowest of them and not their sum.
+  #
+  # ONLY the two tests that touch the database run here. The other tests are not dialect-dependent, and running them three
+  # times would triple the cost and prove nothing new. The CLEAT_TS_DIALECT selection is tests/typescript/typescript_dialect_test.go.
+  # ------------------------------------------------------------------------------------------------------------------
+  typescript-tier2-mssql:
+    name: TypeScript Tier 2 (Linux x86_64, SQL Server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Overrides the workflow-level list: this job declares ITS database, so an unset or unreachable DSN is a failure here.
+      CLEAT_REQUIRE_TOOLCHAINS: typescript,mssql
+      CLEAT_TS_DIALECT: mssql
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+
+    services:
+      mssql:
+        # Pinned by digest 2026-08-07; `2022-latest` is a moving tag and this is
+        # a required check. Full rationale, the re-derive commands, and why the
+        # `ancestor=` filters had to move with it: tier1-gate.yml's mssql
+        # service. Bump all six sites together or `Lint` fails the PR.
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # Postgres, MySQL and everything else in this job (cleat#2101).
+          # 2048 is comfortably above what the tier1/multi-db fixtures need
+          # and caps the worst case where several mssql services land on one
+          # runner at once. Bump all six sites together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Rust + wasm32-wasip1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # Verifies javy against toolchain.lock BEFORE running it, and exits 2 (UNMEASURED) on a mismatch.
+      - name: Install the pinned toolchain
+        run: packages/cleat-ts/bootstrap.sh
+
+      - name: "Tests (the worker tests, on mssql)"
+        run: |
+          set -o pipefail
+          go test -count=1 -json -run '^(TestTypeScriptRunsAllThreeSuspensionsOnARealWorker|TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution)$' ./tests/typescript/ | tee typescript-tier2-mssql-report.json > /dev/null
+
+      # By NAME, not by count: a -run pattern that matches nothing exits 0 and prints ok, and this job's whole subject is that a
+      # green can hide a test that never ran. Both tests must have PASSED, on this dialect.
+      # `if: always()`, for the reason the job above gives (cleat#3980): the step before sends stdout to /dev/null, so this
+      # step is the only thing that ever prints WHICH test failed, and it must not be skipped exactly when that matters.
+      - name: Read the result (failures, package failures, both tests passed)
+        if: always()
+        run: |
+          f=typescript-tier2-mssql-report.json
+          fail=$(grep '"Action":"fail"' "$f" | grep -c '"Test":' || true)
+          pkgfail=$(grep '"Action":"fail"' "$f" | grep -vc '"Test":' || true)
+          echo "tests failed: $fail, package failures: $pkgfail"
+          # NAME the failures, and print what each said: the report is on a runner that is already gone.
+          if [ "$fail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep '"Test":' \
+              | sed -E 's/.*"Test":"([^"]+)".*/  FAILED: \1/' | sort -u | head -20 >&2
+            failed_tests=$(grep '"Action":"fail"' "$f" | grep -oE '"Test":"[^"]+"' | sed 's/"Test":"//; s/"$//' | sort -u)
+            for t in $failed_tests; do
+              echo "--- output for $t ---" >&2
+              grep "\"Test\":\"$t\"" "$f" | grep '"Action":"output"' \
+                | sed -E 's/.*"Output":"(.*)"\}$/  | \1/' | head -30 >&2
+            done
+          fi
+          if [ "$pkgfail" != 0 ]; then
+            grep '"Action":"fail"' "$f" | grep -v '"Test":' | head -3 >&2
+          fi
+          [ "$fail" = 0 ] && [ "$pkgfail" = 0 ] || { echo "a failure or a package that did not build" >&2; exit 1; }
+          for t in TestTypeScriptRunsAllThreeSuspensionsOnARealWorker TestTypeScriptRunSurvivesAKillInTheMiddleOfExecution; do
+            grep '"Action":"pass"' "$f" | grep -q "\"Test\":\"$t\"" || { echo "$t did not pass on mssql" >&2; exit 1; }
+          done
+
+      - name: "Skip budget (zero, because the database was declared)"
+        run: scripts/check-skip-budget.sh typescript-tier2-mssql typescript-tier2-mssql-report.json
