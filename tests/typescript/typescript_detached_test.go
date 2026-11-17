@@ -119,7 +119,7 @@ func runDetachedEntry(t *testing.T, wasm []byte, entry string, store *memDetache
 		t.Fatalf("%s: the workflow suspended (%s). The run it started is still running, so a binding that WAITED for it would "+
 			"look exactly like this", entry, susp.Reason)
 	}
-	return string(raw), hist
+	return raw, hist
 }
 
 // runDetachedEvents returns every run_detached event in the history.
