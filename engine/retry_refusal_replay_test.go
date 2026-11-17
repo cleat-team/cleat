@@ -15,10 +15,10 @@ package engine
 //     unobservable;
 //   - a PINNED, ADVANCEABLE CLOCK, because "did the 1ms backoff suspend?" is a race against how long the machine takes between
 //     recording the failed call and evaluating the deadline (cleat#4047). Left to race, a fast machine runs attempt 2 inside
-//     the first segment, the replay never happens, and the test stops measuring the thing #4032 fixed. The clock is frozen at
-//     the workflow's start instant for the first segment, so the deadline is always ahead of it and the sleep ALWAYS suspends;
-//     it is advanced past that deadline for the replay, so the replayed sleep is satisfied. `WithWorkflowStartTime` is what
-//     makes the replay session anchor at the same instant instead of at the wall clock;
+//     the first segment, the replay never happens, and the test stops measuring the thing #4032 fixed. The clock is held 60s
+//     BEFORE real time for the first segment, so the sleep's deadline (anchored on an event stamped with the real clock) is
+//     always ahead of it and the sleep ALWAYS suspends; it is moved to 60s AFTER real time for the replay, so the replayed
+//     sleep is satisfied. `WithWorkflowStartTime` anchors both segments at one instant, as created_at does in production;
 //   - and the replay run twice, once at the budget that refused and once at a budget under which the policy FITS. The second is
 //     the case that decides the design: the tenant's budget is writable while a run is in flight, so a fix that re-asks the
 //     budget instead of reading the recorded shape reproduces the original defect in the other direction. Measured on the
@@ -159,7 +159,7 @@ func TestARefusedRetryPolicyResumesWithItsNextAttempt(t *testing.T) {
 			// recorded an ordinary call. With the clock pinned this is deterministic -- if it ever stops suspending, the pin
 			// has been lost and the replay below would be measuring nothing.
 			if susp == nil {
-				t.Fatalf("the first segment did not suspend although the clock is frozen at the workflow's start: the sleep's "+
+				t.Fatalf("the first segment did not suspend although the clock is 60s behind real time, where the sleep's "+
 					"deadline cannot have passed. Attempts: %d. Without this suspension the replay is not a fallback replay at "+
 					"all, and the test would report a green having exercised the in-segment path instead.", caller.attempts())
 			}
