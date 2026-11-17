@@ -125,7 +125,21 @@ func TestTypeScriptDeferSegmentRunsOnARealWorker(t *testing.T) {
 			"guest that stopped calling out. Recorded: %v\nworker log tail:\n%s", rec.snapshot(), tail(w.out.String(), 3000))
 	}
 
-	// Then the sleep. "A run waiting out a sleep is not held by any worker (it reads ready)" -- the same status this
+	// THEN the resume, which is the word in #3826's done-when this test did not cover until the fixture grew a short
+	// sleep: the run stops at that sleep, wakes on the timer, and carries on to `resumed`. The call arriving is the
+	// observation -- a run that suspended and never woke cannot make it -- and it is asserted before the cancel so the
+	// resume is not inferred from a later state that the cancel could also explain.
+	resumeDeadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(resumeDeadline) && !rec.has("inventory/resumed") {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !rec.has("inventory/resumed") {
+		t.Fatalf("the run never resumed from its short sleep: inventory/resumed is missing, recorded %v.\n\n"+
+			"A workflow that suspends and is then cancelled has not been shown to RESUME, and that is half of what the "+
+			"done-when asks for.\nworker log tail:\n%s", rec.snapshot(), tail(w.out.String(), 3000))
+	}
+
+	// Then the long sleep. "A run waiting out a sleep is not held by any worker (it reads ready)" -- the same status this
 	// waits for, and the point at which the run can be cancelled.
 	var status string
 	deadline := time.Now().Add(60 * time.Second)
