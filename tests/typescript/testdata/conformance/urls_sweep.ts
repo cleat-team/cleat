@@ -74,5 +74,20 @@ export function urlsSweep(): void {
     raw.push(acc("http://a" + ch + "b.example/"));
     xn.push(acc("http://xn--" + puny("a" + ch + "b") + ".example/"));
   }
-  __cleat_result(JSON.stringify([ranges(raw, samples), ranges(xn, samples), samples.length.toString()]));
+  // An accept/refuse sweep cannot see a host BOTH sides accept and encode differently, so a sample compares the host VALUE,
+  // between letters and at the start of the label (where UTS46 has its own rules). cleat-review's value sweep found the
+  // soft-hyphen and leading-combining-mark cases this way (cleat#3898).
+  const valued: number[] = [];
+  for (let cp = 0; cp <= 0xffff; cp += 7) valued.push(cp);
+  for (let cp = 0x10000; cp < 0x110000; cp += 601) valued.push(cp);
+  const values: string[] = [];
+  for (const cp of valued) {
+    if (cp >= 0xd800 && cp <= 0xdfff) { values.push(cp.toString(16) + ":!:!"); continue; }
+    const ch = String.fromCodePoint(cp);
+    let inner: string, initial: string;
+    try { inner = new URL("http://a" + ch + "b.example/").host; } catch { inner = "!"; }
+    try { initial = new URL("http://" + ch + "x.example/").host; } catch { initial = "!"; }
+    values.push(cp.toString(16) + ":" + inner + ":" + initial);
+  }
+  __cleat_result(JSON.stringify([ranges(raw, samples), ranges(xn, samples), samples.length.toString(), JSON.stringify(values)]));
 }

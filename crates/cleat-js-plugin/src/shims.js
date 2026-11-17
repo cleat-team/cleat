@@ -417,7 +417,9 @@
       const cp = Array.from(label, (c) => c.codePointAt(0));
       let rtl = false, hasEn = false, hasAn = false;
       for (const c of cp) {
-        if (c > 0x7f && !inTable(ALLOWED_RS, c)) return false;
+        // The allow-table was measured with a Latin neighbour, so it says nothing about a right-to-left code point; those are
+        // governed by the bidi rule below instead, and a right-to-left label is checked against the RTL class.
+        if (c > 0x7f && !inTable(ALLOWED_RS, c) && !isRtlCp(c)) return false;
         if (isRtlCp(c)) rtl = true;
         if (c >= 0x30 && c <= 0x39) hasEn = true;
         if ((c >= 0x660 && c <= 0x669) || (c >= 0x6f0 && c <= 0x6f9)) hasAn = true;
@@ -449,10 +451,23 @@
       for (let i = 0; i < labels.length; i++) {
         let l = labels[i];
         for (const c of Array.from(l, (x) => x.codePointAt(0))) {
-          if (c > 0x7f && !inTable(ALLOWED_RS || (ALLOWED_RS = rangeTable(URL_ALLOWED)), c)) return null;
+          if (c > 0x7f && !isRtlCp(c) && !inTable(ALLOWED_RS || (ALLOWED_RS = rangeTable(URL_ALLOWED)), c)) return null;
+          if (foldRefused(c)) return null;
         }
-        l = l.normalize("NFKC").toLowerCase();
+        // The default-ignorable code points are removed by UTS46 before anything else, so `a\u00ADb` is `ab` and not a
+        // Punycode label for a soft hyphen. Node does this and the first version of the shim did not, which a value sweep
+        // (not an accept/refuse sweep) caught. The same set the xn-- branch checks for.
+        l = l.replace(/[\u00AD\u034F\u061C\u115F-\u1160\u17B4-\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu, "");
+        // UTS46 folds capital sigma to sigma ALWAYS; JavaScript's toLowerCase applies Final_Sigma and would turn a
+        // label-final capital sigma into final sigma. A per-label lowercase cannot see the following label, and a single
+        // code point sweep cannot see it either -- it needs a preceding cased letter (`ΕΛΛΑΣ.gr`), found by pairs.
+        l = l.replace(/\u03A3/g, "\u03C3").normalize("NFKC").toLowerCase();
+        // Lowercasing can move a combining mark out of canonical order (U+0130 lowercases to i + combining dot, which may
+        // then precede another mark), so NFC again after it.
+        l = l.normalize("NFC");
         if (l.indexOf(".") >= 0) return null;
+        // A label may not START with a combining mark; UTS46 refuses it and Node does too.
+        if (l.length && /\p{M}/u.test(String.fromCodePoint(l.codePointAt(0)))) return null;
         if (l.slice(0, 4) === "xn--") {
           const payload = l.slice(4), cp = unpuny(payload);
           if (cp === null || cp.length === 0 || !cp.some((c) => c > 0x7f)) return null;
@@ -462,7 +477,7 @@
             // A Punycode label may not decode to a dot (it would have been two labels), and the Cherokee small letters fold to
             // their uppercase block in Node's case tables but not in this engine's, so they are refused here by name.
             if (c === 0x2e || c === 0x3002 || c === 0xff0e || c === 0xff61) return null;
-            if ((c >= 0x13f8 && c <= 0x13fd) || (c >= 0xab70 && c <= 0xabbf)) return null;
+            if (foldRefused(c)) return null;
           }
           const decoded = String.fromCodePoint.apply(null, cp);
           const canon = decoded.replace(/[­͏؜ᅟ-ᅠ឴-឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ￰-￸\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu, "").normalize("NFKC");
@@ -526,6 +541,20 @@
     // drive letter", which also requires the third code point to be end, a separator, "?" or "#". So `C:x` does NOT start
     // with one, and a base's drive letter is inherited in front of it.
     const startsWithDrive = (str) => isDriveLetter(str.slice(0, 2)) && (str.length === 2 || /[\/\\?#]/.test(str[2]));
+    // Code points UTS46 case-folds to something other than a lowercased copy of themselves (Cherokee folds to its uppercase
+    // block, Cyrillic Extended-C to older Cyrillic letters, Greek Extended's ypogegrammeni forms to a two-letter sequence).
+    // Reproducing those mappings needs the UTS46 table, so they are REFUSED rather than mis-encoded -- loud, not silent.
+    // Measured with the value sweep in urls_sweep.ts, which is what found them (cleat#3898).
+    const foldRefused = (c) => (c >= 0x13a0 && c <= 0x13fd) || (c >= 0xab70 && c <= 0xabbf) ||
+      (c >= 0x1c80 && c <= 0x1c88) || (c >= 0x1f80 && c <= 0x1fff) ||
+      c === 0x345 || c === 0x3f2 || c === 0x3f9 || (c >= 0x1d6a8 && c <= 0x1d7cb) ||
+      // Arabic-Indic and Extended Arabic-Indic digits: Node 26 accepts a label made of them and Node 24 (the version CI
+      // pins) refuses, so they are refused here -- loud against 26, exact against 24, which is the version-split rule.
+      (c >= 0x660 && c <= 0x669) || (c >= 0x6f0 && c <= 0x6f9) || c === 0x66b || c === 0x66c ||
+      // The property that matters is bidi class AN, not "Arabic digits": U+0600-U+0605, U+06DD, U+0890-U+0891, U+08E2,
+      // U+10D30-U+10D39 (Hanifi Rohingya) and U+10E60-U+10E7E (Rumi) are AN too, and Node 24 refuses a label of them.
+      (c >= 0x600 && c <= 0x605) || c === 0x6dd || (c >= 0x890 && c <= 0x891) || c === 0x8e2 ||
+      (c >= 0x10d30 && c <= 0x10d39) || (c >= 0x10e60 && c <= 0x10e7e);
     const pathState = (path, str, special, file) => {
       const segs = str.split(special ? /[\/\\]/ : "/");
       for (let i = 0; i < segs.length; i++) {
