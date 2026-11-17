@@ -157,7 +157,8 @@ test("signalWorkflow is recorded in extras.signalsSent, and only a send to the r
       ["00000000-0000-0000-0000-0000000c1ea7", "to-me", '"text"'],
     ],
   );
-  assert.deepEqual(run.result, { me: "text" }, "the run's own send did not come back through pollSignal");
+  // `other` is absent: the send to ANOTHER run was polled back by this one only if the store queued every send.
+  assert.deepEqual(run.result, { me: "text" }, "the run's own send did not come back through pollSignal, or a send to another run did");
 });
 
 test("a poll sees a signal the test queued and nothing for a name nobody sent", () => {

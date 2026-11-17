@@ -7,8 +7,9 @@
 //!
 //! `poll_signal` is a READ and is deliberately not guarded: `engine/signaller.go` records no event for it and consumes
 //! nothing, so a poll after the segment has suspended leaves no trace in the history. Measured, not assumed:
-//! `TestTypeScriptASignalPollAfterASuspensionRecordsNothing`. (Guarding it would not make that test fail, which is why the
-//! test exists as a measurement of the claim and not as a falsification of a guard.) `signal_workflow` records a
+//! `TestTypeScriptASignalSentAfterASuspensionRecordsNothing`, which asserts that NO event of any type follows the
+//! suspending call. (Guarding the poll would not make that test fail, which is why it measures the claim and does not falsify a
+//! guard; the send beside it is what the test falsifies.) `signal_workflow` records a
 //! `signal_received` event and delivers, so it IS effectful and IS guarded, with a late-call test that fails without it.
 
 use javy_plugin_api::javy::quickjs::{Object, prelude::Func};
@@ -35,12 +36,16 @@ pub(crate) fn install(g: &Object<'_>) {
 
     g.set(
         "__cleat_signal_workflow",
-        Func::from(|target_run_id: String, name: String, payload: String| -> String {
-            guarded(|| match HostCalls.signal_workflow(&target_run_id, &name, &payload) {
-                Ok(()) => json!({ "ok": null }),
-                Err(e) => json!({ "err": e }),
-            })
-        }),
+        Func::from(
+            |target_run_id: String, name: String, payload: String| -> String {
+                guarded(
+                    || match HostCalls.signal_workflow(&target_run_id, &name, &payload) {
+                        Ok(()) => json!({ "ok": null }),
+                        Err(e) => json!({ "err": e }),
+                    },
+                )
+            },
+        ),
     )
     .unwrap();
 }

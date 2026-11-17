@@ -20,6 +20,7 @@ type sentRow struct{ target, name, payload string }
 // memSignalsE2E is an engine.SignalStore. Deliveries are queued per name (oldest first); DeliveredAtMs stays zero, which the
 // engine reads as "visible now". Polling removes nothing and ConsumeSignal does, as in the shipped stores.
 type memSignalsE2E struct {
+	self     string // when set, a delivery is queued only if addressed to it
 	mu       sync.Mutex
 	queue    map[string][]engine.SignalDelivery
 	nextID   int64
@@ -42,6 +43,9 @@ func (m *memSignalsE2E) DeliverSignal(_ context.Context, target, name, payload s
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sent = append(m.sent, sentRow{target, name, payload})
+	if m.self != "" && target != m.self {
+		return nil
+	}
 	m.nextID++
 	m.queue[name] = append(m.queue[name], engine.SignalDelivery{ID: m.nextID, Payload: payload})
 	return nil
@@ -142,6 +146,7 @@ func TestTypeScriptAPolledSignalIsStillThereForTheWaitThatConsumesIt(t *testing.
 func TestTypeScriptSignalWorkflowIsDeliveredAndRecordedAndNotRedeliveredOnReplay(t *testing.T) {
 	wasm := buildSignals(t)
 	store := newMemSignalsE2E(nil)
+	store.self = "run-self"
 	e, closeRT := newEngineWith(t, engine.WithSignalStore(store), engine.WithWorkflowID("run-self"))
 	defer closeRT()
 	input := json.RawMessage(`{"target":"run-other"}`)
@@ -158,8 +163,11 @@ func TestTypeScriptSignalWorkflowIsDeliveredAndRecordedAndNotRedeliveredOnReplay
 			t.Errorf("send %d = %+v, want %+v (the payload crosses JSON-encoded; none is null)", i, store.sent[i], w)
 		}
 	}
+	// `other` is ABSENT (undefined): a signal sent to ANOTHER run is not this run's to read, and the store above queues a delivery
+	// only when it is addressed to "run-self", as a real store would. A store (or a binding) that handed every send back to its
+	// sender would put {n:1} here.
 	if raw != `{"me":"text"}` {
-		t.Errorf("result %s: a string sent to the run's own id did not come back as the same string through pollSignal", raw)
+		t.Errorf("result %s, want exactly {\"me\":\"text\"}: the run's own send back as the same string, and nothing for the send to another run", raw)
 	}
 	var recorded int
 	for _, ev := range history {
@@ -180,8 +188,9 @@ func TestTypeScriptSignalWorkflowIsDeliveredAndRecordedAndNotRedeliveredOnReplay
 	}
 }
 
-// What `guarded` on signal_workflow buys, read from the history. The poll beside it is there to MEASURE that it records
-// nothing (so leaving it unguarded is correct); it is not a falsification of a guard, and the comment in the plugin says so.
+// What `guarded` on signal_workflow buys, read from the history: nothing of any type follows the suspending call. The poll beside
+// it is there to MEASURE that it records nothing (so leaving it unguarded is correct); it is not a falsification of a guard,
+// and the comment in the plugin says so.
 func TestTypeScriptASignalSentAfterASuspensionRecordsNothing(t *testing.T) {
 	wasm := buildSignals(t)
 	store := newMemSignalsE2E(map[string][]string{"go": {`1`}})
@@ -194,12 +203,23 @@ func TestTypeScriptASignalSentAfterASuspensionRecordsNothing(t *testing.T) {
 	if susp == nil || !strings.Contains(susp.Reason, "cleat_sleep(60000ms)") {
 		t.Fatalf("the workflow did not suspend at the sleep (%v); the ordering below is then unmeasured", susp)
 	}
-	for _, ev := range history {
-		if ev.EventType == engine.EventTypeSignalReceived {
-			t.Fatalf("the segment recorded a signal event (%s %q) AFTER the call that suspended it; signal_workflow must be guarded", ev.EventType, ev.SignalName)
-		}
+	// NO event of ANY type may be recorded. The sleep suspends the segment WITHOUT recording an event (measured: the history of
+	// this run is empty, which is also what `susp` above establishes), so everything the late calls would have recorded would be
+	// the whole history. That sees a poll that recorded something as well as a send that recorded a signal_received.
+	if len(history) != 0 {
+		t.Fatalf("the segment recorded %v AFTER the call that suspended it; signal_workflow must be guarded, and a poll must record nothing", signalEventTypes(history))
 	}
 	if len(store.sent) != 0 {
 		t.Fatalf("a send made after the suspension reached the store: %v", store.sent)
 	}
+}
+
+// signalEventTypes names a history's events, for a failure message. Distinct from other groups' helpers on purpose: two groups
+// each defining `eventTypes` would build alone and fail to compile together.
+func signalEventTypes(h []engine.EventRecord) []string {
+	var out []string
+	for _, ev := range h {
+		out = append(out, string(ev.EventType))
+	}
+	return out
 }

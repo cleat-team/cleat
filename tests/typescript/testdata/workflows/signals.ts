@@ -17,12 +17,15 @@ export const signalsPollThenWait = workflow<Record<string, never>, { polled: unk
 });
 
 // Sends: to another run, to itself, with no payload, and with a string. The target is an input so the test can name the run.
-export const signalsSend = workflow<{ target: string }, { me: string }>(async (ctx, input) => {
+export const signalsSend = workflow<{ target: string }, { me: string; other: unknown }>(async (ctx, input) => {
   await ctx.signalWorkflow(input.target, "hello", { n: 1 });
   await ctx.signalWorkflow(input.target, "bare");
   await ctx.signalWorkflow(ctx.runId(), "to-me", "text");
   const back = await ctx.pollSignal("to-me");
-  return { me: back as string };
+  // A send to ANOTHER run must not be readable back by this one: polled here, it is undefined, so a store that queued every send
+  // regardless of its target would put {n:1} here and the test would see it.
+  const other = await ctx.pollSignal("hello");
+  return { me: back as string, other };
 });
 
 // A send and a poll AFTER the call that suspended the segment, neither awaited. The send must not reach the host (it would
