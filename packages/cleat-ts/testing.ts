@@ -54,6 +54,8 @@ export interface WorkflowRun {
   promises?: string[];
   /** The signal names the workflow CONSUMED, in order, as the store saw them. */
   signalsConsumed?: string[];
+  /** The child workflow names the run STARTED, in order, as the store saw them. */
+  childrenStarted?: string[];
 }
 
 /** What a durable call returns, keyed by `"<service>/<operation>"`. A value is the JSON text the guest receives. */
@@ -89,6 +91,16 @@ export interface RunOptions {
    * for after the queue is empty suspends. Delivering mid-run is resume support, which is a different change.
    */
   signals?: Record<string, unknown[]>;
+
+  /**
+   * Child workflow outcomes, keyed by the NAME the parent starts the child under. A child is reported as having finished
+   * before the run began, so the parent never waits.
+   *
+   * `{ result: <value> }` is a child that succeeded; `{ error: "<message>" }` is one that FAILED, which is a different
+   * thing and the reason this accepts both -- a harness that could only script success would leave the parent's error
+   * path untested by construction. A name that is absent leaves the child RUNNING, so the parent suspends.
+   */
+  children?: Record<string, { result?: unknown; error?: string }>;
 }
 
 /** A failure of the HARNESS, not of the workflow under test. Never assert on this as if it were a result. */
@@ -141,6 +153,9 @@ export function runWorkflow(modulePath: string, entry: string, input: unknown = 
   }
   if (options.signals) {
     writeScript("signals", options.signals, "-signals");
+  }
+  if (options.children) {
+    writeScript("children", options.children, "-children");
   }
   let stdout: string;
   try {

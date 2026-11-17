@@ -286,7 +286,7 @@ func TestBuildStoresWiresEachFlagToTheLoaderThatCanReadIt(t *testing.T) {
 	rejects := write("promise-rejects.json", `{"refused":"nope"}`)
 	signals := write("signals.json", `{"approve":[{"ok":true}]}`)
 
-	ps, ss, err := buildStores(promises, rejects, signals)
+	ps, ss, _, err := buildStores(promises, rejects, signals, "")
 	if err != nil {
 		t.Fatalf("buildStores refused fixtures the runner must accept: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestBuildStoresWiresEachFlagToTheLoaderThatCanReadIt(t *testing.T) {
 func TestBuildStoresWithNoFixturesStillReturnsUsableStores(t *testing.T) {
 	// The control for the wiring test: no paths must still produce stores rather than nil, or a workflow touching a
 	// promise would fail with errNoPromiseStore instead of parking.
-	ps, ss, err := buildStores("", "", "")
+	ps, ss, _, err := buildStores("", "", "", "")
 	if err != nil {
 		t.Fatalf("buildStores with no fixtures: %v", err)
 	}
@@ -326,5 +326,109 @@ func TestBuildStoresWithNoFixturesStillReturnsUsableStores(t *testing.T) {
 	}
 	if _, found, _ := ss.PollSignal(context.Background(), "wf", "approve"); found {
 		t.Error("an unscripted store found a signal")
+	}
+}
+
+func TestMemoryChildrenReturnsAScriptedSuccess(t *testing.T) {
+	c := newMemoryChildren(map[string]engine.ChildOutcome{
+		"charge": {Completed: true, Result: `{"id":"ch_1"}`},
+	})
+	id, err := c.StartChildWorkflow(context.Background(), "parent", "charge", `{}`, 0, "", 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflow: %v", err)
+	}
+	out, err := c.GetChildResult(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetChildResult: %v", err)
+	}
+	if !out.Completed || out.Failed || out.Result != `{"id":"ch_1"}` {
+		t.Fatalf("outcome = %+v, want completed, not failed, with the scripted result", out)
+	}
+	if ms, ok, err := c.GetChildCompletedAtMs(context.Background(), id); err != nil || !ok || ms == 0 {
+		t.Fatalf("GetChildCompletedAtMs = (%d, %v, %v), want a non-zero instant with ok", ms, ok, err)
+	}
+}
+
+// The error path, which a harness that could only script success would leave untestable by construction: a child that
+// FAILED is a completed call with Failed set, NOT a store error. Conflating those is cleat#1115 -- a parent told "your
+// child failed" because the store blinked branches wrongly.
+func TestMemoryChildrenReturnsAScriptedFailure(t *testing.T) {
+	c := newMemoryChildren(map[string]engine.ChildOutcome{
+		"charge": {Completed: true, Failed: true, Error: "card declined"},
+	})
+	id, err := c.StartChildWorkflow(context.Background(), "parent", "charge", `{}`, 0, "", 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflow: %v", err)
+	}
+	out, err := c.GetChildResult(context.Background(), id)
+	if err != nil {
+		t.Fatalf("a failed child came back as a store error: %v", err)
+	}
+	if !out.Completed || !out.Failed || out.Error != "card declined" {
+		t.Fatalf("outcome = %+v, want completed+failed with the scripted error", out)
+	}
+	if out.Result != "" {
+		t.Errorf("a failed child reported a result: %q", out.Result)
+	}
+}
+
+func TestMemoryChildrenLeavesAnUnscriptedChildRunning(t *testing.T) {
+	// The control: the parent must PARK on a child nobody scripted, not be handed an invented outcome.
+	c := newMemoryChildren(nil)
+	id, err := c.StartChildWorkflow(context.Background(), "parent", "anything", `{}`, 0, "", 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflow: %v", err)
+	}
+	out, err := c.GetChildResult(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetChildResult: %v", err)
+	}
+	if out.Completed || out.Failed {
+		t.Fatalf("outcome = %+v, want neither completed nor failed", out)
+	}
+	if _, ok, err := c.GetChildCompletedAtMs(context.Background(), id); err != nil || ok {
+		t.Fatalf("GetChildCompletedAtMs = (_, %v, %v), want ok=false for a running child", ok, err)
+	}
+}
+
+func TestMemoryChildrenRefusesAnUnknownRunID(t *testing.T) {
+	c := newMemoryChildren(nil)
+	if _, err := c.GetChildResult(context.Background(), "nope"); err == nil {
+		t.Error("GetChildResult answered for a run id the store never issued")
+	}
+	if _, ok, err := c.GetChildCompletedAtMs(context.Background(), "nope"); err == nil || ok {
+		t.Error("GetChildCompletedAtMs answered for a run id the store never issued")
+	}
+}
+
+func TestLoadChildScriptAcceptsBothSpellingsAndRefusesAmbiguity(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	ok, err := loadChildScript(write("ok.json", `{"charge":{"result":{"id":"ch_1"}},"refund":{"error":"not allowed"}}`))
+	if err != nil {
+		t.Fatalf("a valid child script was refused: %v", err)
+	}
+	if out := ok["charge"]; !out.Completed || out.Failed || out.Result != `{"id":"ch_1"}` {
+		t.Errorf("charge = %+v, want completed with the result", out)
+	}
+	if out := ok["refund"]; !out.Completed || !out.Failed || out.Error != "not allowed" {
+		t.Errorf("refund = %+v, want completed+failed with the error", out)
+	}
+
+	// A child scripted both ways is a broken fixture, not a case to pick a winner for.
+	if _, err := loadChildScript(write("both.json", `{"x":{"result":1,"error":"no"}}`)); err == nil {
+		t.Error("a child scripted as both a result and an error was accepted")
+	}
+	// Neither is also a broken fixture: it would silently mean "running", which the script is supposed to say by
+	// omission rather than by an empty object.
+	if _, err := loadChildScript(write("neither.json", `{"x":{}}`)); err == nil {
+		t.Error("a child with neither a result nor an error was accepted")
 	}
 }

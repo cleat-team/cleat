@@ -114,6 +114,8 @@ type envelope struct {
 	// the store ever being touched -- the same reason StubbedCalls exists (cleat#3828).
 	Promises []string `json:"promises,omitempty"`
 	Signals  []string `json:"signalsConsumed,omitempty"`
+	// Children is the child workflow names this run started, in order, from the store.
+	Children []string `json:"childrenStarted,omitempty"`
 }
 
 func unmeasured(format string, args ...any) {
@@ -135,27 +137,33 @@ func unmeasured(format string, args ...any) {
 // The stores are ALWAYS returned, even when nothing was scripted: leaving them nil would make a workflow that touches a
 // promise fail with errNoPromiseStore rather than suspend, so a test could not tell "this workflow uses no store" from
 // "I forgot to script it" -- and the second is the mistake a harness should make loud.
-func buildStores(promisesPath, rejectsPath, signalsPath string) (*memoryPromises, *memorySignals, error) {
+func buildStores(promisesPath, rejectsPath, signalsPath, childrenPath string) (*memoryPromises, *memorySignals, *memoryChildren, error) {
 	var resolves, rejects map[string]string
 	var payloads map[string][]string
+	var outcomes map[string]engine.ChildOutcome
 	var err error
 	if promisesPath != "" {
 		if resolves, err = loadStringMap(promisesPath, "promises"); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	if rejectsPath != "" {
 		// loadMessageMap, NOT loadStringMap: a rejection is an error message, not JSON the guest parses.
 		if rejects, err = loadMessageMap(rejectsPath, "promise-rejects"); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	if signalsPath != "" {
 		if payloads, err = loadSignalScript(signalsPath); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return newMemoryPromises(resolves, rejects), newMemorySignals(payloads), nil
+	if childrenPath != "" {
+		if outcomes, err = loadChildScript(childrenPath); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return newMemoryPromises(resolves, rejects), newMemorySignals(payloads), newMemoryChildren(outcomes), nil
 }
 
 func main() {
@@ -167,11 +175,13 @@ func main() {
 	promisesPath := flag.String("promises", "", "optional JSON file: {\"<promise name>\": <JSON text it resolves with>}; a promise created under another name stays pending and the workflow suspends")
 	promiseRejectsPath := flag.String("promise-rejects", "", "optional JSON file: {\"<promise name>\": <rejection message>}")
 	signalsPath := flag.String("signals", "", "optional JSON file: {\"<signal name>\": [<payload JSON>, ...]}, delivered before the run starts")
+	childrenPath := flag.String("children", "", "optional JSON file: {\"<child name>\": {\"result\": <any>}} or {\"<child name>\": {\"error\": \"...\"}}; an unscripted child stays running and the parent suspends")
 	flag.Parse()
 
 	if *module == "" || *entry == "" {
 		unmeasured("usage: cleat-ts-run -module <file.wasm> -entry <name> [-input <json>] [-workflow-id <id>] " +
-			"[-answers <file.json>] [-promises <file.json>] [-promise-rejects <file.json>] [-signals <file.json>]")
+			"[-answers <file.json>] [-promises <file.json>] [-promise-rejects <file.json>] [-signals <file.json>] " +
+			"[-children <file.json>]")
 	}
 	if !json.Valid([]byte(*input)) {
 		unmeasured("-input is not valid JSON: %s", *input)
@@ -201,7 +211,7 @@ func main() {
 	} else {
 		caller = stubbedCaller{}
 	}
-	promises, signals, err := buildStores(*promisesPath, *promiseRejectsPath, *signalsPath)
+	promises, signals, children, err := buildStores(*promisesPath, *promiseRejectsPath, *signalsPath, *childrenPath)
 	if err != nil {
 		unmeasured("%v", err)
 	}
@@ -212,6 +222,7 @@ func main() {
 		engine.WithBackends(engine.WasmtimeLanguages, wt),
 		engine.WithPromiseStore(promises),
 		engine.WithSignalStore(signals),
+		engine.WithChildWorkflowStore(children),
 	)
 
 	result, history, susp, _, queryState, err := e.Execute(ctx, wasm, *entry, json.RawMessage(*input))
@@ -220,6 +231,7 @@ func main() {
 		StubbedCalls: *answersPath == "",
 		Promises:     promises.nameList(),
 		Signals:      signals.consumedList(),
+		Children:     children.startedList(),
 	}
 	for _, ev := range history {
 		out.Events = append(out.Events, eventOut{
