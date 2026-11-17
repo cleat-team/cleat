@@ -456,6 +456,41 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	if maxAttempts > int64(ceiling) {
 		maxAttempts = int64(ceiling)
 	}
+	// REFUSE A POLICY TOO LONG TO RUN IN ONE SEGMENT -- ON EVERY SEGMENT, and
+	// therefore BEFORE the replay branch below. cleat#4032.
+	//
+	// This used to sit after the replay return, on the reasoning that "a
+	// refusal records no event, so replay must never reach this and find
+	// nothing". The premise is right and the conclusion was wrong: a guest
+	// that is refused does not stop. Both SDKs fall back to their own loop of
+	// ordinary DurableCalls, which DO record events, and on the next segment
+	// the guest asks this same question again. Answering from history instead
+	// of from the budget handed `replayCall` the guest's first FAILED attempt
+	// -- the error its own loop was in the middle of retrying -- because
+	// replayRetryAttempts only resumes on call_attempt_failed records and an
+	// ordinary call event stops the walk. The workflow then died on the very
+	// error the policy existed to retry.
+	//
+	// The budget is arithmetic over the policy (retryPolicyFitsBudget consults
+	// no clock and no history), so it gives the same answer on every segment
+	// and a replay cannot disagree with the execution that recorded it.
+	//
+	// No event, no attempt consumed, no call made. The guest runs the policy
+	// itself, suspending between attempts, which is what it used to do when it
+	// made this decision guest-side.
+	//
+	// Skipped when the segment is being stopped, because ABI.md requires bit 31
+	// to win over any field and a refusal IS a field: the stop paths below
+	// return the sentinel unchanged.
+	if !s.stopBeforeNewWork() {
+		if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
+			requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
+			msg := fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
+				"run the policy in the guest, suspending between attempts", budget)
+			written, _ := s.writeResult(ctx, m, responsePtr, msg, responseMaxLen)
+			return packDurableCallResult(int(written), callErrorRetryPolicyTooLong, 1)
+		}
+	}
 	if s.isReplay {
 		spent, firstStep, resume := s.replayRetryAttempts(ctx, service, operation)
 		if !resume {
@@ -467,8 +502,8 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 		// stopped rather than restarting it, which is what re-spent the
 		// caller's MaxAttempts (cleat#1145).
 		//
-		// The budget check below is not repeated: a policy that fitted on the
-		// first incarnation fits with fewer attempts left.
+		// The budget was already settled above, before this branch: a policy
+		// that fitted on the first incarnation fits with fewer attempts left.
 		s.exitReplay()
 		if s.stopBeforeNewWork() {
 			return callSuspendSentinel
@@ -481,21 +516,6 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 		return callSuspendSentinel
 	}
 
-	// Refuse a policy too long to run in one segment, and refuse it HERE:
-	// after the stop sentinel (ABI.md requires bit 31 to win over any field,
-	// and a refusal is a field) and after the replay return (a refusal records
-	// no event, so replay must never reach this and find nothing).
-	//
-	// No event, no attempt consumed, no call made. The guest runs the policy
-	// itself, suspending between attempts, which is what it used to do when it
-	// made this decision guest-side.
-	if budget := s.engine.hostRetryBudget(ctx); !retryPolicyFitsBudget(
-		requestedAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs, budget) {
-		msg := fmt.Sprintf("retry policy rejected: worst-case backoff exceeds the %s host-retry budget; "+
-			"run the policy in the guest, suspending between attempts", budget)
-		written, _ := s.writeResult(ctx, m, responsePtr, msg, responseMaxLen)
-		return packDurableCallResult(int(written), callErrorRetryPolicyTooLong, 1)
-	}
 	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
 		nonRetryableErrorsJSON, responsePtr, responseMaxLen, 0, -1)
