@@ -100,4 +100,37 @@ func TestTypeScriptKilledWorkflowDoesNotRunItsDefersYet(t *testing.T) {
 		t.Fatalf("a killed workflow recorded %v. The defers ran after a kill, which this test says does not happen yet.\n\n"+
 			"That is the limit being FIXED, not broken: see the comment above this test for what to change.", got)
 	}
+
+	// The damaged instance must not outlive the execution that damaged it. "No second entry repairs it" is only a
+	// limitation rather than a hazard if the second entry is never THIS instance -- so run another workflow on the same
+	// engine and require it to work.
+	//
+	// The code says it cannot be reused: Execute creates a store per call (`store := wasmtime.NewStore(b.engine)` with
+	// `defer store.Close()`) and instantiates into that store (`linker.Instantiate`), and nothing pools or caches an
+	// instance -- only compiled MODULES are cached, and a compiled module carries no guest state. That is the citation;
+	// this is the check, because a citation cannot fail when the code changes.
+	second := build(t, root, "tests/typescript/testdata/workflows/answer.ts", "answer")
+	if second.exit != 0 {
+		t.Fatalf("building answer.ts failed (exit %d):\n%s", second.exit, second.output)
+	}
+	secondBytes, err := os.ReadFile(second.module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(caller.snapshot())
+	_, _, susp, _, _, err := e.Execute(ctx, secondBytes, "answer", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("a second workflow on the same engine failed after a killed one: %v\n\n"+
+			"If this is a runtime-state error, a poisoned instance is being REUSED and the kill limit is a hazard, not "+
+			"a limitation. Execute is supposed to instantiate into a fresh store per call.", err)
+	}
+	if susp != nil {
+		t.Fatalf("the second workflow suspended (%s); it should have run to an outcome", susp.Reason)
+	}
+	after := caller.snapshot()
+	if len(after) != before+1 || after[before] != "payments/charge" {
+		t.Fatalf("the workflow after the kill recorded %v, want exactly one more entry, \"payments/charge\".\n\n"+
+			"An empty tail means the second workflow did not run its body; anything else means it ran on state left "+
+			"by the killed one.", after[before:])
+	}
 }
